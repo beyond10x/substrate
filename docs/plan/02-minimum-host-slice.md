@@ -1,6 +1,6 @@
 # Plan 02: minimum host slice
 
-**Status:** contract execution-readiness gate passed; runtime slice next · **Date:** 2026-08-13
+**Status:** complete · **Date:** 2026-08-13
 
 The first implementation proves the contract on one Linux host without Docker, Kubernetes, cloud,
 connectors, Flux, or autodev in the build graph.
@@ -68,3 +68,23 @@ exists.
 Git clone/snapshot transport, leases, PTY sessions, workloads, images, volumes, endpoints, Docker,
 Kubernetes, connector projection, hosted identity, and fleet placement do not enter the first slice
 unless design closure proves one is necessary for correctness.
+
+## Completion evidence
+
+The phase landed as four standalone Rust crates: contract-owned wire types and exact hashing, a
+SQLite WAL/FULL subject-scoped operation/resource store, the Linux host driver, and the
+Unix-socket HTTP daemon. The daemon exposes exactly the twelve registry routes and requires an
+explicit UID mapping before it creates a socket.
+
+The portable lane proves strict envelopes, all route shapes, observed workspace/file lifecycle,
+durable same-input replay, different-input conflict, operation reconciliation, cross-subject
+not-found, path/body bounds, persisted exec output, and typed refusal when confinement is absent.
+The real delegated Linux lane additionally proves bubblewrap namespace/no-egress execution,
+default-empty shaped environment, cgroup pids and swap-inclusive memory enforcement, capped output
+while both pipes drain, timeout, signal escalation, whole-tree kill, cgroup emptiness, and observed
+nonzero exits. The host advertises those exec facts only when bubblewrap works and the running daemon
+is inside a writable process-free cgroup delegation whose controllers pass live writes.
+
+Phase 2 intentionally does not add the phase-3 event journal or leases. Accepted mutations and
+resources are durable now; restart maps accepted operations and nonterminal exec observations to
+`unknown` and never redispatches them.

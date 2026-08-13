@@ -6,8 +6,8 @@ The roadmap is ordered. A later phase does not begin while an earlier exit crite
 |---:|---|---|---|
 | 0 | Private design repository | private `daemonloom/substrate`, bot-authored `main`, portable docs | complete |
 | 1 | Design closure | contract questions are decided or explicitly deferred; canonical schema/translation, trust-domain, destination-security, capability-snapshot, and driver guarantees are reviewable | complete |
-| 2 | Minimum host slice | one confined workspace, bounded argv-only exec, observed result, named refusals, and machine facts | in progress — contract execution-readiness passed; runtime vertical slice is next |
-| 3 | Lifecycle and recovery | operation ledger, events, leases, cancellation, and unanswered-outcome reconciliation | pending |
+| 2 | Minimum host slice | one confined workspace, bounded argv-only exec, observed result, named refusals, and machine facts | complete — portable and delegated-host lanes green |
+| 3 | Lifecycle and recovery | operation ledger, events, leases, cancellation, and unanswered-outcome reconciliation | next — durable phase-2 ledger/cancellation exist; event continuity and leases remain |
 | 4 | Direct byte plane | PTY/session establishment and bounded channel authority without routing bytes through connectors | pending |
 | 5 | Docker driver | the same contract serves container-backed execs and workloads with truthful capability facts | pending |
 | 6 | Stack adoption | connectors projection, one Flux adapter, and one autodev `Executor` adapter prove the public contract independently | externally gated — Flux/autodev must first record adoption in their own repositories |

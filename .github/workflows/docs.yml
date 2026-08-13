@@ -19,3 +19,20 @@ jobs:
         run: python3 scripts/check-adrs.py
       - name: Check development contract bundle
         run: python3 scripts/check-contract-bundle.py
+
+  runtime:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Install Rust quality components
+        run: rustup component add rustfmt clippy
+      - name: Check Rust formatting
+        run: cargo fmt --all --check
+      - name: Test standalone workspace
+        run: cargo test --workspace --locked
+      - name: Lint all Rust targets
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Build daemon
+        run: cargo build --workspace --locked
+      - name: Run independent Unix-socket vectors
+        run: python3 scripts/check-runtime-vectors.py --binary target/debug/substrated
