@@ -1,27 +1,95 @@
 {
   "$schema": "../../schemas/vector.json",
-  "assertions": [
-    "response validates against schemas/response.json",
-    "result validates against schemas/capability.json",
-    "every advertised fact was probed on the running backend",
-    "an unavailable fact is absent rather than false or optimistic"
-  ],
-  "context": {
-    "authenticated_subject": "local:1000"
+  "action": {
+    "kind": "http",
+    "operation": "machine.get",
+    "request": {
+      "headers": {
+        "x-request-id": "req_machine_0001"
+      },
+      "method": "GET",
+      "path": "/v1/machine",
+      "query": {}
+    },
+    "valid_address": true,
+    "valid_input": true
   },
+  "context": {
+    "actor": "vector-client",
+    "authority": "http-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000",
+    "transport": {
+      "authenticated": true,
+      "kind": "unix",
+      "reachable": false
+    }
+  },
+  "covers": [
+    "route.machine.get"
+  ],
   "expected": {
-    "http_status": 200,
-    "outcome": "success"
+    "kind": "http-response",
+    "response": {
+      "body": {
+        "api_version": "v1",
+        "request_id": "req_machine_0001",
+        "result": {
+          "config_generation": 7,
+          "driver": "host",
+          "driver_version": "fixture-1",
+          "facts": {
+            "exec.argv-only": true,
+            "exec.cgroup-kill": true,
+            "exec.cgroup-limits": {
+              "cpu": true,
+              "memory": true,
+              "processes": true
+            },
+            "exec.namespaces": {
+              "ipc": true,
+              "mount": true,
+              "network": true,
+              "pid": true,
+              "user": true,
+              "uts": true
+            },
+            "exec.no-egress": true,
+            "exec.output-limit-bytes": 65536,
+            "exec.signals": [
+              "INT",
+              "TERM",
+              "KILL"
+            ],
+            "workspace.atomic-replace": true,
+            "workspace.guarded-io": true,
+            "workspace.list-limit-items": 100,
+            "workspace.max-file-bytes": 1048576,
+            "workspace.openat2-beneath": true,
+            "workspace.read-limit-bytes": 65536
+          },
+          "probed_at": "2026-08-13T12:00:00Z",
+          "snapshot": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+        }
+      },
+      "status": 200
+    }
   },
   "id": "machine-probe-is-observed",
   "layer": "http",
   "phase": 2,
-  "preconditions": [
-    "daemon listens on an owner-permissioned Unix socket",
-    "caller maps to local subject local:1000"
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/advertised_unprobed_fact_count",
+      "expected": 0,
+      "operator": "equals"
+    }
   ],
-  "request": {
-    "method": "GET",
-    "path": "/v1/machine"
-  }
+  "setup": []
 }

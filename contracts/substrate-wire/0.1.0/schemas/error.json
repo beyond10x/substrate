@@ -1,12 +1,6 @@
 {
-  "$id": "urn:daemonloom:substrate-wire:0.1.0:error",
-  "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "additionalProperties": false,
-  "properties": {
-    "api_version": {
-      "const": "v1"
-    },
-    "error": {
+  "$defs": {
+    "detail": {
       "additionalProperties": false,
       "properties": {
         "address": {
@@ -32,10 +26,7 @@
           "type": "string"
         },
         "operation": {
-          "maxLength": 128,
-          "minLength": 16,
-          "pattern": "^[A-Za-z0-9_-]+$",
-          "type": "string"
+          "$ref": "common.json#/$defs/operation-id"
         },
         "retriable": {
           "type": "boolean"
@@ -48,12 +39,20 @@
         "retriable"
       ],
       "type": "object"
+    }
+  },
+  "$id": "urn:daemonloom:substrate-wire:0.1.0:error",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "api_version": {
+      "$ref": "common.json#/$defs/api-version"
+    },
+    "error": {
+      "$ref": "#/$defs/detail"
     },
     "request_id": {
-      "maxLength": 128,
-      "minLength": 8,
-      "pattern": "^[A-Za-z0-9_-]+$",
-      "type": "string"
+      "$ref": "common.json#/$defs/request-id"
     }
   },
   "required": [

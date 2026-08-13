@@ -1,0 +1,183 @@
+{
+  "$schema": "../schemas/hash-fixtures.json",
+  "algorithm": "sha256",
+  "cases": [
+    {
+      "api_major": "1",
+      "excluded": {
+        "authorization": "Bearer sbt_authorization_workspace-create-base",
+        "bearer": "sbt_raw_workspace-create-base",
+        "deployment": "dep_a",
+        "headers": {
+          "traceparent": "00-workspace-create-base"
+        },
+        "operation": "01JHASHBASE00000000001",
+        "principal": "principal:workspace-create-base",
+        "request_id": "req_workspace_create_base",
+        "subject": "local:1000"
+      },
+      "id": "workspace-create-base",
+      "input": {
+        "labels": {
+          "a": "first",
+          "z": "last"
+        },
+        "source": "empty"
+      },
+      "jcs_input_hex": "7b226c6162656c73223a7b2261223a226669727374222c227a223a226c617374227d2c22736f75726365223a22656d707479227d",
+      "ledger_key": {
+        "deployment": "dep_a",
+        "operation": "01JHASHBASE00000000001",
+        "subject": "local:1000"
+      },
+      "method": "POST",
+      "normalized_address": "/v1/workspaces",
+      "sha256": "432efe8b36b82ab62c8dfccb228e585e35204fe0435aa1999947128ba6b64bf7",
+      "tuple_hex": "000000013100000004504f53540000000e2f76312f776f726b737061636573000000347b226c6162656c73223a7b2261223a226669727374222c227a223a226c617374227d2c22736f75726365223a22656d707479227d"
+    },
+    {
+      "api_major": "1",
+      "excluded": {
+        "authorization": "Bearer sbt_authorization_workspace-create-transport-variant",
+        "bearer": "sbt_raw_workspace-create-transport-variant",
+        "deployment": "dep_b",
+        "headers": {
+          "traceparent": "00-workspace-create-transport-variant"
+        },
+        "operation": "01JHASHOTHER0000000002",
+        "principal": "principal:workspace-create-transport-variant",
+        "request_id": "req_workspace_create_transport_variant",
+        "subject": "local:2000"
+      },
+      "id": "workspace-create-transport-variant",
+      "input": {
+        "labels": {
+          "a": "first",
+          "z": "last"
+        },
+        "source": "empty"
+      },
+      "jcs_input_hex": "7b226c6162656c73223a7b2261223a226669727374222c227a223a226c617374227d2c22736f75726365223a22656d707479227d",
+      "ledger_key": {
+        "deployment": "dep_b",
+        "operation": "01JHASHOTHER0000000002",
+        "subject": "local:2000"
+      },
+      "method": "POST",
+      "normalized_address": "/v1/workspaces",
+      "relation": {
+        "case": "workspace-create-base",
+        "kind": "same-request-hash-different-ledger-key"
+      },
+      "sha256": "432efe8b36b82ab62c8dfccb228e585e35204fe0435aa1999947128ba6b64bf7",
+      "tuple_hex": "000000013100000004504f53540000000e2f76312f776f726b737061636573000000347b226c6162656c73223a7b2261223a226669727374222c227a223a226c617374227d2c22736f75726365223a22656d707479227d"
+    },
+    {
+      "api_major": "1",
+      "excluded": {
+        "authorization": "Bearer sbt_authorization_workspace-create-replay",
+        "bearer": "sbt_raw_workspace-create-replay",
+        "deployment": "dep_a",
+        "headers": {
+          "traceparent": "00-workspace-create-replay"
+        },
+        "operation": "01JHASHBASE00000000001",
+        "principal": "principal:workspace-create-replay",
+        "request_id": "req_workspace_create_replay",
+        "subject": "local:1000"
+      },
+      "id": "workspace-create-replay",
+      "input": {
+        "labels": {
+          "a": "first",
+          "z": "last"
+        },
+        "source": "empty"
+      },
+      "jcs_input_hex": "7b226c6162656c73223a7b2261223a226669727374222c227a223a226c617374227d2c22736f75726365223a22656d707479227d",
+      "ledger_key": {
+        "deployment": "dep_a",
+        "operation": "01JHASHBASE00000000001",
+        "subject": "local:1000"
+      },
+      "method": "POST",
+      "normalized_address": "/v1/workspaces",
+      "relation": {
+        "case": "workspace-create-base",
+        "kind": "same-request-hash-same-ledger-key"
+      },
+      "sha256": "432efe8b36b82ab62c8dfccb228e585e35204fe0435aa1999947128ba6b64bf7",
+      "tuple_hex": "000000013100000004504f53540000000e2f76312f776f726b737061636573000000347b226c6162656c73223a7b2261223a226669727374222c227a223a226c617374227d2c22736f75726365223a22656d707479227d"
+    },
+    {
+      "api_major": "1",
+      "excluded": {
+        "authorization": "Bearer sbt_authorization_workspace-create-conflict",
+        "bearer": "sbt_raw_workspace-create-conflict",
+        "deployment": "dep_a",
+        "headers": {
+          "traceparent": "00-workspace-create-conflict"
+        },
+        "operation": "01JHASHBASE00000000001",
+        "principal": "principal:workspace-create-conflict",
+        "request_id": "req_workspace_create_conflict",
+        "subject": "local:1000"
+      },
+      "id": "workspace-create-conflict",
+      "input": {
+        "labels": {
+          "a": "changed",
+          "z": "last"
+        },
+        "source": "empty"
+      },
+      "jcs_input_hex": "7b226c6162656c73223a7b2261223a226368616e676564222c227a223a226c617374227d2c22736f75726365223a22656d707479227d",
+      "ledger_key": {
+        "deployment": "dep_a",
+        "operation": "01JHASHBASE00000000001",
+        "subject": "local:1000"
+      },
+      "method": "POST",
+      "normalized_address": "/v1/workspaces",
+      "relation": {
+        "case": "workspace-create-base",
+        "kind": "different-request-hash-same-ledger-key"
+      },
+      "sha256": "89f4057e0baab4eaeb793617ff7d24c53f5d3f144f1b735b46c4bb4124c7daa5",
+      "tuple_hex": "000000013100000004504f53540000000e2f76312f776f726b737061636573000000367b226c6162656c73223a7b2261223a226368616e676564222c227a223a226c617374227d2c22736f75726365223a22656d707479227d"
+    },
+    {
+      "api_major": "1",
+      "excluded": {
+        "authorization": "Bearer sbt_authorization_workspace-file-address",
+        "bearer": "sbt_raw_workspace-file-address",
+        "deployment": "dep_a",
+        "headers": {
+          "traceparent": "00-workspace-file-address"
+        },
+        "operation": "01JHASHFILE000000000003",
+        "principal": "principal:workspace-file-address",
+        "request_id": "req_workspace_file_address",
+        "subject": "local:1000"
+      },
+      "id": "workspace-file-address",
+      "input": {
+        "content": {
+          "data": "aGVsbG8=",
+          "encoding": "base64"
+        }
+      },
+      "jcs_input_hex": "7b22636f6e74656e74223a7b2264617461223a22614756736247383d222c22656e636f64696e67223a22626173653634227d7d",
+      "ledger_key": {
+        "deployment": "dep_a",
+        "operation": "01JHASHFILE000000000003",
+        "subject": "local:1000"
+      },
+      "method": "PUT",
+      "normalized_address": "/v1/workspaces/ws_vector/files/src/main.txt",
+      "sha256": "170ea4c9458e955a7d00498cc59d12af5c601cd21898310ac330da9642e8957e",
+      "tuple_hex": "0000000131000000035055540000002b2f76312f776f726b7370616365732f77735f766563746f722f66696c65732f7372632f6d61696e2e747874000000337b22636f6e74656e74223a7b2264617461223a22614756736247383d222c22656e636f64696e67223a22626173653634227d7d"
+    }
+  ],
+  "format": "daemonloom.substrate-canonical-hash-fixtures.v1"
+}

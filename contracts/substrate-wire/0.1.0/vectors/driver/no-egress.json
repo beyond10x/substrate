@@ -1,28 +1,65 @@
 {
   "$schema": "../../schemas/vector.json",
-  "assertions": [
-    "the child has a distinct network namespace",
-    "the namespace contains no usable interface",
-    "DNS, loopback, link-local, private, metadata, and public connection attempts all fail",
-    "the child cannot reach the daemon control socket"
-  ],
-  "context": {
-    "fixture_authority": "driver-harness"
+  "action": {
+    "command": {
+      "argv": [
+        "/fixture/probe-network"
+      ],
+      "network": "none",
+      "operation": "exec.start"
+    },
+    "kind": "driver",
+    "port": "exec"
   },
+  "context": {
+    "authority": "driver-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000"
+  },
+  "covers": [],
   "expected": {
-    "outcome": "success"
+    "kind": "driver-outcome",
+    "outcome": {
+      "blocked_classes": [
+        "dns",
+        "loopback",
+        "link-local",
+        "metadata",
+        "private",
+        "public"
+      ],
+      "state": "exited"
+    }
   },
   "id": "minimum-exec-has-no-egress",
   "layer": "driver",
   "phase": 2,
-  "preconditions": [
-    "fixture attempts every address class through direct IP and DNS"
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/successful_connect_count",
+      "expected": 0,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/distinct_network_namespace",
+      "expected": true,
+      "operator": "equals"
+    }
   ],
-  "request": {
-    "argv": [
-      "/fixture/probe-network"
-    ],
-    "network": "none",
-    "operation": "exec.start"
-  }
+  "setup": [
+    {
+      "kind": "network",
+      "name": "all-address-classes",
+      "state": {
+        "control_socket": true,
+        "dns": true
+      }
+    }
+  ]
 }

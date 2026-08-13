@@ -6,66 +6,456 @@
     "$schema": {
       "const": "../../schemas/vector.json"
     },
-    "assertions": {
-      "items": {
-        "minLength": 1,
-        "type": "string"
-      },
-      "minItems": 1,
-      "type": "array"
+    "action": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "http"
+            },
+            "operation": {
+              "type": "string"
+            },
+            "request": {
+              "additionalProperties": false,
+              "properties": {
+                "body": {
+                  "type": "object"
+                },
+                "headers": {
+                  "type": "object"
+                },
+                "method": {
+                  "enum": [
+                    "GET",
+                    "POST",
+                    "PUT",
+                    "DELETE"
+                  ]
+                },
+                "path": {
+                  "pattern": "^/v1/",
+                  "type": "string"
+                },
+                "query": {
+                  "type": "object"
+                }
+              },
+              "required": [
+                "method",
+                "path",
+                "query",
+                "headers"
+              ],
+              "type": "object"
+            },
+            "valid_address": {
+              "type": "boolean"
+            },
+            "valid_input": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "kind",
+            "operation",
+            "request",
+            "valid_address",
+            "valid_input"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "command": {
+              "type": "object"
+            },
+            "kind": {
+              "const": "driver"
+            },
+            "port": {
+              "enum": [
+                "machine",
+                "workspace",
+                "exec"
+              ]
+            }
+          },
+          "required": [
+            "kind",
+            "port",
+            "command"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "raw-http"
+            },
+            "operation": {
+              "type": "string"
+            },
+            "request": {
+              "additionalProperties": false,
+              "properties": {
+                "body": {
+                  "additionalProperties": false,
+                  "properties": {
+                    "repeat": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "count": {
+                          "minimum": 1,
+                          "type": "integer"
+                        },
+                        "octet_hex": {
+                          "pattern": "^[0-9a-f]{2}$",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "octet_hex",
+                        "count"
+                      ],
+                      "type": "object"
+                    },
+                    "sha256": {
+                      "pattern": "^[0-9a-f]{64}$",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "repeat",
+                    "sha256"
+                  ],
+                  "type": "object"
+                },
+                "headers": {
+                  "type": "object"
+                },
+                "method": {
+                  "enum": [
+                    "GET",
+                    "POST",
+                    "PUT",
+                    "DELETE"
+                  ]
+                },
+                "path": {
+                  "pattern": "^/v1/",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "method",
+                "path",
+                "headers",
+                "body"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "kind",
+            "operation",
+            "request"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "http-sequence"
+            },
+            "operation": {
+              "type": "string"
+            },
+            "steps": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "request": {
+                    "additionalProperties": false,
+                    "properties": {
+                      "body": {
+                        "type": "object"
+                      },
+                      "headers": {
+                        "type": "object"
+                      },
+                      "method": {
+                        "enum": [
+                          "GET",
+                          "POST",
+                          "PUT",
+                          "DELETE"
+                        ]
+                      },
+                      "path": {
+                        "pattern": "^/v1/",
+                        "type": "string"
+                      },
+                      "query": {
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "method",
+                      "path",
+                      "query",
+                      "headers",
+                      "body"
+                    ],
+                    "type": "object"
+                  },
+                  "valid_input": {
+                    "const": true
+                  }
+                },
+                "required": [
+                  "request",
+                  "valid_input"
+                ],
+                "type": "object"
+              },
+              "minItems": 2,
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "operation",
+            "steps"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "configuration": {
+              "additionalProperties": false,
+              "properties": {
+                "authentication": {
+                  "const": "none"
+                },
+                "listen": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "tls": {
+                  "const": false
+                },
+                "trusted_tunnel": {
+                  "const": false
+                }
+              },
+              "required": [
+                "listen",
+                "authentication",
+                "tls",
+                "trusted_tunnel"
+              ],
+              "type": "object"
+            },
+            "kind": {
+              "const": "startup"
+            }
+          },
+          "required": [
+            "kind",
+            "configuration"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "context": {
       "additionalProperties": false,
-      "description": "Trusted fixture-harness context; never part of the HTTP request body.",
       "properties": {
-        "authenticated_subject": {
+        "actor": {
+          "type": "string"
+        },
+        "authority": {
+          "enum": [
+            "http-harness",
+            "driver-harness"
+          ]
+        },
+        "clock": {
+          "$ref": "common.json#/$defs/timestamp"
+        },
+        "deployment": {
           "minLength": 1,
           "type": "string"
         },
-        "fixture_authority": {
-          "enum": [
-            "driver-harness"
-          ]
-        }
-      },
-      "type": "object"
-    },
-    "expected": {
-      "additionalProperties": false,
-      "properties": {
-        "class": {
-          "enum": [
-            "refused",
-            "conflict",
-            "unserved",
-            "exhausted",
-            "failed"
-          ]
-        },
-        "code": {
-          "pattern": "^[a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*)+$",
+        "subject": {
+          "minLength": 1,
           "type": "string"
         },
-        "http_status": {
-          "maximum": 599,
-          "minimum": 200,
-          "type": "integer"
-        },
-        "outcome": {
-          "enum": [
-            "success",
-            "refused",
-            "conflict",
-            "unserved",
-            "exhausted",
-            "failed"
-          ]
+        "transport": {
+          "additionalProperties": false,
+          "properties": {
+            "authenticated": {
+              "type": "boolean"
+            },
+            "kind": {
+              "enum": [
+                "unix",
+                "tcp"
+              ]
+            },
+            "reachable": {
+              "type": "boolean"
+            }
+          },
+          "required": [
+            "kind",
+            "authenticated",
+            "reachable"
+          ],
+          "type": "object"
         }
       },
       "required": [
-        "outcome"
+        "authority",
+        "clock",
+        "deployment",
+        "subject"
       ],
       "type": "object"
+    },
+    "covers": {
+      "items": {
+        "type": "string"
+      },
+      "minItems": 0,
+      "type": "array",
+      "uniqueItems": true
+    },
+    "expected": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "http-response"
+            },
+            "response": {
+              "additionalProperties": false,
+              "properties": {
+                "body": {
+                  "type": "object"
+                },
+                "status": {
+                  "maximum": 599,
+                  "minimum": 200,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "status",
+                "body"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "kind",
+            "response"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "driver-outcome"
+            },
+            "outcome": {
+              "type": "object"
+            }
+          },
+          "required": [
+            "kind",
+            "outcome"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "startup-outcome"
+            },
+            "outcome": {
+              "additionalProperties": false,
+              "properties": {
+                "code": {
+                  "const": "daemon.startup-refused"
+                },
+                "message": {
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "started": {
+                  "const": false
+                }
+              },
+              "required": [
+                "started",
+                "code",
+                "message"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "kind",
+            "outcome"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "http-sequence"
+            },
+            "responses": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "body": {
+                    "type": "object"
+                  },
+                  "status": {
+                    "maximum": 599,
+                    "minimum": 200,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "status",
+                  "body"
+                ],
+                "type": "object"
+              },
+              "minItems": 2,
+              "type": "array"
+            }
+          },
+          "required": [
+            "kind",
+            "responses"
+          ],
+          "type": "object"
+        }
+      ]
     },
     "id": {
       "pattern": "^[a-z][a-z0-9-]+$",
@@ -78,28 +468,90 @@
       ]
     },
     "phase": {
-      "const": 2
+      "enum": [
+        2,
+        6
+      ]
     },
-    "preconditions": {
+    "postconditions": {
       "items": {
-        "minLength": 1,
-        "type": "string"
+        "additionalProperties": false,
+        "properties": {
+          "actual": {
+            "pattern": "^/",
+            "type": "string"
+          },
+          "expected": {},
+          "operator": {
+            "enum": [
+              "equals",
+              "not-equals",
+              "lte",
+              "gte"
+            ]
+          }
+        },
+        "required": [
+          "actual",
+          "operator",
+          "expected"
+        ],
+        "type": "object"
       },
+      "minItems": 1,
       "type": "array"
     },
-    "request": {
-      "type": "object"
+    "setup": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "kind": {
+            "enum": [
+              "backend",
+              "crash",
+              "daemon-authority",
+              "daemon-config",
+              "exec",
+              "exec-output",
+              "fault",
+              "git-source",
+              "machine",
+              "network",
+              "operation",
+              "output",
+              "path-shape",
+              "process-tree",
+              "transport",
+              "workspace"
+            ]
+          },
+          "name": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "state": {}
+        },
+        "required": [
+          "kind",
+          "name",
+          "state"
+        ],
+        "type": "object"
+      },
+      "type": "array"
     }
   },
   "required": [
+    "$schema",
     "id",
     "phase",
     "layer",
+    "covers",
     "context",
-    "preconditions",
-    "request",
+    "setup",
+    "action",
     "expected",
-    "assertions"
+    "postconditions"
   ],
   "title": "Substrate conformance vector",
   "type": "object"

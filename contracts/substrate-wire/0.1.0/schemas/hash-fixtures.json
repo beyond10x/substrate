@@ -1,0 +1,159 @@
+{
+  "$id": "urn:daemonloom:substrate-wire:0.1.0:hash-fixtures",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "const": "../schemas/hash-fixtures.json"
+    },
+    "algorithm": {
+      "const": "sha256"
+    },
+    "cases": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "api_major": {
+            "const": "1"
+          },
+          "excluded": {
+            "additionalProperties": false,
+            "properties": {
+              "authorization": {
+                "type": "string"
+              },
+              "bearer": {
+                "type": "string"
+              },
+              "deployment": {
+                "type": "string"
+              },
+              "headers": {
+                "type": "object"
+              },
+              "operation": {
+                "$ref": "common.json#/$defs/operation-id"
+              },
+              "principal": {
+                "type": "string"
+              },
+              "request_id": {
+                "$ref": "common.json#/$defs/request-id"
+              },
+              "subject": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "operation",
+              "request_id",
+              "authorization",
+              "bearer",
+              "headers",
+              "subject",
+              "deployment",
+              "principal"
+            ],
+            "type": "object"
+          },
+          "id": {
+            "pattern": "^[a-z][a-z0-9-]+$",
+            "type": "string"
+          },
+          "input": {
+            "type": "object"
+          },
+          "jcs_input_hex": {
+            "pattern": "^(?:[0-9a-f]{2})*$",
+            "type": "string"
+          },
+          "ledger_key": {
+            "additionalProperties": false,
+            "properties": {
+              "deployment": {
+                "type": "string"
+              },
+              "operation": {
+                "$ref": "common.json#/$defs/operation-id"
+              },
+              "subject": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "deployment",
+              "subject",
+              "operation"
+            ],
+            "type": "object"
+          },
+          "method": {
+            "enum": [
+              "POST",
+              "PUT",
+              "DELETE"
+            ]
+          },
+          "normalized_address": {
+            "pattern": "^/v1/",
+            "type": "string"
+          },
+          "relation": {
+            "additionalProperties": false,
+            "properties": {
+              "case": {
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "same-request-hash-different-ledger-key",
+                  "same-request-hash-same-ledger-key",
+                  "different-request-hash-same-ledger-key"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "case"
+            ],
+            "type": "object"
+          },
+          "sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "tuple_hex": {
+            "pattern": "^(?:[0-9a-f]{2})+$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "api_major",
+          "method",
+          "normalized_address",
+          "input",
+          "jcs_input_hex",
+          "tuple_hex",
+          "sha256",
+          "excluded",
+          "ledger_key"
+        ],
+        "type": "object"
+      },
+      "minItems": 5,
+      "type": "array"
+    },
+    "format": {
+      "const": "daemonloom.substrate-canonical-hash-fixtures.v1"
+    }
+  },
+  "required": [
+    "$schema",
+    "format",
+    "algorithm",
+    "cases"
+  ],
+  "title": "Canonical request-hash fixtures",
+  "type": "object"
+}

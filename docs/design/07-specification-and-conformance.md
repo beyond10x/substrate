@@ -137,5 +137,12 @@ evidence until they contain exact fixture setup, wire bytes, expected instances 
 machine-checkable postconditions. The bundle checker proves inventory integrity, not runtime
 conformance.
 
+The `0.1.0` development bundle now satisfies that contract-execution-readiness gate. Its operation
+registry selects closed address, input, and result schemas for all twelve phase-2 routes;
+`hashing.json` fixes the length encoding and exact digest fixtures; `coverage.json` makes the route,
+error, recovery, and Design 04 threat inventories exact; and `runner.json` defines the independent
+producer/runner boundary. This opens runtime scaffolding but does not count the unexecuted vectors
+as host-driver conformance evidence.
+
 Phase 2 exits only when a black-box client built from the bundle and the host driver pass these
 vectors without repository source access or a sibling checkout.

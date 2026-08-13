@@ -1,0 +1,27 @@
+{
+  "$id": "urn:daemonloom:substrate-wire:0.1.0:result:workspace-destroy",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "absent": {
+      "const": true
+    },
+    "id": {
+      "$ref": "../common.json#/$defs/workspace-id"
+    },
+    "kind": {
+      "const": "workspace"
+    },
+    "observed_at": {
+      "$ref": "../common.json#/$defs/timestamp"
+    }
+  },
+  "required": [
+    "kind",
+    "id",
+    "absent",
+    "observed_at"
+  ],
+  "title": "workspace-destroy operation result",
+  "type": "object"
+}

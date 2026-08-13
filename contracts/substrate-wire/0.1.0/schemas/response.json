@@ -1,31 +1,290 @@
 {
   "$id": "urn:daemonloom:substrate-wire:0.1.0:response",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "additionalProperties": false,
-  "description": "Successful substrate response. Answered failures use error.json.",
-  "properties": {
-    "api_version": {
-      "const": "v1"
+  "anyOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "$ref": "common.json#/$defs/api-version"
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "request_id": {
+          "$ref": "common.json#/$defs/request-id"
+        },
+        "result": {
+          "$ref": "results/machine-get.json"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "result"
+      ],
+      "type": "object"
     },
-    "operation": {
-      "maxLength": 128,
-      "minLength": 16,
-      "pattern": "^[A-Za-z0-9_-]+$",
-      "type": "string"
+    {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "$ref": "common.json#/$defs/api-version"
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "request_id": {
+          "$ref": "common.json#/$defs/request-id"
+        },
+        "result": {
+          "$ref": "results/workspace-create.json"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "result",
+        "operation"
+      ],
+      "type": "object"
     },
-    "request_id": {
-      "maxLength": 128,
-      "minLength": 8,
-      "pattern": "^[A-Za-z0-9_-]+$",
-      "type": "string"
+    {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "$ref": "common.json#/$defs/api-version"
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "request_id": {
+          "$ref": "common.json#/$defs/request-id"
+        },
+        "result": {
+          "$ref": "results/workspace-get.json"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "result"
+      ],
+      "type": "object"
     },
-    "result": {}
-  },
-  "required": [
-    "api_version",
-    "request_id",
-    "result"
+    {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "$ref": "common.json#/$defs/api-version"
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "request_id": {
+          "$ref": "common.json#/$defs/request-id"
+        },
+        "result": {
+          "$ref": "results/workspace-file-read.json"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "result"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "$ref": "common.json#/$defs/api-version"
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "request_id": {
+          "$ref": "common.json#/$defs/request-id"
+        },
+        "result": {
+          "$ref": "results/workspace-file-write.json"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "result",
+        "operation"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "$ref": "common.json#/$defs/api-version"
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "request_id": {
+          "$ref": "common.json#/$defs/request-id"
+        },
+        "result": {
+          "$ref": "results/workspace-file-delete.json"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "result",
+        "operation"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "$ref": "common.json#/$defs/api-version"
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "request_id": {
+          "$ref": "common.json#/$defs/request-id"
+        },
+        "result": {
+          "$ref": "results/workspace-destroy.json"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "result",
+        "operation"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "$ref": "common.json#/$defs/api-version"
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "request_id": {
+          "$ref": "common.json#/$defs/request-id"
+        },
+        "result": {
+          "$ref": "results/exec-start.json"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "result",
+        "operation"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "$ref": "common.json#/$defs/api-version"
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "request_id": {
+          "$ref": "common.json#/$defs/request-id"
+        },
+        "result": {
+          "$ref": "results/exec-get.json"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "result"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "$ref": "common.json#/$defs/api-version"
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "request_id": {
+          "$ref": "common.json#/$defs/request-id"
+        },
+        "result": {
+          "$ref": "results/exec-output-get.json"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "result"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "$ref": "common.json#/$defs/api-version"
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "request_id": {
+          "$ref": "common.json#/$defs/request-id"
+        },
+        "result": {
+          "$ref": "results/exec-signal.json"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "result",
+        "operation"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "$ref": "common.json#/$defs/api-version"
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "request_id": {
+          "$ref": "common.json#/$defs/request-id"
+        },
+        "result": {
+          "$ref": "results/operation-get.json"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "result"
+      ],
+      "type": "object"
+    }
   ],
-  "title": "Substrate success response",
-  "type": "object"
+  "description": "The route registry selects one branch; no generic result value is authoritative.",
+  "title": "Closed phase-2 success response union"
 }

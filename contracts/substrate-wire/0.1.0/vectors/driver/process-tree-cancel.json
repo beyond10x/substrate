@@ -1,26 +1,62 @@
 {
   "$schema": "../../schemas/vector.json",
-  "assertions": [
-    "cancellation targets the operation cgroup rather than only the leading process",
-    "after the configured grace interval the entire cgroup is killed",
-    "the terminal observation proves the cgroup is empty",
-    "no descendant marker continues changing after terminal response"
-  ],
-  "context": {
-    "fixture_authority": "driver-harness"
+  "action": {
+    "command": {
+      "grace_ms": 1000,
+      "operation": "exec.signal",
+      "signal": "TERM",
+      "target": "ex_vector"
+    },
+    "kind": "driver",
+    "port": "exec"
   },
+  "context": {
+    "authority": "driver-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000"
+  },
+  "covers": [
+    "security.process-tree-cancellation"
+  ],
   "expected": {
-    "outcome": "success"
+    "kind": "driver-outcome",
+    "outcome": {
+      "exit": {
+        "code": null,
+        "signal": "KILL"
+      },
+      "state": "cancelled"
+    }
   },
   "id": "cancel-reaps-daemonized-descendants",
   "layer": "driver",
   "phase": 2,
-  "preconditions": [
-    "fixture forks twice, ignores TERM, and writes a monotonic marker"
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/cgroup_process_count",
+      "expected": 0,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/marker_changed_after_observation",
+      "expected": false,
+      "operator": "equals"
+    }
   ],
-  "request": {
-    "operation": "exec.cancel",
-    "signal": "TERM",
-    "target": "ex_vector"
-  }
+  "setup": [
+    {
+      "kind": "process-tree",
+      "name": "daemonized-ignore-term",
+      "state": {
+        "descendants": 3,
+        "marker_sha256": "4444444444444444444444444444444444444444444444444444444444444444"
+      }
+    }
+  ]
 }

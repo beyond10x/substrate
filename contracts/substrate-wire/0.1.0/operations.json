@@ -1,0 +1,364 @@
+{
+  "$schema": "schemas/operation-registry.json",
+  "api_major": 1,
+  "operations": [
+    {
+      "address_schema": "schemas/addresses/machine-get.json",
+      "capability_predicates": [],
+      "direction": "outbound",
+      "effects": [],
+      "exposure": "callable",
+      "id": "machine.get",
+      "idempotency": "idempotent",
+      "input_binding": "query",
+      "input_schema": "schemas/inputs/machine-get.json",
+      "method": "GET",
+      "path": "/v1/machine",
+      "required_scope": "observe",
+      "result_schema": "schemas/results/machine-get.json",
+      "risk": "read"
+    },
+    {
+      "address_schema": "schemas/addresses/workspace-create.json",
+      "capability_predicates": [
+        {
+          "fact": "workspace.guarded-io",
+          "op": "eq",
+          "value": true
+        },
+        {
+          "fact": "workspace.openat2-beneath",
+          "op": "eq",
+          "value": true
+        },
+        {
+          "fact": "workspace.atomic-replace",
+          "op": "eq",
+          "value": true
+        },
+        {
+          "fact": "workspace.git",
+          "op": "eq",
+          "value": true,
+          "when": {
+            "input_pointer": "/source",
+            "not_equals": "empty"
+          }
+        }
+      ],
+      "direction": "outbound",
+      "effects": [
+        "filesystem:workspace",
+        "network:egress"
+      ],
+      "exposure": "projected",
+      "id": "workspace.create",
+      "idempotency": "keyed",
+      "input_binding": "body.input",
+      "input_schema": "schemas/inputs/workspace-create.json",
+      "method": "POST",
+      "path": "/v1/workspaces",
+      "required_scope": "workspaces",
+      "result_schema": "schemas/results/workspace-create.json",
+      "risk": "write"
+    },
+    {
+      "address_schema": "schemas/addresses/workspace-get.json",
+      "capability_predicates": [],
+      "direction": "outbound",
+      "effects": [],
+      "exposure": "callable",
+      "id": "workspace.get",
+      "idempotency": "idempotent",
+      "input_binding": "query",
+      "input_schema": "schemas/inputs/workspace-get.json",
+      "method": "GET",
+      "path": "/v1/workspaces/{workspace_id}",
+      "required_scope": "workspaces",
+      "result_schema": "schemas/results/workspace-get.json",
+      "risk": "read"
+    },
+    {
+      "address_schema": "schemas/addresses/workspace-file-read.json",
+      "capability_predicates": [
+        {
+          "fact": "workspace.guarded-io",
+          "op": "eq",
+          "value": true
+        },
+        {
+          "fact": "workspace.read-limit-bytes",
+          "input_pointer": "/limit_bytes",
+          "op": "gte",
+          "when": {
+            "equals": "file",
+            "input_pointer": "/mode"
+          }
+        },
+        {
+          "fact": "workspace.list-limit-items",
+          "input_pointer": "/limit_items",
+          "op": "gte",
+          "when": {
+            "equals": "directory",
+            "input_pointer": "/mode"
+          }
+        }
+      ],
+      "direction": "outbound",
+      "effects": [],
+      "exposure": "projected",
+      "id": "workspace.file.read",
+      "idempotency": "idempotent",
+      "input_binding": "query",
+      "input_schema": "schemas/inputs/workspace-file-read.json",
+      "method": "GET",
+      "path": "/v1/workspaces/{workspace_id}/files/{path}",
+      "required_scope": "workspaces",
+      "result_schema": "schemas/results/workspace-file-read.json",
+      "risk": "read"
+    },
+    {
+      "address_schema": "schemas/addresses/workspace-file-write.json",
+      "capability_predicates": [
+        {
+          "fact": "workspace.guarded-io",
+          "op": "eq",
+          "value": true
+        },
+        {
+          "fact": "workspace.atomic-replace",
+          "op": "eq",
+          "value": true
+        },
+        {
+          "fact": "workspace.max-file-bytes",
+          "input_pointer": "/content/data",
+          "op": "gte",
+          "transform": "base64-decoded-length"
+        }
+      ],
+      "direction": "outbound",
+      "effects": [
+        "filesystem:workspace"
+      ],
+      "exposure": "projected",
+      "id": "workspace.file.write",
+      "idempotency": "keyed",
+      "input_binding": "body.input",
+      "input_schema": "schemas/inputs/workspace-file-write.json",
+      "method": "PUT",
+      "path": "/v1/workspaces/{workspace_id}/files/{path}",
+      "required_scope": "workspaces",
+      "result_schema": "schemas/results/workspace-file-write.json",
+      "risk": "write"
+    },
+    {
+      "address_schema": "schemas/addresses/workspace-file-delete.json",
+      "capability_predicates": [
+        {
+          "fact": "workspace.guarded-io",
+          "op": "eq",
+          "value": true
+        }
+      ],
+      "direction": "outbound",
+      "effects": [
+        "filesystem:workspace"
+      ],
+      "exposure": "projected",
+      "id": "workspace.file.delete",
+      "idempotency": "keyed",
+      "input_binding": "body.input",
+      "input_schema": "schemas/inputs/workspace-file-delete.json",
+      "method": "DELETE",
+      "path": "/v1/workspaces/{workspace_id}/files/{path}",
+      "required_scope": "workspaces",
+      "result_schema": "schemas/results/workspace-file-delete.json",
+      "risk": "destructive"
+    },
+    {
+      "address_schema": "schemas/addresses/workspace-destroy.json",
+      "capability_predicates": [
+        {
+          "fact": "workspace.guarded-io",
+          "op": "eq",
+          "value": true
+        }
+      ],
+      "direction": "outbound",
+      "effects": [
+        "filesystem:workspace"
+      ],
+      "exposure": "projected",
+      "id": "workspace.destroy",
+      "idempotency": "keyed",
+      "input_binding": "body.input",
+      "input_schema": "schemas/inputs/workspace-destroy.json",
+      "method": "DELETE",
+      "path": "/v1/workspaces/{workspace_id}",
+      "required_scope": "workspaces",
+      "result_schema": "schemas/results/workspace-destroy.json",
+      "risk": "destructive"
+    },
+    {
+      "address_schema": "schemas/addresses/exec-start.json",
+      "capability_predicates": [
+        {
+          "fact": "exec.argv-only",
+          "op": "eq",
+          "value": true
+        },
+        {
+          "fact": "exec.namespaces",
+          "op": "eq",
+          "value": {
+            "ipc": true,
+            "mount": true,
+            "network": true,
+            "pid": true,
+            "user": true,
+            "uts": true
+          }
+        },
+        {
+          "fact": "exec.cgroup-limits",
+          "op": "eq",
+          "value": {
+            "cpu": true,
+            "memory": true,
+            "processes": true
+          }
+        },
+        {
+          "fact": "exec.cgroup-kill",
+          "op": "eq",
+          "value": true
+        },
+        {
+          "fact": "exec.output-limit-bytes",
+          "input_pointer": "/limits/output_bytes",
+          "op": "gte"
+        },
+        {
+          "fact": "exec.no-egress",
+          "op": "eq",
+          "value": true,
+          "when": {
+            "equals": "none",
+            "input_pointer": "/sandbox/network"
+          }
+        },
+        {
+          "fact": "exec.network-aperture",
+          "op": "eq",
+          "value": true,
+          "when": {
+            "equals": "aperture",
+            "input_pointer": "/sandbox/network"
+          }
+        }
+      ],
+      "direction": "outbound",
+      "effects": [
+        "process",
+        "filesystem:workspace",
+        "network:egress"
+      ],
+      "exposure": "projected",
+      "id": "exec.start",
+      "idempotency": "keyed",
+      "input_binding": "body.input",
+      "input_schema": "schemas/inputs/exec-start.json",
+      "method": "POST",
+      "path": "/v1/execs",
+      "required_scope": "exec",
+      "result_schema": "schemas/results/exec-start.json",
+      "risk": "write"
+    },
+    {
+      "address_schema": "schemas/addresses/exec-get.json",
+      "capability_predicates": [],
+      "direction": "outbound",
+      "effects": [],
+      "exposure": "callable",
+      "id": "exec.get",
+      "idempotency": "idempotent",
+      "input_binding": "query",
+      "input_schema": "schemas/inputs/exec-get.json",
+      "method": "GET",
+      "path": "/v1/execs/{exec_id}",
+      "required_scope": "exec",
+      "result_schema": "schemas/results/exec-get.json",
+      "risk": "read"
+    },
+    {
+      "address_schema": "schemas/addresses/exec-output-get.json",
+      "capability_predicates": [
+        {
+          "fact": "exec.output-limit-bytes",
+          "input_pointer": "/limit_bytes",
+          "op": "gte"
+        }
+      ],
+      "direction": "outbound",
+      "effects": [],
+      "exposure": "projected",
+      "id": "exec.output.get",
+      "idempotency": "idempotent",
+      "input_binding": "query",
+      "input_schema": "schemas/inputs/exec-output-get.json",
+      "method": "GET",
+      "path": "/v1/execs/{exec_id}/output",
+      "required_scope": "exec",
+      "result_schema": "schemas/results/exec-output-get.json",
+      "risk": "read"
+    },
+    {
+      "address_schema": "schemas/addresses/exec-signal.json",
+      "capability_predicates": [
+        {
+          "fact": "exec.cgroup-kill",
+          "op": "eq",
+          "value": true
+        },
+        {
+          "fact": "exec.signals",
+          "input_pointer": "/signal",
+          "op": "one_of"
+        }
+      ],
+      "direction": "outbound",
+      "effects": [
+        "process"
+      ],
+      "exposure": "projected",
+      "id": "exec.signal",
+      "idempotency": "keyed",
+      "input_binding": "body.input",
+      "input_schema": "schemas/inputs/exec-signal.json",
+      "method": "POST",
+      "path": "/v1/execs/{exec_id}/signal",
+      "required_scope": "exec",
+      "result_schema": "schemas/results/exec-signal.json",
+      "risk": "destructive"
+    },
+    {
+      "address_schema": "schemas/addresses/operation-get.json",
+      "capability_predicates": [],
+      "direction": "outbound",
+      "effects": [],
+      "exposure": "callable",
+      "id": "operation.get",
+      "idempotency": "idempotent",
+      "input_binding": "query",
+      "input_schema": "schemas/inputs/operation-get.json",
+      "method": "GET",
+      "path": "/v1/ops/{operation_id}",
+      "required_scope": "observe",
+      "result_schema": "schemas/results/operation-get.json",
+      "risk": "read"
+    }
+  ],
+  "registry_format": "daemonloom.substrate-operation-registry.v1"
+}

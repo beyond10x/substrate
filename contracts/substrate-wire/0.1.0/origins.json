@@ -22,6 +22,20 @@
       "version": "RFC 8785"
     },
     {
+      "name": "JSON Pointer",
+      "origin": "standard",
+      "role": "clean-room runner postcondition addressing",
+      "uri": "https://www.rfc-editor.org/rfc/rfc6901.html",
+      "version": "RFC 6901"
+    },
+    {
+      "name": "Base Encodings",
+      "origin": "standard",
+      "role": "bounded binary file and output content in JSON",
+      "uri": "https://www.rfc-editor.org/rfc/rfc4648.html",
+      "version": "RFC 4648"
+    },
+    {
       "name": "HTTP Semantics",
       "origin": "standard",
       "role": "method and status semantics",

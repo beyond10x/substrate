@@ -1,27 +1,57 @@
 {
   "$schema": "../../schemas/vector.json",
-  "assertions": [
-    "driver dispatch is not entered",
-    "the operation record retains the admitted snapshot for diagnosis",
-    "a fresh machine observation carries the incremented config generation"
-  ],
-  "context": {
-    "fixture_authority": "driver-harness"
+  "action": {
+    "command": {
+      "admitted_snapshot": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+      "operation": "exec.start"
+    },
+    "kind": "driver",
+    "port": "exec"
   },
+  "context": {
+    "authority": "driver-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000"
+  },
+  "covers": [
+    "security.stale-capability"
+  ],
   "expected": {
-    "class": "refused",
-    "code": "exec.capability-stale",
-    "outcome": "refused"
+    "kind": "driver-outcome",
+    "outcome": {
+      "code": "exec.capability-stale",
+      "status": "refused"
+    }
   },
   "id": "stale-capability-is-refused-before-dispatch",
   "layer": "driver",
   "phase": 2,
-  "preconditions": [
-    "operation was admitted against config generation 7",
-    "sandbox backend or configuration changes to generation 8 before dispatch"
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/driver/dispatch_count",
+      "expected": 0,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/credential_acquisition_count",
+      "expected": 0,
+      "operator": "equals"
+    }
   ],
-  "request": {
-    "admitted_snapshot": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
-    "operation": "exec.start"
-  }
+  "setup": [
+    {
+      "kind": "backend",
+      "name": "generation-changed",
+      "state": {
+        "admitted_generation": 7,
+        "current_generation": 8
+      }
+    }
+  ]
 }

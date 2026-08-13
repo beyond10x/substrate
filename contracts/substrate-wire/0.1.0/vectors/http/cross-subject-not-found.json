@@ -1,27 +1,74 @@
 {
   "$schema": "../../schemas/vector.json",
-  "assertions": [
-    "response validates against schemas/error.json",
-    "the response is byte-equivalent in shape to an unknown operation id refusal",
-    "no owner, actor, resource, request hash, or existence fact is disclosed"
-  ],
-  "context": {
-    "authenticated_subject": "local:1000"
+  "action": {
+    "kind": "http",
+    "operation": "operation.get",
+    "request": {
+      "headers": {
+        "x-request-id": "req_cross_operation"
+      },
+      "method": "GET",
+      "path": "/v1/ops/01JPHASE2OTHERSUBJECT01",
+      "query": {}
+    },
+    "valid_address": true,
+    "valid_input": true
   },
+  "context": {
+    "actor": "vector-client",
+    "authority": "http-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000",
+    "transport": {
+      "authenticated": true,
+      "kind": "unix",
+      "reachable": false
+    }
+  },
+  "covers": [
+    "lifecycle.subject-operation-isolation"
+  ],
   "expected": {
-    "class": "refused",
-    "code": "resource.not-found",
-    "http_status": 404,
-    "outcome": "refused"
+    "kind": "http-response",
+    "response": {
+      "body": {
+        "api_version": "v1",
+        "error": {
+          "address": "operation",
+          "class": "refused",
+          "code": "resource.not-found",
+          "message": "Resource was not found.",
+          "retriable": false
+        },
+        "request_id": "req_cross_operation"
+      },
+      "status": 404
+    }
   },
   "id": "cross-subject-operation-is-not-found",
   "layer": "http",
   "phase": 2,
-  "preconditions": [
-    "operation 01JPHASE2OTHERSUBJECT01 belongs to local:1001"
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/disclosed_ledger_fields",
+      "expected": 0,
+      "operator": "equals"
+    }
   ],
-  "request": {
-    "method": "GET",
-    "path": "/v1/ops/01JPHASE2OTHERSUBJECT01"
-  }
+  "setup": [
+    {
+      "kind": "operation",
+      "name": "other-subject",
+      "state": {
+        "operation": "01JPHASE2OTHERSUBJECT01",
+        "owner": "local:1001"
+      }
+    }
+  ]
 }

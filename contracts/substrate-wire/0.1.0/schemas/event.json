@@ -2,7 +2,7 @@
   "$id": "urn:daemonloom:substrate-wire:0.1.0:event",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
-  "description": "Reserved phase-2 state-transition record. No phase-2 event endpoint is served.",
+  "description": "Reserved state record; phase 2 serves no event endpoint.",
   "properties": {
     "actor": {
       "minLength": 1,
@@ -13,14 +13,10 @@
       "type": "integer"
     },
     "observed_at": {
-      "format": "date-time",
-      "type": "string"
+      "$ref": "common.json#/$defs/timestamp"
     },
     "op": {
-      "maxLength": 128,
-      "minLength": 16,
-      "pattern": "^[A-Za-z0-9_-]+$",
-      "type": "string"
+      "$ref": "common.json#/$defs/operation-id"
     },
     "principal": {
       "type": [

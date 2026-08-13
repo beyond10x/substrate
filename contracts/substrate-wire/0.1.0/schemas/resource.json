@@ -1,10 +1,10 @@
 {
   "$defs": {
-    "confinement": {
+    "confinement-applied": {
       "additionalProperties": false,
       "properties": {
         "capability_snapshot": {
-          "minLength": 16,
+          "pattern": "^sha256:[0-9a-f]{64}$",
           "type": "string"
         },
         "cgroup": {
@@ -12,16 +12,20 @@
           "minLength": 1,
           "type": "string"
         },
+        "filesystem": {
+          "const": "workspace-rw-system-ro"
+        },
         "network": {
           "const": "none"
         },
-        "sandbox": {
+        "profile": {
           "const": "workspace"
         }
       },
       "required": [
         "capability_snapshot",
-        "sandbox",
+        "profile",
+        "filesystem",
         "network",
         "cgroup"
       ],
@@ -31,100 +35,536 @@
       "additionalProperties": false,
       "properties": {
         "capability_snapshot": {
-          "minLength": 16,
+          "pattern": "^sha256:[0-9a-f]{64}$",
           "type": "string"
         },
         "network": {
-          "const": "none"
+          "enum": [
+            "none",
+            "aperture"
+          ]
         },
-        "sandbox": {
+        "profile": {
           "const": "workspace"
+        },
+        "require": {
+          "const": true
         }
       },
       "required": [
         "capability_snapshot",
-        "sandbox",
-        "network"
+        "profile",
+        "network",
+        "require"
       ],
       "type": "object"
     },
     "exec": {
-      "additionalProperties": false,
-      "properties": {
-        "applied": {
-          "oneOf": [
-            {
-              "$ref": "#/$defs/confinement"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
-        "exit": {
+      "oneOf": [
+        {
           "additionalProperties": false,
           "properties": {
-            "code": {
-              "maximum": 255,
-              "minimum": 0,
-              "type": [
-                "integer",
-                "null"
-              ]
+            "applied": {
+              "type": "null"
             },
-            "signal": {
-              "type": [
-                "string",
-                "null"
-              ]
+            "exit": {
+              "type": "null"
+            },
+            "id": {
+              "$ref": "common.json#/$defs/exec-id"
+            },
+            "kind": {
+              "const": "exec"
+            },
+            "observed_at": {
+              "$ref": "common.json#/$defs/timestamp"
+            },
+            "requested": {
+              "additionalProperties": false,
+              "properties": {
+                "capability_snapshot": {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "network": {
+                  "enum": [
+                    "none",
+                    "aperture"
+                  ]
+                },
+                "profile": {
+                  "const": "workspace"
+                },
+                "require": {
+                  "const": true
+                }
+              },
+              "required": [
+                "capability_snapshot",
+                "profile",
+                "network",
+                "require"
+              ],
+              "type": "object"
+            },
+            "state": {
+              "const": "accepted"
+            },
+            "workspace": {
+              "$ref": "common.json#/$defs/workspace-id"
             }
           },
           "required": [
-            "code",
-            "signal"
+            "kind",
+            "id",
+            "workspace",
+            "state",
+            "observed_at",
+            "requested",
+            "applied",
+            "exit"
           ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "applied": {
+              "additionalProperties": false,
+              "properties": {
+                "capability_snapshot": {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "cgroup": {
+                  "maxLength": 512,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "filesystem": {
+                  "const": "workspace-rw-system-ro"
+                },
+                "network": {
+                  "const": "none"
+                },
+                "profile": {
+                  "const": "workspace"
+                }
+              },
+              "required": [
+                "capability_snapshot",
+                "profile",
+                "filesystem",
+                "network",
+                "cgroup"
+              ],
+              "type": "object"
+            },
+            "exit": {
+              "type": "null"
+            },
+            "id": {
+              "$ref": "common.json#/$defs/exec-id"
+            },
+            "kind": {
+              "const": "exec"
+            },
+            "observed_at": {
+              "$ref": "common.json#/$defs/timestamp"
+            },
+            "requested": {
+              "additionalProperties": false,
+              "properties": {
+                "capability_snapshot": {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "network": {
+                  "const": "none"
+                },
+                "profile": {
+                  "const": "workspace"
+                },
+                "require": {
+                  "const": true
+                }
+              },
+              "required": [
+                "capability_snapshot",
+                "profile",
+                "network",
+                "require"
+              ],
+              "type": "object"
+            },
+            "state": {
+              "const": "running"
+            },
+            "workspace": {
+              "$ref": "common.json#/$defs/workspace-id"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "workspace",
+            "state",
+            "observed_at",
+            "requested",
+            "applied",
+            "exit"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "applied": {
+              "additionalProperties": false,
+              "properties": {
+                "capability_snapshot": {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "cgroup": {
+                  "maxLength": 512,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "filesystem": {
+                  "const": "workspace-rw-system-ro"
+                },
+                "network": {
+                  "const": "none"
+                },
+                "profile": {
+                  "const": "workspace"
+                }
+              },
+              "required": [
+                "capability_snapshot",
+                "profile",
+                "filesystem",
+                "network",
+                "cgroup"
+              ],
+              "type": "object"
+            },
+            "exit": {
+              "additionalProperties": false,
+              "oneOf": [
+                {
+                  "properties": {
+                    "code": {
+                      "type": "integer"
+                    },
+                    "signal": {
+                      "type": "null"
+                    }
+                  }
+                },
+                {
+                  "properties": {
+                    "code": {
+                      "type": "null"
+                    },
+                    "signal": {
+                      "enum": [
+                        "INT",
+                        "TERM",
+                        "KILL"
+                      ]
+                    }
+                  }
+                }
+              ],
+              "properties": {
+                "code": {
+                  "maximum": 255,
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "signal": {
+                  "enum": [
+                    "INT",
+                    "TERM",
+                    "KILL",
+                    null
+                  ]
+                }
+              },
+              "required": [
+                "code",
+                "signal"
+              ],
+              "type": "object"
+            },
+            "id": {
+              "$ref": "common.json#/$defs/exec-id"
+            },
+            "kind": {
+              "const": "exec"
+            },
+            "observed_at": {
+              "$ref": "common.json#/$defs/timestamp"
+            },
+            "requested": {
+              "additionalProperties": false,
+              "properties": {
+                "capability_snapshot": {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "network": {
+                  "const": "none"
+                },
+                "profile": {
+                  "const": "workspace"
+                },
+                "require": {
+                  "const": true
+                }
+              },
+              "required": [
+                "capability_snapshot",
+                "profile",
+                "network",
+                "require"
+              ],
+              "type": "object"
+            },
+            "state": {
+              "enum": [
+                "exited",
+                "cancelled"
+              ]
+            },
+            "workspace": {
+              "$ref": "common.json#/$defs/workspace-id"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "workspace",
+            "state",
+            "observed_at",
+            "requested",
+            "applied",
+            "exit"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "applied": {
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "capability_snapshot": {
+                      "pattern": "^sha256:[0-9a-f]{64}$",
+                      "type": "string"
+                    },
+                    "cgroup": {
+                      "maxLength": 512,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "filesystem": {
+                      "const": "workspace-rw-system-ro"
+                    },
+                    "network": {
+                      "const": "none"
+                    },
+                    "profile": {
+                      "const": "workspace"
+                    }
+                  },
+                  "required": [
+                    "capability_snapshot",
+                    "profile",
+                    "filesystem",
+                    "network",
+                    "cgroup"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "exit": {
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "oneOf": [
+                    {
+                      "properties": {
+                        "code": {
+                          "type": "integer"
+                        },
+                        "signal": {
+                          "type": "null"
+                        }
+                      }
+                    },
+                    {
+                      "properties": {
+                        "code": {
+                          "type": "null"
+                        },
+                        "signal": {
+                          "enum": [
+                            "INT",
+                            "TERM",
+                            "KILL"
+                          ]
+                        }
+                      }
+                    }
+                  ],
+                  "properties": {
+                    "code": {
+                      "maximum": 255,
+                      "minimum": 0,
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "signal": {
+                      "enum": [
+                        "INT",
+                        "TERM",
+                        "KILL",
+                        null
+                      ]
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "signal"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "id": {
+              "$ref": "common.json#/$defs/exec-id"
+            },
+            "kind": {
+              "const": "exec"
+            },
+            "observed_at": {
+              "$ref": "common.json#/$defs/timestamp"
+            },
+            "requested": {
+              "additionalProperties": false,
+              "properties": {
+                "capability_snapshot": {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "network": {
+                  "enum": [
+                    "none",
+                    "aperture"
+                  ]
+                },
+                "profile": {
+                  "const": "workspace"
+                },
+                "require": {
+                  "const": true
+                }
+              },
+              "required": [
+                "capability_snapshot",
+                "profile",
+                "network",
+                "require"
+              ],
+              "type": "object"
+            },
+            "state": {
+              "const": "unknown"
+            },
+            "workspace": {
+              "$ref": "common.json#/$defs/workspace-id"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "workspace",
+            "state",
+            "observed_at",
+            "requested",
+            "applied",
+            "exit"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "exit": {
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "properties": {
+            "code": {
+              "type": "integer"
+            },
+            "signal": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "code": {
+              "type": "null"
+            },
+            "signal": {
+              "enum": [
+                "INT",
+                "TERM",
+                "KILL"
+              ]
+            }
+          }
+        }
+      ],
+      "properties": {
+        "code": {
+          "maximum": 255,
+          "minimum": 0,
           "type": [
-            "object",
+            "integer",
             "null"
           ]
         },
-        "id": {
-          "pattern": "^ex_[A-Za-z0-9]+$",
-          "type": "string"
-        },
-        "kind": {
-          "const": "exec"
-        },
-        "observed_at": {
-          "format": "date-time",
-          "type": "string"
-        },
-        "requested": {
-          "$ref": "#/$defs/confinement-request"
-        },
-        "state": {
+        "signal": {
           "enum": [
-            "accepted",
-            "running",
-            "exited",
-            "cancelled",
-            "unknown"
+            "INT",
+            "TERM",
+            "KILL",
+            null
           ]
-        },
-        "workspace": {
-          "pattern": "^ws_[A-Za-z0-9]+$",
-          "type": "string"
         }
       },
       "required": [
-        "kind",
-        "id",
-        "workspace",
-        "state",
-        "observed_at",
-        "applied",
-        "requested",
-        "exit"
+        "code",
+        "signal"
       ],
       "type": "object"
     },
@@ -132,27 +572,16 @@
       "additionalProperties": false,
       "properties": {
         "id": {
-          "pattern": "^ws_[A-Za-z0-9]+$",
-          "type": "string"
+          "$ref": "common.json#/$defs/workspace-id"
         },
         "kind": {
           "const": "workspace"
         },
         "labels": {
-          "additionalProperties": {
-            "maxLength": 256,
-            "type": "string"
-          },
-          "maxProperties": 64,
-          "propertyNames": {
-            "maxLength": 128,
-            "pattern": "^[A-Za-z0-9_.-]+$"
-          },
-          "type": "object"
+          "$ref": "common.json#/$defs/labels"
         },
         "observed_at": {
-          "format": "date-time",
-          "type": "string"
+          "$ref": "common.json#/$defs/timestamp"
         },
         "state": {
           "enum": [

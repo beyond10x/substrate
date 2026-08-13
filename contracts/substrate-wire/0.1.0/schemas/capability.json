@@ -117,19 +117,18 @@
           "type": "integer"
         }
       },
+      "required": [],
       "type": "object"
     },
     "probed_at": {
-      "format": "date-time",
-      "type": "string"
+      "$ref": "common.json#/$defs/timestamp"
     },
     "snapshot": {
-      "minLength": 16,
+      "pattern": "^sha256:[0-9a-f]{64}$",
       "type": "string"
     },
     "valid_until": {
-      "format": "date-time",
-      "type": "string"
+      "$ref": "common.json#/$defs/timestamp"
     }
   },
   "required": [

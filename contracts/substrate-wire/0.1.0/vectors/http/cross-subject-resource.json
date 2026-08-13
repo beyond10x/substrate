@@ -1,0 +1,80 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "kind": "http",
+    "operation": "workspace.get",
+    "request": {
+      "headers": {
+        "x-request-id": "req_cross_resource"
+      },
+      "method": "GET",
+      "path": "/v1/workspaces/ws_other",
+      "query": {}
+    },
+    "valid_address": true,
+    "valid_input": true
+  },
+  "context": {
+    "actor": "vector-client",
+    "authority": "http-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000",
+    "transport": {
+      "authenticated": true,
+      "kind": "unix",
+      "reachable": false
+    }
+  },
+  "covers": [
+    "security.subject-resource-isolation"
+  ],
+  "expected": {
+    "kind": "http-response",
+    "response": {
+      "body": {
+        "api_version": "v1",
+        "error": {
+          "address": "resource",
+          "class": "refused",
+          "code": "resource.not-found",
+          "message": "Resource was not found.",
+          "retriable": false
+        },
+        "request_id": "req_cross_resource"
+      },
+      "status": 404
+    }
+  },
+  "id": "cross-subject-resource-is-not-found",
+  "layer": "http",
+  "phase": 2,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/disclosed_owner_fields",
+      "expected": 0,
+      "operator": "equals"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "workspace",
+      "name": "other-subject",
+      "state": {
+        "owner": "local:1001",
+        "resource": {
+          "id": "ws_other",
+          "kind": "workspace",
+          "labels": {},
+          "observed_at": "2026-08-13T12:00:00Z",
+          "state": "ready"
+        }
+      }
+    }
+  ]
+}

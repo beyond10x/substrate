@@ -1,0 +1,105 @@
+{
+  "$id": "urn:daemonloom:substrate-wire:0.1.0:runner-result",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "pass"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "diagnostics": {
+            "maxItems": 0
+          },
+          "expected_match": {
+            "const": true
+          },
+          "postconditions": {
+            "items": {
+              "properties": {
+                "matched": {
+                  "const": true
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "properties": {
+    "diagnostics": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "expected_match": {
+      "type": "boolean"
+    },
+    "format": {
+      "const": "daemonloom.substrate-runner-result.v1"
+    },
+    "postconditions": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "actual": {},
+          "expected": {},
+          "matched": {
+            "type": "boolean"
+          },
+          "operator": {
+            "enum": [
+              "equals",
+              "not-equals",
+              "lte",
+              "gte"
+            ]
+          },
+          "pointer": {
+            "pattern": "^/",
+            "type": "string"
+          }
+        },
+        "required": [
+          "pointer",
+          "operator",
+          "expected",
+          "actual",
+          "matched"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "status": {
+      "enum": [
+        "pass",
+        "fail"
+      ]
+    },
+    "vector_id": {
+      "pattern": "^[a-z][a-z0-9-]+$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "format",
+    "vector_id",
+    "status",
+    "expected_match",
+    "postconditions",
+    "diagnostics"
+  ],
+  "title": "Clean-room runner result",
+  "type": "object"
+}

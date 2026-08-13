@@ -1,0 +1,95 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "kind": "http",
+    "operation": "workspace.file.write",
+    "request": {
+      "body": {
+        "input": {
+          "content": {
+            "data": "aGVsbG8=",
+            "encoding": "base64"
+          }
+        },
+        "op": "01JPHASE2FAILEDWRITE0001"
+      },
+      "headers": {
+        "x-request-id": "req_failed_write1"
+      },
+      "method": "PUT",
+      "path": "/v1/workspaces/ws_vector/files/src/main.txt",
+      "query": {}
+    },
+    "valid_address": true,
+    "valid_input": true
+  },
+  "context": {
+    "actor": "vector-client",
+    "authority": "http-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000",
+    "transport": {
+      "authenticated": true,
+      "kind": "unix",
+      "reachable": false
+    }
+  },
+  "covers": [
+    "error.failed"
+  ],
+  "expected": {
+    "kind": "http-response",
+    "response": {
+      "body": {
+        "api_version": "v1",
+        "error": {
+          "address": "workspace.file",
+          "class": "failed",
+          "code": "workspace.driver-failed",
+          "message": "Atomic replacement failed after operation acceptance.",
+          "operation": "01JPHASE2FAILEDWRITE0001",
+          "retriable": true
+        },
+        "request_id": "req_failed_write1"
+      },
+      "status": 500
+    }
+  },
+  "id": "accepted-machinery-failure-is-wire-failed",
+  "layer": "http",
+  "phase": 2,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/operation_state",
+      "expected": "terminal",
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/original_target_intact",
+      "expected": true,
+      "operator": "equals"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "fault",
+      "name": "atomic-rename-eio",
+      "state": {
+        "after_acceptance": true
+      }
+    },
+    {
+      "kind": "workspace",
+      "name": "owned-with-old-file",
+      "state": {
+        "owner": "local:1000"
+      }
+    }
+  ]
+}
