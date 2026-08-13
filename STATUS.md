@@ -4,6 +4,11 @@
 
 ## Current state
 
+The active repository goal is **phase-2 contract execution readiness**. Runtime scaffolding begins
+only after the operation registry, closed route schemas, exact hashing fixtures, complete threat
+inventory, and machine-executable fixture format pass the bundle gate in a clean checkout. The
+ordered checklist is [Plan 02](docs/plan/02-minimum-host-slice.md#active-goal-contract-execution-readiness).
+
 | Area | State | Next proof |
 |---|---|---|
 | Repository | private `daemonloom/substrate`; bot-authored `main` is synchronized | keep visibility, authorship, and portable-document invariants enforced |
