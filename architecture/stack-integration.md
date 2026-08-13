@@ -10,7 +10,7 @@ failure semantics apply in every posture.
 | cloud | deploys, registers, selects, meters, and operates substrate instances | substrate owns resource and enforcement truth; cloud owns fleet/tenant composition |
 | daemonloom/agent | may request bounded execution behind an agent-owned port | agent owns loops, tasks, tools, harnesses, and model providers |
 | Flux | may map its guarded-IO and remote delegate seams onto the public API | Flux owns Flux-Lang, harness behavior, and error projection; substrate has no Flux dependency |
-| autodev | may implement `Executor` and evidence handoff over workspaces, execs, leases, and snapshots | autodev owns turns, verification, scheduling, and coordinator refs |
+| autodev | may extract its proposed `Executor` port and implement it over workspaces, execs, leases, and snapshots | autodev owns turns, verification, scheduling, and coordinator refs |
 | applications | consume direct or governed operations | applications never select driver internals or weaken isolation requirements |
 
 ## Connector path
@@ -20,9 +20,14 @@ admits declared risk/effects, selects a configured substrate connection, and sen
 substrate request. Substrate independently enforces its local token scope, capabilities, limits, and
 isolation. Neither service treats the other's success as proof of its own checks.
 
+A personal client may instead call substrate directly under architecture ADR 0013. That request is
+locally authenticated, enforced, and observed, but it is not admitted by connector grants and does
+not enter the durable platform audit.
+
 Substrate events retain substrate resource and operation provenance when connectors republishes
-them. Continuous PTY/tunnel bytes follow the byte-plane split: connectors brokers a short-lived
-session authority, while client and substrate exchange bytes directly.
+them through the ingestion protocol proposed in architecture RFC 0003. Continuous PTY/tunnel bytes
+follow the byte-plane split: connectors brokers a short-lived session authority under architecture
+RFC 0002, while client and substrate exchange bytes directly after that RFC is accepted.
 
 ## Hosted path
 

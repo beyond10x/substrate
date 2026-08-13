@@ -27,8 +27,9 @@ domain ─X─▶ HTTP, Docker, Kubernetes, persistence, or telemetry libraries
 
 ## Cross-foundation seams
 
-- Connectors may declare substrate mechanically as a first-party provider. Substrate does not need
-  connectors to serve its direct API.
+- Connectors may declare substrate as a first-party provider through a deterministic translation of
+  a released substrate bundle plus a connectors-owned manifest. Substrate does not need connectors
+  to serve its direct API.
 - Hosted authentication may validate identity-issued material through a narrow stable protocol;
   substrate does not import the identity domain implementation.
 - Cloud may provision, register, meter, and select deployments through public APIs. It cannot add a

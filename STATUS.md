@@ -8,9 +8,9 @@
 |---|---|---|
 | Repository | private `daemonloom/substrate`; bot-authored `main` is synchronized | keep visibility, authorship, and portable-document invariants enforced |
 | Boundary | accepted: standalone, generic execution data plane, Flux-free | keep all design documents consistent with ADRs 0001 and 0002 |
-| Wire contract | detailed founding draft | close the questions named by the design-closure plan |
+| Wire contract | detailed founding draft; canonical machine-readable bundle and connector translation are not yet defined | close the expanded design-closure gate and architecture RFC dependencies |
 | Drivers | host, Docker, and later Kubernetes intent documented | accept the driver/capability model before selecting implementation crates |
-| Security | principles and known threats documented | complete isolation guarantees and secret handoff design |
+| Security | one-trust-domain/tenant, authenticated personal mode, subject ownership, and destination-bound credential invariants documented | complete isolation guarantees, token lifecycle, Git refusal cases, and secret handoff design |
 | Stack integration | ownership mapped across connectors, identity, cloud, agent, Flux, and autodev | agree direct, governed, and hosted deployment postures |
 | Implementation | intentionally absent | begin only after the design-closure gate is accepted |
 

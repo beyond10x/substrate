@@ -7,12 +7,14 @@ adapter and remains buildable without a sibling substrate checkout.
 
 ## Proof sequence
 
-1. **connectors projection:** mechanically declare the stable substrate operation subset, risk,
-   effects, idempotency, capabilities, and events. Govern one operation under a connector grant.
+1. **connectors translation:** generate the stable substrate operation subset from a pinned released
+   substrate bundle plus a connectors-owned projection manifest. Prove the mapped risk, semantic
+   effects, idempotency, capabilities, and events byte-for-byte and govern one operation.
 2. **Flux adapter:** map guarded workspace/exec behavior and unanswered outcomes onto Flux-owned
    delegate concepts. The adapter lives in Flux; substrate remains unchanged and Flux-free.
-3. **autodev adapter:** implement the existing `Executor` port using pinned workspace materialization,
-   bounded exec, lease/reconciliation, and evidence handoff. Scheduling remains in autodev.
+3. **autodev adapter:** first extract and accept autodev's proposed `Executor` port, then implement
+   it using pinned workspace materialization, bounded exec, lease/reconciliation, and evidence
+   handoff. Scheduling remains in autodev.
 4. **agent journey:** demonstrate that the generic agent layer can request execution through an
    agent-owned tool/runner port without importing substrate domain types into its core lifecycle.
 5. **hosted composition:** register and select a deployment using identity/cloud trust while serving

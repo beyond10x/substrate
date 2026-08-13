@@ -35,6 +35,8 @@ consumer-specific vocabulary.
 ## 3. Capability facts
 
 A capability is published only after its probe succeeds. Facts are closed, typed, and versioned.
+Each probe result has a snapshot id bound to driver identity, backend/configuration generation, and
+probe time. A backend replacement or relevant configuration change invalidates the snapshot.
 Working groups include:
 
 - `workspace`: confinement mode, snapshots, maximum file/range sizes;
@@ -51,8 +53,10 @@ capability.
 
 ## 4. Admission
 
-Every command maps to a required capability predicate. Admission evaluates it before materializing
-secrets or changing state. If no configured driver proves the requirement, the answer is `unserved`.
+Every command maps to a required capability predicate. Admission evaluates it against one selected
+driver snapshot before materializing secrets or changing state, binds that snapshot to the
+operation, and rechecks security-critical predicates immediately before dispatch. If no configured
+driver proves the requirement, the answer is `unserved`.
 If a driver normally serves it but a request violates a guard or local policy, the answer is
 `refused`. Capacity pressure is `exhausted`; machinery failure after acceptance is `failed`.
 
@@ -80,3 +84,4 @@ at least one consumer journey needs it and unsupported drivers can refuse it coh
 2. The canonical capability document and predicate syntax.
 3. Persistence ownership for resource/operation metadata versus driver observation.
 4. Startup behavior when an optional driver probe fails.
+5. Snapshot invalidation and the security-critical predicates that must be rechecked at dispatch.

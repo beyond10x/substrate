@@ -23,9 +23,9 @@ Three sibling products each stopped at the same edge, deliberately:
 - **Flux** solved guarded IO *in-process* (path confinement, argv-only exec, environment clearing,
   OS sandboxing) and left the remote wire explicitly open — its delegate seam says
   *"no wire format is chosen here, deliberately."*
-- **autodev** extracted the `Executor` port and decided (decision-0002) that *confinement
-  belongs to the substrate, not to harness flags* — then noted the real substrate does not
-  exist yet.
+- **autodev** designed a proposed `Executor` port and decided (decision-0002) that *confinement
+  belongs to the substrate, not to harness flags* — extraction remains downstream work and the real
+  substrate does not exist yet.
 - **connectors** refuses behaviour hosting by principle (*"no foreign engine in the dispatch
   path"*); it governs invocation but must never contain the thing invoked.
 
@@ -53,17 +53,17 @@ decides who may ask and remembers who did; flux and autodev are clients on both 
    weaker than asked.
 3. **Argv-only, everywhere.** No operation in the contract accepts a shell string. "Shell
    access" means a caller explicitly chose `argv = ["bash"]`, and that choice is the caller's.
-4. **A data-only, catalog-declarable wire.** Plain HTTP+JSON plus WebSocket channels with
-   closed event sets. Every operation natively declares the connectors risk vocabulary
-   (direction, risk, idempotency, effects); the provider declaration is a mechanical,
-   tested projection of this spec.
+4. **A data-only, catalog-declarable wire.** Plain HTTP+JSON plus transport-independent channel
+   semantics with closed event sets. Substrate owns a canonical machine-readable specification;
+   connectors deterministically translates a pinned bundle plus its projection manifest into the
+   connector catalog and proves the result byte-for-byte.
 5. **Thin authn, no policy engine.** Bearer tokens with coarse per-family scopes, loopback by
    default, refusal to bind reachable addresses without auth configured. Rich authorization —
    grants over declared facts — is the platform's job; duplicating it here would recreate the
    split connectors was founded to end.
-6. **One daemon, one scope.** A daemon governs one machine (host/docker) or one cluster
-   namespace (k8s). Fleets, placement, and federation belong to consumers (autodev's executor
-   registry, the platform's connections). substrate is not a scheduler.
+6. **One daemon, one trust domain and scope.** A daemon governs one tenant on one machine
+   (host/docker) or one handed-over cluster namespace (k8s). Fleets, placement, and federation
+   belong to consumers. substrate is not a scheduler.
 7. **Capabilities are probed facts.** A daemon advertises what it verified (bubblewrap present,
    docker reachable), not what it hopes. Unadvertised operations answer `unserved`.
 8. **Liveness is asserted, never assumed.** Workspaces, execs, and workloads can carry leases;
@@ -78,8 +78,9 @@ decides who may ask and remembers who did; flux and autodev are clients on both 
 
 ## Non-goals
 
-- **No grants engine, no identity provider, no credential brokering.** Tokens here are blast-
-  radius limiters, not policy.
+- **No grants engine, no identity provider, no vendor-credential broker.** Substrate still owns
+  local auth, destination-bound source/registry secrets, workload secret delivery, and channel
+  authority verification. Tokens here are blast-radius limiters, not rich policy.
 - **No cross-machine scheduling.** Not Nomad, not a PaaS. One daemon, one scope.
 - **No catalog and no plugin runtime.** substrate is *declared in* a catalog; it does not have
   one.
@@ -95,7 +96,8 @@ decides who may ask and remembers who did; flux and autodev are clients on both 
   option (exec with the working tree as a mounted workspace, egress off). Flux itself is deployable
   as a workload — which is also how connectors' future "supervised client runtime" tier can
   exist without embedding an engine.
-- **autodev.** A `RemoteExecutor` behind the existing `Executor` port: checkout the pinned base
+- **autodev.** A future `RemoteExecutor` behind the proposed `Executor` port, after that port is
+  extracted: checkout the pinned base
   as a workspace, exec the harness turn, snapshot back as a git bundle or a push to a
   coordinator-owned ref. Evidence semantics unchanged; liveness is the lease autodev already
   designed.

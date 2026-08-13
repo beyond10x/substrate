@@ -27,28 +27,32 @@ consumers (Flux, autodev, the platform) see only it.
 - **Versioning.** Additive evolution within `/v1`. Optional features are gated by capability
   facts (§8), never by version sniffing.
 - **Authentication.** `Authorization: Bearer sbt_…`. Tokens are daemon configuration, each
-  carrying a label (the event `actor`) and coarse scopes: `observe`, `workspaces`, `exec`,
-  `workloads`, `images`, `admin`. The daemon binds loopback by default and **refuses to start
-  on a reachable address with no authentication configured**. Scopes are blast-radius
-  limiters; policy lives in the platform's grants.
+  carrying a stable local subject, an operational label (the immediate event `actor`), and coarse
+  scopes: `observe`, `workspaces`, `exec`, `workloads`, `images`, `admin`. Resources and operation
+  ids are namespaced to that authenticated subject; another subject receives the same not-found
+  answer as an unknown id. The daemon binds loopback by default and **refuses to start on a
+  reachable address without authentication and TLS/mTLS or a configured trusted tunnel**. Scopes
+  are blast-radius limiters; policy lives in the platform's grants. One daemon is one trust domain
+  and, for v1, one tenant.
 
-## 2. Operation metadata: the risk vocabulary is native
+## 2. Operation metadata: the substrate vocabulary is native
 
 Every operation in this spec declares, in the spec itself:
 
 - `direction` — `outbound` for all request/response operations; events are `inbound`.
-- `risk` — on the catalog's ordered scale; working values here: `read` | `write` |
-  `destructive`.
+- `risk` — substrate-local working values: `read` | `write` | `destructive`.
 - `idempotency` — `idempotent` | `keyed` (safe under the same `op` id) | `none`.
 - `effects` — a **closed v1 set**: `process`, `filesystem:workspace`, `filesystem:volume`,
   `network:egress`, `network:expose`, `image`, `workload`.
 - `expose` — `callable` | `callable-direct` (§7.8; duplex surfaces the platform brokers but
   never proxies) | `projected` (worth showing to a model).
 
-The connectors provider declaration is a **mechanical projection of this spec**, and the
-projection is tested byte-for-byte against the catalog artifact. A grant can therefore say
-"risk ≤ `write`, effects ⊆ {`process`, `filesystem:workspace`}" and admit sandboxed exec while
-excluding deployment — decided from declared facts, never from operation-id lists.
+These fields are not asserted to be byte-compatible with connectors. Substrate publishes a
+canonical machine-readable wire/metadata bundle. Connectors owns a small projection manifest for
+its distinct direction, risk, idempotency, semantic-effect, exposure, auth, credential, and request
+facts. A deterministic translation of the pinned substrate bundle plus that manifest produces the
+first-party provider document and is tested byte-for-byte against the compiled catalog artifact.
+No grant example is normative until that translation and its conformance fixture exist.
 
 ## 3. The six families
 
@@ -71,10 +75,14 @@ refused, and paths are walked component-by-component without depending on a prod
 
 Semantics:
 
-- **Sources are git-native.** `{git: {url, ref, depth}}`, `{bundle: <uploaded artifact>}`, or
-  empty. Checkout pins a ref and records the observed commit. Bulk content leaves only via
-  `snapshot` — a bundle/tar download or a push `{url, refspec, credential: <named>}` to a
-  caller-designated remote (autodev's `refs/autodev/handoffs/<worker>` pattern).
+- **Sources are git-native.** `{git: {source: <named>, ref, depth}}`, an unauthenticated URL that
+  passes a deployment destination aperture, `{bundle: <uploaded artifact>}`, or empty. Checkout
+  resolves a mutable ref to an immutable commit and records that commit. A named source binds
+  scheme, authority, port, path, credential, and destination policy in daemon configuration.
+  Callers never pair an arbitrary URL with a stored credential. Bulk content leaves only via
+  `snapshot` — a bundle/tar download or a push `{remote: <named>, refspec}` to a configured,
+  credential-bound remote. Redirects, proxies, submodules, Git LFS, credential helpers, and hooks
+  are disabled unless their bounded behavior is explicitly part of the named source/remote.
 - **File IO is bounded.** Reads are ranged and byte-capped; writes are atomic replacements.
   This surface is for inspection and small edits, not bulk transfer (§10).
 - Workspaces are disposable and may carry a lease (§5).
@@ -97,10 +105,12 @@ The exec spec: `{workspace, argv, env, image?, sandbox, timeout, stdin?, wait?}`
 - **Environment is default-deny.** The child's env is cleared to the non-secret allowlist,
   then shaped by `env: {allow: […], set: {…}}`. No credential ambient in the daemon's own
   environment can reach a child.
-- **Sandbox profiles:** `unconfined` | `workspace` (fs: workspace rw + system ro; `network:
-  none|full`), plus `require: true` — if the driver cannot enforce the requested profile the
-  exec is **refused**, never run weaker. Which confinement was actually applied is recorded on
-  the exec.
+- **Sandbox profiles:** ordinary callers use `workspace` (fs: workspace rw + system ro;
+  `network: none|aperture`) plus `require: true` — if the driver cannot enforce the requested
+  profile the exec is **refused**, never run weaker. `aperture` names deployment-owned egress
+  policy; request data cannot widen it. An operator-only unconfined profile is a distinct authority,
+  disabled by default and unavailable in hosted or satellite postures. Which confinement and
+  destination policy snapshot were actually applied is recorded on the exec.
 - **`image` is driver-dependent.** On a container-backed driver an exec may name the image it
   runs in (default from daemon config); the host driver refuses the field as `unserved`.
 - **Exit is an observation, not an error.** `exited{code: 1}` is a successful answer. Captured
@@ -182,11 +192,12 @@ restart: never|on-failure|always, resources?, lease_ttl?, labels}`.
   typed event `{seq, resource, transition, observed_at, actor, op}`. The event set is closed
   and declared (what connectors' inbound grants require); replay is cursor-based within a
   stated retention window, and the window itself is a machine fact.
-- **`/v1/machine` reports probed facts**: drivers present, sandbox backends verified usable,
+- **`/v1/machine` reports a versioned snapshot of probed facts**: drivers present, sandbox backends verified usable,
   capability matrix (§8), resource totals, versions, retention windows, configured exposure
   policy. A capability listed here is a promise; one absent here answers `unserved`.
-- **`/v1/ops/{op}`** answers, for any operation id the caller minted: never seen | accepted &
-  in flight | terminal outcome. This is the recovery surface for the unanswered modes (§6.2).
+- **`/v1/ops/{op}`** answers only inside the authenticated subject and deployment namespace, for
+  an operation id that subject minted: never seen | accepted & in flight | terminal outcome. This
+  is the recovery surface for the unanswered modes (§6.2), not a cross-principal ledger oracle.
 - Metrics are per-resource and machine-level usage, JSON. (Prometheus exposition on a second
   listener is an open question, §10.)
 
@@ -198,9 +209,11 @@ Owned by this contract and implemented behind substrate driver ports:
   on every file operation and every mount resolution.
 - Process spawn is argv-only through one builder per driver; env is cleared to a non-secret
   allowlist then explicitly shaped; captured streams are byte-capped with truncation notices.
-- Sandbox availability is probed at startup (`bubblewrap`/`seatbelt` on host; container
-  isolation on docker/k8s) and reported as fact. `require: true` + unavailable backend =
-  `refused`, with the missing backend named.
+- Sandbox availability is probed into a versioned capability snapshot (`bubblewrap`/`seatbelt` on
+  host; container isolation on docker/k8s) and reported as fact. Admission binds the operation to
+  the selected driver's snapshot; backend/configuration change invalidates it, and
+  security-critical predicates are rechecked at operation start. `require: true` + unavailable
+  backend = `refused`, with the missing backend named.
 
 ## 5. Leases
 
@@ -260,20 +273,23 @@ change that breaks one is a breaking change to this contract, whatever the diff 
 
 1. **One operation = one method + path + JSON body**, expressible as a reviewed request
    template in catalog text. No signing, no cookies, no multi-leg handshakes.
-2. **The risk vocabulary lives in this spec** (§2); the provider declaration is a mechanical
-   projection, tested byte-for-byte against the compiled catalog artifact.
+2. **Substrate metadata lives in its released specification** (§2). The connector document is a
+   deterministic, versioned translation of that bundle plus a connectors-owned projection manifest;
+   the result is tested byte-for-byte against the compiled catalog artifact.
 3. **Effects come from the closed v1 set** (§2). New effects are additive spec changes,
    declared before any operation carries them — never derived at runtime.
-4. **A Connection is `{base_url, token}`** (plus optional CA pin). No OAuth dance, no refresh
-   flow; enrolling a machine is configuration, not ceremony. In the SaaS posture a LAN-bound
+4. **Connectors owns the Connection shape.** Substrate exposes an authenticated endpoint and
+   deployment identity; connectors binds those to its configured Connection without substrate
+   redefining that noun. In the SaaS posture a LAN-bound
    daemon is unreachable by construction and the destination aperture must refuse it; the
    answer is connectors' **satellite posture** (design 03: a platform deployment near the
    endpoint, dialing up, later federated) — substrate grows no reverse-tunnel surface of its
    own.
 5. **Every mutation is `keyed`** on a client `op` id, so platform-side retry policy needs no
    knowledge of substrate internals.
-6. **Events are a closed, declared set with cursor replay** — exactly what inbound grants
-   (closed event sets, no wildcards) and replay-by-id delivery require.
+6. **Events are a closed, declared set with bounded cursor replay.** Durable connector delivery is
+   a separate composition guarantee; its cursor, deduplication, gap recovery, and reconciliation
+   are proposed in the umbrella RFC 0003.
 7. **No secret values in ordinary JSON, ever.** Registries and secret slots are named daemon
    configuration; audit records stay value-free by type.
 8. **Duplex is brokered, never proxied.** Sessions and tunnels are declared channel bindings
@@ -309,13 +325,13 @@ capability fact `workload.replace: recreate|rolling` rather than papered over.
 
 ## 9. Security posture, stated plainly
 
-- The daemon is **data plane only**. Its authentication exists to bound blast radius; the
+- The daemon is **data plane only**. Its authentication and subject-scoped resource ownership exist to bound blast radius; the
   governor is the platform's grant system and the operator's choice of which machines to
   enroll.
-- **A docker-driver daemon is root-equivalent on its machine.** A caller holding `workloads`
-  scope there can own the host. This is a fact of the substrate, not a solvable defect;
-  posture (loopback default, per-caller tokens, grants in front, dedicated machines for
-  untrusted work) is the mitigation, and this document does not pretend otherwise.
+- **A docker-driver daemon is root-equivalent on its machine.** A caller holding the separately
+  admitted Docker workload authority there can own the host. This is a fact of the substrate, not a
+  solvable defect; the deployment is one trust domain, uses dedicated machines for untrusted work,
+  and never shares one daemon across mutually untrusted hosted tenants.
 - The host driver should run as a dedicated user; children get cleared environments and named
   secret slots only where declared; nothing a child observes includes daemon credentials.
 - Confinement claims are always recorded per exec/workload — what was *asked* and what was
@@ -323,12 +339,10 @@ capability fact `workload.replace: recreate|rolling` rather than papered over.
 
 ## 10. Open questions
 
-1. **The brokered-establishment handshake.** Direction is settled by connectors Design 03
-   (the platform brokers establishment; bytes flow direct), but the shape is not: what a
-   daemon endpoint reference looks like from behind NAT (composes with the satellite
-   posture), the channel authority's TTL and single-use redemption semantics, and how the
-   daemon verifies an authority the platform minted (shared secret vs. asymmetric). This is a
-   substrate protocol question inside Design 03's now-fixed driver/satellite/byte-plane ownership.
+1. **The brokered-establishment handshake.** Direction is settled by architecture ADR 0010 (the
+   platform brokers establishment; bytes flow direct), while authority and endpoint semantics are
+   proposed cross-repository work in architecture RFC 0002. Sessions remain deferred until it is
+   accepted.
 2. **Bulk workspace transfer.** Bundles over HTTP are fine to ~100 MB; beyond that, a shared
    git remote is the honest answer. Does the contract need a third transfer mode, or is
    "use a remote" a documented limit? (Inherit autodev's honesty: no protocol that is elegant

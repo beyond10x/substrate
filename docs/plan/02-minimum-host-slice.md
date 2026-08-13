@@ -11,7 +11,7 @@ connectors, Flux, or autodev in the build graph.
 2. Create an empty confined workspace beneath a configured root.
 3. Read, list, atomically write, and delete bounded workspace files.
 4. Start one argv-only exec with cleared/shaped environment, timeout, output cap, and a required
-   workspace sandbox.
+   workspace sandbox with no egress.
 5. Observe exec state and terminal exit without treating a non-zero program exit as a wire error.
 6. Signal/cancel an exec and clean up its process tree.
 7. Persist operation ids sufficiently to reconcile a lost answer.
@@ -20,8 +20,9 @@ connectors, Flux, or autodev in the build graph.
 ## Acceptance evidence
 
 - A black-box client completes the journey using only the versioned wire.
-- Lexical and symlink escapes, unavailable sandbox, excess output, invalid operation replay, and
-  daemon credential inheritance have negative tests.
+- Lexical and symlink escapes, unavailable sandbox, excess output, invalid operation replay,
+  cross-subject resource and operation-id access, unauthenticated loopback, daemon credential
+  inheritance, and stale capability snapshots have negative tests.
 - Responses distinguish request, acceptance, applied enforcement, and observed result.
 - Killing the client after dispatch can be reconciled with the original operation id.
 - The repository builds and tests without a Flux checkout or any consumer source.

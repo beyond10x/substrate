@@ -12,6 +12,9 @@ Assume callers can submit hostile paths, repositories, arguments, environment re
 trees, images, output volume, network targets, and races. Assume executed code attempts filesystem
 escape, secret discovery, child-process survival, resource exhaustion, and daemon credential theft.
 
+Assume callers also attempt SSRF, DNS rebinding, redirect/proxy escape, cross-subject resource-id
+enumeration, operation-id collision, and pairing a stored credential with an attacker destination.
+
 Do not assume Docker socket access is a security boundary: a Docker-backed deployment is
 root-equivalent to its host unless separately isolated by its environment. Kubernetes authority is
 bounded only by the handed-over credentials and namespace enforcement.
@@ -47,6 +50,14 @@ backend was actually probed. If `require` cannot be honored, execution is refuse
 
 Network defaults are explicit per posture and request. DNS, loopback, private destinations, public
 egress, listening sockets, and exposed endpoints are separate capabilities rather than one boolean.
+Ordinary execution defaults to no egress. An aperture is deployment/operator authority, is matched
+after resolution and on connect, and cannot be widened by request fields. Loopback, link-local,
+metadata, private, and public ranges are separate policy classes. Redirects and proxy behavior are
+subject to the same final-destination check.
+
+Named source, registry, and push credentials are inseparable from their configured scheme,
+authority, port, path, and destination aperture. A request can select a configured binding but
+cannot supply a new destination for its credential.
 
 ## 5. Resource bounds
 
@@ -67,3 +78,5 @@ environment, and session authorities by type.
 3. Decide process-tree containment and cleanup primitives.
 4. Define network capability granularity and default egress.
 5. Close the secret materialization design in Design 06.
+6. Fix subject/resource/operation namespace isolation and not-found behavior.
+7. Define Git redirect, proxy, submodule, LFS, helper, hook, and DNS-rebinding refusal cases.

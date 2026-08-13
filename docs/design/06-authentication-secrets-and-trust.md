@@ -7,14 +7,16 @@ provider, organization model, connector credential broker, or general authorizat
 
 ## 1. Authentication boundary
 
-The founding wire uses bearer tokens configured at the daemon with an actor label and coarse scopes:
-observe, workspaces, exec, workloads, images, and admin. Loopback still authenticates unless an
-explicit personal-development mode is later accepted. Reachable unauthenticated listeners are
-refused at startup.
+The founding wire uses high-entropy bearer tokens configured at the daemon with a stable local
+subject, actor label, and coarse scopes: observe, workspaces, exec, workloads, images, and admin.
+Loopback always authenticates; there is no unauthenticated personal-development mode. Prefer an
+owner-permissioned Unix-domain socket for personal use, otherwise store the bearer in an owner-only
+file. Reachable unauthenticated listeners are refused at startup, and non-loopback control traffic
+requires TLS/mTLS or a configured trusted tunnel.
 
-Hosted deployments may later validate short-lived identity-issued service material through a stable
-protocol or standard. Substrate stores only the claims required for local admission and provenance;
-organization membership and role evaluation remain outside.
+Hosted deployments may later validate short-lived identity-issued service material through the
+stable protocol proposed in architecture RFC 0001. Substrate stores only the claims required for
+local admission and provenance; organization membership and role evaluation remain outside.
 
 ## 2. Authorization split
 
@@ -27,13 +29,17 @@ Higher layers decide rich intent:
 
 Substrate independently applies local token scope, resource ownership/addressing, capability,
 limits, sandbox, exposure, and lease checks. A higher-layer permit cannot override them.
+Every resource and operation-ledger key is scoped by deployment and authenticated subject. The
+initiating platform principal, when present, is retained separately from the immediate service
+actor through tamper-safe delegated context; caller-written identity strings are not trusted.
 
 ## 3. Secrets
 
 Ordinary request JSON never contains secret values. Requests may reference a named daemon-configured
 secret slot or an operation-scoped opaque handoff. The contract must distinguish:
 
-- registry/source credentials used by the driver itself;
+- registry/source credentials used by the driver itself and immutably bound to configured
+  destination constraints;
 - workload secret slots mounted or delivered only to the selected workload;
 - future connector-artifact credentials admitted and brokered by connectors;
 - channel authorities used only for session establishment.
@@ -49,11 +55,14 @@ needs deployment identity, rotation, revocation, and authenticated registration.
 satellite colocated with substrate is a separate service identity; process proximity does not create
 implicit trust.
 
+One daemon is one trust domain and, in v1, one tenant. Hosted placement must not multiplex mutually
+untrusted tenants through one daemon. Operator-only unconfined or root-equivalent driver authority
+uses a distinct credential and is disabled by default.
+
 ## Decisions required before implementation
 
-1. Personal-mode authentication requirements.
-2. Token storage, hashing, rotation, and revocation behavior.
-3. Hosted service-identity mechanism and stable validation protocol.
-4. Secret slot lifecycle and Linux delivery primitive.
-5. Brokered operation-secret handoff for a future attested artifact; this remains deferred with the
+1. Token hashing, rotation, and revocation behavior.
+2. Hosted service-identity mechanism and acceptance of architecture RFC 0001.
+3. Secret slot lifecycle and Linux delivery primitive.
+4. Brokered operation-secret handoff for a future attested artifact; this remains deferred with the
    connector artifact decision.
