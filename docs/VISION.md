@@ -3,8 +3,8 @@
 **Status:** founding document · **Date:** 2026-08-13
 
 The accepted boundary is summarized in the [architecture overview](../architecture/overview.md).
-Detailed questions remain in the numbered [design documents](design/), and implementation remains
-blocked on the [design-closure plan](plan/01-design-closure.md).
+The numbered [design documents](design/) now contain accepted v1 decisions or named later-phase
+deferrals, and the [design-closure plan](plan/01-design-closure.md) unblocks the minimum host slice.
 
 ## What this is
 
@@ -57,10 +57,10 @@ decides who may ask and remembers who did; flux and autodev are clients on both 
    semantics with closed event sets. Substrate owns a canonical machine-readable specification;
    connectors deterministically translates a pinned bundle plus its projection manifest into the
    connector catalog and proves the result byte-for-byte.
-5. **Thin authn, no policy engine.** Bearer tokens with coarse per-family scopes, loopback by
-   default, refusal to bind reachable addresses without auth configured. Rich authorization —
-   grants over declared facts — is the platform's job; duplicating it here would recreate the
-   split connectors was founded to end.
+5. **Thin authn, no policy engine.** Owner-permissioned Unix peer identity or expiring generated
+   bearer tokens with coarse per-family scopes; no unauthenticated loopback and no reachable TCP
+   without TLS/trusted transport. Rich authorization—grants over declared facts—is the platform's
+   job; duplicating it here would recreate the split connectors was founded to end.
 6. **One daemon, one trust domain and scope.** A daemon governs one tenant on one machine
    (host/docker) or one handed-over cluster namespace (k8s). Fleets, placement, and federation
    belong to consumers. substrate is not a scheduler.

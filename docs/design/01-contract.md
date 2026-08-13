@@ -1,6 +1,6 @@
 # Design 01: the substrate API contract
 
-**Status:** draft for review · **Date:** 2026-08-13
+**Status:** accepted v1 design · **Date:** 2026-08-13
 
 This document is the product: the wire contract a substrate daemon serves, family by family,
 with the error taxonomy and the constraints that keep every operation declarable in the
@@ -26,14 +26,17 @@ consumers (Flux, autodev, the platform) see only it.
   filters by `?label=`. Cursors are opaque.
 - **Versioning.** Additive evolution within `/v1`. Optional features are gated by capability
   facts (§8), never by version sniffing.
-- **Authentication.** `Authorization: Bearer sbt_…`. Tokens are daemon configuration, each
-  carrying a stable local subject, an operational label (the immediate event `actor`), and coarse
-  scopes: `observe`, `workspaces`, `exec`, `workloads`, `images`, `admin`. Resources and operation
-  ids are namespaced to that authenticated subject; another subject receives the same not-found
-  answer as an unknown id. The daemon binds loopback by default and **refuses to start on a
-  reachable address without authentication and TLS/mTLS or a configured trusted tunnel**. Scopes
-  are blast-radius limiters; policy lives in the platform's grants. One daemon is one trust domain
-  and, for v1, one tenant.
+- **Authentication.** An owner-permissioned Unix socket maps OS peer credentials to a configured
+  local subject. TCP uses `Authorization: Bearer sbt_…`; tokens carry a stable local subject,
+  immediate actor label, expiry, and coarse scopes: `observe`, `workspaces`, `exec`, `sessions`,
+  `workloads`, `images`, `volumes`, `endpoints`, and `admin`. Each resource-family scope authorizes
+  only that family's declared operations. `admin` authorizes token and daemon-configuration
+  maintenance; it does not imply any resource-family scope. Resources and operation ids are
+  namespaced to deployment plus subject;
+  another subject receives the same not-found answer as an unknown id. The daemon **refuses to
+  start on a reachable TCP address without authentication and TLS/mTLS or a configured trusted
+  tunnel**. Scopes are blast-radius limiters; policy lives in the platform's grants. One daemon is
+  one trust domain and, for v1, one tenant.
 
 ## 2. Operation metadata: the substrate vocabulary is native
 
@@ -51,10 +54,11 @@ These fields are not asserted to be byte-compatible with connectors. Substrate p
 canonical machine-readable wire/metadata bundle. Connectors owns a small projection manifest for
 its distinct direction, risk, idempotency, semantic-effect, exposure, auth, credential, and request
 facts. A deterministic translation of the pinned substrate bundle plus that manifest produces the
-first-party provider document and is tested byte-for-byte against the compiled catalog artifact.
-No grant example is normative until that translation and its conformance fixture exist.
+first-party provider document. Phase 6 must test the result byte-for-byte against the compiled
+catalog artifact before adoption can exit. No grant example is normative until that translation and
+its conformance fixture exist.
 
-## 3. The six families
+## 3. Six API families covering nine resource kinds
 
 ### 3.1 Workspace — a confined tree with identity
 
@@ -98,7 +102,7 @@ Semantics:
 | Live output stream | `WS /v1/execs/{id}/stream` | read | — | — |
 | Open interactive session | `POST /v1/sessions` + `WS /v1/sessions/{id}/channel` | write | keyed | process, filesystem:workspace |
 
-The exec spec: `{workspace, argv, env, image?, sandbox, timeout, stdin?, wait?}`.
+The exec spec: `{workspace, argv, env, image?, sandbox, timeout, stdin?, wait?, lease_ttl?}`.
 
 - **Argv-only.** `argv[0]` is the program; there is no shell-string field anywhere in this
   contract. cwd is pinned to the workspace root.
@@ -116,7 +120,8 @@ The exec spec: `{workspace, argv, env, image?, sandbox, timeout, stdin?, wait?}`
 - **Exit is an observation, not an error.** `exited{code: 1}` is a successful answer. Captured
   output is byte-capped per stream with an appended truncation notice; the reader drains past
   the cap so a full pipe cannot deadlock the child.
-- **Sessions are the only duplex surface** (PTY; frames: `stdin`, `stdout`, `resize`, `exit`).
+- **Sessions are the only duplex surface** (PTY; frames: `stdin`, `stdout`, `resize`, `signal`,
+  `exit`, `protocol_error`).
   `?wait=true` on short execs returns the terminal observation directly; everything else polls
   or streams.
 - Background execs live and die with their workspace and have **no restart policy** — that is
@@ -189,17 +194,18 @@ restart: never|on-failure|always, resources?, lease_ttl?, labels}`.
 | Usage metrics | `GET /v1/metrics` | read | idempotent |
 
 - **Events are the observability spine.** Every state transition of every resource emits one
-  typed event `{seq, resource, transition, observed_at, actor, op}`. The event set is closed
-  and declared (what connectors' inbound grants require); replay is cursor-based within a
-  stated retention window, and the window itself is a machine fact.
+  typed event `{generation, seq, resource, transition, observed_at, actor, principal?, op}`. Pull
+  and push share the persisted generation and sequence. The event set is closed and declared;
+  replay is cursor-based within a stated retention window, and the window itself is a machine fact.
 - **`/v1/machine` reports a versioned snapshot of probed facts**: drivers present, sandbox backends verified usable,
   capability matrix (§8), resource totals, versions, retention windows, configured exposure
   policy. A capability listed here is a promise; one absent here answers `unserved`.
-- **`/v1/ops/{op}`** answers only inside the authenticated subject and deployment namespace, for
-  an operation id that subject minted: never seen | accepted & in flight | terminal outcome. This
-  is the recovery surface for the unanswered modes (§6.2), not a cross-principal ledger oracle.
-- Metrics are per-resource and machine-level usage, JSON. (Prometheus exposition on a second
-  listener is an open question, §10.)
+- **`/v1/ops/{op}`** answers only inside the authenticated subject and deployment namespace. No row
+  is the same not-found response as an unknown resource; a row is one of `refused`, `accepted`,
+  `unknown`, or `terminal`. This is the recovery surface for the unanswered modes (§6.2), not a
+  cross-principal ledger oracle.
+- Metrics are per-resource and machine-level usage, JSON. Prometheus exposition is a later
+  telemetry adapter and does not add a second v1 control listener.
 
 ## 4. Sandbox & environment model
 
@@ -209,15 +215,15 @@ Owned by this contract and implemented behind substrate driver ports:
   on every file operation and every mount resolution.
 - Process spawn is argv-only through one builder per driver; env is cleared to a non-secret
   allowlist then explicitly shaped; captured streams are byte-capped with truncation notices.
-- Sandbox availability is probed into a versioned capability snapshot (`bubblewrap`/`seatbelt` on
-  host; container isolation on docker/k8s) and reported as fact. Admission binds the operation to
+- Sandbox availability is probed into a versioned capability snapshot (bubblewrap namespaces on
+  the Linux host driver; container isolation on Docker/Kubernetes) and reported as fact. Admission binds the operation to
   the selected driver's snapshot; backend/configuration change invalidates it, and
   security-critical predicates are rechecked at operation start. `require: true` + unavailable
   backend = `refused`, with the missing backend named.
 
 ## 5. Leases
 
-Liveness is asserted, never assumed. A workspace, exec, or workload created with `lease_ttl`
+Liveness is asserted, never assumed. A workspace, exec, session, or workload created with `lease_ttl`
 must be renewed (`POST /v1/{kind}/{id}/lease/renew`) before expiry; expiry is a **typed
 transition** — exec killed, workload stopped, workspace frozen then collected after the
 retention window — each emitting an event with reason `lease-expired`. A consumer that dies
@@ -275,7 +281,7 @@ change that breaks one is a breaking change to this contract, whatever the diff 
    template in catalog text. No signing, no cookies, no multi-leg handshakes.
 2. **Substrate metadata lives in its released specification** (§2). The connector document is a
    deterministic, versioned translation of that bundle plus a connectors-owned projection manifest;
-   the result is tested byte-for-byte against the compiled catalog artifact.
+   phase 6 must test the result byte-for-byte against the compiled catalog artifact before adoption.
 3. **Effects come from the closed v1 set** (§2). New effects are additive spec changes,
    declared before any operation carries them — never derived at runtime.
 4. **Connectors owns the Connection shape.** Substrate exposes an authenticated endpoint and
@@ -288,8 +294,8 @@ change that breaks one is a breaking change to this contract, whatever the diff 
 5. **Every mutation is `keyed`** on a client `op` id, so platform-side retry policy needs no
    knowledge of substrate internals.
 6. **Events are a closed, declared set with bounded cursor replay.** Durable connector delivery is
-   a separate composition guarantee; its cursor, deduplication, gap recovery, and reconciliation
-   are proposed in the umbrella RFC 0003.
+   a separate composition guarantee governed by
+   [architecture ADR 0017 — Connectors owns durable ingestion of substrate events](https://github.com/daemonloom/architecture/blob/main/adr/0017-substrate-event-ingestion.md).
 7. **No secret values in ordinary JSON, ever.** Registries and secret slots are named daemon
    configuration; audit records stay value-free by type.
 8. **Duplex is brokered, never proxied.** Sessions and tunnels are declared channel bindings
@@ -337,20 +343,18 @@ capability fact `workload.replace: recreate|rolling` rather than papered over.
 - Confinement claims are always recorded per exec/workload — what was *asked* and what was
   *applied* — so an audit never has to infer.
 
-## 10. Open questions
+## 10. Decisions and explicit deferrals
 
-1. **The brokered-establishment handshake.** Direction is settled by architecture ADR 0010 (the
-   platform brokers establishment; bytes flow direct), while authority and endpoint semantics are
-   proposed cross-repository work in architecture RFC 0002. Sessions remain deferred until it is
-   accepted.
-2. **Bulk workspace transfer.** Bundles over HTTP are fine to ~100 MB; beyond that, a shared
-   git remote is the honest answer. Does the contract need a third transfer mode, or is
-   "use a remote" a documented limit? (Inherit autodev's honesty: no protocol that is elegant
-   in a demo and miserable at 300 MB.)
-3. **k8s driver scope.** Namespace-per-daemon via kubeconfig context is the working assumption;
-   does anything in the workload family force CRDs? (Hope: no.)
-4. **Confined builds.** Is a rootless-buildkit path worth carrying in v1 so `image.build.
-   confined: true` exists anywhere, or does that wait for the k8s driver?
-5. **Metrics exposition.** JSON only, or a second listener with Prometheus exposition
-   (autodev's two-listener precedent makes the second listener cheap to justify)?
-6. **Volume quotas.** Are size limits a v1 requirement or a capability fact added later?
+1. **Session establishment:** governed by
+   [architecture ADR 0016 — Direct-byte establishment uses operation-scoped authority](https://github.com/daemonloom/architecture/blob/main/adr/0016-operation-scoped-session-authority.md)
+   and deferred to substrate phase 4.
+2. **Bulk workspace transfer:** HTTP bundle upload/download has a hard 100 MiB v1 ceiling that a
+   deployment may lower. Larger transfer uses a configured Git remote; there is no third bulk
+   protocol hidden in the control API. Git and bundles are phase 6, not minimum-host operations.
+3. **Kubernetes:** post-v1, namespace-per-daemon, no CRD requirement until a concrete workload
+   journey proves one. Nothing in the host wire anticipates CRD shapes.
+4. **Confined builds:** image build is unserved by the host driver and deferred beyond the Docker
+   driver. A later rootless BuildKit proof may add a capability; v1 carries no speculative path.
+5. **Metrics:** JSON on the authenticated control API. Prometheus is a later adapter/listener.
+6. **Volume quotas:** volumes are outside the minimum slice. A later driver serves them only when it
+   can report and enforce a quota capability; otherwise quota requests are `unserved`.

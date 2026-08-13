@@ -1,22 +1,25 @@
 # Design 06: authentication, secrets, and trust
 
-**Status:** draft for review · **Date:** 2026-08-13
+**Status:** accepted v1 design · **Date:** 2026-08-13
 
 Substrate needs enough local authority to protect a machine. It must not become Daemonloom's identity
 provider, organization model, connector credential broker, or general authorization engine.
 
 ## 1. Authentication boundary
 
-The founding wire uses high-entropy bearer tokens configured at the daemon with a stable local
-subject, actor label, and coarse scopes: observe, workspaces, exec, workloads, images, and admin.
-Loopback always authenticates; there is no unauthenticated personal-development mode. Prefer an
-owner-permissioned Unix-domain socket for personal use, otherwise store the bearer in an owner-only
-file. Reachable unauthenticated listeners are refused at startup, and non-loopback control traffic
-requires TLS/mTLS or a configured trusted tunnel.
+The founding wire prefers an owner-permissioned Unix-domain socket authenticated from OS peer
+credentials mapped to a stable local subject. TCP uses a generated 256-bit bearer with stable
+subject, actor label, explicit expiry, and coarse scopes: observe, workspaces, exec, sessions,
+workloads, images, volumes, endpoints, and admin. A resource-family scope authorizes only that
+family. `admin` authorizes token and daemon-configuration maintenance and never inherits a resource
+scope. There is no unauthenticated personal-development mode. Reachable unauthenticated
+listeners are refused at startup, and non-loopback control traffic requires TLS/mTLS or a configured
+trusted tunnel.
 
-Hosted deployments may later validate short-lived identity-issued service material through the
-stable protocol proposed in architecture RFC 0001. Substrate stores only the claims required for
-local admission and provenance; organization membership and role evaluation remain outside.
+Hosted deployments validate short-lived identity-issued service material through
+[architecture ADR 0015 — Foundation services share one trust envelope](https://github.com/daemonloom/architecture/blob/main/adr/0015-foundation-trust-envelope.md).
+Substrate stores only the accepted claims required for local admission and provenance; organization
+membership and role evaluation remain outside.
 
 ## 2. Authorization split
 
@@ -59,10 +62,23 @@ One daemon is one trust domain and, in v1, one tenant. Hosted placement must not
 untrusted tenants through one daemon. Operator-only unconfined or root-equivalent driver authority
 uses a distinct credential and is disabled by default.
 
-## Decisions required before implementation
+## V1 decisions and deferrals
 
-1. Token hashing, rotation, and revocation behavior.
-2. Hosted service-identity mechanism and acceptance of architecture RFC 0001.
-3. Secret slot lifecycle and Linux delivery primitive.
-4. Brokered operation-secret handoff for a future attested artifact; this remains deferred with the
-   connector artifact decision.
+1. **Local token lifecycle:** TCP tokens contain 256 random bits and a non-secret lookup prefix.
+   Configuration stores SHA-256 digests, never bearer text; comparison is constant-time. Tokens have
+   an explicit expiry, default 30 days and hard maximum 90 days, and may overlap during rotation.
+   Revocation is an atomic configuration generation change, invalidates capability/auth caches, and
+   applies before the next request. The generated bearer file is owner read/write only.
+2. **Hosted identity:** RFC 0001 is accepted by architecture ADR 0015. Hosted material has a
+   five-minute maximum lifetime and 60-second connected revocation bound; hosted auth remains phase
+   7 and does not enter the minimum host slice.
+3. **Secret slots:** no secret slot is served by the minimum host slice. Later host exec support uses
+   a sealed Linux `memfd` passed at a declared child descriptor; only the slot-to-descriptor mapping
+   (never the value) may appear in the shaped environment. Acquisition happens after all admission
+   and dispatch-time checks, and the daemon closes its copy immediately after spawn. A driver that
+   cannot prove sealing, descriptor isolation, and cleanup reports the capability absent.
+4. **Brokered artifact secrets:** deferred with external connector artifacts. No generic opaque
+   handoff exists until an attestation/supply-chain ADR accepts that implementation form.
+
+Unix peer identity and local bearer identity are separate configured subjects. Neither can claim an
+organization, platform principal, or delegated actor chain.

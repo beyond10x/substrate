@@ -1,6 +1,6 @@
 # Design 04: security and isolation
 
-**Status:** draft for review · **Date:** 2026-08-13
+**Status:** accepted v1 design · **Date:** 2026-08-13
 
 Substrate deliberately exposes high-impact machine authority. Its safety contract is therefore about
 precise guarantees, observable enforcement, and named refusal—not about claiming all drivers are
@@ -71,12 +71,60 @@ Errors may name a path, capability, limit, or configured secret slot, but never 
 Logs and events exclude bearer tokens, request authorization, injected secret values, raw child
 environment, and session authorities by type.
 
-## Security gates before implementation
+## 7. Minimum host guarantee
 
-1. Write host-driver attack cases and expected refusal classes.
-2. Fix the minimum Linux isolation guarantee and explicitly state other operating-system support.
-3. Decide process-tree containment and cleanup primitives.
-4. Define network capability granularity and default egress.
-5. Close the secret materialization design in Design 06.
-6. Fix subject/resource/operation namespace isolation and not-found behavior.
-7. Define Git redirect, proxy, submodule, LFS, helper, hook, and DNS-rebinding refusal cases.
+The first host driver is Linux-only and requires all of the following before it advertises `exec`:
+
+- a dedicated unprivileged daemon/worker identity;
+- `openat2` path resolution rooted at a pre-opened workspace directory with `RESOLVE_BENEATH`,
+  `RESOLVE_NO_MAGICLINKS`, and no-follow behavior for guarded file operations;
+- unprivileged user, mount, PID, IPC, UTS, and network namespaces through a probed bubblewrap
+  backend; the workspace is the only writable bind and system inputs are explicit read-only binds;
+- a delegated cgroup v2 subtree with process, memory, and CPU bounds plus whole-cgroup termination;
+- cleared environment, closed inherited descriptors, `no_new_privs`, a private temporary directory,
+  and no ambient daemon/control credential;
+- a new network namespace with no usable interface for the minimum slice.
+
+The minimum slice does not claim protection from kernel compromise or syscall-level seccomp
+containment. If `openat2`, namespace isolation, bubblewrap, cgroup delegation/kill, or no-egress
+probing is unavailable, workspace file operations or exec are absent from capabilities as
+appropriate; execution never falls back to an unconfined process. Non-Linux hosts are unserved.
+
+Cancellation signals the cgroup, waits the configured grace interval, kills the entire cgroup, and
+observes emptiness. A process group alone is not accepted proof that descendants are gone.
+
+## 8. Git destination behavior
+
+Git is deferred to stack-adoption phase 6, but its security shape is fixed:
+
+- anonymous sources permit HTTPS only and still pass the deployment aperture; authenticated HTTPS
+  or SSH uses a named source/remote whose scheme, host, port, path prefix, credential, and host-key
+  policy are inseparable;
+- `file`, `git`, `ext`, scp-like unparsed addresses, URL userinfo, caller proxy settings, credential
+  helpers, hooks, and protocol-command overrides are refused;
+- every DNS answer must be inside the configured class, the connection is pinned to a validated
+  address while TLS/SSH verifies the configured name, and each reconnect/redirect resolves and
+  checks again; mixed allowed/forbidden answers fail closed;
+- redirects are disabled by default; a named source may allow at most three and every hop must stay
+  inside the same configured aperture. Proxies are disabled unless the named binding fixes the
+  proxy and separately admits its destination;
+- submodules and Git LFS are disabled by default. Enabling either requires named destination and
+  credential bindings for every secondary fetch. No inherited parent credential crosses authority;
+- checkout resolves to and records an immutable commit. Mutable refs are input convenience, never
+  the observed source identity.
+
+## 9. Required threat vectors
+
+| Attack | Required outcome |
+|---|---|
+| lexical, symlink, magic-link, mount, or absolute path escape | `refused` with no outside access |
+| sandbox/backend disappears after admission | `refused` before dispatch against stale snapshot |
+| child forks, daemonizes, ignores signal, or fills output pipe | bounded observation, cgroup kill, no surviving process |
+| request asks for egress in minimum slice | `unserved`; no weaker execution |
+| cross-subject resource or operation id | indistinguishable not-found refusal |
+| daemon environment/fd/credential discovery | value absent; violation fails the conformance test |
+| Git rebinding, redirect, proxy, helper, hook, LFS, or submodule escape | `refused` before credential release/connect |
+| input/output/resource limit exceeded | `exhausted` or typed truncation as specified, never unbounded use |
+
+These vectors are the conformance inventory; implementation supplies fixtures before the minimum
+slice exits.

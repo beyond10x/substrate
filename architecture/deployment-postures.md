@@ -5,8 +5,8 @@ operations—not resource semantics.
 
 | Posture | Reachability | Authentication | Placement owner |
 |---|---|---|---|
-| personal | owner-permissioned Unix socket or loopback by default | local configured high-entropy token; never unauthenticated | caller/operator |
-| organization | LAN or private overlay, explicit opt-in | per-service tokens; later identity-issued service material | organization control plane or caller |
+| personal | owner-permissioned Unix socket or loopback TCP by explicit configuration | OS peer identity or expiring generated bearer; never unauthenticated | caller/operator |
+| organization | LAN or private overlay, explicit opt-in | per-service token or identity-issued material | organization control plane or caller |
 | hosted | private workload network; no unauthenticated public listener | identity/cloud-managed service trust | cloud |
 | satellite-adjacent | local to private connectors and endpoints; outward control relationship | deployment identity plus operation-scoped channel authority | cloud/connectors federation |
 
@@ -25,5 +25,9 @@ operations—not resource semantics.
   authentication, limits, or enforcement. Architecture ADR 0013 limits this to the personal trust
   domain and records that connector grants and platform audit are absent.
 
-Hosted and satellite trust details remain design work in
+Hosted trust follows
+[architecture ADR 0015 — Foundation services share one trust envelope](https://github.com/daemonloom/architecture/blob/main/adr/0015-foundation-trust-envelope.md);
+satellite federation follows
+[architecture ADR 0018 — Connectors satellites federate outward under bounded authority](https://github.com/daemonloom/architecture/blob/main/adr/0018-connectors-satellite-federation.md).
+Substrate-specific handling is fixed in
 [authentication, secrets, and trust](../docs/design/06-authentication-secrets-and-trust.md).

@@ -8,7 +8,8 @@ Substrate runs things and reports what it observed. It does not decide product p
 loops, understand connector vendors, or depend on Flux. Consumers choose whether to call its stable
 API directly or through a higher-level Daemonloom service.
 
-**Status:** design phase. There is deliberately no implementation workspace yet.
+**Status:** design closure accepted; the minimum host slice is implementation-ready. No
+implementation workspace has landed yet.
 
 ## Start here
 
@@ -17,7 +18,8 @@ API directly or through a higher-level Daemonloom service.
 3. [Domain model](architecture/domain-model.md)
 4. [Stack integration](architecture/stack-integration.md)
 5. [API contract](docs/design/01-contract.md)
-6. [Roadmap](ROADMAP.md)
+6. [Specification bundle and minimum wire](docs/design/07-specification-and-conformance.md)
+7. [Roadmap](ROADMAP.md)
 
 ## Repository map
 

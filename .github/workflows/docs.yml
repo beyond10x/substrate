@@ -1,0 +1,19 @@
+name: docs
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  governance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Check repository-portable Markdown links
+        run: python3 scripts/check-links.py
+      - name: Check ADR identity and index
+        run: python3 scripts/check-adrs.py

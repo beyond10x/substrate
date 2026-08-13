@@ -11,6 +11,11 @@
 | workload | A long-lived substrate-managed application, normally image-backed |
 | observation | State re-read from the serving driver after an action or probe |
 | operation id | Caller-minted stable identifier used to reconcile retries and unanswered mutations |
+| capability snapshot | Versioned facts probed from one driver/config generation and bound to admission |
+| stream generation | Persisted event epoch that changes only when sequence continuity cannot be proved |
+| reconciliation snapshot | Barriered resource and operation/tombstone view used after an event-history gap |
+| contract bundle | Owner-issued canonical schemas, vectors, provenance, and hash manifest released by digest |
+| subject | Authenticated local or foundation principal namespace owning resources and operation ids |
 | lease | Renewable liveness assertion that turns abandonment into a typed observed transition |
 | refusal | An answered rejection naming the unmet guard, capability, address, or limit without exposing a secret value |
 | unserved | A declared operation or capability that the selected deployment does not implement |

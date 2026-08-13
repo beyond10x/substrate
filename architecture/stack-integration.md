@@ -25,9 +25,12 @@ locally authenticated, enforced, and observed, but it is not admitted by connect
 not enter the durable platform audit.
 
 Substrate events retain substrate resource and operation provenance when connectors republishes
-them through the ingestion protocol proposed in architecture RFC 0003. Continuous PTY/tunnel bytes
-follow the byte-plane split: connectors brokers a short-lived session authority under architecture
-RFC 0002, while client and substrate exchange bytes directly after that RFC is accepted.
+them under
+[architecture ADR 0017 — Connectors owns durable ingestion of substrate events](https://github.com/daemonloom/architecture/blob/main/adr/0017-substrate-event-ingestion.md).
+Continuous PTY/tunnel bytes follow the byte-plane split: connectors brokers a short-lived session
+authority under
+[architecture ADR 0016 — Direct-byte establishment uses operation-scoped authority](https://github.com/daemonloom/architecture/blob/main/adr/0016-operation-scoped-session-authority.md),
+while client and substrate exchange bytes directly.
 
 ## Hosted path
 
@@ -36,4 +39,6 @@ verified facts and policy, then invokes the same public contract. Substrate does
 tenants, schedule across machines, or phone home to a mandatory central service.
 
 A private deployment may be colocated with a connectors satellite. Colocation is composition, not a
-new substrate mode and not a reverse tunnel hidden inside substrate.
+new substrate mode and not a reverse tunnel hidden inside substrate. Enrollment, outage, queue, and
+containment semantics are fixed by
+[architecture ADR 0018 — Connectors satellites federate outward under bounded authority](https://github.com/daemonloom/architecture/blob/main/adr/0018-connectors-satellite-federation.md).

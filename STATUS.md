@@ -7,16 +7,17 @@
 | Area | State | Next proof |
 |---|---|---|
 | Repository | private `daemonloom/substrate`; bot-authored `main` is synchronized | keep visibility, authorship, and portable-document invariants enforced |
-| Boundary | accepted: standalone, generic execution data plane, Flux-free | keep all design documents consistent with ADRs 0001 and 0002 |
-| Wire contract | detailed founding draft; canonical machine-readable bundle and connector translation are not yet defined | close the expanded design-closure gate and architecture RFC dependencies |
-| Drivers | host, Docker, and later Kubernetes intent documented | accept the driver/capability model before selecting implementation crates |
-| Security | one-trust-domain/tenant, authenticated personal mode, subject ownership, and destination-bound credential invariants documented | complete isolation guarantees, token lifecycle, Git refusal cases, and secret handoff design |
-| Stack integration | ownership mapped across connectors, identity, cloud, agent, Flux, and autodev | agree direct, governed, and hosted deployment postures |
-| Implementation | intentionally absent | begin only after the design-closure gate is accepted |
+| Boundary | accepted: standalone, generic execution data plane, Flux-free | enforce ADRs 0001–0006 in dependency and conformance tests |
+| Wire contract | minimum endpoint/envelope, bundle layout, compatibility, and connectors projection mapping accepted | implement the `0.1.0` development bundle before generating server/client code |
+| Drivers | exactly one active driver per v1 daemon; first driver is Linux host | implement the closed capability document and host conformance port |
+| Security | Linux enforcement floor, local/hosted trust, token lifecycle, Git refusal rules, secret handoff, and subject isolation accepted | turn Design 04 threat rows into negative fixtures |
+| Stack integration | trust, session, event, federation, and contract-release seams accepted in umbrella ADRs 0015–0019 | keep later features behind their named phases |
+| Implementation | absent but unblocked | begin phase 2 with bundle/vectors, then the minimum vertical slice |
 
 ## Repository facts
 
-- No `Cargo.toml`, source tree, implementation crate, generated API, or container artifact exists.
+- No `Cargo.toml`, source tree, implementation crate, generated API, or container artifact exists
+  yet; this is observed delivery state, not a remaining design blocker.
 - No Flux package, type, protocol, or checkout is required.
 - The existing contract is preserved and curated rather than replaced.
 - The first planned implementation is a minimum host slice; Docker and Kubernetes do not block it.

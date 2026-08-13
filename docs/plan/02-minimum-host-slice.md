@@ -1,9 +1,14 @@
 # Plan 02: minimum host slice
 
-**Status:** planned after design closure · **Date:** 2026-08-13
+**Status:** ready for implementation · **Date:** 2026-08-13
 
 The first implementation proves the contract on one Linux host without Docker, Kubernetes, cloud,
 connectors, Flux, or autodev in the build graph.
+
+The canonical endpoint/envelope set is fixed in
+[Design 07](../design/07-specification-and-conformance.md); the Linux enforcement floor is fixed in
+[Design 04](../design/04-security-and-isolation.md). Implementation starts with the `0.1.0`
+development bundle and failing black-box vectors, not server-only types that later become a spec.
 
 ## Slice
 

@@ -1,6 +1,6 @@
 # Design 02: driver and capability model
 
-**Status:** draft for review · **Date:** 2026-08-13
+**Status:** accepted v1 design · **Date:** 2026-08-13
 
 One substrate contract must remain truthful across host, Docker, and later Kubernetes backends.
 Drivers are repository-owned adapters behind closed ports, not plugins, caller choices, or separate
@@ -8,10 +8,10 @@ products.
 
 ## 1. Selection and composition
 
-A deployment configuration selects installed drivers at startup. Each resource records the driver
-that owns it, but ordinary client commands target resource identities and requirements rather than a
-driver name. Creation may carry capability requirements; deployment policy selects an eligible
-configured driver.
+A v1 daemon selects exactly one active driver at startup. Each resource records that driver and its
+capability snapshot, but ordinary client commands target resource identities and requirements rather
+than a driver name. Multi-driver placement is a later cloud/composition concern, not a hidden local
+scheduler.
 
 The initial daemon contains one host driver. Docker is the second proof of the port boundary.
 Kubernetes remains a later target and cannot distort the host contract before a concrete journey
@@ -65,7 +65,8 @@ path, and no caller-supplied executable used as a driver.
 
 ## 5. Compatibility
 
-Driver conformance is proven against shared black-box fixtures for:
+Before a driver may be declared conformant, its implementing phase must prove these properties
+against shared black-box fixtures:
 
 - idempotent operation replay;
 - observed-state re-read;
@@ -78,10 +79,20 @@ Driver conformance is proven against shared black-box fixtures for:
 A driver-specific extension first appears as a capability fact. It enters the shared wire only when
 at least one consumer journey needs it and unsupported drivers can refuse it coherently.
 
-## Decisions required before implementation
+## V1 decisions
 
-1. Whether v1 supports multiple active drivers in one daemon or exactly one selected driver.
-2. The canonical capability document and predicate syntax.
-3. Persistence ownership for resource/operation metadata versus driver observation.
-4. Startup behavior when an optional driver probe fails.
-5. Snapshot invalidation and the security-critical predicates that must be rechecked at dispatch.
+1. **Selection:** exactly one active driver per daemon. The minimum slice selects `host`.
+2. **Capability wire:** `/v1/machine` publishes `{snapshot, driver, driver_version,
+   config_generation, probed_at, valid_until?, facts}`. Facts are a closed map from namespaced fact
+   name to a JSON scalar or closed object. A request supplies a conjunction of typed predicates
+   `{fact, op: eq|one_of|lte|gte, value}`; unknown facts/operators are refused, never ignored.
+3. **Persistence:** the substrate domain store owns resource identity, desired command, operation
+   ledger, applied-policy record, and event journal. Drivers own external execution state and return
+   observations; the service reconciles rather than treating its metadata as driver truth.
+4. **Probe failure:** failure of the selected driver's mandatory probe leaves the daemon unready and
+   its operations unserved. A daemon may expose authenticated health diagnostics but cannot publish
+   optimistic capabilities. Optional facts are simply absent with a diagnostic.
+5. **Invalidation:** every driver/config/backend change increments `config_generation` and invalidates
+   snapshots. Operations bind the admitted snapshot. Immediately before dispatch the daemon rechecks
+   driver identity, generation, sandbox backend, filesystem root, network aperture, resource limits,
+   and credential/destination binding; mismatch is `refused` before secret acquisition or dispatch.

@@ -11,7 +11,7 @@ Flux already contains guarded local execution behavior and may become a major su
 Depending on Flux would nevertheless reverse the foundation/product boundary, couple substrate's
 release to a coding agent, and prevent other clients from adopting the execution contract cleanly.
 The umbrella decision is recorded in
-[daemonloom/architecture ADR 0004](https://github.com/daemonloom/architecture/blob/main/adr/0004-substrate-contract-is-flux-free.md).
+[daemonloom/architecture ADR 0004 — Substrate is standalone and Flux-free](https://github.com/daemonloom/architecture/blob/main/adr/0004-substrate-contract-is-flux-free.md).
 
 ## Decision
 

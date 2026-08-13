@@ -1,9 +1,13 @@
 # Plan 04: stack adoption
 
-**Status:** deferred until the public contract is proven · **Date:** 2026-08-13
+**Status:** externally gated until Flux and autodev record adoption · **Date:** 2026-08-13
 
 Adoption proves release independence. Each consumer integrates over the public wire or its own
 adapter and remains buildable without a sibling substrate checkout.
+
+The foundation repositories cannot satisfy this gate alone. Flux and autodev must first accept the
+corresponding adoption decisions or stories in their own repositories; until then, this plan carries
+no family-controlled delivery date.
 
 ## Proof sequence
 
