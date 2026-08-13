@@ -1,0 +1,48 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "assertions": [
+    "response validates against schemas/response.json",
+    "result validates as an exec in schemas/resource.json",
+    "result.state is exited and result.exit.code is 1",
+    "the wire outcome remains success because program exit is an observation",
+    "applied sandbox is workspace and applied network is none"
+  ],
+  "context": {
+    "authenticated_subject": "local:1000"
+  },
+  "expected": {
+    "http_status": 200,
+    "outcome": "success"
+  },
+  "id": "nonzero-exit-is-not-wire-failure",
+  "layer": "http",
+  "phase": 2,
+  "preconditions": [
+    "workspace ws_vector belongs to local:1000",
+    "all minimum exec facts are advertised"
+  ],
+  "request": {
+    "body": {
+      "input": {
+        "argv": [
+          "/usr/bin/false"
+        ],
+        "env": {
+          "allow": [],
+          "set": {}
+        },
+        "sandbox": {
+          "network": "none",
+          "profile": "workspace",
+          "require": true
+        },
+        "timeout_ms": 5000,
+        "wait": true,
+        "workspace": "ws_vector"
+      },
+      "op": "01JPHASE2EXECNONZERO001"
+    },
+    "method": "POST",
+    "path": "/v1/execs"
+  }
+}

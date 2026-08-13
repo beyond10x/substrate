@@ -1,0 +1,106 @@
+{
+  "$id": "urn:daemonloom:substrate-wire:0.1.0:vector",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "const": "../../schemas/vector.json"
+    },
+    "assertions": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "context": {
+      "additionalProperties": false,
+      "description": "Trusted fixture-harness context; never part of the HTTP request body.",
+      "properties": {
+        "authenticated_subject": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "fixture_authority": {
+          "enum": [
+            "driver-harness"
+          ]
+        }
+      },
+      "type": "object"
+    },
+    "expected": {
+      "additionalProperties": false,
+      "properties": {
+        "class": {
+          "enum": [
+            "refused",
+            "conflict",
+            "unserved",
+            "exhausted",
+            "failed"
+          ]
+        },
+        "code": {
+          "pattern": "^[a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*)+$",
+          "type": "string"
+        },
+        "http_status": {
+          "maximum": 599,
+          "minimum": 200,
+          "type": "integer"
+        },
+        "outcome": {
+          "enum": [
+            "success",
+            "refused",
+            "conflict",
+            "unserved",
+            "exhausted",
+            "failed"
+          ]
+        }
+      },
+      "required": [
+        "outcome"
+      ],
+      "type": "object"
+    },
+    "id": {
+      "pattern": "^[a-z][a-z0-9-]+$",
+      "type": "string"
+    },
+    "layer": {
+      "enum": [
+        "http",
+        "driver"
+      ]
+    },
+    "phase": {
+      "const": 2
+    },
+    "preconditions": {
+      "items": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "request": {
+      "type": "object"
+    }
+  },
+  "required": [
+    "id",
+    "phase",
+    "layer",
+    "context",
+    "preconditions",
+    "request",
+    "expected",
+    "assertions"
+  ],
+  "title": "Substrate conformance vector",
+  "type": "object"
+}

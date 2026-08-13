@@ -1,0 +1,36 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "assertions": [
+    "response validates against schemas/error.json",
+    "the original operation record and resource remain unchanged",
+    "no second driver mutation is dispatched"
+  ],
+  "context": {
+    "authenticated_subject": "local:1000"
+  },
+  "expected": {
+    "class": "conflict",
+    "code": "operation.request-conflict",
+    "http_status": 409,
+    "outcome": "conflict"
+  },
+  "id": "same-operation-different-body-conflicts",
+  "layer": "http",
+  "phase": 2,
+  "preconditions": [
+    "operation 01JPHASE2REPLAYCONFLICT was durably accepted for a different canonical input"
+  ],
+  "request": {
+    "body": {
+      "input": {
+        "labels": {
+          "different": "body"
+        },
+        "source": "empty"
+      },
+      "op": "01JPHASE2REPLAYCONFLICT"
+    },
+    "method": "POST",
+    "path": "/v1/workspaces"
+  }
+}

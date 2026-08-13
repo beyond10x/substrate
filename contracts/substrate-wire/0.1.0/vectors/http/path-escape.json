@@ -1,0 +1,27 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "assertions": [
+    "response validates against schemas/error.json",
+    "no path outside ws_vector is opened or statted after admission",
+    "the response contains no host absolute path"
+  ],
+  "context": {
+    "authenticated_subject": "local:1000"
+  },
+  "expected": {
+    "class": "refused",
+    "code": "workspace.path-escape",
+    "http_status": 422,
+    "outcome": "refused"
+  },
+  "id": "lexical-path-escape-is-refused",
+  "layer": "http",
+  "phase": 2,
+  "preconditions": [
+    "workspace ws_vector belongs to local:1000"
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/v1/workspaces/ws_vector/files/%2e%2e%2fetc%2fpasswd"
+  }
+}

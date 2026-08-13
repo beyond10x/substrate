@@ -6,7 +6,7 @@ The roadmap is ordered. A later phase does not begin while an earlier exit crite
 |---:|---|---|---|
 | 0 | Private design repository | private `daemonloom/substrate`, bot-authored `main`, portable docs | complete |
 | 1 | Design closure | contract questions are decided or explicitly deferred; canonical schema/translation, trust-domain, destination-security, capability-snapshot, and driver guarantees are reviewable | complete |
-| 2 | Minimum host slice | one confined workspace, bounded argv-only exec, observed result, named refusals, and machine facts | pending |
+| 2 | Minimum host slice | one confined workspace, bounded argv-only exec, observed result, named refusals, and machine facts | in progress — draft bundle scaffold and first non-executable vector cases landed |
 | 3 | Lifecycle and recovery | operation ledger, events, leases, cancellation, and unanswered-outcome reconciliation | pending |
 | 4 | Direct byte plane | PTY/session establishment and bounded channel authority without routing bytes through connectors | pending |
 | 5 | Docker driver | the same contract serves container-backed execs and workloads with truthful capability facts | pending |

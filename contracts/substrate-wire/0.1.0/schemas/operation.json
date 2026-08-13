@@ -1,0 +1,148 @@
+{
+  "$id": "urn:daemonloom:substrate-wire:0.1.0:operation",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "refused"
+          }
+        },
+        "required": [
+          "state"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "type": "object"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "enum": [
+              "accepted",
+              "unknown",
+              "terminal"
+            ]
+          }
+        },
+        "required": [
+          "state"
+        ]
+      },
+      "then": {
+        "properties": {
+          "capability_snapshot": {
+            "minLength": 16,
+            "type": "string"
+          }
+        },
+        "required": [
+          "accepted_at"
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {
+            "const": "terminal"
+          }
+        },
+        "required": [
+          "state"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "type": "object"
+          }
+        },
+        "required": [
+          "terminal_at"
+        ]
+      }
+    }
+  ],
+  "properties": {
+    "accepted_at": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "actor": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "capability_snapshot": {
+      "oneOf": [
+        {
+          "minLength": 16,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "operation": {
+      "maxLength": 128,
+      "minLength": 16,
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string"
+    },
+    "outcome": {
+      "type": [
+        "object",
+        "null"
+      ]
+    },
+    "principal": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "request_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "resource": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "state": {
+      "enum": [
+        "refused",
+        "accepted",
+        "unknown",
+        "terminal"
+      ]
+    },
+    "terminal_at": {
+      "format": "date-time",
+      "type": "string"
+    }
+  },
+  "required": [
+    "operation",
+    "request_hash",
+    "state",
+    "capability_snapshot",
+    "actor",
+    "principal",
+    "resource",
+    "outcome"
+  ],
+  "title": "Subject-scoped operation record",
+  "type": "object"
+}

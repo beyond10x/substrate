@@ -1,0 +1,66 @@
+{
+  "$id": "urn:daemonloom:substrate-wire:0.1.0:error",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "api_version": {
+      "const": "v1"
+    },
+    "error": {
+      "additionalProperties": false,
+      "properties": {
+        "address": {
+          "maxLength": 512,
+          "type": "string"
+        },
+        "class": {
+          "enum": [
+            "refused",
+            "conflict",
+            "unserved",
+            "exhausted",
+            "failed"
+          ]
+        },
+        "code": {
+          "pattern": "^[a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*)+$",
+          "type": "string"
+        },
+        "message": {
+          "maxLength": 1024,
+          "minLength": 1,
+          "type": "string"
+        },
+        "operation": {
+          "maxLength": 128,
+          "minLength": 16,
+          "pattern": "^[A-Za-z0-9_-]+$",
+          "type": "string"
+        },
+        "retriable": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "class",
+        "code",
+        "message",
+        "retriable"
+      ],
+      "type": "object"
+    },
+    "request_id": {
+      "maxLength": 128,
+      "minLength": 8,
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "api_version",
+    "request_id",
+    "error"
+  ],
+  "title": "Substrate answered failure",
+  "type": "object"
+}

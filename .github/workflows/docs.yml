@@ -17,3 +17,5 @@ jobs:
         run: python3 scripts/check-links.py
       - name: Check ADR identity and index
         run: python3 scripts/check-adrs.py
+      - name: Check development contract bundle
+        run: python3 scripts/check-contract-bundle.py

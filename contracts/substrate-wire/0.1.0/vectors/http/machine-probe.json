@@ -1,0 +1,27 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "assertions": [
+    "response validates against schemas/response.json",
+    "result validates against schemas/capability.json",
+    "every advertised fact was probed on the running backend",
+    "an unavailable fact is absent rather than false or optimistic"
+  ],
+  "context": {
+    "authenticated_subject": "local:1000"
+  },
+  "expected": {
+    "http_status": 200,
+    "outcome": "success"
+  },
+  "id": "machine-probe-is-observed",
+  "layer": "http",
+  "phase": 2,
+  "preconditions": [
+    "daemon listens on an owner-permissioned Unix socket",
+    "caller maps to local subject local:1000"
+  ],
+  "request": {
+    "method": "GET",
+    "path": "/v1/machine"
+  }
+}

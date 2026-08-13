@@ -1,0 +1,36 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "assertions": [
+    "response validates against schemas/response.json",
+    "result validates as a workspace in schemas/resource.json",
+    "the workspace root is beneath the configured substrate root",
+    "repeating the same body and operation id returns the same logical workspace"
+  ],
+  "context": {
+    "authenticated_subject": "local:1000"
+  },
+  "expected": {
+    "http_status": 201,
+    "outcome": "success"
+  },
+  "id": "empty-workspace-create-is-keyed",
+  "layer": "http",
+  "phase": 2,
+  "preconditions": [
+    "workspace.openat2-beneath is advertised",
+    "workspace.atomic-replace is advertised"
+  ],
+  "request": {
+    "body": {
+      "input": {
+        "labels": {
+          "vector": "workspace-create"
+        },
+        "source": "empty"
+      },
+      "op": "01JPHASE2WORKSPACECREATE"
+    },
+    "method": "POST",
+    "path": "/v1/workspaces"
+  }
+}

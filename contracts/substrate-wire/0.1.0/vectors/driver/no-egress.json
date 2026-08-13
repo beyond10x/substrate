@@ -1,0 +1,28 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "assertions": [
+    "the child has a distinct network namespace",
+    "the namespace contains no usable interface",
+    "DNS, loopback, link-local, private, metadata, and public connection attempts all fail",
+    "the child cannot reach the daemon control socket"
+  ],
+  "context": {
+    "fixture_authority": "driver-harness"
+  },
+  "expected": {
+    "outcome": "success"
+  },
+  "id": "minimum-exec-has-no-egress",
+  "layer": "driver",
+  "phase": 2,
+  "preconditions": [
+    "fixture attempts every address class through direct IP and DNS"
+  ],
+  "request": {
+    "argv": [
+      "/fixture/probe-network"
+    ],
+    "network": "none",
+    "operation": "exec.start"
+  }
+}

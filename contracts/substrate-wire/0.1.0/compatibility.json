@@ -1,0 +1,15 @@
+{
+  "contract": "substrate-wire",
+  "development_constraints": [
+    "This bundle is incomplete and cannot satisfy a stable dependency.",
+    "Route-specific request and result schemas remain to be added before server or client generation.",
+    "No compatibility promise begins before a signed stable release."
+  ],
+  "request_policy": "closed",
+  "response_policy": "open only where a schema explicitly permits optional additive fields",
+  "status": "development",
+  "supported_api_majors": [
+    1
+  ],
+  "version": "0.1.0"
+}

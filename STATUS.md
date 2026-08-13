@@ -8,16 +8,16 @@
 |---|---|---|
 | Repository | private `daemonloom/substrate`; bot-authored `main` is synchronized | keep visibility, authorship, and portable-document invariants enforced |
 | Boundary | accepted: standalone, generic execution data plane, Flux-free | enforce ADRs 0001–0006 in dependency and conformance tests |
-| Wire contract | minimum endpoint/envelope, bundle layout, compatibility, and connectors projection mapping accepted | implement the `0.1.0` development bundle before generating server/client code |
+| Wire contract | `substrate-wire` 0.1.0 draft common schemas and first non-executable vector cases are hash-covered | add closed route schemas, machine-checkable fixtures, and the remaining threat inventory before generating code |
 | Drivers | exactly one active driver per v1 daemon; first driver is Linux host | implement the closed capability document and host conformance port |
-| Security | Linux enforcement floor, local/hosted trust, token lifecycle, Git refusal rules, secret handoff, and subject isolation accepted | turn Design 04 threat rows into negative fixtures |
+| Security | Linux enforcement floor, local/hosted trust, token lifecycle, Git refusal rules, secret handoff, and subject isolation accepted | complete the executable Design 04 threat fixtures; the present cases are not proof |
 | Stack integration | trust, session, event, federation, and contract-release seams accepted in umbrella ADRs 0015–0019 | keep later features behind their named phases |
-| Implementation | absent but unblocked | begin phase 2 with bundle/vectors, then the minimum vertical slice |
+| Implementation | phase 2 contract work in progress; no runtime code yet | finish the closed route schemas and executable vectors, then scaffold the minimum vertical slice |
 
 ## Repository facts
 
 - No `Cargo.toml`, source tree, implementation crate, generated API, or container artifact exists
-  yet; this is observed delivery state, not a remaining design blocker.
+  yet; the development contract bundle is the first implementation artifact.
 - No Flux package, type, protocol, or checkout is required.
 - The existing contract is preserved and curated rather than replaced.
 - The first planned implementation is a minimum host slice; Docker and Kubernetes do not block it.

@@ -1,0 +1,31 @@
+{
+  "$id": "urn:daemonloom:substrate-wire:0.1.0:response",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Successful substrate response. Answered failures use error.json.",
+  "properties": {
+    "api_version": {
+      "const": "v1"
+    },
+    "operation": {
+      "maxLength": 128,
+      "minLength": 16,
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string"
+    },
+    "request_id": {
+      "maxLength": 128,
+      "minLength": 8,
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string"
+    },
+    "result": {}
+  },
+  "required": [
+    "api_version",
+    "request_id",
+    "result"
+  ],
+  "title": "Substrate success response",
+  "type": "object"
+}

@@ -1,0 +1,28 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "assertions": [
+    "the path walk uses the pre-opened workspace root",
+    "no component is followed outside that root",
+    "the outside sentinel is neither read nor modified"
+  ],
+  "context": {
+    "fixture_authority": "driver-harness"
+  },
+  "expected": {
+    "class": "refused",
+    "code": "workspace.path-escape",
+    "outcome": "refused"
+  },
+  "id": "symlink-escape-is-refused",
+  "layer": "driver",
+  "phase": 2,
+  "preconditions": [
+    "workspace contains link -> /tmp/substrate-outside-sentinel",
+    "outside sentinel contains a unique value"
+  ],
+  "request": {
+    "operation": "workspace.read-file",
+    "path": "link/secret",
+    "workspace": "ws_vector"
+  }
+}

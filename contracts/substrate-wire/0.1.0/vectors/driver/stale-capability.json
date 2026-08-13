@@ -1,0 +1,27 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "assertions": [
+    "driver dispatch is not entered",
+    "the operation record retains the admitted snapshot for diagnosis",
+    "a fresh machine observation carries the incremented config generation"
+  ],
+  "context": {
+    "fixture_authority": "driver-harness"
+  },
+  "expected": {
+    "class": "refused",
+    "code": "exec.capability-stale",
+    "outcome": "refused"
+  },
+  "id": "stale-capability-is-refused-before-dispatch",
+  "layer": "driver",
+  "phase": 2,
+  "preconditions": [
+    "operation was admitted against config generation 7",
+    "sandbox backend or configuration changes to generation 8 before dispatch"
+  ],
+  "request": {
+    "admitted_snapshot": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+    "operation": "exec.start"
+  }
+}

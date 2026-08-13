@@ -15,6 +15,8 @@ The first development bundle is `0.1.0` and contains:
 ```text
 bundle.json
 origins.json
+compatibility.json
+packaging.json
 schemas/request.json
 schemas/response.json
 schemas/error.json
@@ -22,15 +24,18 @@ schemas/resource.json
 schemas/capability.json
 schemas/operation.json
 schemas/event.json
+schemas/vector.json
 vectors/http/*.json
 vectors/driver/*.json
-projection/connectors-v1.json
 ```
 
 Every schema and vocabulary in the bundle is explicitly `origin: daemonloom`; HTTP, JSON Schema,
 JSON canonicalization, OAuth/JWT, WebSocket, and later OCI inputs retain official specification URI
 and version in `origins.json`. The bundle follows deterministic OCI packaging, signing, digest
 pinning, and clean-room conformance from ADR 0019. Markdown is explanation, not wire authority.
+`bundle.json` lists the media type, byte length, and digest of every bundle path except itself; the
+outer OCI manifest digest pins `bundle.json`. This avoids a recursive self-hash while leaving every
+distributed byte covered.
 
 ## 2. Minimum host endpoint set
 
@@ -72,9 +77,9 @@ Answered failure is:
   error: { class, code, message, address?, retriable, operation? } }
 ```
 
-The closed classes and HTTP mappings remain those in Design 01. Secret values, authority tokens,
-raw environment, and untrusted provider response bodies are structurally impossible in these
-envelopes.
+The closed classes and HTTP mappings remain those in Design 01. The route-specific schemas must
+make secret values, authority tokens, raw environment, shell strings, and untrusted provider
+response bodies structurally impossible. The common envelope alone does not provide that proof.
 
 The operation record is:
 
@@ -99,7 +104,7 @@ no egress, cgroup limits/kill, output caps, and supported signals. A fact appear
 running backend probes it. Unknown required facts make a request `unserved`; malformed or unknown
 predicate syntax is `refused`.
 
-## 5. Connectors projection manifest
+## 5. Connectors-owned projection manifest
 
 The projection is a deterministic translation, never schema identity:
 
@@ -114,17 +119,23 @@ The projection is a deterministic translation, never schema identity:
 | auth/credential/request facts | explicit connectors-owned manifest entries; never synthesized from substrate absence |
 | substrate event direction | channel declaration, never an outbound operation direction |
 
-The manifest must name every source operation exactly once, reject an unknown source enum, reject an
+The manifest is published by connectors beside its connector schema, not inside the substrate-owned
+bundle. It must name every source operation exactly once, reject an unknown source enum, reject an
 unmapped target field, and record both source bundle and connector schema digests. The generated
 provider document is compared byte-for-byte with the catalog artifact. This proof belongs to
 substrate phase 6/connectors S-023 and S-031 and is not a source dependency of the host daemon.
 
 ## 6. Conformance inventory
 
-The wire suite covers canonical hashing/replay conflict, strict request fields, additive response
+The completed wire suite covers canonical hashing/replay conflict, strict request fields, additive response
 handling, error classes, subject-scoped not-found, crash-before/after dispatch, observed response,
 and capability invalidation. The driver suite covers every threat vector in Design 04 plus output
 draining, non-zero exit as observation, whole-cgroup cancellation, and post-action re-observation.
+
+Development vector cases may begin as prose-backed design inputs, but they are not conformance
+evidence until they contain exact fixture setup, wire bytes, expected instances or hashes, and
+machine-checkable postconditions. The bundle checker proves inventory integrity, not runtime
+conformance.
 
 Phase 2 exits only when a black-box client built from the bundle and the host driver pass these
 vectors without repository source access or a sibling checkout.

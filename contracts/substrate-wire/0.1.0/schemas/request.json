@@ -1,0 +1,23 @@
+{
+  "$id": "urn:daemonloom:substrate-wire:0.1.0:request",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Body shared by every phase-2 mutation. The HTTP route fixes the input schema.",
+  "properties": {
+    "input": {
+      "type": "object"
+    },
+    "op": {
+      "maxLength": 128,
+      "minLength": 16,
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "op",
+    "input"
+  ],
+  "title": "Substrate mutation request",
+  "type": "object"
+}

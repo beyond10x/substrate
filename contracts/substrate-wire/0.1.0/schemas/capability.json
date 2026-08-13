@@ -1,0 +1,145 @@
+{
+  "$id": "urn:daemonloom:substrate-wire:0.1.0:capability",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "config_generation": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "driver": {
+      "const": "host"
+    },
+    "driver_version": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "facts": {
+      "additionalProperties": false,
+      "properties": {
+        "exec.argv-only": {
+          "const": true
+        },
+        "exec.cgroup-kill": {
+          "const": true
+        },
+        "exec.cgroup-limits": {
+          "additionalProperties": false,
+          "properties": {
+            "cpu": {
+              "const": true
+            },
+            "memory": {
+              "const": true
+            },
+            "processes": {
+              "const": true
+            }
+          },
+          "required": [
+            "processes",
+            "memory",
+            "cpu"
+          ],
+          "type": "object"
+        },
+        "exec.namespaces": {
+          "additionalProperties": false,
+          "properties": {
+            "ipc": {
+              "const": true
+            },
+            "mount": {
+              "const": true
+            },
+            "network": {
+              "const": true
+            },
+            "pid": {
+              "const": true
+            },
+            "user": {
+              "const": true
+            },
+            "uts": {
+              "const": true
+            }
+          },
+          "required": [
+            "user",
+            "mount",
+            "pid",
+            "ipc",
+            "uts",
+            "network"
+          ],
+          "type": "object"
+        },
+        "exec.no-egress": {
+          "const": true
+        },
+        "exec.output-limit-bytes": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "exec.signals": {
+          "items": {
+            "enum": [
+              "INT",
+              "TERM",
+              "KILL"
+            ]
+          },
+          "maxItems": 3,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "workspace.atomic-replace": {
+          "const": true
+        },
+        "workspace.guarded-io": {
+          "const": true
+        },
+        "workspace.list-limit-items": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "workspace.max-file-bytes": {
+          "minimum": 1,
+          "type": "integer"
+        },
+        "workspace.openat2-beneath": {
+          "const": true
+        },
+        "workspace.read-limit-bytes": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "type": "object"
+    },
+    "probed_at": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "snapshot": {
+      "minLength": 16,
+      "type": "string"
+    },
+    "valid_until": {
+      "format": "date-time",
+      "type": "string"
+    }
+  },
+  "required": [
+    "snapshot",
+    "driver",
+    "driver_version",
+    "config_generation",
+    "probed_at",
+    "facts"
+  ],
+  "title": "Phase-2 machine capability snapshot",
+  "type": "object"
+}

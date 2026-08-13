@@ -1,0 +1,63 @@
+{
+  "$id": "urn:daemonloom:substrate-wire:0.1.0:event",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Reserved phase-2 state-transition record. No phase-2 event endpoint is served.",
+  "properties": {
+    "actor": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "generation": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "observed_at": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "op": {
+      "maxLength": 128,
+      "minLength": 16,
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string"
+    },
+    "principal": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "resource": {
+      "minLength": 4,
+      "type": "string"
+    },
+    "seq": {
+      "minimum": 1,
+      "type": "integer"
+    },
+    "transition": {
+      "enum": [
+        "workspace.created",
+        "workspace.destroyed",
+        "exec.accepted",
+        "exec.running",
+        "exec.exited",
+        "exec.cancelled",
+        "exec.unknown"
+      ]
+    }
+  },
+  "required": [
+    "generation",
+    "seq",
+    "resource",
+    "transition",
+    "observed_at",
+    "actor",
+    "principal",
+    "op"
+  ],
+  "title": "Phase-2 persisted state transition",
+  "type": "object"
+}

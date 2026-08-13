@@ -1,0 +1,46 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "assertions": [
+    "response validates against schemas/error.json",
+    "no driver process is spawned",
+    "the request is not silently weakened to network none"
+  ],
+  "context": {
+    "authenticated_subject": "local:1000"
+  },
+  "expected": {
+    "class": "unserved",
+    "code": "exec.network-unserved",
+    "http_status": 501,
+    "outcome": "unserved"
+  },
+  "id": "phase-two-egress-is-unserved",
+  "layer": "http",
+  "phase": 2,
+  "preconditions": [
+    "workspace ws_vector belongs to local:1000"
+  ],
+  "request": {
+    "body": {
+      "input": {
+        "argv": [
+          "/usr/bin/true"
+        ],
+        "env": {
+          "allow": [],
+          "set": {}
+        },
+        "sandbox": {
+          "network": "aperture",
+          "profile": "workspace",
+          "require": true
+        },
+        "timeout_ms": 5000,
+        "workspace": "ws_vector"
+      },
+      "op": "01JPHASE2EGRESSUNSERVED"
+    },
+    "method": "POST",
+    "path": "/v1/execs"
+  }
+}

@@ -1,0 +1,187 @@
+{
+  "$defs": {
+    "confinement": {
+      "additionalProperties": false,
+      "properties": {
+        "capability_snapshot": {
+          "minLength": 16,
+          "type": "string"
+        },
+        "cgroup": {
+          "maxLength": 512,
+          "minLength": 1,
+          "type": "string"
+        },
+        "network": {
+          "const": "none"
+        },
+        "sandbox": {
+          "const": "workspace"
+        }
+      },
+      "required": [
+        "capability_snapshot",
+        "sandbox",
+        "network",
+        "cgroup"
+      ],
+      "type": "object"
+    },
+    "confinement-request": {
+      "additionalProperties": false,
+      "properties": {
+        "capability_snapshot": {
+          "minLength": 16,
+          "type": "string"
+        },
+        "network": {
+          "const": "none"
+        },
+        "sandbox": {
+          "const": "workspace"
+        }
+      },
+      "required": [
+        "capability_snapshot",
+        "sandbox",
+        "network"
+      ],
+      "type": "object"
+    },
+    "exec": {
+      "additionalProperties": false,
+      "properties": {
+        "applied": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/confinement"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "exit": {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "maximum": 255,
+              "minimum": 0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "signal": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "required": [
+            "code",
+            "signal"
+          ],
+          "type": [
+            "object",
+            "null"
+          ]
+        },
+        "id": {
+          "pattern": "^ex_[A-Za-z0-9]+$",
+          "type": "string"
+        },
+        "kind": {
+          "const": "exec"
+        },
+        "observed_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "requested": {
+          "$ref": "#/$defs/confinement-request"
+        },
+        "state": {
+          "enum": [
+            "accepted",
+            "running",
+            "exited",
+            "cancelled",
+            "unknown"
+          ]
+        },
+        "workspace": {
+          "pattern": "^ws_[A-Za-z0-9]+$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "id",
+        "workspace",
+        "state",
+        "observed_at",
+        "applied",
+        "requested",
+        "exit"
+      ],
+      "type": "object"
+    },
+    "workspace": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "pattern": "^ws_[A-Za-z0-9]+$",
+          "type": "string"
+        },
+        "kind": {
+          "const": "workspace"
+        },
+        "labels": {
+          "additionalProperties": {
+            "maxLength": 256,
+            "type": "string"
+          },
+          "maxProperties": 64,
+          "propertyNames": {
+            "maxLength": 128,
+            "pattern": "^[A-Za-z0-9_.-]+$"
+          },
+          "type": "object"
+        },
+        "observed_at": {
+          "format": "date-time",
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "ready",
+            "destroying",
+            "destroyed",
+            "unknown"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "id",
+        "state",
+        "observed_at",
+        "labels"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "urn:daemonloom:substrate-wire:0.1.0:resource",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/workspace"
+    },
+    {
+      "$ref": "#/$defs/exec"
+    }
+  ],
+  "title": "Phase-2 observed resource"
+}

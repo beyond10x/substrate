@@ -1,0 +1,26 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "assertions": [
+    "cancellation targets the operation cgroup rather than only the leading process",
+    "after the configured grace interval the entire cgroup is killed",
+    "the terminal observation proves the cgroup is empty",
+    "no descendant marker continues changing after terminal response"
+  ],
+  "context": {
+    "fixture_authority": "driver-harness"
+  },
+  "expected": {
+    "outcome": "success"
+  },
+  "id": "cancel-reaps-daemonized-descendants",
+  "layer": "driver",
+  "phase": 2,
+  "preconditions": [
+    "fixture forks twice, ignores TERM, and writes a monotonic marker"
+  ],
+  "request": {
+    "operation": "exec.cancel",
+    "signal": "TERM",
+    "target": "ex_vector"
+  }
+}

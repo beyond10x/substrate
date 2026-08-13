@@ -1,0 +1,28 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "assertions": [
+    "stored stdout and stderr do not exceed their declared byte caps plus the fixed truncation marker",
+    "the reader continues draining both pipes after the storage cap",
+    "the child exits without a full-pipe deadlock",
+    "the terminal observation reports truncation independently for each stream"
+  ],
+  "context": {
+    "fixture_authority": "driver-harness"
+  },
+  "expected": {
+    "outcome": "success"
+  },
+  "id": "output-cap-drains-past-truncation",
+  "layer": "driver",
+  "phase": 2,
+  "preconditions": [
+    "fixture writes twice the configured cap to stdout and stderr concurrently"
+  ],
+  "request": {
+    "argv": [
+      "/fixture/fill-both-pipes"
+    ],
+    "operation": "exec.start",
+    "output_limit_bytes": 65536
+  }
+}
