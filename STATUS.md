@@ -6,7 +6,7 @@
 
 | Area | State | Next proof |
 |---|---|---|
-| Repository | design corpus being published as private `daemonloom/substrate` | bot-authored `main` is synchronized and private |
+| Repository | private `daemonloom/substrate`; bot-authored `main` is synchronized | keep visibility, authorship, and portable-document invariants enforced |
 | Boundary | accepted: standalone, generic execution data plane, Flux-free | keep all design documents consistent with ADRs 0001 and 0002 |
 | Wire contract | detailed founding draft | close the questions named by the design-closure plan |
 | Drivers | host, Docker, and later Kubernetes intent documented | accept the driver/capability model before selecting implementation crates |

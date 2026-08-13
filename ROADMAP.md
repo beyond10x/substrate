@@ -4,7 +4,7 @@ The roadmap is ordered. A later phase does not begin while an earlier exit crite
 
 | Phase | Outcome | Exit criterion | State |
 |---:|---|---|---|
-| 0 | Private design repository | private `daemonloom/substrate`, bot-authored `main`, portable docs | in progress |
+| 0 | Private design repository | private `daemonloom/substrate`, bot-authored `main`, portable docs | complete |
 | 1 | Design closure | contract questions are decided or explicitly deferred; security and driver guarantees are reviewable | pending |
 | 2 | Minimum host slice | one confined workspace, bounded argv-only exec, observed result, named refusals, and machine facts | pending |
 | 3 | Lifecycle and recovery | operation ledger, events, leases, cancellation, and unanswered-outcome reconciliation | pending |
