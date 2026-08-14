@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::Write as _;
 use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
+use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -13,10 +14,11 @@ use base64::Engine as _;
 use chrono::Utc;
 use parking_lot::Mutex;
 use substrate_wire::{
-    AppliedConfinement, AppliedFilesystem, AppliedNetwork, Base64Content, Base64Encoding,
-    BaselineEnvironment, CapabilitySnapshot, Exec, ExecExit, ExecKind, ExecOutputQuery,
-    ExecSignalInput, ExecStartInput, ExecState, NetworkMode, OutputSlice, OutputStream,
-    PipeSessionStartInput, SandboxProfile, Signal,
+    AppliedConfinement, AppliedExecutionCapsule, AppliedFilesystem, AppliedNetwork, Base64Content,
+    Base64Encoding, BaselineEnvironment, CapabilitySnapshot, EXECUTION_CAPSULE_MOUNT, Exec,
+    ExecExit, ExecKind, ExecOutputQuery, ExecSignalInput, ExecStartInput, ExecState,
+    ExecutionCapsuleInput, NetworkMode, OutputSlice, OutputStream, PipeSessionStartInput,
+    SandboxProfile, Signal,
 };
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::process::{Child, ChildStdin, Command};
@@ -75,6 +77,11 @@ struct PipeSettings {
     queued_frames: usize,
 }
 
+struct PreparedCapsule {
+    directory: tempfile::TempDir,
+    applied: AppliedExecutionCapsule,
+}
+
 impl Execution {
     fn new(observation: ExecObservation, pipe: Option<PipeState>) -> Self {
         Self {
@@ -104,13 +111,14 @@ impl ProcessRuntime {
             reservations: Arc::new(Mutex::new(HashSet::new())),
             active: Arc::new(AtomicUsize::new(0)),
         };
-        runtime.reconcile_orphans()?;
+        let process_trees_reconciled = runtime.reconcile_orphans()?;
+        runtime.reconcile_capsules(process_trees_reconciled)?;
         Ok(runtime)
     }
 
-    fn reconcile_orphans(&self) -> Result<(), DriverError> {
+    fn reconcile_orphans(&self) -> Result<bool, DriverError> {
         let Some(root) = self.config.cgroup_root.as_deref() else {
-            return Ok(());
+            return Ok(false);
         };
         let entries = std::fs::read_dir(root).map_err(|error| {
             DriverError::failed(
@@ -142,6 +150,94 @@ impl ProcessRuntime {
                 return Err(DriverError::failed(
                     "exec.cgroup-not-empty",
                     "An orphaned exec cgroup could not be proven empty.",
+                ));
+            }
+        }
+        Ok(true)
+    }
+
+    fn reconcile_capsules(&self, process_trees_reconciled: bool) -> Result<(), DriverError> {
+        let entries = match std::fs::read_dir(&self.config.capsule_root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(DriverError::failed(
+                    "capsule.reconcile-failed",
+                    format!("capsule root: {error}"),
+                ));
+            }
+        };
+        let mut reconciled = 0_usize;
+        for entry in entries {
+            if !process_trees_reconciled {
+                return Err(DriverError::failed(
+                    "capsule.reconcile-unproven",
+                    "Stale capsule cleanup requires successful cgroup-root reconciliation.",
+                ));
+            }
+            let entry = entry.map_err(|error| {
+                DriverError::failed(
+                    "capsule.reconcile-failed",
+                    format!("capsule entry: {error}"),
+                )
+            })?;
+            reconciled = reconciled.checked_add(1).ok_or_else(|| {
+                DriverError::failed(
+                    "capsule.reconcile-failed",
+                    "Capsule reconciliation count overflowed.",
+                )
+            })?;
+            if reconciled > self.config.max_tracked_execs {
+                return Err(DriverError::failed(
+                    "capsule.reconcile-limit",
+                    "Stale capsule count exceeds the configured tracked-exec bound.",
+                ));
+            }
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                return Err(DriverError::failed(
+                    "capsule.reconcile-invalid",
+                    "A stale capsule has a non-UTF-8 name.",
+                ));
+            };
+            if !name.starts_with("capsule-")
+                || !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            {
+                return Err(DriverError::failed(
+                    "capsule.reconcile-invalid",
+                    "The capsule root contains an unexpected entry.",
+                ));
+            }
+            let path = entry.path();
+            let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+                DriverError::failed(
+                    "capsule.reconcile-failed",
+                    format!("stale capsule metadata: {error}"),
+                )
+            })?;
+            if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+                return Err(DriverError::failed(
+                    "capsule.reconcile-invalid",
+                    "A stale capsule is not a private directory.",
+                ));
+            }
+            std::fs::remove_dir_all(&path).map_err(|error| {
+                DriverError::failed(
+                    "capsule.reconcile-failed",
+                    format!("stale capsule cleanup: {error}"),
+                )
+            })?;
+            if path.try_exists().map_err(|error| {
+                DriverError::failed(
+                    "capsule.reconcile-failed",
+                    format!("stale capsule absence: {error}"),
+                )
+            })? {
+                return Err(DriverError::failed(
+                    "capsule.reconcile-failed",
+                    "A stale capsule could not be proven absent.",
                 ));
             }
         }
@@ -205,6 +301,10 @@ impl ProcessRuntime {
         if let Err(error) = self.admit(id, workspace, input) {
             return DispatchOutcome::NotDispatched(error);
         }
+        let capsule = match self.prepare_capsule(input.capsule.as_ref()) {
+            Ok(value) => value,
+            Err(error) => return DispatchOutcome::NotDispatched(error),
+        };
         let permit =
             match ActivePermit::acquire(Arc::clone(&self.active), self.config.max_concurrent_execs)
             {
@@ -234,7 +334,13 @@ impl ProcessRuntime {
             }
         };
         let sync_fd = sync_read.as_raw_fd();
-        let mut command = self.command(workspace, input, sync_fd, pipe_settings.is_some());
+        let mut command = self.command(
+            workspace,
+            input,
+            sync_fd,
+            pipe_settings.is_some(),
+            capsule.as_ref(),
+        );
         let write_fd = sync_write.as_raw_fd();
         // SAFETY: pre_exec runs after fork; it invokes only async-signal-safe libc calls and does
         // not allocate. The captured descriptor is a plain integer owned by the parent until spawn.
@@ -294,12 +400,18 @@ impl ProcessRuntime {
         }
         drop(sync_write);
 
+        let applied_capsule = capsule.as_ref().map(|value| value.applied.clone());
         let applied = AppliedConfinement {
             capability_snapshot: self.capability.snapshot.clone(),
             cgroup: cgroup.name().to_owned(),
-            filesystem: AppliedFilesystem::WorkspaceReadWriteSystemReadOnly,
+            filesystem: if applied_capsule.is_some() {
+                AppliedFilesystem::WorkspaceReadWriteCapsuleReadOnlySystemReadOnly
+            } else {
+                AppliedFilesystem::WorkspaceReadWriteSystemReadOnly
+            },
             network: AppliedNetwork::None,
             profile: SandboxProfile::Workspace,
+            capsule: applied_capsule,
         };
         let resource = Exec {
             id: id.to_owned(),
@@ -358,6 +470,7 @@ impl ProcessRuntime {
             output_limit,
             pipe_sender,
             pipe_settings.map_or(PIPE_FRAME_BYTES, |settings| settings.frame_limit),
+            capsule,
             permit,
         ));
         if input.wait {
@@ -675,6 +788,16 @@ impl ProcessRuntime {
                 "argv",
             ));
         }
+        if let Some(capsule) = &input.capsule {
+            let expected = format!("{EXECUTION_CAPSULE_MOUNT}/{}", capsule.entrypoint);
+            if input.argv.first() != Some(&expected) {
+                return Err(DriverError::refused(
+                    "capsule.entrypoint-mismatch",
+                    "Exec argv does not start with the declared capsule entrypoint.",
+                    "argv",
+                ));
+            }
+        }
         if input.limits.timeout_ms == 0
             || input.limits.timeout_ms > 86_400_000
             || input.limits.output_bytes == 0
@@ -723,6 +846,7 @@ impl ProcessRuntime {
         input: &ExecStartInput,
         sync_fd: RawFd,
         interactive: bool,
+        capsule: Option<&PreparedCapsule>,
     ) -> Command {
         let mut command = Command::new(&self.config.bubblewrap);
         command
@@ -762,8 +886,15 @@ impl ProcessRuntime {
                 "/dev",
                 "--tmpfs",
                 "/tmp",
-                "--bind",
-            ])
+            ]);
+        if let Some(capsule) = capsule {
+            command
+                .arg("--ro-bind")
+                .arg(capsule.directory.path())
+                .arg(EXECUTION_CAPSULE_MOUNT);
+        }
+        command
+            .arg("--bind")
             .arg(workspace)
             .args(["/workspace", "--chdir", "/workspace", "--block-fd"])
             .arg(sync_fd.to_string());
@@ -783,6 +914,92 @@ impl ProcessRuntime {
         command.args(&input.argv);
         command
     }
+
+    fn prepare_capsule(
+        &self,
+        capsule: Option<&ExecutionCapsuleInput>,
+    ) -> Result<Option<PreparedCapsule>, DriverError> {
+        let Some(capsule) = capsule else {
+            return Ok(None);
+        };
+        let validation = substrate_wire::validate_execution_capsule(capsule).map_err(|error| {
+            DriverError::refused(
+                "capsule.invalid",
+                format!("Execution capsule validation failed: {error}"),
+                "capsule",
+            )
+        })?;
+        let directory = tempfile::Builder::new()
+            .prefix("capsule-")
+            .tempdir_in(&self.config.capsule_root)
+            .map_err(|error| {
+                DriverError::failed(
+                    "capsule.materialization-failed",
+                    format!("create private capsule: {error}"),
+                )
+            })?;
+        for file in &capsule.files {
+            let destination = directory.path().join(&file.path);
+            if let Some(parent) = destination.parent() {
+                std::fs::create_dir_all(parent).map_err(|error| {
+                    DriverError::failed(
+                        "capsule.materialization-failed",
+                        format!("create capsule directory: {error}"),
+                    )
+                })?;
+            }
+            let bytes = file.content.decode().map_err(|error| {
+                DriverError::refused(
+                    "capsule.invalid",
+                    format!("decode capsule file: {error}"),
+                    "capsule.files.content",
+                )
+            })?;
+            let mut output = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(if file.executable { 0o500 } else { 0o400 })
+                .open(&destination)
+                .map_err(|error| {
+                    DriverError::failed(
+                        "capsule.materialization-failed",
+                        format!("create capsule file: {error}"),
+                    )
+                })?;
+            output.write_all(&bytes).map_err(|error| {
+                DriverError::failed(
+                    "capsule.materialization-failed",
+                    format!("write capsule file: {error}"),
+                )
+            })?;
+            output.sync_all().map_err(|error| {
+                DriverError::failed(
+                    "capsule.materialization-failed",
+                    format!("sync capsule file: {error}"),
+                )
+            })?;
+            std::fs::set_permissions(
+                &destination,
+                std::fs::Permissions::from_mode(if file.executable { 0o500 } else { 0o400 }),
+            )
+            .map_err(|error| {
+                DriverError::failed(
+                    "capsule.materialization-failed",
+                    format!("set capsule file mode: {error}"),
+                )
+            })?;
+        }
+        Ok(Some(PreparedCapsule {
+            directory,
+            applied: AppliedExecutionCapsule {
+                manifest_sha256: capsule.manifest_sha256.clone(),
+                entrypoint: format!("{EXECUTION_CAPSULE_MOUNT}/{}", capsule.entrypoint),
+                mount: EXECUTION_CAPSULE_MOUNT.to_owned(),
+                file_count: validation.file_count,
+                total_bytes: validation.total_bytes,
+            },
+        }))
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -794,6 +1011,7 @@ async fn run_child(
     output_limit: usize,
     pipe_sender: Option<mpsc::Sender<PipeFrame>>,
     frame_limit: usize,
+    capsule: Option<PreparedCapsule>,
     _permit: ActivePermit,
 ) {
     let stdout = child.stdout.take();
@@ -832,6 +1050,7 @@ async fn run_child(
     let (stderr, stderr_truncated) = stderr_task.await.unwrap_or_else(|_| (Vec::new(), true));
     let forced_cancellation = timed_out || execution.cancellation_requested.load(Ordering::Acquire);
     let cgroup_reconciled = reconcile_cgroup(&cgroup).await;
+    let capsule_reconciled = capsule.is_none_or(|capsule| capsule.directory.close().is_ok());
     let mut observation = execution.observation.lock();
     observation.stdout = stdout;
     observation.stderr = stderr;
@@ -840,7 +1059,7 @@ async fn run_child(
     observation.output_complete = true;
     observation.resource.observed_at = Utc::now();
     match status {
-        _ if !cgroup_reconciled => {
+        _ if !cgroup_reconciled || !capsule_reconciled => {
             observation.resource.state = ExecState::Unknown;
             observation.resource.exit = None;
         }
@@ -1398,10 +1617,15 @@ fn process_tree(leader: u32) -> Result<Vec<u32>, DriverError> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::os::unix::fs::symlink;
 
+    use base64::Engine as _;
+    use sha2::{Digest as _, Sha256};
     use substrate_wire::{
-        CapabilityFacts, CapabilitySnapshot, CgroupLimitFacts, ExecEnvironment, ExecLimits,
-        ExecStartInput, ExecState, HostDriverKind, NamespaceFacts, NetworkMode, SandboxProfile,
+        Base64Content, Base64Encoding, CapabilityFacts, CapabilitySnapshot, CgroupLimitFacts,
+        ExecEnvironment, ExecLimits, ExecStartInput, ExecState, ExecutionCapsuleFile,
+        ExecutionCapsuleFileRole, ExecutionCapsuleInput, HostDriverKind, NamespaceFacts,
+        NetworkMode, SandboxProfile, canonical_execution_capsule_hash,
     };
 
     use super::{
@@ -1451,6 +1675,141 @@ mod tests {
             assert!(is_secretish_name(name), "{name}");
         }
         assert!(!is_secretish_name("VECTOR_VISIBLE"));
+    }
+
+    #[test]
+    fn capsule_materialization_verifies_bytes_and_cleans_private_directory() {
+        let root = tempfile::tempdir().expect("root");
+        let mut config = HostConfig::minimum(root.path().join("workspaces"));
+        let cgroup_root = root.path().join("cgroups");
+        std::fs::create_dir(&cgroup_root).expect("cgroup root");
+        config.cgroup_root = Some(cgroup_root);
+        std::fs::create_dir_all(&config.capsule_root).expect("capsule root");
+        let capability = CapabilitySnapshot {
+            snapshot: format!("sha256:{}", "7".repeat(64)),
+            driver: HostDriverKind::Host,
+            driver_version: "test".to_owned(),
+            config_generation: 1,
+            probed_at: chrono::Utc::now(),
+            valid_until: None,
+            facts: CapabilityFacts::default(),
+        };
+        let runtime = ProcessRuntime::new(config.clone(), capability).expect("runtime");
+        let bytes = b"#!/bin/sh\nprintf capsule";
+        let file = ExecutionCapsuleFile {
+            path: "bin/harness".to_owned(),
+            role: ExecutionCapsuleFileRole::Runtime,
+            executable: true,
+            sha256: hex::encode(Sha256::digest(bytes)),
+            content: Base64Content {
+                encoding: Base64Encoding::Base64,
+                data: base64::engine::general_purpose::STANDARD.encode(bytes),
+            },
+        };
+        let manifest_sha256 =
+            canonical_execution_capsule_hash("bin/harness", std::slice::from_ref(&file))
+                .expect("manifest");
+        let mut capsule = ExecutionCapsuleInput {
+            manifest_sha256,
+            entrypoint: "bin/harness".to_owned(),
+            files: vec![file],
+        };
+        let prepared = runtime
+            .prepare_capsule(Some(&capsule))
+            .expect("materializes")
+            .expect("present");
+        assert_eq!(
+            std::fs::read(prepared.directory.path().join("bin/harness")).expect("read"),
+            bytes
+        );
+        assert_eq!(prepared.applied.mount, "/runtime");
+        prepared.directory.close().expect("cleanup");
+        assert_eq!(
+            std::fs::read_dir(&config.capsule_root)
+                .expect("list capsule root")
+                .count(),
+            0
+        );
+
+        capsule.files[0].content.data = "dGFtcGVyZWQ=".to_owned();
+        let error = runtime
+            .prepare_capsule(Some(&capsule))
+            .err()
+            .expect("tamper refuses");
+        assert_eq!(error.code, "capsule.invalid");
+        assert_eq!(
+            std::fs::read_dir(&config.capsule_root)
+                .expect("list capsule root")
+                .count(),
+            0
+        );
+    }
+
+    #[test]
+    fn startup_reconciles_only_private_stale_capsule_directories() {
+        let root = tempfile::tempdir().expect("root");
+        let mut config = HostConfig::minimum(root.path().join("workspaces"));
+        let cgroup_root = root.path().join("cgroups");
+        std::fs::create_dir(&cgroup_root).expect("cgroup root");
+        config.cgroup_root = Some(cgroup_root);
+        std::fs::create_dir_all(config.capsule_root.join("capsule-crashed"))
+            .expect("stale capsule");
+        std::fs::write(
+            config.capsule_root.join("capsule-crashed/bin"),
+            b"stale runtime",
+        )
+        .expect("stale bytes");
+        let capability = CapabilitySnapshot {
+            snapshot: format!("sha256:{}", "7".repeat(64)),
+            driver: HostDriverKind::Host,
+            driver_version: "test".to_owned(),
+            config_generation: 1,
+            probed_at: chrono::Utc::now(),
+            valid_until: None,
+            facts: CapabilityFacts::default(),
+        };
+        ProcessRuntime::new(config.clone(), capability.clone()).expect("reconciles stale capsule");
+        assert_eq!(
+            std::fs::read_dir(&config.capsule_root)
+                .expect("list capsule root")
+                .count(),
+            0
+        );
+
+        let outside = root.path().join("outside");
+        std::fs::create_dir(&outside).expect("outside");
+        std::fs::write(outside.join("keep"), b"operator data").expect("outside marker");
+        symlink(&outside, config.capsule_root.join("capsule-symlink"))
+            .expect("malicious stale link");
+        let error = ProcessRuntime::new(config.clone(), capability)
+            .err()
+            .expect("symlink refuses");
+        assert_eq!(error.code, "capsule.reconcile-invalid");
+        assert_eq!(
+            std::fs::read(outside.join("keep")).expect("outside retained"),
+            b"operator data"
+        );
+
+        std::fs::remove_file(config.capsule_root.join("capsule-symlink"))
+            .expect("remove test symlink");
+        std::fs::create_dir(config.capsule_root.join("capsule-unproven"))
+            .expect("unproven capsule");
+        config.cgroup_root = None;
+        let error = ProcessRuntime::new(
+            config,
+            CapabilitySnapshot {
+                snapshot: format!("sha256:{}", "7".repeat(64)),
+                driver: HostDriverKind::Host,
+                driver_version: "test".to_owned(),
+                config_generation: 1,
+                probed_at: chrono::Utc::now(),
+                valid_until: None,
+                facts: CapabilityFacts::default(),
+            },
+        )
+        .err()
+        .expect("unproven tree state refuses stale cleanup");
+        assert_eq!(error.code, "capsule.reconcile-unproven");
     }
 
     #[tokio::test]
@@ -1506,6 +1865,7 @@ mod tests {
                 cpu_millis: 1_000,
             },
             wait: false,
+            capsule: None,
             lease_ttl_ms: None,
         };
         let DispatchOutcome::NotDispatched(error) = runtime
@@ -1573,6 +1933,7 @@ mod tests {
                 cpu_millis: 1_000,
             },
             wait: false,
+            capsule: None,
             lease_ttl_ms: None,
         };
         let DispatchOutcome::NotDispatched(error) = runtime

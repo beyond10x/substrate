@@ -20,6 +20,10 @@ pub const MAX_SNAPSHOT_PAGE_ITEMS: u32 = 1_000;
 pub const MAX_CURRENT_WORKSPACES: u64 = 1_024;
 pub const MAX_CURRENT_EXECS: u64 = 2_048;
 pub const MAX_SNAPSHOT_PROVENANCE_EVENTS: u64 = 1_024;
+pub const MAX_EXECUTION_CAPSULE_FILES: u32 = 32;
+pub const MAX_EXECUTION_CAPSULE_FILE_BYTES: u64 = 262_144;
+pub const MAX_EXECUTION_CAPSULE_BYTES: u64 = 524_288;
+pub const EXECUTION_CAPSULE_MOUNT: &str = "/runtime";
 pub const OPERATION_LEDGER_SUBJECT_MAX_ROWS: u64 = 100_000;
 pub const OPERATION_LEDGER_SUBJECT_MAX_BYTES: u64 = 512 * 1024 * 1024;
 pub const OPERATION_LEDGER_GLOBAL_MAX_ROWS: u64 = 1_000_000;
@@ -419,12 +423,26 @@ pub struct AppliedConfinement {
     pub filesystem: AppliedFilesystem,
     pub network: AppliedNetwork,
     pub profile: SandboxProfile,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capsule: Option<AppliedExecutionCapsule>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AppliedFilesystem {
     #[serde(rename = "workspace-rw-system-ro")]
     WorkspaceReadWriteSystemReadOnly,
+    #[serde(rename = "workspace-rw-capsule-ro-system-ro")]
+    WorkspaceReadWriteCapsuleReadOnlySystemReadOnly,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppliedExecutionCapsule {
+    pub manifest_sha256: String,
+    pub entrypoint: String,
+    pub mount: String,
+    pub file_count: u32,
+    pub total_bytes: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -476,6 +494,50 @@ pub struct ExecLimits {
     pub cpu_millis: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExecutionCapsuleFileRole {
+    Runtime,
+    Configuration,
+    Hook,
+    ProtocolSidecar,
+}
+
+impl ExecutionCapsuleFileRole {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Runtime => "runtime",
+            Self::Configuration => "configuration",
+            Self::Hook => "hook",
+            Self::ProtocolSidecar => "protocol-sidecar",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionCapsuleFile {
+    pub path: String,
+    pub role: ExecutionCapsuleFileRole,
+    pub executable: bool,
+    pub sha256: String,
+    pub content: Base64Content,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionCapsuleInput {
+    pub manifest_sha256: String,
+    pub entrypoint: String,
+    pub files: Vec<ExecutionCapsuleFile>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExecutionCapsuleValidation {
+    pub file_count: u32,
+    pub total_bytes: u64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecStartInput {
@@ -485,6 +547,8 @@ pub struct ExecStartInput {
     pub sandbox: ConfinementRequest,
     pub limits: ExecLimits,
     pub wait: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capsule: Option<ExecutionCapsuleInput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lease_ttl_ms: Option<u64>,
 }
@@ -935,6 +999,11 @@ pub struct CapabilityFacts {
     #[serde(rename = "exec.signals", skip_serializing_if = "Option::is_none")]
     pub exec_signals: Option<Vec<Signal>>,
     #[serde(
+        rename = "exec.inline-capsule",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub exec_inline_capsule: Option<ExecutionCapsuleFacts>,
+    #[serde(
         rename = "snapshot.provenance-events",
         skip_serializing_if = "Option::is_none"
     )]
@@ -968,9 +1037,19 @@ impl Default for CapabilityFacts {
             exec_output_limit_bytes: None,
             exec_max_current: None,
             exec_signals: None,
+            exec_inline_capsule: None,
             snapshot_provenance_events: None,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecutionCapsuleFacts {
+    pub mount: String,
+    pub max_files: u32,
+    pub max_file_bytes: u64,
+    pub max_total_bytes: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1041,6 +1120,18 @@ pub enum WireValidationError {
     FloatingPoint,
     #[error("request contains an unsupported JSON number")]
     UnsupportedNumber,
+    #[error("execution capsule is outside the closed bounds")]
+    InvalidCapsuleBounds,
+    #[error("execution capsule files are not in canonical path order")]
+    InvalidCapsuleOrder,
+    #[error("execution capsule digest is not canonical SHA-256")]
+    InvalidCapsuleDigest,
+    #[error("execution capsule entrypoint is not an executable file")]
+    InvalidCapsuleEntrypoint,
+    #[error("execution capsule file content does not match its digest")]
+    CapsuleContentMismatch,
+    #[error("execution capsule manifest does not match its digest")]
+    CapsuleManifestMismatch,
 }
 
 /// Validates a caller-minted operation identifier.
@@ -1080,6 +1171,96 @@ pub fn validate_relative_path(value: &str) -> Result<(), WireValidationError> {
         }
     }
     Ok(())
+}
+
+/// Computes the canonical identity of an execution-capsule manifest.
+///
+/// The hash covers a domain tag, entrypoint, and each already path-sorted file's path, role,
+/// executable bit, and lowercase content digest. Every field is prefixed by a four-byte big-endian
+/// length. File bytes are covered through their independently verified digest.
+///
+/// # Errors
+///
+/// Returns a typed validation error for invalid paths, order, bounds, digests, or entrypoint.
+pub fn canonical_execution_capsule_hash(
+    entrypoint: &str,
+    files: &[ExecutionCapsuleFile],
+) -> Result<String, WireValidationError> {
+    validate_relative_path(entrypoint)?;
+    let max_files = usize::try_from(MAX_EXECUTION_CAPSULE_FILES)
+        .map_err(|_| WireValidationError::InvalidCapsuleBounds)?;
+    if files.is_empty() || files.len() > max_files {
+        return Err(WireValidationError::InvalidCapsuleBounds);
+    }
+    let mut previous: Option<&str> = None;
+    let mut found_entrypoint = false;
+    let mut framed = Vec::with_capacity(files.len().saturating_mul(160));
+    append_framed(&mut framed, b"daemonloom.execution-capsule.v1")?;
+    append_framed(&mut framed, entrypoint.as_bytes())?;
+    for file in files {
+        validate_relative_path(&file.path)?;
+        if previous.is_some_and(|value| value >= file.path.as_str()) {
+            return Err(WireValidationError::InvalidCapsuleOrder);
+        }
+        if !is_canonical_sha256(&file.sha256) {
+            return Err(WireValidationError::InvalidCapsuleDigest);
+        }
+        found_entrypoint |= file.path == entrypoint && file.executable;
+        append_framed(&mut framed, file.path.as_bytes())?;
+        append_framed(&mut framed, file.role.as_str().as_bytes())?;
+        append_framed(&mut framed, if file.executable { b"1" } else { b"0" })?;
+        append_framed(&mut framed, file.sha256.as_bytes())?;
+        previous = Some(&file.path);
+    }
+    if !found_entrypoint {
+        return Err(WireValidationError::InvalidCapsuleEntrypoint);
+    }
+    Ok(hex::encode(Sha256::digest(framed)))
+}
+
+/// Validates all capsule bytes and returns the exact admitted size observation.
+///
+/// # Errors
+///
+/// Returns a typed validation error when any manifest or byte invariant is false.
+pub fn validate_execution_capsule(
+    capsule: &ExecutionCapsuleInput,
+) -> Result<ExecutionCapsuleValidation, WireValidationError> {
+    if !is_canonical_sha256(&capsule.manifest_sha256) {
+        return Err(WireValidationError::InvalidCapsuleDigest);
+    }
+    let computed = canonical_execution_capsule_hash(&capsule.entrypoint, &capsule.files)?;
+    if computed != capsule.manifest_sha256 {
+        return Err(WireValidationError::CapsuleManifestMismatch);
+    }
+    let mut total_bytes = 0_u64;
+    for file in &capsule.files {
+        let bytes = file.content.decode()?;
+        let size =
+            u64::try_from(bytes.len()).map_err(|_| WireValidationError::InvalidCapsuleBounds)?;
+        if size > MAX_EXECUTION_CAPSULE_FILE_BYTES {
+            return Err(WireValidationError::InvalidCapsuleBounds);
+        }
+        total_bytes = total_bytes
+            .checked_add(size)
+            .filter(|value| *value <= MAX_EXECUTION_CAPSULE_BYTES)
+            .ok_or(WireValidationError::InvalidCapsuleBounds)?;
+        if hex::encode(Sha256::digest(&bytes)) != file.sha256 {
+            return Err(WireValidationError::CapsuleContentMismatch);
+        }
+    }
+    Ok(ExecutionCapsuleValidation {
+        file_count: u32::try_from(capsule.files.len())
+            .map_err(|_| WireValidationError::InvalidCapsuleBounds)?,
+        total_bytes,
+    })
+}
+
+fn is_canonical_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
 }
 
 /// Computes the exact phase-2 request digest over the canonical length-delimited tuple.
@@ -1327,8 +1508,10 @@ pub fn canonical_json(value: &Value) -> Result<String, WireValidationError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        OutputStream, PipeClientFrame, PipeServerFrame, canonical_json, canonical_query,
-        canonical_request_hash, canonical_request_hash_v2, validate_relative_path,
+        Base64Content, Base64Encoding, ExecutionCapsuleFile, ExecutionCapsuleFileRole,
+        ExecutionCapsuleInput, OutputStream, PipeClientFrame, PipeServerFrame,
+        canonical_execution_capsule_hash, canonical_json, canonical_query, canonical_request_hash,
+        canonical_request_hash_v2, validate_execution_capsule, validate_relative_path,
     };
     use serde::Deserialize as _;
     use serde_json::Value;
@@ -1452,6 +1635,38 @@ mod tests {
     }
 
     #[test]
+    fn execution_capsule_hash_binds_order_metadata_and_bytes() {
+        let bytes = b"#!/bin/sh\nprintf capsule";
+        let mut files = vec![ExecutionCapsuleFile {
+            path: "bin/harness".to_owned(),
+            role: ExecutionCapsuleFileRole::Runtime,
+            executable: true,
+            sha256: hex::encode(Sha256::digest(bytes)),
+            content: Base64Content {
+                encoding: Base64Encoding::Base64,
+                data: base64::Engine::encode(&base64::engine::general_purpose::STANDARD, bytes),
+            },
+        }];
+        let digest = canonical_execution_capsule_hash("bin/harness", &files).expect("hashes");
+        let capsule = ExecutionCapsuleInput {
+            manifest_sha256: digest.clone(),
+            entrypoint: "bin/harness".to_owned(),
+            files: files.clone(),
+        };
+        let observed = validate_execution_capsule(&capsule).expect("capsule validates");
+        assert_eq!(observed.file_count, 1);
+        assert_eq!(observed.total_bytes, u64::try_from(bytes.len()).unwrap());
+
+        files[0].content.data = "dGFtcGVyZWQ=".to_owned();
+        let tampered = ExecutionCapsuleInput {
+            manifest_sha256: digest,
+            entrypoint: "bin/harness".to_owned(),
+            files,
+        };
+        assert!(validate_execution_capsule(&tampered).is_err());
+    }
+
+    #[test]
     fn phase_3_query_binding_is_order_independent_but_duplicate_sensitive() {
         let input = serde_json::json!({"path": "a"});
         let left = canonical_request_hash_v2("POST", "/v1/x", &input, Some("b=2&a=1&a=1"))
@@ -1552,10 +1767,10 @@ mod tests {
 
     #[test]
     fn successor_bundle_manifest_has_reviewed_digest() {
-        let bytes = include_bytes!("../../../contracts/substrate-wire/0.3.0/bundle.json");
+        let bytes = include_bytes!("../../../contracts/substrate-wire/0.4.0/bundle.json");
         assert_eq!(
             hex::encode(Sha256::digest(bytes)),
-            "cf66bdbb2a36e77cf4cd66549d4d4a37d2408917fa638e79ae0e25c7eaa5661a"
+            "05f28dcbbc32561eb0873b172df634cd07abcfaa778883cc708758fb40d3c1ac"
         );
     }
 }

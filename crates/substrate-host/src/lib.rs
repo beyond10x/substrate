@@ -6,6 +6,7 @@ mod probe;
 mod process;
 
 use std::collections::HashSet;
+use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
@@ -25,6 +26,7 @@ pub use process::{ExecObservation, PipeFrame, PipeStream};
 #[derive(Debug, Clone)]
 pub struct HostConfig {
     pub workspace_root: PathBuf,
+    pub capsule_root: PathBuf,
     pub cgroup_root: Option<PathBuf>,
     pub bubblewrap: PathBuf,
     pub config_generation: u64,
@@ -42,8 +44,10 @@ pub struct HostConfig {
 
 impl HostConfig {
     pub fn minimum(workspace_root: impl Into<PathBuf>) -> Self {
+        let workspace_root = workspace_root.into();
         Self {
-            workspace_root: workspace_root.into(),
+            capsule_root: workspace_root.join(".substrate-capsules"),
+            workspace_root,
             cgroup_root: None,
             bubblewrap: PathBuf::from("/usr/bin/bwrap"),
             config_generation: 1,
@@ -341,6 +345,13 @@ impl HostDriver {
         std::fs::create_dir_all(&config.workspace_root).map_err(|error| {
             DriverError::failed("workspace.root-failed", format!("workspace root: {error}"))
         })?;
+        std::fs::create_dir_all(&config.capsule_root).map_err(|error| {
+            DriverError::failed("capsule.root-failed", format!("capsule root: {error}"))
+        })?;
+        std::fs::set_permissions(&config.capsule_root, std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| {
+                DriverError::failed("capsule.root-failed", format!("capsule root mode: {error}"))
+            })?;
         let filesystem = Arc::new(fs::GuardedFilesystem::open(
             &config.workspace_root,
             config.max_file_bytes,

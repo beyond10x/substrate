@@ -167,6 +167,7 @@ impl VectorDriver {
                     filesystem: AppliedFilesystem::WorkspaceReadWriteSystemReadOnly,
                     network: AppliedNetwork::None,
                     cgroup: "substrate/vector".to_owned(),
+                    capsule: None,
                 }),
                 exit: Some(substrate_wire::ExecExit {
                     code: None,
@@ -764,7 +765,7 @@ fn bundle_vector(version: &str, layer: &str, name: &str) -> Value {
             .any(|entry| entry["path"] == relative),
         "vector must be selected from the immutable bundle manifest"
     );
-    if matches!(version, "0.2.0" | "0.3.0") {
+    if matches!(version, "0.2.0" | "0.3.0" | "0.4.0") {
         assert!(
             manifest["conformance"]["executable_vectors"]
                 .as_array()
@@ -782,7 +783,7 @@ fn bundle_vector(version: &str, layer: &str, name: &str) -> Value {
 fn successor_executable_manifest_is_the_exact_review_branch_set() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("contracts/substrate-wire/0.3.0");
+        .join("contracts/substrate-wire/0.4.0");
     let manifest: Value = serde_json::from_slice(
         &std::fs::read(root.join("bundle.json")).expect("bundle manifest bytes"),
     )
@@ -798,13 +799,13 @@ fn successor_executable_manifest_is_the_exact_review_branch_set() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn successor_pipe_session_positive_and_adversarial_vectors_execute_exactly() {
-    let positive = bundle_vector("0.3.0", "http", "pipe-session-start");
+    let positive = bundle_vector("0.4.0", "http", "pipe-session-start");
     let harness = Harness::open(false);
     seed_workspace(&harness.store);
     assert_exact_http(&harness.execute(&positive).await, &positive);
     assert_eq!(harness.driver.start_count.load(Ordering::SeqCst), 1);
 
-    let refusal = bundle_vector("0.3.0", "http", "pipe-session-missing-lease");
+    let refusal = bundle_vector("0.4.0", "http", "pipe-session-missing-lease");
     let harness = Harness::open(false);
     seed_workspace(&harness.store);
     assert_exact_http(&harness.execute(&refusal).await, &refusal);

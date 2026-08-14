@@ -1,0 +1,9 @@
+{
+  "$id": "urn:daemonloom:substrate-wire:0.4.0:input:machine-get",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {},
+  "required": [],
+  "title": "machine-get operation input",
+  "type": "object"
+}

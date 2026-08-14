@@ -41,6 +41,15 @@ cases but no code or type dependency.
   unavailable to children by default.
 - Process groups, descendants, timeout, cancellation, output caps, and cleanup are part of the
   applied observation.
+- A requested execution capsule is independently digest-verified, materialized as regular files in
+  a private per-execution directory, and mounted read-only at `/runtime`; the mutable workspace
+  remains a separate `/workspace` mount.
+- Capsule directories remain owned through whole-tree terminal observation. After a daemon crash,
+  startup reconciles orphan cgroups first and then removes only bounded, well-formed private capsule
+  directories; an unexpected entry or symlink fails closed.
+- The inline development capsule attests only its application/configuration/hook bytes. It does not
+  attest the host kernel, interpreter, libraries, or read-only system tree and carries neither
+  secrets nor network authority.
 
 ## 4. Sandbox and network
 

@@ -4,7 +4,9 @@ use std::process::{Command, Stdio};
 use chrono::Utc;
 use sha2::{Digest as _, Sha256};
 use substrate_wire::{
-    CapabilityFacts, CapabilitySnapshot, CgroupLimitFacts, HostDriverKind, NamespaceFacts,
+    CapabilityFacts, CapabilitySnapshot, CgroupLimitFacts, EXECUTION_CAPSULE_MOUNT,
+    ExecutionCapsuleFacts, HostDriverKind, MAX_EXECUTION_CAPSULE_BYTES,
+    MAX_EXECUTION_CAPSULE_FILE_BYTES, MAX_EXECUTION_CAPSULE_FILES, NamespaceFacts,
     OPERATION_LEDGER_GLOBAL_MAX_BYTES, OPERATION_LEDGER_GLOBAL_MAX_ROWS,
     OPERATION_LEDGER_SUBJECT_MAX_BYTES, OPERATION_LEDGER_SUBJECT_MAX_ROWS, Signal,
 };
@@ -56,6 +58,12 @@ pub fn probe(config: &HostConfig, openat2: bool) -> CapabilitySnapshot {
         exec_output_limit_bytes: Some(config.output_limit_bytes),
         exec_max_current: Some(config.max_current_execs),
         exec_signals: exec.then_some(vec![Signal::Int, Signal::Term, Signal::Kill]),
+        exec_inline_capsule: exec.then_some(ExecutionCapsuleFacts {
+            mount: EXECUTION_CAPSULE_MOUNT.to_owned(),
+            max_files: MAX_EXECUTION_CAPSULE_FILES,
+            max_file_bytes: MAX_EXECUTION_CAPSULE_FILE_BYTES,
+            max_total_bytes: MAX_EXECUTION_CAPSULE_BYTES,
+        }),
         snapshot_provenance_events: Some(config.snapshot_provenance_events),
     };
     let serialized = serde_json::to_vec(&facts).expect("capability facts serialize");

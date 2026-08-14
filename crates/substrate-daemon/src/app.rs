@@ -2090,7 +2090,7 @@ async fn pipe_session_capabilities(
         Success::observed(
             request_id,
             PipeSessionCapabilities {
-                contract: "substrate-wire/0.3.0".to_owned(),
+                contract: "substrate-wire/0.4.0".to_owned(),
                 transport: "unix-websocket-json".to_owned(),
                 capability_snapshot: machine.snapshot,
                 lease_required: true,

@@ -1,0 +1,220 @@
+{
+  "$id": "urn:daemonloom:substrate-wire:0.4.0:capability",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "config_generation": {
+      "maximum": 18446744073709551615,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "driver": {
+      "const": "host"
+    },
+    "driver_version": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "facts": {
+      "additionalProperties": false,
+      "properties": {
+        "events.pull": {
+          "const": true
+        },
+        "events.retention-events": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "events.stream": {
+          "const": true
+        },
+        "exec.argv-only": {
+          "const": true
+        },
+        "exec.cgroup-kill": {
+          "const": true
+        },
+        "exec.cgroup-limits": {
+          "additionalProperties": false,
+          "properties": {
+            "cpu": {
+              "const": true
+            },
+            "memory": {
+              "const": true
+            },
+            "processes": {
+              "const": true
+            }
+          },
+          "required": [
+            "processes",
+            "memory",
+            "cpu"
+          ],
+          "type": "object"
+        },
+        "exec.inline-capsule": {
+          "additionalProperties": false,
+          "properties": {
+            "max_file_bytes": {
+              "const": 262144
+            },
+            "max_files": {
+              "const": 32
+            },
+            "max_total_bytes": {
+              "const": 524288
+            },
+            "mount": {
+              "const": "/runtime"
+            }
+          },
+          "required": [
+            "mount",
+            "max_files",
+            "max_file_bytes",
+            "max_total_bytes"
+          ],
+          "type": "object"
+        },
+        "exec.max-current": {
+          "const": 2048
+        },
+        "exec.namespaces": {
+          "additionalProperties": false,
+          "properties": {
+            "ipc": {
+              "const": true
+            },
+            "mount": {
+              "const": true
+            },
+            "network": {
+              "const": true
+            },
+            "pid": {
+              "const": true
+            },
+            "user": {
+              "const": true
+            },
+            "uts": {
+              "const": true
+            }
+          },
+          "required": [
+            "user",
+            "mount",
+            "pid",
+            "ipc",
+            "uts",
+            "network"
+          ],
+          "type": "object"
+        },
+        "exec.no-egress": {
+          "const": true
+        },
+        "exec.output-limit-bytes": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "exec.signals": {
+          "items": {
+            "enum": [
+              "INT",
+              "TERM",
+              "KILL"
+            ]
+          },
+          "maxItems": 3,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "leases.clock-tolerance-ms": {
+          "const": 30000
+        },
+        "leases.explicit": {
+          "const": true
+        },
+        "operation.ledger-global-max-bytes": {
+          "const": 4294967296
+        },
+        "operation.ledger-global-max-rows": {
+          "const": 1000000
+        },
+        "operation.ledger-subject-max-bytes": {
+          "const": 536870912
+        },
+        "operation.ledger-subject-max-rows": {
+          "const": 100000
+        },
+        "snapshot.provenance-events": {
+          "const": 1024
+        },
+        "workspace.atomic-replace": {
+          "const": true
+        },
+        "workspace.guarded-io": {
+          "const": true
+        },
+        "workspace.list-limit-items": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "workspace.max-current": {
+          "const": 1024
+        },
+        "workspace.max-file-bytes": {
+          "const": 1048576
+        },
+        "workspace.openat2-beneath": {
+          "const": true
+        },
+        "workspace.read-limit-bytes": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "events.pull",
+        "events.stream",
+        "events.retention-events",
+        "exec.max-current",
+        "operation.ledger-global-max-bytes",
+        "operation.ledger-global-max-rows",
+        "operation.ledger-subject-max-bytes",
+        "operation.ledger-subject-max-rows",
+        "workspace.max-current",
+        "snapshot.provenance-events"
+      ],
+      "type": "object"
+    },
+    "probed_at": {
+      "$ref": "common.json#/$defs/timestamp"
+    },
+    "snapshot": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "valid_until": {
+      "$ref": "common.json#/$defs/timestamp"
+    }
+  },
+  "required": [
+    "snapshot",
+    "driver",
+    "driver_version",
+    "config_generation",
+    "probed_at",
+    "facts"
+  ],
+  "title": "Phase-3 machine capability snapshot",
+  "type": "object"
+}

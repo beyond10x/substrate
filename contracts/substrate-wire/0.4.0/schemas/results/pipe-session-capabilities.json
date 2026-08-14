@@ -1,0 +1,48 @@
+{
+  "$id": "urn:daemonloom:substrate-wire:0.4.0:result:pipe-session-capabilities",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "capability_snapshot": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "contract": {
+      "const": "substrate-wire/0.4.0"
+    },
+    "lease_required": {
+      "const": true
+    },
+    "max_frame_bytes": {
+      "const": 65536
+    },
+    "max_input_bytes": {
+      "const": 16777216
+    },
+    "max_queued_frames": {
+      "const": 16
+    },
+    "network": {
+      "const": "none"
+    },
+    "single_attachment": {
+      "const": true
+    },
+    "transport": {
+      "const": "unix-websocket-json"
+    }
+  },
+  "required": [
+    "contract",
+    "transport",
+    "capability_snapshot",
+    "lease_required",
+    "single_attachment",
+    "network",
+    "max_input_bytes",
+    "max_frame_bytes",
+    "max_queued_frames"
+  ],
+  "title": "pipe-session-capabilities operation result",
+  "type": "object"
+}

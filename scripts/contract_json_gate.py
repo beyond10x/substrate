@@ -61,7 +61,7 @@ def authority_schemas(version: str) -> dict[str, object]:
                 "preserves_routes": {"const": 12},
             }
         )
-    elif version == "0.3.0":
+    elif version in {"0.3.0", "0.4.0"}:
         bundle_properties["compatibility"] = closed(
             {
                 "adds_routes": {"const": 7},

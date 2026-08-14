@@ -9,11 +9,12 @@ model-free governed-harness slice accepted by
 
 ## Slice A: raw-pipe development contract
 
-**Progress:** the deterministic `substrate-wire` 0.3.0 development bundle has 26 closed operations,
-21 executable vectors, 65 design vectors, and 106 checked requirements. Its session vocabulary
-implements [ADR 0008](../../adr/0008-pipe-sessions-have-distinct-durable-identity.md), and Agent
-consumes an exact independently verified copy without a Substrate source dependency. Packaging,
-signing, and a stable clean-room release remain open.
+**Progress:** the deterministic `substrate-wire` 0.4.0 development bundle has 26 closed operations,
+21 executable vectors, 71 design vectors, 112 checked requirements, and 11 hash fixtures. Its
+session vocabulary implements
+[ADR 0008](../../adr/0008-pipe-sessions-have-distinct-durable-identity.md), and Agent consumes an
+exact independently verified copy without a Substrate source dependency. Packaging, signing, and a
+stable clean-room release remain open.
 
 - add a successor development bundle; never rewrite immutable 0.1.0 bytes;
 - define session resource, start/get/cancel/retire operations, capability facts, and closed channel
@@ -45,7 +46,7 @@ protocol-loss containment, lease expiry, restart reconciliation, and whole-tree 
 
 ## Slice C: Agent compatibility proof
 
-**Progress:** Agent's no-fallback backend consumes the exact copied 0.3.0 bundle and drives the
+**Progress:** Agent's no-fallback backend consumes the exact copied 0.4.0 bundle and drives the
 model-free fake Codex app-server through a real delegated daemon. It checks capability/profile/
 configuration binding, bidirectional bytes, bounded pressure, approval lifecycle, half-close,
 attachment and protocol failure, lease expiry, restart reconciliation, exact terminal pairing, and
@@ -58,6 +59,27 @@ is involved. Stable/public `substrate_confined` reporting remains an Agent relea
 - let the consumer use copied development contract bytes or a separately built artifact, never a
   sibling Substrate source dependency;
 - report `substrate-confined` only from Substrate capability and terminal observations.
+
+## Slice D: immutable execution capsule
+
+**Progress:** complete for the bounded inline development capsule.
+[ADR 0009](../../adr/0009-execution-capsules-are-verified-read-only-inputs.md) fixes a bounded inline
+development contract: Substrate independently verifies exact application, configuration, sidecar,
+and hook bytes, mounts them read-only at `/runtime`, keeps `/workspace` mutable and separate, and
+reports the applied capsule identity. Agent compiles that identity from its profile and rejects
+drift before model dispatch. The deterministic 0.4.0 bundle has 26 closed operations, 21 executable
+vectors, 71 design vectors, 112 checked requirements, and 11 exact hash fixtures. Normal completion
+owns capsule cleanup through terminal tree reconciliation; startup removes stale private capsule
+directories only after orphan cgroups are reconciled and refuses unexpected or symlink entries.
+
+- publish a deterministic successor bundle with canonical capsule hashing and adversarial vectors;
+- materialize only bounded regular files from validated relative paths and retain the private
+  directory through whole-tree terminal reconciliation;
+- prove digest/path/entrypoint refusal, read-only enforcement, workspace separation, and cleanup;
+- extend the real model-free Agent lane so the fake app-server and hook/config fixtures execute
+  from the applied capsule;
+- keep host base closure, signing, registry/OCI transport, secrets, egress, and public reporting as
+  explicit later gates.
 
 ## Later phase-4 slices
 

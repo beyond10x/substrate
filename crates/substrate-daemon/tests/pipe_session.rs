@@ -192,6 +192,7 @@ impl Driver for PipeFixtureDriver {
                     filesystem: AppliedFilesystem::WorkspaceReadWriteSystemReadOnly,
                     network: AppliedNetwork::None,
                     profile: SandboxProfile::Workspace,
+                    capsule: None,
                 }),
                 exit: None,
                 lease: None,
@@ -628,7 +629,7 @@ async fn durable_pipe_start_single_attachment_and_terminal_output_are_scoped() {
         .call(Method::GET, "/v1/pipe-sessions", Body::empty())
         .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(capabilities["result"]["contract"], "substrate-wire/0.3.0");
+    assert_eq!(capabilities["result"]["contract"], "substrate-wire/0.4.0");
     assert_eq!(capabilities["result"]["single_attachment"], true);
     assert_eq!(capabilities["result"]["network"], "none");
     let (session_id, exec_id) = harness.start_pipe().await;

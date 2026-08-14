@@ -1,0 +1,67 @@
+{
+  "$id": "urn:daemonloom:substrate-wire:0.4.0:coverage",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "const": "schemas/coverage.json"
+    },
+    "format": {
+      "const": "daemonloom.substrate-conformance-coverage.v1"
+    },
+    "requirements": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "evidence": {
+            "items": {
+              "additionalProperties": false,
+              "properties": {
+                "id": {
+                  "pattern": "^[a-z][a-z0-9-]+$",
+                  "type": "string"
+                },
+                "kind": {
+                  "enum": [
+                    "vector",
+                    "hash-fixture"
+                  ]
+                }
+              },
+              "required": [
+                "kind",
+                "id"
+              ],
+              "type": "object"
+            },
+            "minItems": 1,
+            "type": "array"
+          },
+          "id": {
+            "pattern": "^[a-z][a-z0-9.-]+$",
+            "type": "string"
+          },
+          "source": {
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "source",
+          "evidence"
+        ],
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "required": [
+    "$schema",
+    "format",
+    "requirements"
+  ],
+  "title": "Conformance coverage inventory",
+  "type": "object"
+}
