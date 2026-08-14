@@ -17,8 +17,12 @@ jobs:
         run: python3 scripts/check-links.py
       - name: Check ADR identity and index
         run: python3 scripts/check-adrs.py
+      - name: Prove closed JSON classification failures
+        run: python3 scripts/test_contract_json_gate.py -v
       - name: Check development contract bundle
         run: python3 scripts/check-contract-bundle.py
+      - name: Check lifecycle contract bundle
+        run: python3 scripts/check-contract-bundle-0.2.0.py
 
   runtime:
     runs-on: ubuntu-latest

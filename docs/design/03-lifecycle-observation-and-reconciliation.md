@@ -7,7 +7,7 @@ acceptance, observation, expiry, and recovery explicit so clients never guess wh
 
 ## 1. Command lifecycle
 
-Every mutation carries a caller-minted operation id and follows:
+Every keyed resource mutation carries a caller-minted operation id and follows:
 
 ```text
 unseen → admitted → accepted → terminal
@@ -20,6 +20,10 @@ preconditions passed, but no durable driver authority exists yet. `accepted` mea
 before-dispatch transaction committed and the operation may change driver state. `unknown` means
 acceptance is durable but a terminal observation cannot currently be proved. Terminal records the
 typed outcome and the latest provable resource observation.
+
+A declared bounded control operation can be non-keyed and therefore does not enter this lifecycle.
+In 0.2 the only such mutation is reconciliation snapshot creation: it has `idempotency: none`, an
+exact `{}` request body, and no operation-ledger row; its typed control event is the durable barrier.
 
 The durable ledger contains one of:
 
@@ -86,10 +90,34 @@ Clients may project the taxonomy into their own types. The canonical substrate c
    observed state. Provable state becomes terminal; absence that is itself authoritative may become
    failed/refused as defined by the operation; ambiguity remains `unknown`. The daemon never repeats
    a mutation merely because it restarted.
-4. **Events:** one persisted generation and monotonic sequence are shared by pull and push. A
-   generation changes only when continuity cannot be proved. Retention gaps use the barriered
-   snapshot protocol accepted by architecture ADR 0017.
-5. **Leases:** not served in the minimum host slice. Phase 3 must add monotonic-clock accounting,
-   30-second maximum clock tolerance, explicit per-resource TTLs (no implicit lease), and a
-   deployment-configured cleanup/tombstone retention no shorter than event retention before the
-   capability appears.
+4. **Events:** every authenticated `(deployment, subject)` owns an opaque daemon-minted
+   `source_scope`, persisted generation, and monotonic sequence shared by pull and push. A
+   generation changes only when continuity cannot be proved. Subject-scoped coalesced wakeups are
+   hints over the durable journal; they carry no queued-history guarantee. Retention gaps use the
+   barriered snapshot protocol accepted by architecture ADR 0017.
+5. **Leases:** the minimum host slice remains valid without a lease. Phase 3 adds optional explicit
+   workspace and exec TTLs, idempotent renewal, and a periodic cleanup sweeper. The durable lease
+   record contains wall deadline, issuing wall time, Linux boot identity, issuing boot-relative
+   time, and boot-relative deadline—never a process-local `Instant`. A boot change, monotonic
+   regression, or wall/monotonic disagreement above 30 seconds expires conservatively. Workspace
+   tombstones are retained no less than the native event window; cleanup failure remains an event
+   and is retried.
+6. **Bounded observation:** pull pages are capped at 1,000 events. WebSocket push uses the same event
+   values and opaque cursor, caps durable catch-up at 16 pages, and applies explicit stream/send
+   capacity rather than a fake queued-wakeup count. Its centrally configured admission policy also
+   bounds global and subject streams, page/frame/message/write sizes, client control rate, send
+   deadline, and total lifetime; data frames are protocol-closed. A cursor source/epoch mismatch or
+   retention gap never silently fast-forwards.
+7. **Stable reconciliation:** non-keyed snapshot control materializes a complete quota-bounded set
+   of declared current resource kinds plus one honest bounded provenance window in the same SQLite
+   transaction as its inclusive barrier event. Pagination reads only those rows and returns an
+   opaque resume cursor. Missing rows produce `snapshot.incomplete`; later mutations cannot enter
+   an existing snapshot. An empty current set is authoritative and valid.
+8. **Destroy recovery:** workspace destroy commits a durable `destroying` observation before it
+   touches the backing tree. Exec start refuses that state. Descriptor-relative cleanup advances in
+   bounded batches without a total depth/item ceiling; after restart the daemon resumes it under the
+   same workspace lock. Proof that the root is absent terminalizes the original accepted/unknown
+   operation and its tombstone. The continuation is authorized by the persisted `destroying`
+   resource plus the linked durable destroy operation and stored root identity; it neither
+   redispatches arbitrary request input nor mints a fresh operation, and only an observed absent
+   root permits success.

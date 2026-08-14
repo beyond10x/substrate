@@ -9,7 +9,7 @@ use chrono::Utc;
 use serde_json::{Value, json};
 use substrate_daemon::{App, Identity, router};
 use substrate_host::{HostConfig, HostDriver};
-use substrate_store::{Scope, Store, StoredExec};
+use substrate_store::{ExecWrite, NewOperation, Reservation, Scope, Store, StoredExec};
 use substrate_wire::{
     ConfinementRequest, Exec, ExecExit, ExecKind, ExecState, NetworkMode, SandboxProfile,
 };
@@ -77,7 +77,7 @@ fn mutation(operation: &str, input: Value) -> Body {
     )
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 #[allow(clippy::too_many_lines)] // One sequential black-box journey proves lifecycle ordering.
 async fn twelve_route_vertical_slice_is_scoped_durable_and_observed() {
     let harness = Harness::open();
@@ -218,26 +218,67 @@ async fn twelve_route_vertical_slice_is_scoped_durable_and_observed() {
             code: Some(0),
             signal: None,
         }),
+        lease: None,
     };
-    harness
-        .store
-        .put_exec(
-            &Scope {
-                deployment: "dep_http_test".to_owned(),
-                subject: "local:1000".to_owned(),
-            },
-            &StoredExec {
-                resource: exec,
-                stdout: b"hello".to_vec(),
-                stderr: Vec::new(),
-                stdout_truncated: false,
-                stderr_truncated: false,
-                output_complete: true,
-                cgroup: None,
-                leader_pid: None,
-            },
-        )
-        .expect("seed terminal exec");
+    let scope = Scope {
+        deployment: "dep_http_test".to_owned(),
+        subject: "local:1000".to_owned(),
+    };
+    let seed_operation = NewOperation {
+        scope: scope.clone(),
+        operation: "01JPHASE3SEEDHTTPEXEC01".to_owned(),
+        operation_kind: "exec.start".to_owned(),
+        request_hash: "8".repeat(64),
+        accepted_at: Utc::now().to_rfc3339(),
+        capability_snapshot: Some(snapshot.clone()),
+        actor: "http-test-fixture".to_owned(),
+        principal: None,
+        resource: Some(exec_id.to_owned()),
+    };
+    let mut provisional = exec.clone();
+    provisional.state = ExecState::Accepted;
+    provisional.exit = None;
+    assert_eq!(
+        harness
+            .store
+            .reserve_exec_start(
+                &seed_operation,
+                &StoredExec {
+                    resource: provisional,
+                    stdout: Vec::new(),
+                    stderr: Vec::new(),
+                    stdout_truncated: false,
+                    stderr_truncated: false,
+                    output_complete: false,
+                    cgroup: None,
+                    leader_pid: None,
+                },
+                None,
+                None,
+            )
+            .expect("admit terminal exec fixture"),
+        Reservation::Accepted
+    );
+    assert!(matches!(
+        harness
+            .store
+            .complete_exec(
+                &scope,
+                &seed_operation.operation,
+                &Utc::now().to_rfc3339(),
+                StatusCode::CREATED.as_u16(),
+                &exec,
+                b"hello",
+                &[],
+                false,
+                false,
+                true,
+                None,
+                None,
+            )
+            .expect("complete terminal exec fixture"),
+        ExecWrite::PersistedExact(_)
+    ));
 
     let (status, observed_exec) = harness
         .call(
@@ -354,7 +395,7 @@ async fn twelve_route_vertical_slice_is_scoped_durable_and_observed() {
     assert_eq!(destroyed["result"]["absent"], true);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn strict_limits_and_path_escape_are_typed_before_dispatch() {
     let harness = Harness::open();
     let (status, query) = harness
@@ -414,7 +455,7 @@ async fn strict_limits_and_path_escape_are_typed_before_dispatch() {
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(escape["error"]["code"], "workspace.path-escape");
 
-    let oversized = Body::from(vec![b' '; 1_048_577]);
+    let oversized = Body::from(vec![b' '; 2_097_153]);
     let (status, limit) = harness
         .call(
             "local:1000",

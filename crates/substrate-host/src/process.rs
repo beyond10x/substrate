@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
 use std::io::Write as _;
 use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
@@ -22,11 +22,11 @@ use tokio::io::{AsyncRead, AsyncReadExt as _};
 use tokio::process::{Child, Command};
 use tokio::sync::Notify;
 
-use crate::{DriverError, HostConfig};
+use crate::{DispatchOutcome, DriverError, HostConfig};
 
 const TRUNCATION_MARKER: &[u8] = b"\n[substrate: output truncated]\n";
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecObservation {
     pub resource: Exec,
     pub stdout: Vec<u8>,
@@ -42,6 +42,7 @@ struct Execution {
     observation: Mutex<ExecObservation>,
     notify: Notify,
     cancellation_requested: AtomicBool,
+    delivered_signal: Mutex<Option<Signal>>,
 }
 
 impl Execution {
@@ -50,6 +51,7 @@ impl Execution {
             observation: Mutex::new(observation),
             notify: Notify::new(),
             cancellation_requested: AtomicBool::new(false),
+            delivered_signal: Mutex::new(None),
         }
     }
 }
@@ -58,6 +60,7 @@ pub struct ProcessRuntime {
     config: HostConfig,
     capability: CapabilitySnapshot,
     executions: Arc<Mutex<HashMap<String, Arc<Execution>>>>,
+    reservations: Arc<Mutex<HashSet<String>>>,
     active: Arc<AtomicUsize>,
 }
 
@@ -67,6 +70,7 @@ impl ProcessRuntime {
             config,
             capability,
             executions: Arc::new(Mutex::new(HashMap::new())),
+            reservations: Arc::new(Mutex::new(HashSet::new())),
             active: Arc::new(AtomicUsize::new(0)),
         };
         runtime.reconcile_orphans()?;
@@ -119,23 +123,36 @@ impl ProcessRuntime {
         id: &str,
         workspace: &Path,
         input: &ExecStartInput,
-    ) -> Result<ExecObservation, DriverError> {
-        self.admit(id, workspace, input)?;
+    ) -> DispatchOutcome<ExecObservation> {
+        if let Err(error) = self.admit(id, workspace, input) {
+            return DispatchOutcome::NotDispatched(error);
+        }
         let permit =
-            ActivePermit::acquire(Arc::clone(&self.active), self.config.max_concurrent_execs)?;
-        let cgroup = Cgroup::create(
-            self.config
-                .cgroup_root
-                .as_deref()
-                .ok_or_else(sandbox_unavailable)?,
+            match ActivePermit::acquire(Arc::clone(&self.active), self.config.max_concurrent_execs)
+            {
+                Ok(value) => value,
+                Err(error) => return DispatchOutcome::NotDispatched(error),
+            };
+        let tracking = match TrackingReservation::acquire(
+            Arc::clone(&self.executions),
+            Arc::clone(&self.reservations),
             id,
-            input,
-        )?;
+            self.config.max_tracked_execs,
+        ) {
+            Ok(value) => value,
+            Err(error) => return DispatchOutcome::NotDispatched(error),
+        };
+        let Some(cgroup_root) = self.config.cgroup_root.as_deref() else {
+            return DispatchOutcome::NotDispatched(sandbox_unavailable());
+        };
+        let cgroup = match Cgroup::create(cgroup_root, id, input) {
+            Ok(value) => value,
+            Err(outcome) => return outcome,
+        };
         let (sync_read, sync_write) = match pipe() {
             Ok(pipe) => pipe,
             Err(error) => {
-                let _ = cgroup.prove_empty_and_remove();
-                return Err(error);
+                return contain_cgroup(&cgroup, error);
             }
         };
         let sync_fd = sync_read.as_raw_fd();
@@ -173,32 +190,29 @@ impl ProcessRuntime {
                 Ok(())
             });
         }
-        let mut child = match command.spawn() {
+        let child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
-                let _ = cgroup.prove_empty_and_remove();
-                return Err(DriverError::failed(
-                    "exec.spawn-failed",
-                    format!("bubblewrap spawn failed: {error}"),
-                ));
+                return contain_cgroup(
+                    &cgroup,
+                    DriverError::failed(
+                        "exec.spawn-failed",
+                        format!("bubblewrap spawn failed: {error}"),
+                    ),
+                );
             }
         };
         drop(sync_read);
-        let leader_pid = child.id().ok_or_else(|| {
-            DriverError::failed("exec.spawn-failed", "spawn returned no process identity")
-        })?;
+        let Some(leader_pid) = child.id() else {
+            let error =
+                DriverError::failed("exec.spawn-failed", "spawn returned no process identity");
+            return contain_spawned(child, cgroup, error).await;
+        };
         if let Err(error) = cgroup.attach_tree(leader_pid) {
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            let _ = cgroup.prove_empty_and_remove();
-            return Err(error);
+            return contain_spawned(child, cgroup, error).await;
         }
         if let Err(error) = release_barrier(&sync_write) {
-            let _ = cgroup.kill_all();
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            let _ = cgroup.prove_empty_and_remove();
-            return Err(error);
+            return contain_spawned(child, cgroup, error).await;
         }
         drop(sync_write);
 
@@ -218,6 +232,7 @@ impl ProcessRuntime {
             requested: input.sandbox.clone(),
             applied: Some(applied),
             exit: None,
+            lease: None,
         };
         let observation = ExecObservation {
             resource,
@@ -230,34 +245,7 @@ impl ProcessRuntime {
             leader_pid: Some(leader_pid),
         };
         let execution = Arc::new(Execution::new(observation.clone()));
-        let insertion = {
-            let mut executions = self.executions.lock();
-            if executions.len() >= self.config.max_tracked_execs {
-                Err(DriverError::exhausted(
-                    "exec.tracking-capacity",
-                    "The bounded exec observation capacity is exhausted.",
-                    "exec",
-                ))
-            } else if executions.contains_key(id) {
-                Err(DriverError {
-                    class: crate::DriverErrorClass::Conflict,
-                    code: "exec.already-exists",
-                    message: "Exec identity already exists.".to_owned(),
-                    address: Some("exec".to_owned()),
-                    retriable: false,
-                })
-            } else {
-                executions.insert(id.to_owned(), Arc::clone(&execution));
-                Ok(())
-            }
-        };
-        if let Err(error) = insertion {
-            let _ = cgroup.kill_all();
-            let _ = child.kill().await;
-            let _ = child.wait().await;
-            let _ = reconcile_cgroup(&cgroup).await;
-            return Err(error);
-        }
+        tracking.install(Arc::clone(&execution));
         let timeout = Duration::from_millis(input.limits.timeout_ms);
         let output_limit = usize::try_from(input.limits.output_bytes)
             .unwrap_or(usize::MAX)
@@ -271,10 +259,14 @@ impl ProcessRuntime {
             permit,
         ));
         if input.wait {
-            wait_terminal(&execution, timeout.saturating_add(Duration::from_secs(5))).await?;
-            Ok(execution.observation.lock().clone())
+            if let Err(error) =
+                wait_terminal(&execution, timeout.saturating_add(Duration::from_secs(5))).await
+            {
+                return DispatchOutcome::OutcomeUnknown(error);
+            }
+            DispatchOutcome::Observed(execution.observation.lock().clone())
         } else {
-            Ok(observation)
+            DispatchOutcome::Observed(observation)
         }
     }
 
@@ -286,10 +278,47 @@ impl ProcessRuntime {
             .cloned()
             .ok_or_else(DriverError::not_found)?;
         let observation = execution.observation.lock().clone();
-        if is_terminal(observation.resource.state) {
-            self.executions.lock().remove(id);
-        }
         Ok(observation)
+    }
+
+    pub fn acknowledge(&self, persisted: &ExecObservation) {
+        if !is_terminal(persisted.resource.state) {
+            return;
+        }
+        let mut executions = self.executions.lock();
+        let exact_terminal_match = executions
+            .get(&persisted.resource.id)
+            .is_some_and(|execution| *execution.observation.lock() == *persisted);
+        if exact_terminal_match {
+            executions.remove(&persisted.resource.id);
+        }
+    }
+
+    pub fn discard_terminal(&self, id: &str) {
+        let mut executions = self.executions.lock();
+        if executions
+            .get(id)
+            .is_some_and(|execution| is_terminal(execution.observation.lock().resource.state))
+        {
+            executions.remove(id);
+        }
+    }
+
+    pub fn completed(&self) -> Vec<ExecObservation> {
+        self.executions
+            .lock()
+            .values()
+            .filter_map(|execution| {
+                let observation = execution.observation.lock();
+                is_terminal(observation.resource.state).then(|| observation.clone())
+            })
+            .collect()
+    }
+
+    pub fn set_lease(&self, id: &str, lease: Option<substrate_wire::LeaseObservation>) {
+        if let Some(execution) = self.executions.lock().get(id) {
+            execution.observation.lock().resource.lease = lease;
+        }
     }
 
     pub fn output(&self, id: &str, query: &ExecOutputQuery) -> Result<OutputSlice, DriverError> {
@@ -347,23 +376,31 @@ impl ProcessRuntime {
             .cgroup
             .clone()
             .ok_or_else(|| DriverError::failed("exec.cgroup-missing", "Exec has no cgroup"))?;
-        let leader_pid = execution.observation.lock().leader_pid;
         let cgroup_root = self
             .config
             .cgroup_root
             .as_deref()
             .ok_or_else(sandbox_unavailable)?;
         let cgroup = Cgroup::existing(cgroup_root, &cgroup_name)?;
-        execution
-            .cancellation_requested
-            .store(true, Ordering::Release);
         match input.signal {
-            Signal::Kill => cgroup.kill_all()?,
+            Signal::Kill => {
+                cgroup.kill_all()?;
+                execution
+                    .cancellation_requested
+                    .store(true, Ordering::Release);
+                *execution.delivered_signal.lock() = Some(Signal::Kill);
+            }
             signal => {
-                cgroup.signal_all(signal, leader_pid)?;
+                let leader = execution.observation.lock().leader_pid;
+                cgroup.signal_all(signal, leader)?;
+                *execution.delivered_signal.lock() = Some(signal);
                 let grace = Duration::from_millis(input.grace_ms);
                 if wait_terminal(&execution, grace).await.is_err() {
                     cgroup.kill_all()?;
+                    execution
+                        .cancellation_requested
+                        .store(true, Ordering::Release);
+                    *execution.delivered_signal.lock() = Some(Signal::Kill);
                 }
             }
         }
@@ -431,8 +468,11 @@ impl ProcessRuntime {
             || input.limits.output_bytes == 0
             || input.limits.output_bytes > self.config.output_limit_bytes
             || input.limits.processes == 0
+            || input.limits.processes > 4096
             || input.limits.memory_bytes < 1_048_576
+            || input.limits.memory_bytes > 1_099_511_627_776
             || input.limits.cpu_millis == 0
+            || input.limits.cpu_millis > 86_400_000
         {
             return Err(DriverError::exhausted(
                 "exec.limit-unserved",
@@ -513,11 +553,12 @@ impl ProcessRuntime {
         }
         // Bubblewrap injects PWD after `--clearenv`; remove that implementation detail before
         // exec, then restore it only when the closed request explicitly supplied PWD.
-        command.arg("--").args(["/usr/bin/env", "-u", "PWD"]);
+        command.arg("--").args(["/usr/bin/env", "-u", "PWD", "--"]);
         if let Some(value) = input.env.set.get("PWD") {
+            command.args(["/usr/bin/env", "--"]);
             command.arg(format!("PWD={value}"));
         }
-        command.arg("--").args(&input.argv);
+        command.args(&input.argv);
         command
     }
 }
@@ -545,7 +586,7 @@ async fn run_child(
     };
     let (stdout, stdout_truncated) = stdout_task.await.unwrap_or_else(|_| (Vec::new(), true));
     let (stderr, stderr_truncated) = stderr_task.await.unwrap_or_else(|_| (Vec::new(), true));
-    let cancellation = timed_out || execution.cancellation_requested.load(Ordering::Acquire);
+    let forced_cancellation = timed_out || execution.cancellation_requested.load(Ordering::Acquire);
     let cgroup_reconciled = reconcile_cgroup(&cgroup).await;
     let mut observation = execution.observation.lock();
     observation.stdout = stdout;
@@ -560,16 +601,23 @@ async fn run_child(
             observation.resource.exit = None;
         }
         Ok(status) => {
-            let signal = status.signal().and_then(signal_from_number);
+            let delivered = *execution.delivered_signal.lock();
+            let signal = status.signal().and_then(signal_from_number).or_else(|| {
+                delivered.filter(|delivered| status.code() == Some(128 + delivered.number()))
+            });
             observation.resource.exit = Some(ExecExit {
-                code: status.code().and_then(|code| u8::try_from(code).ok()),
+                code: signal
+                    .is_none()
+                    .then(|| status.code().and_then(|code| u8::try_from(code).ok()))
+                    .flatten(),
                 signal,
             });
-            observation.resource.state = if cancellation {
-                ExecState::Cancelled
-            } else {
-                ExecState::Exited
-            };
+            observation.resource.state =
+                if forced_cancellation || signal.is_some_and(|signal| Some(signal) == delivered) {
+                    ExecState::Cancelled
+                } else {
+                    ExecState::Exited
+                };
         }
         Err(_) => {
             observation.resource.state = ExecState::Unknown;
@@ -582,6 +630,67 @@ async fn run_child(
 
 struct ActivePermit {
     active: Arc<AtomicUsize>,
+}
+
+struct TrackingReservation {
+    executions: Arc<Mutex<HashMap<String, Arc<Execution>>>>,
+    reservations: Arc<Mutex<HashSet<String>>>,
+    id: String,
+    installed: bool,
+}
+
+impl TrackingReservation {
+    fn acquire(
+        executions: Arc<Mutex<HashMap<String, Arc<Execution>>>>,
+        reservations: Arc<Mutex<HashSet<String>>>,
+        id: &str,
+        maximum: usize,
+    ) -> Result<Self, DriverError> {
+        let executions_guard = executions.lock();
+        let mut reservations_guard = reservations.lock();
+        if executions_guard
+            .len()
+            .saturating_add(reservations_guard.len())
+            >= maximum
+        {
+            return Err(DriverError::exhausted(
+                "exec.tracking-capacity",
+                "The bounded exec observation capacity is exhausted.",
+                "exec",
+            ));
+        }
+        if executions_guard.contains_key(id) || !reservations_guard.insert(id.to_owned()) {
+            return Err(DriverError {
+                class: crate::DriverErrorClass::Conflict,
+                code: "exec.already-exists",
+                message: "Exec identity already exists.".to_owned(),
+                address: Some("exec".to_owned()),
+                retriable: false,
+            });
+        }
+        drop(reservations_guard);
+        drop(executions_guard);
+        Ok(Self {
+            executions,
+            reservations,
+            id: id.to_owned(),
+            installed: false,
+        })
+    }
+
+    fn install(mut self, execution: Arc<Execution>) {
+        self.executions.lock().insert(self.id.clone(), execution);
+        self.reservations.lock().remove(&self.id);
+        self.installed = true;
+    }
+}
+
+impl Drop for TrackingReservation {
+    fn drop(&mut self) {
+        if !self.installed {
+            self.reservations.lock().remove(&self.id);
+        }
+    }
 }
 
 impl ActivePermit {
@@ -618,6 +727,46 @@ async fn reconcile_cgroup(cgroup: &Cgroup) -> bool {
         }
     }
     false
+}
+
+async fn contain_spawned(
+    child: Child,
+    cgroup: Cgroup,
+    error: DriverError,
+) -> DispatchOutcome<ExecObservation> {
+    contain_spawned_with_reconciliation(child, cgroup, error, |cgroup| async move {
+        reconcile_cgroup(&cgroup).await
+    })
+    .await
+}
+
+async fn contain_spawned_with_reconciliation<F, Fut>(
+    mut child: Child,
+    cgroup: Cgroup,
+    error: DriverError,
+    reconcile: F,
+) -> DispatchOutcome<ExecObservation>
+where
+    F: FnOnce(Cgroup) -> Fut,
+    Fut: std::future::Future<Output = bool>,
+{
+    let _ = cgroup.kill_all();
+    let _ = child.kill().await;
+    let reaped = child.wait().await.is_ok();
+    let absent = reconcile(cgroup).await;
+    if reaped && absent {
+        DispatchOutcome::ContainedAbsent(error)
+    } else {
+        DispatchOutcome::OutcomeUnknown(error)
+    }
+}
+
+fn contain_cgroup(cgroup: &Cgroup, error: DriverError) -> DispatchOutcome<ExecObservation> {
+    if cgroup.prove_empty_and_remove().is_ok() {
+        DispatchOutcome::ContainedAbsent(error)
+    } else {
+        DispatchOutcome::OutcomeUnknown(error)
+    }
 }
 
 async fn drain_capped<R>(reader: Option<R>, limit: usize) -> (Vec<u8>, bool)
@@ -658,11 +807,28 @@ where
 }
 
 async fn wait_terminal(execution: &Execution, limit: Duration) -> Result<(), DriverError> {
+    wait_terminal_with_hook(execution, limit, || {}).await
+}
+
+async fn wait_terminal_with_hook<F>(
+    execution: &Execution,
+    limit: Duration,
+    after_state_check: F,
+) -> Result<(), DriverError>
+where
+    F: FnOnce(),
+{
     let deadline = tokio::time::Instant::now() + limit;
+    let mut after_state_check = Some(after_state_check);
     loop {
         let notified = execution.notify.notified();
+        tokio::pin!(notified);
+        notified.as_mut().enable();
         if is_terminal(execution.observation.lock().resource.state) {
             return Ok(());
+        }
+        if let Some(hook) = after_state_check.take() {
+            hook();
         }
         tokio::time::timeout_at(deadline, notified)
             .await
@@ -675,7 +841,7 @@ async fn wait_terminal(execution: &Execution, limit: Duration) -> Result<(), Dri
 const fn is_terminal(state: ExecState) -> bool {
     matches!(
         state,
-        ExecState::Exited | ExecState::Cancelled | ExecState::Unknown
+        ExecState::Exited | ExecState::Cancelled | ExecState::Expired | ExecState::Unknown
     )
 }
 
@@ -758,14 +924,19 @@ struct Cgroup {
 }
 
 impl Cgroup {
-    fn create(root: &Path, id: &str, input: &ExecStartInput) -> Result<Self, DriverError> {
+    #[allow(clippy::result_large_err)] // The error preserves the typed dispatch posture.
+    fn create(
+        root: &Path,
+        id: &str,
+        input: &ExecStartInput,
+    ) -> Result<Self, DispatchOutcome<ExecObservation>> {
         let name = format!("substrate-{id}");
         let path = root.join(&name);
         std::fs::create_dir(&path).map_err(|error| {
-            DriverError::failed(
+            DispatchOutcome::NotDispatched(DriverError::failed(
                 "exec.cgroup-create-failed",
                 format!("cgroup create: {error}"),
-            )
+            ))
         })?;
         let result = (|| {
             write_control(&path, "pids.max", &input.limits.processes.to_string())?;
@@ -785,10 +956,9 @@ impl Cgroup {
             }
             Ok(())
         })();
-        if result.is_err() {
-            let _ = std::fs::remove_dir(&path);
+        if let Err(error) = result {
+            return Err(contain_cgroup(&Self { path, name }, error));
         }
-        result?;
         Ok(Self { path, name })
     }
 
@@ -963,11 +1133,42 @@ mod tests {
 
     use substrate_wire::{
         CapabilityFacts, CapabilitySnapshot, CgroupLimitFacts, ExecEnvironment, ExecLimits,
-        ExecStartInput, HostDriverKind, NamespaceFacts, NetworkMode, SandboxProfile,
+        ExecStartInput, ExecState, HostDriverKind, NamespaceFacts, NetworkMode, SandboxProfile,
     };
 
-    use super::{ProcessRuntime, is_secretish_name};
-    use crate::HostConfig;
+    use super::{
+        Cgroup, ExecObservation, Execution, ProcessRuntime, contain_spawned_with_reconciliation,
+        is_secretish_name, is_terminal, wait_terminal_with_hook,
+    };
+    use crate::{DispatchOutcome, HostConfig};
+
+    fn running_observation(id: &str) -> ExecObservation {
+        ExecObservation {
+            resource: substrate_wire::Exec {
+                id: id.to_owned(),
+                kind: substrate_wire::ExecKind::Exec,
+                workspace: "ws_test".to_owned(),
+                state: substrate_wire::ExecState::Running,
+                observed_at: chrono::Utc::now(),
+                requested: substrate_wire::ConfinementRequest {
+                    capability_snapshot: format!("sha256:{}", "7".repeat(64)),
+                    network: NetworkMode::None,
+                    profile: SandboxProfile::Workspace,
+                    required: true,
+                },
+                applied: None,
+                exit: None,
+                lease: None,
+            },
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            stdout_truncated: false,
+            stderr_truncated: false,
+            output_complete: false,
+            cgroup: None,
+            leader_pid: None,
+        }
+    }
 
     #[test]
     fn secret_shaped_environment_names_are_never_admitted() {
@@ -1036,11 +1237,124 @@ mod tests {
                 cpu_millis: 1_000,
             },
             wait: false,
+            lease_ttl_ms: None,
         };
-        let error = runtime
+        let DispatchOutcome::NotDispatched(error) = runtime
             .start("ex_test", std::path::Path::new("/does/not/exist"), &input)
             .await
-            .expect_err("stale snapshot");
+        else {
+            panic!("stale snapshot must refuse before dispatch");
+        };
         assert_eq!(error.code, "exec.capability-stale");
+    }
+
+    #[test]
+    fn stale_running_acknowledgement_cannot_discard_newer_terminal_observation() {
+        let capability = CapabilitySnapshot {
+            snapshot: format!("sha256:{}", "7".repeat(64)),
+            driver: HostDriverKind::Host,
+            driver_version: "test".to_owned(),
+            config_generation: 1,
+            probed_at: chrono::Utc::now(),
+            valid_until: None,
+            facts: CapabilityFacts::default(),
+        };
+        let runtime = ProcessRuntime::new(HostConfig::minimum("/does/not/exist"), capability)
+            .expect("runtime");
+        let mut running = running_observation("ex_ack_race");
+        let execution = std::sync::Arc::new(Execution::new(running.clone()));
+        runtime.executions.lock().insert(
+            running.resource.id.clone(),
+            std::sync::Arc::clone(&execution),
+        );
+
+        let stale_running = running.clone();
+        running.resource.state = substrate_wire::ExecState::Exited;
+        running.resource.exit = Some(substrate_wire::ExecExit {
+            code: Some(0),
+            signal: None,
+        });
+        running.output_complete = true;
+        *execution.observation.lock() = running.clone();
+
+        runtime.acknowledge(&stale_running);
+        assert_eq!(
+            runtime.observe("ex_ack_race").expect("terminal retained"),
+            running
+        );
+        runtime.acknowledge(&running);
+        assert!(runtime.observe("ex_ack_race").is_err());
+    }
+
+    #[test]
+    fn expired_exec_is_terminal_for_exact_acknowledgement() {
+        assert!(is_terminal(ExecState::Expired));
+    }
+
+    #[tokio::test]
+    async fn terminal_notify_between_state_check_and_wait_is_not_lost() {
+        let mut running = running_observation("ex_notify_race");
+        running.resource.exit = None;
+        running.output_complete = false;
+        let execution = std::sync::Arc::new(Execution::new(running));
+        let hook_execution = std::sync::Arc::clone(&execution);
+        wait_terminal_with_hook(
+            &execution,
+            std::time::Duration::from_millis(100),
+            move || {
+                hook_execution.observation.lock().resource.state = ExecState::Exited;
+                hook_execution.notify.notify_waiters();
+            },
+        )
+        .await
+        .expect("registered waiter receives the transition");
+    }
+
+    #[tokio::test]
+    async fn post_spawn_failure_with_proven_empty_cgroup_is_contained_absent() {
+        let child = tokio::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn contained child");
+        let cgroup = Cgroup {
+            path: std::path::PathBuf::from("/does/not/exist"),
+            name: "substrate-ex_contained".to_owned(),
+        };
+        let error = crate::DriverError::failed(
+            "exec.post-spawn-failed",
+            "injected failure after process spawn",
+        );
+
+        let outcome =
+            contain_spawned_with_reconciliation(child, cgroup, error, |_| async { true }).await;
+
+        let DispatchOutcome::ContainedAbsent(error) = outcome else {
+            panic!("reaped child plus proven-empty cgroup must be contained absent");
+        };
+        assert_eq!(error.code, "exec.post-spawn-failed");
+    }
+
+    #[tokio::test]
+    async fn post_spawn_failure_with_failed_cgroup_cleanup_is_outcome_unknown() {
+        let child = tokio::process::Command::new("/bin/sleep")
+            .arg("30")
+            .spawn()
+            .expect("spawn uncontained child");
+        let cgroup = Cgroup {
+            path: std::path::PathBuf::from("/does/not/exist"),
+            name: "substrate-ex_unknown".to_owned(),
+        };
+        let error = crate::DriverError::failed(
+            "exec.post-spawn-failed",
+            "injected failure after process spawn",
+        );
+
+        let outcome =
+            contain_spawned_with_reconciliation(child, cgroup, error, |_| async { false }).await;
+
+        let DispatchOutcome::OutcomeUnknown(error) = outcome else {
+            panic!("unproven cgroup cleanup must remain outcome unknown");
+        };
+        assert_eq!(error.code, "exec.post-spawn-failed");
     }
 }

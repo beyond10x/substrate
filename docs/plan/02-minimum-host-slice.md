@@ -31,7 +31,7 @@ now provides:
    absolute, dangling-link, magic-link, and mount escapes; bounded read/list/write/delete; atomic
    replacement; unauthenticated reachable startup; crash-before/after dispatch; lost-answer
    reconciliation; resource and operation subject isolation; timeout; and post-action observation.
-6. A dependency-free bundle gate validating schema instances, exact inventory, hash/length/
+6. An offline bundle gate validating schema instances, exact inventory, hash/length/
    media-type coverage, duplicate keys, safe paths, and deterministic source form, plus the
    producer/clean-room runner interface without adding runtime implementation.
 

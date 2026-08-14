@@ -24,7 +24,27 @@ const RESOLVE_BENEATH: u64 = 0x08;
 const GUARDED_RESOLVE: u64 =
     RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_SYMLINKS | RESOLVE_NO_XDEV;
 const MAX_DIRECTORY_SCAN_ITEMS: usize = 100_000;
-const MAX_DESTROY_ITEMS: usize = 100_000;
+pub(super) const DESTROY_BATCH_ITEMS: usize = 4_096;
+type RawDirectoryEntry = (CString, libc::mode_t, Option<u64>);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum WorkspaceDestroyBatch {
+    Pending { removed_items: u64 },
+    Absent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RemovalBatch {
+    complete: bool,
+    processed_items: usize,
+    removed_items: usize,
+}
+
+struct RemovalCounters {
+    remaining: usize,
+    processed: usize,
+    removed: usize,
+}
 
 #[repr(C)]
 struct OpenHow {
@@ -75,6 +95,11 @@ impl GuardedFilesystem {
 
     pub const fn openat2_available(&self) -> bool {
         self.openat2
+    }
+
+    pub(super) fn root_identity(&self) -> Result<(libc::dev_t, libc::ino_t), DriverError> {
+        let metadata = fstat(self.root.as_raw_fd())?;
+        Ok((metadata.st_dev, metadata.st_ino))
     }
 
     pub fn create_workspace(&self, name: &str) -> Result<(), DriverError> {
@@ -367,10 +392,29 @@ impl GuardedFilesystem {
         })
     }
 
-    pub fn destroy_workspace(&self, root_name: &str) -> Result<(), DriverError> {
-        let workspace = self.workspace_fd(root_name)?;
-        let mut remaining = MAX_DESTROY_ITEMS;
-        remove_children(workspace.as_raw_fd(), 0, &mut remaining)?;
+    pub fn destroy_workspace_batch(
+        &self,
+        root_name: &str,
+    ) -> Result<WorkspaceDestroyBatch, DriverError> {
+        let workspace = match self.workspace_fd(root_name) {
+            Ok(workspace) => workspace,
+            Err(error) if error.class == crate::DriverErrorClass::NotFound => {
+                return Ok(WorkspaceDestroyBatch::Absent);
+            }
+            Err(error) => return Err(error),
+        };
+        let batch = remove_children_batch(workspace.as_raw_fd(), DESTROY_BATCH_ITEMS)?;
+        if !batch.complete {
+            if batch.processed_items == 0 {
+                return Err(DriverError::failed(
+                    "workspace.destroy-no-progress",
+                    "Workspace cleanup could not make bounded forward progress.",
+                ));
+            }
+            return Ok(WorkspaceDestroyBatch::Pending {
+                removed_items: u64::try_from(batch.removed_items).expect("usize fits u64"),
+            });
+        }
         drop(workspace);
         let name = CString::new(root_name).map_err(|_| path_escape())?;
         // SAFETY: name is a validated direct child; children were removed descriptor-relatively.
@@ -383,7 +427,7 @@ impl GuardedFilesystem {
         }
         sync_fd(self.root.as_raw_fd())?;
         match self.workspace_fd(root_name) {
-            Err(error) if error.code == "resource.not-found" => Ok(()),
+            Err(error) if error.code == "resource.not-found" => Ok(WorkspaceDestroyBatch::Absent),
             Ok(_) => Err(io_failed(
                 "workspace.observe-failed",
                 std::io::Error::other("workspace still exists"),
@@ -410,6 +454,15 @@ fn openat2(
     mode: libc::mode_t,
 ) -> Result<OwnedFd, DriverError> {
     let path = CString::new(path).map_err(|_| path_escape())?;
+    openat2_cstr(directory, &path, flags, mode)
+}
+
+fn openat2_cstr(
+    directory: RawFd,
+    path: &CStr,
+    flags: i32,
+    mode: libc::mode_t,
+) -> Result<OwnedFd, DriverError> {
     let how = OpenHow {
         flags: u64::try_from(flags).expect("open flags are non-negative"),
         mode: u64::from(mode),
@@ -435,10 +488,149 @@ fn openat2(
 }
 
 fn list_directory(fd: RawFd) -> Result<Vec<DirectoryEntry>, DriverError> {
-    let duplicate = duplicate(fd)?;
-    let raw = duplicate.as_raw_fd();
-    std::mem::forget(duplicate);
-    // SAFETY: ownership of the duplicated descriptor transfers to DIR*.
+    let entries = raw_directory_entries(fd)?;
+    let mut result = Vec::new();
+    for (name, file_type, size) in entries {
+        let name_text = String::from_utf8(name.to_bytes().to_vec()).map_err(|_| path_escape())?;
+        let (kind, size) = match file_type {
+            libc::S_IFREG => (DirectoryEntryKind::File, size),
+            libc::S_IFDIR => (DirectoryEntryKind::Directory, None),
+            libc::S_IFLNK => (DirectoryEntryKind::Symlink, None),
+            _ => return Err(path_escape()),
+        };
+        result.push(DirectoryEntry {
+            name: name_text,
+            kind,
+            size,
+        });
+    }
+    Ok(result)
+}
+
+fn remove_children_batch(root: RawFd, limit: usize) -> Result<RemovalBatch, DriverError> {
+    let root_scan_limit = limit.div_ceil(2);
+    let (entries, root_has_more) = raw_directory_entries_bounded(root, root_scan_limit)?;
+    let mut counters = RemovalCounters {
+        remaining: limit.saturating_sub(entries.len()),
+        processed: entries.len(),
+        removed: 0,
+    };
+    for (name, file_type, _) in entries {
+        if file_type == libc::S_IFDIR {
+            if counters.remaining > 0 {
+                flatten_directory_batch(root, &name, &mut counters)?;
+            }
+        } else {
+            unlink_entry(root, &name, 0)?;
+            counters.removed += 1;
+        }
+    }
+    sync_fd(root)?;
+    let complete = !root_has_more
+        && counters.processed < limit
+        && raw_directory_entries_bounded(root, 1)?.0.is_empty();
+    Ok(RemovalBatch {
+        complete,
+        processed_items: counters.processed,
+        removed_items: counters.removed,
+    })
+}
+
+fn flatten_directory_batch(
+    root: RawFd,
+    name: &CStr,
+    counters: &mut RemovalCounters,
+) -> Result<(), DriverError> {
+    let child = openat2_cstr(
+        root,
+        name,
+        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        0,
+    )?;
+    let (entries, has_more) = raw_directory_entries_bounded(child.as_raw_fd(), counters.remaining)?;
+    counters.remaining = counters.remaining.saturating_sub(entries.len());
+    counters.processed += entries.len();
+    for (entry_name, file_type, _) in entries {
+        if file_type == libc::S_IFDIR {
+            let flattened = CString::new(format!(".substrate-gc-{}", Ulid::new()))
+                .expect("generated cleanup identity has no NUL");
+            // SAFETY: both directory fds are owned and both names are NUL-terminated.
+            if unsafe {
+                libc::renameat(
+                    child.as_raw_fd(),
+                    entry_name.as_ptr(),
+                    root,
+                    flattened.as_ptr(),
+                )
+            } != 0
+            {
+                return Err(io_failed(
+                    "workspace.destroy-failed",
+                    std::io::Error::last_os_error(),
+                ));
+            }
+        } else {
+            unlink_entry(child.as_raw_fd(), &entry_name, 0)?;
+            counters.removed += 1;
+        }
+    }
+    sync_fd(child.as_raw_fd())?;
+    drop(child);
+    if !has_more {
+        match unlink_entry(root, name, libc::AT_REMOVEDIR) {
+            Ok(()) => {
+                counters.removed += 1;
+            }
+            Err(error) if error.code == "workspace.destroy-not-empty" => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn unlink_entry(directory: RawFd, name: &CStr, flags: i32) -> Result<(), DriverError> {
+    // SAFETY: name came from this directory's own readdir result or a validated direct child.
+    if unsafe { libc::unlinkat(directory, name.as_ptr(), flags) } == 0 {
+        return Ok(());
+    }
+    let error = std::io::Error::last_os_error();
+    if flags == libc::AT_REMOVEDIR && error.raw_os_error() == Some(libc::ENOTEMPTY) {
+        return Err(DriverError::failed(
+            "workspace.destroy-not-empty",
+            "Workspace directory still contains entries.",
+        ));
+    }
+    Err(io_failed("workspace.destroy-failed", error))
+}
+
+struct DirectoryStream(*mut libc::DIR);
+
+impl Drop for DirectoryStream {
+    fn drop(&mut self) {
+        // SAFETY: the stream is created by fdopendir and owned by this guard.
+        unsafe { libc::closedir(self.0) };
+    }
+}
+
+fn raw_directory_entries(fd: RawFd) -> Result<Vec<RawDirectoryEntry>, DriverError> {
+    raw_directory_entries_bounded(fd, usize::MAX).map(|(entries, _)| entries)
+}
+
+fn raw_directory_entries_bounded(
+    fd: RawFd,
+    limit: usize,
+) -> Result<(Vec<RawDirectoryEntry>, bool), DriverError> {
+    // A fresh open file description is required: dup(2) would share the directory offset and
+    // make a later cleanup batch falsely observe end-of-directory.
+    let scan = openat2(
+        fd,
+        ".",
+        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        0,
+    )?;
+    let raw = scan.as_raw_fd();
+    std::mem::forget(scan);
+    // SAFETY: ownership of the fresh descriptor transfers to DIR*.
     let directory = unsafe { libc::fdopendir(raw) };
     if directory.is_null() {
         // SAFETY: fdopendir did not acquire the duplicated fd on failure.
@@ -448,42 +640,32 @@ fn list_directory(fd: RawFd) -> Result<Vec<DirectoryEntry>, DriverError> {
             std::io::Error::last_os_error(),
         ));
     }
+    let directory = DirectoryStream(directory);
     let mut result = Vec::new();
+    let mut has_more = false;
     loop {
-        // SAFETY: directory remains live until closed below.
-        let entry = unsafe { libc::readdir(directory) };
+        // SAFETY: directory remains live for the guard's lifetime.
+        let entry = unsafe { libc::readdir(directory.0) };
         if entry.is_null() {
             break;
         }
         // SAFETY: readdir returns a dirent with a NUL-terminated d_name.
         let name = unsafe { CStr::from_ptr((*entry).d_name.as_ptr()) };
-        if name.to_bytes() == b"." || name.to_bytes() == b".." {
+        if matches!(name.to_bytes(), b"." | b"..") {
             continue;
         }
-        let name_text = String::from_utf8(name.to_bytes().to_vec()).map_err(|_| path_escape())?;
-        let metadata = fstatat(fd, name)?;
-        let file_type = metadata.st_mode & libc::S_IFMT;
-        let (kind, size) = match file_type {
-            libc::S_IFREG => (
-                DirectoryEntryKind::File,
-                Some(u64::try_from(metadata.st_size).unwrap_or(0)),
-            ),
-            libc::S_IFDIR => (DirectoryEntryKind::Directory, None),
-            libc::S_IFLNK => (DirectoryEntryKind::Symlink, None),
-            _ => {
-                // SAFETY: directory is live and closed exactly once on this error path.
-                unsafe { libc::closedir(directory) };
-                return Err(path_escape());
-            }
-        };
-        result.push(DirectoryEntry {
-            name: name_text,
-            kind,
-            size,
-        });
+        if result.len() == limit {
+            has_more = true;
+            break;
+        }
+        let name = CString::new(name.to_bytes()).map_err(|_| path_escape())?;
+        let metadata = fstatat(fd, &name)?;
+        result.push((
+            name,
+            metadata.st_mode & libc::S_IFMT,
+            Some(u64::try_from(metadata.st_size).unwrap_or(0)),
+        ));
         if result.len() > MAX_DIRECTORY_SCAN_ITEMS {
-            // SAFETY: directory is live and closed exactly once on this error path.
-            unsafe { libc::closedir(directory) };
             return Err(DriverError::exhausted(
                 "workspace.directory-scan-limit",
                 "Directory exceeds the bounded observation limit.",
@@ -491,62 +673,7 @@ fn list_directory(fd: RawFd) -> Result<Vec<DirectoryEntry>, DriverError> {
             ));
         }
     }
-    // SAFETY: directory was obtained by fdopendir and is closed exactly once.
-    if unsafe { libc::closedir(directory) } != 0 {
-        return Err(io_failed(
-            "workspace.list-failed",
-            std::io::Error::last_os_error(),
-        ));
-    }
-    Ok(result)
-}
-
-fn remove_children(fd: RawFd, depth: usize, remaining: &mut usize) -> Result<(), DriverError> {
-    if depth > substrate_wire::MAX_PATH_DEPTH {
-        return Err(path_escape());
-    }
-    let entries = list_directory(fd)?;
-    if entries.len() > *remaining {
-        return Err(DriverError::exhausted(
-            "workspace.destroy-limit",
-            "Workspace exceeds the bounded destroy traversal limit.",
-            "workspace",
-        ));
-    }
-    *remaining -= entries.len();
-    for entry in entries {
-        let name = CString::new(entry.name.as_str()).map_err(|_| path_escape())?;
-        match entry.kind {
-            DirectoryEntryKind::File | DirectoryEntryKind::Symlink => {
-                // Symlinks are removed as objects and never followed.
-                // SAFETY: name came from this directory's own readdir result.
-                if unsafe { libc::unlinkat(fd, name.as_ptr(), 0) } != 0 {
-                    return Err(io_failed(
-                        "workspace.destroy-failed",
-                        std::io::Error::last_os_error(),
-                    ));
-                }
-            }
-            DirectoryEntryKind::Directory => {
-                let child = openat2(
-                    fd,
-                    &entry.name,
-                    libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-                    0,
-                )?;
-                remove_children(child.as_raw_fd(), depth + 1, remaining)?;
-                drop(child);
-                // SAFETY: child was opened beneath fd with NO_XDEV/NO_SYMLINKS.
-                if unsafe { libc::unlinkat(fd, name.as_ptr(), libc::AT_REMOVEDIR) } != 0 {
-                    return Err(io_failed(
-                        "workspace.destroy-failed",
-                        std::io::Error::last_os_error(),
-                    ));
-                }
-            }
-        }
-    }
-    sync_fd(fd)
+    Ok((result, has_more))
 }
 
 fn refuse_unsafe_existing(parent: RawFd, name: &str) -> Result<(), DriverError> {
@@ -715,12 +842,19 @@ fn decode_cursor(cursor: Option<&str>) -> Result<usize, DriverError> {
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::CString;
+    use std::ffi::OsString;
+    use std::os::fd::AsRawFd as _;
+    use std::os::unix::ffi::OsStringExt as _;
     use std::os::unix::fs::symlink;
 
     use substrate_wire::{FileMode, FileReadQuery};
     use tempfile::tempdir;
 
-    use super::GuardedFilesystem;
+    use super::{
+        DESTROY_BATCH_ITEMS, GuardedFilesystem, WorkspaceDestroyBatch, openat2,
+        remove_children_batch,
+    };
 
     #[test]
     fn guarded_io_refuses_escape_and_observes_atomic_content() {
@@ -774,5 +908,139 @@ mod tests {
             std::fs::read_to_string(outside.path().join("secret")).expect("outside unchanged"),
             "outside"
         );
+    }
+
+    #[test]
+    fn destroy_removes_fifo_non_utf8_and_deep_entries_without_following() {
+        let directory = tempdir().expect("tempdir");
+        let filesystem =
+            GuardedFilesystem::open(directory.path(), 1024, 1024, 100).expect("guarded filesystem");
+        if !filesystem.openat2_available() {
+            return;
+        }
+        filesystem
+            .create_workspace("ws_hostile")
+            .expect("workspace");
+        let root = directory.path().join("ws_hostile");
+        let fifo = std::ffi::CString::new(root.join("pipe").as_os_str().as_encoded_bytes())
+            .expect("fifo path");
+        // SAFETY: path is a valid NUL-terminated test path.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        std::fs::write(root.join(OsString::from_vec(vec![0xff])), b"raw").expect("raw filename");
+        let mut deep = root;
+        for _ in 0..70 {
+            deep = deep.join("d");
+            std::fs::create_dir(&deep).expect("deep directory");
+        }
+        destroy_until_absent(&filesystem, "ws_hostile");
+        assert!(!directory.path().join("ws_hostile").exists());
+    }
+
+    #[test]
+    fn destroy_batches_progress_beyond_former_depth_and_item_caps() {
+        let directory = tempdir().expect("tempdir");
+        let filesystem =
+            GuardedFilesystem::open(directory.path(), 1024, 1024, 100).expect("guarded filesystem");
+        if !filesystem.openat2_available() {
+            return;
+        }
+
+        filesystem
+            .create_workspace("ws_deep")
+            .expect("deep workspace");
+        let deep_root = filesystem.workspace_fd("ws_deep").expect("workspace fd");
+        let child_name = CString::new("d").expect("child name");
+        let mut parent = openat2(
+            deep_root.as_raw_fd(),
+            ".",
+            libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+            0,
+        )
+        .expect("root duplicate");
+        for _ in 0..1_100 {
+            // SAFETY: parent is live and child_name is a fixed NUL-terminated relative name.
+            assert_eq!(
+                unsafe { libc::mkdirat(parent.as_raw_fd(), child_name.as_ptr(), 0o700) },
+                0
+            );
+            parent = openat2(
+                parent.as_raw_fd(),
+                "d",
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC,
+                0,
+            )
+            .expect("open nested directory");
+        }
+        drop(parent);
+        assert_cleanup_batches_progress(deep_root.as_raw_fd());
+        drop(deep_root);
+        assert_eq!(
+            filesystem
+                .destroy_workspace_batch("ws_deep")
+                .expect("remove empty deep workspace"),
+            WorkspaceDestroyBatch::Absent
+        );
+
+        filesystem
+            .create_workspace("ws_wide")
+            .expect("wide workspace");
+        let wide_root = filesystem.workspace_fd("ws_wide").expect("workspace fd");
+        for index in 0..=u32::try_from(DESTROY_BATCH_ITEMS).expect("batch fits u32") {
+            let name = CString::new(format!("f{index:06}")).expect("entry name");
+            // SAFETY: workspace descriptor and generated direct-child name are valid.
+            assert_eq!(
+                unsafe {
+                    libc::mknodat(
+                        wide_root.as_raw_fd(),
+                        name.as_ptr(),
+                        libc::S_IFREG | 0o600,
+                        0,
+                    )
+                },
+                0
+            );
+        }
+        assert_cleanup_batches_progress(wide_root.as_raw_fd());
+        drop(wide_root);
+        assert_eq!(
+            filesystem
+                .destroy_workspace_batch("ws_wide")
+                .expect("remove empty wide workspace"),
+            WorkspaceDestroyBatch::Absent
+        );
+        assert!(!directory.path().join("ws_deep").exists());
+        assert!(!directory.path().join("ws_wide").exists());
+    }
+
+    fn assert_cleanup_batches_progress(root: libc::c_int) {
+        let mut batches = 0;
+        loop {
+            let batch = remove_children_batch(root, DESTROY_BATCH_ITEMS).expect("cleanup batch");
+            batches += 1;
+            if batch.complete {
+                break;
+            }
+            assert!(
+                batch.processed_items > 0,
+                "every incomplete batch must advance cleanup"
+            );
+            assert!(batch.processed_items <= DESTROY_BATCH_ITEMS);
+        }
+        assert!(batches > 1, "fixture must require repeated bounded batches");
+    }
+
+    fn destroy_until_absent(filesystem: &GuardedFilesystem, root_name: &str) {
+        for _ in 0..2_048 {
+            match filesystem
+                .destroy_workspace_batch(root_name)
+                .expect("workspace cleanup batch")
+            {
+                WorkspaceDestroyBatch::Pending { removed_items } => {
+                    assert!(removed_items <= u64::try_from(DESTROY_BATCH_ITEMS).unwrap());
+                }
+                WorkspaceDestroyBatch::Absent => return,
+            }
+        }
+        panic!("workspace cleanup did not complete within the test bound");
     }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "substrate-wire"
-description = "Closed Rust representation of substrate-wire phase 2"
+description = "Closed Rust representation of substrate-wire phase 3"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true

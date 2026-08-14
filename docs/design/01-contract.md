@@ -15,10 +15,13 @@ consumers (Flux, autodev, the platform) see only it.
 - **Identity of resources.** Server-minted prefixed ids: `ws_…` (workspace), `ex_…` (exec),
   `ses_…` (session), `wl_…` (workload), `vol_…` (volume), `ep_…` (endpoint); images go by
   digest. Ids are opaque; labels (`key=value`, caller-owned) are the query surface.
-- **Operation ids.** Every mutation takes a **client-minted** `op` id (recommended: ULID).
-  Replaying the same `op` with the same body is a no-op returning the original outcome;
+- **Operation ids.** Every resource mutation takes a **client-minted** `op` id (recommended:
+  ULID). Replaying the same `op` with the same body is a no-op returning the original outcome;
   replaying it with a different body is `conflict`. This is the reconciliation handle for the
-  unanswered failure modes (§6.2) and what makes platform-side retry safe.
+  unanswered failure modes (§6.2) and what makes platform-side retry safe. A bounded control
+  operation may instead declare `idempotency: none`; in 0.2 the only such mutation is
+  reconciliation snapshot creation, whose request body is exactly `{}` and which creates no
+  operation-ledger row.
 - **Observed answers.** A mutation's `2xx` body is the resource **re-read from the driver**
   after the change, stamped `observed_at`. The contract has no response that merely echoes a
   request. Fields the driver cannot know are `null` and mean *unknown*, never zero.
@@ -265,7 +268,7 @@ Substrate owns their wire meaning; clients may project them into their own inter
 | `unknown` | Accepted, but the terminal outcome is unproven (connection died mid-flight). | Reconcile via the ledger and event replay. Never auto-retry a mutation under a fresh id. |
 
 The contract's affordances for them are deliberate features, not conveniences: client-minted
-`op` ids on every mutation, the operation ledger, cursor-replayable events, and leases that
+`op` ids on every resource mutation, the operation ledger, cursor-replayable events, and leases that
 turn a vanished client into a typed, observable expiry.
 
 A Flux adapter can project this taxonomy into its delegate seam: `unserved` → `Unserved`; every
@@ -291,8 +294,9 @@ change that breaks one is a breaking change to this contract, whatever the diff 
    answer is connectors' **satellite posture** (design 03: a platform deployment near the
    endpoint, dialing up, later federated) — substrate grows no reverse-tunnel surface of its
    own.
-5. **Every mutation is `keyed`** on a client `op` id, so platform-side retry policy needs no
-   knowledge of substrate internals.
+5. **Every resource mutation is `keyed`** on a client `op` id, so platform-side retry policy needs
+   no knowledge of substrate internals. Reconciliation snapshot creation is the explicit bounded
+   non-keyed control exception: `idempotency: none`, exact request body `{}`, no operation row.
 6. **Events are a closed, declared set with bounded cursor replay.** Durable connector delivery is
    a separate composition guarantee governed by
    [architecture ADR 0017 — Connectors owns durable ingestion of substrate events](https://github.com/daemonloom/architecture/blob/main/adr/0017-substrate-event-ingestion.md).

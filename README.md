@@ -8,9 +8,12 @@ Substrate runs things and reports what it observed. It does not decide product p
 loops, understand connector vendors, or depend on Flux. Consumers choose whether to call its stable
 API directly or through a higher-level Daemonloom service.
 
-**Status:** the phase-2 minimum host slice is implemented and passes the contract, router,
-guarded-filesystem, persistence, unserved-host, and delegated Linux confinement lanes. Phase 3 is
-next; events, leases, sessions, Git sources, and every later resource family remain absent.
+**Status:** phase 3 closure is in progress under an
+[open NO-GO review](docs/reviews/2026-08-14-phase-3-closure-review.md). Durable provisional dispatch,
+authoritative terminal exec persistence, and subject-scoped post-commit event wakeups are green.
+The current 0.2.0 tree is still development input, not a publishable contract; lifecycle,
+capacity, recovery, transport, semantic-schema, and final adversarial evidence remain open. Phase 4
+sessions/stdin/PTY and Git sources remain absent.
 
 ## Start here
 
@@ -37,10 +40,12 @@ next; events, leases, sessions, Git sources, and every later resource family rem
   Rust types remain subordinate to it.
 - [`scripts/check-runtime-vectors.py`](scripts/check-runtime-vectors.py) is an independent
   Unix-socket HTTP runner with an optional delegated-cgroup confinement lane.
+- [`scripts/contract_json_gate.py`](scripts/contract_json_gate.py) fails closed on unclassified or
+  schema-invalid contract JSON and meta-validates every Draft 2020-12 schema offline.
 - [`STATUS.md`](STATUS.md) records observed progress; [`ROADMAP.md`](ROADMAP.md) records ordered exit
   criteria.
 
-## Minimum daemon
+## Lifecycle daemon
 
 `substrated` serves only an owner-permissioned Unix socket. Startup requires at least one explicit
 `--allow-uid`; the daemon derives `local:<uid>` from kernel peer credentials and never accepts a
@@ -53,6 +58,7 @@ target/debug/substrated \
   --state ./run/state.db \
   --workspaces ./run/workspaces \
   --deployment personal \
+  --event-retention 10000 \
   --allow-uid 1000
 ```
 
@@ -64,13 +70,27 @@ delegation root itself process-free (for example with systemd `Delegate=yes` plu
 tests the controllers, bubblewrap namespaces, cgroup kill, and swap-inclusive memory bound before it
 advertises exec.
 
-Phase 2 continuously drains both stdout and stderr while a process runs, retains their bounded
-captures, persists them when the exec is observed, and exposes ranged reads. It does not yet provide
-a live byte stream or stdin: those belong to the phase-4 session channel, including PTY input,
-resize, signals, explicit end/truncation frames, and bounded reconnect semantics. Git is likewise a
-future, policy-confined workspace materialization/snapshot transport—not a runtime dependency; the
-current daemon serves only `source: "empty"` and returns a typed `workspace.source-unserved`
-response for a valid Git source request.
+The daemon continuously drains both stdout and stderr while a process runs, retains their bounded
+captures, persists them when the exec is observed, and exposes ranged reads. Phase 3 also streams
+lifecycle events; it does not expose a live process-byte stream or stdin. Those belong to the
+phase-4 session channel, including PTY input, resize, signals, explicit end/truncation frames, and
+bounded reconnect semantics.
+
+Each authenticated subject has a daemon-minted opaque source scope with its own durable generation,
+sequence, retention, and coalesced wake hints. Pull and push read the same subject-local journal;
+the final 0.2 contract will require snapshot-first durable bootstrap and an opaque resume cursor.
+The current snapshot and lease implementations are being replaced with a complete quota-bounded
+current-resource projection, honest bounded provenance, transactional lifecycle freeze, and
+bounded fair cleanup. Until that closure lands, connectors S-029 remains blocked.
+Expired snapshot metadata and materialized items are physically garbage-collected under explicit
+per-subject bounds while a bounded marker retains the `expired` versus `not found` distinction.
+Terminal exec observations and output remain in memory until the durable store acknowledges them;
+maintenance cannot regress a durable terminal state. Blocking filesystem and SQLite work uses
+separate bounded lanes so saturation backpressures callers without starving asynchronous service.
+
+Git remains a future, policy-confined workspace materialization/snapshot transport—not a runtime
+dependency. The current daemon serves only `source: "empty"` and returns a typed
+`workspace.source-unserved` response for a valid Git source request.
 
 Run the portable black-box lane with:
 
@@ -81,6 +101,9 @@ python3 scripts/check-runtime-vectors.py
 Pass `--cgroup-root <delegated-root>` while the runner itself is inside that delegation to add the
 real no-egress, shaped-environment, pids/memory, timeout, truncation, and whole-tree cancellation
 cases.
+
+The runner reports the current portable and delegated case inventories from each fresh execution;
+documentation does not pin counts that can drift as adversarial coverage grows.
 
 ## Relationships
 

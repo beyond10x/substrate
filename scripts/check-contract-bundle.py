@@ -17,6 +17,8 @@ import tempfile
 from pathlib import Path, PurePosixPath
 from urllib.parse import unquote_to_bytes
 
+from contract_json_gate import check_json_authority
+
 
 ROOT = Path(__file__).resolve().parent.parent
 BUNDLE = ROOT / "contracts" / "substrate-wire" / "0.1.0"
@@ -1036,6 +1038,7 @@ def main() -> int:
     failures: list[str] = []
     documents = Documents(failures)
     listed = check_manifest(documents, failures)
+    json_documents = check_json_authority(BUNDLE, "0.1.0", documents, validate, failures)
     check_renderer_reproducibility(failures)
     check_schema_references(documents, listed, failures)
     operations, _ = check_registry(documents, failures)
@@ -1048,7 +1051,8 @@ def main() -> int:
         print("\n".join(failures), file=sys.stderr)
         return 1
     print(
-        f"substrate-wire 0.1.0: {len(listed)} files, {len(operations)} closed operations, "
+        f"substrate-wire 0.1.0: {len(listed)} files, {json_documents} classified JSON documents, "
+        f"{len(operations)} closed operations, "
         f"{len(vector_ids)} executable vectors, {len(REQUIRED_COVERAGE)} requirements, and "
         f"{len(hash_ids)} exact hash fixtures verified"
     )

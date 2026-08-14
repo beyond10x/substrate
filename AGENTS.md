@@ -22,6 +22,10 @@ This repository owns the standalone Daemonloom execution substrate. During the d
 - A missing isolation or capability guarantee is a named refusal, never silent degradation.
 - Drivers implement one substrate contract and expose verified capability facts; clients do not
   branch on driver internals.
+- Every created JSON authority must have one exact schema classification and validate in CI.
+  Unclassified JSON fails closed. Every JSON Schema must validate offline against its declared
+  Draft 2020-12 meta-schema with the pinned standards validator; immutable historical bundle bytes
+  are classified externally without rewriting them.
 - Do not add implementation code until the design-closure gate in `docs/plan/01-design-closure.md`
   is accepted.
 

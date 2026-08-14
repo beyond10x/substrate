@@ -61,10 +61,30 @@ volumes, endpoints, Docker, Kubernetes, and hosted identity are absent capabilit
 successes. A call to a known but absent family returns `unserved` only if that path is present in the
 released version; otherwise ordinary not-found applies.
 
+### Phase-3 additive endpoint set
+
+`substrate-wire` 0.2.0 preserves all twelve routes above and adds exactly seven:
+
+| Method and path | Purpose |
+|---|---|
+| `GET /v1/events` | bounded pull from the retained generation/sequence journal |
+| `GET /v1/events/stream` | bounded WebSocket delivery of the same event values and cursors |
+| `POST /v1/reconciliation-snapshots` | materialize one subject-scoped state view at an event barrier |
+| `GET /v1/reconciliation-snapshots/{snapshot_id}` | page the immutable materialization |
+| `POST /v1/workspaces/{workspace_id}/lease/renew` | keyed renewal of an existing explicit workspace lease |
+| `POST /v1/execs/{exec_id}/lease/renew` | keyed renewal of an existing explicit exec lease |
+| `DELETE /v1/execs/{exec_id}` | keyed retirement of terminal durable exec state and bounded output |
+
+Workspace creation and exec start gain an optional explicit `lease_ttl_ms`; omission preserves the
+0.1.0 request bytes and means no lease. Phase 3 does not add Git, sessions/stdin/PTY, workloads,
+images, volumes, endpoints, Docker, Kubernetes, or hosted identity.
+
 ## 3. Canonical envelopes
 
-Every request receives or is assigned a `request_id`. Every mutation JSON body contains `op` and
-its operation-specific `input`. Success is:
+Every request receives or is assigned a `request_id`. Every keyed resource-mutation JSON body
+contains `op` and its operation-specific `input`. Reconciliation snapshot creation is the one
+bounded non-keyed control mutation in 0.2: its body is exactly `{}`, it creates no operation-ledger
+row, and its committed control event supplies the barrier. Success is:
 
 ```text
 { api_version, request_id, operation?, result }
@@ -91,10 +111,13 @@ The operation record is:
 `state` is `refused | accepted | terminal | unknown`. `outcome` contains either an observed result
 or the typed answered error. Another subject sees not-found, not the record.
 
-The canonical request hash is SHA-256 over a length-delimited tuple of API major, HTTP method,
-normalized route/resource address, and RFC 8785-canonical operation input. Transport headers,
+The immutable 0.1 hash is SHA-256 over its pinned length-delimited tuple of API major, HTTP method,
+normalized route/resource address, and RFC 8785-canonical typed operation input. The 0.2 hash has a
+new, explicitly versioned tuple: hash version, method, normalized address, canonical raw JSON
+`input`, and canonical query. Strictly decoded query pairs are sorted with duplicates preserved;
+malformed percent/UTF-8 queries retain exact raw bytes in a separate domain. Transport headers,
 bearer material, and `request_id` are excluded. Subject/deployment scope is part of the ledger key.
-Reusing the same scoped operation id with a different hash is `conflict`.
+Reusing the same scoped operation id with a different version-appropriate hash is `conflict`.
 
 ## 4. Capability and driver predicates
 
@@ -137,6 +160,19 @@ evidence until they contain exact fixture setup, wire bytes, expected instances 
 machine-checkable postconditions. The bundle checker proves inventory integrity, not runtime
 conformance.
 
+Every JSON authority is schema-classified. Payloads use their declared bundle-relative `$schema`;
+the five bootstrap authorities (`bundle`, `compatibility` including errata, `origins`, `packaging`,
+and `hashing`) use fixed closed schemas in the offline gate. Adding an unclassified JSON
+file fails CI. Every file below `schemas/` must declare Draft 2020-12 and pass the offline
+pinned `jsonschema` crate's standards-conforming meta-schema validator before it can classify
+another document. The same validator compiles each classified schema and validates its JSON
+instance. Historical rootless-URN `$id` values cannot resolve relative references under standard
+URI rules, so the gate deterministically inlines the exact bundle-relative `$ref` targets before
+standards instance validation; it never changes the authoritative bytes or their assertions.
+Negative tests inject an unclassified file, an invalid fixed authority, an invalid declared
+payload, and an invalid schema to prove each production failure boundary. The immutable 0.1 bytes
+are not edited; the same gate supplies their external bootstrap classification.
+
 The `0.1.0` development bundle now satisfies that contract-execution-readiness gate. Its operation
 registry selects closed address, input, and result schemas for all twelve phase-2 routes;
 `hashing.json` fixes the length encoding and exact digest fixtures; `coverage.json` makes the route,
@@ -146,3 +182,23 @@ as host-driver conformance evidence.
 
 Phase 2 exits only when a black-box client built from the bundle and the host driver pass these
 vectors without repository source access or a sibling checkout.
+
+The additive `0.2.0` bundle is being regenerated from its authoritative renderer and is not yet a
+publishable release. Its registry has 19 closed operations: the twelve 0.1 operations and exactly
+seven additive operations. Its schemas additionally close source-scoped streams, snapshot-first
+bootstrap, finite ledger capacity, durable refusals, transport bounds, maintenance scheduling, and
+lifecycle crash windows. The manifest distinguishes nineteen 0.2 vectors executed by the daemon
+runtime tests from design vectors that receive schema and semantic checking but are not claimed as
+runtime executions. Portable and delegated runtime inventories must be reported from
+fresh gate output; this design does not pin unmeasured case counts. No prose count or passing static
+schema gate substitutes for the regenerated manifest and executable runtime evidence.
+
+The 0.1.0 directory is immutable. Runtime compatibility is nevertheless executable rather than
+assumed: `contract_vectors.rs` selects disputed vectors through each bundle manifest and compares
+exact JSON results. Path-depth, cross-subject operation hiding, and TERM observation remain exact
+0.1 behavior. Version 0.2 explicitly corrects four predecessor expectations: restart changes an unanswered
+accepted operation to `unknown`, and a terminally persisted machinery failure sets
+`retriable=false`; its input-limit vector also uses the 2 MiB envelope needed to represent the
+advertised exactly 1 MiB decoded file, and a durably terminal write-limit refusal no longer
+promises retry under the same operation id. These are safety clarifications, not silent
+reinterpretations of 0.1 bytes.

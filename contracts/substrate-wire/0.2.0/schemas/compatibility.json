@@ -1,0 +1,121 @@
+{
+  "$id": "urn:daemonloom:substrate-wire:0.2.0:compatibility",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "const": "schemas/compatibility.json"
+    },
+    "contract": {
+      "const": "substrate-wire"
+    },
+    "development_constraints": {
+      "items": {
+        "maxLength": 1024,
+        "minLength": 1,
+        "type": "string"
+      },
+      "minItems": 3,
+      "type": "array"
+    },
+    "errata_from": {
+      "additionalProperties": false,
+      "properties": {
+        "records": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "compatibility_impact": {
+                "maxLength": 1024,
+                "minLength": 1,
+                "type": "string"
+              },
+              "corrected_expectation": {
+                "maxLength": 1024,
+                "minLength": 1,
+                "type": "string"
+              },
+              "erroneous_expectation": {
+                "maxLength": 1024,
+                "minLength": 1,
+                "type": "string"
+              },
+              "predecessor_path": {
+                "pattern": "^vectors/(?:driver|http)/[a-z0-9-]+\\.json$",
+                "type": "string"
+              },
+              "predecessor_sha256": {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              },
+              "reason": {
+                "maxLength": 2048,
+                "minLength": 1,
+                "type": "string"
+              },
+              "replacement_path": {
+                "pattern": "^vectors/(?:driver|http)/[a-z0-9-]+\\.json$",
+                "type": "string"
+              },
+              "replacement_sha256": {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "predecessor_path",
+              "predecessor_sha256",
+              "replacement_path",
+              "replacement_sha256",
+              "erroneous_expectation",
+              "corrected_expectation",
+              "reason",
+              "compatibility_impact"
+            ],
+            "type": "object"
+          },
+          "minItems": 3,
+          "type": "array"
+        },
+        "version": {
+          "const": "0.1.0"
+        }
+      },
+      "required": [
+        "version",
+        "records"
+      ],
+      "type": "object"
+    },
+    "request_policy": {
+      "const": "closed"
+    },
+    "response_policy": {
+      "const": "closed-route-selected-envelopes"
+    },
+    "status": {
+      "const": "development"
+    },
+    "supported_api_majors": {
+      "const": [
+        1
+      ]
+    },
+    "version": {
+      "const": "0.2.0"
+    }
+  },
+  "required": [
+    "$schema",
+    "contract",
+    "version",
+    "status",
+    "supported_api_majors",
+    "request_policy",
+    "response_policy",
+    "development_constraints",
+    "errata_from"
+  ],
+  "title": "Development compatibility and predecessor errata",
+  "type": "object"
+}

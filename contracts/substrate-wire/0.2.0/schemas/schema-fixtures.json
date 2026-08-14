@@ -1,0 +1,50 @@
+{
+  "$id": "urn:daemonloom:substrate-wire:0.2.0:schema-fixtures",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "const": "../schemas/schema-fixtures.json"
+    },
+    "format": {
+      "const": "daemonloom.substrate-schema-fixtures.v1"
+    },
+    "invalid": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "pattern": "^[a-z][a-z0-9-]+$",
+            "type": "string"
+          },
+          "instance": {}
+        },
+        "required": [
+          "id",
+          "instance"
+        ],
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "schema": {
+      "pattern": "^schemas/[a-z0-9/-]+\\.json$",
+      "type": "string"
+    },
+    "valid": {
+      "items": {},
+      "minItems": 1,
+      "type": "array"
+    }
+  },
+  "required": [
+    "$schema",
+    "format",
+    "schema",
+    "valid",
+    "invalid"
+  ],
+  "title": "Positive and negative schema invariant fixtures",
+  "type": "object"
+}

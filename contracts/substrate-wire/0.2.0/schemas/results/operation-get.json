@@ -1,0 +1,6 @@
+{
+  "$id": "urn:daemonloom:substrate-wire:0.2.0:result:operation-get",
+  "$ref": "../operation.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "operation-get operation result"
+}

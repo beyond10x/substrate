@@ -4,7 +4,9 @@ use std::process::{Command, Stdio};
 use chrono::Utc;
 use sha2::{Digest as _, Sha256};
 use substrate_wire::{
-    CapabilityFacts, CapabilitySnapshot, CgroupLimitFacts, HostDriverKind, NamespaceFacts, Signal,
+    CapabilityFacts, CapabilitySnapshot, CgroupLimitFacts, HostDriverKind, NamespaceFacts,
+    OPERATION_LEDGER_GLOBAL_MAX_BYTES, OPERATION_LEDGER_GLOBAL_MAX_ROWS,
+    OPERATION_LEDGER_SUBJECT_MAX_BYTES, OPERATION_LEDGER_SUBJECT_MAX_ROWS, Signal,
 };
 
 use crate::HostConfig;
@@ -13,13 +15,24 @@ pub fn probe(config: &HostConfig, openat2: bool) -> CapabilitySnapshot {
     let workspace = openat2;
     let namespaces = probe_bubblewrap(config);
     let cgroup = probe_cgroup(config);
+    let lease_clock = probe_lease_clock();
     let unprivileged = effective_uid() != 0;
     let close_range = probe_close_range();
     let exec = namespaces && cgroup && unprivileged && close_range;
     let facts = CapabilityFacts {
+        events_pull: Some(true),
+        events_stream: Some(true),
+        events_retention_events: Some(config.event_retention),
+        operation_ledger_subject_max_rows: OPERATION_LEDGER_SUBJECT_MAX_ROWS,
+        operation_ledger_subject_max_bytes: OPERATION_LEDGER_SUBJECT_MAX_BYTES,
+        operation_ledger_global_max_rows: OPERATION_LEDGER_GLOBAL_MAX_ROWS,
+        operation_ledger_global_max_bytes: OPERATION_LEDGER_GLOBAL_MAX_BYTES,
+        leases_explicit: lease_clock.then_some(true),
+        leases_clock_tolerance_ms: lease_clock.then_some(substrate_wire::LEASE_CLOCK_TOLERANCE_MS),
         workspace_guarded_io: workspace.then_some(true),
         workspace_openat2_beneath: workspace.then_some(true),
         workspace_atomic_replace: workspace.then_some(true),
+        workspace_max_current: Some(config.max_current_workspaces),
         workspace_max_file_bytes: workspace.then_some(config.max_file_bytes),
         workspace_read_limit_bytes: workspace.then_some(config.read_limit_bytes),
         workspace_list_limit_items: workspace.then_some(config.list_limit_items),
@@ -41,7 +54,9 @@ pub fn probe(config: &HostConfig, openat2: bool) -> CapabilitySnapshot {
         exec_cgroup_kill: exec.then_some(true),
         // Persisted bounded output remains observable even when new exec admission is unavailable.
         exec_output_limit_bytes: Some(config.output_limit_bytes),
+        exec_max_current: Some(config.max_current_execs),
         exec_signals: exec.then_some(vec![Signal::Int, Signal::Term, Signal::Kill]),
+        snapshot_provenance_events: Some(config.snapshot_provenance_events),
     };
     let serialized = serde_json::to_vec(&facts).expect("capability facts serialize");
     CapabilitySnapshot {
@@ -53,6 +68,23 @@ pub fn probe(config: &HostConfig, openat2: bool) -> CapabilitySnapshot {
         valid_until: None,
         facts,
     }
+}
+
+fn probe_lease_clock() -> bool {
+    let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id");
+    let uptime = std::fs::read_to_string("/proc/uptime");
+    boot_id.is_ok_and(|value| {
+        let value = value.trim();
+        !value.is_empty()
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() || byte == b'-')
+    }) && uptime.is_ok_and(|value| {
+        value
+            .split_whitespace()
+            .next()
+            .is_some_and(|seconds| seconds.parse::<f64>().is_ok_and(f64::is_finite))
+    })
 }
 
 fn probe_bubblewrap(config: &HostConfig) -> bool {

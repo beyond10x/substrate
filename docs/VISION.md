@@ -45,7 +45,7 @@ decides who may ask and remembers who did; flux and autodev are clients on both 
 
 ## Principles
 
-1. **Observe, never trust.** Every mutation answers with state re-read from the driver, never
+1. **Observe, never trust.** Every resource mutation answers with state re-read from the driver, never
    the request echoed back. Absence stays absence: unknown is never rendered as zero or as
    success. No verb's reported outcome can disagree with the artifact.
 2. **Fail closed, refuse by name.** A refusal names the address (path, capability, limit),
