@@ -12,9 +12,10 @@ API directly or through a higher-level Daemonloom service.
 [archived closure disposition](docs/reviews/archived/2026-08-14-phase-3-closure-review-disposition.md).
 The deterministic 0.2.0 development bundle, runtime, portable lane, and delegated Linux lane are
 green. The bundle is not yet a published stable release: OCI packaging, signing, and digest pinning
-remain release work. Phase 4 now has a source-typed bounded raw-pipe primitive plus a durable
-leased start and single-attachment Unix-WebSocket daemon route. The successor bundle, delegated
-Agent compatibility lane, PTY, and Git sources remain absent.
+remain release work. Phase 4 now has a source-typed bounded raw-pipe primitive, distinct durable
+session identity, leased start, and single-attachment Unix-WebSocket daemon route. The deterministic
+0.3.0 successor development bundle and delegated model-free Agent compatibility lane are green.
+PTY, network session authority, and Git sources remain absent.
 
 ## Start here
 
@@ -82,10 +83,13 @@ is implied.
 Phase 4 now starts with a raw-pipe mode for machine protocols before PTY support. It preserves
 stdin, stdout, and stderr as distinct bounded streams and is initially model-free and no-egress;
 see [ADR 0007](adr/0007-protocol-processes-use-raw-pipe-sessions.md) and
-[Plan 04](docs/plan/04-direct-byte-plane.md). The route and an Agent-owned copied-contract semantic
-consumer now exist, but neither the semantic driver fixture nor the portable refusal lane proves a
-real delegated cgroup. Released-contract and `substrate-confined` conformance therefore remain
-open until the delegated compatibility lane passes.
+[Plan 04](docs/plan/04-direct-byte-plane.md). The route and an Agent-owned exact copy of the 0.3.0
+development bundle now compose against a real daemon in a delegated cgroup. That model-free lane
+proves no-egress execution, an empty exec-time environment, profile/configuration binding, bounded
+framing and queue pressure, attachment and protocol-failure containment, lease expiry, restart
+reconciliation, whole-tree cleanup, and exact durable session/exec terminal evidence. A signed
+stable contract release and public Agent `substrate_confined` report remain separate release and
+product gates.
 
 Each authenticated subject has a daemon-minted opaque source scope with its own durable generation,
 sequence, retention, and coalesced wake hints. Pull and push read the same subject-local journal;

@@ -23,7 +23,8 @@ use substrate_wire::{
     AppliedConfinement, AppliedFilesystem, AppliedNetwork, CapabilitySnapshot, ConfinementRequest,
     Exec, ExecOutputQuery, ExecSignalInput, ExecStartInput, ExecState, FileAbsence,
     FileObservation, FileReadQuery, FileReadResult, HostDriverKind, NetworkMode, OutputSlice,
-    SandboxProfile, Workspace, WorkspaceCreateInput, WorkspaceKind, WorkspaceState,
+    PipeSessionStartInput, SandboxProfile, Workspace, WorkspaceCreateInput, WorkspaceKind,
+    WorkspaceState,
 };
 use tempfile::TempDir;
 use tokio::sync::Notify;
@@ -45,6 +46,30 @@ const EXECUTABLE_VECTORS_0_2: &[&str] = &[
     "vectors/http/input-body-limit.json",
     "vectors/http/ledger-capacity.json",
     "vectors/http/machinery-failure.json",
+    "vectors/http/reconciliation-snapshot-create.json",
+    "vectors/http/reconciliation-snapshot-empty.json",
+    "vectors/http/reconciliation-snapshot-get.json",
+    "vectors/http/replay-conflict.json",
+    "vectors/http/workspace-capacity.json",
+    "vectors/http/write-limit.json",
+];
+
+const EXECUTABLE_VECTORS_0_3: &[&str] = &[
+    "vectors/driver/crash-after-dispatch.json",
+    "vectors/driver/crash-before-dispatch.json",
+    "vectors/driver/event-push-pull-identity.json",
+    "vectors/driver/event-retention-gap.json",
+    "vectors/driver/event-stream-backpressure.json",
+    "vectors/driver/restart-no-redispatch.json",
+    "vectors/driver/snapshot-concurrent-mutation.json",
+    "vectors/http/event-cross-scope-cursor.json",
+    "vectors/http/exec-capacity.json",
+    "vectors/http/exec-start.json",
+    "vectors/http/input-body-limit.json",
+    "vectors/http/ledger-capacity.json",
+    "vectors/http/machinery-failure.json",
+    "vectors/http/pipe-session-missing-lease.json",
+    "vectors/http/pipe-session-start.json",
     "vectors/http/reconciliation-snapshot-create.json",
     "vectors/http/reconciliation-snapshot-empty.json",
     "vectors/http/reconciliation-snapshot-get.json",
@@ -81,6 +106,10 @@ impl Authority for VectorAuthority {
 
     fn exec_id(&self) -> String {
         "ex_vector".to_owned()
+    }
+
+    fn session_id(&self) -> String {
+        "ses_vector".to_owned()
     }
 
     fn snapshot_id(&self) -> String {
@@ -176,6 +205,7 @@ impl Driver for VectorDriver {
             exec_cgroup_kill: Some(true),
             exec_no_egress: Some(true),
             exec_output_limit_bytes: Some(1_048_576),
+            leases_explicit: Some(true),
             ..substrate_wire::CapabilityFacts::default()
         };
         CapabilitySnapshot {
@@ -378,6 +408,15 @@ impl Driver for VectorDriver {
                 DispatchOutcome::Observed(observation)
             }
         }
+    }
+
+    async fn start_pipe_session(
+        &self,
+        id: &str,
+        workspace_root_name: &str,
+        input: &PipeSessionStartInput,
+    ) -> DispatchOutcome<ExecObservation> {
+        self.start_exec(id, workspace_root_name, &input.exec).await
     }
 
     async fn observe_exec(&self, _id: &str) -> Result<ExecObservation, DriverError> {
@@ -725,7 +764,7 @@ fn bundle_vector(version: &str, layer: &str, name: &str) -> Value {
             .any(|entry| entry["path"] == relative),
         "vector must be selected from the immutable bundle manifest"
     );
-    if version == "0.2.0" {
+    if matches!(version, "0.2.0" | "0.3.0") {
         assert!(
             manifest["conformance"]["executable_vectors"]
                 .as_array()
@@ -737,6 +776,39 @@ fn bundle_vector(version: &str, layer: &str, name: &str) -> Value {
     }
     serde_json::from_slice(&std::fs::read(root.join(relative)).expect("vector bytes"))
         .expect("vector JSON")
+}
+
+#[test]
+fn successor_executable_manifest_is_the_exact_review_branch_set() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("contracts/substrate-wire/0.3.0");
+    let manifest: Value = serde_json::from_slice(
+        &std::fs::read(root.join("bundle.json")).expect("bundle manifest bytes"),
+    )
+    .expect("bundle manifest JSON");
+    let actual = manifest["conformance"]["executable_vectors"]
+        .as_array()
+        .expect("executable vector array")
+        .iter()
+        .map(|entry| entry.as_str().expect("vector path"))
+        .collect::<Vec<_>>();
+    assert_eq!(actual, EXECUTABLE_VECTORS_0_3);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn successor_pipe_session_positive_and_adversarial_vectors_execute_exactly() {
+    let positive = bundle_vector("0.3.0", "http", "pipe-session-start");
+    let harness = Harness::open(false);
+    seed_workspace(&harness.store);
+    assert_exact_http(&harness.execute(&positive).await, &positive);
+    assert_eq!(harness.driver.start_count.load(Ordering::SeqCst), 1);
+
+    let refusal = bundle_vector("0.3.0", "http", "pipe-session-missing-lease");
+    let harness = Harness::open(false);
+    seed_workspace(&harness.store);
+    assert_exact_http(&harness.execute(&refusal).await, &refusal);
+    assert_eq!(harness.driver.start_count.load(Ordering::SeqCst), 0);
 }
 
 #[test]

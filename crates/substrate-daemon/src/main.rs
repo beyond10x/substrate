@@ -42,9 +42,9 @@ impl UnixTransportPolicy {
             accept_retry_delay: std::time::Duration::from_millis(25),
             max_buffer_bytes: 64 * 1024,
             max_headers: 64,
-            // One request per raw HTTP connection gives incomplete/idle clients a finite header or
-            // connection deadline without an additional keep-alive idle state.
-            keep_alive: false,
+            // WebSocket session attachment requires HTTP/1.1 upgrade/keep-alive semantics. The
+            // outer connection lifetime remains the finite bound for idle and upgraded peers.
+            keep_alive: true,
         }
     }
 }

@@ -81,6 +81,12 @@ The first phase-4 daemon slice is implemented: bounded raw stdin/stdout/stderr p
 existing confinement path and refuse without delegated isolation; a durable leased exec reservation
 precedes dispatch; and one subject-scoped Unix-WebSocket attachment enforces ordering, bounds,
 half-close, output-bounded forwarding, backpressure-safe loss cancellation, and terminal
-persistence. A distinct durable session identity,
-replay/reconnect, successor bundle, delegated cross-repository evidence, endpoints, tunnels, and PTY
-remain unimplemented. Phase 4 is active under [Plan 04](../plan/04-direct-byte-plane.md).
+persistence.
+
+[ADR 0008](../../adr/0008-pipe-sessions-have-distinct-durable-identity.md) closes the remaining
+identity question: `ses_…` is a durable public resource bound one-to-one to its underlying `ex_…`;
+the pair is reserved and terminalized atomically, attachment is claimed durably once, and one exec
+lease drives both projections. That lifecycle, the deterministic 0.3.0 successor development
+bundle, and delegated model-free Agent evidence are implemented. Stable release, network authority,
+endpoints, tunnels, reconnect, and PTY remain open. Phase 4 is active under
+[Plan 04](../plan/04-direct-byte-plane.md).

@@ -687,6 +687,76 @@ pub struct PipeSessionStartInput {
     pub queued_frames: u32,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SessionKind {
+    #[serde(rename = "session")]
+    Session,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionMode {
+    Pipes,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionState {
+    Accepted,
+    Ready,
+    Attached,
+    Exited,
+    Cancelled,
+    Expired,
+    Unknown,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SessionAttachmentState {
+    Pending,
+    Available,
+    Attached,
+    Consumed,
+    Uncertain,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PipeSessionLimits {
+    pub input_bytes: u64,
+    pub frame_bytes: u64,
+    pub queued_frames: u32,
+}
+
+/// Durable raw-pipe session resource. Its lease is the projection of the single underlying exec
+/// lease; it is evidence, not a second cleanup authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PipeSession {
+    pub id: String,
+    pub kind: SessionKind,
+    pub mode: SessionMode,
+    pub exec: String,
+    pub workspace: String,
+    pub state: SessionState,
+    pub attachment: SessionAttachmentState,
+    pub observed_at: DateTime<Utc>,
+    pub capability_snapshot: String,
+    pub limits: PipeSessionLimits,
+    pub exit: Option<ExecExit>,
+    pub lease: LeaseObservation,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionAbsence {
+    pub kind: SessionKind,
+    pub id: String,
+    pub absent: bool,
+    pub observed_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PipeSessionCapabilities {
@@ -1481,12 +1551,11 @@ mod tests {
     }
 
     #[test]
-    fn agent_consumer_contract_copy_has_reviewed_digest() {
-        let bytes =
-            include_bytes!("../../../contracts/substrate-session/v0alpha1/consumer-contract.md");
+    fn successor_bundle_manifest_has_reviewed_digest() {
+        let bytes = include_bytes!("../../../contracts/substrate-wire/0.3.0/bundle.json");
         assert_eq!(
             hex::encode(Sha256::digest(bytes)),
-            "0d6a2f04e186b7ab0ccdf1111f5f1c59d03d1e6ec25321692cfafa4f183d5fd7"
+            "cf66bdbb2a36e77cf4cd66549d4d4a37d2408917fa638e79ae0e25c7eaa5661a"
         );
     }
 }

@@ -13,3 +13,4 @@ with YAML frontmatter containing `date` and `status`. Draft design questions rem
 | [0005](0005-operations-are-durable-before-driver-dispatch.md) | Operations are durable before driver dispatch | accepted |
 | [0006](0006-substrate-publishes-its-own-contract-bundle.md) | Substrate publishes its own contract bundle | accepted |
 | [0007](0007-protocol-processes-use-raw-pipe-sessions.md) | Protocol processes use raw-pipe sessions | accepted |
+| [0008](0008-pipe-sessions-have-distinct-durable-identity.md) | Pipe sessions have distinct durable identity | accepted |

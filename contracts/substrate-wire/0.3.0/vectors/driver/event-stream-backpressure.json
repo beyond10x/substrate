@@ -1,0 +1,53 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "command": {
+      "operation": "event.stream"
+    },
+    "kind": "driver",
+    "port": "lifecycle"
+  },
+  "context": {
+    "authority": "driver-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000"
+  },
+  "covers": [
+    "events.stream-backpressure"
+  ],
+  "expected": {
+    "kind": "driver-outcome",
+    "outcome": {
+      "code": "event.stream-backpressure",
+      "last_cursor": "ev2.scope_vector_subject.41.7",
+      "recovery": "pull"
+    }
+  },
+  "id": "stream-backpressure-closes-with-recovery-cursor",
+  "layer": "driver",
+  "phase": 3,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/unbounded_buffer",
+      "expected": false,
+      "operator": "equals"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "stream",
+      "name": "encoded-frame-over-limit",
+      "state": {
+        "event_count": 65,
+        "max_output_bytes": 2097152,
+        "observation_payload_bytes": 40000
+      }
+    }
+  ]
+}

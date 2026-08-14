@@ -373,7 +373,7 @@ impl Harness {
         (status, value)
     }
 
-    async fn start_pipe(&self) -> String {
+    async fn start_pipe(&self) -> (String, String) {
         let (status, workspace) = self
             .call(
                 Method::POST,
@@ -421,10 +421,16 @@ impl Harness {
             )
             .await;
         assert_eq!(status, StatusCode::ACCEPTED, "{session}");
-        session["result"]["id"]
-            .as_str()
-            .expect("pipe exec id")
-            .to_owned()
+        (
+            session["result"]["id"]
+                .as_str()
+                .expect("pipe session id")
+                .to_owned(),
+            session["result"]["exec"]
+                .as_str()
+                .expect("pipe exec id")
+                .to_owned(),
+        )
     }
 }
 
@@ -615,20 +621,30 @@ impl WebSocketClient {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)] // One end-to-end session lifecycle shares a single daemon.
 async fn durable_pipe_start_single_attachment_and_terminal_output_are_scoped() {
     let harness = Harness::open().await;
     let (status, capabilities) = harness
         .call(Method::GET, "/v1/pipe-sessions", Body::empty())
         .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(
-        capabilities["result"]["contract"],
-        "substrate-session/v0alpha1"
-    );
+    assert_eq!(capabilities["result"]["contract"], "substrate-wire/0.3.0");
     assert_eq!(capabilities["result"]["single_attachment"], true);
     assert_eq!(capabilities["result"]["network"], "none");
-    let exec_id = harness.start_pipe().await;
-    let path = format!("/v1/pipe-sessions/{exec_id}/attach");
+    let (session_id, exec_id) = harness.start_pipe().await;
+    let (status, renewed) = harness
+        .call(
+            Method::POST,
+            &format!("/v1/pipe-sessions/{session_id}/lease/renew"),
+            mutation("01JPIPESESSIONRENEW00001", json!({"ttl_ms": 90_000})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{renewed}");
+    assert_eq!(
+        renewed["result"]["lease"]["authorizing_operation"],
+        "01JPIPESESSIONRENEW00001"
+    );
+    let path = format!("/v1/pipe-sessions/{session_id}/attach");
     let mut client = Handshake::open(harness.server.address, &path)
         .await
         .upgraded();
@@ -685,13 +701,62 @@ async fn durable_pipe_start_single_attachment_and_terminal_output_are_scoped() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(observed["result"]["state"], "exited");
     assert_eq!(observed["result"]["applied"]["network"], "none");
+    let (status, session) = harness
+        .call(
+            Method::GET,
+            &format!("/v1/pipe-sessions/{session_id}"),
+            Body::empty(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(session["result"]["state"], "exited");
+    assert_eq!(session["result"]["attachment"], "consumed");
+    assert_eq!(session["result"]["exec"], exec_id);
+
+    let (status, refusal) = harness
+        .call(
+            Method::DELETE,
+            &format!("/v1/execs/{exec_id}"),
+            mutation("01JPIPEEXECRETIRE000001", json!({})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{refusal}");
+    assert_eq!(refusal["error"]["code"], "exec.session-owned");
+
+    let (status, absence) = harness
+        .call(
+            Method::DELETE,
+            &format!("/v1/pipe-sessions/{session_id}"),
+            mutation("01JPIPESESSIONRETIRE001", json!({})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{absence}");
+    assert_eq!(absence["result"]["absent"], true);
+    assert_eq!(
+        harness
+            .call(
+                Method::GET,
+                &format!("/v1/pipe-sessions/{session_id}"),
+                Body::empty(),
+            )
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
+    assert_eq!(
+        harness
+            .call(Method::GET, &format!("/v1/execs/{exec_id}"), Body::empty(),)
+            .await
+            .0,
+        StatusCode::NOT_FOUND
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn invalid_sequence_fails_closed_and_disconnect_cancels_the_session() {
     let harness = Harness::open().await;
-    let exec_id = harness.start_pipe().await;
-    let path = format!("/v1/pipe-sessions/{exec_id}/attach");
+    let (session_id, exec_id) = harness.start_pipe().await;
+    let path = format!("/v1/pipe-sessions/{session_id}/attach");
     let mut client = Handshake::open(harness.server.address, &path)
         .await
         .upgraded();

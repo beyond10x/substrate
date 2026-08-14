@@ -13,6 +13,7 @@ use substrate_wire::{
     ExecKind, ExecState, LeaseObservation, LeaseState, OPERATION_LEDGER_GLOBAL_MAX_BYTES,
     OPERATION_LEDGER_GLOBAL_MAX_ROWS, OPERATION_LEDGER_SUBJECT_MAX_BYTES,
     OPERATION_LEDGER_SUBJECT_MAX_ROWS, OperationOutcome, OperationRecord, OperationState,
+    PipeSession, SessionAbsence, SessionAttachmentState, SessionKind, SessionState,
     SnapshotHistory, SnapshotItem, SnapshotItemKind, SnapshotMetadata, SnapshotPage,
     SnapshotPartitions, Workspace, WorkspaceState,
 };
@@ -138,6 +139,14 @@ pub enum ExecRetireReservation {
     Retired(substrate_wire::ExecAbsence),
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum SessionRetireReservation {
+    Existing(Reservation),
+    Capacity(OperationCapacity),
+    Refused(StoredAnswer),
+    Retired(SessionAbsence),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkspaceAdmission {
     Missing,
@@ -194,6 +203,14 @@ pub enum ExecWrite {
     PersistedTransformed(StoredExec),
     Superseded(StoredExec),
     Retired,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionAttachmentClaim {
+    Claimed,
+    AlreadyClaimed,
+    NotAttachable,
+    Missing,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -471,6 +488,23 @@ impl Store {
             ) WITHOUT ROWID;
             CREATE INDEX IF NOT EXISTS execs_recovery_state
                 ON execs (
+                    deployment,
+                    json_extract(resource_json, '$.state'),
+                    subject,
+                    id
+                );
+
+            CREATE TABLE IF NOT EXISTS sessions (
+                deployment TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                id TEXT NOT NULL,
+                exec_id TEXT NOT NULL,
+                resource_json TEXT NOT NULL,
+                PRIMARY KEY (deployment, subject, id),
+                UNIQUE (deployment, subject, exec_id)
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS sessions_recovery_state
+                ON sessions (
                     deployment,
                     json_extract(resource_json, '$.state'),
                     subject,
@@ -764,6 +798,99 @@ impl Store {
         Ok(Reservation::Accepted)
     }
 
+    /// Atomically reserves a durable pipe session, its private exec, and the exec lease which is
+    /// the sole physical cleanup authority for both resources.
+    pub fn reserve_pipe_session_start(
+        &self,
+        new: &NewOperation,
+        provisional_session: &PipeSession,
+        provisional_exec: &StoredExec,
+        lease: &NewLease,
+        workspace_clock: Option<&LeaseClock>,
+    ) -> Result<Reservation, StoreError> {
+        let mut connection = self.connection.lock();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(reservation) = existing_reservation(&transaction, new)? {
+            transaction.commit()?;
+            return Ok(reservation);
+        }
+        let workspace_json: Option<String> = transaction
+            .query_row(
+                "SELECT resource_json FROM workspaces
+                 WHERE deployment = ?1 AND subject = ?2 AND id = ?3",
+                params![
+                    new.scope.deployment,
+                    new.scope.subject,
+                    provisional_exec.resource.workspace
+                ],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(workspace_json) = workspace_json else {
+            return Err(StoreError::NotAccepted(new.operation.clone()));
+        };
+        let mut workspace: Workspace = serde_json::from_str(&workspace_json)?;
+        let (newly_frozen, frozen_event) = freeze_workspace_lease_if_due(
+            &transaction,
+            self.event_retention,
+            &new.scope,
+            &provisional_exec.resource.workspace,
+            &mut workspace,
+            workspace_clock,
+        )?;
+        if newly_frozen
+            || workspace.state != WorkspaceState::Ready
+            || workspace
+                .lease
+                .as_ref()
+                .is_some_and(|lease| lease.state != LeaseState::Active)
+        {
+            transaction.commit()?;
+            drop(connection);
+            if let Some(event) = frozen_event {
+                self.report_committed(&[commit_effect(&new.scope, &event)]);
+            }
+            return Err(StoreError::WorkspaceFrozen);
+        }
+        if resource_partition_at_capacity(
+            &transaction,
+            &new.scope,
+            "execs",
+            self.config.snapshot_max_execs,
+        )? {
+            let (reservation, event) =
+                self.persist_resource_capacity_refusal(transaction, new, ResourceCapacity::Execs)?;
+            drop(connection);
+            if let Some(event) = event {
+                self.report_committed(&[commit_effect(&new.scope, &event)]);
+            }
+            return Ok(reservation);
+        }
+        let event =
+            match insert_accepted_operation(&transaction, self.event_retention, self.config, new) {
+                Ok(event) => event,
+                Err(StoreError::OperationCapacity(capacity)) => {
+                    transaction.rollback()?;
+                    return Ok(Reservation::Capacity(capacity));
+                }
+                Err(error) => return Err(error),
+            };
+        upsert_exec(&transaction, &new.scope, provisional_exec)?;
+        upsert_session(&transaction, &new.scope, provisional_session)?;
+        upsert_lease(
+            &transaction,
+            &new.scope,
+            "exec",
+            &provisional_exec.resource.id,
+            lease,
+            &new.operation,
+        )?;
+        transaction.commit()?;
+        drop(connection);
+        self.report_committed(&[commit_effect(&new.scope, &event)]);
+        Ok(Reservation::Accepted)
+    }
+
     fn persist_resource_capacity_refusal(
         &self,
         transaction: rusqlite::Transaction<'_>,
@@ -846,6 +973,7 @@ impl Store {
             return Err(StoreError::NotAccepted(new.operation.clone()));
         }
         let stored = load_exec(&transaction, &new.scope, id)?;
+        let session_owned = load_session_for_exec(&transaction, &new.scope, id)?.is_some();
         let refusal = match stored.as_ref() {
             None => Some((
                 404,
@@ -853,6 +981,17 @@ impl Store {
                     class: ErrorClass::Refused,
                     code: "resource.not-found".to_owned(),
                     message: "Exec was not found.".to_owned(),
+                    retriable: false,
+                    address: Some("exec".to_owned()),
+                    operation: Some(new.operation.clone()),
+                },
+            )),
+            Some(_) if session_owned => Some((
+                409,
+                ErrorDetail {
+                    class: ErrorClass::Conflict,
+                    code: "exec.session-owned".to_owned(),
+                    message: "A session-owned exec must be retired through its session.".to_owned(),
                     retriable: false,
                     address: Some("exec".to_owned()),
                     operation: Some(new.operation.clone()),
@@ -958,6 +1097,154 @@ impl Store {
             commit_effect(&new.scope, &retired),
         ]);
         Ok(ExecRetireReservation::Retired(absence))
+    }
+
+    #[allow(clippy::too_many_lines)]
+    pub fn retire_pipe_session(
+        &self,
+        new: &NewOperation,
+        id: &str,
+        observed_at: DateTime<Utc>,
+    ) -> Result<SessionRetireReservation, StoreError> {
+        let mut connection = self.connection.lock();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(reservation) = existing_reservation(&transaction, new)? {
+            transaction.commit()?;
+            return Ok(SessionRetireReservation::Existing(reservation));
+        }
+        if new.operation_kind != "session.retire" || new.resource.as_deref() != Some(id) {
+            return Err(StoreError::NotAccepted(new.operation.clone()));
+        }
+        let session = load_session(&transaction, &new.scope, id)?;
+        let refusal = match session.as_ref() {
+            None => Some((
+                404,
+                ErrorDetail {
+                    class: ErrorClass::Refused,
+                    code: "resource.not-found".to_owned(),
+                    message: "Session was not found.".to_owned(),
+                    retriable: false,
+                    address: Some("session".to_owned()),
+                    operation: Some(new.operation.clone()),
+                },
+            )),
+            Some(value)
+                if !matches!(
+                    value.state,
+                    SessionState::Exited
+                        | SessionState::Cancelled
+                        | SessionState::Expired
+                        | SessionState::Unknown
+                ) =>
+            {
+                Some((
+                    409,
+                    ErrorDetail {
+                        class: ErrorClass::Conflict,
+                        code: "session.not-terminal".to_owned(),
+                        message: "Only a durable terminal session can be retired.".to_owned(),
+                        retriable: false,
+                        address: Some("session".to_owned()),
+                        operation: Some(new.operation.clone()),
+                    },
+                ))
+            }
+            Some(_) => None,
+        };
+        if let Some((status, detail)) = refusal {
+            let (answer, event) = match insert_refused_operation(
+                &transaction,
+                self.event_retention,
+                self.config,
+                new,
+                &observed_at.to_rfc3339(),
+                status,
+                &detail,
+            ) {
+                Ok(value) => value,
+                Err(StoreError::OperationCapacity(capacity)) => {
+                    transaction.rollback()?;
+                    return Ok(SessionRetireReservation::Capacity(capacity));
+                }
+                Err(error) => return Err(error),
+            };
+            transaction.commit()?;
+            drop(connection);
+            self.report_committed(&[commit_effect(&new.scope, &event)]);
+            return Ok(SessionRetireReservation::Refused(answer));
+        }
+        let Some(session) = session else {
+            return Err(StoreError::NotAccepted(new.operation.clone()));
+        };
+        let accepted =
+            match insert_accepted_operation(&transaction, self.event_retention, self.config, new) {
+                Ok(event) => event,
+                Err(StoreError::OperationCapacity(capacity)) => {
+                    transaction.rollback()?;
+                    return Ok(SessionRetireReservation::Capacity(capacity));
+                }
+                Err(error) => return Err(error),
+            };
+        let absence = SessionAbsence {
+            kind: SessionKind::Session,
+            id: id.to_owned(),
+            absent: true,
+            observed_at,
+        };
+        let outcome = OperationOutcome::Success {
+            result: serde_json::to_value(&absence)?,
+        };
+        let changed = transaction.execute(
+            "UPDATE operations
+             SET state = 'terminal', terminal_at = ?4, resource = ?5, outcome_json = ?6,
+                 response_status = 200
+             WHERE deployment = ?1 AND subject = ?2 AND operation = ?3 AND state = 'accepted'",
+            params![
+                new.scope.deployment,
+                new.scope.subject,
+                new.operation,
+                observed_at.to_rfc3339(),
+                id,
+                serde_json::to_string(&outcome)?,
+            ],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::NotAccepted(new.operation.clone()));
+        }
+        finalize_operation_accounting(&transaction, self.config, &new.scope, &new.operation)?;
+        transaction.execute(
+            "DELETE FROM leases WHERE deployment = ?1 AND subject = ?2
+             AND resource_kind = 'exec' AND resource_id = ?3",
+            params![new.scope.deployment, new.scope.subject, session.exec],
+        )?;
+        transaction.execute(
+            "DELETE FROM execs WHERE deployment = ?1 AND subject = ?2 AND id = ?3",
+            params![new.scope.deployment, new.scope.subject, session.exec],
+        )?;
+        transaction.execute(
+            "DELETE FROM sessions WHERE deployment = ?1 AND subject = ?2 AND id = ?3",
+            params![new.scope.deployment, new.scope.subject, id],
+        )?;
+        let retired = append_event(
+            &transaction,
+            self.event_retention,
+            &new.scope,
+            id,
+            "session",
+            "session.retired",
+            &observed_at.to_rfc3339(),
+            &new.actor,
+            new.principal.as_deref(),
+            &new.operation,
+            Some(serde_json::to_value(&absence)?),
+        )?;
+        transaction.commit()?;
+        drop(connection);
+        self.report_committed(&[
+            commit_effect(&new.scope, &accepted),
+            commit_effect(&new.scope, &retired),
+        ]);
+        Ok(SessionRetireReservation::Retired(absence))
     }
 
     pub fn record_refusal(
@@ -1379,6 +1666,143 @@ impl Store {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn complete_pipe_session_start(
+        &self,
+        scope: &Scope,
+        operation: &str,
+        terminal_at: &str,
+        status: u16,
+        session: &PipeSession,
+        exec: &StoredExec,
+        lease: &NewLease,
+    ) -> Result<(PipeSession, StoredExec), StoreError> {
+        let mut connection = self.connection.lock();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if load_exec(&transaction, scope, &exec.resource.id)?.is_none()
+            || load_session(&transaction, scope, &session.id)?.is_none()
+        {
+            transaction.commit()?;
+            return Err(StoreError::NotAccepted(operation.to_owned()));
+        }
+        let outcome = OperationOutcome::Success {
+            result: serde_json::to_value(session)?,
+        };
+        let changed = transaction.execute(
+            "UPDATE operations
+             SET state = 'terminal', terminal_at = ?4, resource = ?5, outcome_json = ?6,
+                 response_status = ?7
+             WHERE deployment = ?1 AND subject = ?2 AND operation = ?3
+               AND state IN ('accepted','unknown')",
+            params![
+                scope.deployment,
+                scope.subject,
+                operation,
+                terminal_at,
+                session.id,
+                serde_json::to_string(&outcome)?,
+                i64::from(status),
+            ],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::NotAccepted(operation.to_owned()));
+        }
+        finalize_operation_accounting(&transaction, self.config, scope, operation)?;
+        upsert_exec(&transaction, scope, exec)?;
+        upsert_session(&transaction, scope, session)?;
+        upsert_lease(
+            &transaction,
+            scope,
+            "exec",
+            &exec.resource.id,
+            lease,
+            operation,
+        )?;
+        let (actor, principal, _) = operation_identity_full(&transaction, scope, operation)?;
+        let event = append_event(
+            &transaction,
+            self.event_retention,
+            scope,
+            &session.id,
+            "session",
+            "session.ready",
+            terminal_at,
+            &actor,
+            principal.as_deref(),
+            operation,
+            Some(serde_json::to_value(session)?),
+        )?;
+        transaction.commit()?;
+        drop(connection);
+        self.report_committed(&[commit_effect(scope, &event)]);
+        Ok((session.clone(), exec.clone()))
+    }
+
+    pub fn complete_pipe_session_observation(
+        &self,
+        scope: &Scope,
+        operation: &str,
+        terminal_at: &str,
+        status: u16,
+        session_id: &str,
+        exec: &StoredExec,
+    ) -> Result<PipeSession, StoreError> {
+        let mut connection = self.connection.lock();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(previous_exec) = load_exec(&transaction, scope, &exec.resource.id)? else {
+            return Err(StoreError::NotAccepted(operation.to_owned()));
+        };
+        let authoritative = if is_terminal_exec_state(previous_exec.resource.state) {
+            previous_exec
+        } else {
+            exec.clone()
+        };
+        upsert_exec(&transaction, scope, &authoritative)?;
+        let _projection = project_session_from_exec(&transaction, scope, &authoritative.resource)?;
+        let session = load_session(&transaction, scope, session_id)?
+            .ok_or_else(|| StoreError::NotAccepted(operation.to_owned()))?;
+        let outcome = OperationOutcome::Success {
+            result: serde_json::to_value(&session)?,
+        };
+        let changed = transaction.execute(
+            "UPDATE operations
+             SET state = 'terminal', terminal_at = ?4, resource = ?5, outcome_json = ?6,
+                 response_status = ?7
+             WHERE deployment = ?1 AND subject = ?2 AND operation = ?3 AND state = 'accepted'",
+            params![
+                scope.deployment,
+                scope.subject,
+                operation,
+                terminal_at,
+                session_id,
+                serde_json::to_string(&outcome)?,
+                i64::from(status),
+            ],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::NotAccepted(operation.to_owned()));
+        }
+        finalize_operation_accounting(&transaction, self.config, scope, operation)?;
+        let (actor, principal) = operation_identity(&transaction, scope, operation)?;
+        let event = append_event(
+            &transaction,
+            self.event_retention,
+            scope,
+            session_id,
+            "session",
+            session_transition(session.state),
+            terminal_at,
+            &actor,
+            principal.as_deref(),
+            operation,
+            Some(serde_json::to_value(&session)?),
+        )?;
+        transaction.commit()?;
+        drop(connection);
+        self.report_committed(&[commit_effect(scope, &event)]);
+        Ok(session)
+    }
+
     pub fn complete_error(
         &self,
         scope: &Scope,
@@ -1450,6 +1874,49 @@ impl Store {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub fn complete_pipe_session_dispatch_absence(
+        &self,
+        scope: &Scope,
+        operation: &str,
+        terminal_at: &str,
+        status: u16,
+        session_id: &str,
+        exec_id: &str,
+        error: &ErrorDetail,
+    ) -> Result<(), StoreError> {
+        let mut connection = self.connection.lock();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let event = complete_operation_error_transaction(
+            &transaction,
+            self.event_retention,
+            self.config,
+            scope,
+            operation,
+            terminal_at,
+            status,
+            Some(session_id),
+            error,
+        )?;
+        transaction.execute(
+            "DELETE FROM sessions WHERE deployment = ?1 AND subject = ?2 AND id = ?3",
+            params![scope.deployment, scope.subject, session_id],
+        )?;
+        transaction.execute(
+            "DELETE FROM execs WHERE deployment = ?1 AND subject = ?2 AND id = ?3",
+            params![scope.deployment, scope.subject, exec_id],
+        )?;
+        transaction.execute(
+            "DELETE FROM leases WHERE deployment = ?1 AND subject = ?2
+             AND resource_kind = 'exec' AND resource_id = ?3",
+            params![scope.deployment, scope.subject, exec_id],
+        )?;
+        transaction.commit()?;
+        drop(connection);
+        self.report_committed(&[commit_effect(scope, &event)]);
+        Ok(())
+    }
+
     pub fn mark_dispatch_unknown(
         &self,
         scope: &Scope,
@@ -1503,6 +1970,57 @@ impl Store {
             principal.as_deref(),
             operation,
             Some(json!({ "state": "unknown", "reason": "dispatch-outcome-unproven" })),
+        )?;
+        transaction.commit()?;
+        drop(connection);
+        self.report_committed(&[commit_effect(scope, &event)]);
+        Ok(())
+    }
+
+    pub fn mark_pipe_session_dispatch_unknown(
+        &self,
+        scope: &Scope,
+        operation: &str,
+        observed_at: DateTime<Utc>,
+        session_id: &str,
+        exec_id: &str,
+    ) -> Result<(), StoreError> {
+        let mut connection = self.connection.lock();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let changed = transaction.execute(
+            "UPDATE operations SET state = 'unknown'
+             WHERE deployment = ?1 AND subject = ?2 AND operation = ?3 AND state = 'accepted'",
+            params![scope.deployment, scope.subject, operation],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::NotAccepted(operation.to_owned()));
+        }
+        refresh_nonterminal_operation_accounting(&transaction, self.config, scope, operation)?;
+        let mut exec = load_exec(&transaction, scope, exec_id)?
+            .ok_or_else(|| StoreError::NotAccepted(operation.to_owned()))?;
+        exec.resource.state = ExecState::Unknown;
+        exec.resource.observed_at = observed_at;
+        exec.output_complete = true;
+        upsert_exec(&transaction, scope, &exec)?;
+        let mut session = load_session(&transaction, scope, session_id)?
+            .ok_or_else(|| StoreError::NotAccepted(operation.to_owned()))?;
+        session.state = SessionState::Unknown;
+        session.attachment = SessionAttachmentState::Uncertain;
+        session.observed_at = observed_at;
+        upsert_session(&transaction, scope, &session)?;
+        let (actor, principal) = operation_identity(&transaction, scope, operation)?;
+        let event = append_event(
+            &transaction,
+            self.event_retention,
+            scope,
+            session_id,
+            "session",
+            "session.unknown",
+            &observed_at.to_rfc3339(),
+            &actor,
+            principal.as_deref(),
+            operation,
+            Some(serde_json::to_value(&session)?),
         )?;
         transaction.commit()?;
         drop(connection);
@@ -2141,7 +2659,8 @@ impl Store {
         }
         let previous = previous_stored.map(|stored| stored.resource);
         upsert_exec(&transaction, scope, &resource)?;
-        let mut effect = None;
+        let projected_session = project_session_from_exec(&transaction, scope, &resource.resource)?;
+        let mut effects = Vec::new();
         if previous.as_ref().map(|value| value.state) != Some(resource.resource.state)
             && let Some((operation, actor, principal)) =
                 resource_operation_identity(&transaction, scope, &resource.resource.id)?
@@ -2167,13 +2686,32 @@ impl Store {
                 &operation,
                 Some(serde_json::to_value(&resource.resource)?),
             )?;
-            effect = Some(commit_effect(scope, &event));
+            effects.push(commit_effect(scope, &event));
+        }
+        if let Some((session, previous_state)) = projected_session
+            && previous_state != session.state
+        {
+            let transition = session_transition(session.state);
+            let operation = session.lease.authorizing_operation.clone();
+            let (actor, principal) = operation_identity(&transaction, scope, &operation)?;
+            let event = append_event(
+                &transaction,
+                self.event_retention,
+                scope,
+                &session.id,
+                "session",
+                transition,
+                &session.observed_at.to_rfc3339(),
+                &actor,
+                principal.as_deref(),
+                &operation,
+                Some(serde_json::to_value(&session)?),
+            )?;
+            effects.push(commit_effect(scope, &event));
         }
         transaction.commit()?;
         drop(connection);
-        if let Some(effect) = effect {
-            self.report_committed(&[effect]);
-        }
+        self.report_committed(&effects);
         Ok(if transformed {
             ExecWrite::PersistedTransformed(resource)
         } else {
@@ -2186,22 +2724,73 @@ impl Store {
         load_exec(&connection, scope, id)
     }
 
-    /// Reports whether the scoped exec was durably created through the raw-pipe start operation.
-    /// The operation record, rather than a process-local flag, is the attachment admission fact.
-    pub fn is_pipe_exec(&self, scope: &Scope, id: &str) -> Result<bool, StoreError> {
+    pub fn session(&self, scope: &Scope, id: &str) -> Result<Option<PipeSession>, StoreError> {
         let connection = self.connection.lock();
-        let present = connection
-            .query_row(
-                "SELECT 1 FROM operations
-                 WHERE deployment = ?1 AND subject = ?2 AND resource = ?3
-                   AND operation_kind = 'exec.pipe.start' AND state = 'terminal'
-                 ORDER BY accepted_at DESC LIMIT 1",
-                params![scope.deployment, scope.subject, id],
-                |_| Ok(()),
-            )
-            .optional()?
-            .is_some();
-        Ok(present)
+        load_session(&connection, scope, id)
+    }
+
+    pub fn session_for_exec(
+        &self,
+        scope: &Scope,
+        exec_id: &str,
+    ) -> Result<Option<PipeSession>, StoreError> {
+        let connection = self.connection.lock();
+        load_session_for_exec(&connection, scope, exec_id)
+    }
+
+    /// Consumes the one durable attachment right before the WebSocket upgrade. A failed upgrade or
+    /// a lost attachment is therefore terminally contained instead of becoming reconnectable.
+    pub fn claim_pipe_session_attachment(
+        &self,
+        scope: &Scope,
+        id: &str,
+        observed_at: DateTime<Utc>,
+    ) -> Result<SessionAttachmentClaim, StoreError> {
+        let mut connection = self.connection.lock();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(mut session) = load_session(&transaction, scope, id)? else {
+            transaction.commit()?;
+            return Ok(SessionAttachmentClaim::Missing);
+        };
+        if matches!(
+            session.attachment,
+            SessionAttachmentState::Attached
+                | SessionAttachmentState::Consumed
+                | SessionAttachmentState::Uncertain
+        ) {
+            transaction.commit()?;
+            return Ok(SessionAttachmentClaim::AlreadyClaimed);
+        }
+        if session.state != SessionState::Ready
+            || session.attachment != SessionAttachmentState::Available
+            || session.lease.state != LeaseState::Active
+        {
+            transaction.commit()?;
+            return Ok(SessionAttachmentClaim::NotAttachable);
+        }
+        session.state = SessionState::Attached;
+        session.attachment = SessionAttachmentState::Attached;
+        session.observed_at = observed_at;
+        upsert_session(&transaction, scope, &session)?;
+        let operation = session.lease.authorizing_operation.clone();
+        let (actor, principal) = operation_identity(&transaction, scope, &operation)?;
+        let event = append_event(
+            &transaction,
+            self.event_retention,
+            scope,
+            id,
+            "session",
+            "session.attached",
+            &observed_at.to_rfc3339(),
+            &actor,
+            principal.as_deref(),
+            &operation,
+            Some(serde_json::to_value(&session)?),
+        )?;
+        transaction.commit()?;
+        drop(connection);
+        self.report_committed(&[commit_effect(scope, &event)]);
+        Ok(SessionAttachmentClaim::Claimed)
     }
 
     pub fn scopes_for_exec(&self, deployment: &str, id: &str) -> Result<Vec<Scope>, StoreError> {
@@ -2862,6 +3451,47 @@ impl Store {
         Ok(resource)
     }
 
+    pub fn renew_pipe_session_lease(
+        &self,
+        scope: &Scope,
+        operation: &str,
+        terminal_at: &str,
+        status: u16,
+        session_id: &str,
+        lease: &NewLease,
+    ) -> Result<PipeSession, StoreError> {
+        let mut connection = self.connection.lock();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let mut session = load_session(&transaction, scope, session_id)?
+            .ok_or_else(|| StoreError::NotAccepted(session_id.to_owned()))?;
+        ensure_lease_renewable(&transaction, scope, "exec", &session.exec, &lease.clock)?;
+        let mut exec = load_exec(&transaction, scope, &session.exec)?
+            .ok_or_else(|| StoreError::NotAccepted(session.exec.clone()))?;
+        exec.resource.lease = Some(lease.observation());
+        session.lease = lease.observation();
+        session.observed_at = lease.clock.wall;
+        upsert_exec(&transaction, scope, &exec)?;
+        upsert_session(&transaction, scope, &session)?;
+        upsert_lease(&transaction, scope, "exec", &session.exec, lease, operation)?;
+        let event = complete_lease_operation(
+            &transaction,
+            self.event_retention,
+            self.config,
+            scope,
+            operation,
+            terminal_at,
+            status,
+            session_id,
+            "session",
+            "session.lease-renewed",
+            &session,
+        )?;
+        transaction.commit()?;
+        drop(connection);
+        self.report_committed(&[commit_effect(scope, &event)]);
+        Ok(session)
+    }
+
     #[allow(clippy::too_many_lines)] // One bounded transaction advances the durable fair cursor.
     pub fn lease_cleanup_candidates(
         &self,
@@ -3106,6 +3736,11 @@ impl Store {
                             lease.state = LeaseState::Expiring;
                         }
                         upsert_exec(&transaction, &candidate.scope, &stored)?;
+                        let _projected = project_session_from_exec(
+                            &transaction,
+                            &candidate.scope,
+                            &stored.resource,
+                        )?;
                         let operation = lease_authorizing_operation(
                             &transaction,
                             &candidate.scope,
@@ -3191,6 +3826,8 @@ impl Store {
                 lease.state = LeaseState::Expired;
             }
             upsert_exec(&transaction, &expired.scope, &stored)?;
+            let projected_session =
+                project_session_from_exec(&transaction, &expired.scope, &stored.resource)?;
             transaction.execute(
                 "UPDATE leases SET state = 'expired'
                  WHERE deployment = ?1 AND subject = ?2 AND resource_kind = 'exec'
@@ -3210,9 +3847,32 @@ impl Store {
                 &operation,
                 Some(serde_json::to_value(&stored.resource)?),
             )?;
+            let session_event = if let Some((session, previous_state)) = projected_session
+                && previous_state != session.state
+            {
+                Some(append_event(
+                    &transaction,
+                    self.event_retention,
+                    &expired.scope,
+                    &session.id,
+                    "session",
+                    session_transition(session.state),
+                    &observed_at.to_rfc3339(),
+                    LEASE_SWEEPER_ACTOR,
+                    principal.as_deref(),
+                    &operation,
+                    Some(serde_json::to_value(&session)?),
+                )?)
+            } else {
+                None
+            };
             transaction.commit()?;
             drop(connection);
-            self.report_committed(&[commit_effect(&expired.scope, &event)]);
+            let mut effects = vec![commit_effect(&expired.scope, &event)];
+            if let Some(event) = session_event {
+                effects.push(commit_effect(&expired.scope, &event));
+            }
+            self.report_committed(&effects);
             return Ok(if previous_terminal {
                 ExecWrite::Superseded(stored)
             } else {
@@ -3488,14 +4148,20 @@ impl Store {
         for (subject, id) in &keys {
             let operation = transaction
                 .query_row(
-                    "SELECT operation, state FROM operations
-                     WHERE deployment = ?1 AND subject = ?2 AND resource = ?3
-                       AND operation_kind IN ('exec.start','exec.pipe.start')
+                    "SELECT o.operation, o.state FROM operations o
+                     LEFT JOIN sessions s
+                       ON s.deployment = o.deployment AND s.subject = o.subject
+                      AND s.id = o.resource
+                     WHERE o.deployment = ?1 AND o.subject = ?2
                        AND (
-                           state IN ('unknown','terminal')
-                           OR (state = 'accepted' AND accepted_at < ?4)
+                         (o.resource = ?3 AND o.operation_kind = 'exec.start')
+                         OR (s.exec_id = ?3 AND o.operation_kind = 'session.start')
                        )
-                     ORDER BY accepted_at DESC, operation DESC LIMIT 1",
+                       AND (
+                           o.state IN ('unknown','terminal')
+                           OR (o.state = 'accepted' AND o.accepted_at < ?4)
+                       )
+                     ORDER BY o.accepted_at DESC, o.operation DESC LIMIT 1",
                     params![deployment, subject, id, accepted_before.to_rfc3339()],
                     |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
                 )
@@ -3570,6 +4236,8 @@ impl Store {
                 serde_json::to_string(&stored.resource)?,
             ],
         )?;
+        let projected_session =
+            project_session_from_exec(&transaction, &candidate.scope, &stored.resource)?;
         let (actor, principal) =
             operation_identity(&transaction, &candidate.scope, &candidate.operation)?;
         let event = append_event(
@@ -3585,9 +4253,32 @@ impl Store {
             &candidate.operation,
             Some(serde_json::to_value(&stored.resource)?),
         )?;
+        let session_event = if let Some((session, previous_state)) = projected_session
+            && previous_state != session.state
+        {
+            Some(append_event(
+                &transaction,
+                self.event_retention,
+                &candidate.scope,
+                &session.id,
+                "session",
+                "session.unknown",
+                &observed_at.to_rfc3339(),
+                &actor,
+                principal.as_deref(),
+                &candidate.operation,
+                Some(serde_json::to_value(&session)?),
+            )?)
+        } else {
+            None
+        };
         transaction.commit()?;
         drop(connection);
-        self.report_committed(&[commit_effect(&candidate.scope, &event)]);
+        let mut effects = vec![commit_effect(&candidate.scope, &event)];
+        if let Some(event) = session_event {
+            effects.push(commit_effect(&candidate.scope, &event));
+        }
+        self.report_committed(&effects);
         Ok(())
     }
 
@@ -3690,10 +4381,17 @@ impl Store {
         for (state, subject, id, json) in &rows {
             let operation = transaction
                 .query_row(
-                    "SELECT operation, actor, principal FROM operations
-                     WHERE deployment = ?1 AND subject = ?2 AND resource = ?3
-                       AND operation_kind IN ('exec.start','exec.pipe.start') AND accepted_at < ?4
-                     ORDER BY accepted_at DESC, operation DESC LIMIT 1",
+                    "SELECT o.operation, o.actor, o.principal FROM operations o
+                     LEFT JOIN sessions s
+                       ON s.deployment = o.deployment AND s.subject = o.subject
+                      AND s.id = o.resource
+                     WHERE o.deployment = ?1 AND o.subject = ?2
+                       AND (
+                         (o.resource = ?3 AND o.operation_kind = 'exec.start')
+                         OR (s.exec_id = ?3 AND o.operation_kind = 'session.start')
+                       )
+                       AND o.accepted_at < ?4
+                     ORDER BY o.accepted_at DESC, o.operation DESC LIMIT 1",
                     params![deployment, subject, id, accepted_before],
                     |row| {
                         Ok((
@@ -3720,6 +4418,7 @@ impl Store {
                 deployment: deployment.to_owned(),
                 subject: subject.clone(),
             };
+            let projected_session = project_session_from_exec(&transaction, &scope, &resource)?;
             let event = append_event(
                 &transaction,
                 self.event_retention,
@@ -3734,6 +4433,24 @@ impl Store {
                 Some(serde_json::to_value(&resource)?),
             )?;
             effects.push(commit_effect(&scope, &event));
+            if let Some((session, previous_state)) = projected_session
+                && previous_state != session.state
+            {
+                let session_event = append_event(
+                    &transaction,
+                    self.event_retention,
+                    &scope,
+                    &session.id,
+                    "session",
+                    "session.unknown",
+                    &observed_at,
+                    &actor,
+                    principal.as_deref(),
+                    &operation,
+                    Some(serde_json::to_value(&session)?),
+                )?;
+                effects.push(commit_effect(&scope, &session_event));
+            }
             recovered = recovered.saturating_add(1);
             if recovered.saturating_sub(accepted.len()) == exec_limit {
                 break;
@@ -5198,6 +5915,8 @@ fn operation_resource_kind(operation_kind: &str) -> &str {
         "workspace"
     } else if operation_kind.starts_with("exec.") {
         "exec"
+    } else if operation_kind.starts_with("session.") {
+        "session"
     } else if operation_kind.starts_with("reconciliation.") {
         "snapshot"
     } else {
@@ -5218,6 +5937,10 @@ fn terminal_transition(operation_kind: &str, outcome: &OperationOutcome) -> &'st
         "exec.start" | "exec.pipe.start" => "exec.observed",
         "exec.signal" => "exec.cancelled",
         "exec.lease.renew" => "exec.lease-renewed",
+        "session.start" => "session.ready",
+        "session.signal" => "session.cancelled",
+        "session.lease.renew" => "session.lease-renewed",
+        "session.retire" => "session.retired",
         "reconciliation.snapshot.create" => "snapshot.created",
         _ => "operation.terminal",
     }
@@ -5290,9 +6013,16 @@ fn resource_operation_identity(
 ) -> Result<Option<(String, String, Option<String>)>, StoreError> {
     connection
         .query_row(
-            "SELECT operation, actor, principal FROM operations
-             WHERE deployment = ?1 AND subject = ?2 AND resource = ?3
-             ORDER BY accepted_at LIMIT 1",
+            "SELECT operation, actor, principal FROM (
+                SELECT operation, actor, principal, accepted_at FROM operations
+                WHERE deployment = ?1 AND subject = ?2 AND resource = ?3
+                UNION ALL
+                SELECT o.operation, o.actor, o.principal, o.accepted_at
+                FROM sessions s JOIN operations o
+                  ON o.deployment = s.deployment AND o.subject = s.subject
+                 AND o.resource = s.id AND o.operation_kind = 'session.start'
+                WHERE s.deployment = ?1 AND s.subject = ?2 AND s.exec_id = ?3
+             ) ORDER BY accepted_at LIMIT 1",
             params![scope.deployment, scope.subject, resource],
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
@@ -5858,6 +6588,40 @@ fn load_exec(
         .transpose()
 }
 
+fn load_session(
+    connection: &Connection,
+    scope: &Scope,
+    id: &str,
+) -> Result<Option<PipeSession>, StoreError> {
+    connection
+        .query_row(
+            "SELECT resource_json FROM sessions
+             WHERE deployment = ?1 AND subject = ?2 AND id = ?3",
+            params![scope.deployment, scope.subject, id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .map(|json| serde_json::from_str(&json).map_err(StoreError::from))
+        .transpose()
+}
+
+fn load_session_for_exec(
+    connection: &Connection,
+    scope: &Scope,
+    exec_id: &str,
+) -> Result<Option<PipeSession>, StoreError> {
+    connection
+        .query_row(
+            "SELECT resource_json FROM sessions
+             WHERE deployment = ?1 AND subject = ?2 AND exec_id = ?3",
+            params![scope.deployment, scope.subject, exec_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()?
+        .map(|json| serde_json::from_str(&json).map_err(StoreError::from))
+        .transpose()
+}
+
 fn load_operation(
     connection: &Connection,
     scope: &Scope,
@@ -5999,6 +6763,77 @@ fn upsert_exec(
     Ok(())
 }
 
+fn upsert_session(
+    connection: &Connection,
+    scope: &Scope,
+    session: &PipeSession,
+) -> Result<(), StoreError> {
+    connection.execute(
+        "INSERT INTO sessions (deployment, subject, id, exec_id, resource_json)
+         VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT (deployment, subject, id) DO UPDATE SET
+            exec_id = excluded.exec_id,
+            resource_json = excluded.resource_json",
+        params![
+            scope.deployment,
+            scope.subject,
+            session.id,
+            session.exec,
+            serde_json::to_string(session)?,
+        ],
+    )?;
+    Ok(())
+}
+
+fn project_session_from_exec(
+    connection: &Connection,
+    scope: &Scope,
+    exec: &Exec,
+) -> Result<Option<(PipeSession, SessionState)>, StoreError> {
+    let Some(mut session) = load_session_for_exec(connection, scope, &exec.id)? else {
+        return Ok(None);
+    };
+    let previous_state = session.state;
+    session.observed_at = exec.observed_at;
+    session.exit.clone_from(&exec.exit);
+    if let Some(lease) = exec.lease.as_ref() {
+        session.lease.clone_from(lease);
+    }
+    session.state = match exec.state {
+        ExecState::Accepted => SessionState::Accepted,
+        ExecState::Running if session.attachment == SessionAttachmentState::Attached => {
+            SessionState::Attached
+        }
+        ExecState::Running => SessionState::Ready,
+        ExecState::Exited => SessionState::Exited,
+        ExecState::Cancelled => SessionState::Cancelled,
+        ExecState::Expired => SessionState::Expired,
+        ExecState::Unknown => SessionState::Unknown,
+    };
+    if matches!(
+        session.state,
+        SessionState::Exited | SessionState::Cancelled | SessionState::Expired
+    ) {
+        session.attachment = SessionAttachmentState::Consumed;
+    } else if session.state == SessionState::Unknown {
+        session.attachment = SessionAttachmentState::Uncertain;
+    }
+    upsert_session(connection, scope, &session)?;
+    Ok(Some((session, previous_state)))
+}
+
+const fn session_transition(state: SessionState) -> &'static str {
+    match state {
+        SessionState::Accepted => "session.accepted",
+        SessionState::Ready => "session.ready",
+        SessionState::Attached => "session.attached",
+        SessionState::Exited => "session.exited",
+        SessionState::Cancelled => "session.cancelled",
+        SessionState::Expired => "session.lease-expired",
+        SessionState::Unknown => "session.unknown",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -6008,17 +6843,18 @@ mod tests {
     use rusqlite::params;
     use substrate_wire::{
         ConfinementRequest, ErrorClass, ErrorDetail, EventCause, Exec, ExecKind, ExecState,
-        LeaseObservation, LeaseState, NetworkMode, OperationOutcome, OperationState,
-        SandboxProfile, SnapshotItemKind, Workspace, WorkspaceKind, WorkspaceState,
+        LeaseObservation, LeaseState, NetworkMode, OperationOutcome, OperationState, PipeSession,
+        PipeSessionLimits, SandboxProfile, SessionAttachmentState, SessionKind, SessionMode,
+        SessionState, SnapshotItemKind, Workspace, WorkspaceKind, WorkspaceState,
     };
     use tempfile::tempdir;
 
     use super::{
         CommitEffect, CommitEffectSink, EventCursorError, ExecRetireReservation, ExecWrite,
         ExpiredLease, LEASE_SWEEPER_ACTOR, LeaseClock, LeaseResource, NewLease, NewOperation,
-        OperationCapacity, Reservation, Scope, SnapshotReadError, Store, StoreConfig, StoreError,
-        StoredExec, WorkspaceAdmission, WorkspaceDestroyReservation, WorkspaceObservationWrite,
-        event_cursor, lease_due, upsert_exec, upsert_lease,
+        OperationCapacity, Reservation, Scope, SessionAttachmentClaim, SnapshotReadError, Store,
+        StoreConfig, StoreError, StoredExec, WorkspaceAdmission, WorkspaceDestroyReservation,
+        WorkspaceObservationWrite, event_cursor, lease_due, upsert_exec, upsert_lease,
     };
 
     #[derive(Default)]
@@ -6161,6 +6997,27 @@ mod tests {
             output_complete: false,
             cgroup: None,
             leader_pid: None,
+        }
+    }
+
+    fn pipe_session(id: &str, exec_id: &str, workspace: &str, lease: &NewLease) -> PipeSession {
+        PipeSession {
+            id: id.to_owned(),
+            kind: SessionKind::Session,
+            mode: SessionMode::Pipes,
+            exec: exec_id.to_owned(),
+            workspace: workspace.to_owned(),
+            state: SessionState::Accepted,
+            attachment: SessionAttachmentState::Pending,
+            observed_at: "2026-08-13T12:00:01Z".parse().expect("time"),
+            capability_snapshot: format!("sha256:{}", "7".repeat(64)),
+            limits: PipeSessionLimits {
+                input_bytes: 1_024,
+                frame_bytes: 256,
+                queued_frames: 4,
+            },
+            exit: None,
+            lease: lease.observation(),
         }
     }
 
@@ -7034,6 +7891,112 @@ mod tests {
                 )
                 .expect("destroy admission")
                 .is_none()
+        );
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One transaction/restart scenario keeps its setup adjacent.
+    fn restart_makes_pipe_session_nonattachable_without_redispatching_its_exec() {
+        let store = Store::open(":memory:").expect("open store");
+        let scope = scope("local:1000");
+        store
+            .put_workspace(&scope, "ws_pipe_restart", &workspace("ws_pipe_restart"))
+            .expect("seed workspace");
+        let start = operation_named(
+            "local:1000",
+            "01JPIPESTORERESTART0001",
+            "session.start",
+            "ses_restart",
+            &"b".repeat(64),
+        );
+        let lease = NewLease {
+            ttl_ms: 60_000,
+            clock: LeaseClock {
+                wall: "2026-08-13T12:00:00Z".parse().expect("time"),
+                boot_id: "boot-test".to_owned(),
+                boottime_ms: 1_000,
+            },
+            authorizing_operation: start.operation.clone(),
+            actor: "test".to_owned(),
+            principal: None,
+        };
+        let mut running = exec("ex_pipe_restart", "ws_pipe_restart", ExecState::Accepted);
+        running.resource.lease = Some(lease.observation());
+        let provisional = pipe_session("ses_restart", "ex_pipe_restart", "ws_pipe_restart", &lease);
+        assert_eq!(
+            store
+                .reserve_pipe_session_start(&start, &provisional, &running, &lease, None)
+                .expect("reserve session"),
+            Reservation::Accepted
+        );
+        running.resource.state = ExecState::Running;
+        let mut ready = provisional;
+        ready.state = SessionState::Ready;
+        ready.attachment = SessionAttachmentState::Available;
+        store
+            .complete_pipe_session_start(
+                &scope,
+                &start.operation,
+                "2026-08-13T12:00:01Z",
+                202,
+                &ready,
+                &running,
+                &lease,
+            )
+            .expect("complete session start");
+        assert_eq!(
+            store
+                .claim_pipe_session_attachment(
+                    &scope,
+                    "ses_restart",
+                    "2026-08-13T12:00:02Z".parse().expect("time"),
+                )
+                .expect("claim attachment"),
+            SessionAttachmentClaim::Claimed
+        );
+        store
+            .reconcile_after_restart(
+                "dep_test",
+                "2026-08-13T12:00:03Z".parse().expect("cutoff"),
+                "2026-08-13T12:00:03Z".parse().expect("observed"),
+                64,
+            )
+            .expect("restart reconcile");
+        let session = store
+            .session(&scope, "ses_restart")
+            .expect("session lookup")
+            .expect("durable session");
+        assert_eq!(session.state, SessionState::Unknown);
+        assert_eq!(session.attachment, SessionAttachmentState::Uncertain);
+        assert_eq!(
+            store
+                .exec(&scope, "ex_pipe_restart")
+                .expect("exec lookup")
+                .expect("durable exec")
+                .resource
+                .state,
+            ExecState::Unknown
+        );
+        assert!(
+            store
+                .recovery_execs(
+                    "dep_test",
+                    "2026-08-13T12:00:03Z".parse().expect("cutoff"),
+                    8,
+                )
+                .expect("recovery candidates")
+                .iter()
+                .any(|candidate| candidate.stored.resource.id == "ex_pipe_restart")
+        );
+        assert_eq!(
+            store
+                .claim_pipe_session_attachment(
+                    &scope,
+                    "ses_restart",
+                    "2026-08-13T12:00:04Z".parse().expect("time"),
+                )
+                .expect("repeat claim"),
+            SessionAttachmentClaim::AlreadyClaimed
         );
     }
 

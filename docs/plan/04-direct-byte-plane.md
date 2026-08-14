@@ -9,9 +9,11 @@ model-free governed-harness slice accepted by
 
 ## Slice A: raw-pipe development contract
 
-**Progress:** source-typed capability/start/client/server vocabulary and an independently
-digest-pinned Agent copy exist. Deterministic successor bundle generation, full adversarial vectors,
-and the clean-room released-bundle runner remain open.
+**Progress:** the deterministic `substrate-wire` 0.3.0 development bundle has 26 closed operations,
+21 executable vectors, 65 design vectors, and 106 checked requirements. Its session vocabulary
+implements [ADR 0008](../../adr/0008-pipe-sessions-have-distinct-durable-identity.md), and Agent
+consumes an exact independently verified copy without a Substrate source dependency. Packaging,
+signing, and a stable clean-room release remain open.
 
 - add a successor development bundle; never rewrite immutable 0.1.0 bytes;
 - define session resource, start/get/cancel/retire operations, capability facts, and closed channel
@@ -29,8 +31,10 @@ dispatch and serves one subject-scoped Unix-WebSocket attachment with strict ord
 messages/control rate/lifetime, cancellation on loss, separate stderr, and authoritative terminal
 persistence. Live forwarding stops at the admitted output bound, and loss containment closes the
 output queue before kill so backpressure cannot block reconciliation; an uncertain containment
-retains a bounded attachment tombstone. Portable refusal and semantic route tests pass; a distinct session identity,
-successor bundle, and delegated whole-tree integration evidence remain open.
+retains a bounded attachment tombstone. Portable refusal and semantic route tests pass. The
+distinct session resource is implemented and terminal/restart projections are atomic. The real
+delegated Agent lane proves empty environment, no egress, applied bounds, pressure, attachment and
+protocol-loss containment, lease expiry, restart reconciliation, and whole-tree cleanup.
 
 - reuse the proven workspace, bubblewrap, cgroup, empty environment, output draining, lease, and
   whole-tree cancellation implementation;
@@ -41,11 +45,12 @@ successor bundle, and delegated whole-tree integration evidence remain open.
 
 ## Slice C: Agent compatibility proof
 
-**Progress:** Agent has a no-fallback copied-contract backend and a clean-room semantic server which
-drives the model-free fake Codex app-server through the execution port. It pins the copied contract
-digest and checks inspection, applied confinement shape, bidirectional bytes, approval lifecycle,
-half-close, and terminal reconciliation. This is semantic compatibility, not delegated
-`substrate-confined` evidence.
+**Progress:** Agent's no-fallback backend consumes the exact copied 0.3.0 bundle and drives the
+model-free fake Codex app-server through a real delegated daemon. It checks capability/profile/
+configuration binding, bidirectional bytes, bounded pressure, approval lifecycle, half-close,
+attachment and protocol failure, lease expiry, restart reconciliation, exact terminal pairing, and
+whole-tree cleanup. No model, credential, egress, public CLI surface, or sibling source dependency
+is involved. Stable/public `substrate_confined` reporting remains an Agent release gate.
 
 - run a synthetic app-server protocol process with no model, credential, or network;
 - prove start ordering, bidirectional framing, output pressure, cancellation, child-tree cleanup,

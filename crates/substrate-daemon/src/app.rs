@@ -28,18 +28,20 @@ use substrate_host::{
 use substrate_store::{
     CommitEffect, CommitEffectSink, EventCursorError, ExecRetireReservation, ExecWrite,
     ExpiredLease, LeaseClock, LeaseResource, NewLease, NewOperation, Reservation, Scope,
-    SnapshotReadError, Store, StoreError, StoredAnswer, StoredExec, WorkspaceAdmission,
-    WorkspaceDestroyReservation, WorkspaceObservationWrite,
+    SessionAttachmentClaim, SessionRetireReservation, SnapshotReadError, Store, StoreError,
+    StoredAnswer, StoredExec, WorkspaceAdmission, WorkspaceDestroyReservation,
+    WorkspaceObservationWrite,
 };
 use substrate_wire::{
     Base64Content, Base64Encoding, EmptyInput, ErrorClass, ErrorDetail, EventPage, EventQuery,
     Exec, ExecKind, ExecOutputQuery, ExecSignalInput, ExecStartInput, ExecState, Failure,
     FileReadQuery, FileWriteInput, LeaseRenewInput, MAX_EVENT_PAGE_ITEMS, MAX_LEASE_TTL_MS,
     MAX_SNAPSHOT_PAGE_ITEMS, MIN_LEASE_TTL_MS, NetworkMode, OperationOutcome, OperationState,
-    OutputSlice, OutputStream, PipeClientFrame, PipeServerFrame, PipeSessionCapabilities,
-    PipeSessionStartInput, Success, WireValidationError, WorkspaceAbsence, WorkspaceCreateInput,
-    WorkspaceKind, WorkspaceSource, WorkspaceState, canonical_request_hash_v2,
-    validate_operation_id, validate_relative_path,
+    OutputSlice, OutputStream, PipeClientFrame, PipeServerFrame, PipeSession,
+    PipeSessionCapabilities, PipeSessionLimits, PipeSessionStartInput, SessionAttachmentState,
+    SessionKind, SessionMode, SessionState, Success, WireValidationError, WorkspaceAbsence,
+    WorkspaceCreateInput, WorkspaceKind, WorkspaceSource, WorkspaceState,
+    canonical_request_hash_v2, validate_operation_id, validate_relative_path,
 };
 use tokio::sync::{Mutex, Notify, OwnedMutexGuard, Semaphore, watch};
 use ulid::Ulid;
@@ -427,6 +429,7 @@ pub trait Authority: Send + Sync {
     fn request_id(&self) -> String;
     fn workspace_id(&self) -> String;
     fn exec_id(&self) -> String;
+    fn session_id(&self) -> String;
     fn snapshot_id(&self) -> String;
     /// Returns durable wall and boot-relative evidence for lease accounting.
     ///
@@ -453,6 +456,10 @@ impl Authority for SystemAuthority {
 
     fn exec_id(&self) -> String {
         format!("ex_{}", Ulid::new())
+    }
+
+    fn session_id(&self) -> String {
+        format!("ses_{}", Ulid::new())
     }
 
     fn snapshot_id(&self) -> String {
@@ -1144,8 +1151,20 @@ pub fn router(app: Arc<App>) -> Router {
             get(pipe_session_capabilities).post(pipe_session_start),
         )
         .route(
-            "/v1/pipe-sessions/{exec_id}/attach",
+            "/v1/pipe-sessions/{session_id}",
+            get(pipe_session_get).delete(pipe_session_retire),
+        )
+        .route(
+            "/v1/pipe-sessions/{session_id}/attach",
             get(pipe_session_attach),
+        )
+        .route(
+            "/v1/pipe-sessions/{session_id}/signal",
+            post(pipe_session_signal),
+        )
+        .route(
+            "/v1/pipe-sessions/{session_id}/lease/renew",
+            post(pipe_session_lease_renew),
         )
         .route(
             "/v1/workspaces/{workspace_id}/lease/renew",
@@ -2071,7 +2090,7 @@ async fn pipe_session_capabilities(
         Success::observed(
             request_id,
             PipeSessionCapabilities {
-                contract: "substrate-session/v0alpha1".to_owned(),
+                contract: "substrate-wire/0.3.0".to_owned(),
                 transport: "unix-websocket-json".to_owned(),
                 capability_snapshot: machine.snapshot,
                 lease_required: true,
@@ -2097,7 +2116,7 @@ async fn pipe_session_start(
     let mutation = match decode_mutation::<PipeSessionStartInput>(
         &app,
         &identity,
-        "exec.pipe.start",
+        "session.start",
         "POST",
         "/v1/pipe-sessions",
         raw_query.as_deref(),
@@ -2114,7 +2133,7 @@ async fn pipe_session_start(
             &app,
             &identity,
             &request_id,
-            "exec.pipe.start",
+            "session.start",
             "POST",
             "/v1/pipe-sessions",
             &mutation,
@@ -2135,7 +2154,7 @@ async fn pipe_session_start(
                 &app,
                 &identity,
                 &request_id,
-                "exec.pipe.start",
+                "session.start",
                 "POST",
                 "/v1/pipe-sessions",
                 &mutation,
@@ -2148,7 +2167,7 @@ async fn pipe_session_start(
                 &app,
                 &identity,
                 &request_id,
-                "exec.pipe.start",
+                "session.start",
                 "POST",
                 "/v1/pipe-sessions",
                 &mutation,
@@ -2172,7 +2191,7 @@ async fn pipe_session_start(
                 &app,
                 &identity,
                 &request_id,
-                "exec.pipe.start",
+                "session.start",
                 "POST",
                 "/v1/pipe-sessions",
                 &mutation,
@@ -2181,21 +2200,22 @@ async fn pipe_session_start(
             .await;
         }
     };
-    let id = app.authority.exec_id();
+    let exec_id = app.authority.exec_id();
+    let session_id = app.authority.session_id();
     let capability = Some(mutation.input.exec.sandbox.capability_snapshot.clone());
     let new = new_operation(
         &app,
         &identity,
-        "exec.pipe.start",
+        "session.start",
         "POST",
         "/v1/pipe-sessions",
         &mutation,
         capability,
-        Some(id.clone()),
+        Some(session_id.clone()),
     );
     let provisional = StoredExec {
         resource: Exec {
-            id: id.clone(),
+            id: exec_id.clone(),
             kind: ExecKind::Exec,
             workspace: mutation.input.exec.workspace.clone(),
             state: ExecState::Accepted,
@@ -2213,11 +2233,34 @@ async fn pipe_session_start(
         cgroup: None,
         leader_pid: None,
     };
+    let provisional_session = PipeSession {
+        id: session_id.clone(),
+        kind: SessionKind::Session,
+        mode: SessionMode::Pipes,
+        exec: exec_id.clone(),
+        workspace: mutation.input.exec.workspace.clone(),
+        state: SessionState::Accepted,
+        attachment: SessionAttachmentState::Pending,
+        observed_at: app.authority.now(),
+        capability_snapshot: mutation.input.exec.sandbox.capability_snapshot.clone(),
+        limits: PipeSessionLimits {
+            input_bytes: mutation.input.input_limit_bytes,
+            frame_bytes: mutation.input.frame_limit_bytes,
+            queued_frames: mutation.input.queued_frames,
+        },
+        exit: None,
+        lease: lease.observation(),
+    };
     let workspace_clock = app.lease_clock().ok();
     if let Some(response) = reservation_response(
         app.store_io(|| {
-            app.store
-                .reserve_exec_start(&new, &provisional, Some(&lease), workspace_clock.as_ref())
+            app.store.reserve_pipe_session_start(
+                &new,
+                &provisional_session,
+                &provisional,
+                &lease,
+                workspace_clock.as_ref(),
+            )
         })
         .await,
         &request_id,
@@ -2227,32 +2270,381 @@ async fn pipe_session_start(
     }
     match app
         .driver
-        .start_pipe_session(&id, &root_name, &mutation.input)
+        .start_pipe_session(&exec_id, &root_name, &mutation.input)
         .await
     {
         DispatchOutcome::Observed(mut observation) => {
             observation.resource.lease = Some(lease.observation());
             app.driver
                 .set_exec_lease(&observation.resource.id, observation.resource.lease.clone());
-            finish_exec_leased(
+            finish_pipe_session_start(
                 &app,
                 &scope,
                 &request_id,
                 &operation,
-                StatusCode::ACCEPTED,
+                &provisional_session,
                 observation,
-                Some(&lease),
+                &lease,
             )
             .await
         }
         DispatchOutcome::NotDispatched(error) | DispatchOutcome::ContainedAbsent(error) => {
-            finish_dispatch_absence(&app, &scope, &request_id, &operation, "exec", &id, &error)
-                .await
+            finish_pipe_session_dispatch_absence(
+                &app,
+                &scope,
+                &request_id,
+                &operation,
+                &session_id,
+                &exec_id,
+                &error,
+            )
+            .await
         }
         DispatchOutcome::OutcomeUnknown(error) => {
-            finish_dispatch_unknown(&app, &scope, &request_id, &operation, "exec", &id, &error)
-                .await
+            finish_pipe_session_dispatch_unknown(
+                &app,
+                &scope,
+                &request_id,
+                &operation,
+                &session_id,
+                &exec_id,
+                &error,
+            )
+            .await
         }
+    }
+}
+
+async fn pipe_session_get(
+    State(app): State<Arc<App>>,
+    Extension(identity): Extension<Identity>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    RawQuery(raw_query): RawQuery,
+) -> Response {
+    let request_id = request_id(&app, &headers);
+    if !query_is_empty(raw_query.as_deref()) {
+        return schema_invalid(&request_id, None, "query");
+    }
+    app.sweep_expired().await;
+    let scope = app.scope(&identity);
+    let session = match app
+        .store_io(|| app.store.session(&scope, &session_id))
+        .await
+    {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found(&request_id),
+        Err(error) => return store_failure(&request_id, None, &error),
+    };
+    if matches!(
+        session.state,
+        SessionState::Exited
+            | SessionState::Cancelled
+            | SessionState::Expired
+            | SessionState::Unknown
+    ) {
+        return success(StatusCode::OK, Success::observed(request_id, session));
+    }
+    if let Ok(observation) = app.driver.observe_exec(&session.exec).await {
+        let _write = app
+            .store_io(|| app.store.put_exec(&scope, &stored_exec(&observation)))
+            .await;
+    }
+    match app
+        .store_io(|| app.store.session(&scope, &session_id))
+        .await
+    {
+        Ok(Some(value)) => success(StatusCode::OK, Success::observed(request_id, value)),
+        Ok(None) => not_found(&request_id),
+        Err(error) => store_failure(&request_id, None, &error),
+    }
+}
+
+async fn pipe_session_retire(
+    State(app): State<Arc<App>>,
+    Extension(identity): Extension<Identity>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    RawQuery(raw_query): RawQuery,
+    body: Body,
+) -> Response {
+    let request_id = request_id(&app, &headers);
+    let address = format!("/v1/pipe-sessions/{session_id}");
+    let mutation = match decode_mutation::<EmptyInput>(
+        &app,
+        &identity,
+        "session.retire",
+        "DELETE",
+        &address,
+        raw_query.as_deref(),
+        body,
+        &request_id,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let operation = mutation.op.clone();
+    let new = new_operation(
+        &app,
+        &identity,
+        "session.retire",
+        "DELETE",
+        &address,
+        &mutation,
+        None,
+        Some(session_id.clone()),
+    );
+    match app
+        .store_io(|| {
+            app.store
+                .retire_pipe_session(&new, &session_id, app.authority.now())
+        })
+        .await
+    {
+        Ok(SessionRetireReservation::Existing(reservation)) => {
+            reservation_response(Ok(reservation), &request_id, &operation)
+                .unwrap_or_else(|| outcome_unknown(&request_id, &operation))
+        }
+        Ok(SessionRetireReservation::Capacity(_)) => operation_ledger_capacity(&request_id),
+        Ok(SessionRetireReservation::Refused(answer)) => replay(&request_id, &operation, answer),
+        Ok(SessionRetireReservation::Retired(absence)) => success(
+            StatusCode::OK,
+            Success::mutation(request_id, operation, absence),
+        ),
+        Err(error) => store_failure(&request_id, Some(&operation), &error),
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+async fn pipe_session_signal(
+    State(app): State<Arc<App>>,
+    Extension(identity): Extension<Identity>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    RawQuery(raw_query): RawQuery,
+    body: Body,
+) -> Response {
+    let request_id = request_id(&app, &headers);
+    let address = format!("/v1/pipe-sessions/{session_id}/signal");
+    let mutation = match decode_mutation::<ExecSignalInput>(
+        &app,
+        &identity,
+        "session.signal",
+        "POST",
+        &address,
+        raw_query.as_deref(),
+        body,
+        &request_id,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    if mutation.input.grace_ms > 30_000 {
+        let response = schema_invalid(&request_id, Some(&mutation.op), "input");
+        return refuse_before_dispatch_response(
+            &app,
+            &identity,
+            &request_id,
+            "session.signal",
+            "POST",
+            &address,
+            &mutation,
+            response,
+        )
+        .await;
+    }
+    let scope = app.scope(&identity);
+    let session = match app
+        .store_io(|| app.store.session(&scope, &session_id))
+        .await
+    {
+        Ok(Some(value)) => value,
+        Ok(None) => {
+            return refuse_before_dispatch_response(
+                &app,
+                &identity,
+                &request_id,
+                "session.signal",
+                "POST",
+                &address,
+                &mutation,
+                not_found_with_operation(&request_id, &mutation.op),
+            )
+            .await;
+        }
+        Err(error) => return store_failure(&request_id, Some(&mutation.op), &error),
+    };
+    let operation = mutation.op.clone();
+    if let Some(response) = begin(
+        &app,
+        &identity,
+        &request_id,
+        "session.signal",
+        "POST",
+        &address,
+        &mutation,
+        None,
+        Some(session_id.clone()),
+    )
+    .await
+    {
+        return response;
+    }
+    let exec = match app.store_io(|| app.store.exec(&scope, &session.exec)).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return outcome_unknown(&request_id, &operation),
+        Err(error) => return store_failure(&request_id, Some(&operation), &error),
+    };
+    if is_pipe_terminal(exec.resource.state) {
+        return finish_pipe_session_observation(
+            &app,
+            &scope,
+            &request_id,
+            &operation,
+            &session_id,
+            observation_from_stored(exec),
+        )
+        .await;
+    }
+    match app.driver.signal(&session.exec, &mutation.input).await {
+        Ok(observation) => {
+            finish_pipe_session_observation(
+                &app,
+                &scope,
+                &request_id,
+                &operation,
+                &session_id,
+                observation,
+            )
+            .await
+        }
+        Err(error) => {
+            finish_driver_error(
+                &app,
+                &scope,
+                &request_id,
+                &operation,
+                Some(&session_id),
+                &error,
+            )
+            .await
+        }
+    }
+}
+
+#[allow(clippy::too_many_lines)]
+async fn pipe_session_lease_renew(
+    State(app): State<Arc<App>>,
+    Extension(identity): Extension<Identity>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    RawQuery(raw_query): RawQuery,
+    body: Body,
+) -> Response {
+    let request_id = request_id(&app, &headers);
+    let address = format!("/v1/pipe-sessions/{session_id}/lease/renew");
+    let mutation = match decode_mutation::<LeaseRenewInput>(
+        &app,
+        &identity,
+        "session.lease.renew",
+        "POST",
+        &address,
+        raw_query.as_deref(),
+        body,
+        &request_id,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    if !(MIN_LEASE_TTL_MS..=MAX_LEASE_TTL_MS).contains(&mutation.input.ttl_ms) {
+        let response = schema_invalid(&request_id, Some(&mutation.op), "input");
+        return refuse_before_dispatch_response(
+            &app,
+            &identity,
+            &request_id,
+            "session.lease.renew",
+            "POST",
+            &address,
+            &mutation,
+            response,
+        )
+        .await;
+    }
+    let scope = app.scope(&identity);
+    let session = match app
+        .store_io(|| app.store.session(&scope, &session_id))
+        .await
+    {
+        Ok(Some(value)) => value,
+        Ok(None) => {
+            return refuse_before_dispatch_response(
+                &app,
+                &identity,
+                &request_id,
+                "session.lease.renew",
+                "POST",
+                &address,
+                &mutation,
+                not_found_with_operation(&request_id, &mutation.op),
+            )
+            .await;
+        }
+        Err(error) => return store_failure(&request_id, Some(&mutation.op), &error),
+    };
+    let operation = mutation.op.clone();
+    let lease = match new_lease(
+        &app,
+        &identity,
+        mutation.input.ttl_ms,
+        &request_id,
+        &operation,
+    ) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    if let Some(response) = begin(
+        &app,
+        &identity,
+        &request_id,
+        "session.lease.renew",
+        "POST",
+        &address,
+        &mutation,
+        None,
+        Some(session_id.clone()),
+    )
+    .await
+    {
+        return response;
+    }
+    match app
+        .store_io(|| {
+            app.store.renew_pipe_session_lease(
+                &scope,
+                &operation,
+                &app.authority.now().to_rfc3339(),
+                200,
+                &session_id,
+                &lease,
+            )
+        })
+        .await
+    {
+        Ok(resource) => {
+            app.driver
+                .set_exec_lease(&session.exec, Some(resource.lease.clone()));
+            success(
+                StatusCode::OK,
+                Success::mutation(request_id, operation, resource),
+            )
+        }
+        Err(error) => finish_lease_store_error(&app, &scope, &request_id, &operation, &error).await,
     }
 }
 
@@ -2261,7 +2653,7 @@ async fn pipe_session_attach(
     State(app): State<Arc<App>>,
     Extension(identity): Extension<Identity>,
     headers: HeaderMap,
-    Path(exec_id): Path<String>,
+    Path(session_id): Path<String>,
     RawQuery(raw_query): RawQuery,
     ws: WebSocketUpgrade,
 ) -> Response {
@@ -2271,36 +2663,17 @@ async fn pipe_session_attach(
     }
     app.sweep_expired().await;
     let scope = app.scope(&identity);
-    let stored = match app.store_io(|| app.store.exec(&scope, &exec_id)).await {
+    let session = match app
+        .store_io(|| app.store.session(&scope, &session_id))
+        .await
+    {
         Ok(Some(value)) => value,
         Ok(None) => return not_found(&request_id),
         Err(error) => return store_failure(&request_id, None, &error),
     };
-    let is_pipe = match app
-        .store_io(|| app.store.is_pipe_exec(&scope, &exec_id))
-        .await
-    {
-        Ok(value) => value,
-        Err(error) => return store_failure(&request_id, None, &error),
-    };
-    if !is_pipe {
-        return failure(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            &request_id,
-            None,
-            ErrorClass::Refused,
-            "session.not-pipe",
-            "The selected exec is not a raw-pipe session.",
-            Some("session"),
-            false,
-        );
-    }
-    if stored.resource.state != ExecState::Running
-        || stored
-            .resource
-            .lease
-            .as_ref()
-            .is_none_or(|lease| lease.state != substrate_wire::LeaseState::Active)
+    if session.state != SessionState::Ready
+        || session.attachment != SessionAttachmentState::Available
+        || session.lease.state != substrate_wire::LeaseState::Active
     {
         return failure(
             StatusCode::CONFLICT,
@@ -2313,7 +2686,7 @@ async fn pipe_session_attach(
             false,
         );
     }
-    let permit = match app.pipe_attachment_limits.acquire(&scope, &exec_id) {
+    let permit = match app.pipe_attachment_limits.acquire(&scope, &session_id) {
         Ok(value) => value,
         Err(PipeAttachmentRefusal::AlreadyAttached) => {
             return failure(
@@ -2340,6 +2713,42 @@ async fn pipe_session_attach(
             );
         }
     };
+    match app
+        .store_io(|| {
+            app.store
+                .claim_pipe_session_attachment(&scope, &session_id, app.authority.now())
+        })
+        .await
+    {
+        Ok(SessionAttachmentClaim::Claimed) => {}
+        Ok(SessionAttachmentClaim::AlreadyClaimed) => {
+            return failure(
+                StatusCode::CONFLICT,
+                &request_id,
+                None,
+                ErrorClass::Conflict,
+                "session.already-attached",
+                "The raw-pipe session attachment right has already been consumed.",
+                Some("session"),
+                false,
+            );
+        }
+        Ok(SessionAttachmentClaim::NotAttachable) => {
+            return failure(
+                StatusCode::CONFLICT,
+                &request_id,
+                None,
+                ErrorClass::Conflict,
+                "session.not-attachable",
+                "The raw-pipe session is not attachable.",
+                Some("session"),
+                false,
+            );
+        }
+        Ok(SessionAttachmentClaim::Missing) => return not_found(&request_id),
+        Err(error) => return store_failure(&request_id, None, &error),
+    }
+    let exec_id = session.exec;
     let policy = app.pipe_session_policy;
     ws.read_buffer_size(policy.max_message_bytes)
         .write_buffer_size(policy.write_buffer_bytes)
@@ -4504,6 +4913,80 @@ async fn finish_exec_leased(
     )
 }
 
+async fn finish_pipe_session_start(
+    app: &App,
+    scope: &Scope,
+    request_id: &str,
+    operation: &str,
+    provisional: &PipeSession,
+    observation: ExecObservation,
+    lease: &NewLease,
+) -> Response {
+    let mut session = provisional.clone();
+    session.state = SessionState::Ready;
+    session.attachment = SessionAttachmentState::Available;
+    session.observed_at = observation.resource.observed_at;
+    session.exit.clone_from(&observation.resource.exit);
+    session.lease = lease.observation();
+    let stored = stored_exec(&observation);
+    match app
+        .store_io(|| {
+            app.store.complete_pipe_session_start(
+                scope,
+                operation,
+                &app.authority.now().to_rfc3339(),
+                StatusCode::ACCEPTED.as_u16(),
+                &session,
+                &stored,
+                lease,
+            )
+        })
+        .await
+    {
+        Ok((authoritative, _)) => {
+            app.driver.acknowledge_exec(&observation);
+            success(
+                StatusCode::ACCEPTED,
+                Success::mutation(request_id, operation, authoritative),
+            )
+        }
+        Err(error) => store_failure(request_id, Some(operation), &error),
+    }
+}
+
+async fn finish_pipe_session_observation(
+    app: &App,
+    scope: &Scope,
+    request_id: &str,
+    operation: &str,
+    session_id: &str,
+    observation: ExecObservation,
+) -> Response {
+    let stored = stored_exec(&observation);
+    match app
+        .store_io(|| {
+            app.store.complete_pipe_session_observation(
+                scope,
+                operation,
+                &app.authority.now().to_rfc3339(),
+                StatusCode::OK.as_u16(),
+                session_id,
+                &stored,
+            )
+        })
+        .await
+    {
+        Ok(session) => {
+            app.driver.acknowledge_exec(&observation);
+            success(
+                StatusCode::OK,
+                Success::mutation(request_id, operation, session),
+            )
+        }
+        Err(error) => store_failure(request_id, Some(operation), &error),
+    }
+}
+
 fn stored_exec(observation: &ExecObservation) -> StoredExec {
     StoredExec {
         resource: observation.resource.clone(),
@@ -4664,6 +5147,78 @@ async fn finish_dispatch_absence(
         return store_failure(request_id, Some(operation), &store_error);
     }
     failure_detail(status, request_id, detail)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn finish_pipe_session_dispatch_absence(
+    app: &App,
+    scope: &Scope,
+    request_id: &str,
+    operation: &str,
+    session_id: &str,
+    exec_id: &str,
+    error: &DriverError,
+) -> Response {
+    let (status, mut detail) = driver_detail(Some(operation), error);
+    detail.retriable = false;
+    if let Err(store_error) = app
+        .store_io(|| {
+            app.store.complete_pipe_session_dispatch_absence(
+                scope,
+                operation,
+                &app.authority.now().to_rfc3339(),
+                status.as_u16(),
+                session_id,
+                exec_id,
+                &detail,
+            )
+        })
+        .await
+    {
+        return store_failure(request_id, Some(operation), &store_error);
+    }
+    failure_detail(status, request_id, detail)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn finish_pipe_session_dispatch_unknown(
+    app: &App,
+    scope: &Scope,
+    request_id: &str,
+    operation: &str,
+    session_id: &str,
+    exec_id: &str,
+    error: &DriverError,
+) -> Response {
+    if let Err(store_error) = app
+        .store_io(|| {
+            app.store.mark_pipe_session_dispatch_unknown(
+                scope,
+                operation,
+                app.authority.now(),
+                session_id,
+                exec_id,
+            )
+        })
+        .await
+    {
+        return store_failure(request_id, Some(operation), &store_error);
+    }
+    tracing::warn!(
+        resource = session_id,
+        code = error.code,
+        "pipe session outcome remains unknown"
+    );
+    failure(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        request_id,
+        Some(operation),
+        ErrorClass::Failed,
+        "operation.outcome-unknown",
+        "The session was accepted, but driver containment or the resulting state is unproven.",
+        Some("session"),
+        true,
+    )
 }
 
 async fn finish_dispatch_unknown(

@@ -6,8 +6,8 @@
 
 Phase 3 **lifecycle and recovery** is complete under the
 [archived closure disposition](docs/reviews/archived/2026-08-14-phase-3-closure-review-disposition.md).
-The phase-3 implementation has nineteen bundled development routes; the unbundled phase-4 pipe
-capability/start/attachment surface is classified separately. All 39 phase-3 review findings have
+The phase-3 implementation has nineteen bundled development routes; the 0.3.0 successor development
+bundle adds seven phase-4 pipe-session routes. All 39 phase-3 review findings have
 deterministic or independently observed evidence. This completes phase-3 implementation
 conformance, not stable publication:
 OCI packaging, signing, and digest pinning remain separate release work. See
@@ -17,11 +17,11 @@ OCI packaging, signing, and digest pinning remain separate release work. See
 |---|---|---|
 | Repository | private `daemonloom/substrate`; bot-authored `main` is synchronized | keep visibility, authorship, and portable-document invariants enforced |
 | Boundary | accepted: standalone, generic execution data plane, Flux-free | enforce ADRs 0001–0006 in dependency and conformance tests |
-| Wire contract | immutable 0.1.0 remains byte-clean; deterministic 0.2.0 has 19 closed operations, 19 runtime-executed vectors, 57 design vectors, and a reproducible fixed point | package, sign, and digest-pin a release without changing the development authority implicitly |
+| Wire contract | immutable 0.1.0 remains byte-clean; deterministic 0.2.0 remains reproducible; deterministic 0.3.0 has 26 closed operations, 21 executable vectors, 65 design vectors, 106 requirements, and a reproducible fixed point | package, sign, and digest-pin a stable release without changing development authority implicitly |
 | Drivers | Linux host driver implemented; absent delegation keeps exec facts absent; real delegated lane passes | retain the delegated lane and add no optimistic facts |
 | Security | `openat2` beneath/no-link/no-mount I/O, atomic replacement, cleared/shaped environment, namespace no-egress, pids/memory+swap/CPU cgroup bounds, output draining, timeout, and whole-tree kill are enforced | expand adversarial coverage without weakening admission |
 | Stack integration | trust, session, event, federation, and contract-release seams accepted in umbrella ADRs 0015–0019 | keep later features behind their named phases |
-| Implementation | phase 3 complete; phase 4 has closed development frames, inspected capability response, durable leased pipe start, and one scoped Unix-WebSocket attachment over the fail-closed host primitive | add the successor bundle and real delegated model-free Agent compatibility proof without regressing phase 3 |
+| Implementation | phase 3 complete; the phase-4 raw-pipe slice has distinct durable session identity, session-native lifecycle operations, one scoped Unix-WebSocket attachment, atomic terminal/restart projection, and a green delegated model-free Agent lane | retain the raw-pipe evidence while adding only separately gated PTY, authority, and release work |
 
 ## Repository facts
 
@@ -38,7 +38,7 @@ OCI packaging, signing, and digest pinning remain separate release work. See
   restart-to-unknown without redispatch, observed-effect/store-failure recovery, real WebSocket
   limits, capped fair maintenance across reopen, lease clocks, symlink escape refusal, and strict
   minimum host limits.
-- Both bundle trees classify every JSON document and meta-validate declared Draft 2020-12 schemas
+- All three bundle trees classify every JSON document and meta-validate declared Draft 2020-12 schemas
   with the pinned standards validator. Semantic relations and fixed authorities are checked
   offline; seven negative gate tests prove unclassified JSON, invalid payloads, invalid schemas,
   and invalid authority targets fail closed.
@@ -56,8 +56,10 @@ Phase 4 is now explicitly active under
 [Plan 04](docs/plan/04-direct-byte-plane.md). The daemon durably reserves the leased underlying exec
 before dispatch, scopes attachment by authenticated subject, admits one attachment, and terminates
 the tree on invalid ordering or attachment loss. Semantic route tests and Agent's independent
-copied-contract fixture pass. A successor bundle and a real delegated Agent compatibility lane have
-not passed, so `substrate-confined` remains unclaimed as cross-repository conformance.
+copied-contract fixture pass. The deterministic 0.3.0 bundle and real delegated Agent compatibility
+lane now also pass, including bounded queue pressure, attachment/protocol loss, lease expiry,
+restart-to-unknown, and whole-tree cleanup. This is development cross-repository confinement
+evidence; it is not a signed stable release or public product conformance claim.
 
 ## External dependencies
 
