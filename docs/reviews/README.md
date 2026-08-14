@@ -6,12 +6,14 @@ unchanged into [`archived/`](archived/) and place its disposition beside it.
 
 ## Current
 
-- [Phase 3 post-curation closure review](2026-08-14-phase-3-closure-review.md) — **open / NO-GO**
+No review is currently open.
 
 ## Archived
 
 - [Minimum host slice review](archived/2026-08-13-2305-minimum-host-slice-review.md)
 - [Minimum host slice disposition](archived/2026-08-13-2305-minimum-host-slice-review-disposition.md)
+- [Phase 3 post-curation closure review](archived/2026-08-14-phase-3-closure-review.md)
+- [Phase 3 closure disposition](archived/2026-08-14-phase-3-closure-review-disposition.md)
 
-The archived minimum-host-slice disposition is historical and superseded for current phase-3
-closure by the open review above.
+The minimum-host-slice disposition remains historical evidence for its narrower phase-2 surface;
+the phase-3 disposition is the current closure record.

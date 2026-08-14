@@ -8,12 +8,11 @@ Substrate runs things and reports what it observed. It does not decide product p
 loops, understand connector vendors, or depend on Flux. Consumers choose whether to call its stable
 API directly or through a higher-level Daemonloom service.
 
-**Status:** phase 3 closure is in progress under an
-[open NO-GO review](docs/reviews/2026-08-14-phase-3-closure-review.md). Durable provisional dispatch,
-authoritative terminal exec persistence, and subject-scoped post-commit event wakeups are green.
-The current 0.2.0 tree is still development input, not a publishable contract; lifecycle,
-capacity, recovery, transport, semantic-schema, and final adversarial evidence remain open. Phase 4
-sessions/stdin/PTY and Git sources remain absent.
+**Status:** phase 3 lifecycle and recovery is complete under the
+[archived closure disposition](docs/reviews/archived/2026-08-14-phase-3-closure-review-disposition.md).
+The deterministic 0.2.0 development bundle, runtime, portable lane, and delegated Linux lane are
+green. The bundle is not yet a published stable release: OCI packaging, signing, and digest pinning
+remain release work. Phase 4 sessions/stdin/PTY and Git sources remain absent.
 
 ## Start here
 
@@ -79,9 +78,10 @@ bounded reconnect semantics.
 Each authenticated subject has a daemon-minted opaque source scope with its own durable generation,
 sequence, retention, and coalesced wake hints. Pull and push read the same subject-local journal;
 the final 0.2 contract will require snapshot-first durable bootstrap and an opaque resume cursor.
-The current snapshot and lease implementations are being replaced with a complete quota-bounded
-current-resource projection, honest bounded provenance, transactional lifecycle freeze, and
-bounded fair cleanup. Until that closure lands, connectors S-029 remains blocked.
+The snapshot and lease implementations provide a complete quota-bounded current-resource
+projection, honest bounded provenance, transactional lifecycle freeze, and bounded fair cleanup.
+The substrate-side prerequisite for connectors S-029 is therefore available; connector adoption
+and contract pinning remain connectors-owned work.
 Expired snapshot metadata and materialized items are physically garbage-collected under explicit
 per-subject bounds while a bounded marker retains the `expired` versus `not found` distinction.
 Terminal exec observations and output remain in memory until the durable store acknowledges them;
