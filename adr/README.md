@@ -12,3 +12,4 @@ with YAML frontmatter containing `date` and `status`. Draft design questions rem
 | [0004](0004-the-host-driver-refuses-without-linux-confinement.md) | The host driver refuses without Linux confinement | accepted |
 | [0005](0005-operations-are-durable-before-driver-dispatch.md) | Operations are durable before driver dispatch | accepted |
 | [0006](0006-substrate-publishes-its-own-contract-bundle.md) | Substrate publishes its own contract bundle | accepted |
+| [0007](0007-protocol-processes-use-raw-pipe-sessions.md) | Protocol processes use raw-pipe sessions | accepted |

@@ -22,8 +22,15 @@ events.
 
 An interactive exec creates a leased session resource before opening its channel. Establishment
 authenticates the control request, admits scopes/capabilities, creates the bounded process, and mints
-or accepts a short-lived channel authority. PTY frames form a closed set: input, output, resize,
-signal, exit, and protocol error.
+or accepts a short-lived channel authority. The mode is explicit:
+
+- `pty` is a human terminal and has input, output, resize, signal, exit, and protocol-error frames;
+- `pipes` is a machine protocol and preserves distinct stdin, stdout, and stderr with input,
+  output, close-input, signal/cancel, exit, truncation, and protocol-error frames.
+
+A PTY is never substituted for pipes. Both modes have finite frame, aggregate-byte, queue, idle,
+lease, and attachment limits. Backpressure or attachment loss follows typed cancellation or
+reconciliation behavior rather than unbounded buffering.
 
 Session authority is operation-scoped, short-lived, revocable, non-loggable, proof-bound on network
 transport, and single-use for initial redemption. Reconnection requires a fresh authority;
@@ -64,5 +71,13 @@ substrate tenant policy or giving connectors access to daemon internals.
    public ingress, reverse tunnel, or connector byte relay in v1; no client-reachable route is
    `unserved`.
 
-All session, endpoint, tunnel, and live-stream implementation remains explicitly deferred to phase
-4. These decisions close the protocol shape without widening the minimum host slice.
+6. **Machine protocols:**
+   [ADR 0007](../../adr/0007-protocol-processes-use-raw-pipe-sessions.md) fixes `pipes` as the first
+   implementation slice. It is owner-permissioned Unix-socket, single-attachment, no-egress, and
+   model-free. PTY, network transport, secret slots, and controlled egress remain absent until
+   their own slice proves them.
+
+The first phase-4 host primitive is implemented: bounded raw stdin/stdout/stderr pipes reuse the
+existing confinement path and refuse without delegated isolation. Durable session ownership,
+attachment/replay, daemon routing, endpoints, tunnels, and PTY remain unimplemented. Phase 4 is
+active under [Plan 04](../plan/04-direct-byte-plane.md).

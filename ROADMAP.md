@@ -8,7 +8,7 @@ The roadmap is ordered. A later phase does not begin while an earlier exit crite
 | 1 | Design closure | contract questions are decided or explicitly deferred; canonical schema/translation, trust-domain, destination-security, capability-snapshot, and driver guarantees are reviewable | complete |
 | 2 | Minimum host slice | one confined workspace, bounded argv-only exec, observed result, named refusals, and machine facts | complete — portable and delegated-host lanes green |
 | 3 | Lifecycle and recovery | operation ledger, events, leases, cancellation, and unanswered-outcome reconciliation | complete — all 39 closure findings resolved; portable and delegated lanes green |
-| 4 | Direct byte plane | PTY/session establishment and bounded channel authority without routing bytes through connectors | pending behind phase-3 closure |
+| 4 | Direct byte plane | raw-pipe then PTY session establishment and bounded channel authority without routing bytes through connectors | in progress — model-free no-egress pipe slice first |
 | 5 | Docker driver | the same contract serves container-backed execs and workloads with truthful capability facts | pending |
 | 6 | Stack adoption | connectors projection, one Flux adapter, and one autodev `Executor` adapter prove the public contract independently | externally gated — Flux/autodev must first record adoption in their own repositories |
 | 7 | Hosted composition | identity/cloud trust and placement operate substrate without moving domain rules into cloud | pending |

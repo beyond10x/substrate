@@ -6,7 +6,7 @@ use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -16,15 +16,29 @@ use substrate_wire::{
     AppliedConfinement, AppliedFilesystem, AppliedNetwork, Base64Content, Base64Encoding,
     BaselineEnvironment, CapabilitySnapshot, Exec, ExecExit, ExecKind, ExecOutputQuery,
     ExecSignalInput, ExecStartInput, ExecState, NetworkMode, OutputSlice, OutputStream,
-    SandboxProfile, Signal,
+    PipeSessionStartInput, SandboxProfile, Signal,
 };
-use tokio::io::{AsyncRead, AsyncReadExt as _};
-use tokio::process::{Child, Command};
-use tokio::sync::Notify;
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::process::{Child, ChildStdin, Command};
+use tokio::sync::{Notify, mpsc};
 
 use crate::{DispatchOutcome, DriverError, HostConfig};
 
 const TRUNCATION_MARKER: &[u8] = b"\n[substrate: output truncated]\n";
+const PIPE_FRAME_BYTES: usize = 64 * 1024;
+const PIPE_QUEUED_FRAMES: usize = 16;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PipeStream {
+    Stdout,
+    Stderr,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PipeFrame {
+    pub stream: PipeStream,
+    pub bytes: Vec<u8>,
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExecObservation {
@@ -43,15 +57,32 @@ struct Execution {
     notify: Notify,
     cancellation_requested: AtomicBool,
     delivered_signal: Mutex<Option<Signal>>,
+    pipe: Option<PipeState>,
+}
+
+struct PipeState {
+    stdin: tokio::sync::Mutex<Option<ChildStdin>>,
+    output: tokio::sync::Mutex<mpsc::Receiver<PipeFrame>>,
+    input_bytes: AtomicU64,
+    input_limit: u64,
+    frame_limit: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PipeSettings {
+    input_limit: u64,
+    frame_limit: usize,
+    queued_frames: usize,
 }
 
 impl Execution {
-    fn new(observation: ExecObservation) -> Self {
+    fn new(observation: ExecObservation, pipe: Option<PipeState>) -> Self {
         Self {
             observation: Mutex::new(observation),
             notify: Notify::new(),
             cancellation_requested: AtomicBool::new(false),
             delivered_signal: Mutex::new(None),
+            pipe,
         }
     }
 }
@@ -117,12 +148,59 @@ impl ProcessRuntime {
         Ok(())
     }
 
-    #[allow(clippy::too_many_lines)] // Admission, spawn barrier, and durable observation stay adjacent.
     pub async fn start(
         &self,
         id: &str,
         workspace: &Path,
         input: &ExecStartInput,
+    ) -> DispatchOutcome<ExecObservation> {
+        self.start_inner(id, workspace, input, None).await
+    }
+
+    /// Starts a confined process with bounded live stdin/stdout/stderr pipes.
+    pub async fn start_pipe(
+        &self,
+        id: &str,
+        workspace: &Path,
+        input: &PipeSessionStartInput,
+    ) -> DispatchOutcome<ExecObservation> {
+        if input.exec.wait {
+            return DispatchOutcome::NotDispatched(DriverError::refused(
+                "session.wait-invalid",
+                "A raw-pipe session cannot use synchronous exec wait.",
+                "wait",
+            ));
+        }
+        if input.input_limit_bytes == 0
+            || input.frame_limit_bytes == 0
+            || input.frame_limit_bytes > PIPE_FRAME_BYTES as u64
+            || input.queued_frames == 0
+            || input.queued_frames
+                > u32::try_from(PIPE_QUEUED_FRAMES).expect("queue ceiling fits u32")
+        {
+            return DispatchOutcome::NotDispatched(DriverError::exhausted(
+                "session.limit-unserved",
+                "Raw-pipe bounds exceed the host development profile.",
+                "session",
+            ));
+        }
+        let settings = PipeSettings {
+            input_limit: input.input_limit_bytes,
+            frame_limit: usize::try_from(input.frame_limit_bytes)
+                .expect("bounded frame fits usize"),
+            queued_frames: usize::try_from(input.queued_frames).expect("bounded queue fits usize"),
+        };
+        self.start_inner(id, workspace, &input.exec, Some(settings))
+            .await
+    }
+
+    #[allow(clippy::too_many_lines)] // Admission, spawn barrier, and durable observation stay adjacent.
+    async fn start_inner(
+        &self,
+        id: &str,
+        workspace: &Path,
+        input: &ExecStartInput,
+        pipe_settings: Option<PipeSettings>,
     ) -> DispatchOutcome<ExecObservation> {
         if let Err(error) = self.admit(id, workspace, input) {
             return DispatchOutcome::NotDispatched(error);
@@ -156,7 +234,7 @@ impl ProcessRuntime {
             }
         };
         let sync_fd = sync_read.as_raw_fd();
-        let mut command = self.command(workspace, input, sync_fd);
+        let mut command = self.command(workspace, input, sync_fd, pipe_settings.is_some());
         let write_fd = sync_write.as_raw_fd();
         // SAFETY: pre_exec runs after fork; it invokes only async-signal-safe libc calls and does
         // not allocate. The captured descriptor is a plain integer owned by the parent until spawn.
@@ -190,7 +268,7 @@ impl ProcessRuntime {
                 Ok(())
             });
         }
-        let child = match command.spawn() {
+        let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => {
                 return contain_cgroup(
@@ -244,7 +322,29 @@ impl ProcessRuntime {
             cgroup: Some(cgroup.name().to_owned()),
             leader_pid: Some(leader_pid),
         };
-        let execution = Arc::new(Execution::new(observation.clone()));
+        let (pipe_sender, pipe) = if let Some(settings) = pipe_settings {
+            let Some(stdin) = child.stdin.take() else {
+                let error = DriverError::failed(
+                    "session.stdin-missing",
+                    "Raw-pipe process did not expose stdin.",
+                );
+                return contain_spawned(child, cgroup, error).await;
+            };
+            let (sender, receiver) = mpsc::channel(settings.queued_frames);
+            (
+                Some(sender),
+                Some(PipeState {
+                    stdin: tokio::sync::Mutex::new(Some(stdin)),
+                    output: tokio::sync::Mutex::new(receiver),
+                    input_bytes: AtomicU64::new(0),
+                    input_limit: settings.input_limit,
+                    frame_limit: settings.frame_limit,
+                }),
+            )
+        } else {
+            (None, None)
+        };
+        let execution = Arc::new(Execution::new(observation.clone(), pipe));
         tracking.install(Arc::clone(&execution));
         let timeout = Duration::from_millis(input.limits.timeout_ms);
         let output_limit = usize::try_from(input.limits.output_bytes)
@@ -256,6 +356,8 @@ impl ProcessRuntime {
             Arc::clone(&execution),
             timeout,
             output_limit,
+            pipe_sender,
+            pipe_settings.map_or(PIPE_FRAME_BYTES, |settings| settings.frame_limit),
             permit,
         ));
         if input.wait {
@@ -268,6 +370,102 @@ impl ProcessRuntime {
         } else {
             DispatchOutcome::Observed(observation)
         }
+    }
+
+    pub async fn write_pipe(&self, id: &str, bytes: &[u8]) -> Result<(), DriverError> {
+        let execution = self.execution(id)?;
+        let pipe = execution.pipe.as_ref().ok_or_else(|| {
+            DriverError::refused(
+                "session.not-pipe",
+                "Exec is not a raw-pipe session.",
+                "session",
+            )
+        })?;
+        if bytes.is_empty() || bytes.len() > pipe.frame_limit {
+            return Err(DriverError::exhausted(
+                "session.frame-limit",
+                "Raw-pipe input frame is outside the admitted bounds.",
+                "frame",
+            ));
+        }
+        let count = u64::try_from(bytes.len()).expect("usize fits u64");
+        let admitted =
+            pipe.input_bytes
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |current| {
+                    current
+                        .checked_add(count)
+                        .filter(|next| *next <= pipe.input_limit)
+                });
+        if admitted.is_err() {
+            return Err(DriverError::exhausted(
+                "session.input-limit",
+                "Raw-pipe input exceeds the admitted byte limit.",
+                "stdin",
+            ));
+        }
+        let mut stdin = pipe.stdin.lock().await;
+        let Some(stdin) = stdin.as_mut() else {
+            return Err(DriverError::refused(
+                "session.input-closed",
+                "Raw-pipe stdin is already closed.",
+                "stdin",
+            ));
+        };
+        stdin.write_all(bytes).await.map_err(|error| {
+            DriverError::failed("session.write-failed", format!("raw-pipe stdin: {error}"))
+        })?;
+        stdin.flush().await.map_err(|error| {
+            DriverError::failed("session.write-failed", format!("raw-pipe stdin: {error}"))
+        })
+    }
+
+    pub async fn close_pipe_input(&self, id: &str) -> Result<(), DriverError> {
+        let execution = self.execution(id)?;
+        let pipe = execution.pipe.as_ref().ok_or_else(|| {
+            DriverError::refused(
+                "session.not-pipe",
+                "Exec is not a raw-pipe session.",
+                "session",
+            )
+        })?;
+        pipe.stdin.lock().await.take();
+        Ok(())
+    }
+
+    pub async fn read_pipe(
+        &self,
+        id: &str,
+        timeout: Duration,
+    ) -> Result<Option<PipeFrame>, DriverError> {
+        if timeout.is_zero() {
+            return Err(DriverError::refused(
+                "session.timeout-invalid",
+                "Raw-pipe read timeout must be nonzero.",
+                "timeout",
+            ));
+        }
+        let execution = self.execution(id)?;
+        let pipe = execution.pipe.as_ref().ok_or_else(|| {
+            DriverError::refused(
+                "session.not-pipe",
+                "Exec is not a raw-pipe session.",
+                "session",
+            )
+        })?;
+        let mut output = pipe.output.lock().await;
+        tokio::time::timeout(timeout, output.recv())
+            .await
+            .map_err(|_| {
+                DriverError::failed("session.read-timeout", "Raw-pipe read deadline elapsed.")
+            })
+    }
+
+    fn execution(&self, id: &str) -> Result<Arc<Execution>, DriverError> {
+        self.executions
+            .lock()
+            .get(id)
+            .cloned()
+            .ok_or_else(DriverError::not_found)
     }
 
     pub fn observe(&self, id: &str) -> Result<ExecObservation, DriverError> {
@@ -505,12 +703,22 @@ impl ProcessRuntime {
         Ok(())
     }
 
-    fn command(&self, workspace: &Path, input: &ExecStartInput, sync_fd: RawFd) -> Command {
+    fn command(
+        &self,
+        workspace: &Path,
+        input: &ExecStartInput,
+        sync_fd: RawFd,
+        interactive: bool,
+    ) -> Command {
         let mut command = Command::new(&self.config.bubblewrap);
         command
             .env_clear()
             .kill_on_drop(true)
-            .stdin(Stdio::null())
+            .stdin(if interactive {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .args([
@@ -563,18 +771,40 @@ impl ProcessRuntime {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_child(
     mut child: Child,
     cgroup: Cgroup,
     execution: Arc<Execution>,
     timeout: Duration,
     output_limit: usize,
+    pipe_sender: Option<mpsc::Sender<PipeFrame>>,
+    frame_limit: usize,
     _permit: ActivePermit,
 ) {
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    let stdout_task = tokio::spawn(async move { drain_capped(stdout, output_limit).await });
-    let stderr_task = tokio::spawn(async move { drain_capped(stderr, output_limit).await });
+    let stdout_sender = pipe_sender.clone();
+    let stdout_task = tokio::spawn(async move {
+        drain_capped(
+            stdout,
+            output_limit,
+            stdout_sender,
+            PipeStream::Stdout,
+            frame_limit,
+        )
+        .await
+    });
+    let stderr_task = tokio::spawn(async move {
+        drain_capped(
+            stderr,
+            output_limit,
+            pipe_sender,
+            PipeStream::Stderr,
+            frame_limit,
+        )
+        .await
+    });
     let timed_out;
     let status = if let Ok(result) = tokio::time::timeout(timeout, child.wait()).await {
         timed_out = false;
@@ -769,7 +999,13 @@ fn contain_cgroup(cgroup: &Cgroup, error: DriverError) -> DispatchOutcome<ExecOb
     }
 }
 
-async fn drain_capped<R>(reader: Option<R>, limit: usize) -> (Vec<u8>, bool)
+async fn drain_capped<R>(
+    reader: Option<R>,
+    limit: usize,
+    sender: Option<mpsc::Sender<PipeFrame>>,
+    stream: PipeStream,
+    frame_limit: usize,
+) -> (Vec<u8>, bool)
 where
     R: AsyncRead + Unpin,
 {
@@ -793,6 +1029,21 @@ where
         stored.extend_from_slice(&buffer[..retained]);
         if retained < count {
             truncated = true;
+        }
+        if let Some(sender) = &sender {
+            for chunk in buffer[..count].chunks(frame_limit) {
+                if sender
+                    .send(PipeFrame {
+                        stream,
+                        bytes: chunk.to_vec(),
+                    })
+                    .await
+                    .is_err()
+                {
+                    truncated = true;
+                    break;
+                }
+            }
         }
     }
     if truncated {
@@ -1137,8 +1388,9 @@ mod tests {
     };
 
     use super::{
-        Cgroup, ExecObservation, Execution, ProcessRuntime, contain_spawned_with_reconciliation,
-        is_secretish_name, is_terminal, wait_terminal_with_hook,
+        Cgroup, ExecObservation, Execution, PipeStream, ProcessRuntime,
+        contain_spawned_with_reconciliation, drain_capped, is_secretish_name, is_terminal,
+        wait_terminal_with_hook,
     };
     use crate::{DispatchOutcome, HostConfig};
 
@@ -1248,6 +1500,105 @@ mod tests {
         assert_eq!(error.code, "exec.capability-stale");
     }
 
+    #[tokio::test]
+    async fn raw_pipe_refuses_when_hard_confinement_is_unavailable() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("ws_test");
+        std::fs::create_dir(&workspace).unwrap();
+        let snapshot = format!("sha256:{}", "7".repeat(64));
+        let capability = CapabilitySnapshot {
+            snapshot: snapshot.clone(),
+            driver: HostDriverKind::Host,
+            driver_version: "test".to_owned(),
+            config_generation: 7,
+            probed_at: chrono::Utc::now(),
+            valid_until: None,
+            facts: CapabilityFacts {
+                exec_argv_only: Some(true),
+                exec_namespaces: Some(NamespaceFacts {
+                    user: true,
+                    mount: true,
+                    pid: true,
+                    ipc: true,
+                    uts: true,
+                    network: true,
+                }),
+                exec_no_egress: Some(true),
+                exec_cgroup_limits: Some(CgroupLimitFacts {
+                    processes: true,
+                    memory: true,
+                    cpu: true,
+                }),
+                exec_cgroup_kill: Some(true),
+                exec_output_limit_bytes: Some(65_536),
+                ..CapabilityFacts::default()
+            },
+        };
+        let runtime = ProcessRuntime::new(HostConfig::minimum(root.path()), capability).unwrap();
+        let input = ExecStartInput {
+            workspace: "ws_test".to_owned(),
+            argv: vec!["/usr/bin/true".to_owned()],
+            env: ExecEnvironment {
+                allow: vec![],
+                set: BTreeMap::new(),
+            },
+            sandbox: substrate_wire::ConfinementRequest {
+                capability_snapshot: snapshot,
+                network: NetworkMode::None,
+                profile: SandboxProfile::Workspace,
+                required: true,
+            },
+            limits: ExecLimits {
+                timeout_ms: 5_000,
+                output_bytes: 65_536,
+                processes: 16,
+                memory_bytes: 67_108_864,
+                cpu_millis: 1_000,
+            },
+            wait: false,
+            lease_ttl_ms: None,
+        };
+        let DispatchOutcome::NotDispatched(error) = runtime
+            .start_pipe(
+                "ex_pipe",
+                &workspace,
+                &substrate_wire::PipeSessionStartInput {
+                    exec: input,
+                    input_limit_bytes: 65_536,
+                    frame_limit_bytes: 4_096,
+                    queued_frames: 4,
+                },
+            )
+            .await
+        else {
+            panic!("raw pipes must not fall back to an unconfined process");
+        };
+        assert_eq!(error.code, "exec.sandbox-unavailable");
+    }
+
+    #[tokio::test]
+    async fn live_drain_preserves_stream_and_bounded_capture() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (mut writer, reader) = tokio::io::duplex(1024);
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
+        let drain = tokio::spawn(drain_capped(
+            Some(reader),
+            4,
+            Some(sender),
+            PipeStream::Stdout,
+            64,
+        ));
+        writer.write_all(b"abcdef").await.unwrap();
+        drop(writer);
+        let frame = receiver.recv().await.unwrap();
+        assert_eq!(frame.stream, PipeStream::Stdout);
+        assert_eq!(frame.bytes, b"abcdef");
+        let (captured, truncated) = drain.await.unwrap();
+        assert_eq!(captured, b"abcd");
+        assert!(truncated);
+    }
+
     #[test]
     fn stale_running_acknowledgement_cannot_discard_newer_terminal_observation() {
         let capability = CapabilitySnapshot {
@@ -1262,7 +1613,7 @@ mod tests {
         let runtime = ProcessRuntime::new(HostConfig::minimum("/does/not/exist"), capability)
             .expect("runtime");
         let mut running = running_observation("ex_ack_race");
-        let execution = std::sync::Arc::new(Execution::new(running.clone()));
+        let execution = std::sync::Arc::new(Execution::new(running.clone(), None));
         runtime.executions.lock().insert(
             running.resource.id.clone(),
             std::sync::Arc::clone(&execution),
@@ -1296,7 +1647,7 @@ mod tests {
         let mut running = running_observation("ex_notify_race");
         running.resource.exit = None;
         running.output_complete = false;
-        let execution = std::sync::Arc::new(Execution::new(running));
+        let execution = std::sync::Arc::new(Execution::new(running, None));
         let hook_execution = std::sync::Arc::clone(&execution);
         wait_terminal_with_hook(
             &execution,

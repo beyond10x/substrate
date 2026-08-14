@@ -20,7 +20,7 @@ use substrate_wire::{
 use thiserror::Error;
 use tokio::sync::Semaphore;
 
-pub use process::ExecObservation;
+pub use process::{ExecObservation, PipeFrame, PipeStream};
 
 #[derive(Debug, Clone)]
 pub struct HostConfig {
@@ -335,6 +335,53 @@ impl HostDriver {
 
     pub fn root(&self) -> &Path {
         &self.config.workspace_root
+    }
+
+    /// Starts one development raw-pipe session inside the same fail-closed confinement used by
+    /// exec. This host-level API precedes the durable public daemon session resource.
+    pub async fn start_pipe_session(
+        &self,
+        id: &str,
+        workspace_root_name: &str,
+        input: &substrate_wire::PipeSessionStartInput,
+    ) -> DispatchOutcome<ExecObservation> {
+        let workspace = match self.workspace_path(workspace_root_name) {
+            Ok(value) => value,
+            Err(error) => return DispatchOutcome::NotDispatched(error),
+        };
+        self.processes.start_pipe(id, &workspace, input).await
+    }
+
+    /// Writes one already-bounded stdin frame.
+    ///
+    /// # Errors
+    ///
+    /// Refuses missing/non-pipe/closed sessions and frame or total-input overflow; reports write
+    /// failures without pretending the bytes were delivered.
+    pub async fn write_pipe_session(&self, id: &str, bytes: &[u8]) -> Result<(), DriverError> {
+        self.processes.write_pipe(id, bytes).await
+    }
+
+    /// Reads one attributed stdout/stderr frame before the supplied deadline.
+    ///
+    /// # Errors
+    ///
+    /// Refuses missing/non-pipe sessions and zero deadlines, and reports deadline expiry.
+    pub async fn read_pipe_session(
+        &self,
+        id: &str,
+        timeout: std::time::Duration,
+    ) -> Result<Option<PipeFrame>, DriverError> {
+        self.processes.read_pipe(id, timeout).await
+    }
+
+    /// Half-closes stdin without ending output observation.
+    ///
+    /// # Errors
+    ///
+    /// Refuses missing resources and execs which were not started as pipe sessions.
+    pub async fn close_pipe_session_input(&self, id: &str) -> Result<(), DriverError> {
+        self.processes.close_pipe_input(id).await
     }
 
     async fn filesystem_io<T, F>(&self, operation: F) -> Result<T, DriverError>

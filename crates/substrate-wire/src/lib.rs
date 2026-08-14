@@ -676,6 +676,58 @@ pub enum OutputStream {
     Stderr,
 }
 
+/// Development raw-pipe start shape. The public session route is not released yet; this closed
+/// shape pins the future boundary without changing immutable 0.1.0 or 0.2.0 bundle bytes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PipeSessionStartInput {
+    pub exec: ExecStartInput,
+    pub input_limit_bytes: u64,
+    pub frame_limit_bytes: u64,
+    pub queued_frames: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum PipeClientFrame {
+    Stdin {
+        sequence: u64,
+        content: Base64Content,
+    },
+    CloseInput {
+        sequence: u64,
+    },
+    Signal {
+        sequence: u64,
+        signal: Signal,
+        grace_ms: u64,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum PipeServerFrame {
+    Output {
+        sequence: u64,
+        stream: OutputStream,
+        content: Base64Content,
+    },
+    Truncated {
+        sequence: u64,
+        stream: OutputStream,
+    },
+    Exit {
+        sequence: u64,
+        state: ExecState,
+        exit: Option<ExecExit>,
+    },
+    ProtocolError {
+        sequence: u64,
+        code: String,
+        message: String,
+    },
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ExecOutputQuery {
@@ -1191,8 +1243,8 @@ pub fn canonical_json(value: &Value) -> Result<String, WireValidationError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        canonical_json, canonical_query, canonical_request_hash, canonical_request_hash_v2,
-        validate_relative_path,
+        OutputStream, PipeClientFrame, PipeServerFrame, canonical_json, canonical_query,
+        canonical_request_hash, canonical_request_hash_v2, validate_relative_path,
     };
     use serde::Deserialize as _;
     use serde_json::Value;
@@ -1376,5 +1428,40 @@ mod tests {
             assert!(validate_relative_path(invalid).is_err(), "{invalid}");
         }
         assert!(validate_relative_path(&["a"; 65].join("/")).is_err());
+    }
+
+    #[test]
+    fn raw_pipe_frames_are_closed_ordered_and_stream_attributed() {
+        let output: PipeServerFrame = serde_json::from_value(serde_json::json!({
+            "kind": "output",
+            "sequence": 1,
+            "stream": "stdout",
+            "content": {"encoding": "base64", "data": "aGVsbG8="}
+        }))
+        .expect("selected frame decodes");
+        assert!(matches!(
+            output,
+            PipeServerFrame::Output {
+                sequence: 1,
+                stream: OutputStream::Stdout,
+                ..
+            }
+        ));
+        assert!(
+            serde_json::from_value::<PipeClientFrame>(serde_json::json!({
+                "kind": "stdin",
+                "sequence": 1,
+                "content": {"encoding": "base64", "data": "eA=="},
+                "future": true
+            }))
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<PipeClientFrame>(serde_json::json!({
+                "kind": "resize",
+                "sequence": 1
+            }))
+            .is_err()
+        );
     }
 }

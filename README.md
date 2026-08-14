@@ -12,7 +12,8 @@ API directly or through a higher-level Daemonloom service.
 [archived closure disposition](docs/reviews/archived/2026-08-14-phase-3-closure-review-disposition.md).
 The deterministic 0.2.0 development bundle, runtime, portable lane, and delegated Linux lane are
 green. The bundle is not yet a published stable release: OCI packaging, signing, and digest pinning
-remain release work. Phase 4 sessions/stdin/PTY and Git sources remain absent.
+remain release work. Phase 4 now has a source-typed, host-level bounded raw-pipe primitive; the
+durable daemon session route, released bundle, PTY, and Git sources remain absent.
 
 ## Start here
 
@@ -72,8 +73,15 @@ advertises exec.
 The daemon continuously drains both stdout and stderr while a process runs, retains their bounded
 captures, persists them when the exec is observed, and exposes ranged reads. Phase 3 also streams
 lifecycle events; it does not expose a live process-byte stream or stdin. Those belong to the
-phase-4 session channel, including PTY input, resize, signals, explicit end/truncation frames, and
-bounded reconnect semantics.
+phase-4 daemon session channel. The host crate now has a development raw-pipe start/read/write/
+half-close primitive with bounded queues, while the durable resource, attachment protocol, PTY
+input, resize, explicit terminal/truncation frames, and reconnect semantics remain to be built.
+
+Phase 4 now starts with a raw-pipe mode for machine protocols before PTY support. It preserves
+stdin, stdout, and stderr as distinct bounded streams and is initially model-free and no-egress;
+see [ADR 0007](adr/0007-protocol-processes-use-raw-pipe-sessions.md) and
+[Plan 04](docs/plan/04-direct-byte-plane.md). No daemon session route is implemented yet, and the
+host primitive does not by itself establish cross-repository or released-contract compatibility.
 
 Each authenticated subject has a daemon-minted opaque source scope with its own durable generation,
 sequence, retention, and coalesced wake hints. Pull and push read the same subject-local journal;

@@ -19,7 +19,7 @@ OCI packaging, signing, and digest pinning remain separate release work. See
 | Drivers | Linux host driver implemented; absent delegation keeps exec facts absent; real delegated lane passes | retain the delegated lane and add no optimistic facts |
 | Security | `openat2` beneath/no-link/no-mount I/O, atomic replacement, cleared/shaped environment, namespace no-egress, pids/memory+swap/CPU cgroup bounds, output draining, timeout, and whole-tree kill are enforced | expand adversarial coverage without weakening admission |
 | Stack integration | trust, session, event, federation, and contract-release seams accepted in umbrella ADRs 0015–0019 | keep later features behind their named phases |
-| Implementation | phase 3 complete: durable provisional dispatch, first-terminal-wins, exact post-commit effects, scoped streams, bounded snapshots, fair maintenance, and crash recovery are independently reviewed | begin phase 4 only under a new explicit goal |
+| Implementation | phase 3 complete; phase 4 has closed development frame types and a host-level bounded raw-pipe primitive that reuses fail-closed exec confinement and refuses without it | add the durable leased daemon route and delegated model-free compatibility proof without regressing phase 3 |
 
 ## Repository facts
 
@@ -48,6 +48,13 @@ OCI packaging, signing, and digest pinning remain separate release work. See
   fixed, subject-scoped lock stripes until the original destroy operation terminalizes.
 - Git, sessions/stdin/PTY, workloads, images, volumes, endpoints, Docker, and Kubernetes are absent
   rather than stubbed.
+
+Phase 4 is now explicitly active under
+[ADR 0007](adr/0007-protocol-processes-use-raw-pipe-sessions.md) and
+[Plan 04](docs/plan/04-direct-byte-plane.md). The source-typed host primitive and portable
+fail-closed tests are implementation evidence only for the bottom of the slice. The current daemon
+still serves no durable session or live stdin channel, and no delegated Agent compatibility lane has
+passed yet.
 
 ## External dependencies
 
