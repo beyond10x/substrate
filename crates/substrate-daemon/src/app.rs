@@ -1,7 +1,7 @@
 #![allow(clippy::result_large_err)] // Axum responses are the natural typed rejection at this seam.
 
 use std::collections::hash_map::DefaultHasher;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::future::Future;
 use std::hash::{Hash as _, Hasher as _};
@@ -22,7 +22,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use substrate_host::{
-    DispatchOutcome, Driver, DriverError, DriverErrorClass, ExecObservation,
+    DispatchOutcome, Driver, DriverError, DriverErrorClass, ExecObservation, PipeStream,
     WorkspaceDestroyProgress,
 };
 use substrate_store::{
@@ -36,7 +36,8 @@ use substrate_wire::{
     Exec, ExecKind, ExecOutputQuery, ExecSignalInput, ExecStartInput, ExecState, Failure,
     FileReadQuery, FileWriteInput, LeaseRenewInput, MAX_EVENT_PAGE_ITEMS, MAX_LEASE_TTL_MS,
     MAX_SNAPSHOT_PAGE_ITEMS, MIN_LEASE_TTL_MS, NetworkMode, OperationOutcome, OperationState,
-    OutputSlice, Success, WireValidationError, WorkspaceAbsence, WorkspaceCreateInput,
+    OutputSlice, OutputStream, PipeClientFrame, PipeServerFrame, PipeSessionCapabilities,
+    PipeSessionStartInput, Success, WireValidationError, WorkspaceAbsence, WorkspaceCreateInput,
     WorkspaceKind, WorkspaceSource, WorkspaceState, canonical_request_hash_v2,
     validate_operation_id, validate_relative_path,
 };
@@ -50,6 +51,9 @@ const WORKSPACE_CLEANUP_BATCH: usize = 32;
 const RESTART_RECONCILE_BATCH: usize = 64;
 const PROVISIONAL_RECOVERY_BATCH: usize = 16;
 const REQUEST_BODY_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const PIPE_MAX_INPUT_BYTES: u64 = 16 * 1_024 * 1_024;
+const PIPE_MAX_FRAME_BYTES: u64 = 64 * 1_024;
+const PIPE_MAX_QUEUED_FRAMES: u32 = 16;
 
 #[derive(Debug)]
 struct BoundMutation<T> {
@@ -138,6 +142,110 @@ struct EventStreamPermit {
     scope: Scope,
     _global: tokio::sync::OwnedSemaphorePermit,
     _subject: tokio::sync::OwnedSemaphorePermit,
+}
+
+#[derive(Clone, Copy)]
+struct PipeSessionPolicy {
+    global_attachments: usize,
+    max_message_bytes: usize,
+    write_buffer_bytes: usize,
+    send_timeout: std::time::Duration,
+    read_poll: std::time::Duration,
+    lifetime: std::time::Duration,
+    max_controls_per_window: u32,
+    control_window: std::time::Duration,
+}
+
+impl PipeSessionPolicy {
+    const fn production() -> Self {
+        Self {
+            global_attachments: 32,
+            // One 64-KiB binary frame expands below this bound in the closed base64 JSON shape.
+            max_message_bytes: 96 * 1_024,
+            write_buffer_bytes: 16 * 1_024,
+            send_timeout: std::time::Duration::from_secs(5),
+            read_poll: std::time::Duration::from_millis(250),
+            lifetime: std::time::Duration::from_hours(1),
+            max_controls_per_window: 120,
+            control_window: std::time::Duration::from_mins(1),
+        }
+    }
+}
+
+struct PipeAttachmentLimits {
+    global: Arc<Semaphore>,
+    attached: ParkingMutex<HashSet<(Scope, String)>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PipeAttachmentRefusal {
+    Capacity,
+    AlreadyAttached,
+}
+
+struct PipeAttachmentPermit {
+    limits: Arc<PipeAttachmentLimits>,
+    scope: Scope,
+    exec_id: String,
+    remove_key_on_drop: bool,
+    global: Option<tokio::sync::OwnedSemaphorePermit>,
+}
+
+impl PipeAttachmentLimits {
+    fn new(global_attachments: usize) -> Arc<Self> {
+        assert!(
+            global_attachments > 0,
+            "global pipe attachment limit must be nonzero"
+        );
+        Arc::new(Self {
+            global: Arc::new(Semaphore::new(global_attachments)),
+            attached: ParkingMutex::new(HashSet::new()),
+        })
+    }
+
+    fn acquire(
+        self: &Arc<Self>,
+        scope: &Scope,
+        exec_id: &str,
+    ) -> Result<PipeAttachmentPermit, PipeAttachmentRefusal> {
+        let global = Arc::clone(&self.global)
+            .try_acquire_owned()
+            .map_err(|_| PipeAttachmentRefusal::Capacity)?;
+        let key = (scope.clone(), exec_id.to_owned());
+        if !self.attached.lock().insert(key) {
+            return Err(PipeAttachmentRefusal::AlreadyAttached);
+        }
+        Ok(PipeAttachmentPermit {
+            limits: Arc::clone(self),
+            scope: scope.clone(),
+            exec_id: exec_id.to_owned(),
+            remove_key_on_drop: true,
+            global: Some(global),
+        })
+    }
+}
+
+impl PipeAttachmentPermit {
+    /// Keeps a process-local tombstone when cancellation could not be proven. Capacity is still
+    /// recovered, but the uncertain exec cannot be attached again before restart reconciliation.
+    fn retain_attachment_tombstone(&mut self) {
+        self.remove_key_on_drop = false;
+    }
+}
+
+impl Drop for PipeAttachmentPermit {
+    fn drop(&mut self) {
+        if self.remove_key_on_drop {
+            self.limits
+                .attached
+                .lock()
+                .remove(&(self.scope.clone(), self.exec_id.clone()));
+        } else if let Some(global) = self.global.take() {
+            // One uncertain cancellation consumes one of the fixed global attachment slots until
+            // daemon restart. This keeps both reattachment and process-local tombstones bounded.
+            global.forget();
+        }
+    }
 }
 
 impl EventStreamLimits {
@@ -368,6 +476,8 @@ pub struct App {
     event_wakeups: Arc<EventWakeups>,
     event_stream_limits: Arc<EventStreamLimits>,
     event_stream_policy: EventStreamPolicy,
+    pipe_attachment_limits: Arc<PipeAttachmentLimits>,
+    pipe_session_policy: PipeSessionPolicy,
     lease_sweep: Mutex<()>,
     workspace_recovery: Mutex<()>,
     provisional_recovery: Mutex<()>,
@@ -396,6 +506,7 @@ impl App {
         let restart_cutoff = authority.now();
         let event_wakeups = Arc::new(EventWakeups::default());
         let event_stream_policy = EventStreamPolicy::production();
+        let pipe_session_policy = PipeSessionPolicy::production();
         let effect_sink: Arc<dyn CommitEffectSink> = event_wakeups.clone();
         store.set_commit_effect_sink(effect_sink);
         Arc::new(Self {
@@ -410,6 +521,10 @@ impl App {
                 event_stream_policy.streams_per_subject,
             ),
             event_stream_policy,
+            pipe_attachment_limits: PipeAttachmentLimits::new(
+                pipe_session_policy.global_attachments,
+            ),
+            pipe_session_policy,
             lease_sweep: Mutex::new(()),
             workspace_recovery: Mutex::new(()),
             provisional_recovery: Mutex::new(()),
@@ -1024,6 +1139,14 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/v1/execs/{exec_id}", get(exec_get).delete(exec_retire))
         .route("/v1/execs/{exec_id}/output", get(exec_output_get))
         .route("/v1/execs/{exec_id}/signal", post(exec_signal))
+        .route(
+            "/v1/pipe-sessions",
+            get(pipe_session_capabilities).post(pipe_session_start),
+        )
+        .route(
+            "/v1/pipe-sessions/{exec_id}/attach",
+            get(pipe_session_attach),
+        )
         .route(
             "/v1/workspaces/{workspace_id}/lease/renew",
             post(workspace_lease_renew),
@@ -1919,6 +2042,692 @@ async fn exec_start(
     }
 }
 
+async fn pipe_session_capabilities(
+    State(app): State<Arc<App>>,
+    Extension(_identity): Extension<Identity>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+) -> Response {
+    let request_id = request_id(&app, &headers);
+    if !query_is_empty(raw_query.as_deref()) {
+        return schema_invalid(&request_id, None, "query");
+    }
+    let machine = app.driver.machine();
+    let facts = &machine.facts;
+    if !pipe_confinement_available(facts) {
+        return failure(
+            StatusCode::NOT_IMPLEMENTED,
+            &request_id,
+            None,
+            ErrorClass::Unserved,
+            "session.confinement-unavailable",
+            "Raw-pipe sessions require namespaces, delegated cgroups, whole-tree kill, explicit leases, and no egress.",
+            Some("session"),
+            false,
+        );
+    }
+    success(
+        StatusCode::OK,
+        Success::observed(
+            request_id,
+            PipeSessionCapabilities {
+                contract: "substrate-session/v0alpha1".to_owned(),
+                transport: "unix-websocket-json".to_owned(),
+                capability_snapshot: machine.snapshot,
+                lease_required: true,
+                single_attachment: true,
+                network: substrate_wire::AppliedNetwork::None,
+                max_input_bytes: PIPE_MAX_INPUT_BYTES,
+                max_frame_bytes: PIPE_MAX_FRAME_BYTES,
+                max_queued_frames: PIPE_MAX_QUEUED_FRAMES,
+            },
+        ),
+    )
+}
+
+#[allow(clippy::too_many_lines)] // Durable reservation and fail-closed pipe dispatch stay adjacent.
+async fn pipe_session_start(
+    State(app): State<Arc<App>>,
+    Extension(identity): Extension<Identity>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+    body: Body,
+) -> Response {
+    let request_id = request_id(&app, &headers);
+    let mutation = match decode_mutation::<PipeSessionStartInput>(
+        &app,
+        &identity,
+        "exec.pipe.start",
+        "POST",
+        "/v1/pipe-sessions",
+        raw_query.as_deref(),
+        body,
+        &request_id,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    if let Err(response) = validate_pipe_session_input(&app, &mutation, &request_id) {
+        return refuse_before_dispatch_response(
+            &app,
+            &identity,
+            &request_id,
+            "exec.pipe.start",
+            "POST",
+            "/v1/pipe-sessions",
+            &mutation,
+            response,
+        )
+        .await;
+    }
+    let scope = app.scope(&identity);
+    let _workspace_guard = app
+        .lock_workspace(&scope, &mutation.input.exec.workspace)
+        .await;
+    let root_name = match app
+        .admit_workspace(&scope, &mutation.input.exec.workspace)
+        .await
+    {
+        Ok(WorkspaceAdmission::Missing) => {
+            return refuse_before_dispatch_response(
+                &app,
+                &identity,
+                &request_id,
+                "exec.pipe.start",
+                "POST",
+                "/v1/pipe-sessions",
+                &mutation,
+                not_found_with_operation(&request_id, &mutation.op),
+            )
+            .await;
+        }
+        Ok(WorkspaceAdmission::Frozen { .. }) => {
+            return refuse_before_dispatch_response(
+                &app,
+                &identity,
+                &request_id,
+                "exec.pipe.start",
+                "POST",
+                "/v1/pipe-sessions",
+                &mutation,
+                workspace_frozen_refusal(&request_id, &mutation.op),
+            )
+            .await;
+        }
+        Ok(WorkspaceAdmission::Admitted { root_name, .. }) => root_name,
+        Err(error) => return store_failure(&request_id, Some(&mutation.op), &error),
+    };
+    let operation = mutation.op.clone();
+    let ttl_ms = mutation
+        .input
+        .exec
+        .lease_ttl_ms
+        .expect("validated pipe sessions always have leases");
+    let lease = match new_lease(&app, &identity, ttl_ms, &request_id, &operation) {
+        Ok(value) => value,
+        Err(response) => {
+            return refuse_before_dispatch_response(
+                &app,
+                &identity,
+                &request_id,
+                "exec.pipe.start",
+                "POST",
+                "/v1/pipe-sessions",
+                &mutation,
+                response,
+            )
+            .await;
+        }
+    };
+    let id = app.authority.exec_id();
+    let capability = Some(mutation.input.exec.sandbox.capability_snapshot.clone());
+    let new = new_operation(
+        &app,
+        &identity,
+        "exec.pipe.start",
+        "POST",
+        "/v1/pipe-sessions",
+        &mutation,
+        capability,
+        Some(id.clone()),
+    );
+    let provisional = StoredExec {
+        resource: Exec {
+            id: id.clone(),
+            kind: ExecKind::Exec,
+            workspace: mutation.input.exec.workspace.clone(),
+            state: ExecState::Accepted,
+            observed_at: app.authority.now(),
+            requested: mutation.input.exec.sandbox.clone(),
+            applied: None,
+            exit: None,
+            lease: Some(lease.observation()),
+        },
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+        stdout_truncated: false,
+        stderr_truncated: false,
+        output_complete: false,
+        cgroup: None,
+        leader_pid: None,
+    };
+    let workspace_clock = app.lease_clock().ok();
+    if let Some(response) = reservation_response(
+        app.store_io(|| {
+            app.store
+                .reserve_exec_start(&new, &provisional, Some(&lease), workspace_clock.as_ref())
+        })
+        .await,
+        &request_id,
+        &mutation.op,
+    ) {
+        return response;
+    }
+    match app
+        .driver
+        .start_pipe_session(&id, &root_name, &mutation.input)
+        .await
+    {
+        DispatchOutcome::Observed(mut observation) => {
+            observation.resource.lease = Some(lease.observation());
+            app.driver
+                .set_exec_lease(&observation.resource.id, observation.resource.lease.clone());
+            finish_exec_leased(
+                &app,
+                &scope,
+                &request_id,
+                &operation,
+                StatusCode::ACCEPTED,
+                observation,
+                Some(&lease),
+            )
+            .await
+        }
+        DispatchOutcome::NotDispatched(error) | DispatchOutcome::ContainedAbsent(error) => {
+            finish_dispatch_absence(&app, &scope, &request_id, &operation, "exec", &id, &error)
+                .await
+        }
+        DispatchOutcome::OutcomeUnknown(error) => {
+            finish_dispatch_unknown(&app, &scope, &request_id, &operation, "exec", &id, &error)
+                .await
+        }
+    }
+}
+
+#[allow(clippy::too_many_lines)] // Attachment preflight keeps scope, lease, and capacity adjacent.
+async fn pipe_session_attach(
+    State(app): State<Arc<App>>,
+    Extension(identity): Extension<Identity>,
+    headers: HeaderMap,
+    Path(exec_id): Path<String>,
+    RawQuery(raw_query): RawQuery,
+    ws: WebSocketUpgrade,
+) -> Response {
+    let request_id = request_id(&app, &headers);
+    if !query_is_empty(raw_query.as_deref()) {
+        return schema_invalid(&request_id, None, "query");
+    }
+    app.sweep_expired().await;
+    let scope = app.scope(&identity);
+    let stored = match app.store_io(|| app.store.exec(&scope, &exec_id)).await {
+        Ok(Some(value)) => value,
+        Ok(None) => return not_found(&request_id),
+        Err(error) => return store_failure(&request_id, None, &error),
+    };
+    let is_pipe = match app
+        .store_io(|| app.store.is_pipe_exec(&scope, &exec_id))
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => return store_failure(&request_id, None, &error),
+    };
+    if !is_pipe {
+        return failure(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            &request_id,
+            None,
+            ErrorClass::Refused,
+            "session.not-pipe",
+            "The selected exec is not a raw-pipe session.",
+            Some("session"),
+            false,
+        );
+    }
+    if stored.resource.state != ExecState::Running
+        || stored
+            .resource
+            .lease
+            .as_ref()
+            .is_none_or(|lease| lease.state != substrate_wire::LeaseState::Active)
+    {
+        return failure(
+            StatusCode::CONFLICT,
+            &request_id,
+            None,
+            ErrorClass::Conflict,
+            "session.not-attachable",
+            "The raw-pipe session is not running under an active lease.",
+            Some("session"),
+            false,
+        );
+    }
+    let permit = match app.pipe_attachment_limits.acquire(&scope, &exec_id) {
+        Ok(value) => value,
+        Err(PipeAttachmentRefusal::AlreadyAttached) => {
+            return failure(
+                StatusCode::CONFLICT,
+                &request_id,
+                None,
+                ErrorClass::Conflict,
+                "session.already-attached",
+                "The raw-pipe session already has its single permitted attachment.",
+                Some("session"),
+                false,
+            );
+        }
+        Err(PipeAttachmentRefusal::Capacity) => {
+            return failure(
+                StatusCode::TOO_MANY_REQUESTS,
+                &request_id,
+                None,
+                ErrorClass::Exhausted,
+                "session.attachment-capacity",
+                "The bounded raw-pipe attachment capacity is exhausted.",
+                Some("session"),
+                true,
+            );
+        }
+    };
+    let policy = app.pipe_session_policy;
+    ws.read_buffer_size(policy.max_message_bytes)
+        .write_buffer_size(policy.write_buffer_bytes)
+        .max_frame_size(policy.max_message_bytes)
+        .max_message_size(policy.max_message_bytes)
+        .max_write_buffer_size(
+            policy
+                .max_message_bytes
+                .saturating_add(policy.write_buffer_bytes),
+        )
+        .on_upgrade(move |socket| async move {
+            let mut permit = permit;
+            let completed = tokio::time::timeout(
+                policy.lifetime,
+                run_pipe_attachment(
+                    Arc::clone(&app),
+                    scope.clone(),
+                    exec_id.clone(),
+                    &permit,
+                    policy,
+                    socket,
+                ),
+            )
+            .await
+            .is_ok_and(|terminal| terminal);
+            if !completed && !terminate_pipe_session(&app, &scope, &exec_id).await {
+                permit.retain_attachment_tombstone();
+            }
+        })
+        .into_response()
+}
+
+#[allow(clippy::too_many_lines)] // The closed bidirectional state machine stays in one audit unit.
+async fn run_pipe_attachment(
+    app: Arc<App>,
+    scope: Scope,
+    exec_id: String,
+    _permit: &PipeAttachmentPermit,
+    policy: PipeSessionPolicy,
+    mut socket: WebSocket,
+) -> bool {
+    let mut expected_client_sequence = 1_u64;
+    let mut server_sequence = 1_u64;
+    let mut input_closed = false;
+    let mut control_rate = ControlRate::new();
+    loop {
+        tokio::select! {
+            incoming = socket.next() => {
+                let frame = match incoming {
+                    Some(Ok(Message::Text(text))) => {
+                        let Ok(value) = serde_json::from_slice::<PipeClientFrame>(text.as_bytes()) else {
+                            let _sent = send_pipe_protocol_error(
+                                &mut socket,
+                                &mut server_sequence,
+                                "session.frame-invalid",
+                                "The client frame is outside the closed raw-pipe vocabulary.",
+                                policy,
+                            ).await;
+                            return false;
+                        };
+                        value
+                    }
+                    Some(Ok(Message::Ping(_) | Message::Pong(_))) => {
+                        if control_rate.exceeded(
+                            policy.max_controls_per_window,
+                            policy.control_window,
+                        ) {
+                            let _sent = send_protocol_close(
+                                &mut socket,
+                                1008,
+                                "raw-pipe control-frame rate exceeded",
+                                policy.send_timeout,
+                            ).await;
+                            return false;
+                        }
+                        continue;
+                    }
+                    Some(Ok(Message::Close(_)) | Err(_)) | None => return false,
+                    Some(Ok(Message::Binary(_))) => {
+                        let _sent = send_pipe_protocol_error(
+                            &mut socket,
+                            &mut server_sequence,
+                            "session.frame-invalid",
+                            "Raw-pipe client frames use the closed JSON text encoding.",
+                            policy,
+                        ).await;
+                        return false;
+                    }
+                };
+                let sequence = pipe_client_sequence(&frame);
+                if sequence != expected_client_sequence {
+                    let _sent = send_pipe_protocol_error(
+                        &mut socket,
+                        &mut server_sequence,
+                        "session.sequence-invalid",
+                        "Raw-pipe client sequences must be contiguous and start at one.",
+                        policy,
+                    ).await;
+                    return false;
+                }
+                expected_client_sequence = expected_client_sequence.saturating_add(1);
+                match frame {
+                    PipeClientFrame::Stdin { content, .. } => {
+                        if input_closed {
+                            let _sent = send_pipe_protocol_error(
+                                &mut socket,
+                                &mut server_sequence,
+                                "session.input-closed",
+                                "Raw-pipe stdin is already closed.",
+                                policy,
+                            ).await;
+                            return false;
+                        }
+                        let Ok(bytes) = content.decode() else {
+                            let _sent = send_pipe_protocol_error(
+                                &mut socket,
+                                &mut server_sequence,
+                                "session.base64-invalid",
+                                "Raw-pipe stdin content is not valid standard base64.",
+                                policy,
+                            ).await;
+                            return false;
+                        };
+                        if let Err(error) = app.driver.write_pipe_session(&exec_id, &bytes).await {
+                            let _sent = send_pipe_protocol_error(
+                                &mut socket,
+                                &mut server_sequence,
+                                error.code,
+                                "Substrate refused or failed the raw-pipe input frame.",
+                                policy,
+                            ).await;
+                            return false;
+                        }
+                    }
+                    PipeClientFrame::CloseInput { .. } => {
+                        if input_closed || app.driver.close_pipe_session_input(&exec_id).await.is_err() {
+                            let _sent = send_pipe_protocol_error(
+                                &mut socket,
+                                &mut server_sequence,
+                                "session.input-closed",
+                                "Raw-pipe stdin cannot be closed again.",
+                                policy,
+                            ).await;
+                            return false;
+                        }
+                        input_closed = true;
+                    }
+                    PipeClientFrame::Signal { signal, grace_ms, .. } => {
+                        if grace_ms > 60_000 {
+                            let _sent = send_pipe_protocol_error(
+                                &mut socket,
+                                &mut server_sequence,
+                                "session.signal-invalid",
+                                "Raw-pipe signal grace exceeds the closed bound.",
+                                policy,
+                            ).await;
+                            return false;
+                        }
+                        let observation = match app.driver.signal(
+                            &exec_id,
+                            &ExecSignalInput { signal, grace_ms },
+                        ).await {
+                            Ok(value) => value,
+                            Err(error) => {
+                                let _sent = send_pipe_protocol_error(
+                                    &mut socket,
+                                    &mut server_sequence,
+                                    error.code,
+                                    "Substrate could not terminally observe the signalled raw-pipe process.",
+                                    policy,
+                                ).await;
+                                return false;
+                            }
+                        };
+                        if persist_pipe_observation(&app, &scope, &observation).await.is_err() {
+                            return false;
+                        }
+                        return send_pipe_terminal(
+                            &mut socket,
+                            &mut server_sequence,
+                            &observation,
+                            policy,
+                        ).await.is_ok();
+                    }
+                }
+            }
+            output = app.driver.read_pipe_session(&exec_id, policy.read_poll) => {
+                match output {
+                    Ok(Some(frame)) => {
+                        let stream = match frame.stream {
+                            PipeStream::Stdout => OutputStream::Stdout,
+                            PipeStream::Stderr => OutputStream::Stderr,
+                        };
+                        let server_frame = PipeServerFrame::Output {
+                            sequence: server_sequence,
+                            stream,
+                            content: Base64Content {
+                                encoding: Base64Encoding::Base64,
+                                data: base64::engine::general_purpose::STANDARD.encode(frame.bytes),
+                            },
+                        };
+                        server_sequence = server_sequence.saturating_add(1);
+                        if send_pipe_server_frame(&mut socket, &server_frame, policy).await.is_err() {
+                            return false;
+                        }
+                    }
+                    Ok(None) => {
+                        let Ok(observation) = app.driver.observe_exec(&exec_id).await else {
+                            return false;
+                        };
+                        if persist_pipe_observation(&app, &scope, &observation).await.is_err() {
+                            return false;
+                        }
+                        return send_pipe_terminal(
+                            &mut socket,
+                            &mut server_sequence,
+                            &observation,
+                            policy,
+                        ).await.is_ok();
+                    }
+                    Err(error) if error.code == "session.read-timeout" => {}
+                    Err(error) => {
+                        let _sent = send_pipe_protocol_error(
+                            &mut socket,
+                            &mut server_sequence,
+                            error.code,
+                            "Substrate could not continue raw-pipe output observation.",
+                            policy,
+                        ).await;
+                        return false;
+                    }
+                }
+            }
+        }
+    }
+}
+
+const fn pipe_client_sequence(frame: &PipeClientFrame) -> u64 {
+    match frame {
+        PipeClientFrame::Stdin { sequence, .. }
+        | PipeClientFrame::CloseInput { sequence }
+        | PipeClientFrame::Signal { sequence, .. } => *sequence,
+    }
+}
+
+async fn send_pipe_server_frame(
+    socket: &mut WebSocket,
+    frame: &PipeServerFrame,
+    policy: PipeSessionPolicy,
+) -> Result<(), ()> {
+    let bytes = serde_json::to_vec(frame).map_err(|_| ())?;
+    if bytes.len() > policy.max_message_bytes {
+        return Err(());
+    }
+    enforce_stream_send_deadline(
+        policy.send_timeout,
+        socket.send(Message::Text(
+            String::from_utf8(bytes).map_err(|_| ())?.into(),
+        )),
+    )
+    .await
+}
+
+async fn send_pipe_protocol_error(
+    socket: &mut WebSocket,
+    sequence: &mut u64,
+    code: &str,
+    message: &str,
+    policy: PipeSessionPolicy,
+) -> Result<(), ()> {
+    let frame = PipeServerFrame::ProtocolError {
+        sequence: *sequence,
+        code: code.to_owned(),
+        message: message.to_owned(),
+    };
+    *sequence = sequence.saturating_add(1);
+    send_pipe_server_frame(socket, &frame, policy).await
+}
+
+async fn send_pipe_terminal(
+    socket: &mut WebSocket,
+    sequence: &mut u64,
+    observation: &ExecObservation,
+    policy: PipeSessionPolicy,
+) -> Result<(), ()> {
+    if !is_pipe_terminal(observation.resource.state) {
+        return Err(());
+    }
+    if observation.stdout_truncated {
+        send_pipe_server_frame(
+            socket,
+            &PipeServerFrame::Truncated {
+                sequence: *sequence,
+                stream: OutputStream::Stdout,
+            },
+            policy,
+        )
+        .await?;
+        *sequence = sequence.saturating_add(1);
+    }
+    if observation.stderr_truncated {
+        send_pipe_server_frame(
+            socket,
+            &PipeServerFrame::Truncated {
+                sequence: *sequence,
+                stream: OutputStream::Stderr,
+            },
+            policy,
+        )
+        .await?;
+        *sequence = sequence.saturating_add(1);
+    }
+    let frame = PipeServerFrame::Exit {
+        sequence: *sequence,
+        state: observation.resource.state,
+        exit: observation.resource.exit.clone(),
+    };
+    *sequence = sequence.saturating_add(1);
+    send_pipe_server_frame(socket, &frame, policy).await
+}
+
+async fn persist_pipe_observation(
+    app: &App,
+    scope: &Scope,
+    observation: &ExecObservation,
+) -> Result<(), ()> {
+    if !is_pipe_terminal(observation.resource.state) {
+        return Err(());
+    }
+    match app
+        .store_io(|| app.store.put_exec(scope, &stored_exec(observation)))
+        .await
+    {
+        Ok(ExecWrite::PersistedExact(stored)) if is_pipe_terminal(stored.resource.state) => {
+            app.driver.acknowledge_exec(observation);
+            Ok(())
+        }
+        Ok(ExecWrite::Superseded(stored)) if is_pipe_terminal(stored.resource.state) => {
+            app.driver.discard_superseded_exec(&observation.resource.id);
+            Ok(())
+        }
+        Ok(ExecWrite::Retired) => {
+            app.driver.discard_superseded_exec(&observation.resource.id);
+            Ok(())
+        }
+        Ok(ExecWrite::PersistedTransformed(stored)) if is_pipe_terminal(stored.resource.state) => {
+            let authoritative = observation_from_stored(stored);
+            app.driver.set_exec_lease(
+                &observation.resource.id,
+                authoritative.resource.lease.clone(),
+            );
+            app.driver.acknowledge_exec(&authoritative);
+            Ok(())
+        }
+        Ok(
+            ExecWrite::PersistedExact(_)
+            | ExecWrite::Superseded(_)
+            | ExecWrite::PersistedTransformed(_),
+        )
+        | Err(_) => Err(()),
+    }
+}
+
+const fn is_pipe_terminal(state: ExecState) -> bool {
+    matches!(
+        state,
+        ExecState::Exited | ExecState::Cancelled | ExecState::Expired | ExecState::Unknown
+    )
+}
+
+async fn terminate_pipe_session(app: &App, scope: &Scope, exec_id: &str) -> bool {
+    let signal = ExecSignalInput {
+        signal: substrate_wire::Signal::Kill,
+        grace_ms: 0,
+    };
+    let Ok(Ok(observation)) = tokio::time::timeout(
+        MAINTENANCE_DRIVER_TIMEOUT,
+        app.driver.signal(exec_id, &signal),
+    )
+    .await
+    else {
+        return false;
+    };
+    persist_pipe_observation(app, scope, &observation)
+        .await
+        .is_ok()
+}
+
 async fn exec_get(
     State(app): State<Arc<App>>,
     Extension(identity): Extension<Identity>,
@@ -2786,7 +3595,10 @@ async fn run_event_stream(
                                 return;
                             }
                             ClientFrame::Control => {
-                                if control_rate.exceeded(policy) {
+                                if control_rate.exceeded(
+                                    policy.max_controls_per_window,
+                                    policy.control_window,
+                                ) {
                                     let _ = send_protocol_close(
                                         &mut socket,
                                         1008,
@@ -2832,13 +3644,13 @@ impl ControlRate {
         }
     }
 
-    fn exceeded(&mut self, policy: EventStreamPolicy) -> bool {
-        if self.window_started.elapsed() >= policy.control_window {
+    fn exceeded(&mut self, maximum: u32, window: std::time::Duration) -> bool {
+        if self.window_started.elapsed() >= window {
             self.window_started = tokio::time::Instant::now();
             self.count = 0;
         }
         self.count = self.count.saturating_add(1);
-        self.count > policy.max_controls_per_window
+        self.count > maximum
     }
 }
 
@@ -3368,6 +4180,56 @@ fn validate_exec_input(
         ));
     }
     Ok(())
+}
+
+fn validate_pipe_session_input(
+    app: &App,
+    mutation: &BoundMutation<PipeSessionStartInput>,
+    request_id: &str,
+) -> Result<(), Response> {
+    let exec_mutation = BoundMutation {
+        op: mutation.op.clone(),
+        input: mutation.input.exec.clone(),
+        request_hash: mutation.request_hash.clone(),
+    };
+    validate_exec_input(app, &exec_mutation, request_id)?;
+    if !pipe_confinement_available(&app.driver.machine().facts) {
+        return Err(failure(
+            StatusCode::NOT_IMPLEMENTED,
+            request_id,
+            Some(&mutation.op),
+            ErrorClass::Unserved,
+            "session.confinement-unavailable",
+            "Raw-pipe sessions require complete namespaces and cgroup limits, whole-tree kill, explicit leases, no egress, and bounded output.",
+            Some("session"),
+            false,
+        ));
+    }
+    let input = &mutation.input;
+    if input.exec.wait
+        || input.exec.lease_ttl_ms.is_none()
+        || input.input_limit_bytes == 0
+        || input.input_limit_bytes > PIPE_MAX_INPUT_BYTES
+        || input.frame_limit_bytes == 0
+        || input.frame_limit_bytes > PIPE_MAX_FRAME_BYTES
+        || input.queued_frames == 0
+        || input.queued_frames > PIPE_MAX_QUEUED_FRAMES
+    {
+        return Err(schema_invalid(request_id, Some(&mutation.op), "input"));
+    }
+    Ok(())
+}
+
+fn pipe_confinement_available(facts: &substrate_wire::CapabilityFacts) -> bool {
+    let namespaces = facts.exec_namespaces.as_ref();
+    let cgroups = facts.exec_cgroup_limits.as_ref();
+    namespaces.is_some_and(|value| {
+        value.user && value.mount && value.pid && value.ipc && value.uts && value.network
+    }) && cgroups.is_some_and(|value| value.processes && value.memory && value.cpu)
+        && facts.exec_cgroup_kill == Some(true)
+        && facts.exec_no_egress == Some(true)
+        && facts.leases_explicit == Some(true)
+        && facts.exec_output_limit_bytes.is_some_and(|value| value > 0)
 }
 
 fn valid_environment_name(name: &str) -> bool {
@@ -4295,11 +5157,11 @@ mod tests {
         policy.control_window = Duration::from_secs(5);
         let mut rate = ControlRate::new();
 
-        assert!(!rate.exceeded(policy));
-        assert!(!rate.exceeded(policy));
-        assert!(rate.exceeded(policy));
+        assert!(!rate.exceeded(policy.max_controls_per_window, policy.control_window));
+        assert!(!rate.exceeded(policy.max_controls_per_window, policy.control_window));
+        assert!(rate.exceeded(policy.max_controls_per_window, policy.control_window));
         tokio::time::advance(policy.control_window).await;
-        assert!(!rate.exceeded(policy));
+        assert!(!rate.exceeded(policy.max_controls_per_window, policy.control_window));
     }
 
     #[tokio::test(start_paused = true)]

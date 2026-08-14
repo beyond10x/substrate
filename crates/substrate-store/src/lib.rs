@@ -2186,6 +2186,24 @@ impl Store {
         load_exec(&connection, scope, id)
     }
 
+    /// Reports whether the scoped exec was durably created through the raw-pipe start operation.
+    /// The operation record, rather than a process-local flag, is the attachment admission fact.
+    pub fn is_pipe_exec(&self, scope: &Scope, id: &str) -> Result<bool, StoreError> {
+        let connection = self.connection.lock();
+        let present = connection
+            .query_row(
+                "SELECT 1 FROM operations
+                 WHERE deployment = ?1 AND subject = ?2 AND resource = ?3
+                   AND operation_kind = 'exec.pipe.start' AND state = 'terminal'
+                 ORDER BY accepted_at DESC LIMIT 1",
+                params![scope.deployment, scope.subject, id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        Ok(present)
+    }
+
     pub fn scopes_for_exec(&self, deployment: &str, id: &str) -> Result<Vec<Scope>, StoreError> {
         let connection = self.connection.lock();
         let mut statement = connection.prepare(
@@ -3472,7 +3490,7 @@ impl Store {
                 .query_row(
                     "SELECT operation, state FROM operations
                      WHERE deployment = ?1 AND subject = ?2 AND resource = ?3
-                       AND operation_kind = 'exec.start'
+                       AND operation_kind IN ('exec.start','exec.pipe.start')
                        AND (
                            state IN ('unknown','terminal')
                            OR (state = 'accepted' AND accepted_at < ?4)
@@ -3674,7 +3692,7 @@ impl Store {
                 .query_row(
                     "SELECT operation, actor, principal FROM operations
                      WHERE deployment = ?1 AND subject = ?2 AND resource = ?3
-                       AND operation_kind = 'exec.start' AND accepted_at < ?4
+                       AND operation_kind IN ('exec.start','exec.pipe.start') AND accepted_at < ?4
                      ORDER BY accepted_at DESC, operation DESC LIMIT 1",
                     params![deployment, subject, id, accepted_before],
                     |row| {
@@ -5197,7 +5215,7 @@ fn terminal_transition(operation_kind: &str, outcome: &OperationOutcome) -> &'st
         "workspace.file.delete" => "workspace.file-deleted",
         "workspace.destroy" => "workspace.destroyed",
         "workspace.lease.renew" => "workspace.lease-renewed",
-        "exec.start" => "exec.observed",
+        "exec.start" | "exec.pipe.start" => "exec.observed",
         "exec.signal" => "exec.cancelled",
         "exec.lease.renew" => "exec.lease-renewed",
         "reconciliation.snapshot.create" => "snapshot.created",

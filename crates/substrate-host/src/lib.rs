@@ -209,6 +209,52 @@ pub trait Driver: Send + Sync {
         input: &ExecStartInput,
     ) -> DispatchOutcome<ExecObservation>;
 
+    /// Starts one bounded raw-pipe process. Drivers which do not implement the direct byte plane
+    /// refuse explicitly; callers must never fall back to a direct host child.
+    async fn start_pipe_session(
+        &self,
+        _id: &str,
+        _workspace_root_name: &str,
+        _input: &substrate_wire::PipeSessionStartInput,
+    ) -> DispatchOutcome<ExecObservation> {
+        DispatchOutcome::NotDispatched(DriverError::unserved(
+            "session.unserved",
+            "The selected driver does not serve raw-pipe sessions.",
+            "session",
+        ))
+    }
+
+    /// Writes one bounded frame to an admitted raw-pipe process.
+    async fn write_pipe_session(&self, _id: &str, _bytes: &[u8]) -> Result<(), DriverError> {
+        Err(DriverError::unserved(
+            "session.unserved",
+            "The selected driver does not serve raw-pipe sessions.",
+            "session",
+        ))
+    }
+
+    /// Reads one attributed raw-pipe output frame before the supplied deadline.
+    async fn read_pipe_session(
+        &self,
+        _id: &str,
+        _timeout: std::time::Duration,
+    ) -> Result<Option<PipeFrame>, DriverError> {
+        Err(DriverError::unserved(
+            "session.unserved",
+            "The selected driver does not serve raw-pipe sessions.",
+            "session",
+        ))
+    }
+
+    /// Half-closes the admitted raw-pipe process input.
+    async fn close_pipe_session_input(&self, _id: &str) -> Result<(), DriverError> {
+        Err(DriverError::unserved(
+            "session.unserved",
+            "The selected driver does not serve raw-pipe sessions.",
+            "session",
+        ))
+    }
+
     async fn observe_exec(&self, id: &str) -> Result<ExecObservation, DriverError>;
 
     async fn output(&self, id: &str, query: &ExecOutputQuery) -> Result<OutputSlice, DriverError>;
@@ -573,6 +619,31 @@ impl Driver for HostDriver {
             Err(error) => return DispatchOutcome::NotDispatched(error),
         };
         self.processes.start(id, &workspace, input).await
+    }
+
+    async fn start_pipe_session(
+        &self,
+        id: &str,
+        workspace_root_name: &str,
+        input: &substrate_wire::PipeSessionStartInput,
+    ) -> DispatchOutcome<ExecObservation> {
+        HostDriver::start_pipe_session(self, id, workspace_root_name, input).await
+    }
+
+    async fn write_pipe_session(&self, id: &str, bytes: &[u8]) -> Result<(), DriverError> {
+        HostDriver::write_pipe_session(self, id, bytes).await
+    }
+
+    async fn read_pipe_session(
+        &self,
+        id: &str,
+        timeout: std::time::Duration,
+    ) -> Result<Option<PipeFrame>, DriverError> {
+        HostDriver::read_pipe_session(self, id, timeout).await
+    }
+
+    async fn close_pipe_session_input(&self, id: &str) -> Result<(), DriverError> {
+        HostDriver::close_pipe_session_input(self, id).await
     }
 
     async fn observe_exec(&self, id: &str) -> Result<ExecObservation, DriverError> {

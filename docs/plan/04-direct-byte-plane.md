@@ -9,9 +9,9 @@ model-free governed-harness slice accepted by
 
 ## Slice A: raw-pipe development contract
 
-**Progress:** source-typed start/client/server frame vocabulary exists under
-`substrate-wire`, with a development contract note. Deterministic successor bundle generation,
-adversarial vectors, and the clean-room runner remain open.
+**Progress:** source-typed capability/start/client/server vocabulary and an independently
+digest-pinned Agent copy exist. Deterministic successor bundle generation, full adversarial vectors,
+and the clean-room released-bundle runner remain open.
 
 - add a successor development bundle; never rewrite immutable 0.1.0 bytes;
 - define session resource, start/get/cancel/retire operations, capability facts, and closed channel
@@ -24,9 +24,13 @@ adversarial vectors, and the clean-room runner remain open.
 ## Slice B: confined Linux pipe session
 
 **Progress:** the host crate can start, write, read, half-close, bound, and cancel a pipe process by
-reusing the exec confinement path; portable tests prove refusal without hard confinement and stream
-attribution. Durable session storage, lease/attachment ownership, daemon routing, and delegated
-whole-tree integration evidence remain open.
+reusing the exec confinement path. The daemon durably reserves the leased underlying exec before
+dispatch and serves one subject-scoped Unix-WebSocket attachment with strict ordering, bounded
+messages/control rate/lifetime, cancellation on loss, separate stderr, and authoritative terminal
+persistence. Live forwarding stops at the admitted output bound, and loss containment closes the
+output queue before kill so backpressure cannot block reconciliation; an uncertain containment
+retains a bounded attachment tombstone. Portable refusal and semantic route tests pass; a distinct session identity,
+successor bundle, and delegated whole-tree integration evidence remain open.
 
 - reuse the proven workspace, bubblewrap, cgroup, empty environment, output draining, lease, and
   whole-tree cancellation implementation;
@@ -36,6 +40,12 @@ whole-tree integration evidence remain open.
 - make the durable operation/session terminal state authoritative before cleanup/reclamation.
 
 ## Slice C: Agent compatibility proof
+
+**Progress:** Agent has a no-fallback copied-contract backend and a clean-room semantic server which
+drives the model-free fake Codex app-server through the execution port. It pins the copied contract
+digest and checks inspection, applied confinement shape, bidirectional bytes, approval lifecycle,
+half-close, and terminal reconciliation. This is semantic compatibility, not delegated
+`substrate-confined` evidence.
 
 - run a synthetic app-server protocol process with no model, credential, or network;
 - prove start ordering, bidirectional framing, output pressure, cancellation, child-tree cleanup,

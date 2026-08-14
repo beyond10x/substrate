@@ -77,7 +77,10 @@ substrate tenant policy or giving connectors access to daemon internals.
    model-free. PTY, network transport, secret slots, and controlled egress remain absent until
    their own slice proves them.
 
-The first phase-4 host primitive is implemented: bounded raw stdin/stdout/stderr pipes reuse the
-existing confinement path and refuse without delegated isolation. Durable session ownership,
-attachment/replay, daemon routing, endpoints, tunnels, and PTY remain unimplemented. Phase 4 is
-active under [Plan 04](../plan/04-direct-byte-plane.md).
+The first phase-4 daemon slice is implemented: bounded raw stdin/stdout/stderr pipes reuse the
+existing confinement path and refuse without delegated isolation; a durable leased exec reservation
+precedes dispatch; and one subject-scoped Unix-WebSocket attachment enforces ordering, bounds,
+half-close, output-bounded forwarding, backpressure-safe loss cancellation, and terminal
+persistence. A distinct durable session identity,
+replay/reconnect, successor bundle, delegated cross-repository evidence, endpoints, tunnels, and PTY
+remain unimplemented. Phase 4 is active under [Plan 04](../plan/04-direct-byte-plane.md).

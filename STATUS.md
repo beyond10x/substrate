@@ -6,8 +6,10 @@
 
 Phase 3 **lifecycle and recovery** is complete under the
 [archived closure disposition](docs/reviews/archived/2026-08-14-phase-3-closure-review-disposition.md).
-The implementation has nineteen development routes; all 39 review findings have deterministic or
-independently observed evidence. This completes implementation conformance, not stable publication:
+The phase-3 implementation has nineteen bundled development routes; the unbundled phase-4 pipe
+capability/start/attachment surface is classified separately. All 39 phase-3 review findings have
+deterministic or independently observed evidence. This completes phase-3 implementation
+conformance, not stable publication:
 OCI packaging, signing, and digest pinning remain separate release work. See
 [Plan 03](docs/plan/03-lifecycle-and-recovery.md).
 
@@ -19,7 +21,7 @@ OCI packaging, signing, and digest pinning remain separate release work. See
 | Drivers | Linux host driver implemented; absent delegation keeps exec facts absent; real delegated lane passes | retain the delegated lane and add no optimistic facts |
 | Security | `openat2` beneath/no-link/no-mount I/O, atomic replacement, cleared/shaped environment, namespace no-egress, pids/memory+swap/CPU cgroup bounds, output draining, timeout, and whole-tree kill are enforced | expand adversarial coverage without weakening admission |
 | Stack integration | trust, session, event, federation, and contract-release seams accepted in umbrella ADRs 0015–0019 | keep later features behind their named phases |
-| Implementation | phase 3 complete; phase 4 has closed development frame types and a host-level bounded raw-pipe primitive that reuses fail-closed exec confinement and refuses without it | add the durable leased daemon route and delegated model-free compatibility proof without regressing phase 3 |
+| Implementation | phase 3 complete; phase 4 has closed development frames, inspected capability response, durable leased pipe start, and one scoped Unix-WebSocket attachment over the fail-closed host primitive | add the successor bundle and real delegated model-free Agent compatibility proof without regressing phase 3 |
 
 ## Repository facts
 
@@ -46,15 +48,16 @@ OCI packaging, signing, and digest pinning remain separate release work. See
 - Workspace cleanup advances in descriptor-relative 4,096-item batches without a total depth/item
   ceiling. Durable `destroying` blocks exec start and is automatically resumed after restart under
   fixed, subject-scoped lock stripes until the original destroy operation terminalizes.
-- Git, sessions/stdin/PTY, workloads, images, volumes, endpoints, Docker, and Kubernetes are absent
-  rather than stubbed.
+- Git, PTY, reconnect, workloads, images, volumes, endpoints, Docker, and Kubernetes are absent
+  rather than stubbed. The development pipe session is the sole phase-4 byte-plane slice.
 
 Phase 4 is now explicitly active under
 [ADR 0007](adr/0007-protocol-processes-use-raw-pipe-sessions.md) and
-[Plan 04](docs/plan/04-direct-byte-plane.md). The source-typed host primitive and portable
-fail-closed tests are implementation evidence only for the bottom of the slice. The current daemon
-still serves no durable session or live stdin channel, and no delegated Agent compatibility lane has
-passed yet.
+[Plan 04](docs/plan/04-direct-byte-plane.md). The daemon durably reserves the leased underlying exec
+before dispatch, scopes attachment by authenticated subject, admits one attachment, and terminates
+the tree on invalid ordering or attachment loss. Semantic route tests and Agent's independent
+copied-contract fixture pass. A successor bundle and a real delegated Agent compatibility lane have
+not passed, so `substrate-confined` remains unclaimed as cross-repository conformance.
 
 ## External dependencies
 

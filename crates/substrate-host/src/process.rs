@@ -453,11 +453,19 @@ impl ProcessRuntime {
             )
         })?;
         let mut output = pipe.output.lock().await;
-        tokio::time::timeout(timeout, output.recv())
+        let frame = tokio::time::timeout(timeout, output.recv())
             .await
             .map_err(|_| {
                 DriverError::failed("session.read-timeout", "Raw-pipe read deadline elapsed.")
-            })
+            })?;
+        drop(output);
+        if frame.is_none() {
+            // The output senders close just before the child task records its cgroup-reconciled
+            // terminal observation. Never let an attachment turn that narrow ordering window into
+            // a premature EOF claim.
+            wait_terminal(&execution, Duration::from_secs(5)).await?;
+        }
+        Ok(frame)
     }
 
     fn execution(&self, id: &str) -> Result<Arc<Execution>, DriverError> {
@@ -567,6 +575,12 @@ impl ProcessRuntime {
             .ok_or_else(DriverError::not_found)?;
         if is_terminal(execution.observation.lock().resource.state) {
             return Ok(execution.observation.lock().clone());
+        }
+        if let Some(pipe) = &execution.pipe {
+            // A disconnected or backpressured attachment may no longer drain the bounded output
+            // queue. Close its receiver before signalling so output pumps can finish draining the
+            // kernel pipes and terminal reconciliation cannot deadlock behind a full queue.
+            pipe.output.lock().await.close();
         }
         let cgroup_name = execution
             .observation
@@ -1031,7 +1045,10 @@ where
             truncated = true;
         }
         if let Some(sender) = &sender {
-            for chunk in buffer[..count].chunks(frame_limit) {
+            // The live channel carries only bytes retained under the same admitted output bound.
+            // Continue draining excess child output without forwarding it so the child cannot
+            // block and a consumer cannot observe more bytes than Substrate attested.
+            for chunk in buffer[..retained].chunks(frame_limit) {
                 if sender
                     .send(PipeFrame {
                         stream,
@@ -1593,7 +1610,8 @@ mod tests {
         drop(writer);
         let frame = receiver.recv().await.unwrap();
         assert_eq!(frame.stream, PipeStream::Stdout);
-        assert_eq!(frame.bytes, b"abcdef");
+        assert_eq!(frame.bytes, b"abcd");
+        assert!(receiver.recv().await.is_none());
         let (captured, truncated) = drain.await.unwrap();
         assert_eq!(captured, b"abcd");
         assert!(truncated);

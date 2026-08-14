@@ -676,8 +676,8 @@ pub enum OutputStream {
     Stderr,
 }
 
-/// Development raw-pipe start shape. The public session route is not released yet; this closed
-/// shape pins the future boundary without changing immutable 0.1.0 or 0.2.0 bundle bytes.
+/// Development raw-pipe start shape. The daemon route is implemented but not released; this closed
+/// shape does not change immutable 0.1.0 or 0.2.0 bundle bytes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PipeSessionStartInput {
@@ -685,6 +685,20 @@ pub struct PipeSessionStartInput {
     pub input_limit_bytes: u64,
     pub frame_limit_bytes: u64,
     pub queued_frames: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PipeSessionCapabilities {
+    pub contract: String,
+    pub transport: String,
+    pub capability_snapshot: String,
+    pub lease_required: bool,
+    pub single_attachment: bool,
+    pub network: AppliedNetwork,
+    pub max_input_bytes: u64,
+    pub max_frame_bytes: u64,
+    pub max_queued_frames: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1248,6 +1262,7 @@ mod tests {
     };
     use serde::Deserialize as _;
     use serde_json::Value;
+    use sha2::{Digest as _, Sha256};
 
     #[derive(serde::Deserialize)]
     struct HashFixtures {
@@ -1462,6 +1477,16 @@ mod tests {
                 "sequence": 1
             }))
             .is_err()
+        );
+    }
+
+    #[test]
+    fn agent_consumer_contract_copy_has_reviewed_digest() {
+        let bytes =
+            include_bytes!("../../../contracts/substrate-session/v0alpha1/consumer-contract.md");
+        assert_eq!(
+            hex::encode(Sha256::digest(bytes)),
+            "0d6a2f04e186b7ab0ccdf1111f5f1c59d03d1e6ec25321692cfafa4f183d5fd7"
         );
     }
 }
