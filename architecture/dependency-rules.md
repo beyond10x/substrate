@@ -14,6 +14,12 @@ host / Docker / Kubernetes adapters ──▶ substrate driver ports
 Protocol clients may be generated from a released substrate specification, but compatibility never
 relies on sibling checkout paths.
 
+A product composition root may pin and compile the `substrate-daemon` crate solely to bootstrap a
+separate daemon child process from a single-file distribution. Product operations must still use
+the public Unix-socket contract; importing daemon application or host-driver APIs into product
+session, task, tool, or workflow code is forbidden. Packaging the entrypoint does not collapse the
+process or trust boundary.
+
 ## Forbidden direction
 
 ```text

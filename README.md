@@ -66,6 +66,13 @@ target/debug/substrated \
   --allow-uid 1000
 ```
 
+The `substrate-daemon` crate also exposes the same daemon composition as `DaemonConfig` plus the
+async `serve` entrypoint. This lets a product ship the daemon code inside one distributable and
+start it through a private child-process mode. It does **not** expose a direct execution binding:
+the product remains a normal client, every operation crosses the owner-permissioned Unix socket,
+and kernel peer credentials, protocol validation, lifecycle isolation, and driver enforcement all
+remain in the daemon process. The native `substrated` binary is a thin CLI over that same entrypoint.
+
 Without a delegated cgroup root, workspace operations remain served and exec confinement facts are
 absent, so exec admission answers `exec.sandbox-unavailable`. A Linux deployment that serves exec
 must place the daemon in a delegated cgroup subtree with `cpu`, `memory`, and `pids`, keep the
