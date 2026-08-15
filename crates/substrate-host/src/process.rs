@@ -1911,7 +1911,9 @@ mod tests {
                 ..CapabilityFacts::default()
             },
         };
-        let runtime = ProcessRuntime::new(HostConfig::minimum(root.path()), capability).unwrap();
+        let mut config = HostConfig::minimum(root.path());
+        config.bubblewrap = std::env::current_exe().expect("test executable");
+        let runtime = ProcessRuntime::new(config, capability).unwrap();
         let input = ExecStartInput {
             workspace: "ws_test".to_owned(),
             argv: vec!["/usr/bin/true".to_owned()],

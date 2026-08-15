@@ -764,10 +764,11 @@ mod tests {
         let (done_send, done_receive) = tokio::sync::oneshot::channel();
         let (release_send, release_receive) = std::sync::mpsc::channel();
         let owner = tokio::task::spawn_blocking(move || {
-            let _ownership =
+            let ownership =
                 WorkspaceDestroyOwnership::acquire(namespace, "ws_busy").expect("owner");
             ready_send.send(()).expect("announce ownership");
             release_receive.recv().expect("release ownership");
+            drop(ownership);
             done_send.send(()).expect("announce release");
         });
         ready_receive.await.expect("ownership ready");
