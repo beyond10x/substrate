@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::io;
+use std::io::{self, Read as _};
 use std::net::{IpAddr, SocketAddr};
 use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
@@ -611,17 +611,34 @@ async fn require_tcp_bearer(
     }
 }
 
+#[allow(clippy::verbose_bit_mask)] // Permission masks are clearer here than bit-position arithmetic.
 fn read_bearer_digest(path: &Path) -> anyhow::Result<[u8; 32]> {
-    let metadata = std::fs::metadata(path).context("inspect TCP bearer file")?;
-    if !metadata.is_file() || metadata.len() > 512 {
-        bail!("TCP bearer file must be one bounded regular file");
+    let mut file = std::fs::File::open(path).context("open TCP bearer file")?;
+    let metadata = file.metadata().context("inspect TCP bearer file")?;
+    let mode = metadata.mode();
+    let effective_user = nix::unistd::geteuid().as_raw();
+    let effective_group = nix::unistd::getegid().as_raw();
+    let current_user_private =
+        metadata.uid() == effective_user && mode & 0o400 != 0 && mode & 0o077 == 0;
+    let root_projected_group = metadata.uid() == 0
+        && metadata.gid() == effective_group
+        && mode & 0o040 != 0
+        && mode & 0o037 == 0;
+    if !metadata.is_file()
+        || metadata.len() > 512
+        || !(current_user_private || root_projected_group)
+    {
+        bail!("TCP bearer file must be one bounded regular file with private workload ownership");
     }
-    let mut bearer = Zeroizing::new(
-        std::fs::read_to_string(path)
-            .context("read TCP bearer file")?
-            .trim()
-            .to_owned(),
-    );
+    let mut bearer = Zeroizing::new(String::new());
+    (&mut file)
+        .take(513)
+        .read_to_string(&mut bearer)
+        .context("read TCP bearer file")?;
+    if bearer.len() > 512 {
+        bail!("TCP bearer file exceeds its admitted bound");
+    }
+    let bearer = bearer.trim();
     let valid = bearer
         .strip_prefix("dl_substrate_v1_")
         .is_some_and(|token| {
@@ -631,7 +648,6 @@ fn read_bearer_digest(path: &Path) -> anyhow::Result<[u8; 32]> {
                     .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
         });
     if !valid {
-        bearer.clear();
         bail!("TCP bearer file has an invalid credential shape");
     }
     Ok(Sha256::digest(bearer.as_bytes()).into())
@@ -926,6 +942,8 @@ mod tests {
         let path = directory.path().join("bearer");
         let bearer = format!("dl_substrate_v1_{}", "a".repeat(43));
         std::fs::write(&path, format!("{bearer}\n")).expect("write bearer");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .expect("secure bearer");
         assert_eq!(
             read_bearer_digest(&path).unwrap(),
             Sha256::digest(bearer).as_slice()
@@ -933,6 +951,39 @@ mod tests {
 
         std::fs::write(&path, "invalid").expect("replace bearer");
         assert!(read_bearer_digest(&path).is_err());
+    }
+
+    #[test]
+    fn hosted_bearer_file_refuses_widened_and_oversized_material() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("bearer");
+        let bearer = format!("dl_substrate_v1_{}", "a".repeat(43));
+        std::fs::write(&path, &bearer).expect("write bearer");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o640))
+            .expect("widen bearer");
+        assert!(read_bearer_digest(&path).is_err());
+
+        std::fs::write(&path, "a".repeat(513)).expect("write oversized bearer");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .expect("secure oversized bearer");
+        assert!(read_bearer_digest(&path).is_err());
+    }
+
+    #[test]
+    fn hosted_bearer_file_admits_a_projected_symlink_to_a_safe_target() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let target = directory.path().join("bearer-target");
+        let link = directory.path().join("bearer");
+        let bearer = format!("dl_substrate_v1_{}", "a".repeat(43));
+        std::fs::write(&target, &bearer).expect("write bearer");
+        std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600))
+            .expect("secure bearer");
+        std::os::unix::fs::symlink(&target, &link).expect("project bearer");
+
+        assert_eq!(
+            read_bearer_digest(&link).unwrap(),
+            Sha256::digest(bearer).as_slice()
+        );
     }
 
     #[test]

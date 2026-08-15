@@ -7,14 +7,8 @@ config="${DAEMONLOOM_BOT_CONFIG:-${config_root}/daemonloom-bot.json}"
 key="${DAEMONLOOM_BOT_KEY:-${config_root}/daemonloom-bot.private-key.pem}"
 org="${DAEMONLOOM_BOT_ORG:-daemonloom}"
 
-[ -r "$config" ] || {
-  echo "daemonloom-bot config is not readable; set DAEMONLOOM_BOT_CONFIG" >&2
-  exit 1
-}
-[ -r "$key" ] || {
-  echo "daemonloom-bot private key is not readable; set DAEMONLOOM_BOT_KEY" >&2
-  exit 1
-}
+script_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+python3 "${script_root}/check-bot-files.py" "$config" "$key"
 
 app_id="${DAEMONLOOM_BOT_APP_ID:-$(jq -er '.app_id' "$config")}"
 

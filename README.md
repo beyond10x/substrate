@@ -69,7 +69,9 @@ target/debug/substrate-daemon \
 Cloud may enable the current TCP transport only as an explicitly acknowledged development profile
 on a private overlay (`--tcp-development-only --tcp-private-overlay`). That mode
 requires a bounded `dl_substrate_v1_...` bearer file plus deployment-owned `--tcp-subject` and
-`--tcp-actor` bindings; every HTTP route requires that bearer. A configured
+`--tcp-actor` bindings; every HTTP route requires that bearer. The daemon opens that file once,
+bounds it to 512 bytes, and admits either an owner-private workload file or a root-owned,
+group-readable projected Secret with no group write/execute or world access. A configured
 `--tcp-path-prefix /api/substrate` publishes the existing v1 contract below
 `/api/substrate/v1`. This static bearer does not satisfy the accepted scoped, expiring, rotating
 hosted trust-envelope profile and therefore must not be published through external or shared
