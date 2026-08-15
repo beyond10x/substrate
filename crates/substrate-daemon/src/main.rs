@@ -1,9 +1,10 @@
 #![forbid(unsafe_code)]
 
+use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use clap::Parser;
-use substrate_daemon::{DaemonConfig, serve};
+use substrate_daemon::{DaemonConfig, TcpDaemonConfig, serve};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
@@ -36,10 +37,42 @@ struct Arguments {
 
     #[arg(long, default_value_t = 10_000)]
     event_retention: u64,
+
+    #[arg(
+        long,
+        env = "SUBSTRATE_TCP_LISTEN",
+        requires_all = ["tcp_bearer_file", "tcp_subject", "tcp_actor", "tcp_private_overlay"]
+    )]
+    tcp_listen: Option<SocketAddr>,
+
+    #[arg(long, env = "SUBSTRATE_TCP_BEARER_FILE", requires = "tcp_listen")]
+    tcp_bearer_file: Option<PathBuf>,
+
+    #[arg(long, env = "SUBSTRATE_TCP_SUBJECT", requires = "tcp_listen")]
+    tcp_subject: Option<String>,
+
+    #[arg(long, env = "SUBSTRATE_TCP_ACTOR", requires = "tcp_listen")]
+    tcp_actor: Option<String>,
+
+    #[arg(long, env = "SUBSTRATE_TCP_PRIVATE_OVERLAY", requires = "tcp_listen")]
+    tcp_private_overlay: bool,
 }
 
 impl From<Arguments> for DaemonConfig {
     fn from(arguments: Arguments) -> Self {
+        let tcp = arguments.tcp_listen.map(|listen| TcpDaemonConfig {
+            listen,
+            bearer_file: arguments
+                .tcp_bearer_file
+                .expect("clap requires a bearer file with TCP"),
+            subject: arguments
+                .tcp_subject
+                .expect("clap requires a subject with TCP"),
+            actor: arguments
+                .tcp_actor
+                .expect("clap requires an actor with TCP"),
+            private_overlay: arguments.tcp_private_overlay,
+        });
         Self {
             socket: arguments.socket,
             state: arguments.state,
@@ -49,6 +82,7 @@ impl From<Arguments> for DaemonConfig {
             cgroup_root: arguments.cgroup_root,
             bubblewrap: arguments.bubblewrap,
             event_retention: arguments.event_retention,
+            tcp,
         }
     }
 }

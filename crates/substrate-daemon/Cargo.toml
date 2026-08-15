@@ -32,6 +32,7 @@ serde.workspace = true
 serde_json.workspace = true
 serde_urlencoded.workspace = true
 sha2.workspace = true
+subtle.workspace = true
 substrate-host = { path = "../substrate-host" }
 substrate-store = { path = "../substrate-store" }
 substrate-wire = { path = "../substrate-wire" }
@@ -41,6 +42,7 @@ tower.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 ulid.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 rusqlite.workspace = true

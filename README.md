@@ -51,9 +51,9 @@ absent.
 
 ## Lifecycle daemon
 
-`substrated` serves only an owner-permissioned Unix socket. Startup requires at least one explicit
-`--allow-uid`; the daemon derives `local:<uid>` from kernel peer credentials and never accepts a
-subject from HTTP data.
+By default, `substrated` serves an owner-permissioned Unix socket. Startup requires at least one
+explicit `--allow-uid`; the daemon derives `local:<uid>` from kernel peer credentials and never
+accepts a subject from HTTP data.
 
 ```console
 cargo build --workspace --locked
@@ -65,6 +65,14 @@ target/debug/substrated \
   --event-retention 10000 \
   --allow-uid 1000
 ```
+
+Cloud may instead enable the hosted TCP transport on an explicitly private overlay. That mode
+requires a bounded `dl_substrate_v1_...` bearer file plus deployment-owned `--tcp-subject` and
+`--tcp-actor` bindings; every HTTP route requires that bearer. It is not a public authentication
+protocol and must not be exposed by ingress. The Cloud chart therefore publishes only a ClusterIP
+service and admits ingress solely from its Connectors workload. A hosted container without a
+delegated cgroup/bubblewrap environment continues to report execution sandbox unavailability
+rather than weakening confinement.
 
 The `substrate-daemon` crate also exposes the same daemon composition as `DaemonConfig` plus the
 async `serve` entrypoint. This lets a product ship the daemon code inside one distributable and

@@ -2,6 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
+use std::net::SocketAddr;
 use std::os::unix::fs::{FileTypeExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -9,14 +10,22 @@ use std::sync::Arc;
 use crate::{App, Identity, router};
 use anyhow::{Context as _, bail};
 use axum::Extension;
+use axum::extract::{Request, State};
+use axum::http::{StatusCode, header};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::service::TowerToHyperService;
 use substrate_host::{HostConfig, HostDriver};
 use substrate_store::Store;
-use tokio::net::{UnixListener, UnixStream};
+use subtle::ConstantTimeEq as _;
+use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tracing::{info, warn};
+use zeroize::Zeroizing;
+
+use sha2::{Digest as _, Sha256};
 
 #[derive(Debug, Clone, Copy)]
 struct UnixTransportPolicy {
@@ -225,6 +234,17 @@ pub struct DaemonConfig {
     pub cgroup_root: Option<PathBuf>,
     pub bubblewrap: PathBuf,
     pub event_retention: u64,
+    pub tcp: Option<TcpDaemonConfig>,
+}
+
+/// Authenticated TCP listener for hosted/private-overlay composition.
+#[derive(Debug, Clone)]
+pub struct TcpDaemonConfig {
+    pub listen: SocketAddr,
+    pub bearer_file: PathBuf,
+    pub subject: String,
+    pub actor: String,
+    pub private_overlay: bool,
 }
 
 impl DaemonConfig {
@@ -244,6 +264,7 @@ impl DaemonConfig {
             cgroup_root: None,
             bubblewrap: PathBuf::from("/usr/bin/bwrap"),
             event_retention: 10_000,
+            tcp: None,
         }
     }
 }
@@ -256,7 +277,7 @@ impl DaemonConfig {
 /// and after serving if the shutdown signal cannot be installed.
 #[allow(clippy::too_many_lines)] // Startup proof, ownership, and accept-loop cleanup stay adjacent.
 pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
-    if config.allow_uids.is_empty() {
+    if config.tcp.is_none() && config.allow_uids.is_empty() {
         bail!("at least one explicit --allow-uid mapping is required");
     }
     if config.deployment.is_empty()
@@ -268,7 +289,9 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
         bail!("deployment must be a non-empty stable identifier");
     }
     let _instance_lock = lock_instance(&config.socket)?;
-    prepare_socket(&config.socket)?;
+    if config.tcp.is_none() {
+        prepare_socket(&config.socket)?;
+    }
     if let Some(parent) = config.state.parent() {
         std::fs::create_dir_all(parent).context("create state directory")?;
     }
@@ -297,6 +320,11 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
             sweeper_app.sweep_expired().await;
         }
     });
+    if let Some(tcp) = config.tcp.as_ref() {
+        let result = serve_tcp(Arc::clone(&app), tcp).await;
+        lease_sweeper.abort();
+        return result;
+    }
     let listener = UnixListener::bind(&config.socket).context("bind unix socket")?;
     let socket_cleanup = SocketCleanup(config.socket.clone());
     std::fs::set_permissions(&config.socket, std::fs::Permissions::from_mode(0o600))
@@ -355,6 +383,92 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
     drop(listener);
     drop(socket_cleanup);
     Ok(())
+}
+
+#[derive(Clone)]
+struct TcpAuthState {
+    bearer_sha256: [u8; 32],
+}
+
+async fn serve_tcp(app: Arc<App>, config: &TcpDaemonConfig) -> anyhow::Result<()> {
+    if !config.private_overlay {
+        bail!("hosted TCP requires an explicitly configured private overlay");
+    }
+    if !valid_identity_ref(&config.subject) || !valid_identity_ref(&config.actor) {
+        bail!("hosted TCP subject and actor must be bounded stable references");
+    }
+    let auth = TcpAuthState {
+        bearer_sha256: read_bearer_digest(&config.bearer_file)?,
+    };
+    let identity = Identity {
+        subject: config.subject.clone(),
+        actor: config.actor.clone(),
+        principal: None,
+    };
+    let service = router(app)
+        .layer(Extension(identity))
+        .layer(middleware::from_fn_with_state(auth, require_tcp_bearer));
+    let listener = TcpListener::bind(config.listen)
+        .await
+        .context("bind authenticated TCP listener")?;
+    info!(listen = %config.listen, "substrate authenticated TCP ready");
+    axum::serve(listener, service)
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+        })
+        .await
+        .context("serve authenticated TCP listener")
+}
+
+async fn require_tcp_bearer(
+    State(auth): State<TcpAuthState>,
+    request: Request,
+    next: Next,
+) -> Response {
+    let presented = request
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+    let admitted = presented.is_some_and(|value| {
+        let digest = Sha256::digest(value.as_bytes());
+        bool::from(auth.bearer_sha256.ct_eq(digest.as_ref()))
+    });
+    if admitted {
+        next.run(request).await
+    } else {
+        (StatusCode::UNAUTHORIZED, "substrate bearer required\n").into_response()
+    }
+}
+
+fn read_bearer_digest(path: &Path) -> anyhow::Result<[u8; 32]> {
+    let metadata = std::fs::metadata(path).context("inspect TCP bearer file")?;
+    if !metadata.is_file() || metadata.len() > 512 {
+        bail!("TCP bearer file must be one bounded regular file");
+    }
+    let mut bearer = Zeroizing::new(
+        std::fs::read_to_string(path)
+            .context("read TCP bearer file")?
+            .trim()
+            .to_owned(),
+    );
+    let valid = bearer
+        .strip_prefix("dl_substrate_v1_")
+        .is_some_and(|token| {
+            token.len() == 43
+                && token
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+        });
+    if !valid {
+        bearer.clear();
+        bail!("TCP bearer file has an invalid credential shape");
+    }
+    Ok(Sha256::digest(bearer.as_bytes()).into())
+}
+
+fn valid_identity_ref(value: &str) -> bool {
+    !value.is_empty() && value.len() <= 256 && value.bytes().all(|byte| byte.is_ascii_graphic())
 }
 
 fn lock_instance(socket: &Path) -> anyhow::Result<InstanceLock> {
@@ -585,5 +699,20 @@ mod tests {
         drop(listener);
         drop(cleanup);
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn hosted_bearer_file_is_closed_and_hashed() {
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let path = directory.path().join("bearer");
+        let bearer = format!("dl_substrate_v1_{}", "a".repeat(43));
+        std::fs::write(&path, format!("{bearer}\n")).expect("write bearer");
+        assert_eq!(
+            read_bearer_digest(&path).unwrap(),
+            Sha256::digest(bearer).as_slice()
+        );
+
+        std::fs::write(&path, "invalid").expect("replace bearer");
+        assert!(read_bearer_digest(&path).is_err());
     }
 }

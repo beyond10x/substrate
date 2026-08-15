@@ -4,4 +4,4 @@ mod app;
 mod runtime;
 
 pub use app::{App, Authority, Identity, SystemAuthority, router};
-pub use runtime::{DaemonConfig, serve};
+pub use runtime::{DaemonConfig, TcpDaemonConfig, serve};
