@@ -211,8 +211,11 @@ def check_startup_refusal(binary: Path, root: Path) -> None:
 
 
 def check_dual_daemon_refusal(harness: Harness) -> None:
+    command = harness.command.copy()
+    second_socket = harness.socket.with_name("substrate-second.sock")
+    command[command.index("--socket") + 1] = str(second_socket)
     result = subprocess.run(
-        harness.command,
+        command,
         stdin=subprocess.DEVNULL,
         capture_output=True,
         text=True,
@@ -220,7 +223,8 @@ def check_dual_daemon_refusal(harness: Harness) -> None:
         check=False,
     )
     assert result.returncode != 0
-    assert "another substrate daemon owns this socket identity" in result.stderr
+    assert "another substrate daemon owns this durable state identity" in result.stderr
+    assert not second_socket.exists()
     status, machine = harness.call(
         "GET", "/v1/machine", "req_dual_daemon_owner_survives"
     )

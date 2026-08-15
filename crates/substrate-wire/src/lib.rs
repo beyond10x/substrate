@@ -491,6 +491,7 @@ pub struct ExecLimits {
     pub output_bytes: u64,
     pub processes: u32,
     pub memory_bytes: u64,
+    /// Cumulative CPU-time budget across the complete execution cgroup, not a rate or share.
     pub cpu_millis: u64,
 }
 

@@ -1,11 +1,11 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::OpenOptions;
-use std::io::Write as _;
+use std::io::{self, Write as _};
 use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{ExitStatus, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
@@ -97,6 +97,7 @@ impl Execution {
 pub struct ProcessRuntime {
     config: HostConfig,
     capability: CapabilitySnapshot,
+    backend_binding: Option<crate::probe::BackendBinding>,
     executions: Arc<Mutex<HashMap<String, Arc<Execution>>>>,
     reservations: Arc<Mutex<HashSet<String>>>,
     active: Arc<AtomicUsize>,
@@ -104,9 +105,11 @@ pub struct ProcessRuntime {
 
 impl ProcessRuntime {
     pub fn new(config: HostConfig, capability: CapabilitySnapshot) -> Result<Self, DriverError> {
+        let backend_binding = crate::probe::backend_binding(&config);
         let runtime = Self {
             config,
             capability,
+            backend_binding,
             executions: Arc::new(Mutex::new(HashMap::new())),
             reservations: Arc::new(Mutex::new(HashSet::new())),
             active: Arc::new(AtomicUsize::new(0)),
@@ -459,6 +462,7 @@ impl ProcessRuntime {
         let execution = Arc::new(Execution::new(observation.clone(), pipe));
         tracking.install(Arc::clone(&execution));
         let timeout = Duration::from_millis(input.limits.timeout_ms);
+        let cpu_budget_micros = input.limits.cpu_millis.saturating_mul(1_000);
         let output_limit = usize::try_from(input.limits.output_bytes)
             .unwrap_or(usize::MAX)
             .min(usize::try_from(self.config.output_limit_bytes).unwrap_or(usize::MAX));
@@ -467,6 +471,7 @@ impl ProcessRuntime {
             cgroup,
             Arc::clone(&execution),
             timeout,
+            cpu_budget_micros,
             output_limit,
             pipe_sender,
             pipe_settings.map_or(PIPE_FRAME_BYTES, |settings| settings.frame_limit),
@@ -820,21 +825,15 @@ impl ProcessRuntime {
     }
 
     fn recheck_backend(&self) -> Result<(), DriverError> {
-        if !self.config.bubblewrap.is_file() {
-            return Err(DriverError::refused(
-                "exec.capability-stale",
-                "Bubblewrap disappeared after capability admission.",
-                "exec.namespaces",
-            ));
-        }
-        let Some(root) = self.config.cgroup_root.as_deref() else {
+        if self.backend_binding.is_none() {
             return Err(sandbox_unavailable());
-        };
-        if !root.join("cgroup.procs").is_file() {
+        }
+        let current = crate::probe::backend_binding(&self.config);
+        if current.is_none() || current != self.backend_binding {
             return Err(DriverError::refused(
                 "exec.capability-stale",
-                "Cgroup delegation disappeared after capability admission.",
-                "exec.cgroup-limits",
+                "The admitted confinement backend identity or configuration changed after probing.",
+                "capability_snapshot",
             ));
         }
         Ok(())
@@ -1008,6 +1007,7 @@ async fn run_child(
     cgroup: Cgroup,
     execution: Arc<Execution>,
     timeout: Duration,
+    cpu_budget_micros: u64,
     output_limit: usize,
     pipe_sender: Option<mpsc::Sender<PipeFrame>>,
     frame_limit: usize,
@@ -1037,18 +1037,12 @@ async fn run_child(
         )
         .await
     });
-    let timed_out;
-    let status = if let Ok(result) = tokio::time::timeout(timeout, child.wait()).await {
-        timed_out = false;
-        result
-    } else {
-        timed_out = true;
-        let _ = cgroup.kill_all();
-        child.wait().await
-    };
+    let (status, timed_out, cpu_exhausted, cpu_measurement_failed) =
+        wait_for_child(&mut child, &cgroup, &execution, timeout, cpu_budget_micros).await;
     let (stdout, stdout_truncated) = stdout_task.await.unwrap_or_else(|_| (Vec::new(), true));
     let (stderr, stderr_truncated) = stderr_task.await.unwrap_or_else(|_| (Vec::new(), true));
-    let forced_cancellation = timed_out || execution.cancellation_requested.load(Ordering::Acquire);
+    let forced_cancellation =
+        timed_out || cpu_exhausted || execution.cancellation_requested.load(Ordering::Acquire);
     let cgroup_reconciled = reconcile_cgroup(&cgroup).await;
     let capsule_reconciled = capsule.is_none_or(|capsule| capsule.directory.close().is_ok());
     let mut observation = execution.observation.lock();
@@ -1059,7 +1053,7 @@ async fn run_child(
     observation.output_complete = true;
     observation.resource.observed_at = Utc::now();
     match status {
-        _ if !cgroup_reconciled || !capsule_reconciled => {
+        _ if !cgroup_reconciled || !capsule_reconciled || cpu_measurement_failed => {
             observation.resource.state = ExecState::Unknown;
             observation.resource.exit = None;
         }
@@ -1089,6 +1083,57 @@ async fn run_child(
     }
     drop(observation);
     execution.notify.notify_waiters();
+}
+
+async fn wait_for_child(
+    child: &mut Child,
+    cgroup: &Cgroup,
+    execution: &Execution,
+    timeout: Duration,
+    cpu_budget_micros: u64,
+) -> (io::Result<ExitStatus>, bool, bool, bool) {
+    let mut timed_out = false;
+    let mut cpu_exhausted = false;
+    let mut cpu_measurement_failed = false;
+    let timeout_sleep = tokio::time::sleep(timeout);
+    tokio::pin!(timeout_sleep);
+    let mut cpu_poll = tokio::time::interval(Duration::from_millis(1));
+    cpu_poll.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let status = loop {
+        tokio::select! {
+            result = child.wait() => break result,
+            () = &mut timeout_sleep => {
+                timed_out = true;
+                let _ = cgroup.kill_all();
+                close_live_output(execution).await;
+                break child.wait().await;
+            }
+            _ = cpu_poll.tick() => {
+                match cgroup.cpu_usage_micros() {
+                    Ok(usage) if usage >= cpu_budget_micros => {
+                        cpu_exhausted = true;
+                        let _ = cgroup.kill_all();
+                        close_live_output(execution).await;
+                        break child.wait().await;
+                    }
+                    Ok(_) => {}
+                    Err(_) => {
+                        cpu_measurement_failed = true;
+                        let _ = cgroup.kill_all();
+                        close_live_output(execution).await;
+                        break child.wait().await;
+                    }
+                }
+            }
+        }
+    };
+    (status, timed_out, cpu_exhausted, cpu_measurement_failed)
+}
+
+async fn close_live_output(execution: &Execution) {
+    if let Some(pipe) = &execution.pipe {
+        pipe.output.lock().await.close();
+    }
 }
 
 struct ActivePermit {
@@ -1491,6 +1536,29 @@ impl Cgroup {
         write_control(&self.path, "cgroup.kill", "1")
     }
 
+    fn cpu_usage_micros(&self) -> Result<u64, DriverError> {
+        let stats = std::fs::read_to_string(self.path.join("cpu.stat")).map_err(|error| {
+            DriverError::failed(
+                "exec.cgroup-read-failed",
+                format!("cgroup cpu.stat: {error}"),
+            )
+        })?;
+        stats
+            .lines()
+            .find_map(|line| {
+                let mut fields = line.split_whitespace();
+                (fields.next() == Some("usage_usec"))
+                    .then(|| fields.next()?.parse::<u64>().ok())
+                    .flatten()
+            })
+            .ok_or_else(|| {
+                DriverError::failed(
+                    "exec.cgroup-read-failed",
+                    "cgroup cpu.stat omitted usage_usec",
+                )
+            })
+    }
+
     fn signal_all(&self, signal: Signal, excluded_pid: Option<u32>) -> Result<(), DriverError> {
         let processes =
             std::fs::read_to_string(self.path.join("cgroup.procs")).map_err(|error| {
@@ -1618,6 +1686,8 @@ fn process_tree(leader: u32) -> Result<Vec<u32>, DriverError> {
 mod tests {
     use std::collections::BTreeMap;
     use std::os::unix::fs::symlink;
+    use std::sync::atomic::AtomicU64;
+    use std::time::Duration;
 
     use base64::Engine as _;
     use sha2::{Digest as _, Sha256};
@@ -1629,9 +1699,9 @@ mod tests {
     };
 
     use super::{
-        Cgroup, ExecObservation, Execution, PipeStream, ProcessRuntime,
-        contain_spawned_with_reconciliation, drain_capped, is_secretish_name, is_terminal,
-        wait_terminal_with_hook,
+        Cgroup, ExecObservation, Execution, PipeState, PipeStream, ProcessRuntime,
+        close_live_output, contain_spawned_with_reconciliation, drain_capped, is_secretish_name,
+        is_terminal, wait_terminal_with_hook,
     };
     use crate::{DispatchOutcome, HostConfig};
 
@@ -1978,6 +2048,59 @@ mod tests {
         let (captured, truncated) = drain.await.unwrap();
         assert_eq!(captured, b"abcd");
         assert!(truncated);
+    }
+
+    #[tokio::test]
+    async fn closing_a_saturated_live_queue_unblocks_bounded_capture() {
+        use tokio::io::AsyncWriteExt as _;
+
+        let (mut writer, reader) = tokio::io::duplex(1_024);
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        let execution = std::sync::Arc::new(Execution::new(
+            running_observation("ex_saturated_pipe"),
+            Some(PipeState {
+                stdin: tokio::sync::Mutex::new(None),
+                output: tokio::sync::Mutex::new(receiver),
+                input_bytes: AtomicU64::new(0),
+                input_limit: 1_024,
+                frame_limit: 1,
+            }),
+        ));
+        let drain = tokio::spawn(drain_capped(
+            Some(reader),
+            64,
+            Some(sender),
+            PipeStream::Stdout,
+            1,
+        ));
+        writer
+            .write_all(b"queue saturation must not block timeout")
+            .await
+            .unwrap();
+        drop(writer);
+        tokio::task::yield_now().await;
+        close_live_output(&execution).await;
+        let (captured, truncated) = tokio::time::timeout(Duration::from_secs(1), drain)
+            .await
+            .expect("closed receiver releases drain")
+            .unwrap();
+        assert!(!captured.is_empty());
+        assert!(truncated);
+    }
+
+    #[test]
+    fn cumulative_cpu_usage_is_read_from_the_exec_cgroup() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::write(
+            directory.path().join("cpu.stat"),
+            "usage_usec 1234\nuser_usec 1000\nsystem_usec 234\n",
+        )
+        .unwrap();
+        let cgroup = Cgroup {
+            path: directory.path().to_path_buf(),
+            name: "substrate-ex_cpu".to_owned(),
+        };
+        assert_eq!(cgroup.cpu_usage_micros().unwrap(), 1_234);
     }
 
     #[test]

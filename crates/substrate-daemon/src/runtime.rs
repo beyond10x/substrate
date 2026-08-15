@@ -2,8 +2,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
-use std::net::SocketAddr;
-use std::os::unix::fs::{FileTypeExt as _, PermissionsExt as _};
+use std::net::{IpAddr, SocketAddr};
+use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -17,6 +17,7 @@ use axum::{Extension, Router};
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::service::TowerToHyperService;
+use parking_lot::Mutex;
 use substrate_host::{HostConfig, HostDriver};
 use substrate_store::Store;
 use subtle::ConstantTimeEq as _;
@@ -189,8 +190,8 @@ fn http1_builder(policy: UnixTransportPolicy) -> http1::Builder {
     builder
 }
 
-async fn enforce_connection_lifetime<F, T, E>(
-    permit: ConnectionPermit,
+async fn enforce_connection_lifetime<P, F, T, E>(
+    permit: P,
     lifetime: std::time::Duration,
     connection: F,
 ) -> Result<Result<T, E>, tokio::time::error::Elapsed>
@@ -199,6 +200,51 @@ where
 {
     let _permit = permit;
     tokio::time::timeout(lifetime, connection).await
+}
+
+struct TcpConnectionPermit {
+    _global: OwnedSemaphorePermit,
+    _source: OwnedSemaphorePermit,
+}
+
+struct TcpConnectionLimits {
+    global: Arc<Semaphore>,
+    by_source: Mutex<BTreeMap<IpAddr, Arc<Semaphore>>>,
+    per_source: usize,
+    max_sources: usize,
+}
+
+impl TcpConnectionLimits {
+    fn production() -> Self {
+        Self {
+            global: Arc::new(Semaphore::new(128)),
+            by_source: Mutex::new(BTreeMap::new()),
+            per_source: 16,
+            max_sources: 1_024,
+        }
+    }
+
+    fn acquire(&self, source: IpAddr) -> Option<TcpConnectionPermit> {
+        let source_limit = {
+            let mut sources = self.by_source.lock();
+            if let Some(limit) = sources.get(&source) {
+                Arc::clone(limit)
+            } else {
+                if sources.len() >= self.max_sources {
+                    return None;
+                }
+                let limit = Arc::new(Semaphore::new(self.per_source));
+                sources.insert(source, Arc::clone(&limit));
+                limit
+            }
+        };
+        let global = Arc::clone(&self.global).try_acquire_owned().ok()?;
+        let source = source_limit.try_acquire_owned().ok()?;
+        Some(TcpConnectionPermit {
+            _global: global,
+            _source: source,
+        })
+    }
 }
 
 struct InstanceLock {
@@ -246,6 +292,9 @@ pub struct TcpDaemonConfig {
     pub subject: String,
     pub actor: String,
     pub private_overlay: bool,
+    /// Explicit acknowledgement that the static-bearer transport is not the accepted hosted
+    /// trust-envelope profile and must not be exposed as a production control surface.
+    pub development_only: bool,
 }
 
 impl DaemonConfig {
@@ -289,12 +338,10 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
     {
         bail!("deployment must be a non-empty stable identifier");
     }
-    let _instance_lock = lock_instance(&config.socket)?;
+    prepare_private_state_path(&config.state)?;
+    let _instance_lock = lock_state_identity(&config.state)?;
     if config.tcp.is_none() {
         prepare_socket(&config.socket)?;
-    }
-    if let Some(parent) = config.state.parent() {
-        std::fs::create_dir_all(parent).context("create state directory")?;
     }
     if config.event_retention == 0 {
         bail!("event retention must be nonzero");
@@ -303,7 +350,10 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
         Store::open_with_event_retention(&config.state, config.event_retention)
             .context("open durable state")?,
     );
+    std::fs::set_permissions(&config.state, std::fs::Permissions::from_mode(0o600))
+        .context("restrict durable state database")?;
     let mut host_config = HostConfig::minimum(&config.workspaces);
+    host_config.config_generation = configuration_generation(&config);
     host_config.cgroup_root = config.cgroup_root;
     host_config.bubblewrap = config.bubblewrap;
     host_config.event_retention = config.event_retention;
@@ -333,6 +383,8 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
     let allowed = config.allow_uids.into_iter().collect::<BTreeSet<_>>();
     let transport_policy = UnixTransportPolicy::production();
     let connection_limits = ConnectionLimits::new(&allowed, transport_policy);
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
     info!(socket = %config.socket.display(), "substrate ready");
 
     loop {
@@ -374,8 +426,8 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
                     }
                 });
             }
-            signal = tokio::signal::ctrl_c() => {
-                signal.context("install shutdown signal")?;
+            signal = &mut shutdown => {
+                signal?;
                 break;
             }
         }
@@ -386,12 +438,42 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn configuration_generation(config: &DaemonConfig) -> u64 {
+    let mut material = Vec::new();
+    for value in [
+        config.deployment.as_bytes(),
+        config.workspaces.as_os_str().as_encoded_bytes(),
+        config.bubblewrap.as_os_str().as_encoded_bytes(),
+    ] {
+        material.extend_from_slice(&(value.len() as u64).to_be_bytes());
+        material.extend_from_slice(value);
+    }
+    if let Some(root) = &config.cgroup_root {
+        let value = root.as_os_str().as_encoded_bytes();
+        material.extend_from_slice(&(value.len() as u64).to_be_bytes());
+        material.extend_from_slice(value);
+    } else {
+        material.extend_from_slice(&0_u64.to_be_bytes());
+    }
+    material.extend_from_slice(&config.event_retention.to_be_bytes());
+    let digest = Sha256::digest(material);
+    u64::from_be_bytes(
+        digest[..8]
+            .try_into()
+            .expect("SHA-256 prefix is eight bytes"),
+    )
+    .max(1)
+}
+
 #[derive(Clone)]
 struct TcpAuthState {
     bearer_sha256: [u8; 32],
 }
 
 async fn serve_tcp(app: Arc<App>, config: &TcpDaemonConfig) -> anyhow::Result<()> {
+    if !config.development_only {
+        bail!("static-bearer TCP is available only in the explicit development profile");
+    }
     if !config.private_overlay {
         bail!("hosted TCP requires an explicitly configured private overlay");
     }
@@ -420,13 +502,92 @@ async fn serve_tcp(app: Arc<App>, config: &TcpDaemonConfig) -> anyhow::Result<()
     let listener = TcpListener::bind(config.listen)
         .await
         .context("bind authenticated TCP listener")?;
-    info!(listen = %config.listen, "substrate authenticated TCP ready");
-    axum::serve(listener, service)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
-        .await
-        .context("serve authenticated TCP listener")
+    info!(listen = %config.listen, "substrate development-only authenticated TCP ready");
+    let policy = UnixTransportPolicy::production();
+    let limits = TcpConnectionLimits::production();
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
+    let mut connections = tokio::task::JoinSet::new();
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => {
+                let (stream, address) = match accepted {
+                    Ok(accepted) => accepted,
+                    Err(error) => {
+                        warn!(%error, "transient TCP accept failure");
+                        tokio::time::sleep(policy.accept_retry_delay).await;
+                        continue;
+                    }
+                };
+                let Some(permit) = limits.acquire(address.ip()) else {
+                    warn!(source = %address.ip(), "refused TCP peer at connection capacity");
+                    continue;
+                };
+                let service = service.clone();
+                connections.spawn(async move {
+                    let io = TokioIo::new(stream);
+                    let builder = http1_builder(policy);
+                    let connection = builder
+                        .serve_connection(io, TowerToHyperService::new(service))
+                        .with_upgrades();
+                    match enforce_connection_lifetime(
+                        permit,
+                        policy.connection_lifetime,
+                        connection,
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => warn!(%error, "TCP HTTP connection failed"),
+                        Err(_) => warn!(source = %address.ip(), "TCP connection lifetime expired"),
+                    }
+                });
+            }
+            joined = connections.join_next(), if !connections.is_empty() => {
+                if let Some(Err(error)) = joined {
+                    warn!(%error, "TCP connection task failed");
+                }
+            }
+            signal = &mut shutdown => {
+                signal?;
+                break;
+            }
+        }
+    }
+    drop(listener);
+    let drained = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while let Some(result) = connections.join_next().await {
+            if let Err(error) = result {
+                warn!(%error, "TCP connection task failed while draining");
+            }
+        }
+    })
+    .await;
+    if drained.is_err() {
+        connections.abort_all();
+    }
+    Ok(())
+}
+
+async fn shutdown_signal() -> anyhow::Result<()> {
+    let interrupt = async {
+        tokio::signal::ctrl_c()
+            .await
+            .context("install Ctrl-C shutdown signal")
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        let mut signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .context("install SIGTERM shutdown signal")?;
+        signal.recv().await;
+        Ok(())
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<anyhow::Result<()>>();
+    tokio::select! {
+        result = interrupt => result,
+        result = terminate => result,
+    }
 }
 
 async fn require_tcp_bearer(
@@ -493,8 +654,42 @@ fn valid_path_prefix(value: &str) -> bool {
             }))
 }
 
-fn lock_instance(socket: &Path) -> anyhow::Result<InstanceLock> {
-    let path = socket.with_extension("lock");
+fn prepare_private_state_path(state: &Path) -> anyhow::Result<()> {
+    let parent = state
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .context("durable state path requires a parent directory")?;
+    if !parent.exists() {
+        std::fs::create_dir_all(parent).context("create state directory")?;
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
+            .context("restrict state directory")?;
+    }
+    let parent_metadata = std::fs::symlink_metadata(parent).context("inspect state directory")?;
+    let current_uid = nix::unistd::Uid::current().as_raw();
+    if !parent_metadata.is_dir()
+        || parent_metadata.uid() != current_uid
+        || !owner_only(parent_metadata.permissions().mode())
+    {
+        bail!("state directory must be owner-controlled with mode 0700 or stricter");
+    }
+    match std::fs::symlink_metadata(state) {
+        Ok(metadata)
+            if metadata.is_file()
+                && metadata.uid() == current_uid
+                && owner_only(metadata.permissions().mode()) => {}
+        Ok(_) => bail!("state database must be an owner-only regular file, never a symlink"),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error).context("inspect durable state database"),
+    }
+    Ok(())
+}
+
+fn owner_only(mode: u32) -> bool {
+    mode.trailing_zeros() >= 6
+}
+
+fn lock_state_identity(state: &Path) -> anyhow::Result<InstanceLock> {
+    let path = state.with_extension("instance.lock");
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).context("create lock directory")?;
     }
@@ -505,9 +700,11 @@ fn lock_instance(socket: &Path) -> anyhow::Result<InstanceLock> {
         .write(true)
         .open(&path)
         .context("open instance lock")?;
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+        .context("restrict instance lock")?;
     let file = nix::fcntl::Flock::lock(file, nix::fcntl::FlockArg::LockExclusiveNonblock)
         .map_err(|(_, error)| error)
-        .context("another substrate daemon owns this socket identity")?;
+        .context("another substrate daemon owns this durable state identity")?;
     Ok(InstanceLock { path, _file: file })
 }
 
@@ -736,5 +933,36 @@ mod tests {
 
         std::fs::write(&path, "invalid").expect("replace bearer");
         assert!(read_bearer_digest(&path).is_err());
+    }
+
+    #[test]
+    fn tcp_capacity_is_global_and_source_scoped() {
+        let limits = TcpConnectionLimits::production();
+        let source: IpAddr = "192.0.2.1".parse().unwrap();
+        let permits = (0..16)
+            .map(|_| limits.acquire(source).expect("per-source capacity"))
+            .collect::<Vec<_>>();
+        assert!(limits.acquire(source).is_none());
+        assert!(limits.acquire("192.0.2.2".parse().unwrap()).is_some());
+        drop(permits);
+        assert!(limits.acquire(source).is_some());
+    }
+
+    #[test]
+    fn durable_state_requires_an_owner_private_directory_and_regular_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let private = directory.path().join("private");
+        std::fs::create_dir(&private).unwrap();
+        std::fs::set_permissions(&private, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let state = private.join("state.db");
+        prepare_private_state_path(&state).unwrap();
+
+        let broad = directory.path().join("broad");
+        std::fs::create_dir(&broad).unwrap();
+        std::fs::set_permissions(&broad, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(prepare_private_state_path(&broad.join("state.db")).is_err());
+
+        std::os::unix::fs::symlink(&state, private.join("linked.db")).unwrap();
+        assert!(prepare_private_state_path(&private.join("linked.db")).is_err());
     }
 }

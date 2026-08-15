@@ -773,31 +773,16 @@ impl App {
                     }
                 }
                 Err(error) if error.class == DriverErrorClass::NotFound => {
-                    if candidate.operation_state == OperationState::Terminal {
-                        let _ = self
-                            .store_io(|| {
-                                self.store
-                                    .mark_exec_physically_absent(&candidate, self.authority.now())
-                            })
-                            .await;
-                    } else {
-                        let (status, mut detail) =
-                            driver_detail(Some(&candidate.operation), &error);
-                        detail.retriable = false;
-                        let _ = self
-                            .store_io(|| {
-                                self.store.complete_dispatch_absence(
-                                    &candidate.scope,
-                                    &candidate.operation,
-                                    &self.authority.now().to_rfc3339(),
-                                    status.as_u16(),
-                                    "exec",
-                                    &candidate.stored.resource.id,
-                                    &detail,
-                                )
-                            })
-                            .await;
-                    }
+                    // Absence after restart proves only that no process remains now. It cannot
+                    // prove whether dispatch crossed the launch barrier before the crash. Preserve
+                    // the durable `unknown` operation/exec result while recording physical absence
+                    // so cleanup can proceed without inventing a definitive not-found outcome.
+                    let _ = self
+                        .store_io(|| {
+                            self.store
+                                .mark_exec_physically_absent(&candidate, self.authority.now())
+                        })
+                        .await;
                 }
                 Err(_) => {}
             }

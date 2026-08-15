@@ -66,23 +66,22 @@ target/debug/substrate-daemon \
   --allow-uid 1000
 ```
 
-Cloud may instead enable the hosted TCP transport on an explicitly private overlay. That mode
+Cloud may enable the current TCP transport only as an explicitly acknowledged development profile
+on a private overlay (`--tcp-development-only --tcp-private-overlay`). That mode
 requires a bounded `dl_substrate_v1_...` bearer file plus deployment-owned `--tcp-subject` and
 `--tcp-actor` bindings; every HTTP route requires that bearer. A configured
 `--tcp-path-prefix /api/substrate` publishes the existing v1 contract below
-`/api/substrate/v1`. It is not an anonymous authentication
-protocol and must not be exposed without TLS termination and the bearer check. The Cloud chart
-publishes the service through its internal TLS ingress while admitting pod traffic only from that
-ingress controller and its Connectors workload. A hosted container without a
+`/api/substrate/v1`. This static bearer does not satisfy the accepted scoped, expiring, rotating
+hosted trust-envelope profile and therefore must not be published through external or shared
+ingress. The Cloud development chart keeps it cluster-internal and admits only its Connector
+workload. A hosted container without a
 delegated cgroup/bubblewrap environment continues to report execution sandbox unavailability
 rather than weakening confinement.
 
-The `substrate-daemon` crate also exposes the same daemon composition as `DaemonConfig` plus the
-async `serve` entrypoint. This lets a product ship the daemon code inside one distributable and
-start it through a private child-process mode. It does **not** expose a direct execution binding:
-the product remains a normal client, every operation crosses the owner-permissioned Unix socket,
-and kernel peer credentials, protocol validation, lifecycle isolation, and driver enforcement all
-remain in the daemon process. The native `substrate-daemon` binary is a thin CLI over that same entrypoint.
+The `substrate-daemon` crate exposes `DaemonConfig` plus the async `serve` entrypoint for this
+repository's own binary and tests. Cross-repository consumers use the separately released native
+`substrate-daemon` artifact and owner-released wire contract; they do not import this implementation
+crate. Every operation crosses an authenticated socket boundary.
 
 Without a delegated cgroup root, workspace operations remain served and exec confinement facts are
 absent, so exec admission answers `exec.sandbox-unavailable`. A Linux deployment that serves exec

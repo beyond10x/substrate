@@ -92,7 +92,9 @@ at least one consumer journey needs it and unsupported drivers can refuse it coh
 4. **Probe failure:** failure of the selected driver's mandatory probe leaves the daemon unready and
    its operations unserved. A daemon may expose authenticated health diagnostics but cannot publish
    optimistic capabilities. Optional facts are simply absent with a diagnostic.
-5. **Invalidation:** every driver/config/backend change increments `config_generation` and invalidates
-   snapshots. Operations bind the admitted snapshot. Immediately before dispatch the daemon rechecks
-   driver identity, generation, sandbox backend, filesystem root, network aperture, resource limits,
-   and credential/destination binding; mismatch is `refused` before secret acquisition or dispatch.
+5. **Invalidation:** every driver/config/backend change changes `config_generation` and invalidates
+   snapshots. The snapshot digest binds driver kind/version, configuration generation, probe time,
+   canonical backend paths, backend file identity and SHA-256, cgroup-root identity/controllers,
+   and capability facts. Operations bind the admitted snapshot. Immediately before dispatch the
+   daemon recomputes the security-critical backend binding; mismatch is `refused` before secret
+   acquisition or dispatch.

@@ -59,6 +59,9 @@ struct Arguments {
 
     #[arg(long, env = "SUBSTRATE_TCP_PRIVATE_OVERLAY", requires = "tcp_listen")]
     tcp_private_overlay: bool,
+
+    #[arg(long, env = "SUBSTRATE_TCP_DEVELOPMENT_ONLY", requires = "tcp_listen")]
+    tcp_development_only: bool,
 }
 
 impl From<Arguments> for DaemonConfig {
@@ -76,6 +79,7 @@ impl From<Arguments> for DaemonConfig {
                 .tcp_actor
                 .expect("clap requires an actor with TCP"),
             private_overlay: arguments.tcp_private_overlay,
+            development_only: arguments.tcp_development_only,
         });
         Self {
             socket: arguments.socket,

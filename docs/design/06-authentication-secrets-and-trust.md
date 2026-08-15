@@ -21,6 +21,11 @@ Hosted deployments validate short-lived identity-issued service material through
 Substrate stores only the accepted claims required for local admission and provenance; organization
 membership and role evaluation remain outside.
 
+The current static-bearer TCP listener is deliberately marked `development_only` in runtime
+configuration. It is bounded and authenticated, but it does not claim conformance with the hosted
+identity, expiry, scope, overlap-rotation, or connected-revocation requirements below. Production
+composition must keep it disabled until the trust-envelope verifier profile is implemented.
+
 ## 2. Authorization split
 
 Higher layers decide rich intent:

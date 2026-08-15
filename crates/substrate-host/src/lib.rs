@@ -13,6 +13,7 @@ use std::sync::{Arc, OnceLock};
 use async_trait::async_trait;
 use chrono::Utc;
 use parking_lot::Mutex;
+use sha2::{Digest as _, Sha256};
 use substrate_wire::{
     CapabilitySnapshot, ExecOutputQuery, ExecSignalInput, ExecStartInput, FileAbsence,
     FileObservation, FileReadQuery, FileReadResult, LeaseObservation, OutputSlice, Workspace,
@@ -45,12 +46,25 @@ pub struct HostConfig {
 impl HostConfig {
     pub fn minimum(workspace_root: impl Into<PathBuf>) -> Self {
         let workspace_root = workspace_root.into();
+        let generation_digest: [u8; 32] =
+            Sha256::digest(workspace_root.as_os_str().as_encoded_bytes()).into();
+        let config_generation = u64::from_be_bytes([
+            generation_digest[0],
+            generation_digest[1],
+            generation_digest[2],
+            generation_digest[3],
+            generation_digest[4],
+            generation_digest[5],
+            generation_digest[6],
+            generation_digest[7],
+        ])
+        .max(1);
         Self {
             capsule_root: workspace_root.join(".substrate-capsules"),
             workspace_root,
             cgroup_root: None,
             bubblewrap: PathBuf::from("/usr/bin/bwrap"),
-            config_generation: 1,
+            config_generation,
             max_file_bytes: substrate_wire::MAX_FILE_BYTES,
             read_limit_bytes: substrate_wire::MAX_IO_BYTES,
             list_limit_items: substrate_wire::MAX_LIST_ITEMS,
