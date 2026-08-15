@@ -9,11 +9,11 @@ use std::sync::Arc;
 
 use crate::{App, Identity, router};
 use anyhow::{Context as _, bail};
-use axum::Extension;
 use axum::extract::{Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
+use axum::{Extension, Router};
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::service::TowerToHyperService;
@@ -241,6 +241,7 @@ pub struct DaemonConfig {
 #[derive(Debug, Clone)]
 pub struct TcpDaemonConfig {
     pub listen: SocketAddr,
+    pub path_prefix: String,
     pub bearer_file: PathBuf,
     pub subject: String,
     pub actor: String,
@@ -394,6 +395,9 @@ async fn serve_tcp(app: Arc<App>, config: &TcpDaemonConfig) -> anyhow::Result<()
     if !config.private_overlay {
         bail!("hosted TCP requires an explicitly configured private overlay");
     }
+    if !valid_path_prefix(&config.path_prefix) {
+        bail!("hosted TCP path prefix must be absolute, lowercase, and have no trailing slash");
+    }
     if !valid_identity_ref(&config.subject) || !valid_identity_ref(&config.actor) {
         bail!("hosted TCP subject and actor must be bounded stable references");
     }
@@ -408,6 +412,11 @@ async fn serve_tcp(app: Arc<App>, config: &TcpDaemonConfig) -> anyhow::Result<()
     let service = router(app)
         .layer(Extension(identity))
         .layer(middleware::from_fn_with_state(auth, require_tcp_bearer));
+    let service = if config.path_prefix == "/" {
+        service
+    } else {
+        Router::new().nest(&config.path_prefix, service)
+    };
     let listener = TcpListener::bind(config.listen)
         .await
         .context("bind authenticated TCP listener")?;
@@ -469,6 +478,19 @@ fn read_bearer_digest(path: &Path) -> anyhow::Result<[u8; 32]> {
 
 fn valid_identity_ref(value: &str) -> bool {
     !value.is_empty() && value.len() <= 256 && value.bytes().all(|byte| byte.is_ascii_graphic())
+}
+
+fn valid_path_prefix(value: &str) -> bool {
+    value == "/"
+        || (value.starts_with('/')
+            && !value.ends_with('/')
+            && value.len() <= 128
+            && value.split('/').skip(1).all(|segment| {
+                !segment.is_empty()
+                    && segment.bytes().all(|byte| {
+                        byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'
+                    })
+            }))
 }
 
 fn lock_instance(socket: &Path) -> anyhow::Result<InstanceLock> {

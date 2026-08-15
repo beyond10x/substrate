@@ -51,13 +51,13 @@ absent.
 
 ## Lifecycle daemon
 
-By default, `substrated` serves an owner-permissioned Unix socket. Startup requires at least one
+By default, `substrate-daemon` serves an owner-permissioned Unix socket. Startup requires at least one
 explicit `--allow-uid`; the daemon derives `local:<uid>` from kernel peer credentials and never
 accepts a subject from HTTP data.
 
 ```console
 cargo build --workspace --locked
-target/debug/substrated \
+target/debug/substrate-daemon \
   --socket ./run/substrate.sock \
   --state ./run/state.db \
   --workspaces ./run/workspaces \
@@ -68,9 +68,12 @@ target/debug/substrated \
 
 Cloud may instead enable the hosted TCP transport on an explicitly private overlay. That mode
 requires a bounded `dl_substrate_v1_...` bearer file plus deployment-owned `--tcp-subject` and
-`--tcp-actor` bindings; every HTTP route requires that bearer. It is not a public authentication
-protocol and must not be exposed by ingress. The Cloud chart therefore publishes only a ClusterIP
-service and admits ingress solely from its Connectors workload. A hosted container without a
+`--tcp-actor` bindings; every HTTP route requires that bearer. A configured
+`--tcp-path-prefix /api/substrate` publishes the existing v1 contract below
+`/api/substrate/v1`. It is not an anonymous authentication
+protocol and must not be exposed without TLS termination and the bearer check. The Cloud chart
+publishes the service through its internal TLS ingress while admitting pod traffic only from that
+ingress controller and its Connectors workload. A hosted container without a
 delegated cgroup/bubblewrap environment continues to report execution sandbox unavailability
 rather than weakening confinement.
 
@@ -79,7 +82,7 @@ async `serve` entrypoint. This lets a product ship the daemon code inside one di
 start it through a private child-process mode. It does **not** expose a direct execution binding:
 the product remains a normal client, every operation crosses the owner-permissioned Unix socket,
 and kernel peer credentials, protocol validation, lifecycle isolation, and driver enforcement all
-remain in the daemon process. The native `substrated` binary is a thin CLI over that same entrypoint.
+remain in the daemon process. The native `substrate-daemon` binary is a thin CLI over that same entrypoint.
 
 Without a delegated cgroup root, workspace operations remain served and exec confinement facts are
 absent, so exec admission answers `exec.sandbox-unavailable`. A Linux deployment that serves exec

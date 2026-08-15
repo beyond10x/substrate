@@ -67,9 +67,9 @@ class Harness:
         while not self.socket.exists():
             if self.process.poll() is not None:
                 error = self.process.stderr.read() if self.process.stderr else ""
-                raise AssertionError(f"substrated exited before readiness: {error}")
+                raise AssertionError(f"substrate-daemon exited before readiness: {error}")
             if time.monotonic() >= deadline:
-                raise AssertionError("substrated did not create its Unix socket")
+                raise AssertionError("substrate-daemon did not create its Unix socket")
             time.sleep(0.02)
 
     def close(self) -> None:
@@ -78,7 +78,7 @@ class Harness:
             self.process.wait(timeout=10)
         if self.process.returncode != 0:
             error = self.process.stderr.read() if self.process.stderr else ""
-            raise AssertionError(f"substrated shutdown failed: {error}")
+            raise AssertionError(f"substrate-daemon shutdown failed: {error}")
 
     def call(
         self,
@@ -1163,7 +1163,7 @@ def check_http_journey(
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument(
-        "--binary", type=Path, default=Path("target/debug/substrated")
+        "--binary", type=Path, default=Path("target/debug/substrate-daemon")
     )
     parser.add_argument("--cgroup-root", type=Path)
     arguments = parser.parse_args()

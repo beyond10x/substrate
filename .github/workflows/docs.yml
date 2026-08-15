@@ -43,4 +43,4 @@ jobs:
       - name: Build daemon
         run: cargo build --workspace --locked
       - name: Run independent Unix-socket vectors
-        run: python3 scripts/check-runtime-vectors.py --binary target/debug/substrated
+        run: python3 scripts/check-runtime-vectors.py --binary target/debug/substrate-daemon

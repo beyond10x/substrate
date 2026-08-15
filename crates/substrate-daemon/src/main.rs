@@ -9,7 +9,7 @@ use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, Parser)]
 #[command(
-    name = "substrated",
+    name = "substrate-daemon",
     version,
     about = "Daemonloom minimum substrate host"
 )]
@@ -45,6 +45,9 @@ struct Arguments {
     )]
     tcp_listen: Option<SocketAddr>,
 
+    #[arg(long, env = "SUBSTRATE_TCP_PATH_PREFIX", requires = "tcp_listen")]
+    tcp_path_prefix: Option<String>,
+
     #[arg(long, env = "SUBSTRATE_TCP_BEARER_FILE", requires = "tcp_listen")]
     tcp_bearer_file: Option<PathBuf>,
 
@@ -62,6 +65,7 @@ impl From<Arguments> for DaemonConfig {
     fn from(arguments: Arguments) -> Self {
         let tcp = arguments.tcp_listen.map(|listen| TcpDaemonConfig {
             listen,
+            path_prefix: arguments.tcp_path_prefix.unwrap_or_else(|| "/".to_owned()),
             bearer_file: arguments
                 .tcp_bearer_file
                 .expect("clap requires a bearer file with TCP"),
