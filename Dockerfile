@@ -1,4 +1,4 @@
-FROM rust:1.88-bookworm AS builder
+FROM rust:1.97-bookworm AS builder
 WORKDIR /src
 COPY . .
 RUN cargo build --locked --release -p substrate-daemon --bin substrate-daemon
