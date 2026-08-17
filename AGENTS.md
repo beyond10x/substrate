@@ -1,4 +1,4 @@
-# Working on daemonloom/substrate
+# Working on daemonloom/foundation/substrate
 
 This repository owns the standalone Daemonloom execution substrate. During the design phase, read:
 

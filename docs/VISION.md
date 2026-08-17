@@ -105,7 +105,7 @@ decides who may ask and remembers who did; flux and autodev are clients on both 
   grants admit operations from the risk vocabulary this spec declares; substrate events flow
   through platform delivery with provenance. In the personal posture, flux and autodev may also
   dial a loopback daemon directly — the platform is the governor, not a mandatory hop. Two
-  alignments with [connectors Design 03](https://github.com/daemonloom/daemonloom/blob/main/connectors/docs/design/03-beyond-http.md): a daemon on a private network is
+  alignments with [connectors Design 03](https://github.com/daemonloom/daemonloom/blob/main/foundation/connectors/docs/design/03-beyond-http.md): a daemon on a private network is
   reached the way any LAN-bound endpoint is — a **satellite** deployment near it, dialing up —
   so substrate carries no reverse-tunnel surface; and duplex byte streams (sessions, tunnels)
   follow the **byte-plane split** — the platform brokers establishment, the bytes flow directly.
