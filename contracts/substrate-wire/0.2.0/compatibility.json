@@ -1,0 +1,61 @@
+{
+  "$schema": "schemas/compatibility.json",
+  "contract": "substrate-wire",
+  "development_constraints": [
+    "This development bundle is contract-execution-ready but cannot satisfy a stable dependency.",
+    "Passing the bundle gate proves bundle integrity; it does not claim producer or host-driver conformance.",
+    "No compatibility promise begins before a signed stable release."
+  ],
+  "errata_from": {
+    "records": [
+      {
+        "compatibility_impact": "0.1 development consumers must select 0.2; producers must not claim exact 0.1 behavior for this vector.",
+        "corrected_expectation": "response.body.error.retriable=false",
+        "erroneous_expectation": "response.body.error.retriable=true",
+        "predecessor_path": "vectors/http/machinery-failure.json",
+        "predecessor_sha256": "820d687d40c7da4d095da9011ba40c68678a3581f929233e0b758d4a26e4e6c9",
+        "reason": "A terminal replay answer cannot be retried under the same operation id and cannot authorize redispatch under a new id.",
+        "replacement_path": "vectors/http/machinery-failure.json",
+        "replacement_sha256": "47fa1e2310f2d7a1b86908003660c24d38dbffa8275283f85413c87f42093da6"
+      },
+      {
+        "compatibility_impact": "0.1 development consumers must select 0.2; producers must not claim exact 0.1 behavior for this vector.",
+        "corrected_expectation": "outcome.operation_state_after_restart=unknown",
+        "erroneous_expectation": "outcome.operation_state_after_restart=accepted",
+        "predecessor_path": "vectors/driver/crash-before-dispatch.json",
+        "predecessor_sha256": "b09373e8629a791ba10968917895c4ed67fa4556befe6841841a7dd5204bc560",
+        "reason": "After process continuity is lost, accepted overstates dispatch knowledge; the unanswered outcome must reconcile to unknown without redispatch.",
+        "replacement_path": "vectors/driver/crash-before-dispatch.json",
+        "replacement_sha256": "254841946d4bd642ac1585b6ccffff00f12fac7f3379bf3981d4f09c591a9950"
+      },
+      {
+        "compatibility_impact": "0.1 development consumers must select 0.2; producers must not claim exact 0.1 behavior for this vector.",
+        "corrected_expectation": "setup.body-limit.limit_bytes=2097152 and request.body.repeat.count=2097153",
+        "erroneous_expectation": "setup.body-limit.limit_bytes=1048576 and request.body.repeat.count=1048577",
+        "predecessor_path": "vectors/http/input-body-limit.json",
+        "predecessor_sha256": "1c103c5582c8f3acad14f35eabcc22d879e2ea0909b89975216c7b328f9c3201",
+        "reason": "The transport must admit the JSON and base64 expansion of an exactly 1 MiB decoded file while still enforcing a finite request-body ceiling.",
+        "replacement_path": "vectors/http/input-body-limit.json",
+        "replacement_sha256": "ab7abe398bf7e4e5a2a0431a21bd8dea74debaba556886f1db55cb0a5f352fd5"
+      },
+      {
+        "compatibility_impact": "0.1 development consumers must select 0.2; producers must not claim exact 0.1 behavior for this vector.",
+        "corrected_expectation": "response.body.error.retriable=false",
+        "erroneous_expectation": "response.body.error.retriable=true",
+        "predecessor_path": "vectors/http/write-limit.json",
+        "predecessor_sha256": "848433f5bc599caa79dc2a4d701167c3435d97eee18b87fd3ac6db20c72248e5",
+        "reason": "A write-limit refusal is a terminal replay answer for its operation id and therefore cannot promise redispatch under that same id.",
+        "replacement_path": "vectors/http/write-limit.json",
+        "replacement_sha256": "8d0f0db7212dec0a94f5a823913426937c0e2701f759f91e77c1cb1746c0c6ef"
+      }
+    ],
+    "version": "0.1.0"
+  },
+  "request_policy": "closed",
+  "response_policy": "closed-route-selected-envelopes",
+  "status": "development",
+  "supported_api_majors": [
+    1
+  ],
+  "version": "0.2.0"
+}

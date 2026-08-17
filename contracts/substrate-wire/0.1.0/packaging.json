@@ -1,0 +1,22 @@
+{
+  "archive": {
+    "compression": "none",
+    "format": "posix-tar",
+    "gid": 0,
+    "group_name": "",
+    "mode": "normalized-by-file-kind",
+    "owner_name": "",
+    "path_order": "bytewise",
+    "source_date_epoch": "source-commit timestamp",
+    "uid": 0
+  },
+  "json_authority": "RFC 8785 JSON Canonicalization Scheme",
+  "release_blockers": [
+    "materialize the source commit and SOURCE_DATE_EPOCH",
+    "canonicalize every JSON authority file using the pinned release generator",
+    "build the sorted archive twice and prove byte identity",
+    "pass every vector with an independent clean-room runner against the producer",
+    "publish and sign the private OCI artifact"
+  ],
+  "status": "development"
+}

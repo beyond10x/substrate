@@ -1,0 +1,141 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "kind": "http",
+    "operation": "exec.start",
+    "request": {
+      "body": {
+        "input": {
+          "argv": [
+            "/usr/bin/true"
+          ],
+          "env": {
+            "allow": [],
+            "set": {}
+          },
+          "limits": {
+            "cpu_millis": 1000,
+            "memory_bytes": 67108864,
+            "output_bytes": 65536,
+            "processes": 16,
+            "timeout_ms": 5000
+          },
+          "sandbox": {
+            "capability_snapshot": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+            "network": "aperture",
+            "profile": "workspace",
+            "require": true
+          },
+          "wait": false,
+          "workspace": "ws_vector"
+        },
+        "op": "01JPHASE2EGRESSUNSERVED"
+      },
+      "headers": {
+        "x-request-id": "req_egress_0001"
+      },
+      "method": "POST",
+      "path": "/v1/execs",
+      "query": {}
+    },
+    "valid_address": true,
+    "valid_input": true
+  },
+  "context": {
+    "actor": "vector-client",
+    "authority": "http-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000",
+    "transport": {
+      "authenticated": true,
+      "kind": "unix",
+      "reachable": false
+    }
+  },
+  "covers": [
+    "error.unserved",
+    "security.no-egress"
+  ],
+  "expected": {
+    "kind": "http-response",
+    "response": {
+      "body": {
+        "api_version": "v1",
+        "error": {
+          "address": "exec.network-aperture",
+          "class": "unserved",
+          "code": "exec.network-unserved",
+          "message": "Requested network aperture is not served by this host.",
+          "operation": "01JPHASE2EGRESSUNSERVED",
+          "retriable": false
+        },
+        "request_id": "req_egress_0001"
+      },
+      "status": 501
+    }
+  },
+  "id": "phase-two-egress-is-unserved",
+  "layer": "http",
+  "phase": 2,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/driver/dispatch_count",
+      "expected": 0,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/network_was_weakened",
+      "expected": false,
+      "operator": "equals"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "machine",
+      "name": "minimum-host",
+      "state": {
+        "config_generation": 7,
+        "driver": "host",
+        "driver_version": "fixture-1",
+        "facts": {
+          "exec.argv-only": true,
+          "exec.cgroup-kill": true,
+          "exec.cgroup-limits": {
+            "cpu": true,
+            "memory": true,
+            "processes": true
+          },
+          "exec.namespaces": {
+            "ipc": true,
+            "mount": true,
+            "network": true,
+            "pid": true,
+            "user": true,
+            "uts": true
+          },
+          "exec.no-egress": true,
+          "exec.output-limit-bytes": 65536,
+          "exec.signals": [
+            "INT",
+            "TERM",
+            "KILL"
+          ],
+          "workspace.atomic-replace": true,
+          "workspace.guarded-io": true,
+          "workspace.list-limit-items": 100,
+          "workspace.max-file-bytes": 1048576,
+          "workspace.openat2-beneath": true,
+          "workspace.read-limit-bytes": 65536
+        },
+        "probed_at": "2026-08-13T12:00:00Z",
+        "snapshot": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+      }
+    }
+  ]
+}

@@ -1,0 +1,56 @@
+{
+  "$id": "urn:daemonloom:substrate-wire:0.4.0:input:workspace-file-read",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "limit_bytes": {
+          "maximum": 1048576,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "mode": {
+          "const": "file"
+        },
+        "offset": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "mode",
+        "offset",
+        "limit_bytes"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "limit_items": {
+          "maximum": 1000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "mode": {
+          "const": "directory"
+        }
+      },
+      "required": [
+        "mode",
+        "cursor",
+        "limit_items"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "workspace-file-read operation input"
+}

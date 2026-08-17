@@ -1,0 +1,634 @@
+{
+  "$schema": "schemas/coverage.json",
+  "format": "daemonloom.substrate-conformance-coverage.v1",
+  "requirements": [
+    {
+      "evidence": [
+        {
+          "id": "nonzero-exit-is-not-wire-failure",
+          "kind": "vector"
+        }
+      ],
+      "id": "behavior.nonzero-exit-observation",
+      "source": "Design 07 section 6"
+    },
+    {
+      "evidence": [
+        {
+          "id": "same-operation-different-input-conflicts",
+          "kind": "vector"
+        }
+      ],
+      "id": "error.conflict",
+      "source": "Design 07 section 6"
+    },
+    {
+      "evidence": [
+        {
+          "id": "read-over-cap-is-exhausted",
+          "kind": "vector"
+        }
+      ],
+      "id": "error.exhausted",
+      "source": "Design 07 section 6"
+    },
+    {
+      "evidence": [
+        {
+          "id": "accepted-machinery-failure-is-wire-failed",
+          "kind": "vector"
+        }
+      ],
+      "id": "error.failed",
+      "source": "Design 07 section 6"
+    },
+    {
+      "evidence": [
+        {
+          "id": "lexical-path-escape-is-refused",
+          "kind": "vector"
+        }
+      ],
+      "id": "error.refused",
+      "source": "Design 07 section 6"
+    },
+    {
+      "evidence": [
+        {
+          "id": "phase-two-egress-is-unserved",
+          "kind": "vector"
+        }
+      ],
+      "id": "error.unserved",
+      "source": "Design 07 section 6"
+    },
+    {
+      "evidence": [
+        {
+          "id": "workspace-create-conflict",
+          "kind": "hash-fixture"
+        }
+      ],
+      "id": "hash.different-input-conflict",
+      "source": "Design 07 section 6"
+    },
+    {
+      "evidence": [
+        {
+          "id": "workspace-create-transport-variant",
+          "kind": "hash-fixture"
+        }
+      ],
+      "id": "hash.ledger-scope",
+      "source": "Design 07 section 6"
+    },
+    {
+      "evidence": [
+        {
+          "id": "workspace-create-transport-variant",
+          "kind": "hash-fixture"
+        }
+      ],
+      "id": "hash.transport-exclusions",
+      "source": "Design 07 section 6"
+    },
+    {
+      "evidence": [
+        {
+          "id": "crash-after-dispatch-never-fabricates-success",
+          "kind": "vector"
+        }
+      ],
+      "id": "lifecycle.crash-after-dispatch",
+      "source": "Design 03"
+    },
+    {
+      "evidence": [
+        {
+          "id": "crash-before-dispatch-does-not-mutate",
+          "kind": "vector"
+        }
+      ],
+      "id": "lifecycle.crash-before-dispatch",
+      "source": "Design 03"
+    },
+    {
+      "evidence": [
+        {
+          "id": "same-operation-different-input-conflicts",
+          "kind": "vector"
+        }
+      ],
+      "id": "lifecycle.different-input-conflict",
+      "source": "Design 03"
+    },
+    {
+      "evidence": [
+        {
+          "id": "operation-ledger-reconciles-terminal-answer",
+          "kind": "vector"
+        },
+        {
+          "id": "lost-answer-reconciles-with-original-operation",
+          "kind": "vector"
+        }
+      ],
+      "id": "lifecycle.lost-answer-reconciliation",
+      "source": "Design 03"
+    },
+    {
+      "evidence": [
+        {
+          "id": "bounded-file-replacement-is-atomic",
+          "kind": "vector"
+        }
+      ],
+      "id": "lifecycle.post-action-observation",
+      "source": "Design 03"
+    },
+    {
+      "evidence": [
+        {
+          "id": "same-operation-same-input-replays-original-outcome",
+          "kind": "vector"
+        }
+      ],
+      "id": "lifecycle.stable-replay",
+      "source": "Design 03"
+    },
+    {
+      "evidence": [
+        {
+          "id": "cross-subject-operation-is-not-found",
+          "kind": "vector"
+        }
+      ],
+      "id": "lifecycle.subject-operation-isolation",
+      "source": "Design 03"
+    },
+    {
+      "evidence": [
+        {
+          "id": "crash-after-dispatch-never-fabricates-success",
+          "kind": "vector"
+        }
+      ],
+      "id": "lifecycle.unknown-preserved",
+      "source": "Design 03"
+    },
+    {
+      "evidence": [
+        {
+          "id": "owned-exec-is-reobserved",
+          "kind": "vector"
+        }
+      ],
+      "id": "route.exec.get",
+      "source": "Design 07 section 2"
+    },
+    {
+      "evidence": [
+        {
+          "id": "bounded-exec-output-is-ranged",
+          "kind": "vector"
+        }
+      ],
+      "id": "route.exec.output.get",
+      "source": "Design 07 section 2"
+    },
+    {
+      "evidence": [
+        {
+          "id": "exec-signal-observes-cgroup-empty",
+          "kind": "vector"
+        }
+      ],
+      "id": "route.exec.signal",
+      "source": "Design 07 section 2"
+    },
+    {
+      "evidence": [
+        {
+          "id": "bounded-exec-start-records-requested-and-applied",
+          "kind": "vector"
+        }
+      ],
+      "id": "route.exec.start",
+      "source": "Design 07 section 2"
+    },
+    {
+      "evidence": [
+        {
+          "id": "machine-probe-is-observed",
+          "kind": "vector"
+        }
+      ],
+      "id": "route.machine.get",
+      "source": "Design 07 section 2"
+    },
+    {
+      "evidence": [
+        {
+          "id": "operation-ledger-reconciles-terminal-answer",
+          "kind": "vector"
+        }
+      ],
+      "id": "route.operation.get",
+      "source": "Design 07 section 2"
+    },
+    {
+      "evidence": [
+        {
+          "id": "empty-workspace-create-is-keyed",
+          "kind": "vector"
+        }
+      ],
+      "id": "route.workspace.create",
+      "source": "Design 07 section 2"
+    },
+    {
+      "evidence": [
+        {
+          "id": "workspace-destroy-observes-absence",
+          "kind": "vector"
+        }
+      ],
+      "id": "route.workspace.destroy",
+      "source": "Design 07 section 2"
+    },
+    {
+      "evidence": [
+        {
+          "id": "bounded-file-delete-observes-absence",
+          "kind": "vector"
+        }
+      ],
+      "id": "route.workspace.file.delete",
+      "source": "Design 07 section 2"
+    },
+    {
+      "evidence": [
+        {
+          "id": "bounded-file-read-is-observed",
+          "kind": "vector"
+        }
+      ],
+      "id": "route.workspace.file.read",
+      "source": "Design 07 section 2"
+    },
+    {
+      "evidence": [
+        {
+          "id": "bounded-file-replacement-is-atomic",
+          "kind": "vector"
+        }
+      ],
+      "id": "route.workspace.file.write",
+      "source": "Design 07 section 2"
+    },
+    {
+      "evidence": [
+        {
+          "id": "owned-workspace-is-observed",
+          "kind": "vector"
+        }
+      ],
+      "id": "route.workspace.get",
+      "source": "Design 07 section 2"
+    },
+    {
+      "evidence": [
+        {
+          "id": "unknown-request-field-is-refused",
+          "kind": "vector"
+        }
+      ],
+      "id": "schema.strict-request",
+      "source": "Design 07 section 6"
+    },
+    {
+      "evidence": [
+        {
+          "id": "bounded-file-replacement-is-atomic",
+          "kind": "vector"
+        }
+      ],
+      "id": "security.atomic-replacement",
+      "source": "Design 04 section 9"
+    },
+    {
+      "evidence": [
+        {
+          "id": "bounded-file-delete-observes-absence",
+          "kind": "vector"
+        },
+        {
+          "id": "delete-over-path-depth-is-refused",
+          "kind": "vector"
+        }
+      ],
+      "id": "security.bounds.delete",
+      "source": "Design 04 section 9"
+    },
+    {
+      "evidence": [
+        {
+          "id": "input-body-over-limit-is-exhausted",
+          "kind": "vector"
+        }
+      ],
+      "id": "security.bounds.input",
+      "source": "Design 04 section 9"
+    },
+    {
+      "evidence": [
+        {
+          "id": "bounded-directory-list-is-observed",
+          "kind": "vector"
+        }
+      ],
+      "id": "security.bounds.list",
+      "source": "Design 04 section 9"
+    },
+    {
+      "evidence": [
+        {
+          "id": "bounded-file-read-is-observed",
+          "kind": "vector"
+        }
+      ],
+      "id": "security.bounds.read",
+      "source": "Design 04 section 9"
+    },
+    {
+      "evidence": [
+        {
+          "id": "exec-resource-limits-are-cgroup-enforced",
+          "kind": "vector"
+        }
+      ],
+      "id": "security.bounds.resource",
+      "source": "Design 04 section 9"
+    },
+    {
+      "evidence": [
+        {
+          "id": "bounded-file-replacement-is-atomic",
+          "kind": "vector"
+        }
+      ],
+      "id": "security.bounds.write",
+      "source": "Design 04 section 9"
+    },
+    {
+      "evidence": [
+        {
+          "id": "daemon-authority-never-reaches-child",
+          "kind": "vector"
+        }
+      ],
+      "id": "security.daemon-credential",
+      "source": "Design 04 section 9"
+    },
+    {
+      "evidence": [
+        {
+          "id": "daemon-authority-never-reaches-child",
+          "kind": "vector"
+        }
+      ],
+      "id": "security.daemon-environment",
+      "source": "Design 04 section 9"
+    },
+    {
+      "evidence": [
+        {
+          "id": "daemon-authority-never-reaches-child",
+          "kind": "vector"
+        }
+      ],
+      "id": "security.daemon-fd",
+      "source": "Design 04 section 9"
+    },
+    {
+      "evidence": [
+        {
+          "id": "git-credential-helper-is-disabled",
+          "kind": "vector"
+        }
+      ],
+      "id": "security.git.helper",
+      "source": "Design 04 section 9"
+    },
+    {
+      "evidence": [
+        {
+          "id": "git-hooks-are-disabled",
+          "kind": "vector"
+        }
+      ],
+      "id": "security.git.hook",
+      "source": "Design 04 section 9"
+    },
+    {
+      "evidence": [
+        {
+          "id": "git-lfs-secondary-fetch-is-disabled",
+          "kind": "vector"
+        }
+      ],
+      "id": "security.git.lfs",
+      "source": "Design 04 section 9"
+    },
+    {
+      "evidence": [
+        {
+          "id": "git-caller-proxy-refuses-before-connect",
+          "kind": "vector"
+        }
+      ],
+      "id": "security.git.proxy",
+      "source": "Design 04 section 9"
+    },
+    {
+      "evidence": [
+        {
+          "id": "git-dns-rebinding-refuses-before-connect",
+          "kind": "vector"
+        }
+      ],
+      "id": "security.git.rebinding",
+      "source": "Design 04 section 9"
+    },
+    {
+      "evidence": [
+        {
+          "id": "git-redirect-escape-refuses-before-connect",
+          "kind": "vector"
+        }
+      ],
+      "id": "security.git.redirect",
+      "source": "Design 04 section 9"
+    },
+    {
+      "evidence": [
+        {
+          "id": "git-submodule-secondary-fetch-is-disabled",
+          "kind": "vector"
+        }
+      ],
+      "id": "security.git.submodule",
+      "source": "Design 04 section 9"
+    },
+    {
+      "evidence": [
+        {
+          "id": "phase-two-egress-is-unserved",
+          "kind": "vector"
+        }
+      ],
+      "id": "security.no-egress",
+      "source": "Design 04 section 9"
+    },
+    {
+      "evidence": [
+        {
+          "id": "output-cap-drains-past-truncation",
+          "kind": "vector"
+        }
+      ],
+      "id": "security.output-draining",
+      "source": "Design 04 section 9"
+    },
+    {
+      "evidence": [
+        {
+          "id": "absolute-path-is-refused",
+          "kind": "vector"
+        }
+      ],
+      "id": "security.path.absolute",
+      "source": "Design 04 section 9"
+    },
+    {
+      "evidence": [
+        {
+          "id": "dangling-link-is-refused",
+          "kind": "vector"
+        }
+      ],
+      "id": "security.path.dangling-link",
+      "source": "Design 04 section 9"
+    },
+    {
+      "evidence": [
+        {
+          "id": "lexical-path-escape-is-refused",
+          "kind": "vector"
+        }
+      ],
+      "id": "security.path.lexical",
+      "source": "Design 04 section 9"
+    },
+    {
+      "evidence": [
+        {
+          "id": "magic-link-is-refused",
+          "kind": "vector"
+        }
+      ],
+      "id": "security.path.magic-link",
+      "source": "Design 04 section 9"
+    },
+    {
+      "evidence": [
+        {
+          "id": "mount-escape-is-refused",
+          "kind": "vector"
+        }
+      ],
+      "id": "security.path.mount",
+      "source": "Design 04 section 9"
+    },
+    {
+      "evidence": [
+        {
+          "id": "symlink-escape-is-refused",
+          "kind": "vector"
+        }
+      ],
+      "id": "security.path.symlink",
+      "source": "Design 04 section 9"
+    },
+    {
+      "evidence": [
+        {
+          "id": "owned-exec-is-reobserved",
+          "kind": "vector"
+        }
+      ],
+      "id": "security.post-action-observation",
+      "source": "Design 04 section 9"
+    },
+    {
+      "evidence": [
+        {
+          "id": "cancel-reaps-daemonized-descendants",
+          "kind": "vector"
+        }
+      ],
+      "id": "security.process-tree-cancellation",
+      "source": "Design 04 section 9"
+    },
+    {
+      "evidence": [
+        {
+          "id": "missing-sandbox-never-falls-back",
+          "kind": "vector"
+        }
+      ],
+      "id": "security.sandbox-unavailable",
+      "source": "Design 04 section 9"
+    },
+    {
+      "evidence": [
+        {
+          "id": "stale-capability-is-refused-before-dispatch",
+          "kind": "vector"
+        }
+      ],
+      "id": "security.stale-capability",
+      "source": "Design 04 section 9"
+    },
+    {
+      "evidence": [
+        {
+          "id": "cross-subject-resource-is-not-found",
+          "kind": "vector"
+        }
+      ],
+      "id": "security.subject-resource-isolation",
+      "source": "Design 04 section 9"
+    },
+    {
+      "evidence": [
+        {
+          "id": "timeout-kills-whole-cgroup",
+          "kind": "vector"
+        }
+      ],
+      "id": "security.timeout",
+      "source": "Design 04 section 9"
+    },
+    {
+      "evidence": [
+        {
+          "id": "reachable-unauthenticated-listener-refuses-startup",
+          "kind": "vector"
+        }
+      ],
+      "id": "security.unauthenticated-reachable-startup",
+      "source": "Design 04 section 9"
+    }
+  ]
+}

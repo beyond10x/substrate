@@ -1,0 +1,23 @@
+{
+  "$id": "urn:daemonloom:substrate-wire:0.2.0:input:event-stream",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "cursor": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "limit": {
+      "maximum": 1000,
+      "minimum": 1,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "limit"
+  ],
+  "title": "event-stream operation input",
+  "type": "object"
+}

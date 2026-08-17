@@ -1,0 +1,40 @@
+{
+  "address_normalization": {
+    "dot_segments": "reject",
+    "encoded_separator": "reject",
+    "path_parameters": "validate-and-substitute-into-registry-template",
+    "percent_encoding": "decode-once-as-utf8-then-encode-non-unreserved-with-uppercase-hex",
+    "query": "excluded; typed query values are operation input",
+    "repeated_separator": "reject",
+    "trailing_separator": "reject-except-root"
+  },
+  "algorithm": "sha256",
+  "canonical_input": "RFC 8785 JCS; phase-2 schemas contain no floating-point numbers",
+  "excluded": [
+    "operation",
+    "request_id",
+    "headers",
+    "authorization",
+    "bearer",
+    "subject",
+    "principal",
+    "deployment"
+  ],
+  "fixtures": "fixtures/canonical-hash.json",
+  "format": "daemonloom.substrate-request-hash.v1",
+  "ledger_key": [
+    "deployment",
+    "subject",
+    "operation"
+  ],
+  "tuple": {
+    "encoding": "concatenated-u32be-length-prefixed-fields",
+    "fields": [
+      "api-major-as-ascii-decimal",
+      "uppercase-http-method",
+      "normalized-address",
+      "rfc8785-operation-input"
+    ],
+    "length_unit": "octets"
+  }
+}

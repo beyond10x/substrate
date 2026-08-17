@@ -1,0 +1,136 @@
+{
+  "$id": "urn:daemonloom:substrate-wire:0.3.0:result:workspace-file-read",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "content": {
+          "additionalProperties": false,
+          "properties": {
+            "data": {
+              "$ref": "../common.json#/$defs/canonical-base64-file"
+            },
+            "encoding": {
+              "const": "base64"
+            }
+          },
+          "required": [
+            "encoding",
+            "data"
+          ],
+          "type": "object"
+        },
+        "eof": {
+          "type": "boolean"
+        },
+        "kind": {
+          "const": "file"
+        },
+        "next_offset": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "observed_at": {
+          "$ref": "../common.json#/$defs/timestamp"
+        },
+        "offset": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "path": {
+          "$ref": "../common.json#/$defs/relative-path"
+        },
+        "returned_bytes": {
+          "maximum": 1048576,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "workspace": {
+          "$ref": "../common.json#/$defs/workspace-id"
+        }
+      },
+      "required": [
+        "kind",
+        "workspace",
+        "path",
+        "offset",
+        "returned_bytes",
+        "next_offset",
+        "eof",
+        "content",
+        "observed_at"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "items": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "enum": [
+                  "file",
+                  "directory",
+                  "symlink"
+                ]
+              },
+              "name": {
+                "maxLength": 255,
+                "minLength": 1,
+                "type": "string"
+              },
+              "size": {
+                "maximum": 9223372036854775807,
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              }
+            },
+            "required": [
+              "name",
+              "kind",
+              "size"
+            ],
+            "type": "object"
+          },
+          "type": "array"
+        },
+        "kind": {
+          "const": "directory"
+        },
+        "next_cursor": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "observed_at": {
+          "$ref": "../common.json#/$defs/timestamp"
+        },
+        "path": {
+          "$ref": "../common.json#/$defs/relative-path"
+        },
+        "workspace": {
+          "$ref": "../common.json#/$defs/workspace-id"
+        }
+      },
+      "required": [
+        "kind",
+        "workspace",
+        "path",
+        "items",
+        "next_cursor",
+        "observed_at"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "workspace-file-read operation result"
+}

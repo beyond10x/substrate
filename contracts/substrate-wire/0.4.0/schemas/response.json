@@ -1,0 +1,619 @@
+{
+  "$id": "urn:daemonloom:substrate-wire:0.4.0:response",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "$ref": "common.json#/$defs/api-version"
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "request_id": {
+          "$ref": "common.json#/$defs/request-id"
+        },
+        "result": {
+          "$ref": "results/machine-get.json"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "result"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "$ref": "common.json#/$defs/api-version"
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "request_id": {
+          "$ref": "common.json#/$defs/request-id"
+        },
+        "result": {
+          "$ref": "results/workspace-create.json"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "result",
+        "operation"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "$ref": "common.json#/$defs/api-version"
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "request_id": {
+          "$ref": "common.json#/$defs/request-id"
+        },
+        "result": {
+          "$ref": "results/workspace-get.json"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "result"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "$ref": "common.json#/$defs/api-version"
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "request_id": {
+          "$ref": "common.json#/$defs/request-id"
+        },
+        "result": {
+          "$ref": "results/workspace-file-read.json"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "result"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "$ref": "common.json#/$defs/api-version"
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "request_id": {
+          "$ref": "common.json#/$defs/request-id"
+        },
+        "result": {
+          "$ref": "results/workspace-file-write.json"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "result",
+        "operation"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "$ref": "common.json#/$defs/api-version"
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "request_id": {
+          "$ref": "common.json#/$defs/request-id"
+        },
+        "result": {
+          "$ref": "results/workspace-file-delete.json"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "result",
+        "operation"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "$ref": "common.json#/$defs/api-version"
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "request_id": {
+          "$ref": "common.json#/$defs/request-id"
+        },
+        "result": {
+          "$ref": "results/workspace-destroy.json"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "result",
+        "operation"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "$ref": "common.json#/$defs/api-version"
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "request_id": {
+          "$ref": "common.json#/$defs/request-id"
+        },
+        "result": {
+          "$ref": "results/exec-start.json"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "result",
+        "operation"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "$ref": "common.json#/$defs/api-version"
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "request_id": {
+          "$ref": "common.json#/$defs/request-id"
+        },
+        "result": {
+          "$ref": "results/exec-get.json"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "result"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "$ref": "common.json#/$defs/api-version"
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "request_id": {
+          "$ref": "common.json#/$defs/request-id"
+        },
+        "result": {
+          "$ref": "results/exec-output-get.json"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "result"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "$ref": "common.json#/$defs/api-version"
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "request_id": {
+          "$ref": "common.json#/$defs/request-id"
+        },
+        "result": {
+          "$ref": "results/exec-signal.json"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "result",
+        "operation"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "$ref": "common.json#/$defs/api-version"
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "request_id": {
+          "$ref": "common.json#/$defs/request-id"
+        },
+        "result": {
+          "$ref": "results/exec-retire.json"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "result",
+        "operation"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "$ref": "common.json#/$defs/api-version"
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "request_id": {
+          "$ref": "common.json#/$defs/request-id"
+        },
+        "result": {
+          "$ref": "results/pipe-session-capabilities.json"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "result"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "$ref": "common.json#/$defs/api-version"
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "request_id": {
+          "$ref": "common.json#/$defs/request-id"
+        },
+        "result": {
+          "$ref": "results/pipe-session-start.json"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "result",
+        "operation"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "$ref": "common.json#/$defs/api-version"
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "request_id": {
+          "$ref": "common.json#/$defs/request-id"
+        },
+        "result": {
+          "$ref": "results/pipe-session-get.json"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "result"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "$ref": "common.json#/$defs/api-version"
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "request_id": {
+          "$ref": "common.json#/$defs/request-id"
+        },
+        "result": {
+          "$ref": "results/pipe-session-attach.json"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "result"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "$ref": "common.json#/$defs/api-version"
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "request_id": {
+          "$ref": "common.json#/$defs/request-id"
+        },
+        "result": {
+          "$ref": "results/pipe-session-signal.json"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "result",
+        "operation"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "$ref": "common.json#/$defs/api-version"
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "request_id": {
+          "$ref": "common.json#/$defs/request-id"
+        },
+        "result": {
+          "$ref": "results/pipe-session-retire.json"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "result",
+        "operation"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "$ref": "common.json#/$defs/api-version"
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "request_id": {
+          "$ref": "common.json#/$defs/request-id"
+        },
+        "result": {
+          "$ref": "results/pipe-session-lease-renew.json"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "result",
+        "operation"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "$ref": "common.json#/$defs/api-version"
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "request_id": {
+          "$ref": "common.json#/$defs/request-id"
+        },
+        "result": {
+          "$ref": "results/operation-get.json"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "result"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "$ref": "common.json#/$defs/api-version"
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "request_id": {
+          "$ref": "common.json#/$defs/request-id"
+        },
+        "result": {
+          "$ref": "results/event-list.json"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "result"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "$ref": "common.json#/$defs/api-version"
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "request_id": {
+          "$ref": "common.json#/$defs/request-id"
+        },
+        "result": {
+          "$ref": "results/event-stream.json"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "result"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "$ref": "common.json#/$defs/api-version"
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "request_id": {
+          "$ref": "common.json#/$defs/request-id"
+        },
+        "result": {
+          "$ref": "results/reconciliation-snapshot-create.json"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "result"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "$ref": "common.json#/$defs/api-version"
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "request_id": {
+          "$ref": "common.json#/$defs/request-id"
+        },
+        "result": {
+          "$ref": "results/reconciliation-snapshot-get.json"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "result"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "$ref": "common.json#/$defs/api-version"
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "request_id": {
+          "$ref": "common.json#/$defs/request-id"
+        },
+        "result": {
+          "$ref": "results/workspace-lease-renew.json"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "result",
+        "operation"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "api_version": {
+          "$ref": "common.json#/$defs/api-version"
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "request_id": {
+          "$ref": "common.json#/$defs/request-id"
+        },
+        "result": {
+          "$ref": "results/exec-lease-renew.json"
+        }
+      },
+      "required": [
+        "api_version",
+        "request_id",
+        "result",
+        "operation"
+      ],
+      "type": "object"
+    }
+  ],
+  "description": "The route registry selects one branch; no generic result value is authoritative.",
+  "title": "Closed phase-3 success response union"
+}

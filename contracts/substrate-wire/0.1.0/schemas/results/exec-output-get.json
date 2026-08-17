@@ -1,0 +1,67 @@
+{
+  "$id": "urn:daemonloom:substrate-wire:0.1.0:result:exec-output-get",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "content": {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "pattern": "^[A-Za-z0-9+/]*={0,2}$",
+          "type": "string"
+        },
+        "encoding": {
+          "const": "base64"
+        }
+      },
+      "required": [
+        "encoding",
+        "data"
+      ],
+      "type": "object"
+    },
+    "eof": {
+      "type": "boolean"
+    },
+    "exec": {
+      "$ref": "../common.json#/$defs/exec-id"
+    },
+    "next_offset": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "observed_at": {
+      "$ref": "../common.json#/$defs/timestamp"
+    },
+    "offset": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "returned_bytes": {
+      "minimum": 0,
+      "type": "integer"
+    },
+    "stream": {
+      "enum": [
+        "stdout",
+        "stderr"
+      ]
+    },
+    "truncated": {
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "exec",
+    "stream",
+    "offset",
+    "returned_bytes",
+    "next_offset",
+    "eof",
+    "truncated",
+    "content",
+    "observed_at"
+  ],
+  "title": "exec-output-get operation result",
+  "type": "object"
+}

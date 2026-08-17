@@ -1,0 +1,36 @@
+# Plan 04: stack adoption
+
+**Status:** externally gated until Flux and autodev record adoption · **Date:** 2026-08-13
+
+Adoption proves release independence. Each consumer integrates over the public wire or its own
+adapter and remains buildable without a sibling substrate checkout.
+
+The foundation repositories cannot satisfy this gate alone. Flux and autodev must first accept the
+corresponding adoption decisions or stories in their own repositories; until then, this plan carries
+no family-controlled delivery date.
+
+## Proof sequence
+
+1. **connectors translation:** generate the stable substrate operation subset from a pinned released
+   substrate bundle plus a connectors-owned projection manifest. Prove the mapped risk, semantic
+   effects, idempotency, capabilities, and events byte-for-byte and govern one operation.
+2. **Flux adapter:** map guarded workspace/exec behavior and unanswered outcomes onto Flux-owned
+   delegate concepts. The adapter lives in Flux; substrate remains unchanged and Flux-free.
+3. **autodev adapter:** first extract and accept autodev's proposed `Executor` port, then implement
+   it using pinned workspace materialization, bounded exec, lease/reconciliation, and evidence
+   handoff. Scheduling remains in autodev.
+4. **agent journey:** demonstrate that the generic agent layer can request execution through an
+   agent-owned tool/runner port without importing substrate domain types into its core lifecycle.
+5. **hosted composition:** register and select a deployment using identity/cloud trust while serving
+   the identical substrate API.
+
+## Compatibility evidence
+
+- Each consumer pins a released protocol/version and runs conformance fixtures.
+- No consumer requires a path dependency or unpublished local source.
+- Substrate CI does not fetch or build any consumer.
+- Credential, principal, grant, placement, and billing semantics remain with their owning layers.
+- PTY/tunnel bytes flow directly after governed establishment rather than through connector invoke.
+
+External connector runtime artifacts are not part of this plan. They require the separate
+connectors security and supply-chain decision described in connectors Design 03.

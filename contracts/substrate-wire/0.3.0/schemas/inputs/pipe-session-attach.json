@@ -1,0 +1,9 @@
+{
+  "$id": "urn:daemonloom:substrate-wire:0.3.0:input:pipe-session-attach",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {},
+  "required": [],
+  "title": "pipe-session-attach operation input",
+  "type": "object"
+}

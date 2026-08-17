@@ -1,0 +1,44 @@
+{
+  "$schema": "schemas/runner.json",
+  "comparison": {
+    "expected": "exact-json-value-equality",
+    "postconditions": "rfc6901-pointer-plus-declared-scalar-operator"
+  },
+  "exit_codes": {
+    "0": "pass",
+    "1": "conformance-failure",
+    "2": "invalid-input",
+    "3": "harness-failure"
+  },
+  "format": "daemonloom.substrate-clean-room-runner.v1",
+  "invocation": {
+    "argv": [
+      "<runner>",
+      "--bundle",
+      "<bundle-dir>",
+      "--vector",
+      "<bundle-relative-vector-path>",
+      "--output",
+      "<runner-result.json>"
+    ],
+    "network": "disabled-unless-vector-setup-provides-sentinels",
+    "working_directory": "new-empty-directory"
+  },
+  "isolation": {
+    "producer_input": "action-only",
+    "repository_access": "bundle-only",
+    "setup_delivery": "runner-only"
+  },
+  "protocol": {
+    "result_schema": "schemas/runner-result.json",
+    "vector_schema": "schemas/vector.json"
+  },
+  "roles": {
+    "producer": "daemon or driver under test; receives only action bytes/commands",
+    "runner": "independent clean-room harness; owns trusted setup, probes, comparison, and reporting"
+  },
+  "selection": {
+    "fixture_identity": "out-of-band-only-never-request-data",
+    "vector": "manifest-listed-bundle-relative-path"
+  }
+}

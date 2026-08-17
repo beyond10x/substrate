@@ -1,0 +1,52 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "command": {
+      "operation": "session.capabilities"
+    },
+    "kind": "driver",
+    "port": "lifecycle"
+  },
+  "context": {
+    "authority": "driver-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000"
+  },
+  "covers": [
+    "route.session.capabilities"
+  ],
+  "expected": {
+    "kind": "driver-outcome",
+    "outcome": {
+      "contract": "substrate-wire/0.3.0",
+      "network": "none",
+      "single_attachment": true
+    }
+  },
+  "id": "pipe-session-capabilities-are-confinement-gated",
+  "layer": "driver",
+  "phase": 4,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/delegated_confinement",
+      "expected": true,
+      "operator": "equals"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "session",
+      "name": "durable-pipe",
+      "state": {
+        "exec": "ex_vector",
+        "id": "ses_vector"
+      }
+    }
+  ]
+}

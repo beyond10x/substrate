@@ -1,0 +1,616 @@
+{
+  "$defs": {
+    "confinement-applied": {
+      "additionalProperties": false,
+      "properties": {
+        "capability_snapshot": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "cgroup": {
+          "maxLength": 512,
+          "minLength": 1,
+          "type": "string"
+        },
+        "filesystem": {
+          "const": "workspace-rw-system-ro"
+        },
+        "network": {
+          "const": "none"
+        },
+        "profile": {
+          "const": "workspace"
+        }
+      },
+      "required": [
+        "capability_snapshot",
+        "profile",
+        "filesystem",
+        "network",
+        "cgroup"
+      ],
+      "type": "object"
+    },
+    "confinement-request": {
+      "additionalProperties": false,
+      "properties": {
+        "capability_snapshot": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "network": {
+          "enum": [
+            "none",
+            "aperture"
+          ]
+        },
+        "profile": {
+          "const": "workspace"
+        },
+        "require": {
+          "const": true
+        }
+      },
+      "required": [
+        "capability_snapshot",
+        "profile",
+        "network",
+        "require"
+      ],
+      "type": "object"
+    },
+    "exec": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "applied": {
+              "type": "null"
+            },
+            "exit": {
+              "type": "null"
+            },
+            "id": {
+              "$ref": "common.json#/$defs/exec-id"
+            },
+            "kind": {
+              "const": "exec"
+            },
+            "observed_at": {
+              "$ref": "common.json#/$defs/timestamp"
+            },
+            "requested": {
+              "additionalProperties": false,
+              "properties": {
+                "capability_snapshot": {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "network": {
+                  "enum": [
+                    "none",
+                    "aperture"
+                  ]
+                },
+                "profile": {
+                  "const": "workspace"
+                },
+                "require": {
+                  "const": true
+                }
+              },
+              "required": [
+                "capability_snapshot",
+                "profile",
+                "network",
+                "require"
+              ],
+              "type": "object"
+            },
+            "state": {
+              "const": "accepted"
+            },
+            "workspace": {
+              "$ref": "common.json#/$defs/workspace-id"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "workspace",
+            "state",
+            "observed_at",
+            "requested",
+            "applied",
+            "exit"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "applied": {
+              "additionalProperties": false,
+              "properties": {
+                "capability_snapshot": {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "cgroup": {
+                  "maxLength": 512,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "filesystem": {
+                  "const": "workspace-rw-system-ro"
+                },
+                "network": {
+                  "const": "none"
+                },
+                "profile": {
+                  "const": "workspace"
+                }
+              },
+              "required": [
+                "capability_snapshot",
+                "profile",
+                "filesystem",
+                "network",
+                "cgroup"
+              ],
+              "type": "object"
+            },
+            "exit": {
+              "type": "null"
+            },
+            "id": {
+              "$ref": "common.json#/$defs/exec-id"
+            },
+            "kind": {
+              "const": "exec"
+            },
+            "observed_at": {
+              "$ref": "common.json#/$defs/timestamp"
+            },
+            "requested": {
+              "additionalProperties": false,
+              "properties": {
+                "capability_snapshot": {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "network": {
+                  "const": "none"
+                },
+                "profile": {
+                  "const": "workspace"
+                },
+                "require": {
+                  "const": true
+                }
+              },
+              "required": [
+                "capability_snapshot",
+                "profile",
+                "network",
+                "require"
+              ],
+              "type": "object"
+            },
+            "state": {
+              "const": "running"
+            },
+            "workspace": {
+              "$ref": "common.json#/$defs/workspace-id"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "workspace",
+            "state",
+            "observed_at",
+            "requested",
+            "applied",
+            "exit"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "applied": {
+              "additionalProperties": false,
+              "properties": {
+                "capability_snapshot": {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "cgroup": {
+                  "maxLength": 512,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "filesystem": {
+                  "const": "workspace-rw-system-ro"
+                },
+                "network": {
+                  "const": "none"
+                },
+                "profile": {
+                  "const": "workspace"
+                }
+              },
+              "required": [
+                "capability_snapshot",
+                "profile",
+                "filesystem",
+                "network",
+                "cgroup"
+              ],
+              "type": "object"
+            },
+            "exit": {
+              "additionalProperties": false,
+              "oneOf": [
+                {
+                  "properties": {
+                    "code": {
+                      "type": "integer"
+                    },
+                    "signal": {
+                      "type": "null"
+                    }
+                  }
+                },
+                {
+                  "properties": {
+                    "code": {
+                      "type": "null"
+                    },
+                    "signal": {
+                      "enum": [
+                        "INT",
+                        "TERM",
+                        "KILL"
+                      ]
+                    }
+                  }
+                }
+              ],
+              "properties": {
+                "code": {
+                  "maximum": 255,
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "signal": {
+                  "enum": [
+                    "INT",
+                    "TERM",
+                    "KILL",
+                    null
+                  ]
+                }
+              },
+              "required": [
+                "code",
+                "signal"
+              ],
+              "type": "object"
+            },
+            "id": {
+              "$ref": "common.json#/$defs/exec-id"
+            },
+            "kind": {
+              "const": "exec"
+            },
+            "observed_at": {
+              "$ref": "common.json#/$defs/timestamp"
+            },
+            "requested": {
+              "additionalProperties": false,
+              "properties": {
+                "capability_snapshot": {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "network": {
+                  "const": "none"
+                },
+                "profile": {
+                  "const": "workspace"
+                },
+                "require": {
+                  "const": true
+                }
+              },
+              "required": [
+                "capability_snapshot",
+                "profile",
+                "network",
+                "require"
+              ],
+              "type": "object"
+            },
+            "state": {
+              "enum": [
+                "exited",
+                "cancelled"
+              ]
+            },
+            "workspace": {
+              "$ref": "common.json#/$defs/workspace-id"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "workspace",
+            "state",
+            "observed_at",
+            "requested",
+            "applied",
+            "exit"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "applied": {
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "capability_snapshot": {
+                      "pattern": "^sha256:[0-9a-f]{64}$",
+                      "type": "string"
+                    },
+                    "cgroup": {
+                      "maxLength": 512,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "filesystem": {
+                      "const": "workspace-rw-system-ro"
+                    },
+                    "network": {
+                      "const": "none"
+                    },
+                    "profile": {
+                      "const": "workspace"
+                    }
+                  },
+                  "required": [
+                    "capability_snapshot",
+                    "profile",
+                    "filesystem",
+                    "network",
+                    "cgroup"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "exit": {
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "oneOf": [
+                    {
+                      "properties": {
+                        "code": {
+                          "type": "integer"
+                        },
+                        "signal": {
+                          "type": "null"
+                        }
+                      }
+                    },
+                    {
+                      "properties": {
+                        "code": {
+                          "type": "null"
+                        },
+                        "signal": {
+                          "enum": [
+                            "INT",
+                            "TERM",
+                            "KILL"
+                          ]
+                        }
+                      }
+                    }
+                  ],
+                  "properties": {
+                    "code": {
+                      "maximum": 255,
+                      "minimum": 0,
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "signal": {
+                      "enum": [
+                        "INT",
+                        "TERM",
+                        "KILL",
+                        null
+                      ]
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "signal"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "id": {
+              "$ref": "common.json#/$defs/exec-id"
+            },
+            "kind": {
+              "const": "exec"
+            },
+            "observed_at": {
+              "$ref": "common.json#/$defs/timestamp"
+            },
+            "requested": {
+              "additionalProperties": false,
+              "properties": {
+                "capability_snapshot": {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "network": {
+                  "enum": [
+                    "none",
+                    "aperture"
+                  ]
+                },
+                "profile": {
+                  "const": "workspace"
+                },
+                "require": {
+                  "const": true
+                }
+              },
+              "required": [
+                "capability_snapshot",
+                "profile",
+                "network",
+                "require"
+              ],
+              "type": "object"
+            },
+            "state": {
+              "const": "unknown"
+            },
+            "workspace": {
+              "$ref": "common.json#/$defs/workspace-id"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "workspace",
+            "state",
+            "observed_at",
+            "requested",
+            "applied",
+            "exit"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "exit": {
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "properties": {
+            "code": {
+              "type": "integer"
+            },
+            "signal": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "code": {
+              "type": "null"
+            },
+            "signal": {
+              "enum": [
+                "INT",
+                "TERM",
+                "KILL"
+              ]
+            }
+          }
+        }
+      ],
+      "properties": {
+        "code": {
+          "maximum": 255,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "signal": {
+          "enum": [
+            "INT",
+            "TERM",
+            "KILL",
+            null
+          ]
+        }
+      },
+      "required": [
+        "code",
+        "signal"
+      ],
+      "type": "object"
+    },
+    "workspace": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "common.json#/$defs/workspace-id"
+        },
+        "kind": {
+          "const": "workspace"
+        },
+        "labels": {
+          "$ref": "common.json#/$defs/labels"
+        },
+        "observed_at": {
+          "$ref": "common.json#/$defs/timestamp"
+        },
+        "state": {
+          "enum": [
+            "ready",
+            "destroying",
+            "destroyed",
+            "unknown"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "id",
+        "state",
+        "observed_at",
+        "labels"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "urn:daemonloom:substrate-wire:0.1.0:resource",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/workspace"
+    },
+    {
+      "$ref": "#/$defs/exec"
+    }
+  ],
+  "title": "Phase-2 observed resource"
+}

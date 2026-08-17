@@ -1,0 +1,503 @@
+{
+  "$schema": "../schemas/hash-fixtures.json",
+  "algorithm": "sha256",
+  "cases": [
+    {
+      "canonical_input_hex": "7b226c6162656c73223a7b2261223a226669727374222c227a223a226c617374227d2c22736f75726365223a22656d707479227d",
+      "canonical_query": [],
+      "canonical_query_hex": "7061697273005b5d",
+      "excluded": {
+        "authorization": "Bearer sbt_authorization_workspace-create-base",
+        "bearer": "sbt_raw_workspace-create-base",
+        "deployment": "dep_a",
+        "headers": {
+          "traceparent": "00-workspace-create-base"
+        },
+        "operation": "01JHASHBASE00000000001",
+        "principal": "principal:workspace-create-base",
+        "request_id": "req_workspace_create_base",
+        "subject": "local:1000"
+      },
+      "hash_version": 2,
+      "id": "workspace-create-base",
+      "input_mode": "rfc8785-jcs",
+      "ledger_key": {
+        "deployment": "dep_a",
+        "operation": "01JHASHBASE00000000001",
+        "subject": "local:1000"
+      },
+      "method": "POST",
+      "normalized_address": "/v1/workspaces",
+      "query_mode": "pairs",
+      "raw_input": {
+        "labels": {
+          "a": "first",
+          "z": "last"
+        },
+        "source": "empty"
+      },
+      "raw_query": {
+        "data": "",
+        "encoding": "hex"
+      },
+      "sha256": "dd909608d6877fe6181e9d90db7e32d97d2d4e93acb82908e474b95318c8a399",
+      "tuple_hex": "000000013200000004504f53540000000e2f76312f776f726b737061636573000000347b226c6162656c73223a7b2261223a226669727374222c227a223a226c617374227d2c22736f75726365223a22656d707479227d000000087061697273005b5d"
+    },
+    {
+      "canonical_input_hex": "7b226c6162656c73223a7b2261223a226669727374222c227a223a226c617374227d2c22736f75726365223a22656d707479227d",
+      "canonical_query": [],
+      "canonical_query_hex": "7061697273005b5d",
+      "excluded": {
+        "authorization": "Bearer sbt_authorization_workspace-create-transport-variant",
+        "bearer": "sbt_raw_workspace-create-transport-variant",
+        "deployment": "dep_b",
+        "headers": {
+          "traceparent": "00-workspace-create-transport-variant"
+        },
+        "operation": "01JHASHOTHER0000000002",
+        "principal": "principal:workspace-create-transport-variant",
+        "request_id": "req_workspace_create_transport_variant",
+        "subject": "local:2000"
+      },
+      "hash_version": 2,
+      "id": "workspace-create-transport-variant",
+      "input_mode": "rfc8785-jcs",
+      "ledger_key": {
+        "deployment": "dep_b",
+        "operation": "01JHASHOTHER0000000002",
+        "subject": "local:2000"
+      },
+      "method": "POST",
+      "normalized_address": "/v1/workspaces",
+      "query_mode": "pairs",
+      "raw_input": {
+        "labels": {
+          "a": "first",
+          "z": "last"
+        },
+        "source": "empty"
+      },
+      "raw_query": {
+        "data": "",
+        "encoding": "hex"
+      },
+      "relation": {
+        "case": "workspace-create-base",
+        "kind": "same-request-hash-different-ledger-key"
+      },
+      "sha256": "dd909608d6877fe6181e9d90db7e32d97d2d4e93acb82908e474b95318c8a399",
+      "tuple_hex": "000000013200000004504f53540000000e2f76312f776f726b737061636573000000347b226c6162656c73223a7b2261223a226669727374222c227a223a226c617374227d2c22736f75726365223a22656d707479227d000000087061697273005b5d"
+    },
+    {
+      "canonical_input_hex": "7b226c6162656c73223a7b2261223a226669727374222c227a223a226c617374227d2c22736f75726365223a22656d707479227d",
+      "canonical_query": [],
+      "canonical_query_hex": "7061697273005b5d",
+      "excluded": {
+        "authorization": "Bearer sbt_authorization_workspace-create-replay",
+        "bearer": "sbt_raw_workspace-create-replay",
+        "deployment": "dep_a",
+        "headers": {
+          "traceparent": "00-workspace-create-replay"
+        },
+        "operation": "01JHASHBASE00000000001",
+        "principal": "principal:workspace-create-replay",
+        "request_id": "req_workspace_create_replay",
+        "subject": "local:1000"
+      },
+      "hash_version": 2,
+      "id": "workspace-create-replay",
+      "input_mode": "rfc8785-jcs",
+      "ledger_key": {
+        "deployment": "dep_a",
+        "operation": "01JHASHBASE00000000001",
+        "subject": "local:1000"
+      },
+      "method": "POST",
+      "normalized_address": "/v1/workspaces",
+      "query_mode": "pairs",
+      "raw_input": {
+        "labels": {
+          "a": "first",
+          "z": "last"
+        },
+        "source": "empty"
+      },
+      "raw_query": {
+        "data": "",
+        "encoding": "hex"
+      },
+      "relation": {
+        "case": "workspace-create-base",
+        "kind": "same-request-hash-same-ledger-key"
+      },
+      "sha256": "dd909608d6877fe6181e9d90db7e32d97d2d4e93acb82908e474b95318c8a399",
+      "tuple_hex": "000000013200000004504f53540000000e2f76312f776f726b737061636573000000347b226c6162656c73223a7b2261223a226669727374222c227a223a226c617374227d2c22736f75726365223a22656d707479227d000000087061697273005b5d"
+    },
+    {
+      "canonical_input_hex": "7b226c6162656c73223a7b2261223a226368616e676564222c227a223a226c617374227d2c22736f75726365223a22656d707479227d",
+      "canonical_query": [],
+      "canonical_query_hex": "7061697273005b5d",
+      "excluded": {
+        "authorization": "Bearer sbt_authorization_workspace-create-conflict",
+        "bearer": "sbt_raw_workspace-create-conflict",
+        "deployment": "dep_a",
+        "headers": {
+          "traceparent": "00-workspace-create-conflict"
+        },
+        "operation": "01JHASHBASE00000000001",
+        "principal": "principal:workspace-create-conflict",
+        "request_id": "req_workspace_create_conflict",
+        "subject": "local:1000"
+      },
+      "hash_version": 2,
+      "id": "workspace-create-conflict",
+      "input_mode": "rfc8785-jcs",
+      "ledger_key": {
+        "deployment": "dep_a",
+        "operation": "01JHASHBASE00000000001",
+        "subject": "local:1000"
+      },
+      "method": "POST",
+      "normalized_address": "/v1/workspaces",
+      "query_mode": "pairs",
+      "raw_input": {
+        "labels": {
+          "a": "changed",
+          "z": "last"
+        },
+        "source": "empty"
+      },
+      "raw_query": {
+        "data": "",
+        "encoding": "hex"
+      },
+      "relation": {
+        "case": "workspace-create-base",
+        "kind": "different-request-hash-same-ledger-key"
+      },
+      "sha256": "9720af6d2d79fafd60cdd2530f620b4b34d9cdc0b65ab0f1abb2d4094a260dcf",
+      "tuple_hex": "000000013200000004504f53540000000e2f76312f776f726b737061636573000000367b226c6162656c73223a7b2261223a226368616e676564222c227a223a226c617374227d2c22736f75726365223a22656d707479227d000000087061697273005b5d"
+    },
+    {
+      "canonical_input_hex": "7b22636f6e74656e74223a7b2264617461223a22614756736247383d222c22656e636f64696e67223a22626173653634227d7d",
+      "canonical_query": [],
+      "canonical_query_hex": "7061697273005b5d",
+      "excluded": {
+        "authorization": "Bearer sbt_authorization_workspace-file-address",
+        "bearer": "sbt_raw_workspace-file-address",
+        "deployment": "dep_a",
+        "headers": {
+          "traceparent": "00-workspace-file-address"
+        },
+        "operation": "01JHASHFILE000000000003",
+        "principal": "principal:workspace-file-address",
+        "request_id": "req_workspace_file_address",
+        "subject": "local:1000"
+      },
+      "hash_version": 2,
+      "id": "workspace-file-address",
+      "input_mode": "rfc8785-jcs",
+      "ledger_key": {
+        "deployment": "dep_a",
+        "operation": "01JHASHFILE000000000003",
+        "subject": "local:1000"
+      },
+      "method": "PUT",
+      "normalized_address": "/v1/workspaces/ws_vector/files/src/main.txt",
+      "query_mode": "pairs",
+      "raw_input": {
+        "content": {
+          "data": "aGVsbG8=",
+          "encoding": "base64"
+        }
+      },
+      "raw_query": {
+        "data": "",
+        "encoding": "hex"
+      },
+      "sha256": "9fdf651a007cf55c791f336d35d4fca15019502a96866ea03a06ff3121440404",
+      "tuple_hex": "0000000132000000035055540000002b2f76312f776f726b7370616365732f77735f766563746f722f66696c65732f7372632f6d61696e2e747874000000337b22636f6e74656e74223a7b2264617461223a22614756736247383d222c22656e636f64696e67223a22626173653634227d7d000000087061697273005b5d"
+    },
+    {
+      "canonical_input_hex": "7b226c6162656c73223a7b7d2c22736f75726365223a22656d707479227d",
+      "canonical_query": [
+        [
+          "plus",
+          "+"
+        ],
+        [
+          "space",
+          " "
+        ],
+        [
+          "tag",
+          "a"
+        ],
+        [
+          "tag",
+          "b"
+        ]
+      ],
+      "canonical_query_hex": "7061697273005b5b22706c7573222c222b225d2c5b227370616365222c2220225d2c5b22746167222c2261225d2c5b22746167222c2262225d5d",
+      "excluded": {
+        "authorization": "Bearer sbt_authorization_query-duplicates-base",
+        "bearer": "sbt_raw_query-duplicates-base",
+        "deployment": "dep_a",
+        "headers": {
+          "traceparent": "00-query-duplicates-base"
+        },
+        "operation": "01JHASHQUERY00000000001",
+        "principal": "principal:query-duplicates-base",
+        "request_id": "req_query_duplicates_base",
+        "subject": "local:1000"
+      },
+      "hash_version": 2,
+      "id": "query-duplicates-base",
+      "input_mode": "rfc8785-jcs",
+      "ledger_key": {
+        "deployment": "dep_a",
+        "operation": "01JHASHQUERY00000000001",
+        "subject": "local:1000"
+      },
+      "method": "POST",
+      "normalized_address": "/v1/workspaces",
+      "query_mode": "pairs",
+      "raw_input": {
+        "labels": {},
+        "source": "empty"
+      },
+      "raw_query": {
+        "data": "7461673d622673706163653d2b267461673d6126706c75733d253242",
+        "encoding": "hex"
+      },
+      "sha256": "47f562143c78e0c40faa39d21ff0903fc8863996ee7383a4f8774362509f6bec",
+      "tuple_hex": "000000013200000004504f53540000000e2f76312f776f726b7370616365730000001e7b226c6162656c73223a7b7d2c22736f75726365223a22656d707479227d0000003a7061697273005b5b22706c7573222c222b225d2c5b227370616365222c2220225d2c5b22746167222c2261225d2c5b22746167222c2262225d5d"
+    },
+    {
+      "canonical_input_hex": "7b226c6162656c73223a7b7d2c22736f75726365223a22656d707479227d",
+      "canonical_query": [
+        [
+          "plus",
+          "+"
+        ],
+        [
+          "space",
+          " "
+        ],
+        [
+          "tag",
+          "a"
+        ],
+        [
+          "tag",
+          "b"
+        ]
+      ],
+      "canonical_query_hex": "7061697273005b5b22706c7573222c222b225d2c5b227370616365222c2220225d2c5b22746167222c2261225d2c5b22746167222c2262225d5d",
+      "excluded": {
+        "authorization": "Bearer sbt_authorization_query-duplicates-reordered",
+        "bearer": "sbt_raw_query-duplicates-reordered",
+        "deployment": "dep_a",
+        "headers": {
+          "traceparent": "00-query-duplicates-reordered"
+        },
+        "operation": "01JHASHQUERY00000000001",
+        "principal": "principal:query-duplicates-reordered",
+        "request_id": "req_query_duplicates_reordered",
+        "subject": "local:1000"
+      },
+      "hash_version": 2,
+      "id": "query-duplicates-reordered",
+      "input_mode": "rfc8785-jcs",
+      "ledger_key": {
+        "deployment": "dep_a",
+        "operation": "01JHASHQUERY00000000001",
+        "subject": "local:1000"
+      },
+      "method": "POST",
+      "normalized_address": "/v1/workspaces",
+      "query_mode": "pairs",
+      "raw_input": {
+        "labels": {},
+        "source": "empty"
+      },
+      "raw_query": {
+        "data": "706c75733d253262267461673d61267461673d622673706163653d253230",
+        "encoding": "hex"
+      },
+      "relation": {
+        "case": "query-duplicates-base",
+        "kind": "same-request-hash-same-ledger-key"
+      },
+      "sha256": "47f562143c78e0c40faa39d21ff0903fc8863996ee7383a4f8774362509f6bec",
+      "tuple_hex": "000000013200000004504f53540000000e2f76312f776f726b7370616365730000001e7b226c6162656c73223a7b7d2c22736f75726365223a22656d707479227d0000003a7061697273005b5b22706c7573222c222b225d2c5b227370616365222c2220225d2c5b22746167222c2261225d2c5b22746167222c2262225d5d"
+    },
+    {
+      "canonical_input_hex": "7b226c6162656c73223a7b7d2c22736f75726365223a22656d707479227d",
+      "canonical_query": null,
+      "canonical_query_hex": "6d616c666f726d65642d7261770037343631363733643235",
+      "excluded": {
+        "authorization": "Bearer sbt_authorization_query-malformed-percent",
+        "bearer": "sbt_raw_query-malformed-percent",
+        "deployment": "dep_a",
+        "headers": {
+          "traceparent": "00-query-malformed-percent"
+        },
+        "operation": "01JHASHQUERY00000000001",
+        "principal": "principal:query-malformed-percent",
+        "request_id": "req_query_malformed_percent",
+        "subject": "local:1000"
+      },
+      "hash_version": 2,
+      "id": "query-malformed-percent",
+      "input_mode": "rfc8785-jcs",
+      "ledger_key": {
+        "deployment": "dep_a",
+        "operation": "01JHASHQUERY00000000001",
+        "subject": "local:1000"
+      },
+      "method": "POST",
+      "normalized_address": "/v1/workspaces",
+      "query_mode": "malformed-raw",
+      "raw_input": {
+        "labels": {},
+        "source": "empty"
+      },
+      "raw_query": {
+        "data": "7461673d25",
+        "encoding": "hex"
+      },
+      "relation": {
+        "case": "query-duplicates-base",
+        "kind": "different-request-hash-same-ledger-key"
+      },
+      "sha256": "f67243412702e4e0c8c5731aaeebe2ae35076df9c1d446d16e76819cacefb752",
+      "tuple_hex": "000000013200000004504f53540000000e2f76312f776f726b7370616365730000001e7b226c6162656c73223a7b7d2c22736f75726365223a22656d707479227d000000186d616c666f726d65642d7261770037343631363733643235"
+    },
+    {
+      "canonical_input_hex": "7b226c6162656c73223a7b7d2c22736f75726365223a22656d707479227d",
+      "canonical_query": null,
+      "canonical_query_hex": "6d616c666f726d65642d726177003734363136373364323534363436",
+      "excluded": {
+        "authorization": "Bearer sbt_authorization_query-malformed-utf8",
+        "bearer": "sbt_raw_query-malformed-utf8",
+        "deployment": "dep_a",
+        "headers": {
+          "traceparent": "00-query-malformed-utf8"
+        },
+        "operation": "01JHASHQUERY00000000001",
+        "principal": "principal:query-malformed-utf8",
+        "request_id": "req_query_malformed_utf8",
+        "subject": "local:1000"
+      },
+      "hash_version": 2,
+      "id": "query-malformed-utf8",
+      "input_mode": "rfc8785-jcs",
+      "ledger_key": {
+        "deployment": "dep_a",
+        "operation": "01JHASHQUERY00000000001",
+        "subject": "local:1000"
+      },
+      "method": "POST",
+      "normalized_address": "/v1/workspaces",
+      "query_mode": "malformed-raw",
+      "raw_input": {
+        "labels": {},
+        "source": "empty"
+      },
+      "raw_query": {
+        "data": "7461673d254646",
+        "encoding": "hex"
+      },
+      "relation": {
+        "case": "query-malformed-percent",
+        "kind": "different-request-hash-same-ledger-key"
+      },
+      "sha256": "80092a0d497d59a3c197e3af45458c72719445401785b4fc2f18e8d93a60ed78",
+      "tuple_hex": "000000013200000004504f53540000000e2f76312f776f726b7370616365730000001e7b226c6162656c73223a7b7d2c22736f75726365223a22656d707479227d0000001c6d616c666f726d65642d726177003734363136373364323534363436"
+    },
+    {
+      "canonical_input_hex": "72656a65637465642d6e756d6265722d6a736f6e3a7b226c6162656c73223a7b7d2c227072696f72697479223a312e352c22736f75726365223a22656d707479227d",
+      "canonical_query": [],
+      "canonical_query_hex": "7061697273005b5d",
+      "excluded": {
+        "authorization": "Bearer sbt_authorization_rejected-float-base",
+        "bearer": "sbt_raw_rejected-float-base",
+        "deployment": "dep_a",
+        "headers": {
+          "traceparent": "00-rejected-float-base"
+        },
+        "operation": "01JHASHFLOAT00000000001",
+        "principal": "principal:rejected-float-base",
+        "request_id": "req_rejected_float_base",
+        "subject": "local:1000"
+      },
+      "hash_version": 2,
+      "id": "rejected-float-base",
+      "input_mode": "rejected-number-json",
+      "ledger_key": {
+        "deployment": "dep_a",
+        "operation": "01JHASHFLOAT00000000001",
+        "subject": "local:1000"
+      },
+      "method": "POST",
+      "normalized_address": "/v1/workspaces",
+      "query_mode": "pairs",
+      "raw_input": {
+        "labels": {},
+        "priority": 1.5,
+        "source": "empty"
+      },
+      "raw_query": {
+        "data": "",
+        "encoding": "hex"
+      },
+      "sha256": "8f956752bc95790fd2687f0af37cd4494d85b90c3618479d7eba8d305d4c304d",
+      "tuple_hex": "000000013200000004504f53540000000e2f76312f776f726b7370616365730000004272656a65637465642d6e756d6265722d6a736f6e3a7b226c6162656c73223a7b7d2c227072696f72697479223a312e352c22736f75726365223a22656d707479227d000000087061697273005b5d"
+    },
+    {
+      "canonical_input_hex": "72656a65637465642d6e756d6265722d6a736f6e3a7b226c6162656c73223a7b7d2c227072696f72697479223a322e352c22736f75726365223a22656d707479227d",
+      "canonical_query": [],
+      "canonical_query_hex": "7061697273005b5d",
+      "excluded": {
+        "authorization": "Bearer sbt_authorization_rejected-float-conflict",
+        "bearer": "sbt_raw_rejected-float-conflict",
+        "deployment": "dep_a",
+        "headers": {
+          "traceparent": "00-rejected-float-conflict"
+        },
+        "operation": "01JHASHFLOAT00000000001",
+        "principal": "principal:rejected-float-conflict",
+        "request_id": "req_rejected_float_conflict",
+        "subject": "local:1000"
+      },
+      "hash_version": 2,
+      "id": "rejected-float-conflict",
+      "input_mode": "rejected-number-json",
+      "ledger_key": {
+        "deployment": "dep_a",
+        "operation": "01JHASHFLOAT00000000001",
+        "subject": "local:1000"
+      },
+      "method": "POST",
+      "normalized_address": "/v1/workspaces",
+      "query_mode": "pairs",
+      "raw_input": {
+        "labels": {},
+        "priority": 2.5,
+        "source": "empty"
+      },
+      "raw_query": {
+        "data": "",
+        "encoding": "hex"
+      },
+      "relation": {
+        "case": "rejected-float-base",
+        "kind": "different-request-hash-same-ledger-key"
+      },
+      "sha256": "8579353799390ecddaa4a11621a6a4625cb31dd073d23b00a6a73388834f2d6c",
+      "tuple_hex": "000000013200000004504f53540000000e2f76312f776f726b7370616365730000004272656a65637465642d6e756d6265722d6a736f6e3a7b226c6162656c73223a7b7d2c227072696f72697479223a322e352c22736f75726365223a22656d707479227d000000087061697273005b5d"
+    }
+  ],
+  "format": "daemonloom.substrate-canonical-hash-fixtures.v2"
+}

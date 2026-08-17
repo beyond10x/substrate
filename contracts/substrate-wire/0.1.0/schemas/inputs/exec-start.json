@@ -1,0 +1,144 @@
+{
+  "$id": "urn:daemonloom:substrate-wire:0.1.0:input:exec-start",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "argv": {
+      "items": {
+        "maxLength": 4096,
+        "minLength": 1,
+        "pattern": "^[^\\u0000]+$",
+        "type": "string"
+      },
+      "maxItems": 256,
+      "minItems": 1,
+      "type": "array"
+    },
+    "env": {
+      "additionalProperties": false,
+      "properties": {
+        "allow": {
+          "items": {
+            "enum": [
+              "LANG",
+              "LC_ALL",
+              "PATH",
+              "TERM",
+              "TZ"
+            ]
+          },
+          "maxItems": 5,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "set": {
+          "additionalProperties": {
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "maxProperties": 64,
+          "propertyNames": {
+            "allOf": [
+              {
+                "pattern": "^[A-Z][A-Z0-9_]{0,127}$"
+              },
+              {
+                "not": {
+                  "pattern": "(?i)(authorization|bearer|credential|password|secret|token|proxy)"
+                }
+              }
+            ]
+          },
+          "type": "object"
+        }
+      },
+      "required": [
+        "allow",
+        "set"
+      ],
+      "type": "object"
+    },
+    "limits": {
+      "additionalProperties": false,
+      "properties": {
+        "cpu_millis": {
+          "maximum": 86400000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "memory_bytes": {
+          "maximum": 1099511627776,
+          "minimum": 1048576,
+          "type": "integer"
+        },
+        "output_bytes": {
+          "maximum": 1048576,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "processes": {
+          "maximum": 4096,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "timeout_ms": {
+          "maximum": 86400000,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "timeout_ms",
+        "output_bytes",
+        "processes",
+        "memory_bytes",
+        "cpu_millis"
+      ],
+      "type": "object"
+    },
+    "sandbox": {
+      "additionalProperties": false,
+      "properties": {
+        "capability_snapshot": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "network": {
+          "enum": [
+            "none",
+            "aperture"
+          ]
+        },
+        "profile": {
+          "const": "workspace"
+        },
+        "require": {
+          "const": true
+        }
+      },
+      "required": [
+        "capability_snapshot",
+        "profile",
+        "network",
+        "require"
+      ],
+      "type": "object"
+    },
+    "wait": {
+      "type": "boolean"
+    },
+    "workspace": {
+      "$ref": "../common.json#/$defs/workspace-id"
+    }
+  },
+  "required": [
+    "workspace",
+    "argv",
+    "env",
+    "sandbox",
+    "limits",
+    "wait"
+  ],
+  "title": "exec-start operation input",
+  "type": "object"
+}

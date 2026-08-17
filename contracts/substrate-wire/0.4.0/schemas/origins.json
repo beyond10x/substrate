@@ -1,0 +1,193 @@
+{
+  "$id": "urn:daemonloom:substrate-wire:0.4.0:origins",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "const": "schemas/origins.json"
+    },
+    "bundle": {
+      "const": "substrate-wire@0.4.0"
+    },
+    "inputs": {
+      "items": {
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "trust": {
+                  "const": "repo-authored"
+                }
+              },
+              "required": [
+                "trust"
+              ]
+            },
+            "then": {
+              "not": {
+                "anyOf": [
+                  {
+                    "required": [
+                      "digest"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "release_blocker"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "uri"
+                    ]
+                  }
+                ]
+              },
+              "properties": {
+                "origin": {
+                  "const": "daemonloom"
+                }
+              }
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "trust": {
+                  "const": "public-standard-uri"
+                }
+              },
+              "required": [
+                "trust"
+              ]
+            },
+            "then": {
+              "not": {
+                "anyOf": [
+                  {
+                    "required": [
+                      "digest"
+                    ]
+                  },
+                  {
+                    "required": [
+                      "release_blocker"
+                    ]
+                  }
+                ]
+              },
+              "properties": {
+                "origin": {
+                  "const": "standard"
+                }
+              },
+              "required": [
+                "uri"
+              ]
+            }
+          },
+          {
+            "if": {
+              "properties": {
+                "trust": {
+                  "const": "public-standard-unpinned"
+                }
+              },
+              "required": [
+                "trust"
+              ]
+            },
+            "then": {
+              "properties": {
+                "digest": {
+                  "type": "null"
+                },
+                "origin": {
+                  "const": "standard"
+                }
+              },
+              "required": [
+                "uri",
+                "digest",
+                "release_blocker"
+              ]
+            }
+          }
+        ],
+        "properties": {
+          "digest": {
+            "oneOf": [
+              {
+                "pattern": "^sha256:[0-9a-f]{64}$",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "name": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "origin": {
+            "enum": [
+              "daemonloom",
+              "standard"
+            ]
+          },
+          "release_blocker": {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string"
+          },
+          "role": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "trust": {
+            "enum": [
+              "repo-authored",
+              "public-standard-unpinned",
+              "public-standard-uri"
+            ]
+          },
+          "uri": {
+            "format": "uri",
+            "maxLength": 512,
+            "type": "string"
+          },
+          "version": {
+            "maxLength": 64,
+            "minLength": 1,
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "origin",
+          "role",
+          "version",
+          "trust"
+        ],
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "origin": {
+      "const": "daemonloom"
+    }
+  },
+  "required": [
+    "$schema",
+    "bundle",
+    "origin",
+    "inputs"
+  ],
+  "title": "Contract input origin and trust inventory",
+  "type": "object"
+}

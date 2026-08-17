@@ -1,0 +1,9 @@
+{
+  "$id": "urn:daemonloom:substrate-wire:0.2.0:input:workspace-file-delete",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {},
+  "required": [],
+  "title": "workspace-file-delete operation input",
+  "type": "object"
+}

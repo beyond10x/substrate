@@ -1,0 +1,222 @@
+{
+  "$schema": "../schemas/schema-fixtures.json",
+  "format": "daemonloom.substrate-schema-fixtures.v1",
+  "invalid": [
+    {
+      "id": "accepted-cannot-claim-applied",
+      "instance": {
+        "applied": {
+          "capability_snapshot": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+          "cgroup": "substrate/vector",
+          "filesystem": "workspace-rw-system-ro",
+          "network": "none",
+          "profile": "workspace"
+        },
+        "exit": null,
+        "id": "ex_vector",
+        "kind": "exec",
+        "observed_at": "2026-08-13T12:00:00Z",
+        "requested": {
+          "capability_snapshot": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+          "network": "none",
+          "profile": "workspace",
+          "require": true
+        },
+        "state": "accepted",
+        "workspace": "ws_vector"
+      }
+    },
+    {
+      "id": "running-requires-applied",
+      "instance": {
+        "applied": null,
+        "exit": null,
+        "id": "ex_vector",
+        "kind": "exec",
+        "observed_at": "2026-08-13T12:00:00Z",
+        "requested": {
+          "capability_snapshot": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+          "network": "none",
+          "profile": "workspace",
+          "require": true
+        },
+        "state": "running",
+        "workspace": "ws_vector"
+      }
+    },
+    {
+      "id": "minimum-host-applied-network-cannot-widen",
+      "instance": {
+        "applied": {
+          "capability_snapshot": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+          "cgroup": "substrate/vector",
+          "filesystem": "workspace-rw-system-ro",
+          "network": "aperture",
+          "profile": "workspace"
+        },
+        "exit": null,
+        "id": "ex_vector",
+        "kind": "exec",
+        "observed_at": "2026-08-13T12:00:00Z",
+        "requested": {
+          "capability_snapshot": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+          "network": "none",
+          "profile": "workspace",
+          "require": true
+        },
+        "state": "running",
+        "workspace": "ws_vector"
+      }
+    },
+    {
+      "id": "applied-network-cannot-weaken-request",
+      "instance": {
+        "applied": {
+          "capability_snapshot": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+          "cgroup": "substrate/vector",
+          "filesystem": "workspace-rw-system-ro",
+          "network": "none",
+          "profile": "workspace"
+        },
+        "exit": null,
+        "id": "ex_vector",
+        "kind": "exec",
+        "observed_at": "2026-08-13T12:00:00Z",
+        "requested": {
+          "capability_snapshot": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+          "network": "aperture",
+          "profile": "workspace",
+          "require": true
+        },
+        "state": "running",
+        "workspace": "ws_vector"
+      }
+    },
+    {
+      "id": "terminal-requires-exit-observation",
+      "instance": {
+        "applied": {
+          "capability_snapshot": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+          "cgroup": "substrate/vector",
+          "filesystem": "workspace-rw-system-ro",
+          "network": "none",
+          "profile": "workspace"
+        },
+        "exit": null,
+        "id": "ex_vector",
+        "kind": "exec",
+        "observed_at": "2026-08-13T12:00:00Z",
+        "requested": {
+          "capability_snapshot": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+          "network": "none",
+          "profile": "workspace",
+          "require": true
+        },
+        "state": "exited",
+        "workspace": "ws_vector"
+      }
+    }
+  ],
+  "schema": "schemas/resource.json",
+  "valid": [
+    {
+      "applied": null,
+      "exit": null,
+      "id": "ex_vector",
+      "kind": "exec",
+      "observed_at": "2026-08-13T12:00:00Z",
+      "requested": {
+        "capability_snapshot": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+        "network": "none",
+        "profile": "workspace",
+        "require": true
+      },
+      "state": "accepted",
+      "workspace": "ws_vector"
+    },
+    {
+      "applied": {
+        "capability_snapshot": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+        "cgroup": "substrate/vector",
+        "filesystem": "workspace-rw-system-ro",
+        "network": "none",
+        "profile": "workspace"
+      },
+      "exit": null,
+      "id": "ex_vector",
+      "kind": "exec",
+      "observed_at": "2026-08-13T12:00:00Z",
+      "requested": {
+        "capability_snapshot": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+        "network": "none",
+        "profile": "workspace",
+        "require": true
+      },
+      "state": "running",
+      "workspace": "ws_vector"
+    },
+    {
+      "applied": {
+        "capability_snapshot": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+        "cgroup": "substrate/vector",
+        "filesystem": "workspace-rw-system-ro",
+        "network": "none",
+        "profile": "workspace"
+      },
+      "exit": {
+        "code": 0,
+        "signal": null
+      },
+      "id": "ex_vector",
+      "kind": "exec",
+      "observed_at": "2026-08-13T12:00:00Z",
+      "requested": {
+        "capability_snapshot": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+        "network": "none",
+        "profile": "workspace",
+        "require": true
+      },
+      "state": "exited",
+      "workspace": "ws_vector"
+    },
+    {
+      "applied": {
+        "capability_snapshot": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+        "cgroup": "substrate/vector",
+        "filesystem": "workspace-rw-system-ro",
+        "network": "none",
+        "profile": "workspace"
+      },
+      "exit": {
+        "code": null,
+        "signal": "TERM"
+      },
+      "id": "ex_vector",
+      "kind": "exec",
+      "observed_at": "2026-08-13T12:00:00Z",
+      "requested": {
+        "capability_snapshot": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+        "network": "none",
+        "profile": "workspace",
+        "require": true
+      },
+      "state": "cancelled",
+      "workspace": "ws_vector"
+    },
+    {
+      "applied": null,
+      "exit": null,
+      "id": "ex_vector",
+      "kind": "exec",
+      "observed_at": "2026-08-13T12:00:00Z",
+      "requested": {
+        "capability_snapshot": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+        "network": "none",
+        "profile": "workspace",
+        "require": true
+      },
+      "state": "unknown",
+      "workspace": "ws_vector"
+    }
+  ]
+}

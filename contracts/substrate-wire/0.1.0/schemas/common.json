@@ -1,0 +1,59 @@
+{
+  "$defs": {
+    "api-version": {
+      "const": "v1"
+    },
+    "empty-input": {
+      "additionalProperties": false,
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "exec-id": {
+      "pattern": "^ex_[A-Za-z0-9]+$",
+      "type": "string"
+    },
+    "labels": {
+      "additionalProperties": {
+        "maxLength": 256,
+        "type": "string"
+      },
+      "maxProperties": 64,
+      "propertyNames": {
+        "maxLength": 128,
+        "pattern": "^[A-Za-z0-9_.-]+$"
+      },
+      "type": "object"
+    },
+    "operation-id": {
+      "maxLength": 128,
+      "minLength": 16,
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string"
+    },
+    "relative-path": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\u0000).+$",
+      "type": "string",
+      "x-daemonloom-max-depth": 64
+    },
+    "request-id": {
+      "maxLength": 128,
+      "minLength": 8,
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string"
+    },
+    "timestamp": {
+      "format": "date-time",
+      "type": "string"
+    },
+    "workspace-id": {
+      "pattern": "^ws_[A-Za-z0-9]+$",
+      "type": "string"
+    }
+  },
+  "$id": "urn:daemonloom:substrate-wire:0.1.0:common",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Substrate phase-2 scalar and envelope definitions"
+}

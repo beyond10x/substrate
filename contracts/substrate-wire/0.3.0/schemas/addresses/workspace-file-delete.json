@@ -1,0 +1,19 @@
+{
+  "$id": "urn:daemonloom:substrate-wire:0.3.0:address:workspace-file-delete",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "path": {
+      "$ref": "../common.json#/$defs/relative-path"
+    },
+    "workspace_id": {
+      "$ref": "../common.json#/$defs/workspace-id"
+    }
+  },
+  "required": [
+    "workspace_id",
+    "path"
+  ],
+  "title": "workspace-file-delete normalized route address",
+  "type": "object"
+}

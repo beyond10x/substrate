@@ -1,0 +1,106 @@
+{
+  "$id": "urn:daemonloom:substrate-wire:0.2.0:result:reconciliation-snapshot-create",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "expires_at": {
+      "$ref": "../common.json#/$defs/timestamp"
+    },
+    "generation": {
+      "maximum": 18446744073709551615,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "history": {
+      "additionalProperties": false,
+      "properties": {
+        "first_seq": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "item_count": {
+          "maximum": 1024,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "through_seq": {
+          "maximum": 18446744073709551615,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "first_seq",
+        "through_seq",
+        "item_count",
+        "truncated"
+      ],
+      "type": "object"
+    },
+    "id": {
+      "$ref": "../common.json#/$defs/snapshot-id"
+    },
+    "item_count": {
+      "maximum": 4096,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "partitions": {
+      "additionalProperties": false,
+      "properties": {
+        "execs": {
+          "maximum": 2048,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "provenance_events": {
+          "maximum": 1024,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "workspaces": {
+          "maximum": 1024,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "workspaces",
+        "execs",
+        "provenance_events"
+      ],
+      "type": "object"
+    },
+    "resume_cursor": {
+      "$ref": "../common.json#/$defs/event-cursor"
+    },
+    "source_scope": {
+      "$ref": "../common.json#/$defs/source-scope"
+    },
+    "through_seq": {
+      "maximum": 18446744073709551615,
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "id",
+    "source_scope",
+    "generation",
+    "through_seq",
+    "resume_cursor",
+    "item_count",
+    "partitions",
+    "history",
+    "expires_at"
+  ],
+  "title": "reconciliation-snapshot-create operation result",
+  "type": "object"
+}

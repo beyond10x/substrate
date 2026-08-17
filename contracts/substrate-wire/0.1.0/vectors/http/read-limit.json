@@ -1,0 +1,111 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "kind": "http",
+    "operation": "workspace.file.read",
+    "request": {
+      "headers": {
+        "x-request-id": "req_read_limit001"
+      },
+      "method": "GET",
+      "path": "/v1/workspaces/ws_vector/files/large.bin",
+      "query": {
+        "limit_bytes": 1048576,
+        "mode": "file",
+        "offset": 0
+      }
+    },
+    "valid_address": true,
+    "valid_input": true
+  },
+  "context": {
+    "actor": "vector-client",
+    "authority": "http-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000",
+    "transport": {
+      "authenticated": true,
+      "kind": "unix",
+      "reachable": false
+    }
+  },
+  "covers": [
+    "error.exhausted"
+  ],
+  "expected": {
+    "kind": "http-response",
+    "response": {
+      "body": {
+        "api_version": "v1",
+        "error": {
+          "address": "limit",
+          "class": "exhausted",
+          "code": "workspace.read-limit",
+          "message": "Requested read exceeds the probed limit.",
+          "retriable": true
+        },
+        "request_id": "req_read_limit001"
+      },
+      "status": 429
+    }
+  },
+  "id": "read-over-cap-is-exhausted",
+  "layer": "http",
+  "phase": 2,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/read_bytes",
+      "expected": 0,
+      "operator": "equals"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "machine",
+      "name": "lower-read-limit",
+      "state": {
+        "config_generation": 7,
+        "driver": "host",
+        "driver_version": "fixture-1",
+        "facts": {
+          "exec.argv-only": true,
+          "exec.cgroup-kill": true,
+          "exec.cgroup-limits": {
+            "cpu": true,
+            "memory": true,
+            "processes": true
+          },
+          "exec.namespaces": {
+            "ipc": true,
+            "mount": true,
+            "network": true,
+            "pid": true,
+            "user": true,
+            "uts": true
+          },
+          "exec.no-egress": true,
+          "exec.output-limit-bytes": 65536,
+          "exec.signals": [
+            "INT",
+            "TERM",
+            "KILL"
+          ],
+          "workspace.atomic-replace": true,
+          "workspace.guarded-io": true,
+          "workspace.list-limit-items": 100,
+          "workspace.max-file-bytes": 1048576,
+          "workspace.openat2-beneath": true,
+          "workspace.read-limit-bytes": 65536
+        },
+        "probed_at": "2026-08-13T12:00:00Z",
+        "snapshot": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+      }
+    }
+  ]
+}

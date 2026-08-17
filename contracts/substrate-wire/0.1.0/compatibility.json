@@ -1,0 +1,15 @@
+{
+  "contract": "substrate-wire",
+  "development_constraints": [
+    "This development bundle is contract-execution-ready but cannot satisfy a stable dependency.",
+    "Passing the bundle gate opens runtime scaffolding; it does not claim producer or host-driver conformance.",
+    "No compatibility promise begins before a signed stable release."
+  ],
+  "request_policy": "closed",
+  "response_policy": "open only where a schema explicitly permits optional additive fields",
+  "status": "development",
+  "supported_api_majors": [
+    1
+  ],
+  "version": "0.1.0"
+}

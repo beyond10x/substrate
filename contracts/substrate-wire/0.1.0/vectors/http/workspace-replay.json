@@ -1,0 +1,167 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "kind": "http-sequence",
+    "operation": "workspace.create",
+    "steps": [
+      {
+        "request": {
+          "body": {
+            "input": {
+              "labels": {
+                "vector": "workspace-replay"
+              },
+              "source": "empty"
+            },
+            "op": "01JPHASE2WORKSPACECREATE"
+          },
+          "headers": {
+            "x-request-id": "req_workspace_replay1"
+          },
+          "method": "POST",
+          "path": "/v1/workspaces",
+          "query": {}
+        },
+        "valid_input": true
+      },
+      {
+        "request": {
+          "body": {
+            "input": {
+              "labels": {
+                "vector": "workspace-replay"
+              },
+              "source": "empty"
+            },
+            "op": "01JPHASE2WORKSPACECREATE"
+          },
+          "headers": {
+            "traceparent": "00-second-attempt",
+            "x-request-id": "req_workspace_replay2"
+          },
+          "method": "POST",
+          "path": "/v1/workspaces",
+          "query": {}
+        },
+        "valid_input": true
+      }
+    ]
+  },
+  "context": {
+    "actor": "vector-client",
+    "authority": "http-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000",
+    "transport": {
+      "authenticated": true,
+      "kind": "unix",
+      "reachable": false
+    }
+  },
+  "covers": [
+    "lifecycle.stable-replay"
+  ],
+  "expected": {
+    "kind": "http-sequence",
+    "responses": [
+      {
+        "body": {
+          "api_version": "v1",
+          "operation": "01JPHASE2WORKSPACECREATE",
+          "request_id": "req_workspace_replay1",
+          "result": {
+            "id": "ws_replayed",
+            "kind": "workspace",
+            "labels": {
+              "vector": "workspace-replay"
+            },
+            "observed_at": "2026-08-13T12:00:00Z",
+            "state": "ready"
+          }
+        },
+        "status": 201
+      },
+      {
+        "body": {
+          "api_version": "v1",
+          "operation": "01JPHASE2WORKSPACECREATE",
+          "request_id": "req_workspace_replay2",
+          "result": {
+            "id": "ws_replayed",
+            "kind": "workspace",
+            "labels": {
+              "vector": "workspace-replay"
+            },
+            "observed_at": "2026-08-13T12:00:00Z",
+            "state": "ready"
+          }
+        },
+        "status": 201
+      }
+    ]
+  },
+  "id": "same-operation-same-input-replays-original-outcome",
+  "layer": "http",
+  "phase": 2,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/driver/dispatch_count",
+      "expected": 1,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/distinct_workspace_count",
+      "expected": 1,
+      "operator": "equals"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "machine",
+      "name": "minimum-host",
+      "state": {
+        "config_generation": 7,
+        "driver": "host",
+        "driver_version": "fixture-1",
+        "facts": {
+          "exec.argv-only": true,
+          "exec.cgroup-kill": true,
+          "exec.cgroup-limits": {
+            "cpu": true,
+            "memory": true,
+            "processes": true
+          },
+          "exec.namespaces": {
+            "ipc": true,
+            "mount": true,
+            "network": true,
+            "pid": true,
+            "user": true,
+            "uts": true
+          },
+          "exec.no-egress": true,
+          "exec.output-limit-bytes": 65536,
+          "exec.signals": [
+            "INT",
+            "TERM",
+            "KILL"
+          ],
+          "workspace.atomic-replace": true,
+          "workspace.guarded-io": true,
+          "workspace.list-limit-items": 100,
+          "workspace.max-file-bytes": 1048576,
+          "workspace.openat2-beneath": true,
+          "workspace.read-limit-bytes": 65536
+        },
+        "probed_at": "2026-08-13T12:00:00Z",
+        "snapshot": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+      }
+    }
+  ]
+}

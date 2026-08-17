@@ -1,0 +1,204 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "kind": "http",
+    "operation": "session.start",
+    "request": {
+      "body": {
+        "input": {
+          "exec": {
+            "argv": [
+              "/usr/bin/true"
+            ],
+            "env": {
+              "allow": [],
+              "set": {}
+            },
+            "lease_ttl_ms": 60000,
+            "limits": {
+              "cpu_millis": 1000,
+              "memory_bytes": 67108864,
+              "output_bytes": 65536,
+              "processes": 16,
+              "timeout_ms": 5000
+            },
+            "sandbox": {
+              "capability_snapshot": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+              "network": "none",
+              "profile": "workspace",
+              "require": true
+            },
+            "wait": false,
+            "workspace": "ws_vector"
+          },
+          "frame_limit_bytes": 65536,
+          "input_limit_bytes": 1048576,
+          "queued_frames": 16
+        },
+        "op": "01JPHASE4SESSIONSTART001"
+      },
+      "headers": {
+        "x-request-id": "req_pipe_start001"
+      },
+      "method": "POST",
+      "path": "/v1/pipe-sessions",
+      "query": {}
+    },
+    "valid_address": true,
+    "valid_input": true
+  },
+  "context": {
+    "actor": "vector-client",
+    "authority": "http-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000",
+    "transport": {
+      "authenticated": true,
+      "kind": "unix",
+      "reachable": false
+    }
+  },
+  "covers": [
+    "route.session.start",
+    "session.distinct-identity",
+    "session.profile-binding",
+    "security.daemon-environment",
+    "security.no-egress"
+  ],
+  "expected": {
+    "kind": "http-response",
+    "response": {
+      "body": {
+        "api_version": "v1",
+        "operation": "01JPHASE4SESSIONSTART001",
+        "request_id": "req_pipe_start001",
+        "result": {
+          "attachment": "available",
+          "capability_snapshot": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+          "exec": "ex_vector",
+          "exit": null,
+          "id": "ses_vector",
+          "kind": "session",
+          "lease": {
+            "actor": "vector-client",
+            "authorizing_operation": "01JPHASE4SESSIONSTART001",
+            "clock_tolerance_ms": 30000,
+            "principal": null,
+            "renew_by": "2026-08-13T12:01:00Z",
+            "state": "active",
+            "ttl_ms": 60000
+          },
+          "limits": {
+            "frame_bytes": 65536,
+            "input_bytes": 1048576,
+            "queued_frames": 16
+          },
+          "mode": "pipes",
+          "observed_at": "2026-08-13T12:00:00Z",
+          "state": "ready",
+          "workspace": "ws_vector"
+        }
+      },
+      "status": 202
+    }
+  },
+  "id": "confined-pipe-session-start-binds-durable-session-and-exec",
+  "layer": "http",
+  "phase": 4,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/driver/dispatch_count",
+      "expected": 1,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/session_id_distinct_from_exec_id",
+      "expected": true,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/child_environment_keys",
+      "expected": [],
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/applied_network",
+      "expected": "none",
+      "operator": "equals"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "machine",
+      "name": "minimum-host",
+      "state": {
+        "config_generation": 7,
+        "driver": "host",
+        "driver_version": "fixture-1",
+        "facts": {
+          "events.pull": true,
+          "events.retention-events": 10000,
+          "events.stream": true,
+          "exec.argv-only": true,
+          "exec.cgroup-kill": true,
+          "exec.cgroup-limits": {
+            "cpu": true,
+            "memory": true,
+            "processes": true
+          },
+          "exec.inline-capsule": {
+            "max_file_bytes": 262144,
+            "max_files": 32,
+            "max_total_bytes": 524288,
+            "mount": "/runtime"
+          },
+          "exec.max-current": 2048,
+          "exec.namespaces": {
+            "ipc": true,
+            "mount": true,
+            "network": true,
+            "pid": true,
+            "user": true,
+            "uts": true
+          },
+          "exec.no-egress": true,
+          "exec.output-limit-bytes": 65536,
+          "exec.signals": [
+            "INT",
+            "TERM",
+            "KILL"
+          ],
+          "leases.clock-tolerance-ms": 30000,
+          "leases.explicit": true,
+          "operation.ledger-global-max-bytes": 4294967296,
+          "operation.ledger-global-max-rows": 1000000,
+          "operation.ledger-subject-max-bytes": 536870912,
+          "operation.ledger-subject-max-rows": 100000,
+          "snapshot.provenance-events": 1024,
+          "workspace.atomic-replace": true,
+          "workspace.guarded-io": true,
+          "workspace.list-limit-items": 100,
+          "workspace.max-current": 1024,
+          "workspace.max-file-bytes": 1048576,
+          "workspace.openat2-beneath": true,
+          "workspace.read-limit-bytes": 65536
+        },
+        "probed_at": "2026-08-13T12:00:00Z",
+        "snapshot": "sha256:7777777777777777777777777777777777777777777777777777777777777777"
+      }
+    },
+    {
+      "kind": "workspace",
+      "name": "owned",
+      "state": {
+        "owner": "local:1000"
+      }
+    }
+  ]
+}

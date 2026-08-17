@@ -1,0 +1,23 @@
+[package]
+name = "substrate-store"
+description = "Durable substrate operation and resource state"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[dependencies]
+chrono.workspace = true
+parking_lot.workspace = true
+rusqlite.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+substrate-wire = { path = "../substrate-wire" }
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

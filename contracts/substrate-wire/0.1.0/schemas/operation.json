@@ -1,0 +1,566 @@
+{
+  "$defs": {
+    "base-properties": {
+      "accepted_at": {
+        "format": "date-time",
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "actor": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "capability_snapshot": {
+        "oneOf": [
+          {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "operation": {
+        "$ref": "common.json#/$defs/operation-id"
+      },
+      "operation_kind": {
+        "enum": [
+          "workspace.create",
+          "workspace.file.write",
+          "workspace.file.delete",
+          "workspace.destroy",
+          "exec.start",
+          "exec.signal"
+        ]
+      },
+      "outcome": {},
+      "principal": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "request_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "type": "string"
+      },
+      "resource": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "state": {
+        "enum": [
+          "refused",
+          "accepted",
+          "unknown",
+          "terminal"
+        ]
+      },
+      "terminal_at": {
+        "format": "date-time",
+        "type": [
+          "string",
+          "null"
+        ]
+      }
+    },
+    "error-outcome": {
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "$ref": "error.json#/$defs/detail"
+        },
+        "kind": {
+          "const": "error"
+        }
+      },
+      "required": [
+        "kind",
+        "error"
+      ],
+      "type": "object"
+    },
+    "success-outcome": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "success"
+        },
+        "result": {
+          "oneOf": [
+            {
+              "$ref": "results/workspace-create.json"
+            },
+            {
+              "$ref": "results/workspace-file-write.json"
+            },
+            {
+              "$ref": "results/workspace-file-delete.json"
+            },
+            {
+              "$ref": "results/workspace-destroy.json"
+            },
+            {
+              "$ref": "results/exec-start.json"
+            },
+            {
+              "$ref": "results/exec-signal.json"
+            }
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "result"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "urn:daemonloom:substrate-wire:0.1.0:operation",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "operation_kind": {
+            "const": "workspace.create"
+          },
+          "outcome": {
+            "properties": {
+              "kind": {
+                "const": "success"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          }
+        },
+        "required": [
+          "operation_kind",
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "properties": {
+              "result": {
+                "$ref": "results/workspace-create.json"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation_kind": {
+            "const": "workspace.file.write"
+          },
+          "outcome": {
+            "properties": {
+              "kind": {
+                "const": "success"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          }
+        },
+        "required": [
+          "operation_kind",
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "properties": {
+              "result": {
+                "$ref": "results/workspace-file-write.json"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation_kind": {
+            "const": "workspace.file.delete"
+          },
+          "outcome": {
+            "properties": {
+              "kind": {
+                "const": "success"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          }
+        },
+        "required": [
+          "operation_kind",
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "properties": {
+              "result": {
+                "$ref": "results/workspace-file-delete.json"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation_kind": {
+            "const": "workspace.destroy"
+          },
+          "outcome": {
+            "properties": {
+              "kind": {
+                "const": "success"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          }
+        },
+        "required": [
+          "operation_kind",
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "properties": {
+              "result": {
+                "$ref": "results/workspace-destroy.json"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation_kind": {
+            "const": "exec.start"
+          },
+          "outcome": {
+            "properties": {
+              "kind": {
+                "const": "success"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          }
+        },
+        "required": [
+          "operation_kind",
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "properties": {
+              "result": {
+                "$ref": "results/exec-start.json"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation_kind": {
+            "const": "exec.signal"
+          },
+          "outcome": {
+            "properties": {
+              "kind": {
+                "const": "success"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          }
+        },
+        "required": [
+          "operation_kind",
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "properties": {
+              "result": {
+                "$ref": "results/exec-signal.json"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "accepted_at": {
+          "type": "null"
+        },
+        "actor": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "capability_snapshot": {
+          "type": "null"
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "operation_kind": {
+          "enum": [
+            "workspace.create",
+            "workspace.file.write",
+            "workspace.file.delete",
+            "workspace.destroy",
+            "exec.start",
+            "exec.signal"
+          ]
+        },
+        "outcome": {
+          "$ref": "#/$defs/error-outcome"
+        },
+        "principal": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "request_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "resource": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "const": "refused"
+        },
+        "terminal_at": {
+          "$ref": "common.json#/$defs/timestamp"
+        }
+      },
+      "required": [
+        "operation",
+        "operation_kind",
+        "request_hash",
+        "state",
+        "accepted_at",
+        "terminal_at",
+        "capability_snapshot",
+        "actor",
+        "principal",
+        "resource",
+        "outcome"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "accepted_at": {
+          "$ref": "common.json#/$defs/timestamp"
+        },
+        "actor": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "capability_snapshot": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "operation_kind": {
+          "enum": [
+            "workspace.create",
+            "workspace.file.write",
+            "workspace.file.delete",
+            "workspace.destroy",
+            "exec.start",
+            "exec.signal"
+          ]
+        },
+        "outcome": {
+          "type": "null"
+        },
+        "principal": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "request_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "resource": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "enum": [
+            "accepted",
+            "unknown"
+          ]
+        },
+        "terminal_at": {
+          "type": "null"
+        }
+      },
+      "required": [
+        "operation",
+        "operation_kind",
+        "request_hash",
+        "state",
+        "accepted_at",
+        "terminal_at",
+        "capability_snapshot",
+        "actor",
+        "principal",
+        "resource",
+        "outcome"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "accepted_at": {
+          "$ref": "common.json#/$defs/timestamp"
+        },
+        "actor": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "capability_snapshot": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "operation_kind": {
+          "enum": [
+            "workspace.create",
+            "workspace.file.write",
+            "workspace.file.delete",
+            "workspace.destroy",
+            "exec.start",
+            "exec.signal"
+          ]
+        },
+        "outcome": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/success-outcome"
+            },
+            {
+              "$ref": "#/$defs/error-outcome"
+            }
+          ]
+        },
+        "principal": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "request_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "resource": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "const": "terminal"
+        },
+        "terminal_at": {
+          "$ref": "common.json#/$defs/timestamp"
+        }
+      },
+      "required": [
+        "operation",
+        "operation_kind",
+        "request_hash",
+        "state",
+        "accepted_at",
+        "terminal_at",
+        "capability_snapshot",
+        "actor",
+        "principal",
+        "resource",
+        "outcome"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "Subject-scoped operation record with structural lifecycle invariants"
+}
