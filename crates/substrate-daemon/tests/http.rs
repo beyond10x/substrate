@@ -396,6 +396,139 @@ async fn twelve_route_vertical_slice_is_scoped_durable_and_observed() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+#[allow(clippy::too_many_lines)]
+async fn v2_file_mutations_enforce_digest_cas_and_return_bounded_diffs() {
+    let harness = Harness::open();
+    let (_, created) = harness
+        .call(
+            "local:1000",
+            Method::POST,
+            "/v1/workspaces",
+            "req_v2_create",
+            mutation(
+                "01JV2CREATEHTTPTEST0001",
+                json!({ "source": "empty", "labels": { "vector": "file-v2" } }),
+            ),
+        )
+        .await;
+    let workspace = created["result"]["id"].as_str().expect("workspace id");
+    let file = format!("/v2/workspaces/{workspace}/files/src/main.txt");
+    let (status, created_file) = harness
+        .call(
+            "local:1000",
+            Method::PUT,
+            &file,
+            "req_v2_write",
+            mutation(
+                "01JV2WRITEHTTPTEST00001",
+                json!({
+                    "content": { "encoding": "base64", "data": "aGVsbG8K" },
+                    "expected": { "state": "absent" },
+                    "create_parents": true
+                }),
+            ),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let digest = created_file["result"]["after_sha256"]
+        .as_str()
+        .expect("after digest")
+        .to_owned();
+    assert_eq!(created_file["result"]["before_sha256"], Value::Null);
+
+    let (status, tree) = harness
+        .call(
+            "local:1000",
+            Method::GET,
+            &format!("/v2/workspaces/{workspace}/tree?limit_items=10&include_hidden=false"),
+            "req_v2_tree",
+            Body::empty(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(tree["result"]["truncated"], false);
+    assert_eq!(
+        tree["result"]["items"],
+        json!([
+            {"path": "src", "kind": "directory", "size": null},
+            {"path": "src/main.txt", "kind": "file", "size": 6}
+        ])
+    );
+
+    let (status, bounded) = harness
+        .call(
+            "local:1000",
+            Method::GET,
+            &format!("/v2/workspaces/{workspace}/tree?limit_items=1&include_hidden=false"),
+            "req_v2_tree_bounded",
+            Body::empty(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(bounded["result"]["items"].as_array().unwrap().len(), 1);
+    assert_eq!(bounded["result"]["truncated"], true);
+
+    let (status, read) = harness
+        .call(
+            "local:1000",
+            Method::GET,
+            &format!("{file}?mode=file&offset=0&limit_bytes=64"),
+            "req_v2_read",
+            Body::empty(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(read["result"]["sha256"], digest);
+    assert_eq!(read["result"]["size"], 6);
+
+    let edit = format!("/v2/workspaces/{workspace}/file-edits/src/main.txt");
+    let (status, edited) = harness
+        .call(
+            "local:1000",
+            Method::POST,
+            &edit,
+            "req_v2_edit",
+            mutation(
+                "01JV2EDITHTTPTEST000001",
+                json!({
+                    "expected_sha256": digest,
+                    "old_text": "hello",
+                    "new_text": "hello world",
+                    "match_policy": "flux_compatible"
+                }),
+            ),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        edited["result"]["diff"]["text"]
+            .as_str()
+            .expect("diff")
+            .contains("+hello world")
+    );
+
+    let (status, stale) = harness
+        .call(
+            "local:1000",
+            Method::POST,
+            &edit,
+            "req_v2_stale",
+            mutation(
+                "01JV2EDITHTTPTEST000002",
+                json!({
+                    "expected_sha256": read["result"]["sha256"],
+                    "old_text": "hello world",
+                    "new_text": "stale",
+                    "match_policy": "exact"
+                }),
+            ),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(stale["error"]["code"], "workspace.stale-content");
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn strict_limits_and_path_escape_are_typed_before_dispatch() {
     let harness = Harness::open();
     let (status, query) = harness

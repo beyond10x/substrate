@@ -288,6 +288,148 @@ pub struct FileWriteInput {
     pub content: Base64Content,
 }
 
+/// Expected state of a path before a guarded mutation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ExpectedFileState {
+    /// The destination must not exist.
+    Absent,
+    /// The destination must be a regular file with this complete-content digest.
+    Sha256 { sha256: String },
+}
+
+impl ExpectedFileState {
+    /// Validates the closed lowercase SHA-256 representation.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WireValidationError::InvalidDigest`] for a malformed digest.
+    pub fn validate(&self) -> Result<(), WireValidationError> {
+        match self {
+            Self::Absent => Ok(()),
+            Self::Sha256 { sha256 } if valid_sha256(sha256) => Ok(()),
+            Self::Sha256 { .. } => Err(WireValidationError::InvalidDigest),
+        }
+    }
+}
+
+/// Complete-file compare-and-set replacement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileReplaceInput {
+    pub content: Base64Content,
+    pub expected: ExpectedFileState,
+    #[serde(default)]
+    pub create_parents: bool,
+}
+
+/// Matching policy for one textual replacement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextMatchPolicy {
+    Exact,
+    FluxCompatible,
+}
+
+/// One compare-and-set textual replacement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileEditInput {
+    pub expected_sha256: String,
+    pub old_text: String,
+    pub new_text: String,
+    pub match_policy: TextMatchPolicy,
+}
+
+/// One line-based patch edit, addressed against the original file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum LinePatchEdit {
+    InsertBefore {
+        line: u32,
+        text: String,
+    },
+    InsertAfter {
+        line: u32,
+        text: String,
+    },
+    ReplaceRange {
+        start_line: u32,
+        end_line: u32,
+        text: String,
+    },
+    DeleteRange {
+        start_line: u32,
+        end_line: u32,
+    },
+}
+
+/// Compare-and-set line patch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FilePatchInput {
+    pub expected_sha256: String,
+    pub edits: Vec<LinePatchEdit>,
+}
+
+/// Directory creation request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DirectoryCreateInput {
+    #[serde(default)]
+    pub parents: bool,
+}
+
+/// Atomic path move request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PathMoveInput {
+    pub destination: String,
+    #[serde(default)]
+    pub create_parents: bool,
+}
+
+/// Bounded unified diff returned by textual mutations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnifiedDiff {
+    pub text: String,
+    pub truncated: bool,
+    pub binary: bool,
+}
+
+/// Result of one guarded file mutation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileMutationResult {
+    pub kind: FileKind,
+    pub workspace: String,
+    pub path: String,
+    pub size: u64,
+    pub before_sha256: Option<String>,
+    pub after_sha256: String,
+    pub atomic_replacement: bool,
+    pub diff: UnifiedDiff,
+    pub observed_at: DateTime<Utc>,
+}
+
+/// V2 file read slice with a digest of the complete file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DigestedFileSlice {
+    pub kind: FileKind,
+    pub workspace: String,
+    pub path: String,
+    pub size: u64,
+    pub sha256: String,
+    pub offset: u64,
+    pub returned_bytes: u64,
+    pub next_offset: u64,
+    pub eof: bool,
+    pub content: Base64Content,
+    pub observed_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub struct EmptyInput {}
@@ -314,6 +456,54 @@ pub struct DirectoryPage {
     pub path: String,
     pub items: Vec<DirectoryEntry>,
     pub next_cursor: Option<String>,
+    pub observed_at: DateTime<Utc>,
+}
+
+/// Bounded recursive workspace-tree query. Hidden path components are omitted unless requested.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceTreeQuery {
+    #[serde(default = "default_tree_limit")]
+    pub limit_items: u32,
+    #[serde(default)]
+    pub include_hidden: bool,
+}
+
+const fn default_tree_limit() -> u32 {
+    MAX_LIST_ITEMS
+}
+
+impl WorkspaceTreeQuery {
+    /// Validates the closed recursive-list bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WireValidationError::InvalidQueryShape`] when the requested limit is zero or
+    /// exceeds the protocol maximum.
+    pub fn validate(&self) -> Result<(), WireValidationError> {
+        if self.limit_items == 0 || self.limit_items > MAX_LIST_ITEMS {
+            return Err(WireValidationError::InvalidQueryShape);
+        }
+        Ok(())
+    }
+}
+
+/// One root-relative entry from a descriptor-confined recursive walk.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceTreeEntry {
+    pub path: String,
+    pub kind: DirectoryEntryKind,
+    pub size: Option<u64>,
+}
+
+/// Deterministically path-sorted bounded recursive tree observation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceTree {
+    pub workspace: String,
+    pub items: Vec<WorkspaceTreeEntry>,
+    pub truncated: bool,
     pub observed_at: DateTime<Utc>,
 }
 
@@ -1109,6 +1299,8 @@ pub struct OperationRecord {
 pub enum WireValidationError {
     #[error("request query does not match its route-specific shape")]
     InvalidQueryShape,
+    #[error("digest is not lowercase SHA-256")]
+    InvalidDigest,
     #[error("content is not canonical base64")]
     InvalidBase64,
     #[error("path is not a safe relative workspace path")]
@@ -1133,6 +1325,13 @@ pub enum WireValidationError {
     CapsuleContentMismatch,
     #[error("execution capsule manifest does not match its digest")]
     CapsuleManifestMismatch,
+}
+
+fn valid_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 /// Validates a caller-minted operation identifier.

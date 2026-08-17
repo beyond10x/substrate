@@ -35,13 +35,14 @@ use substrate_store::{
 use substrate_wire::{
     Base64Content, Base64Encoding, EmptyInput, ErrorClass, ErrorDetail, EventPage, EventQuery,
     Exec, ExecKind, ExecOutputQuery, ExecSignalInput, ExecStartInput, ExecState, Failure,
-    FileReadQuery, FileWriteInput, LeaseRenewInput, MAX_EVENT_PAGE_ITEMS, MAX_LEASE_TTL_MS,
-    MAX_SNAPSHOT_PAGE_ITEMS, MIN_LEASE_TTL_MS, NetworkMode, OperationOutcome, OperationState,
-    OutputSlice, OutputStream, PipeClientFrame, PipeServerFrame, PipeSession,
-    PipeSessionCapabilities, PipeSessionLimits, PipeSessionStartInput, SessionAttachmentState,
-    SessionKind, SessionMode, SessionState, Success, WireValidationError, WorkspaceAbsence,
-    WorkspaceCreateInput, WorkspaceKind, WorkspaceSource, WorkspaceState,
-    canonical_request_hash_v2, validate_operation_id, validate_relative_path,
+    FileEditInput, FilePatchInput, FileReadQuery, FileReplaceInput, FileWriteInput,
+    LeaseRenewInput, MAX_EVENT_PAGE_ITEMS, MAX_LEASE_TTL_MS, MAX_SNAPSHOT_PAGE_ITEMS,
+    MIN_LEASE_TTL_MS, NetworkMode, OperationOutcome, OperationState, OutputSlice, OutputStream,
+    PipeClientFrame, PipeServerFrame, PipeSession, PipeSessionCapabilities, PipeSessionLimits,
+    PipeSessionStartInput, SessionAttachmentState, SessionKind, SessionMode, SessionState, Success,
+    WireValidationError, WorkspaceAbsence, WorkspaceCreateInput, WorkspaceKind, WorkspaceSource,
+    WorkspaceState, WorkspaceTreeQuery, canonical_request_hash_v2, validate_operation_id,
+    validate_relative_path,
 };
 use tokio::sync::{Mutex, Notify, OwnedMutexGuard, Semaphore, watch};
 use ulid::Ulid;
@@ -1127,6 +1128,22 @@ pub fn router(app: Arc<App>) -> Router {
                 .put(workspace_file_write)
                 .delete(workspace_file_delete),
         )
+        .route(
+            "/v2/workspaces/{workspace_id}/files/{*path}",
+            get(workspace_file_read_v2).put(workspace_file_replace_v2),
+        )
+        .route(
+            "/v2/workspaces/{workspace_id}/tree",
+            get(workspace_tree_read_v2),
+        )
+        .route(
+            "/v2/workspaces/{workspace_id}/file-edits/{*path}",
+            post(workspace_file_edit_v2),
+        )
+        .route(
+            "/v2/workspaces/{workspace_id}/file-patches/{*path}",
+            post(workspace_file_patch_v2),
+        )
         .route("/v1/execs", post(exec_start))
         .route("/v1/execs/{exec_id}", get(exec_get).delete(exec_retire))
         .route("/v1/execs/{exec_id}/output", get(exec_output_get))
@@ -1457,6 +1474,94 @@ async fn workspace_file_read(
     }
 }
 
+async fn workspace_file_read_v2(
+    State(app): State<Arc<App>>,
+    Extension(identity): Extension<Identity>,
+    headers: HeaderMap,
+    Path((workspace_id, path)): Path<(String, String)>,
+    RawQuery(raw_query): RawQuery,
+) -> Response {
+    let request_id = request_id(&app, &headers);
+    if let Err(error) = validate_relative_path(&path) {
+        return path_refusal(&request_id, None, &error);
+    }
+    let query: FileReadQuery =
+        match serde_urlencoded::from_str::<FileReadQuery>(raw_query.as_deref().unwrap_or("")) {
+            Ok(value) if value.validate_shape().is_ok() => value,
+            _ => return schema_invalid(&request_id, None, "query"),
+        };
+    let scope = app.scope(&identity);
+    let _workspace_guard = app.lock_workspace(&scope, &workspace_id).await;
+    let root_name = match app.admit_workspace(&scope, &workspace_id).await {
+        Ok(WorkspaceAdmission::Missing) => return not_found(&request_id),
+        Ok(WorkspaceAdmission::Frozen { .. }) => {
+            return failure(
+                StatusCode::CONFLICT,
+                &request_id,
+                None,
+                ErrorClass::Conflict,
+                "workspace.not-ready",
+                "Workspace is not ready for filesystem access.",
+                Some("workspace"),
+                false,
+            );
+        }
+        Ok(WorkspaceAdmission::Admitted { root_name, .. }) => root_name,
+        Err(error) => return store_failure(&request_id, None, &error),
+    };
+    match app
+        .driver
+        .read_workspace_file_v2(&workspace_id, &root_name, &path, &query)
+        .await
+    {
+        Ok(result) => success(StatusCode::OK, Success::observed(request_id, result)),
+        Err(error) => driver_failure(&request_id, None, &error),
+    }
+}
+
+async fn workspace_tree_read_v2(
+    State(app): State<Arc<App>>,
+    Extension(identity): Extension<Identity>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<String>,
+    RawQuery(raw_query): RawQuery,
+) -> Response {
+    let request_id = request_id(&app, &headers);
+    let query: WorkspaceTreeQuery = match serde_urlencoded::from_str::<WorkspaceTreeQuery>(
+        raw_query.as_deref().unwrap_or(""),
+    ) {
+        Ok(value) if value.validate().is_ok() => value,
+        _ => return schema_invalid(&request_id, None, "query"),
+    };
+    let scope = app.scope(&identity);
+    let _workspace_guard = app.lock_workspace(&scope, &workspace_id).await;
+    let root_name = match app.admit_workspace(&scope, &workspace_id).await {
+        Ok(WorkspaceAdmission::Missing) => return not_found(&request_id),
+        Ok(WorkspaceAdmission::Frozen { .. }) => {
+            return failure(
+                StatusCode::CONFLICT,
+                &request_id,
+                None,
+                ErrorClass::Conflict,
+                "workspace.not-ready",
+                "Workspace is not ready for filesystem access.",
+                Some("workspace"),
+                false,
+            );
+        }
+        Ok(WorkspaceAdmission::Admitted { root_name, .. }) => root_name,
+        Err(error) => return store_failure(&request_id, None, &error),
+    };
+    match app
+        .driver
+        .list_workspace_tree_v2(&workspace_id, &root_name, &query)
+        .await
+    {
+        Ok(result) => success(StatusCode::OK, Success::observed(request_id, result)),
+        Err(error) => driver_failure(&request_id, None, &error),
+    }
+}
+
 #[allow(clippy::too_many_lines)] // Durable refusal and atomic host write stay adjacent.
 async fn workspace_file_write(
     State(app): State<Arc<App>>,
@@ -1572,6 +1677,259 @@ async fn workspace_file_write(
         .write_workspace_file(&workspace_id, &root_name, &path, &content)
         .await
     {
+        Ok(observation) => {
+            finish_success(
+                &app,
+                &scope,
+                &request_id,
+                &operation,
+                StatusCode::OK,
+                Some(&workspace_id),
+                observation,
+            )
+            .await
+        }
+        Err(error) => {
+            finish_driver_error(
+                &app,
+                &scope,
+                &request_id,
+                &operation,
+                Some(&workspace_id),
+                &error,
+            )
+            .await
+        }
+    }
+}
+
+enum V2FileMutation {
+    Replace(FileReplaceInput),
+    Edit(FileEditInput),
+    Patch(FilePatchInput),
+}
+
+async fn workspace_file_replace_v2(
+    State(app): State<Arc<App>>,
+    Extension(identity): Extension<Identity>,
+    headers: HeaderMap,
+    Path((workspace_id, path)): Path<(String, String)>,
+    RawQuery(raw_query): RawQuery,
+    body: Body,
+) -> Response {
+    let request_id = request_id(&app, &headers);
+    let address = format!("/v2/workspaces/{workspace_id}/files/{path}");
+    let mutation = match decode_mutation::<FileReplaceInput>(
+        &app,
+        &identity,
+        "workspace.file.replace-v2",
+        "PUT",
+        &address,
+        raw_query.as_deref(),
+        body,
+        &request_id,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    workspace_file_mutation_v2(
+        app,
+        identity,
+        request_id,
+        workspace_id,
+        path,
+        address,
+        "workspace.file.replace-v2",
+        "PUT",
+        BoundMutation {
+            op: mutation.op,
+            input: V2FileMutation::Replace(mutation.input),
+            request_hash: mutation.request_hash,
+        },
+    )
+    .await
+}
+
+async fn workspace_file_edit_v2(
+    State(app): State<Arc<App>>,
+    Extension(identity): Extension<Identity>,
+    headers: HeaderMap,
+    Path((workspace_id, path)): Path<(String, String)>,
+    RawQuery(raw_query): RawQuery,
+    body: Body,
+) -> Response {
+    let request_id = request_id(&app, &headers);
+    let address = format!("/v2/workspaces/{workspace_id}/file-edits/{path}");
+    let mutation = match decode_mutation::<FileEditInput>(
+        &app,
+        &identity,
+        "workspace.file.edit-v2",
+        "POST",
+        &address,
+        raw_query.as_deref(),
+        body,
+        &request_id,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    workspace_file_mutation_v2(
+        app,
+        identity,
+        request_id,
+        workspace_id,
+        path,
+        address,
+        "workspace.file.edit-v2",
+        "POST",
+        BoundMutation {
+            op: mutation.op,
+            input: V2FileMutation::Edit(mutation.input),
+            request_hash: mutation.request_hash,
+        },
+    )
+    .await
+}
+
+async fn workspace_file_patch_v2(
+    State(app): State<Arc<App>>,
+    Extension(identity): Extension<Identity>,
+    headers: HeaderMap,
+    Path((workspace_id, path)): Path<(String, String)>,
+    RawQuery(raw_query): RawQuery,
+    body: Body,
+) -> Response {
+    let request_id = request_id(&app, &headers);
+    let address = format!("/v2/workspaces/{workspace_id}/file-patches/{path}");
+    let mutation = match decode_mutation::<FilePatchInput>(
+        &app,
+        &identity,
+        "workspace.file.patch-v2",
+        "POST",
+        &address,
+        raw_query.as_deref(),
+        body,
+        &request_id,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    workspace_file_mutation_v2(
+        app,
+        identity,
+        request_id,
+        workspace_id,
+        path,
+        address,
+        "workspace.file.patch-v2",
+        "POST",
+        BoundMutation {
+            op: mutation.op,
+            input: V2FileMutation::Patch(mutation.input),
+            request_hash: mutation.request_hash,
+        },
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+async fn workspace_file_mutation_v2(
+    app: Arc<App>,
+    identity: Identity,
+    request_id: String,
+    workspace_id: String,
+    path: String,
+    address: String,
+    operation_kind: &'static str,
+    method: &'static str,
+    mutation: BoundMutation<V2FileMutation>,
+) -> Response {
+    if let Err(error) = validate_relative_path(&path) {
+        let response = path_refusal(&request_id, Some(&mutation.op), &error);
+        return refuse_before_dispatch_response(
+            &app,
+            &identity,
+            &request_id,
+            operation_kind,
+            method,
+            &address,
+            &mutation,
+            response,
+        )
+        .await;
+    }
+    let scope = app.scope(&identity);
+    let _workspace_guard = app.lock_workspace(&scope, &workspace_id).await;
+    let root_name = match app.admit_workspace(&scope, &workspace_id).await {
+        Ok(WorkspaceAdmission::Missing) => {
+            return refuse_workspace_mutation(
+                &app,
+                &identity,
+                &request_id,
+                operation_kind,
+                method,
+                &address,
+                &mutation,
+                workspace_missing_refusal(&request_id, &mutation.op),
+            )
+            .await;
+        }
+        Ok(WorkspaceAdmission::Frozen { .. }) => {
+            return refuse_workspace_mutation(
+                &app,
+                &identity,
+                &request_id,
+                operation_kind,
+                method,
+                &address,
+                &mutation,
+                workspace_frozen_refusal(&request_id, &mutation.op),
+            )
+            .await;
+        }
+        Ok(WorkspaceAdmission::Admitted { root_name, .. }) => root_name,
+        Err(error) => return store_failure(&request_id, Some(&mutation.op), &error),
+    };
+    let operation = mutation.op.clone();
+    if let Some(response) = begin(
+        &app,
+        &identity,
+        &request_id,
+        operation_kind,
+        method,
+        &address,
+        &mutation,
+        None,
+        Some(workspace_id.clone()),
+    )
+    .await
+    {
+        return response;
+    }
+    let result = match &mutation.input {
+        V2FileMutation::Replace(input) => {
+            app.driver
+                .replace_workspace_file_v2(&workspace_id, &root_name, &path, input)
+                .await
+        }
+        V2FileMutation::Edit(input) => {
+            app.driver
+                .edit_workspace_file_v2(&workspace_id, &root_name, &path, input)
+                .await
+        }
+        V2FileMutation::Patch(input) => {
+            app.driver
+                .patch_workspace_file_v2(&workspace_id, &root_name, &path, input)
+                .await
+        }
+    };
+    match result {
         Ok(observation) => {
             finish_success(
                 &app,

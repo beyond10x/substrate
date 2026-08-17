@@ -9,9 +9,11 @@ use base64::Engine as _;
 use chrono::Utc;
 use sha2::{Digest as _, Sha256};
 use substrate_wire::{
-    Base64Content, Base64Encoding, DirectoryEntry, DirectoryEntryKind, DirectoryKind,
-    DirectoryPage, FileAbsence, FileKind, FileMode, FileObservation, FileReadQuery, FileReadResult,
-    FileSlice, validate_relative_path,
+    Base64Content, Base64Encoding, DigestedFileSlice, DirectoryEntry, DirectoryEntryKind,
+    DirectoryKind, DirectoryPage, ExpectedFileState, FileAbsence, FileEditInput, FileKind,
+    FileMode, FileMutationResult, FileObservation, FilePatchInput, FileReadQuery, FileReadResult,
+    FileReplaceInput, FileSlice, LinePatchEdit, TextMatchPolicy, UnifiedDiff, WorkspaceTree,
+    WorkspaceTreeEntry, WorkspaceTreeQuery, validate_relative_path,
 };
 use ulid::Ulid;
 
@@ -24,6 +26,8 @@ const RESOLVE_BENEATH: u64 = 0x08;
 const GUARDED_RESOLVE: u64 =
     RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_SYMLINKS | RESOLVE_NO_XDEV;
 const MAX_DIRECTORY_SCAN_ITEMS: usize = 100_000;
+const MAX_DIFF_LINES: usize = 200;
+const MAX_PATCH_EDITS: usize = 128;
 pub(super) const DESTROY_BATCH_ITEMS: usize = 4_096;
 type RawDirectoryEntry = (CString, libc::mode_t, Option<u64>);
 
@@ -240,6 +244,275 @@ impl GuardedFilesystem {
                 }))
             }
         }
+    }
+
+    pub fn read_digested(
+        &self,
+        workspace_id: &str,
+        root_name: &str,
+        path: &str,
+        query: &FileReadQuery,
+    ) -> Result<DigestedFileSlice, DriverError> {
+        validate_relative_path(path).map_err(|_| path_escape())?;
+        query.validate_shape().map_err(|_| {
+            DriverError::refused(
+                "request.schema-invalid",
+                "File query does not match file mode.",
+                "query",
+            )
+        })?;
+        if query.mode != FileMode::File {
+            return Err(DriverError::refused(
+                "request.schema-invalid",
+                "Digest reads require file mode.",
+                "query",
+            ));
+        }
+        let limit = query.limit_bytes.expect("shape validated");
+        if limit > self.read_limit_bytes {
+            return Err(DriverError::exhausted(
+                "workspace.read-limit",
+                "Requested read exceeds the probed limit.",
+                "limit",
+            ));
+        }
+        let workspace = self.workspace_fd(root_name)?;
+        let bytes = self.read_complete_from(workspace.as_raw_fd(), path)?;
+        let offset = query.offset.expect("shape validated");
+        let start = usize::try_from(offset)
+            .unwrap_or(usize::MAX)
+            .min(bytes.len());
+        let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+        let end = start.saturating_add(limit).min(bytes.len());
+        let slice = &bytes[start..end];
+        let returned_bytes = u64::try_from(slice.len()).expect("usize fits u64");
+        let next_offset = offset.saturating_add(returned_bytes);
+        Ok(DigestedFileSlice {
+            kind: FileKind::File,
+            workspace: workspace_id.to_owned(),
+            path: path.to_owned(),
+            size: u64::try_from(bytes.len()).expect("usize fits u64"),
+            sha256: sha256(&bytes),
+            offset,
+            returned_bytes,
+            next_offset,
+            eof: end >= bytes.len(),
+            content: Base64Content {
+                encoding: Base64Encoding::Base64,
+                data: base64::engine::general_purpose::STANDARD.encode(slice),
+            },
+            observed_at: Utc::now(),
+        })
+    }
+
+    pub fn list_tree(
+        &self,
+        workspace_id: &str,
+        root_name: &str,
+        query: &WorkspaceTreeQuery,
+    ) -> Result<WorkspaceTree, DriverError> {
+        query.validate().map_err(|_| {
+            DriverError::refused(
+                "request.schema-invalid",
+                "Workspace tree query is outside the admitted bound.",
+                "query",
+            )
+        })?;
+        if query.limit_items > self.list_limit_items {
+            return Err(DriverError::exhausted(
+                "workspace.list-limit",
+                "Requested tree exceeds the probed item limit.",
+                "limit",
+            ));
+        }
+        let workspace = self.workspace_fd(root_name)?;
+        let mut items = Vec::with_capacity(
+            usize::try_from(query.limit_items).expect("u32 tree limit fits usize"),
+        );
+        let mut truncated = false;
+        walk_tree(
+            workspace.as_raw_fd(),
+            "",
+            query.include_hidden,
+            usize::try_from(query.limit_items).expect("u32 tree limit fits usize"),
+            &mut items,
+            &mut truncated,
+        )?;
+        Ok(WorkspaceTree {
+            workspace: workspace_id.to_owned(),
+            items,
+            truncated,
+            observed_at: Utc::now(),
+        })
+    }
+
+    pub fn replace_cas(
+        &self,
+        workspace_id: &str,
+        root_name: &str,
+        path: &str,
+        input: &FileReplaceInput,
+    ) -> Result<FileMutationResult, DriverError> {
+        input.expected.validate().map_err(|_| invalid_digest())?;
+        let content = canonical_content(&input.content)?;
+        if input.create_parents {
+            self.create_parent_directories(root_name, path)?;
+        }
+        let before = self.current_file(root_name, path)?;
+        verify_expected(&input.expected, before.as_deref())?;
+        let before_sha256 = before.as_deref().map(sha256);
+        let observation = self.write_atomic(workspace_id, root_name, path, &content)?;
+        Ok(mutation_result(
+            workspace_id,
+            path,
+            before.as_deref(),
+            &content,
+            before_sha256,
+            observation,
+        ))
+    }
+
+    pub fn edit_cas(
+        &self,
+        workspace_id: &str,
+        root_name: &str,
+        path: &str,
+        input: &FileEditInput,
+    ) -> Result<FileMutationResult, DriverError> {
+        if !is_sha256(&input.expected_sha256) {
+            return Err(invalid_digest());
+        }
+        if input.old_text.is_empty() {
+            return Err(DriverError::refused(
+                "workspace.edit-empty-match",
+                "Text edit match must not be empty.",
+                "old_text",
+            ));
+        }
+        let before = self
+            .current_file(root_name, path)?
+            .ok_or_else(DriverError::not_found)?;
+        verify_sha256(&input.expected_sha256, &before)?;
+        let source = std::str::from_utf8(&before).map_err(|_| binary_text_refusal())?;
+        let after = apply_text_edit(source, input)?.into_bytes();
+        let observation = self.write_atomic(workspace_id, root_name, path, &after)?;
+        Ok(mutation_result(
+            workspace_id,
+            path,
+            Some(&before),
+            &after,
+            Some(input.expected_sha256.clone()),
+            observation,
+        ))
+    }
+
+    pub fn patch_cas(
+        &self,
+        workspace_id: &str,
+        root_name: &str,
+        path: &str,
+        input: &FilePatchInput,
+    ) -> Result<FileMutationResult, DriverError> {
+        if !is_sha256(&input.expected_sha256) {
+            return Err(invalid_digest());
+        }
+        if input.edits.is_empty() || input.edits.len() > MAX_PATCH_EDITS {
+            return Err(DriverError::refused(
+                "workspace.patch-count",
+                "Patch must contain between one and 128 edits.",
+                "edits",
+            ));
+        }
+        let before = self
+            .current_file(root_name, path)?
+            .ok_or_else(DriverError::not_found)?;
+        verify_sha256(&input.expected_sha256, &before)?;
+        let source = std::str::from_utf8(&before).map_err(|_| binary_text_refusal())?;
+        let after = apply_line_patch(source, &input.edits)?.into_bytes();
+        let observation = self.write_atomic(workspace_id, root_name, path, &after)?;
+        Ok(mutation_result(
+            workspace_id,
+            path,
+            Some(&before),
+            &after,
+            Some(input.expected_sha256.clone()),
+            observation,
+        ))
+    }
+
+    fn current_file(&self, root_name: &str, path: &str) -> Result<Option<Vec<u8>>, DriverError> {
+        validate_relative_path(path).map_err(|_| path_escape())?;
+        let workspace = self.workspace_fd(root_name)?;
+        match self.read_complete_from(workspace.as_raw_fd(), path) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(error) if error.class == crate::DriverErrorClass::NotFound => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn read_complete_from(&self, workspace: RawFd, path: &str) -> Result<Vec<u8>, DriverError> {
+        let fd = openat2(
+            workspace,
+            path,
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            0,
+        )?;
+        let stat = fstat(fd.as_raw_fd())?;
+        if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
+            return Err(path_escape());
+        }
+        let size = u64::try_from(stat.st_size).unwrap_or(u64::MAX);
+        if size > self.max_file_bytes {
+            return Err(DriverError::exhausted(
+                "workspace.file-limit",
+                "File exceeds the probed complete-file limit.",
+                "file",
+            ));
+        }
+        let mut bytes = Vec::with_capacity(usize::try_from(size).unwrap_or(0));
+        File::from(fd)
+            .read_to_end(&mut bytes)
+            .map_err(|error| io_failed("workspace.read-failed", error))?;
+        Ok(bytes)
+    }
+
+    fn create_parent_directories(&self, root_name: &str, path: &str) -> Result<(), DriverError> {
+        validate_relative_path(path).map_err(|_| path_escape())?;
+        let (parent, _) = split_parent(path)?;
+        if parent == "." {
+            return Ok(());
+        }
+        let workspace = self.workspace_fd(root_name)?;
+        let mut current = duplicate(workspace.as_raw_fd())?;
+        for component in parent.split('/') {
+            let name = CString::new(component).map_err(|_| path_escape())?;
+            match openat2_cstr(
+                current.as_raw_fd(),
+                &name,
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                0,
+            ) {
+                Ok(next) => current = next,
+                Err(error) if error.class == crate::DriverErrorClass::NotFound => {
+                    // SAFETY: current is guarded and component came from a validated relative path.
+                    if unsafe { libc::mkdirat(current.as_raw_fd(), name.as_ptr(), 0o700) } != 0 {
+                        return Err(io_failed(
+                            "workspace.mkdir-failed",
+                            std::io::Error::last_os_error(),
+                        ));
+                    }
+                    sync_fd(current.as_raw_fd())?;
+                    current = openat2_cstr(
+                        current.as_raw_fd(),
+                        &name,
+                        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                        0,
+                    )?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
     }
 
     pub fn write_atomic(
@@ -507,6 +780,65 @@ fn list_directory(fd: RawFd) -> Result<Vec<DirectoryEntry>, DriverError> {
     Ok(result)
 }
 
+fn walk_tree(
+    directory: RawFd,
+    prefix: &str,
+    include_hidden: bool,
+    limit: usize,
+    result: &mut Vec<WorkspaceTreeEntry>,
+    truncated: &mut bool,
+) -> Result<(), DriverError> {
+    let mut entries = raw_directory_entries(directory)?;
+    entries.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
+    for (name, file_type, size) in entries {
+        let name_bytes = name.as_bytes();
+        if !include_hidden && name_bytes.first() == Some(&b'.') {
+            continue;
+        }
+        if result.len() == limit {
+            *truncated = true;
+            return Ok(());
+        }
+        let name_text = String::from_utf8(name_bytes.to_vec()).map_err(|_| path_escape())?;
+        let path = if prefix.is_empty() {
+            name_text
+        } else {
+            format!("{prefix}/{name_text}")
+        };
+        let (kind, entry_size) = match file_type {
+            libc::S_IFREG => (DirectoryEntryKind::File, size),
+            libc::S_IFDIR => (DirectoryEntryKind::Directory, None),
+            libc::S_IFLNK => (DirectoryEntryKind::Symlink, None),
+            _ => return Err(path_escape()),
+        };
+        result.push(WorkspaceTreeEntry {
+            path: path.clone(),
+            kind,
+            size: entry_size,
+        });
+        if file_type == libc::S_IFDIR {
+            let child = openat2_cstr(
+                directory,
+                &name,
+                libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                0,
+            )?;
+            walk_tree(
+                child.as_raw_fd(),
+                &path,
+                include_hidden,
+                limit,
+                result,
+                truncated,
+            )?;
+            if *truncated {
+                return Ok(());
+            }
+        }
+    }
+    Ok(())
+}
+
 fn remove_children_batch(root: RawFd, limit: usize) -> Result<RemovalBatch, DriverError> {
     let root_scan_limit = limit.div_ceil(2);
     let (entries, root_has_more) = raw_directory_entries_bounded(root, root_scan_limit)?;
@@ -674,6 +1006,266 @@ fn raw_directory_entries_bounded(
         }
     }
     Ok((result, has_more))
+}
+
+fn canonical_content(content: &Base64Content) -> Result<Vec<u8>, DriverError> {
+    let bytes = content.decode().map_err(|_| {
+        DriverError::refused(
+            "request.schema-invalid",
+            "File content is not canonical base64.",
+            "content",
+        )
+    })?;
+    if base64::engine::general_purpose::STANDARD.encode(&bytes) != content.data {
+        return Err(DriverError::refused(
+            "request.schema-invalid",
+            "File content is not canonical base64.",
+            "content",
+        ));
+    }
+    Ok(bytes)
+}
+
+fn verify_expected(expected: &ExpectedFileState, before: Option<&[u8]>) -> Result<(), DriverError> {
+    match (expected, before) {
+        (ExpectedFileState::Absent, None) => Ok(()),
+        (ExpectedFileState::Sha256 { sha256: expected }, Some(bytes)) => {
+            verify_sha256(expected, bytes)
+        }
+        _ => Err(stale_content()),
+    }
+}
+
+fn verify_sha256(expected: &str, bytes: &[u8]) -> Result<(), DriverError> {
+    if sha256(bytes) == expected {
+        Ok(())
+    } else {
+        Err(stale_content())
+    }
+}
+
+fn stale_content() -> DriverError {
+    DriverError {
+        class: crate::DriverErrorClass::Conflict,
+        code: "workspace.stale-content",
+        message: "Workspace file changed since the admitted read.".to_owned(),
+        address: Some("expected".to_owned()),
+        retriable: false,
+    }
+}
+
+fn invalid_digest() -> DriverError {
+    DriverError::refused(
+        "workspace.digest-invalid",
+        "Expected digest must be lowercase SHA-256.",
+        "expected_sha256",
+    )
+}
+
+fn binary_text_refusal() -> DriverError {
+    DriverError::refused(
+        "workspace.binary-text-edit",
+        "Structured edits require a UTF-8 regular file.",
+        "file",
+    )
+}
+
+fn sha256(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
+}
+
+fn is_sha256(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+}
+
+fn mutation_result(
+    workspace_id: &str,
+    path: &str,
+    before: Option<&[u8]>,
+    after: &[u8],
+    before_sha256: Option<String>,
+    observation: FileObservation,
+) -> FileMutationResult {
+    FileMutationResult {
+        kind: FileKind::File,
+        workspace: workspace_id.to_owned(),
+        path: path.to_owned(),
+        size: observation.size,
+        before_sha256,
+        after_sha256: observation.sha256,
+        atomic_replacement: observation.atomic_replacement,
+        diff: bounded_diff(path, before, after),
+        observed_at: observation.observed_at,
+    }
+}
+
+fn bounded_diff(path: &str, before: Option<&[u8]>, after: &[u8]) -> UnifiedDiff {
+    let before = before.unwrap_or_default();
+    let (Ok(before), Ok(after)) = (std::str::from_utf8(before), std::str::from_utf8(after)) else {
+        return UnifiedDiff {
+            text: String::new(),
+            truncated: false,
+            binary: true,
+        };
+    };
+    let mut lines = vec![
+        format!("--- a/{path}"),
+        format!("+++ b/{path}"),
+        "@@".to_owned(),
+    ];
+    lines.extend(before.split_inclusive('\n').map(|line| format!("-{line}")));
+    lines.extend(after.split_inclusive('\n').map(|line| format!("+{line}")));
+    let truncated = lines.len() > MAX_DIFF_LINES;
+    lines.truncate(MAX_DIFF_LINES);
+    UnifiedDiff {
+        text: lines.join("\n"),
+        truncated,
+        binary: false,
+    }
+}
+
+fn apply_text_edit(source: &str, input: &FileEditInput) -> Result<String, DriverError> {
+    let exact_matches = source.match_indices(&input.old_text).count();
+    if exact_matches == 1 {
+        return Ok(source.replacen(&input.old_text, &input.new_text, 1));
+    }
+    if exact_matches > 1 || input.match_policy == TextMatchPolicy::Exact {
+        return Err(edit_match_refusal(exact_matches));
+    }
+    let normalized_old = normalize_text_match(&input.old_text);
+    let source_lines: Vec<&str> = source.split_inclusive('\n').collect();
+    let old_line_count = input.old_text.lines().count().max(1);
+    let mut matches = Vec::new();
+    for start in 0..source_lines.len() {
+        let end = start.saturating_add(old_line_count);
+        if end > source_lines.len() {
+            break;
+        }
+        let candidate = source_lines[start..end].concat();
+        if normalize_text_match(&candidate) == normalized_old {
+            matches.push((start, end));
+        }
+    }
+    if matches.len() != 1 {
+        return Err(edit_match_refusal(matches.len()));
+    }
+    let (start, end) = matches[0];
+    let mut result = String::new();
+    result.push_str(&source_lines[..start].concat());
+    result.push_str(&input.new_text);
+    result.push_str(&source_lines[end..].concat());
+    Ok(result)
+}
+
+fn normalize_text_match(value: &str) -> String {
+    value.lines().map(str::trim).collect::<Vec<_>>().join("\n")
+}
+
+fn edit_match_refusal(matches: usize) -> DriverError {
+    let (code, message) = if matches == 0 {
+        (
+            "workspace.edit-not-found",
+            "Edit text was not found uniquely.",
+        )
+    } else {
+        (
+            "workspace.edit-ambiguous",
+            "Edit text matched more than one location.",
+        )
+    };
+    DriverError::refused(code, message, "old_text")
+}
+
+fn apply_line_patch(source: &str, edits: &[LinePatchEdit]) -> Result<String, DriverError> {
+    let newline = if source.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let final_newline = source.ends_with('\n');
+    let normalized = source.replace("\r\n", "\n");
+    let mut lines: Vec<String> = normalized.lines().map(str::to_owned).collect();
+    let line_count = u32::try_from(lines.len()).unwrap_or(u32::MAX);
+    let mut ranges = Vec::with_capacity(edits.len());
+    for edit in edits {
+        let range = match edit {
+            LinePatchEdit::InsertBefore { line, .. } | LinePatchEdit::InsertAfter { line, .. } => {
+                (*line, *line)
+            }
+            LinePatchEdit::ReplaceRange {
+                start_line,
+                end_line,
+                ..
+            }
+            | LinePatchEdit::DeleteRange {
+                start_line,
+                end_line,
+            } => (*start_line, *end_line),
+        };
+        if range.0 == 0 || range.1 < range.0 || range.1 > line_count {
+            return Err(DriverError::refused(
+                "workspace.patch-range",
+                "Patch line range is outside the original file.",
+                "edits",
+            ));
+        }
+        ranges.push(range);
+    }
+    ranges.sort_unstable();
+    if ranges.windows(2).any(|pair| pair[0].1 >= pair[1].0) {
+        return Err(DriverError::refused(
+            "workspace.patch-overlap",
+            "Patch edits overlap in original coordinates.",
+            "edits",
+        ));
+    }
+    for edit in edits.iter().rev() {
+        match edit {
+            LinePatchEdit::InsertBefore { line, text } => {
+                lines.splice(index(*line)..index(*line), text_lines(text));
+            }
+            LinePatchEdit::InsertAfter { line, text } => {
+                let at = usize::try_from(*line).expect("u32 fits usize");
+                lines.splice(at..at, text_lines(text));
+            }
+            LinePatchEdit::ReplaceRange {
+                start_line,
+                end_line,
+                text,
+            } => {
+                lines.splice(
+                    index(*start_line)..usize::try_from(*end_line).unwrap(),
+                    text_lines(text),
+                );
+            }
+            LinePatchEdit::DeleteRange {
+                start_line,
+                end_line,
+            } => {
+                lines.drain(index(*start_line)..usize::try_from(*end_line).unwrap());
+            }
+        }
+    }
+    let mut result = lines.join(newline);
+    if final_newline {
+        result.push_str(newline);
+    }
+    Ok(result)
+}
+
+fn index(line: u32) -> usize {
+    usize::try_from(line.saturating_sub(1)).expect("u32 fits usize")
+}
+
+fn text_lines(value: &str) -> Vec<String> {
+    value
+        .replace("\r\n", "\n")
+        .lines()
+        .map(str::to_owned)
+        .collect()
 }
 
 fn refuse_unsafe_existing(parent: RawFd, name: &str) -> Result<(), DriverError> {

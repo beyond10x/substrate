@@ -15,9 +15,10 @@ use chrono::Utc;
 use parking_lot::Mutex;
 use sha2::{Digest as _, Sha256};
 use substrate_wire::{
-    CapabilitySnapshot, ExecOutputQuery, ExecSignalInput, ExecStartInput, FileAbsence,
-    FileObservation, FileReadQuery, FileReadResult, LeaseObservation, OutputSlice, Workspace,
-    WorkspaceAbsence, WorkspaceCreateInput,
+    CapabilitySnapshot, DigestedFileSlice, ExecOutputQuery, ExecSignalInput, ExecStartInput,
+    FileAbsence, FileEditInput, FileMutationResult, FileObservation, FilePatchInput, FileReadQuery,
+    FileReadResult, FileReplaceInput, LeaseObservation, OutputSlice, Workspace, WorkspaceAbsence,
+    WorkspaceCreateInput, WorkspaceTree, WorkspaceTreeQuery,
 };
 use thiserror::Error;
 use tokio::sync::Semaphore;
@@ -213,6 +214,75 @@ pub trait Driver: Send + Sync {
         root_name: &str,
         path: &str,
     ) -> Result<FileAbsence, DriverError>;
+
+    async fn read_workspace_file_v2(
+        &self,
+        _workspace_id: &str,
+        _root_name: &str,
+        _path: &str,
+        _query: &FileReadQuery,
+    ) -> Result<DigestedFileSlice, DriverError> {
+        Err(DriverError::unserved(
+            "workspace.file-v2-unserved",
+            "The active driver does not serve digest-bound file reads.",
+            "workspace.file.read-v2",
+        ))
+    }
+
+    async fn list_workspace_tree_v2(
+        &self,
+        _workspace_id: &str,
+        _root_name: &str,
+        _query: &WorkspaceTreeQuery,
+    ) -> Result<WorkspaceTree, DriverError> {
+        Err(DriverError::unserved(
+            "workspace.tree-v2-unserved",
+            "The active driver does not serve bounded recursive workspace trees.",
+            "workspace.tree.list-v2",
+        ))
+    }
+
+    async fn replace_workspace_file_v2(
+        &self,
+        _workspace_id: &str,
+        _root_name: &str,
+        _path: &str,
+        _input: &FileReplaceInput,
+    ) -> Result<FileMutationResult, DriverError> {
+        Err(DriverError::unserved(
+            "workspace.file-v2-unserved",
+            "The active driver does not serve compare-and-set replacement.",
+            "workspace.file.replace-v2",
+        ))
+    }
+
+    async fn edit_workspace_file_v2(
+        &self,
+        _workspace_id: &str,
+        _root_name: &str,
+        _path: &str,
+        _input: &FileEditInput,
+    ) -> Result<FileMutationResult, DriverError> {
+        Err(DriverError::unserved(
+            "workspace.file-v2-unserved",
+            "The active driver does not serve structured text edits.",
+            "workspace.file.edit-v2",
+        ))
+    }
+
+    async fn patch_workspace_file_v2(
+        &self,
+        _workspace_id: &str,
+        _root_name: &str,
+        _path: &str,
+        _input: &FilePatchInput,
+    ) -> Result<FileMutationResult, DriverError> {
+        Err(DriverError::unserved(
+            "workspace.file-v2-unserved",
+            "The active driver does not serve line patches.",
+            "workspace.file.patch-v2",
+        ))
+    }
 
     async fn destroy_workspace(
         &self,
@@ -601,6 +671,89 @@ impl Driver for HostDriver {
         let path = path.to_owned();
         self.filesystem_io(move |filesystem| {
             filesystem.delete_file(&workspace_id, &root_name, &path)
+        })
+        .await
+    }
+
+    async fn read_workspace_file_v2(
+        &self,
+        workspace_id: &str,
+        root_name: &str,
+        path: &str,
+        query: &FileReadQuery,
+    ) -> Result<DigestedFileSlice, DriverError> {
+        let workspace_id = workspace_id.to_owned();
+        let root_name = root_name.to_owned();
+        let path = path.to_owned();
+        let query = query.clone();
+        self.filesystem_io(move |filesystem| {
+            filesystem.read_digested(&workspace_id, &root_name, &path, &query)
+        })
+        .await
+    }
+
+    async fn list_workspace_tree_v2(
+        &self,
+        workspace_id: &str,
+        root_name: &str,
+        query: &WorkspaceTreeQuery,
+    ) -> Result<WorkspaceTree, DriverError> {
+        let workspace_id = workspace_id.to_owned();
+        let root_name = root_name.to_owned();
+        let query = query.clone();
+        self.filesystem_io(move |filesystem| {
+            filesystem.list_tree(&workspace_id, &root_name, &query)
+        })
+        .await
+    }
+
+    async fn replace_workspace_file_v2(
+        &self,
+        workspace_id: &str,
+        root_name: &str,
+        path: &str,
+        input: &FileReplaceInput,
+    ) -> Result<FileMutationResult, DriverError> {
+        let workspace_id = workspace_id.to_owned();
+        let root_name = root_name.to_owned();
+        let path = path.to_owned();
+        let input = input.clone();
+        self.filesystem_io(move |filesystem| {
+            filesystem.replace_cas(&workspace_id, &root_name, &path, &input)
+        })
+        .await
+    }
+
+    async fn edit_workspace_file_v2(
+        &self,
+        workspace_id: &str,
+        root_name: &str,
+        path: &str,
+        input: &FileEditInput,
+    ) -> Result<FileMutationResult, DriverError> {
+        let workspace_id = workspace_id.to_owned();
+        let root_name = root_name.to_owned();
+        let path = path.to_owned();
+        let input = input.clone();
+        self.filesystem_io(move |filesystem| {
+            filesystem.edit_cas(&workspace_id, &root_name, &path, &input)
+        })
+        .await
+    }
+
+    async fn patch_workspace_file_v2(
+        &self,
+        workspace_id: &str,
+        root_name: &str,
+        path: &str,
+        input: &FilePatchInput,
+    ) -> Result<FileMutationResult, DriverError> {
+        let workspace_id = workspace_id.to_owned();
+        let root_name = root_name.to_owned();
+        let path = path.to_owned();
+        let input = input.clone();
+        self.filesystem_io(move |filesystem| {
+            filesystem.patch_cas(&workspace_id, &root_name, &path, &input)
         })
         .await
     }
