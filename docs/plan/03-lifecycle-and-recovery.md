@@ -1,10 +1,11 @@
 # Plan 03: lifecycle and recovery
 
-**Status:** closure implementation in progress · **Date:** 2026-08-13
+**Status:** completed under the archived closure disposition · **Date:** 2026-08-17
 
 The post-implementation adversarial review reopened this phase. The additional closure authority is
-[Design 08](../design/08-phase-3-closure-invariants.md); the exit criteria below remain unmet until
-that design has deterministic evidence and an independent audit passes.
+[Design 08](../design/08-phase-3-closure-invariants.md); its deterministic evidence and independent
+audit now pass under the
+[archived closure disposition](../reviews/archived/2026-08-14-phase-3-closure-review-disposition.md).
 
 Phase 3 extends the completed minimum host slice without rewriting the immutable
 `substrate-wire` 0.1.0 bytes. Its authority is the `0.2.0` development bundle: it preserves the

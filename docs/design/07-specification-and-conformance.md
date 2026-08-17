@@ -9,7 +9,7 @@ implementation deliverable; this document fixes what they must contain.
 ## 1. Contract bundle
 
 Substrate owns `substrate-wire` under
-[architecture ADR 0019 — Foundation contracts ship as signed reproducible bundles](https://github.com/daemonloom/daemonloom/blob/main/architecture/adr/0019-contract-release-and-conformance.md).
+[architecture ADR 0019 — Foundation contracts ship as signed reproducible bundles](../../../../architecture/adr/0019-contract-release-and-conformance.md).
 The first development bundle is `0.1.0` and contains:
 
 ```text
@@ -163,7 +163,7 @@ conformance.
 Every JSON authority is schema-classified. Payloads use their declared bundle-relative `$schema`;
 the five bootstrap authorities (`bundle`, `compatibility` including errata, `origins`, `packaging`,
 and `hashing`) use fixed closed schemas in the offline gate. Adding an unclassified JSON
-file fails CI. Every file below `schemas/` must declare Draft 2020-12 and pass the offline
+file fails the gate. Every file below `schemas/` must declare Draft 2020-12 and pass the offline
 pinned `jsonschema` crate's standards-conforming meta-schema validator before it can classify
 another document. The same validator compiles each classified schema and validates its JSON
 instance. Historical rootless-URN `$id` values cannot resolve relative references under standard
@@ -183,15 +183,17 @@ as host-driver conformance evidence.
 Phase 2 exits only when a black-box client built from the bundle and the host driver pass these
 vectors without repository source access or a sibling checkout.
 
-The additive `0.2.0` bundle is being regenerated from its authoritative renderer and is not yet a
-publishable release. Its registry has 19 closed operations: the twelve 0.1 operations and exactly
+The additive `0.2.0` bundle was regenerated from its authoritative renderer and remains an
+immutable development predecessor, not a published stable release. Its registry has 19 closed operations: the twelve 0.1 operations and exactly
 seven additive operations. Its schemas additionally close source-scoped streams, snapshot-first
 bootstrap, finite ledger capacity, durable refusals, transport bounds, maintenance scheduling, and
 lifecycle crash windows. The manifest distinguishes nineteen 0.2 vectors executed by the daemon
 runtime tests from design vectors that receive schema and semantic checking but are not claimed as
 runtime executions. Portable and delegated runtime inventories must be reported from
 fresh gate output; this design does not pin unmeasured case counts. No prose count or passing static
-schema gate substitutes for the regenerated manifest and executable runtime evidence.
+schema gate substitutes for the regenerated manifest and executable runtime evidence. The current
+successor development authority is `0.4.0`, which adds the separately reviewed pipe-session and
+execution-capsule slices without rewriting these earlier bundles.
 
 The 0.1.0 directory is immutable. Runtime compatibility is nevertheless executable rather than
 assumed: `contract_vectors.rs` selects disputed vectors through each bundle manifest and compares

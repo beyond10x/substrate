@@ -1,10 +1,11 @@
 # Design 08: phase 3 closure invariants
 
-**Status:** implementation target · **Date:** 2026-08-13
+**Status:** implemented and closed · **Date:** 2026-08-17
 
-This document records the invariants found by the post-implementation adversarial review. Phase 3
-is not complete until each invariant has deterministic crash, concurrency, capacity, and restart
-evidence. It refines the earlier phase-3 plan without changing the immutable 0.1.0 bundle.
+This document records the invariants found by the post-implementation adversarial review. Each has
+deterministic crash, concurrency, capacity, and restart evidence under the
+[archived closure disposition](../reviews/archived/2026-08-14-phase-3-closure-review-disposition.md).
+It refines the earlier phase-3 plan without changing the immutable 0.1.0 bundle.
 
 ## Durable mutation boundary
 

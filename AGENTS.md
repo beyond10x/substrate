@@ -1,6 +1,6 @@
 # Working on daemonloom/foundation/substrate
 
-This repository owns the standalone Daemonloom execution substrate. During the design phase, read:
+This component owns the standalone Daemonloom execution substrate. During the design phase, read:
 
 1. `README.md`
 2. `docs/VISION.md`
@@ -12,7 +12,8 @@ This repository owns the standalone Daemonloom execution substrate. During the d
 
 ## Invariants
 
-- The repository and every future Daemonloom repository are private.
+- The monorepo is private; any future Daemonloom repository remains private unless an accepted
+  architecture decision explicitly authorizes otherwise.
 - Automated commits and pushes use the GitHub App identity `daemonloom-bot`; never fall back to a
   human identity.
 - Substrate owns generic bounded execution and observed state. It contains no agent loop, connector
@@ -22,7 +23,7 @@ This repository owns the standalone Daemonloom execution substrate. During the d
 - A missing isolation or capability guarantee is a named refusal, never silent degradation.
 - Drivers implement one substrate contract and expose verified capability facts; clients do not
   branch on driver internals.
-- Every created JSON authority must have one exact schema classification and validate in CI.
+- Every created JSON authority must have one exact schema classification and validate in the gate.
   Unclassified JSON fails closed. Every JSON Schema must validate offline against its declared
   Draft 2020-12 meta-schema with the pinned standards validator; immutable historical bundle bytes
   are classified externally without rewriting them.
@@ -35,7 +36,8 @@ This repository owns the standalone Daemonloom execution substrate. During the d
 - Draft contract work belongs in `docs/design/` and must state its status.
 - Accepted decisions belong in `adr/` and use YAML frontmatter with `date` and `status`.
 - Sequencing belongs in `ROADMAP.md`; observed progress belongs in `STATUS.md`.
-- Use repository-relative Markdown links locally and canonical HTTPS links across repositories.
+- Use repository-relative Markdown links for current material anywhere in the monorepo and
+  canonical HTTPS links only for external or immutable historical sources.
   Never commit machine-local paths, sibling-checkout links, `file://` URLs, or editor URIs.
 
 ## Change discipline

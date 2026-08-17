@@ -1,6 +1,6 @@
 # Repository status
 
-**Observed:** 2026-08-14
+**Observed:** 2026-08-17
 
 ## Current state
 
@@ -26,8 +26,9 @@ OCI packaging, signing, and digest pinning remain separate release work. See
 ## Repository facts
 
 - The Rust workspace has five crates: `substrate-wire`, `substrate-store`, `substrate-host`,
-  `substrate-daemon`, and the offline `substrate-contract-check`; the reproducible 0.2.0 development
-  bundle is authoritative until an explicitly packaged and signed release succeeds it.
+  `substrate-daemon`, and the offline `substrate-contract-check`; the reproducible 0.4.0 successor
+  bundle is the current development contract while all earlier bundle directories remain immutable.
+  No development bundle becomes a stable owner release without packaging and signing.
 - No Flux package, type, protocol, or checkout is required.
 - The clean-room runner reports its current portable and delegated case inventories in fresh gate
   output. Portable execution proves typed `unserved` without confinement; delegated execution adds
@@ -59,10 +60,10 @@ the tree on invalid ordering or attachment loss. Semantic route tests and Agent'
 copied-contract fixture pass. The deterministic 0.4.0 bundle and real delegated Agent compatibility
 lane now also pass, including exact capsule/config/hook byte binding, read-only runtime material,
 correlated hook lifecycle, bounded queue pressure, attachment/protocol loss, lease expiry,
-restart-to-unknown, capsule reconciliation, and whole-tree cleanup. This is development cross-repository confinement
+restart-to-unknown, capsule reconciliation, and whole-tree cleanup. This is development cross-component confinement
 evidence; it is not a signed stable release or public product conformance claim.
 
 ## External dependencies
 
-Substrate has no source dependency on another Daemonloom repository. Cross-repository compatibility
-will use stable wire contracts and conformance fixtures, never sibling path dependencies.
+Substrate has no source dependency on another Daemonloom component. Cross-component compatibility
+uses stable wire contracts and conformance fixtures, never sibling implementation-path dependencies.

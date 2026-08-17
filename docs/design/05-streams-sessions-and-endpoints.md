@@ -62,7 +62,7 @@ substrate tenant policy or giving connectors access to daemon internals.
 2. **Issuer:** connectors mints governed authority after grant admission; substrate mints only for
    direct personal admission. Substrate verifies the accepted issuer and independently enforces
    local ownership/capability/lease, as fixed by
-   [architecture ADR 0016 — Direct-byte establishment uses operation-scoped authority](https://github.com/daemonloom/daemonloom/blob/main/architecture/adr/0016-operation-scoped-session-authority.md).
+   [architecture ADR 0016 — Direct-byte establishment uses operation-scoped authority](../../../../architecture/adr/0016-operation-scoped-session-authority.md).
 3. **Redemption:** network authorities are proof-bound, valid for at most 60 seconds, and redeem
    exactly once. Reconnect obtains a fresh authority. V1 permits one concurrent attachment.
 4. **Transport:** WebSocket over TLS carries the v1 closed frames; an owner-permissioned Unix socket

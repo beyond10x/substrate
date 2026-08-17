@@ -1,6 +1,6 @@
 # Architecture decision records
 
-ADRs record accepted repository decisions and are not implementation plans. Each ADR uses Markdown
+ADRs record accepted component decisions and are not implementation plans. Each ADR uses Markdown
 with YAML frontmatter containing `date` and `status`. Draft design questions remain in
 [`docs/design/`](../docs/design/) until accepted.
 

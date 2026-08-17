@@ -11,6 +11,14 @@ from urllib.parse import unquote, urlsplit
 
 
 ROOT = Path(__file__).resolve().parent.parent
+REPOSITORY_ROOT = next(
+    (
+        candidate
+        for candidate in (ROOT, *ROOT.parents)
+        if (candidate / "scripts/check-monorepo.sh").is_file()
+    ),
+    ROOT,
+)
 LINK = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
 EXTERNAL = {"http", "https", "mailto"}
 LOCAL_PREFIXES = ("/", "~/", "file://", "vscode://")
@@ -59,7 +67,7 @@ def main() -> int:
                     continue
                 resolved = (document.parent / path_text).resolve()
                 try:
-                    resolved.relative_to(ROOT)
+                    resolved.relative_to(REPOSITORY_ROOT)
                 except ValueError:
                     failures.append(
                         f"{document.relative_to(ROOT)}:{line_number}: link escapes repository: {target}"
@@ -79,4 +87,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

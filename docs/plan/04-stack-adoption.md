@@ -28,7 +28,7 @@ no family-controlled delivery date.
 
 - Each consumer pins a released protocol/version and runs conformance fixtures.
 - No consumer requires a path dependency or unpublished local source.
-- Substrate CI does not fetch or build any consumer.
+- The Substrate gate does not fetch or build any consumer.
 - Credential, principal, grant, placement, and billing semantics remain with their owning layers.
 - PTY/tunnel bytes flow directly after governed establishment rather than through connector invoke.
 

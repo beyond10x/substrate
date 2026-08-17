@@ -37,9 +37,9 @@ absent.
   design. Each document states whether it is accepted or still under review.
 - [`docs/plan/`](docs/plan/) turns the design into review gates and implementation slices without
   containing implementation.
-- [`adr/`](adr/) records accepted repository decisions with YAML frontmatter.
+- [`adr/`](adr/) records accepted component decisions with YAML frontmatter.
 - [`crates/`](crates/) contains the standalone Rust wire, durable store, Linux host driver, and
-  Unix-socket daemon; there is no sibling-repository dependency.
+  Unix-socket daemon; there is no sibling-component implementation dependency.
 - [`contracts/substrate-wire/`](contracts/substrate-wire/) is the canonical development wire bundle;
   Rust types remain subordinate to it.
 - [`scripts/check-runtime-vectors.py`](scripts/check-runtime-vectors.py) is an independent
@@ -81,7 +81,7 @@ delegated cgroup/bubblewrap environment continues to report execution sandbox un
 rather than weakening confinement.
 
 The `substrate-daemon` crate exposes `DaemonConfig` plus the async `serve` entrypoint for this
-repository's own binary and tests. Cross-repository consumers use the separately released native
+component's own binary and tests. Cross-component consumers use the separately released native
 `substrate-daemon` artifact and owner-released wire contract; they do not import this implementation
 crate. Every operation crosses an authenticated socket boundary.
 
@@ -146,7 +146,7 @@ documentation does not pin counts that can drift as adversarial coverage grows.
 
 ## Relationships
 
-- [daemonloom/connectors](https://github.com/daemonloom/connectors) may govern substrate operations
+- [Connectors](../connectors/) may govern substrate operations
   as a first-party provider and may later use substrate to isolate an attested connector artifact.
 - [Flux](https://github.com/codewandler/flux) may implement a remote execution adapter over the
   substrate API. The dependency never points back into Flux.
