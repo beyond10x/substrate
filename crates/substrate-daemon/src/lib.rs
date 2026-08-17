@@ -3,5 +3,7 @@
 mod app;
 mod runtime;
 
-pub use app::{App, Authority, Identity, SystemAuthority, router};
+pub use app::{
+    App, Authority, CONTRACT_BUNDLE, CONTRACT_BUNDLE_SHA256, Identity, SystemAuthority, router,
+};
 pub use runtime::{DaemonConfig, TcpDaemonConfig, serve};

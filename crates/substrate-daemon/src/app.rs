@@ -10,7 +10,8 @@ use std::sync::{Arc, Weak};
 use axum::body::{Body, to_bytes};
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, RawQuery, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, Request, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse as _, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
@@ -44,6 +45,10 @@ use substrate_wire::{
     WorkspaceState, WorkspaceTreeQuery, canonical_request_hash_v2, validate_operation_id,
     validate_relative_path,
 };
+
+pub const CONTRACT_BUNDLE: &str = "substrate-wire/0.4.0";
+pub const CONTRACT_BUNDLE_SHA256: &str =
+    "05f28dcbbc32561eb0873b172df634cd07abcfaa778883cc708758fb40d3c1ac";
 use tokio::sync::{Mutex, Notify, OwnedMutexGuard, Semaphore, watch};
 use ulid::Ulid;
 
@@ -1185,7 +1190,23 @@ pub fn router(app: Arc<App>) -> Router {
         )
         .route("/v1/ops/{operation_id}", get(operation_get))
         .fallback(route_not_found)
+        .layer(middleware::from_fn(contract_identity))
         .with_state(app)
+}
+
+async fn contract_identity(request: Request<Body>, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    response.headers_mut().insert(
+        "x-daemonloom-contract",
+        CONTRACT_BUNDLE.parse().expect("static contract header"),
+    );
+    response.headers_mut().insert(
+        "x-daemonloom-contract-bundle-sha256",
+        CONTRACT_BUNDLE_SHA256
+            .parse()
+            .expect("static contract digest header"),
+    );
+    response
 }
 
 async fn machine_get(

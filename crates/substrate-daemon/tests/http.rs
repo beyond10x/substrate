@@ -7,7 +7,7 @@ use axum::body::{Body, to_bytes};
 use axum::http::{Method, Request, StatusCode};
 use chrono::Utc;
 use serde_json::{Value, json};
-use substrate_daemon::{App, Identity, router};
+use substrate_daemon::{App, CONTRACT_BUNDLE, CONTRACT_BUNDLE_SHA256, Identity, router};
 use substrate_host::{HostConfig, HostDriver};
 use substrate_store::{ExecWrite, NewOperation, Reservation, Scope, Store, StoredExec};
 use substrate_wire::{
@@ -61,6 +61,11 @@ impl Harness {
             .oneshot(request)
             .await
             .expect("router response");
+        assert_eq!(response.headers()["x-daemonloom-contract"], CONTRACT_BUNDLE);
+        assert_eq!(
+            response.headers()["x-daemonloom-contract-bundle-sha256"],
+            CONTRACT_BUNDLE_SHA256
+        );
         let status = response.status();
         let bytes = to_bytes(response.into_body(), 2_097_152)
             .await
@@ -494,7 +499,7 @@ async fn v2_file_mutations_enforce_digest_cas_and_return_bounded_diffs() {
                     "expected_sha256": digest,
                     "old_text": "hello",
                     "new_text": "hello world",
-                    "match_policy": "flux_compatible"
+                    "match_policy": "line_whitespace_normalized"
                 }),
             ),
         )

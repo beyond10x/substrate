@@ -353,6 +353,8 @@ pub enum StoreError {
     OfflineMigrationRequired,
     #[error("snapshot retention or materialization limit is exhausted")]
     SnapshotLimit,
+    #[error("event does not match the closed Substrate event union")]
+    InvalidEventShape,
 }
 
 impl Store {
@@ -5514,6 +5516,17 @@ fn append_event(
     operation: &str,
     observation: Option<Value>,
 ) -> Result<Event, StoreError> {
+    // Sessions are implemented ahead of their event contract. Until a successor bundle owns a
+    // session branch, publish only the operation-ledger projection that 0.4 consumers can validate.
+    let transition = if resource_kind == "session" {
+        match transition {
+            "session.unknown" => "operation.unknown",
+            "session.cleanup-failed" => "operation.failed",
+            _ => "operation.terminal",
+        }
+    } else {
+        transition
+    };
     let operation_transition = transition.starts_with("operation.");
     let observation = if operation_transition {
         serde_json::to_value(
@@ -5611,6 +5624,9 @@ fn append_event_with_cause(
         cause,
         observation,
     };
+    event
+        .validate_closed_shape()
+        .map_err(|_| StoreError::InvalidEventShape)?;
     connection.execute(
         "INSERT INTO events (deployment, subject, generation, seq, event_json)
          VALUES (?1, ?2, ?3, ?4, ?5)",
@@ -7988,6 +8004,19 @@ mod tests {
                 .iter()
                 .any(|candidate| candidate.stored.resource.id == "ex_pipe_restart")
         );
+        let events = store
+            .events(&scope, None, 100)
+            .expect("session events")
+            .expect("event page");
+        assert!(
+            events
+                .items
+                .iter()
+                .all(|event| event.validate_closed_shape().is_ok())
+        );
+        assert!(events.items.iter().any(|event| {
+            event.transition == "operation.terminal" && event.resource == start.operation
+        }));
         assert_eq!(
             store
                 .claim_pipe_session_attachment(

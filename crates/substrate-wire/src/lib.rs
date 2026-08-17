@@ -328,7 +328,7 @@ pub struct FileReplaceInput {
 #[serde(rename_all = "snake_case")]
 pub enum TextMatchPolicy {
     Exact,
-    FluxCompatible,
+    LineWhitespaceNormalized,
 }
 
 /// One compare-and-set textual replacement.
@@ -835,6 +835,58 @@ pub struct Event {
     pub observation: Value,
 }
 
+impl Event {
+    /// Validate the correlated event fields before an owner persists or publishes the value.
+    ///
+    /// The wire schema is a closed union. Keeping this check beside the wire type prevents stores
+    /// from independently combining a valid transition with the wrong resource or cause branch.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WireValidationError::InvalidEventShape`] when the transition, resource kind,
+    /// cause, or observation do not form one of the protocol's closed event variants.
+    pub fn validate_closed_shape(&self) -> Result<(), WireValidationError> {
+        let operation_cause = matches!(self.cause, EventCause::Operation { .. });
+        let control_cause = matches!(self.cause, EventCause::Control { .. });
+        let valid = match self.transition.as_str() {
+            "operation.accepted" | "operation.refused" | "operation.failed"
+            | "operation.unknown" | "operation.terminal" => {
+                self.resource_kind == "operation"
+                    && operation_cause
+                    && serde_json::from_value::<OperationRecord>(self.observation.clone()).is_ok()
+            }
+            "workspace.created"
+            | "workspace.lease-renewed"
+            | "workspace.lease-expiring"
+            | "workspace.lease-expired"
+            | "workspace.file-written"
+            | "workspace.file-deleted"
+            | "workspace.destroyed"
+            | "workspace.cleanup-failed" => self.resource_kind == "workspace" && operation_cause,
+            "exec.accepted"
+            | "exec.running"
+            | "exec.observed"
+            | "exec.exited"
+            | "exec.cancelled"
+            | "exec.unknown"
+            | "exec.lease-renewed"
+            | "exec.lease-expiring"
+            | "exec.lease-expired"
+            | "exec.retired"
+            | "exec.cleanup-failed" => self.resource_kind == "exec" && operation_cause,
+            "snapshot.created" | "snapshot.refused" => {
+                self.resource_kind == "snapshot" && control_cause
+            }
+            _ => false,
+        };
+        if valid {
+            Ok(())
+        } else {
+            Err(WireValidationError::InvalidEventShape)
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
 pub enum EventCause {
@@ -1323,6 +1375,8 @@ pub enum WireValidationError {
     InvalidCapsuleEntrypoint,
     #[error("execution capsule file content does not match its digest")]
     CapsuleContentMismatch,
+    #[error("event fields do not select one closed event schema branch")]
+    InvalidEventShape,
     #[error("execution capsule manifest does not match its digest")]
     CapsuleManifestMismatch,
 }
