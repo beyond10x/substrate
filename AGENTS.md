@@ -1,6 +1,9 @@
 # Working on daemonloom/foundation/substrate
 
-This component owns the standalone Daemonloom execution substrate. During the design phase, read:
+This component owns the standalone Daemonloom execution substrate. The design-closure gate in
+`docs/plan/01-design-closure.md` is accepted; implementation is in progress against its phase exit
+criteria. The root [`AGENTS.md`](../../AGENTS.md) applies throughout; this file adds component
+rules. Read:
 
 1. `README.md`
 2. `docs/VISION.md`
@@ -27,8 +30,8 @@ This component owns the standalone Daemonloom execution substrate. During the de
   Unclassified JSON fails closed. Every JSON Schema must validate offline against its declared
   Draft 2020-12 meta-schema with the pinned standards validator; immutable historical bundle bytes
   are classified externally without rewriting them.
-- Do not add implementation code until the design-closure gate in `docs/plan/01-design-closure.md`
-  is accepted.
+- Implementation follows the accepted design-closure gate. A contract or capability change beyond
+  its named decisions and deferrals needs a design document or ADR before code.
 
 ## Documents
 
@@ -39,6 +42,21 @@ This component owns the standalone Daemonloom execution substrate. During the de
 - Use repository-relative Markdown links for current material anywhere in the monorepo and
   canonical HTTPS links only for external or immutable historical sources.
   Never commit machine-local paths, sibling-checkout links, `file://` URLs, or editor URIs.
+
+## Gate
+
+```text
+cargo test --workspace --locked
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo fmt --all --check
+python3 scripts/check-links.py
+python3 scripts/check-adrs.py
+python3 scripts/check-contract-bundle.py
+python3 scripts/check-runtime-vectors.py
+```
+
+Run `bash scripts/check-local.sh --release` from the monorepo root before treating a
+cross-component change as green.
 
 ## Change discipline
 
