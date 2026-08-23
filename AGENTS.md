@@ -1,9 +1,16 @@
-# Working on daemonloom/foundation/substrate
+# Working on Substrate
 
-This component owns the standalone Daemonloom execution substrate. The design-closure gate in
+[github.com/beyond10x/substrate](https://github.com/beyond10x/substrate) is the canonical home of
+Substrate. It was extracted from the daemonloom monorepo at
+[`e01ea676`](https://github.com/daemonloom/daemonloom/tree/e01ea676da18fb855814e7621514e0c98fc57c2c)
+with full history on 2026-08-23; the monorepo keeps a pinned git-submodule checkout at
+`foundation/substrate`. The gate is `bash scripts/gate.sh`.
+
+This repository owns the standalone Daemonloom execution substrate. The design-closure gate in
 `docs/plan/01-design-closure.md` is accepted; implementation is in progress against its phase exit
-criteria. The root [`AGENTS.md`](../../AGENTS.md) applies throughout; this file adds component
-rules. Read:
+criteria. The monorepo-era root
+[`AGENTS.md`](https://github.com/daemonloom/daemonloom/blob/e01ea676da18fb855814e7621514e0c98fc57c2c/AGENTS.md)
+is provenance for the rules this file inherited. Read:
 
 1. `README.md`
 2. `docs/VISION.md`
@@ -15,8 +22,9 @@ rules. Read:
 
 ## Invariants
 
-- The monorepo is private; any future Daemonloom repository remains private unless an accepted
-  architecture decision explicitly authorizes otherwise.
+- This repository is private, as is the daemonloom monorepo it came from; any future Daemonloom
+  repository remains private unless an accepted architecture decision explicitly authorizes
+  otherwise.
 - Automated commits and pushes use the GitHub App identity `daemonloom-bot`; never fall back to a
   human identity.
 - Substrate owns generic bounded execution and observed state. It contains no agent loop, connector
@@ -39,24 +47,23 @@ rules. Read:
 - Draft contract work belongs in `docs/design/` and must state its status.
 - Accepted decisions belong in `adr/` and use YAML frontmatter with `date` and `status`.
 - Sequencing belongs in `ROADMAP.md`; observed progress belongs in `STATUS.md`.
-- Use repository-relative Markdown links for current material anywhere in the monorepo and
-  canonical HTTPS links only for external or immutable historical sources.
+- Use repository-relative Markdown links for current material in this repository and
+  canonical HTTPS links only for external or immutable historical sources (including
+  SHA-pinned monorepo provenance URLs).
   Never commit machine-local paths, sibling-checkout links, `file://` URLs, or editor URIs.
 
 ## Gate
 
 ```text
-cargo test --workspace --locked
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo fmt --all --check
-python3 scripts/check-links.py
-python3 scripts/check-adrs.py
-python3 scripts/check-contract-bundle.py
-python3 scripts/check-runtime-vectors.py
+bash scripts/gate.sh
 ```
 
-Run `bash scripts/check-local.sh --release` from the monorepo root before treating a
-cross-component change as green.
+It runs `cargo test --workspace --locked`, `cargo fmt --all --check`,
+`cargo clippy --workspace --all-targets --locked -- -D warnings`, and the script checks
+(`check-links.py`, `check-adrs.py`, `check-contract-bundle.py`, `check-runtime-vectors.py`).
+The monorepo-era cross-component suite (`scripts/check-local.sh` at the monorepo root) no longer
+applies here; changes that affect monorepo consumers are picked up when the monorepo advances its
+`foundation/substrate` submodule pin.
 
 ## Change discipline
 
