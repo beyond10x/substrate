@@ -9,7 +9,7 @@ implementation deliverable; this document fixes what they must contain.
 ## 1. Contract bundle
 
 Substrate owns `substrate-wire` under
-[architecture ADR 0019 — Foundation contracts ship as signed reproducible bundles](../../../../architecture/adr/0019-contract-release-and-conformance.md).
+[architecture ADR 0019 — Foundation contracts ship as signed reproducible bundles](https://github.com/daemonloom/daemonloom/blob/e01ea676da18fb855814e7621514e0c98fc57c2c/architecture/adr/0019-contract-release-and-conformance.md).
 The first development bundle is `0.1.0` and contains:
 
 ```text

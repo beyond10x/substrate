@@ -13,7 +13,7 @@ bidirectional stdin/stdout with stderr kept separate. A PTY changes byte and ter
 cannot safely carry these protocols. Direct host launch would bypass Substrate's process-tree,
 environment, resource, network, lease, and terminal-observation guarantees.
 
-[Architecture ADR 0023](../../../architecture/adr/0023-governed-harness-execution-is-defense-in-depth.md)
+[Architecture ADR 0023](https://github.com/daemonloom/daemonloom/blob/e01ea676da18fb855814e7621514e0c98fc57c2c/architecture/adr/0023-governed-harness-execution-is-defense-in-depth.md)
 requires the first integration to be model-free, no-egress, and confined through a Substrate-owned
 session.
 

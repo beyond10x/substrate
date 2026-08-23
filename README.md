@@ -146,7 +146,7 @@ documentation does not pin counts that can drift as adversarial coverage grows.
 
 ## Relationships
 
-- [Connectors](../connectors/) may govern substrate operations
+- [Connectors](https://github.com/beyond10x/connectors/tree/a8c393135478973a89c700d14478936eb0ae1df5) may govern substrate operations
   as a first-party provider and may later use substrate to isolate an attested connector artifact.
 - [Flux](https://github.com/codewandler/flux) may implement a remote execution adapter over the
   substrate API. The dependency never points back into Flux.

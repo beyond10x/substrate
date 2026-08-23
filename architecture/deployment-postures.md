@@ -26,8 +26,8 @@ operations—not resource semantics.
   domain and records that connector grants and platform audit are absent.
 
 Hosted trust follows
-[architecture ADR 0015 — Foundation services share one trust envelope](../../../architecture/adr/0015-foundation-trust-envelope.md);
+[architecture ADR 0015 — Foundation services share one trust envelope](https://github.com/daemonloom/daemonloom/blob/e01ea676da18fb855814e7621514e0c98fc57c2c/architecture/adr/0015-foundation-trust-envelope.md);
 satellite federation follows
-[architecture ADR 0018 — Connectors satellites federate outward under bounded authority](../../../architecture/adr/0018-connectors-satellite-federation.md).
+[architecture ADR 0018 — Connectors satellites federate outward under bounded authority](https://github.com/daemonloom/daemonloom/blob/e01ea676da18fb855814e7621514e0c98fc57c2c/architecture/adr/0018-connectors-satellite-federation.md).
 Substrate-specific handling is fixed in
 [authentication, secrets, and trust](../docs/design/06-authentication-secrets-and-trust.md).

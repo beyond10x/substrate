@@ -299,7 +299,7 @@ change that breaks one is a breaking change to this contract, whatever the diff 
    non-keyed control exception: `idempotency: none`, exact request body `{}`, no operation row.
 6. **Events are a closed, declared set with bounded cursor replay.** Durable connector delivery is
    a separate composition guarantee governed by
-   [architecture ADR 0017 — Connectors owns durable ingestion of substrate events](../../../../architecture/adr/0017-substrate-event-ingestion.md).
+   [architecture ADR 0017 — Connectors owns durable ingestion of substrate events](https://github.com/daemonloom/daemonloom/blob/e01ea676da18fb855814e7621514e0c98fc57c2c/architecture/adr/0017-substrate-event-ingestion.md).
 7. **No secret values in ordinary JSON, ever.** Registries and secret slots are named daemon
    configuration; audit records stay value-free by type.
 8. **Duplex is brokered, never proxied.** Sessions and tunnels are declared channel bindings
@@ -350,7 +350,7 @@ capability fact `workload.replace: recreate|rolling` rather than papered over.
 ## 10. Decisions and explicit deferrals
 
 1. **Session establishment:** governed by
-   [architecture ADR 0016 — Direct-byte establishment uses operation-scoped authority](../../../../architecture/adr/0016-operation-scoped-session-authority.md)
+   [architecture ADR 0016 — Direct-byte establishment uses operation-scoped authority](https://github.com/daemonloom/daemonloom/blob/e01ea676da18fb855814e7621514e0c98fc57c2c/architecture/adr/0016-operation-scoped-session-authority.md)
    and deferred to substrate phase 4.
 2. **Bulk workspace transfer:** HTTP bundle upload/download has a hard 100 MiB v1 ceiling that a
    deployment may lower. Larger transfer uses a configured Git remote; there is no third bulk
