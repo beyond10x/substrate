@@ -24,5 +24,5 @@ later named phases. They may not appear as optimistic stubs or weaken the minimu
 ## Consequences
 
 - Implementation may begin after the design-closure record is accepted.
-- The daemon remains useful and testable without another Daemonloom repository.
+- The daemon remains useful and testable without another b10x repository.
 - Later families enter only through capability-gated compatible contract releases.

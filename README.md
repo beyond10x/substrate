@@ -1,12 +1,12 @@
-# daemonloom/substrate
+# b10x substrate
 
-Substrate is the standalone Daemonloom execution data plane. It turns one machine—or one handed-over
+Substrate is the standalone b10x execution data plane. It turns one machine—or one handed-over
 cluster scope—into a governed service for confined workspaces, bounded processes, workloads, images,
 volumes, endpoints, leases, and observed state.
 
 Substrate runs things and reports what it observed. It does not decide product policy, run agent
 loops, understand connector vendors, or depend on Flux. Consumers choose whether to call its stable
-API directly or through a higher-level Daemonloom service.
+API directly or through a higher-level b10x service.
 
 **Status:** phase 3 lifecycle and recovery is complete under the
 [archived closure disposition](docs/reviews/archived/2026-08-14-phase-3-closure-review-disposition.md).
@@ -151,8 +151,8 @@ documentation does not pin counts that can drift as adversarial coverage grows.
 - [Flux](https://github.com/codewandler/flux) may implement a remote execution adapter over the
   substrate API. The dependency never points back into Flux.
 - [autodev](https://github.com/codewandler/autodev) may implement its `Executor` port over substrate.
-- `daemonloom/agent` and future products consume bounded execution through their own ports.
-- `daemonloom/cloud` composes and operates substrate deployments; it does not own substrate rules.
+- The b10x agent and future products consume bounded execution through their own ports.
+- The b10x cloud composes and operates substrate deployments; it does not own substrate rules.
 
 The product and binary name are `substrate`. Published packages will use the
-`daemonloom-substrate-*` prefix.
+`b10x-substrate-*` prefix.

@@ -26,4 +26,4 @@ uses the other's checkout or calls the schemas identical.
 
 - The first implementation deliverable is the development bundle plus clean-room vectors.
 - Connector projection is phase-6 adoption and does not enter substrate's runtime dependency graph.
-- Daemonloom-authored schema portions are marked as such while standard inputs retain provenance.
+- Repository-authored schema portions are marked as such while standard inputs retain provenance.

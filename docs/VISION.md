@@ -1,4 +1,4 @@
-# Vision: daemonloom/substrate
+# Vision: b10x substrate
 
 **Status:** founding document · **Date:** 2026-08-13
 
@@ -36,7 +36,7 @@ substrate is exactly one of them:
 |---|---|
 | Guarded local IO prior art | Flux's existing implementation (informs threat cases; no dependency) |
 | **Machine/cluster substrate service (daemon, API)** | **substrate — this repo** |
-| Governed invocation (identity, credentials, grants, audit) | daemonloom/connectors |
+| Governed invocation (identity, credentials, grants, audit) | b10x connectors |
 | Turn execution & verification (harness × substrate) | autodev |
 | Agent sandboxing / agent hosting | flux + autodev, as substrate clients |
 

@@ -24,7 +24,7 @@ guards, and their permit is never treated as proof that local enforcement succee
 
 ## Consequences
 
-The direct API remains useful without the rest of Daemonloom. Connectors can govern it as a
+The direct API remains useful without the rest of the b10x stack. Connectors can govern it as a
 first-party provider, and cloud can compose fleets, without either becoming required runtime
 dependencies. Some requests are admitted twice for different reasons: rich intent above and machine
 safety inside substrate.

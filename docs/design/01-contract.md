@@ -4,7 +4,7 @@
 
 This document is the product: the wire contract a substrate daemon serves, family by family,
 with the error taxonomy and the constraints that keep every operation declarable in the
-daemonloom/connectors catalog. Drivers (`host`, `docker`, `k8s`) implement this contract;
+b10x connectors catalog. Drivers (`host`, `docker`, `k8s`) implement this contract;
 consumers (Flux, autodev, the platform) see only it.
 
 ## 1. Shape of the wire

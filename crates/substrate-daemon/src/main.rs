@@ -11,7 +11,7 @@ use tracing_subscriber::EnvFilter;
 #[command(
     name = "substrate-daemon",
     version,
-    about = "Daemonloom minimum substrate host"
+    about = "b10x minimum substrate host"
 )]
 struct Arguments {
     #[arg(long, env = "SUBSTRATE_SOCKET")]

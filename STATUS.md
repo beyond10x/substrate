@@ -15,7 +15,7 @@ OCI packaging, signing, and digest pinning remain separate release work. See
 
 | Area | State | Next proof |
 |---|---|---|
-| Source | `foundation/substrate` in private `daemonloom/daemonloom`; predecessor history is preserved | keep visibility, authorship, and portable-document invariants enforced |
+| Source | `foundation/substrate` in the daemonloom monorepo; predecessor history is preserved | keep visibility, authorship, and portable-document invariants enforced |
 | Boundary | accepted: standalone, generic execution data plane, Flux-free | enforce ADRs 0001–0006 in dependency and conformance tests |
 | Wire contract | immutable 0.1.0 remains byte-clean; deterministic 0.2.0 and 0.3.0 remain reproducible; deterministic 0.4.0 has 26 closed operations, 21 executable vectors, 71 design vectors, 112 requirements, 11 hash fixtures, and a reproducible fixed point | package, sign, and digest-pin a complete runtime closure and stable release without changing development authority implicitly |
 | Drivers | Linux host driver implemented; absent delegation keeps exec facts absent; real delegated lane passes | retain the delegated lane and add no optimistic facts |
@@ -65,5 +65,5 @@ evidence; it is not a signed stable release or public product conformance claim.
 
 ## External dependencies
 
-Substrate has no source dependency on another Daemonloom component. Cross-component compatibility
+Substrate has no source dependency on another b10x component. Cross-component compatibility
 uses stable wire contracts and conformance fixtures, never sibling implementation-path dependencies.

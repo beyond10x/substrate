@@ -2,7 +2,7 @@
 
 **Status:** accepted v1 design · **Date:** 2026-08-13
 
-Substrate needs enough local authority to protect a machine. It must not become Daemonloom's identity
+Substrate needs enough local authority to protect a machine. It must not become the b10x identity
 provider, organization model, connector credential broker, or general authorization engine.
 
 ## 1. Authentication boundary

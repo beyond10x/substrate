@@ -6,7 +6,7 @@ Substrate. It was extracted from the daemonloom monorepo at
 with full history on 2026-08-23; the monorepo keeps a pinned git-submodule checkout at
 `foundation/substrate`. The gate is `bash scripts/gate.sh`.
 
-This repository owns the standalone Daemonloom execution substrate. The design-closure gate in
+This repository owns the standalone b10x execution substrate. The design-closure gate in
 `docs/plan/01-design-closure.md` is accepted; implementation is in progress against its phase exit
 criteria. The monorepo-era root
 [`AGENTS.md`](https://github.com/daemonloom/daemonloom/blob/e01ea676da18fb855814e7621514e0c98fc57c2c/AGENTS.md)

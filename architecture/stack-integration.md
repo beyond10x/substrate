@@ -1,6 +1,6 @@
 # Stack integration
 
-Substrate is useful both directly and through the Daemonloom control plane. The same resource and
+Substrate is useful both directly and through the b10x control plane. The same resource and
 failure semantics apply in every posture.
 
 | System | Relationship to substrate | Boundary retained |
@@ -8,7 +8,7 @@ failure semantics apply in every posture.
 | connectors | exposes substrate operations under connector declarations/grants; may later request isolated execution of an attested connector artifact | connectors owns provider semantics, credentials, grants, audit, and artifact admission |
 | identity | supplies trusted principal/service identity to hosted composition | substrate keeps only coarse local authentication and never becomes the organization/policy system |
 | cloud | deploys, registers, selects, meters, and operates substrate instances | substrate owns resource and enforcement truth; cloud owns fleet/tenant composition |
-| daemonloom/agent | may pin the daemon crate at its outer composition root, re-execute a private daemon child, then request bounded execution only through the Unix-socket contract | agent owns loops, tasks, tools, harnesses, model providers, and child lifecycle; substrate retains its process, protocol, authentication, and enforcement boundary |
+| b10x agent | may pin the daemon crate at its outer composition root, re-execute a private daemon child, then request bounded execution only through the Unix-socket contract | agent owns loops, tasks, tools, harnesses, model providers, and child lifecycle; substrate retains its process, protocol, authentication, and enforcement boundary |
 | Flux | may map its guarded-IO and remote delegate seams onto the public API | Flux owns Flux-Lang, harness behavior, and error projection; substrate has no Flux dependency |
 | autodev | may extract its proposed `Executor` port and implement it over workspaces, execs, leases, and snapshots | autodev owns turns, verification, scheduling, and coordinator refs |
 | applications | consume direct or governed operations | applications never select driver internals or weaken isolation requirements |

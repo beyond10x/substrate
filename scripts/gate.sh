@@ -20,4 +20,6 @@ run python3 scripts/check-adrs.py
 run python3 scripts/check-contract-bundle.py
 run python3 scripts/check-runtime-vectors.py
 
+run bash scripts/check-brand.sh
+
 printf 'gate: passed\n'
