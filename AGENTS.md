@@ -77,7 +77,7 @@ Substrate is confinement. Everything below is the reason it can be trusted with 
   the `https://b10x.invalid/` URI namespace, the `b10x.execution-capsule.v1` hash domain
   separator and the `origin: b10x` bundle marker are **protocol bytes another party verifies**
   (atlas ADR 0001 § *Wire-visible identifiers*; the exemption list is documented in
-  `scripts/check-brand.sh`). Renaming one is a **coordinated migration with an ADR in atlas**, done
+  atlas' org-wide fence). Renaming one is a **coordinated migration with an ADR in atlas**, done
   by cutting a new bundle version — never by rewriting a frozen one.
 - **Never commit credentials, tokens or key files.** `scripts/check-secrets.sh` exists for this.
 
@@ -105,7 +105,7 @@ bash scripts/gate.sh
 In order: `cargo test --workspace --locked`, `cargo fmt --all --check`,
 `cargo clippy --workspace --all-targets --locked -- -D warnings`, then
 `check-links.py`, `check-adrs.py`, `check-contract-bundle.py`, `check-runtime-vectors.py`, and
-`check-brand.sh`. Green here is the bar for `main`.
+the workspace tests. Green here is the bar for `main`. The former brand is fenced org-wide by `scripts/check-org-brand.sh` in the **atlas** repo, not here.
 
 **`scripts/gate.sh` verifies the 0.1.0 bundle only.** `check-contract-bundle-0.2.0.py`,
 `-0.3.0.py` and `-0.4.0.py` exist and are **not** run by the gate. Touching a successor bundle means

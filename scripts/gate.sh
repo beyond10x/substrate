@@ -23,6 +23,5 @@ run python3 scripts/check-contract-bundle-0.3.0.py
 run python3 scripts/check-contract-bundle-0.4.0.py
 run python3 scripts/check-runtime-vectors.py
 
-run bash scripts/check-brand.sh
 
 printf 'gate: passed\n'
