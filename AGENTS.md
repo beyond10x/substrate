@@ -65,6 +65,12 @@ The monorepo-era cross-component suite (`scripts/check-local.sh` at the monorepo
 applies here; changes that affect monorepo consumers are picked up when the monorepo advances its
 `foundation/substrate` submodule pin.
 
+## Releases
+
+Maintain `CHANGELOG.md` in Keep a Changelog form and cut it under a version heading at release.
+The tag is the bare version — `0.2.0`, the version and nothing else — annotated, at a fully gated
+`main` commit.
+
 ## Change discipline
 
 Keep changes reviewable and preserve the direction from composition/products toward substrate. A
