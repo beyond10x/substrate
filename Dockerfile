@@ -2,8 +2,8 @@
 FROM rust:1.97-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97 AS builder
 WORKDIR /src
 COPY . .
-RUN --mount=type=cache,id=b10x-cargo-registry,target=/usr/local/cargo/registry \
-    --mount=type=cache,id=b10x-cargo-git,target=/usr/local/cargo/git \
+RUN --mount=type=cache,id=b10x-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=b10x-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=b10x-substrate-target,target=/src/target,sharing=locked \
     find Cargo.toml Cargo.lock crates -path '*/target' -prune -o -type f -exec touch {} + && \
     cargo build --locked --release -p substrate-daemon --bin substrate-daemon && \
