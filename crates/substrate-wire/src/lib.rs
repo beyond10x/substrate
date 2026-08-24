@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 
 use base64::Engine as _;
@@ -23,6 +23,11 @@ pub const MAX_SNAPSHOT_PROVENANCE_EVENTS: u64 = 1_024;
 pub const MAX_EXECUTION_CAPSULE_FILES: u32 = 32;
 pub const MAX_EXECUTION_CAPSULE_FILE_BYTES: u64 = 262_144;
 pub const MAX_EXECUTION_CAPSULE_BYTES: u64 = 524_288;
+/// How many host directories one start may declare read-only (ADR 0010).
+///
+/// Small on purpose. A closure that needs many roots is a closure that should be assembled rather
+/// than enumerated, and a long list is a request nobody reviewed.
+pub const MAX_READ_ONLY_ROOTS: u32 = 4;
 pub const EXECUTION_CAPSULE_MOUNT: &str = "/runtime";
 pub const OPERATION_LEDGER_SUBJECT_MAX_ROWS: u64 = 100_000;
 pub const OPERATION_LEDGER_SUBJECT_MAX_BYTES: u64 = 512 * 1024 * 1024;
@@ -615,6 +620,15 @@ pub struct AppliedConfinement {
     pub profile: SandboxProfile,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capsule: Option<AppliedExecutionCapsule>,
+    /// Every declared host root that was mounted (ADR 0010).
+    ///
+    /// Reported rather than inferred. Unlike a capsule there is no manifest and no digest here —
+    /// hashing a package registry on every exec is not a thing anybody would run twice — so what
+    /// substrate can guarantee is narrower: that this directory was mounted read-only at this
+    /// point. **What cannot be verified must at least be visible**, and this is where it is
+    /// visible.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub read_only_roots: Vec<ReadOnlyRoot>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -738,6 +752,14 @@ pub struct ExecStartInput {
     pub sandbox: ConfinementRequest,
     pub limits: ExecLimits,
     pub wait: bool,
+    /// Host directories admitted read-only inside this process (ADR 0010).
+    ///
+    /// Empty on every existing consumer, and empty is what keeps the isolation verified from
+    /// inside a sandbox exactly as it was: nothing outside `/usr`, `/bin`, `/lib`, `/lib64` and the
+    /// workspace is reachable. A root is how a caller brings a closure **in** — a toolchain, a
+    /// package registry — for a process that still has no network to fetch one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub read_only_roots: Vec<ReadOnlyRoot>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capsule: Option<ExecutionCapsuleInput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1377,6 +1399,14 @@ pub enum WireValidationError {
     CapsuleContentMismatch,
     #[error("event fields do not select one closed event schema branch")]
     InvalidEventShape,
+    #[error("declared read-only roots are outside the closed bounds")]
+    InvalidReadOnlyRootBounds,
+    #[error("a declared read-only root path is not absolute and canonical")]
+    InvalidReadOnlyRootPath,
+    #[error("a declared read-only root mount collides with one substrate owns")]
+    ReservedReadOnlyRootMount,
+    #[error("two declared read-only roots name the same mount point")]
+    DuplicateReadOnlyRootMount,
     #[error("execution capsule manifest does not match its digest")]
     CapsuleManifestMismatch,
 }
@@ -1470,6 +1500,81 @@ pub fn canonical_execution_capsule_hash(
         return Err(WireValidationError::InvalidCapsuleEntrypoint);
     }
     Ok(hex::encode(Sha256::digest(framed)))
+}
+
+/// The mount points substrate owns and a caller may not take (ADR 0010).
+///
+/// A root landing on one of these would either shadow the read-only base system the process needs
+/// or the workspace it is supposed to write to. Refused rather than re-pointed: a caller who asked
+/// for `/usr` meant something, and quietly moving it elsewhere would run a different request.
+pub const RESERVED_MOUNTS: [&str; 9] = [
+    "/",
+    "/usr",
+    "/bin",
+    "/lib",
+    "/lib64",
+    "/proc",
+    "/dev",
+    "/tmp",
+    "/workspace",
+];
+
+/// A host directory admitted read-only inside a confined process (ADR 0010).
+///
+/// Both halves are the caller's: which directory, and where it appears. Substrate knows nothing
+/// about what is in it — a toolchain, a package registry, a data set — and deliberately does not,
+/// because the moment it did it would carry one client's vendor semantics.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadOnlyRoot {
+    /// The host directory, absolute and canonical.
+    pub host_path: String,
+    /// Where it appears inside, absolute and canonical.
+    pub mount: String,
+}
+
+/// Checks a start's declared roots against every rule ADR 0010 names.
+///
+/// # Errors
+///
+/// Returns the rule that was broken. **Nothing is adjusted**: a root that cannot be mounted as
+/// asked refuses the dispatch, because a request silently re-pointed is a different request and the
+/// caller would have no way to tell.
+pub fn validate_read_only_roots(roots: &[ReadOnlyRoot]) -> Result<(), WireValidationError> {
+    if roots.len() > MAX_READ_ONLY_ROOTS as usize {
+        return Err(WireValidationError::InvalidReadOnlyRootBounds);
+    }
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for root in roots {
+        if !is_absolute_canonical(&root.host_path) || !is_absolute_canonical(&root.mount) {
+            return Err(WireValidationError::InvalidReadOnlyRootPath);
+        }
+        if RESERVED_MOUNTS.contains(&root.mount.as_str()) || root.mount == EXECUTION_CAPSULE_MOUNT {
+            return Err(WireValidationError::ReservedReadOnlyRootMount);
+        }
+        if !seen.insert(root.mount.as_str()) {
+            return Err(WireValidationError::DuplicateReadOnlyRootMount);
+        }
+    }
+    Ok(())
+}
+
+/// An absolute path with no `.`, no `..`, no empty component and no trailing slash.
+///
+/// Canonical in the textual sense only. Whether the host path exists and is a directory is the
+/// driver's question, because only it can answer without racing.
+fn is_absolute_canonical(path: &str) -> bool {
+    if !path.starts_with('/') || path.len() > 1 && path.ends_with('/') || path.contains("//") {
+        return false;
+    }
+    let components: Vec<&str> = path
+        .split('/')
+        .skip(1)
+        .filter(|part| !part.is_empty())
+        .collect();
+    !components.is_empty()
+        && components.len() <= MAX_PATH_DEPTH
+        && components.iter().all(|part| *part != "." && *part != "..")
 }
 
 /// Validates all capsule bytes and returns the exact admitted size observation.
@@ -1767,6 +1872,10 @@ mod tests {
         canonical_execution_capsule_hash, canonical_json, canonical_query, canonical_request_hash,
         canonical_request_hash_v2, validate_execution_capsule, validate_relative_path,
     };
+    use super::{
+        EXECUTION_CAPSULE_MOUNT, MAX_READ_ONLY_ROOTS, ReadOnlyRoot, WireValidationError,
+        validate_read_only_roots,
+    };
     use serde::Deserialize as _;
     use serde_json::Value;
     use sha2::{Digest as _, Sha256};
@@ -2025,6 +2134,102 @@ mod tests {
         assert_eq!(
             hex::encode(Sha256::digest(bytes)),
             "05f28dcbbc32561eb0873b172df634cd07abcfaa778883cc708758fb40d3c1ac"
+        );
+    }
+
+    fn root(host: &str, mount: &str) -> ReadOnlyRoot {
+        ReadOnlyRoot {
+            host_path: host.to_owned(),
+            mount: mount.to_owned(),
+        }
+    }
+
+    #[test]
+    fn a_declared_root_is_admitted_when_both_paths_are_absolute_and_canonical() {
+        assert!(
+            validate_read_only_roots(&[
+                root("/home/someone/.cargo", "/toolchain/cargo"),
+                root("/home/someone/.rustup", "/toolchain/rustup"),
+            ])
+            .is_ok()
+        );
+        assert!(
+            validate_read_only_roots(&[]).is_ok(),
+            "and none is the default"
+        );
+    }
+
+    #[test]
+    fn a_root_that_could_escape_or_be_re_pointed_is_refused_rather_than_normalised() {
+        // Nothing is adjusted. A request silently re-pointed is a different request, and the
+        // caller would have no way to tell which one ran.
+        for (host, mount) in [
+            ("relative/path", "/toolchain"),
+            ("/home/../etc", "/toolchain"),
+            ("/home/someone/.cargo", "/toolchain/.."),
+            ("/home/someone/.cargo", "toolchain"),
+            ("/home/someone/.cargo", "/toolchain/"),
+            ("/home//someone", "/toolchain"),
+            ("/home/someone/.cargo", "/"),
+        ] {
+            assert_eq!(
+                validate_read_only_roots(&[root(host, mount)]).expect_err("refused"),
+                WireValidationError::InvalidReadOnlyRootPath,
+                "{host} -> {mount}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_root_may_not_take_a_mount_substrate_owns() {
+        // Landing on one of these would shadow either the read-only base system the process needs
+        // or the workspace it is supposed to write to.
+        for mount in [
+            "/usr",
+            "/bin",
+            "/lib",
+            "/lib64",
+            "/proc",
+            "/dev",
+            "/tmp",
+            "/workspace",
+        ] {
+            assert_eq!(
+                validate_read_only_roots(&[root("/home/someone/.cargo", mount)])
+                    .expect_err("refused"),
+                WireValidationError::ReservedReadOnlyRootMount,
+                "{mount}"
+            );
+        }
+        assert_eq!(
+            validate_read_only_roots(&[root("/home/someone/.cargo", EXECUTION_CAPSULE_MOUNT)])
+                .expect_err("refused"),
+            WireValidationError::ReservedReadOnlyRootMount,
+            "including the capsule's, which ADR 0009 owns"
+        );
+    }
+
+    #[test]
+    fn two_roots_cannot_name_one_mount_point() {
+        // Whichever won, the other would be a directory the caller believed was mounted.
+        assert_eq!(
+            validate_read_only_roots(&[
+                root("/home/someone/.cargo", "/toolchain"),
+                root("/home/someone/.rustup", "/toolchain"),
+            ])
+            .expect_err("refused"),
+            WireValidationError::DuplicateReadOnlyRootMount
+        );
+    }
+
+    #[test]
+    fn the_bound_is_the_one_the_capability_snapshot_publishes() {
+        let too_many: Vec<ReadOnlyRoot> = (0..=MAX_READ_ONLY_ROOTS)
+            .map(|index| root("/home/someone/.cargo", &format!("/toolchain/{index}")))
+            .collect();
+        assert_eq!(
+            validate_read_only_roots(&too_many).expect_err("refused"),
+            WireValidationError::InvalidReadOnlyRootBounds
         );
     }
 }

@@ -415,6 +415,10 @@ impl ProcessRuntime {
             network: AppliedNetwork::None,
             profile: SandboxProfile::Workspace,
             capsule: applied_capsule,
+            // What was mounted, not what was asked for: `admit` refused anything it could not
+            // mount exactly as declared, so by here the two are the same list — and a reader gets
+            // it from the record rather than from the fact that a build happened to succeed.
+            read_only_roots: input.read_only_roots.clone(),
         };
         let resource = Exec {
             id: id.to_owned(),
@@ -739,6 +743,40 @@ impl ProcessRuntime {
         Ok(observation)
     }
 
+    /// Every rule ADR 0010 names, checked before dispatch.
+    ///
+    /// Textual rules first, because they are the caller's mistake to hear about; then the
+    /// filesystem question only the driver can answer without racing.
+    fn admit_read_only_roots(roots: &[substrate_wire::ReadOnlyRoot]) -> Result<(), DriverError> {
+        substrate_wire::validate_read_only_roots(roots).map_err(|error| {
+            DriverError::refused(
+                "exec.read-only-root-invalid",
+                format!("A declared read-only root is invalid: {error}"),
+                "read_only_roots",
+            )
+        })?;
+        for root in roots {
+            // `symlink_metadata`, so a symlink is refused as itself rather than followed to
+            // whatever it points at — the caller declared a directory and would not be told.
+            let metadata = std::fs::symlink_metadata(std::path::Path::new(&root.host_path))
+                .map_err(|_| {
+                    DriverError::refused(
+                        "exec.read-only-root-absent",
+                        "A declared read-only root is not present on this host.",
+                        "read_only_roots",
+                    )
+                })?;
+            if !metadata.is_dir() {
+                return Err(DriverError::refused(
+                    "exec.read-only-root-not-a-directory",
+                    "A declared read-only root is not a directory.",
+                    "read_only_roots",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn admit(&self, id: &str, workspace: &Path, input: &ExecStartInput) -> Result<(), DriverError> {
         if !id.starts_with("ex_")
             || !id
@@ -751,6 +789,7 @@ impl ProcessRuntime {
                 "exec",
             ));
         }
+        Self::admit_read_only_roots(&input.read_only_roots)?;
         if input.sandbox.capability_snapshot != self.capability.snapshot {
             return Err(DriverError::refused(
                 "exec.capability-stale",
@@ -891,6 +930,16 @@ impl ProcessRuntime {
                 .arg("--ro-bind")
                 .arg(capsule.directory.path())
                 .arg(EXECUTION_CAPSULE_MOUNT);
+        }
+        // `--ro-bind` and never `--bind`: a declared root is readable and never writable, so a
+        // process cannot alter the toolchain it was given any more than it can alter `/usr`, and
+        // the workspace stays the only writable path. Before the workspace bind, so a root can
+        // never shadow it — though `admit` has already refused that mount point by name.
+        for root in &input.read_only_roots {
+            command
+                .arg("--ro-bind")
+                .arg(&root.host_path)
+                .arg(&root.mount);
         }
         command
             .arg("--bind")
@@ -1915,6 +1964,7 @@ mod tests {
         };
         let runtime = ProcessRuntime::new(config, capability).expect("runtime");
         let input = ExecStartInput {
+            read_only_roots: Vec::new(),
             workspace: "ws_test".to_owned(),
             argv: vec!["/usr/bin/true".to_owned()],
             env: ExecEnvironment {
@@ -1985,6 +2035,7 @@ mod tests {
         config.bubblewrap = std::env::current_exe().expect("test executable");
         let runtime = ProcessRuntime::new(config, capability).unwrap();
         let input = ExecStartInput {
+            read_only_roots: Vec::new(),
             workspace: "ws_test".to_owned(),
             argv: vec!["/usr/bin/true".to_owned()],
             env: ExecEnvironment {

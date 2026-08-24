@@ -15,3 +15,4 @@ with YAML frontmatter containing `date` and `status`. Draft design questions rem
 | [0007](0007-protocol-processes-use-raw-pipe-sessions.md) | Protocol processes use raw-pipe sessions | accepted |
 | [0008](0008-pipe-sessions-have-distinct-durable-identity.md) | Pipe sessions have distinct durable identity | accepted |
 | [0009](0009-execution-capsules-are-verified-read-only-inputs.md) | Execution capsules are verified read-only inputs | accepted |
+| [0010](0010-declared-host-roots-are-mounted-read-only.md) | Declared host roots are mounted read-only | accepted |
