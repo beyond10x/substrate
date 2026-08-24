@@ -41,7 +41,7 @@
       "type": "object"
     }
   },
-  "$id": "urn:daemonloom:substrate-wire:0.4.0:error",
+  "$id": "urn:b10x:substrate-wire:0.4.0:error",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {

@@ -10,7 +10,7 @@
     "2": "invalid-input",
     "3": "harness-failure"
   },
-  "format": "daemonloom.substrate-clean-room-runner.v1",
+  "format": "b10x.substrate-clean-room-runner.v1",
   "invocation": {
     "argv": [
       "<runner>",

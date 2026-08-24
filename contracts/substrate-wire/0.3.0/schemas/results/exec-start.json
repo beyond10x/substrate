@@ -1,5 +1,5 @@
 {
-  "$id": "urn:daemonloom:substrate-wire:0.3.0:result:exec-start",
+  "$id": "urn:b10x:substrate-wire:0.3.0:result:exec-start",
   "$ref": "../resource.json#/$defs/exec",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "exec-start operation result"

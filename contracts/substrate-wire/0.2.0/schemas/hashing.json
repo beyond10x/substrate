@@ -1,5 +1,5 @@
 {
-  "$id": "urn:daemonloom:substrate-wire:0.2.0:hashing",
+  "$id": "urn:b10x:substrate-wire:0.2.0:hashing",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
@@ -61,7 +61,7 @@
           "const": "schema-rejected-number-only"
         },
         "origin": {
-          "const": "daemonloom-repository-authored"
+          "const": "b10x-repository-authored"
         }
       },
       "required": [
@@ -113,7 +113,7 @@
       "const": "fixtures/canonical-hash.json"
     },
     "format": {
-      "const": "daemonloom.substrate-request-hash.v2"
+      "const": "b10x.substrate-request-hash.v2"
     },
     "ledger_key": {
       "const": [

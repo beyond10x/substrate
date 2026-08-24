@@ -1,5 +1,5 @@
 {
-  "$id": "urn:daemonloom:substrate-wire:0.4.0:coverage",
+  "$id": "urn:b10x:substrate-wire:0.4.0:coverage",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
@@ -7,7 +7,7 @@
       "const": "schemas/coverage.json"
     },
     "format": {
-      "const": "daemonloom.substrate-conformance-coverage.v1"
+      "const": "b10x.substrate-conformance-coverage.v1"
     },
     "requirements": {
       "items": {

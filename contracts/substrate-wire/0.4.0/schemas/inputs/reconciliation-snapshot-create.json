@@ -1,5 +1,5 @@
 {
-  "$id": "urn:daemonloom:substrate-wire:0.4.0:input:reconciliation-snapshot-create",
+  "$id": "urn:b10x:substrate-wire:0.4.0:input:reconciliation-snapshot-create",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {},

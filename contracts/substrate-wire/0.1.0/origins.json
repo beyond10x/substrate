@@ -2,8 +2,8 @@
   "bundle": "substrate-wire@0.1.0",
   "inputs": [
     {
-      "name": "Daemonloom substrate contract",
-      "origin": "daemonloom",
+      "name": "B10x substrate contract",
+      "origin": "b10x",
       "role": "wire semantics and conformance vectors",
       "version": "0.1.0"
     },
@@ -68,5 +68,5 @@
       "version": "RFC 6455"
     }
   ],
-  "origin": "daemonloom"
+  "origin": "b10x"
 }

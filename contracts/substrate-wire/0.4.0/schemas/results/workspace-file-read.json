@@ -1,5 +1,5 @@
 {
-  "$id": "urn:daemonloom:substrate-wire:0.4.0:result:workspace-file-read",
+  "$id": "urn:b10x:substrate-wire:0.4.0:result:workspace-file-read",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "oneOf": [
     {

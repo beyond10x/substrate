@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Run one gh command with a daemonloom-bot installation token.
+# Run one gh command with a b10x-bot installation token.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "$0")/.." && pwd)"

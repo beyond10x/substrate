@@ -1,5 +1,5 @@
 {
-  "$id": "urn:daemonloom:substrate-wire:0.3.0:result:event-stream",
+  "$id": "urn:b10x:substrate-wire:0.3.0:result:event-stream",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
@@ -13,7 +13,7 @@
       "const": 64
     },
     "protocol": {
-      "const": "daemonloom.substrate-events.v1"
+      "const": "b10x.substrate-events.v1"
     },
     "recovery": {
       "const": "pull-from-last-cursor"

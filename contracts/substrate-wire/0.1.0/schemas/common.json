@@ -36,7 +36,7 @@
       "minLength": 1,
       "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\u0000).+$",
       "type": "string",
-      "x-daemonloom-max-depth": 64
+      "x-b10x-max-depth": 64
     },
     "request-id": {
       "maxLength": 128,
@@ -53,7 +53,7 @@
       "type": "string"
     }
   },
-  "$id": "urn:daemonloom:substrate-wire:0.1.0:common",
+  "$id": "urn:b10x:substrate-wire:0.1.0:common",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Substrate phase-2 scalar and envelope definitions"
 }

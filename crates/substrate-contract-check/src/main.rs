@@ -57,8 +57,8 @@ fn validate_request(request: &Value) -> Vec<String> {
         let Some(uri) = resource.get("uri").and_then(Value::as_str) else {
             fail_protocol("resource URI must be a string");
         };
-        if !uri.starts_with("https://daemonloom.invalid/") || !resource_uris.insert(uri) {
-            fail_protocol("resource URI must be unique under https://daemonloom.invalid/");
+        if !uri.starts_with("https://b10x.invalid/") || !resource_uris.insert(uri) {
+            fail_protocol("resource URI must be unique under https://b10x.invalid/");
         }
         let Some(schema) = resource.get("schema") else {
             fail_protocol("resource schema is absent");

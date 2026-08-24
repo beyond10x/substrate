@@ -1152,7 +1152,7 @@
       "type": "object"
     }
   },
-  "$id": "urn:daemonloom:substrate-wire:0.2.0:resource",
+  "$id": "urn:b10x:substrate-wire:0.2.0:resource",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "oneOf": [
     {

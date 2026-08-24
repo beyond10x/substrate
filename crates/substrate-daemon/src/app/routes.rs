@@ -108,11 +108,11 @@ pub fn router(app: Arc<App>) -> Router {
 async fn contract_identity(request: Request<Body>, next: Next) -> Response {
     let mut response = next.run(request).await;
     response.headers_mut().insert(
-        "x-daemonloom-contract",
+        "x-b10x-contract",
         CONTRACT_BUNDLE.parse().expect("static contract header"),
     );
     response.headers_mut().insert(
-        "x-daemonloom-contract-bundle-sha256",
+        "x-b10x-contract-bundle-sha256",
         CONTRACT_BUNDLE_SHA256
             .parse()
             .expect("static contract digest header"),

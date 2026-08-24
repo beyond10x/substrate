@@ -17,7 +17,7 @@ listeners are refused at startup, and non-loopback control traffic requires TLS/
 trusted tunnel.
 
 Hosted deployments validate short-lived identity-issued service material through
-[architecture ADR 0015 — Foundation services share one trust envelope](https://github.com/daemonloom/daemonloom/blob/e01ea676da18fb855814e7621514e0c98fc57c2c/architecture/adr/0015-foundation-trust-envelope.md).
+`architecture/adr/0015-foundation-trust-envelope.md`.
 Substrate stores only the accepted claims required for local admission and provenance; organization
 membership and role evaluation remain outside.
 

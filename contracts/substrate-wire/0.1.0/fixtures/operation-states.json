@@ -1,6 +1,6 @@
 {
   "$schema": "../schemas/schema-fixtures.json",
-  "format": "daemonloom.substrate-schema-fixtures.v1",
+  "format": "b10x.substrate-schema-fixtures.v1",
   "invalid": [
     {
       "id": "accepted-cannot-have-outcome",

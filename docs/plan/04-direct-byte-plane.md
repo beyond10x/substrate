@@ -5,7 +5,7 @@
 This phase adds leased interactive process channels without weakening the phase-3 workspace,
 operation, capability-snapshot, recovery, and event guarantees. The first consumer pressure is the
 model-free governed-harness slice accepted by
-[architecture ADR 0023](https://github.com/daemonloom/daemonloom/blob/e01ea676da18fb855814e7621514e0c98fc57c2c/architecture/adr/0023-governed-harness-execution-is-defense-in-depth.md).
+`architecture/adr/0023-governed-harness-execution-is-defense-in-depth.md`.
 
 ## Slice A: raw-pipe development contract
 

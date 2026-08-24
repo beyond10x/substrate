@@ -1,5 +1,5 @@
 {
-  "$id": "urn:daemonloom:substrate-wire:0.4.0:runner-result",
+  "$id": "urn:b10x:substrate-wire:0.4.0:runner-result",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "allOf": [
@@ -92,7 +92,7 @@
       "type": "boolean"
     },
     "format": {
-      "const": "daemonloom.substrate-runner-result.v1"
+      "const": "b10x.substrate-runner-result.v1"
     },
     "postconditions": {
       "items": {

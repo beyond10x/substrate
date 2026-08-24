@@ -15,7 +15,7 @@
     "fallback_prefix": "rejected-number-json:",
     "fallback_structure": "utf16-key-order-json-with-serde-json-number-text",
     "fallback_use": "schema-rejected-number-only",
-    "origin": "daemonloom-repository-authored"
+    "origin": "b10x-repository-authored"
   },
   "canonical_query": {
     "invalid": "malformed-raw-nul-lowercase-hex",
@@ -24,7 +24,7 @@
     "valid": "pairs-nul-rfc8785-array-of-pairs"
   },
   "capsule_manifest": {
-    "domain": "daemonloom.execution-capsule.v1",
+    "domain": "b10x.execution-capsule.v1",
     "encoding": "concatenated-u32be-length-prefixed-fields",
     "fields": [
       "domain",
@@ -51,7 +51,7 @@
     "deployment"
   ],
   "fixtures": "fixtures/canonical-hash.json",
-  "format": "daemonloom.substrate-request-hash.v2",
+  "format": "b10x.substrate-request-hash.v2",
   "ledger_key": [
     "deployment",
     "subject",

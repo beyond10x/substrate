@@ -1,5 +1,5 @@
 {
-  "$id": "urn:daemonloom:substrate-wire:0.4.0:hash-fixtures",
+  "$id": "urn:b10x:substrate-wire:0.4.0:hash-fixtures",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
@@ -234,7 +234,7 @@
       "type": "array"
     },
     "format": {
-      "const": "daemonloom.substrate-canonical-hash-fixtures.v2"
+      "const": "b10x.substrate-canonical-hash-fixtures.v2"
     }
   },
   "required": [

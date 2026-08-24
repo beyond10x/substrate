@@ -703,5 +703,5 @@
       "risk": "write"
     }
   ],
-  "registry_format": "daemonloom.substrate-operation-registry.v1"
+  "registry_format": "b10x.substrate-operation-registry.v1"
 }

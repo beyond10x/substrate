@@ -1,5 +1,5 @@
 {
-  "$id": "urn:daemonloom:substrate-wire:0.4.0:origins",
+  "$id": "urn:b10x:substrate-wire:0.4.0:origins",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
@@ -46,7 +46,7 @@
               },
               "properties": {
                 "origin": {
-                  "const": "daemonloom"
+                  "const": "b10x"
                 }
               }
             }
@@ -134,7 +134,7 @@
           },
           "origin": {
             "enum": [
-              "daemonloom",
+              "b10x",
               "standard"
             ]
           },
@@ -179,7 +179,7 @@
       "type": "array"
     },
     "origin": {
-      "const": "daemonloom"
+      "const": "b10x"
     }
   },
   "required": [

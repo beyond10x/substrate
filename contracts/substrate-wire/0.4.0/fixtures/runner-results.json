@@ -1,13 +1,13 @@
 {
   "$schema": "../schemas/schema-fixtures.json",
-  "format": "daemonloom.substrate-schema-fixtures.v1",
+  "format": "b10x.substrate-schema-fixtures.v1",
   "invalid": [
     {
       "id": "pass-requires-exact-expected-match",
       "instance": {
         "diagnostics": [],
         "expected_match": false,
-        "format": "daemonloom.substrate-runner-result.v1",
+        "format": "b10x.substrate-runner-result.v1",
         "postconditions": [],
         "status": "pass",
         "vector_id": "machine-probe-is-observed"
@@ -18,7 +18,7 @@
       "instance": {
         "diagnostics": [],
         "expected_match": true,
-        "format": "daemonloom.substrate-runner-result.v1",
+        "format": "b10x.substrate-runner-result.v1",
         "postconditions": [
           {
             "actual": 1,
@@ -38,7 +38,7 @@
     {
       "diagnostics": [],
       "expected_match": true,
-      "format": "daemonloom.substrate-runner-result.v1",
+      "format": "b10x.substrate-runner-result.v1",
       "postconditions": [
         {
           "actual": 0,
@@ -56,7 +56,7 @@
         "response differed"
       ],
       "expected_match": false,
-      "format": "daemonloom.substrate-runner-result.v1",
+      "format": "b10x.substrate-runner-result.v1",
       "postconditions": [],
       "status": "fail",
       "vector_id": "machine-probe-is-observed"

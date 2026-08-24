@@ -1,5 +1,5 @@
 {
-  "$id": "urn:daemonloom:substrate-wire:0.4.0:result:exec-retire",
+  "$id": "urn:b10x:substrate-wire:0.4.0:result:exec-retire",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {

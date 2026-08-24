@@ -1,5 +1,5 @@
 {
-  "$id": "urn:daemonloom:substrate-wire:0.3.0:result:pipe-session-capabilities",
+  "$id": "urn:b10x:substrate-wire:0.3.0:result:pipe-session-capabilities",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {

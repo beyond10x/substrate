@@ -1,5 +1,5 @@
 {
-  "$id": "urn:daemonloom:substrate-wire:0.3.0:result:machine-get",
+  "$id": "urn:b10x:substrate-wire:0.3.0:result:machine-get",
   "$ref": "../capability.json",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "machine-get operation result"

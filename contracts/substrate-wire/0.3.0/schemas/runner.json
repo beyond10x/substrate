@@ -1,5 +1,5 @@
 {
-  "$id": "urn:daemonloom:substrate-wire:0.3.0:runner",
+  "$id": "urn:b10x:substrate-wire:0.3.0:runner",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
@@ -47,7 +47,7 @@
       "type": "object"
     },
     "format": {
-      "const": "daemonloom.substrate-clean-room-runner.v1"
+      "const": "b10x.substrate-clean-room-runner.v1"
     },
     "invocation": {
       "additionalProperties": false,

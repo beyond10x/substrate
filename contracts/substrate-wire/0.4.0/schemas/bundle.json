@@ -1,5 +1,5 @@
 {
-  "$id": "urn:daemonloom:substrate-wire:0.4.0:bundle",
+  "$id": "urn:b10x:substrate-wire:0.4.0:bundle",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
@@ -10,7 +10,7 @@
       "const": "v1"
     },
     "bundle_format": {
-      "const": "daemonloom.contract-bundle.v1"
+      "const": "b10x.contract-bundle.v1"
     },
     "compatibility": {
       "additionalProperties": false,
@@ -126,7 +126,7 @@
       "const": "substrate-wire"
     },
     "origin": {
-      "const": "daemonloom"
+      "const": "b10x"
     },
     "source_base_commit": {
       "type": "null"

@@ -1,6 +1,6 @@
 {
   "$schema": "schemas/coverage.json",
-  "format": "daemonloom.substrate-conformance-coverage.v1",
+  "format": "b10x.substrate-conformance-coverage.v1",
   "requirements": [
     {
       "evidence": [

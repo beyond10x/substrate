@@ -9,7 +9,7 @@
 The review was kept open while the implementation, contract, and evidence changed. A final
 independent read-only audit found no remaining substantive or evidence blocker in findings 1–38.
 Finding 39 closed only after the implementation was committed and synchronized to the private
-`daemonloom/substrate` remote by `daemonloom-bot`; completion claims and this archival record were
+`b10x/substrate` remote by `b10x-bot`; completion claims and this archival record were
 then updated separately.
 
 | Findings | Disposition | Principal evidence |

@@ -3,8 +3,8 @@
   "bundle": "substrate-wire@0.2.0",
   "inputs": [
     {
-      "name": "Daemonloom substrate contract",
-      "origin": "daemonloom",
+      "name": "B10x substrate contract",
+      "origin": "b10x",
       "role": "wire semantics and conformance vectors",
       "trust": "repo-authored",
       "version": "0.2.0"
@@ -78,5 +78,5 @@
       "version": "1.1.1"
     }
   ],
-  "origin": "daemonloom"
+  "origin": "b10x"
 }

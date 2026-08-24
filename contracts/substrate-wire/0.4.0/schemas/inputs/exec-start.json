@@ -1,5 +1,5 @@
 {
-  "$id": "urn:daemonloom:substrate-wire:0.4.0:input:exec-start",
+  "$id": "urn:b10x:substrate-wire:0.4.0:input:exec-start",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
@@ -71,8 +71,8 @@
           "maxItems": 32,
           "minItems": 1,
           "type": "array",
-          "x-daemonloom-max-decoded-bytes": 524288,
-          "x-daemonloom-order": "strict-utf8-bytewise-path"
+          "x-b10x-max-decoded-bytes": 524288,
+          "x-b10x-order": "strict-utf8-bytewise-path"
         },
         "manifest_sha256": {
           "pattern": "^[0-9a-f]{64}$",
@@ -85,8 +85,8 @@
         "files"
       ],
       "type": "object",
-      "x-daemonloom-entrypoint": "must-name-an-executable-file",
-      "x-daemonloom-manifest-hash": "daemonloom.execution-capsule.v1"
+      "x-b10x-entrypoint": "must-name-an-executable-file",
+      "x-b10x-manifest-hash": "b10x.execution-capsule.v1"
     },
     "env": {
       "additionalProperties": false,

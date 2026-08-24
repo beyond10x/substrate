@@ -1,5 +1,5 @@
 {
-  "$id": "urn:daemonloom:substrate-wire:0.2.0:result:workspace-get",
+  "$id": "urn:b10x:substrate-wire:0.2.0:result:workspace-get",
   "$ref": "../resource.json#/$defs/workspace",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "workspace-get operation result"

@@ -1,5 +1,5 @@
 {
-  "$id": "urn:daemonloom:substrate-wire:0.3.0:operation-registry",
+  "$id": "urn:b10x:substrate-wire:0.3.0:operation-registry",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "additionalProperties": false,
   "properties": {
@@ -193,7 +193,7 @@
       "type": "array"
     },
     "registry_format": {
-      "const": "daemonloom.substrate-operation-registry.v1"
+      "const": "b10x.substrate-operation-registry.v1"
     }
   },
   "required": [

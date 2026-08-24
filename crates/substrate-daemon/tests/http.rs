@@ -61,9 +61,9 @@ impl Harness {
             .oneshot(request)
             .await
             .expect("router response");
-        assert_eq!(response.headers()["x-daemonloom-contract"], CONTRACT_BUNDLE);
+        assert_eq!(response.headers()["x-b10x-contract"], CONTRACT_BUNDLE);
         assert_eq!(
-            response.headers()["x-daemonloom-contract-bundle-sha256"],
+            response.headers()["x-b10x-contract-bundle-sha256"],
             CONTRACT_BUNDLE_SHA256
         );
         let status = response.status();

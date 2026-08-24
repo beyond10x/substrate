@@ -9,10 +9,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [0.2.0] — 2026-08-24
 
-First release from the standalone repository. Substrate was extracted from the daemonloom monorepo
-at [`e01ea676`](https://github.com/daemonloom/daemonloom/tree/e01ea676da18fb855814e7621514e0c98fc57c2c)
-with full history on 2026-08-23; everything before the extraction is recorded in the monorepo's own
-ledgers, and the version continues from the manifest it arrived with.
+First release from the standalone repository. Substrate was extracted from the b10x monorepo
+at `e01ea676` with full history on 2026-08-23; everything before the extraction is recorded in the
+monorepo's own ledgers, and the version continues from the manifest it arrived with.
 
 ### Added
 

@@ -1,5 +1,5 @@
 {
-  "$id": "urn:daemonloom:substrate-wire:0.3.0:result:pipe-session-lease-renew",
+  "$id": "urn:b10x:substrate-wire:0.3.0:result:pipe-session-lease-renew",
   "$ref": "../resource.json#/$defs/pipe-session",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "pipe-session-lease-renew operation result"

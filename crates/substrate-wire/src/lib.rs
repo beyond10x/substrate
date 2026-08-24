@@ -1479,7 +1479,7 @@ pub fn canonical_execution_capsule_hash(
     let mut previous: Option<&str> = None;
     let mut found_entrypoint = false;
     let mut framed = Vec::with_capacity(files.len().saturating_mul(160));
-    append_framed(&mut framed, b"daemonloom.execution-capsule.v1")?;
+    append_framed(&mut framed, b"b10x.execution-capsule.v1")?;
     append_framed(&mut framed, entrypoint.as_bytes())?;
     for file in files {
         validate_relative_path(&file.path)?;

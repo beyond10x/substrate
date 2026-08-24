@@ -67,7 +67,7 @@ def schema(title: str, *, schema_id: str | None = None, **values: object) -> dic
         "title": title,
     }
     if schema_id is not None:
-        result["$id"] = f"urn:daemonloom:substrate-wire:0.3.0:{schema_id}"
+        result["$id"] = f"urn:b10x:substrate-wire:0.3.0:{schema_id}"
     result.update(values)
     return result
 
@@ -150,14 +150,14 @@ COMMON = schema(
                         "type": "string",
                     },
                 ],
-                "x-daemonloom-max-decoded-bytes": MAX_FILE_BYTES,
+                "x-b10x-max-decoded-bytes": MAX_FILE_BYTES,
             },
             "relative-path": {
                 "maxLength": 4096,
                 "minLength": 1,
                 "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\u0000).+$",
                 "type": "string",
-                "x-daemonloom-max-depth": 64,
+                "x-b10x-max-depth": 64,
             },
             "labels": {
                 "additionalProperties": {"maxLength": 256, "type": "string"},
@@ -918,7 +918,7 @@ pipe_session_attach_result = add_result(
     closed_object(
         {
             "frame_schema": {"const": "schemas/pipe-channel-frame.json"},
-            "protocol": {"const": "daemonloom.substrate-pipe.v1"},
+            "protocol": {"const": "b10x.substrate-pipe.v1"},
             "single_attachment": {"const": True},
         },
         ["protocol", "frame_schema", "single_attachment"],
@@ -966,7 +966,7 @@ event_stream_result = add_result(
             "channel_frames": {"const": "schemas/event-stream-frame.json"},
             "max_catch_up_pages": {"const": 16},
             "max_pending_frames": {"const": 64},
-            "protocol": {"const": "daemonloom.substrate-events.v1"},
+            "protocol": {"const": "b10x.substrate-events.v1"},
             "recovery": {"const": "pull-from-last-cursor"},
             "wake_delivery": {"const": "coalesced-state-notification"},
         },
@@ -1129,7 +1129,7 @@ OPERATION_REGISTRY = {
         }
         for operation_id, method, path, scope, risk, idempotency, effects, exposure, input_schema, result_schema, input_binding, predicates in ROUTES
     ],
-    "registry_format": "daemonloom.substrate-operation-registry.v1",
+    "registry_format": "b10x.substrate-operation-registry.v1",
 }
 
 
@@ -1190,7 +1190,7 @@ OPERATION_REGISTRY_SCHEMA = schema(
                 "minItems": 19,
                 "type": "array",
             },
-            "registry_format": {"const": "daemonloom.substrate-operation-registry.v1"},
+            "registry_format": {"const": "b10x.substrate-operation-registry.v1"},
         },
         ["$schema", "registry_format", "api_major", "operations"],
     ),
@@ -1472,7 +1472,7 @@ HASH_FIXTURES = {
     "$schema": "../schemas/hash-fixtures.json",
     "algorithm": "sha256",
     "cases": HASH_CASES,
-    "format": "daemonloom.substrate-canonical-hash-fixtures.v2",
+    "format": "b10x.substrate-canonical-hash-fixtures.v2",
 }
 
 HASH_SCHEMA = schema(
@@ -1552,7 +1552,7 @@ HASH_SCHEMA = schema(
                 "minItems": 11,
                 "type": "array",
             },
-            "format": {"const": "daemonloom.substrate-canonical-hash-fixtures.v2"},
+            "format": {"const": "b10x.substrate-canonical-hash-fixtures.v2"},
         },
         ["$schema", "format", "algorithm", "cases"],
     ),
@@ -1575,7 +1575,7 @@ HASHING = {
         "fallback_prefix": "rejected-number-json:",
         "fallback_structure": "utf16-key-order-json-with-serde-json-number-text",
         "fallback_use": "schema-rejected-number-only",
-        "origin": "daemonloom-repository-authored",
+        "origin": "b10x-repository-authored",
     },
     "canonical_query": {
         "invalid": "malformed-raw-nul-lowercase-hex",
@@ -1585,7 +1585,7 @@ HASHING = {
     },
     "excluded": ["operation", "request_id", "headers", "authorization", "bearer", "subject", "principal", "deployment"],
     "fixtures": "fixtures/canonical-hash.json",
-    "format": "daemonloom.substrate-request-hash.v2",
+    "format": "b10x.substrate-request-hash.v2",
     "ledger_key": ["deployment", "subject", "operation"],
     "tuple": {
         "encoding": "concatenated-u32be-length-prefixed-fields",
@@ -2803,7 +2803,7 @@ def evidence_for(requirement: str) -> list[dict[str, str]]:
 
 COVERAGE = {
     "$schema": "schemas/coverage.json",
-    "format": "daemonloom.substrate-conformance-coverage.v1",
+    "format": "b10x.substrate-conformance-coverage.v1",
     "requirements": [
         {
             "evidence": evidence_for(requirement),
@@ -2826,7 +2826,7 @@ COVERAGE_SCHEMA = schema(
     **closed_object(
         {
             "$schema": {"const": "schemas/coverage.json"},
-            "format": {"const": "daemonloom.substrate-conformance-coverage.v1"},
+            "format": {"const": "b10x.substrate-conformance-coverage.v1"},
             "requirements": {
                 "items": closed_object(
                     {
@@ -3123,7 +3123,7 @@ RUNNER = {
         "postconditions": "rfc6901-pointer-plus-declared-scalar-operator",
     },
     "exit_codes": {"0": "pass", "1": "conformance-failure", "2": "invalid-input", "3": "harness-failure"},
-    "format": "daemonloom.substrate-clean-room-runner.v1",
+    "format": "b10x.substrate-clean-room-runner.v1",
     "invocation": {
         "argv": ["<runner>", "--bundle", "<bundle-dir>", "--vector", "<bundle-relative-vector-path>", "--output", "<runner-result.json>"],
         "network": "disabled-unless-vector-setup-provides-sentinels",
@@ -3156,7 +3156,7 @@ RUNNER_RESULT_SCHEMA = schema(
         {
             "diagnostics": {"items": {"type": "string"}, "type": "array"},
             "expected_match": {"type": "boolean"},
-            "format": {"const": "daemonloom.substrate-runner-result.v1"},
+            "format": {"const": "b10x.substrate-runner-result.v1"},
             "postconditions": {
                 "items": closed_object(
                     {
@@ -3216,7 +3216,7 @@ RUNNER_SCHEMA = schema(
                 {"0": {"const": "pass"}, "1": {"const": "conformance-failure"}, "2": {"const": "invalid-input"}, "3": {"const": "harness-failure"}},
                 ["0", "1", "2", "3"],
             ),
-            "format": {"const": "daemonloom.substrate-clean-room-runner.v1"},
+            "format": {"const": "b10x.substrate-clean-room-runner.v1"},
             "invocation": closed_object(
                 {
                     "argv": {"items": {"type": "string"}, "minItems": 7, "type": "array"},
@@ -3567,7 +3567,7 @@ SCHEMA_FIXTURES_SCHEMA = schema(
     **closed_object(
         {
             "$schema": {"const": "../schemas/schema-fixtures.json"},
-            "format": {"const": "daemonloom.substrate-schema-fixtures.v1"},
+            "format": {"const": "b10x.substrate-schema-fixtures.v1"},
             "invalid": {
                 "items": closed_object(
                     {"id": {"pattern": "^[a-z][a-z0-9-]+$", "type": "string"}, "instance": {}},
@@ -3631,7 +3631,7 @@ UNKNOWN_OPERATION = {
 
 OPERATION_STATE_FIXTURES = {
     "$schema": "../schemas/schema-fixtures.json",
-    "format": "daemonloom.substrate-schema-fixtures.v1",
+    "format": "b10x.substrate-schema-fixtures.v1",
     "invalid": [
         {"id": "accepted-cannot-have-outcome", "instance": {**ACCEPTED_OPERATION, "outcome": {"kind": "success", "result": workspace("ws_invalid")}}},
         {"id": "operation-kind-must-match-result", "instance": {**terminal_operation, "outcome": {"kind": "success", "result": exec_resource()}}},
@@ -3644,7 +3644,7 @@ OPERATION_STATE_FIXTURES = {
 
 RESOURCE_INVARIANT_FIXTURES = {
     "$schema": "../schemas/schema-fixtures.json",
-    "format": "daemonloom.substrate-schema-fixtures.v1",
+    "format": "b10x.substrate-schema-fixtures.v1",
     "invalid": [
         {"id": "accepted-cannot-claim-applied", "instance": exec_resource(state="accepted", applied_value=applied())},
         {"id": "running-requires-applied", "instance": exec_resource(state="running", applied_value=None)},
@@ -3664,14 +3664,14 @@ RESOURCE_INVARIANT_FIXTURES = {
 
 RUNNER_RESULT_FIXTURES = {
     "$schema": "../schemas/schema-fixtures.json",
-    "format": "daemonloom.substrate-schema-fixtures.v1",
+    "format": "b10x.substrate-schema-fixtures.v1",
     "invalid": [
         {
             "id": "pass-requires-exact-expected-match",
             "instance": {
                 "diagnostics": [],
                 "expected_match": False,
-                "format": "daemonloom.substrate-runner-result.v1",
+                "format": "b10x.substrate-runner-result.v1",
                 "postconditions": [],
                 "status": "pass",
                 "vector_id": "machine-probe-is-observed",
@@ -3682,7 +3682,7 @@ RUNNER_RESULT_FIXTURES = {
             "instance": {
                 "diagnostics": [],
                 "expected_match": True,
-                "format": "daemonloom.substrate-runner-result.v1",
+                "format": "b10x.substrate-runner-result.v1",
                 "postconditions": [
                     {
                         "actual": 1,
@@ -3702,7 +3702,7 @@ RUNNER_RESULT_FIXTURES = {
         {
             "diagnostics": [],
             "expected_match": True,
-            "format": "daemonloom.substrate-runner-result.v1",
+            "format": "b10x.substrate-runner-result.v1",
             "postconditions": [
                 {
                     "actual": 0,
@@ -3718,7 +3718,7 @@ RUNNER_RESULT_FIXTURES = {
         {
             "diagnostics": ["response differed"],
             "expected_match": False,
-            "format": "daemonloom.substrate-runner-result.v1",
+            "format": "b10x.substrate-runner-result.v1",
             "postconditions": [],
             "status": "fail",
             "vector_id": "machine-probe-is-observed",
@@ -3734,7 +3734,7 @@ BUNDLE_SCHEMA = schema(
         {
             "$schema": {"const": "schemas/bundle.json"},
             "api_version": {"const": "v1"},
-            "bundle_format": {"const": "daemonloom.contract-bundle.v1"},
+            "bundle_format": {"const": "b10x.contract-bundle.v1"},
             "compatibility": closed_object(
                 {
                     "adds_routes": {"const": 7},
@@ -3783,7 +3783,7 @@ BUNDLE_SCHEMA = schema(
                 ["name", "version", "digest"],
             ),
             "name": {"const": "substrate-wire"},
-            "origin": {"const": "daemonloom"},
+            "origin": {"const": "b10x"},
             "source_base_commit": {"type": "null"},
             "status": {"const": "development"},
             "version": {"const": "0.3.0"},
@@ -3814,7 +3814,7 @@ ORIGIN_INPUT = closed_object(
     {
         "digest": {"oneOf": [{"pattern": "^sha256:[0-9a-f]{64}$", "type": "string"}, {"type": "null"}]},
         "name": {"maxLength": 256, "minLength": 1, "type": "string"},
-        "origin": {"enum": ["daemonloom", "standard"]},
+        "origin": {"enum": ["b10x", "standard"]},
         "release_blocker": {"maxLength": 512, "minLength": 1, "type": "string"},
         "role": {"maxLength": 256, "minLength": 1, "type": "string"},
         "trust": {"enum": ["repo-authored", "public-standard-unpinned", "public-standard-uri"]},
@@ -3826,7 +3826,7 @@ ORIGIN_INPUT = closed_object(
         {
             "if": {"properties": {"trust": {"const": "repo-authored"}}, "required": ["trust"]},
             "then": {
-                "properties": {"origin": {"const": "daemonloom"}},
+                "properties": {"origin": {"const": "b10x"}},
                 "not": {"anyOf": [{"required": ["digest"]}, {"required": ["release_blocker"]}, {"required": ["uri"]}]},
             },
         },
@@ -3855,7 +3855,7 @@ ORIGINS_SCHEMA = schema(
             "$schema": {"const": "schemas/origins.json"},
             "bundle": {"const": "substrate-wire@0.3.0"},
             "inputs": {"items": ORIGIN_INPUT, "minItems": 1, "type": "array"},
-            "origin": {"const": "daemonloom"},
+            "origin": {"const": "b10x"},
         },
         ["$schema", "bundle", "origin", "inputs"],
     ),
@@ -3916,7 +3916,7 @@ HASHING_SCHEMA = schema(
                     "fallback_prefix": {"const": "rejected-number-json:"},
                     "fallback_structure": {"const": "utf16-key-order-json-with-serde-json-number-text"},
                     "fallback_use": {"const": "schema-rejected-number-only"},
-                    "origin": {"const": "daemonloom-repository-authored"},
+                    "origin": {"const": "b10x-repository-authored"},
                 },
                 ["accepted", "fallback_prefix", "fallback_structure", "fallback_use", "origin"],
             ),
@@ -3931,7 +3931,7 @@ HASHING_SCHEMA = schema(
             ),
             "excluded": {"const": ["operation", "request_id", "headers", "authorization", "bearer", "subject", "principal", "deployment"]},
             "fixtures": {"const": "fixtures/canonical-hash.json"},
-            "format": {"const": "daemonloom.substrate-request-hash.v2"},
+            "format": {"const": "b10x.substrate-request-hash.v2"},
             "ledger_key": {"const": ["deployment", "subject", "operation"]},
             "tuple": closed_object(
                 {
@@ -3950,7 +3950,7 @@ ORIGINS = {
     "$schema": "schemas/origins.json",
     "bundle": "substrate-wire@0.3.0",
     "inputs": [
-        {"name": "Daemonloom substrate contract", "origin": "daemonloom", "role": "wire semantics and conformance vectors", "trust": "repo-authored", "version": "0.3.0"},
+        {"name": "B10x substrate contract", "origin": "b10x", "role": "wire semantics and conformance vectors", "trust": "repo-authored", "version": "0.3.0"},
         *[
             {"name": name, "origin": "standard", "role": role, "trust": "public-standard-uri", "uri": uri, "version": version}
             for name, role, uri, version in (
@@ -3965,7 +3965,7 @@ ORIGINS = {
         {"digest": None, "name": "OAuth 2.0 Bearer Token Usage", "origin": "standard", "release_blocker": "pin-approved-source-bytes", "role": "reachable TCP authorization header semantics", "trust": "public-standard-unpinned", "uri": "https://www.rfc-editor.org/rfc/rfc6750.html", "version": "RFC 6750"},
         {"digest": None, "name": "OCI Image Specification", "origin": "standard", "release_blocker": "pin-exact-oci-1.1.1-source", "role": "signed contract-bundle packaging", "trust": "public-standard-unpinned", "uri": "https://github.com/opencontainers/image-spec/tree/v1.1.1", "version": "1.1.1"},
     ],
-    "origin": "daemonloom",
+    "origin": "b10x",
 }
 
 PACKAGING = {
@@ -4069,7 +4069,7 @@ def render() -> None:
     manifest = {
         "$schema": "schemas/bundle.json",
         "api_version": "v1",
-        "bundle_format": "daemonloom.contract-bundle.v1",
+        "bundle_format": "b10x.contract-bundle.v1",
         "files": files,
         "generator": {
             "digest": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
@@ -4077,7 +4077,7 @@ def render() -> None:
         "version": "1",
         },
         "name": "substrate-wire",
-        "origin": "daemonloom",
+        "origin": "b10x",
         "source_base_commit": None,
         "status": "development",
         "version": "0.3.0",

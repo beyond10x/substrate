@@ -37,7 +37,7 @@ def authority_schemas(version: str) -> dict[str, object]:
     )
     bundle_properties: dict[str, object] = {
         "api_version": {"const": "v1"},
-        "bundle_format": {"const": "daemonloom.contract-bundle.v1"},
+        "bundle_format": {"const": "b10x.contract-bundle.v1"},
         "files": {"type": "array", "items": file_entry, "uniqueItems": True},
         "generator": closed(
             {
@@ -47,7 +47,7 @@ def authority_schemas(version: str) -> dict[str, object]:
             }
         ),
         "name": {"const": "substrate-wire"},
-        "origin": {"const": "daemonloom"},
+        "origin": {"const": "b10x"},
         "source_base_commit": {"type": ["null", "string"]},
         "status": {"const": "development"},
         "version": {"const": version},
@@ -116,7 +116,7 @@ def authority_schemas(version: str) -> dict[str, object]:
         {
             "bundle": {"const": f"substrate-wire@{version}"},
             "inputs": {"type": "array", "items": origin_input, "minItems": 1},
-            "origin": {"const": "daemonloom"},
+            "origin": {"const": "b10x"},
         }
     )
     archive = closed(
@@ -161,7 +161,7 @@ def authority_schemas(version: str) -> dict[str, object]:
             "canonical_input": STRING,
             "excluded": STRING_LIST,
             "fixtures": {"const": "fixtures/canonical-hash.json"},
-            "format": {"const": "daemonloom.substrate-request-hash.v1"},
+            "format": {"const": "b10x.substrate-request-hash.v1"},
             "ledger_key": {"const": ["deployment", "subject", "operation"]},
             "tuple": tuple_schema,
         }
@@ -343,7 +343,7 @@ def check_json_authority(
         schema_uri = standards_resource_uris.get(schema_key, "")
         if not schema_uri:
             schema_uri = (
-                f"https://daemonloom.invalid/substrate-wire/{version}/classified/"
+                f"https://b10x.invalid/substrate-wire/{version}/classified/"
                 f"{len(standards_resource_uris)}"
             )
             try:

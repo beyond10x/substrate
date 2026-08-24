@@ -338,7 +338,7 @@ def validate(
                 dt.datetime.fromisoformat(instance.replace("Z", "+00:00"))
             except ValueError:
                 errors.append(f"{location}: invalid date-time")
-        max_depth = contract.get("x-daemonloom-max-depth")
+        max_depth = contract.get("x-b10x-max-depth")
         if isinstance(max_depth, int) and len(instance.split("/")) > max_depth:
             errors.append(f"{location}: path has more than {max_depth} components")
 
@@ -474,9 +474,9 @@ def check_manifest(documents: Documents, failures: list[str]) -> set[str]:
         return set()
     expected_identity = {
         "api_version": "v1",
-        "bundle_format": "daemonloom.contract-bundle.v1",
+        "bundle_format": "b10x.contract-bundle.v1",
         "name": "substrate-wire",
-        "origin": "daemonloom",
+        "origin": "b10x",
         "status": "development",
         "version": "0.1.0",
     }

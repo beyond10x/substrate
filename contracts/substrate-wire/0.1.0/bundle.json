@@ -1,6 +1,6 @@
 {
   "api_version": "v1",
-  "bundle_format": "daemonloom.contract-bundle.v1",
+  "bundle_format": "b10x.contract-bundle.v1",
   "files": [
     {
       "byte_length": 2329,
@@ -693,7 +693,7 @@
     "version": "1"
   },
   "name": "substrate-wire",
-  "origin": "daemonloom",
+  "origin": "b10x",
   "source_base_commit": null,
   "status": "development",
   "version": "0.1.0"

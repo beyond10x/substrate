@@ -21,7 +21,7 @@
     "deployment"
   ],
   "fixtures": "fixtures/canonical-hash.json",
-  "format": "daemonloom.substrate-request-hash.v1",
+  "format": "b10x.substrate-request-hash.v1",
   "ledger_key": [
     "deployment",
     "subject",

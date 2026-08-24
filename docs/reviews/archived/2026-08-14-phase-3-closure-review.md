@@ -128,6 +128,6 @@ continue in the dirty worktree.
     negative JSON tests, exact 0.1 diff, reproducible 0.2 render, portable black-box lane, delegated
     systemd lane, and an independent read-only closure audit.
 39. Correct STATUS/README/plan counts and claims only after bot-authored commit, private push, and
-    remote synchronization. Add repository-local daemonloom-bot wrappers and preserve all repos
+    remote synchronization. Add repository-local b10x-bot wrappers and preserve all repos
     private.
 

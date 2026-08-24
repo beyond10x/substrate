@@ -1,5 +1,5 @@
 {
-  "$id": "urn:daemonloom:substrate-wire:0.4.0:event",
+  "$id": "urn:b10x:substrate-wire:0.4.0:event",
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "description": "Durable subject-scoped transition from the pull/push shared journal.",
   "oneOf": [
