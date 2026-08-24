@@ -23,7 +23,7 @@ set -euo pipefail
 BANNED="$(printf 'daemon%sloom|codewandler' '')"
 root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
 cd "$root"
-hits=$(git grep -inE '${BANNED}' -- \
+hits=$(git grep -inE "$BANNED" -- \
   ':!CHANGELOG.md' ':!contracts' ':!docs/reviews/archived' \
   ':!scripts/check-brand.sh' \
   ':!scripts/as-bot.sh' ':!scripts/bot-token.sh' ':!scripts/bot-gh.sh' \

@@ -18,6 +18,9 @@ run cargo clippy --workspace --all-targets --locked -- -D warnings
 run python3 scripts/check-links.py
 run python3 scripts/check-adrs.py
 run python3 scripts/check-contract-bundle.py
+run python3 scripts/check-contract-bundle-0.2.0.py
+run python3 scripts/check-contract-bundle-0.3.0.py
+run python3 scripts/check-contract-bundle-0.4.0.py
 run python3 scripts/check-runtime-vectors.py
 
 run bash scripts/check-brand.sh

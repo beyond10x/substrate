@@ -27,7 +27,9 @@ OCI packaging, signing, and digest pinning remain separate release work. See
 
 - The Rust workspace has five crates: `substrate-wire`, `substrate-store`, `substrate-host`,
   `substrate-daemon`, and the offline `substrate-contract-check`; the reproducible 0.4.0 successor
-  bundle is the current development contract while all earlier bundle directories remain immutable.
+  bundle is the current development contract while all earlier bundle directories remain immutable,
+  with the single recorded 2026-08-24 exception of the brand rename, which re-rendered every bundle
+  in place (AGENTS.md invariant 6).
   No development bundle becomes a stable owner release without packaging and signing.
 - No Flux package, type, protocol, or checkout is required.
 - The clean-room runner reports its current portable and delegated case inventories in fresh gate

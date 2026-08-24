@@ -29,6 +29,10 @@ pub const MAX_EXECUTION_CAPSULE_BYTES: u64 = 524_288;
 /// than enumerated, and a long list is a request nobody reviewed.
 pub const MAX_READ_ONLY_ROOTS: u32 = 4;
 pub const EXECUTION_CAPSULE_MOUNT: &str = "/runtime";
+/// Hash-domain separator for the capsule manifest. A wire-visible protocol byte string:
+/// `contracts/substrate-wire/0.4.0/hashing.json` const-pins the same value, and
+/// `capsule_manifest_hash_domain_matches_the_contract` binds the two.
+pub const EXECUTION_CAPSULE_HASH_DOMAIN: &str = "b10x.execution-capsule.v1";
 pub const OPERATION_LEDGER_SUBJECT_MAX_ROWS: u64 = 100_000;
 pub const OPERATION_LEDGER_SUBJECT_MAX_BYTES: u64 = 512 * 1024 * 1024;
 pub const OPERATION_LEDGER_GLOBAL_MAX_ROWS: u64 = 1_000_000;
@@ -1479,7 +1483,7 @@ pub fn canonical_execution_capsule_hash(
     let mut previous: Option<&str> = None;
     let mut found_entrypoint = false;
     let mut framed = Vec::with_capacity(files.len().saturating_mul(160));
-    append_framed(&mut framed, b"b10x.execution-capsule.v1")?;
+    append_framed(&mut framed, EXECUTION_CAPSULE_HASH_DOMAIN.as_bytes())?;
     append_framed(&mut framed, entrypoint.as_bytes())?;
     for file in files {
         validate_relative_path(&file.path)?;
@@ -1873,8 +1877,8 @@ mod tests {
         canonical_request_hash_v2, validate_execution_capsule, validate_relative_path,
     };
     use super::{
-        EXECUTION_CAPSULE_MOUNT, MAX_READ_ONLY_ROOTS, ReadOnlyRoot, WireValidationError,
-        validate_read_only_roots,
+        EXECUTION_CAPSULE_HASH_DOMAIN, EXECUTION_CAPSULE_MOUNT, MAX_READ_ONLY_ROOTS, ReadOnlyRoot,
+        WireValidationError, validate_read_only_roots,
     };
     use serde::Deserialize as _;
     use serde_json::Value;
@@ -2128,12 +2132,30 @@ mod tests {
         );
     }
 
+    /// The capsule hash domain is a wire-visible protocol byte string that another party
+    /// reproduces. Nothing else in the suite reads it: every capsule test computes the digest
+    /// and feeds it straight back, so the whole workspace passes with an arbitrary domain.
+    /// This binds the implementation to the contract that publishes it.
+    #[test]
+    fn capsule_manifest_hash_domain_matches_the_contract() {
+        let hashing: serde_json::Value = serde_json::from_slice(include_bytes!(
+            "../../../contracts/substrate-wire/0.4.0/hashing.json"
+        ))
+        .expect("hashing authority JSON");
+        assert_eq!(
+            hashing["capsule_manifest"]["domain"]
+                .as_str()
+                .expect("declared capsule manifest hash domain"),
+            EXECUTION_CAPSULE_HASH_DOMAIN
+        );
+    }
+
     #[test]
     fn successor_bundle_manifest_has_reviewed_digest() {
         let bytes = include_bytes!("../../../contracts/substrate-wire/0.4.0/bundle.json");
         assert_eq!(
             hex::encode(Sha256::digest(bytes)),
-            "05f28dcbbc32561eb0873b172df634cd07abcfaa778883cc708758fb40d3c1ac"
+            "002337bd011a0b68f8680cc157ee4d0424d49392c36a0f85e5fa0449ea4ea0da"
         );
     }
 

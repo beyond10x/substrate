@@ -2,7 +2,7 @@
 
 pub const CONTRACT_BUNDLE: &str = "substrate-wire/0.4.0";
 pub const CONTRACT_BUNDLE_SHA256: &str =
-    "05f28dcbbc32561eb0873b172df634cd07abcfaa778883cc708758fb40d3c1ac";
+    "002337bd011a0b68f8680cc157ee4d0424d49392c36a0f85e5fa0449ea4ea0da";
 
 const BODY_LIMIT: usize = 2_097_152;
 const WORKSPACE_LOCK_STRIPES: usize = 256;

@@ -606,3 +606,25 @@ async fn strict_limits_and_path_escape_are_typed_before_dispatch() {
     assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(limit["error"]["code"], "request.body-limit");
 }
+
+/// The daemon advertises `x-b10x-contract-bundle-sha256` on every response. That header is a
+/// claim about bytes on disk, so it is pinned to the bytes and not to itself: asserting the
+/// header equals the constant only proves the router copied the constant.
+#[test]
+fn advertised_contract_bundle_digest_matches_the_named_bundle() {
+    use sha2::{Digest, Sha256};
+
+    let bundle = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("contracts")
+        .join(CONTRACT_BUNDLE)
+        .join("bundle.json");
+    let bytes = std::fs::read(&bundle).expect("contract bundle manifest bytes");
+    let actual = format!("{:x}", Sha256::digest(&bytes));
+    assert_eq!(
+        actual,
+        CONTRACT_BUNDLE_SHA256,
+        "CONTRACT_BUNDLE_SHA256 does not match {}",
+        bundle.display()
+    );
+}

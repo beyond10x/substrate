@@ -36,6 +36,11 @@ Each is a claim that can be checked. Breaking one is a design change, not a refa
    `contracts/substrate-wire/0.2.0/README.md:13`). A wire change **adds a successor bundle**; it
    never rewrites bytes in a released one. The compatibility block of a successor states its
    predecessor and its exact `adds_routes`/`preserves_routes` counts, and the checker pins them.
+   **One recorded exception, 2026-08-24:** the brand rename rewrote every frozen bundle in place,
+   because the former brand name is in their bytes and no successor bundle can remove it from
+   them. It was an identifier rename with no semantic wire change, and each bundle was
+   re-rendered by its own renderer rather than hand-edited, so each remains a reproducible fixed
+   point. Immutability applies again from that commit forward; a second such rewrite needs an ADR.
 7. **Every created JSON authority has exactly one schema classification and validates in the gate.**
    Unclassified JSON **fails closed**. Every JSON Schema validates offline against its declared Draft
    2020-12 meta-schema with the pinned standards validator. Immutable historical bundle bytes are

@@ -283,6 +283,16 @@ def check_json_authority(
     # 0.1 is immutable and predates bundled schemas for its five fixed root
     # authorities.  Development 0.2 has no exception: every JSON instance,
     # including the bundle manifest, declares one schema under schemas/.
+    #
+    # Immutability exception, 2026-08-24.  The brand rename rewrote the frozen
+    # bundles 0.1.0, 0.2.0 and 0.3.0 in place: the former brand name appears in
+    # their bytes, and removing it from the repository is what the rename is.
+    # No successor bundle can undo that -- cutting a 0.5.0 would add a bundle
+    # while leaving three rewritten frozen ones unrecorded -- so the rewrite is
+    # recorded here instead of hidden.  This is a one-time identifier rename
+    # with no semantic wire change: every bundle was re-rendered by its own
+    # renderer, so each remains a reproducible fixed point of that renderer.
+    # Immutability applies again from this commit forward.
     embedded = authority_schemas(version) if version == "0.1.0" else {}
     count = 0
     standards_records: list[dict[str, object]] = []
