@@ -2110,6 +2110,9 @@ version = "0.2.2"
 dependencies = [
  "anyhow",
  "clap",
+ "hex",
+ "serde_json",
+ "sha2",
  "tempfile",
 ]
 

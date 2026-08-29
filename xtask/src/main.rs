@@ -8,6 +8,7 @@
 
 mod adrs;
 mod links;
+mod package;
 mod repo;
 mod report;
 mod toolchain;
@@ -41,6 +42,9 @@ enum Command {
     /// Validate ADR identity, frontmatter, index agreement, and supersession links.
     #[command(name = "check-adrs")]
     Adrs,
+    /// Package a released contract bundle as a deterministic OCI image layout.
+    #[command(name = "package-bundle")]
+    PackageBundle(package::Args),
 }
 
 fn main() -> ExitCode {
@@ -65,6 +69,7 @@ fn dispatch() -> Result<ExitCode> {
         }
         Command::Links => links::check(&repo::root()?)?,
         Command::Adrs => adrs::check(&repo::root()?)?,
+        Command::PackageBundle(args) => return package::run(&args),
     };
     Ok(report.emit())
 }
