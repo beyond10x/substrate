@@ -2,7 +2,7 @@
 format: aep.planning-md/1
 id: story:ci-runs-the-full-gate
 kind: story
-status: active
+status: implemented
 title: CI runs the full gate on every push and pull request
 summary: Only pages.yml exists under .github/workflows/; nothing runs scripts/gate.sh on a push or PR.
 owner: substrate
@@ -10,7 +10,7 @@ tags:
 - ci
 relations:
 - decomposes: epic:release-hardening
-revision: 5
+revision: 7
 ---
 # Story: CI runs the full gate on every push and pull request
 
@@ -74,3 +74,21 @@ one-line "to try" for the operator after the first green run.
      `cargo fmt --all --check`, triggers no clippy lint) → commit, push, open a PR → expect red.
   2. `cargo fmt --all` → commit, push → expect green; record both run URLs here.
   3. After the first green run: branch protection on `main` requiring the `Full gate` check.
+
+## Implemented — 2026-08-29
+
+- First `push` run on `main` (`ec82213`): **success** —
+  https://github.com/beyond10x/substrate/actions/runs/33275398365 (`Full gate: success`).
+- Red-then-green on pull request #1 (`ci-gate-smoke`, an isolated worktree):
+  `ef70548` two trailing blank lines in `crates/substrate-wire/src/lib.rs` → **failure** in step
+  "Run the full gate" — https://github.com/beyond10x/substrate/actions/runs/33275756585;
+  `3f83afc` `cargo fmt --all` → **success** —
+  https://github.com/beyond10x/substrate/actions/runs/33275839665. PR closed unmerged, branch
+  deleted.
+- Delegated lane on the hosted runner: reported **absent** (decision taken: stays a local
+  pre-release step).
+- Branch protection on `main` (2026-08-29, `gh api PUT …/branches/main/protection`): required
+  check `Full gate`, `strict=false`, `enforce_admins=true`, no review requirement, force-push and
+  deletion off. Classic protection does not restrict tags; `0.2.2` verified still resolvable.
+  Consequence: every landing on `main` needs the check green on the exact commit — push the sha
+  to a branch first, or open a PR.
