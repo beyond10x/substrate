@@ -39,7 +39,7 @@ and a daemon that cannot prove an aperture publishes no aperture.
 | The request word exists — `NetworkMode::{None, Aperture}` — but the **applied** word does not: `AppliedNetwork` has one variant | `crates/substrate-wire/src/lib.rs:595-599`, `:657-660` |
 | 0.4.0 pins applied network to `"network": {"const": "none"}` in both branches | `contracts/substrate-wire/0.4.0/schemas/resource.json`, `$defs/confinement-applied` |
 | The refusal is a frozen vector covering `security.no-egress`, with postconditions `/probes/network_was_weakened == false` and `dispatch_count == 0` | `contracts/substrate-wire/0.4.0/vectors/http/egress-unserved.json` |
-| The only **executed** no-egress proof is one confined `socket.create_connection(('1.1.1.1',53),1)` asserted to exit non-zero | `scripts/check-runtime-vectors.py:348-367` |
+| The only **executed** no-egress proof is one confined `socket.create_connection(('1.1.1.1',53),1)` asserted to exit non-zero | `crates/substrate-daemon/tests/runtime_vectors.rs:620-640` |
 | The portable lane proves the typed refusal without confinement | `crates/substrate-daemon/tests/pipe_session.rs:800-824` |
 | A spawn barrier already exists between namespace creation and `exec`: `--block-fd`, released after cgroup attach | `crates/substrate-host/src/process.rs:947-948`, `:398-402` |
 
@@ -157,11 +157,11 @@ request (invariant 5, design 08), so "asked and denied" sits in the ledger besid
 | `aperture-fact-absent-refuses` | http | portable | a snapshot without `exec.egress-apertures` refuses every aperture request |
 | `aperture-destination-in-request-refused` | http | portable | a destination-shaped name is `refused`, not silently treated as unknown |
 | `declared-aperture-is-reachable` | driver | delegated | the model-free fake app-server on a loopback endpoint inside the aperture; exit 0 and bytes read |
-| `undeclared-destination-is-unreachable` | driver | delegated | a second listener outside the aperture, same run: non-zero exit, in the shape of `scripts/check-runtime-vectors.py:348-367` |
+| `undeclared-destination-is-unreachable` | driver | delegated | a second listener outside the aperture, same run: non-zero exit, in the shape of `crates/substrate-daemon/tests/runtime_vectors.rs:620-640` |
 | `applied-aperture-is-observed` | http | delegated | `applied.network.name` equals the declared name in both the exec record and `exec.exited` |
 
 The two delegated vectors are one run with two connects, so "reachable" and "unreachable" are proven
-against the same installed aperture rather than two configurations. `scripts/check-runtime-vectors.py`
+against the same installed aperture rather than two configurations. `crates/substrate-daemon/tests/runtime_vectors.rs`
 grows a `check_confined_apertures` beside `check_confined_execs`, behind the same `--cgroup-root`
 gate. Per § 2, CI proves rows one to four and reports five to seven absent.
 

@@ -11,7 +11,7 @@ tags:
 - rust
 relations:
 - decomposes: epic:release-hardening
-revision: 6
+revision: 7
 ---
 # Story: Anything that runs is Rust — the gate's Python moves to `cargo xtask`
 
@@ -68,6 +68,12 @@ Whether `check-runtime-vectors` becomes an `xtask` verb or an integration test u
 already do). Decides: operator. Default if nobody answers: **integration test** — one fewer
 binary, and the gate already runs `cargo test`.
 
+**Resolved 2026-08-30: integration test.** No existing daemon test spawns the binary — `http.rs:29-34`,
+`websocket.rs:36-38`, `pipe_session.rs` and `contract_vectors.rs` all build `App::new(...)` in
+process — so there was no harness to reuse, but the black-box property survives:
+`env!("CARGO_BIN_EXE_substrate-daemon")` lets a test in that package spawn the shipped binary over
+a Unix socket. Nothing outside the gate invoked the script.
+
 ## Progress — 2026-08-30, steps 1–2
 
 - `xtask/` (bin-only, clap derive; `anyhow`, `clap`, dev `tempfile` — no new crate, `Cargo.lock`
@@ -97,3 +103,27 @@ binary, and the gate already runs `cargo test`.
   (`45 passed; 4 failed`) then green. Both Python files deleted; `gate.sh` drops the packager
   test line (it runs under `cargo test --workspace`); gate 12 steps, passed.
 - Remaining: steps 4–6.
+
+
+## Progress — 2026-08-30, step 4
+
+- `crates/substrate-daemon/tests/runtime_vectors.rs` (1,730 lines, one `#[tokio::test]` mirroring
+  the Python's `main()` in order) replaces `scripts/check-runtime-vectors.py`, which is deleted.
+  Hand-written HTTP/1.1 over `tokio::net::UnixStream` and raw WebSocket frames; the lane switch is
+  `SUBSTRATE_VECTORS_CGROUP_ROOT` where the script took `--cgroup-root`, and an unset value keeps
+  the portable branch asserting `exec.sandbox-unavailable` 501 with the delegated cases absent,
+  never counted (invariant 3).
+- Zero new crates; `Cargo.lock` byte-identical. `nix` gains its test-only `signal` feature
+  (`crates/substrate-daemon/Cargo.toml:48-50`).
+- Differential against the Python before deletion: portable lane both `27 HTTP cases, startup
+  refusal, dual-daemon refusal`; delegated lane both `38 HTTP cases` under
+  `systemd-run --user -p Delegate=yes --scope`; two negative cases (`SUBSTRATE_ALLOW_UID` set,
+  non-delegated cgroup root) fail identically on both. Failing-first:
+  `not implemented: cases 2..27 are not ported yet` → `0 passed; 1 failed`.
+- Two deliberate improvements: the temp dir is forced to 0700 (Rust's `TempDir` is 0777 & ~umask
+  and the daemon refuses it), and the case counts are now asserted (`PORTABLE_CASES=27`,
+  `DELEGATED_CASES=38`) rather than printed.
+- The gate keeps no separate step: `cargo test --workspace --locked` runs it. Gate 11 steps,
+  passed; `cargo test --workspace`: 17 suites, 205 passed, 0 failed.
+- **The gate now runs no Python except the frozen bundles' own renderers and checkers.** Remaining
+  for this story: step 5 (`render-bundle 0.5.0` from `substrate-wire` types) and step 6.

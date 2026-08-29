@@ -13,7 +13,7 @@ tags:
 relations:
 - decomposes: epic:byte-plane-completion
 - depends_on: story:sealed-secret-slots
-revision: 3
+revision: 4
 ---
 # Story: Destination-bound egress apertures are declared, verified and refused by name
 
@@ -73,4 +73,5 @@ a prepared namespace cannot be handed in. The draft recommends (c), a per-run fo
 sandbox netns, owing a `setns` spike on a delegated host before the ADR. `NetworkMode::Aperture`
 already exists and is `unserved` twice (`substrate-wire/src/lib.rs:595-599`,
 `operations.rs:290-300`, `process.rs:810-815`); the only executed no-egress proof today is one
-`connect` to `1.1.1.1:53` (`scripts/check-runtime-vectors.py:348-367`).
+`connect` to `1.1.1.1:53` (`crates/substrate-daemon/tests/runtime_vectors.rs:620-640`, ported from the retired
+`scripts/check-runtime-vectors.py:348-367` on 2026-08-30).

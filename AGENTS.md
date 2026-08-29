@@ -117,8 +117,8 @@ bash scripts/gate.sh
 In order: `cargo test --workspace --locked`, `cargo fmt --all --check`,
 `cargo clippy --workspace --all-targets --locked -- -D warnings`, then `cargo xtask check-links`,
 `cargo xtask check-adrs`, `check-contract-bundle.py`, `check-contract-bundle-0.2.0.py`,
-`-0.3.0.py`, `-0.4.0.py`, `test_contract_json_gate.py`, `check-runtime-vectors.py` and
-`cargo xtask check-toolchain`. Green here is the bar for `main`.
+`-0.3.0.py`, `-0.4.0.py`, `test_contract_json_gate.py` and `cargo xtask check-toolchain`.
+Green here is the bar for `main`.
 The former brand is fenced org-wide by `scripts/check-org-brand.sh` in the **atlas** repo, not here.
 
 **The gate's own checks are `cargo xtask` verbs**, in the `xtask/` workspace member — anything that
@@ -129,6 +129,15 @@ bundles' reproducibility proof (invariant 6), not as tooling.
 **`cargo xtask package-bundle <version> --out <dir>`** packages a released bundle as a
 deterministic OCI image layout. It is not a gate step of its own: its cases run under
 `cargo test --workspace --locked`, the gate's first step.
+
+**The clean-room runtime-vector runner is a gate step of its own no longer, for the same
+reason.** `crates/substrate-daemon/tests/runtime_vectors.rs` spawns the *shipped* binary
+(`env!("CARGO_BIN_EXE_substrate-daemon")`) and drives it over its Unix socket with a
+hand-written HTTP/1.1 and WebSocket client, so it links no implementation and asserts only on
+the wire; `cargo test --workspace --locked` runs it. Its portable lane asserts the named
+refusal `exec.sandbox-unavailable` (501). Its delegated lane runs only when
+`SUBSTRATE_VECTORS_CGROUP_ROOT` names a delegated cgroup v2 subtree the test process is inside;
+unset, those cases are **absent, never reported as passed** (invariant 3).
 
 **The gate verifies every released bundle, not just `0.1.0`.** `scripts/gate.sh:20-23` runs the
 `0.1.0` checker and the `0.2.0`, `0.3.0` and `0.4.0` checkers, so a green gate *is* evidence that
