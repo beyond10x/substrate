@@ -12,7 +12,7 @@ tags:
 - wire
 relations:
 - decomposes: epic:byte-plane-completion
-revision: 2
+revision: 3
 ---
 # Story: Sealed secret slots reach a child only as a memfd descriptor
 
@@ -52,3 +52,12 @@ Evidence that satisfies it, in order:
 ## Out of Scope
 
 Brokered artifact secrets (design 06 decision 4) and destination-bound egress.
+
+## Design draft — 2026-08-30
+
+`docs/design/11-sealed-secret-slots.md` (proposed), with `adr/0012` text ready to accept. Verified
+at runtime, not inferred: bubblewrap 0.11.2 passes an inherited descriptor to the child at the
+same number; a sealed memfd read back inside the sandbox reports `F_GET_SEALS == 0xf` and
+`pwrite → EPERM`. `libc` already exports `memfd_create` and the seal constants — no Cargo change.
+Today's `close_range` (`process.rs:348-377`) would close a slot fd; the draft generalises it to one
+range per gap. Mapping variable `SUBSTRATE_SECRET_SLOTS=name=fd,…`; `MFD_CLOEXEC` mandatory.

@@ -10,7 +10,7 @@ tags:
 - ledger
 - o1
 - trust
-revision: 2
+revision: 3
 ---
 # Story: An operation's ledger row carries the declared grant it ran under
 
@@ -66,3 +66,15 @@ becomes the authorization engine). Hosted identity material (phase 7).
 Whether the delegated context is a signed JWT-shaped token from identity or a sealed blob from
 connectors. Decides: the ADR, with both owners. Default if nobody answers: **identity-signed,
 audience `substrate`**, because atlas O1 already pairs "connectors grants and identity audiences".
+
+## Design draft — 2026-08-30
+
+`docs/design/09-delegated-context-and-grant-attribution.md` (proposed) carries the shape and the
+ADR text ready to accept. Findings that move this story's default: identity issues **opaque**
+tokens and holds no signing key, `kid` or JWKS (`identity/src/lib.rs:1936-1939`, `:2172`), and
+`urn:b10x:substrate` is documented but not issuable (`identity/README.md:144`,
+`identity/src/lib.rs:1920-1922`); connectors **already** issues Ed25519 compact JWS carrying
+`dl_grant`, `sub`, `act` (`connectors/crates/service/src/authority.rs:52-71`) and names the field
+`grant_ref` (`connectors/crates/integration-catalog/src/lib.rs:99-106`). The draft keeps the
+story's default (identity-signed) with that cost stated; the cheaper path is a connectors-signed
+context. Decides: the ADR, with both owners.

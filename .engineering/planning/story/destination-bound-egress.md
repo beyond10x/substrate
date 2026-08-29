@@ -13,7 +13,7 @@ tags:
 relations:
 - decomposes: epic:byte-plane-completion
 - depends_on: story:sealed-secret-slots
-revision: 2
+revision: 3
 ---
 # Story: Destination-bound egress apertures are declared, verified and refused by name
 
@@ -63,3 +63,14 @@ Public ingress, DNS, TLS termination and tunnels (design 05 § 4). Brokered conn
 Enforcement mechanism inside the existing namespace no-egress posture: a veth pair plus nftables
 in the sandbox namespace, or a userspace proxy at a declared descriptor. Decides: the ADR. Default
 if nobody answers: **namespace + nftables**, because it keeps bytes out of the daemon.
+
+## Design draft — 2026-08-30
+
+`docs/design/10-destination-bound-egress.md` (proposed). Finding that overturns this story's
+default: option (a), namespace + nftables, needs root, and the daemon withholds `exec` when it
+runs as root (`crates/substrate-host/src/probe.rs:49-51`); bubblewrap 0.11.2 has no `--netns`, so
+a prepared namespace cannot be handed in. The draft recommends (c), a per-run forwarder inside the
+sandbox netns, owing a `setns` spike on a delegated host before the ADR. `NetworkMode::Aperture`
+already exists and is `unserved` twice (`substrate-wire/src/lib.rs:595-599`,
+`operations.rs:290-300`, `process.rs:810-815`); the only executed no-egress proof today is one
+`connect` to `1.1.1.1:53` (`scripts/check-runtime-vectors.py:348-367`).
