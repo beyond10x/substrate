@@ -150,6 +150,7 @@ separate release work. Do not describe a development bundle as stable.
 | Review gates and implementation slices | `docs/plan/` |
 | Ordered exit criteria | `ROADMAP.md` |
 | Observed progress | `STATUS.md` |
+| The plan — epics and stories, with kinds, statuses and legal moves from the `protocol` CLI | `.engineering/planning/`, validated by `protocol artifact validate` |
 | Archived reviews, retained as immutable review input | `docs/reviews/archived/` |
 | What shipped | `CHANGELOG.md` |
 
@@ -162,7 +163,8 @@ contributor status material, or private source.
 
 **Document placement is a rule, not a habit.** Current architecture goes in `architecture/`;
 sequencing in `ROADMAP.md`; observed progress in `STATUS.md`. `docs/plan/` turns design into gates
-and slices and contains no implementation.
+and slices and contains no implementation. Work items — epics and stories — are planning
+artifacts in `.engineering/planning/`, never a second ledger in prose.
 
 **Links.** Use repository-relative Markdown links for material in this repository and canonical HTTPS
 links only for reachable external sources. Cite material that lives outside this repository **by path
@@ -181,3 +183,32 @@ Automated commits and pushes use the GitHub App via `scripts/as-bot.sh` and `scr
 never a human identity. `scripts/bot-token.sh` mints the token, and **the bot-org default it applies
 at `scripts/bot-token.sh:8` is not the org this repository lives in** — set that variable explicitly
 to `beyond10x` rather than relying on the default.
+
+## Planning artifacts
+
+Plan items are markdown files under `.engineering/planning/<kind>/<slug>.md`: YAML frontmatter the
+`protocol` CLI owns, and a body the agent and operator own. `.engineering/project.yaml` pins the
+governing document tree to one `engineering-protocols` commit; advancing the pin is an explicit
+change to that file. The `engineering-protocols` Claude Code plugin (installed user-scope; skill
+`/engineering-protocols:planning`) carries the full model and store conventions.
+
+Kinds, relations, statuses and legal moves come from validated lifecycle documents. Ask the CLI —
+`protocol artifact kinds`, `relations`, `lifecycle <kind>`, `list`, `board`, `graph` — instead of
+reciting them. Before the first planning-store write of a session, run `protocol artifact list`.
+
+1. **A status changes only through `protocol artifact move`.** Never edit `status:` directly.
+2. **Never edit a planning-store file directly.** `new` creates, `relate` links, `move` moves,
+   `body <id> --from <path|->` writes prose.
+3. **After a batch, run `protocol artifact validate` and relay its output verbatim.**
+4. **A refusal is an answer.** Relay the legal moves the CLI names; do not route around it.
+5. **An already-satisfied or wrong request still gets an artifact** recording the finding.
+
+New artifacts start in the lifecycle's initial state. Lifecycle moves are claims about project
+state: propose them and wait for the operator unless the operator asked for the specific move.
+`protocol` must be on `PATH` (`cargo install --path crates/protocol-cli` in an
+`engineering-protocols` checkout); if it is absent, do not improvise machine-owned frontmatter.
+
+A story that changes a contract or a capability still owes its ADR or design document **before
+code** (invariant 8); the story body names which. `ROADMAP.md` keeps the phase order and
+`STATUS.md` the observed state; the store holds the work items and their status, and nothing else
+restates it.

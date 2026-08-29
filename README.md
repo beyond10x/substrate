@@ -155,6 +155,7 @@ runtime dependency. The current daemon serves only `source: "empty"` and returns
 | [`architecture/`](architecture/) | the accepted system boundary and dependency direction |
 | [`docs/design/`](docs/design/) | wire, driver, lifecycle, security, session and trust design; each document states whether it is accepted or under review |
 | [`docs/plan/`](docs/plan/) | design turned into review gates and implementation slices, without implementation |
+| [`.engineering/planning/`](.engineering/planning/) | the plan: epics and stories as governed artifacts, read with `protocol artifact list` / `board` |
 | [`adr/`](adr/) | accepted component decisions, with YAML frontmatter |
 | [`scripts/`](scripts/) | `gate.sh` and the checks it runs |
 
