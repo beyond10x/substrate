@@ -101,6 +101,8 @@ substrate cannot hand bwrap a prepared namespace; and the daemon withholds `exec
 root (`probe.rs:49-51`), so it cannot hold CAP_NET_ADMIN itself. Option (a) therefore means a
 privileged helper — a new trust boundary this repository does not have.
 
+**Recommendation: (c)** — since confirmed by running it; see [10a: egress mechanism spike](10a-egress-mechanism-spike.md), which also records two silent-failure traps an implementation must avoid.
+
 **Recommendation: (c).** It is the only option that keeps the kernel floor literally intact — the
 sandbox netns still has no interface — while working with a vendor binary that speaks a base URL, and
 it needs no privilege the daemon has refused to hold. The forwarder starts at the existing spawn
@@ -186,7 +188,7 @@ release boundary and is re-pinned, not hot-swapped.
 
 | # | Decision | Owner | DEFAULT if nobody answers |
 |---|---|---|---|
-| 1 | Enforcement mechanism | operator, in the ADR | Run the § 4 spike first. The story's default — namespace + nftables — is **contradicted by evidence**: it needs CAP_NET_ADMIN in the host netns while `probe.rs:49-51` makes root a reason to withhold `exec`. If the spike passes, serve (c); if it fails, (a) with a separately identified privileged helper and its own ADR. |
+| 1 | Enforcement mechanism | operator, in the ADR | **Settled: (c).** The § 4 spike ran and passed — see [10a](10a-egress-mechanism-spike.md). Option (a) is refuted on this host by real output: `ip link add veth` and `RTM_SETLINK(IFLA_NET_NS_FD)` both return EPERM at uid 1000. |
 | 2 | DNS inside the aperture | operator | Outside. Resolve at declaration, pin the address, give the sandbox no resolver. If a named destination is required for TLS, bind a generated read-only `/etc/hosts` with exactly the declared mapping — the sandbox has no `/etc` today. |
 | 3 | Protocol set | this design | `tcp` only. |
 | 4 | Re-resolution mid-run | this design | Pinned for the run's lifetime. A re-resolve is a later decision with its own vectors. |
@@ -195,9 +197,9 @@ release boundary and is re-pinned, not hot-swapped.
 
 ## 10. Proposed ADR
 
-Ready to accept at the next free number — 0011 at HEAD — as
-`adr/00NN-egress-apertures-are-declared-by-the-operator.md` plus its `adr/README.md` row, which the
-ADR check requires. Not created by this document.
+Accepted on 2026-08-29 as [ADR 0013](../../adr/0013-egress-apertures-are-declared-by-the-operator.md),
+with its `adr/README.md` row. The block below is what was extracted, kept here as the record of what
+this document proposed.
 
 ```markdown
 ---
