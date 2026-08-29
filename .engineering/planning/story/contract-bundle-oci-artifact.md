@@ -12,7 +12,7 @@ tags:
 relations:
 - decomposes: epic:release-hardening
 - depends_on: story:signed-daemon-image
-revision: 5
+revision: 6
 ---
 # Story: The 0.4.0 contract bundle is a signed, digest-pinned OCI artifact
 
@@ -64,8 +64,15 @@ Evidence that satisfies it:
   `contracts/substrate-wire/0.4.0` byte for byte.
 - `check-contract-bundle-0.4.0.py` → exit 0; `git status contracts/` → clean (invariant 6).
 - Wired into the gate at `scripts/gate.sh:24`.
-- Noted gap: `packaging.json` declares a `posix-tar` source archive; this layout is
-  file-per-layer. Same bytes, per-file digests exposed; the release story decides whether the
-  tar form is also wanted.
+- The `posix-tar` archive `packaging.json` declares is now the last layer (media type
+  `application/vnd.b10x.substrate-wire.bundle.tar`, title `0.4.0.tar`): ustar, directory entries
+  0755 ahead of files 0644, uid/gid 0, empty names, bytewise order, every mtime =
+  `SOURCE_DATE_EPOCH` = author seconds of the last commit touching the bundle (`1787605082`,
+  commit `4b5d411`; `--source-date-epoch` overrides, absent both → exit 2). Per-file layers and the
+  config are byte-identical to before; the manifest digest moves by design to
+  `sha256:3758e80bc39f1eb03b15c69410608c9ef1d2ba8095c7e707c6988dbb5894ab00`
+  (archive `sha256:91fb5524…`, 880,640 bytes). 21 tests; `tar -xf` of the blob reproduces
+  `contracts/substrate-wire/0.4.0` byte for byte. On a shallow CI checkout the epoch would be the
+  tip's author time — pin `--source-date-epoch` there.
 - **Open:** the publish/sign half — `release.yml`, `ghcr.io/beyond10x/b10x-substrate-wire`,
   cosign, digest in `CHANGELOG.md` — waits on `story:signed-daemon-image`.
