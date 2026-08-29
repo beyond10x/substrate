@@ -9,7 +9,7 @@ owner: substrate
 tags:
 - phase-4
 - wire
-revision: 2
+revision: 3
 ---
 # Epic: Byte-plane completion
 
@@ -36,13 +36,15 @@ under invariant 8 with an ADR each and no new design document:
 
 ## Scope
 
-Three stories, each an ADR, a successor bundle, host/daemon work and delegated-lane evidence — in
+Four stories, each an ADR, a successor bundle, host/daemon work and delegated-lane evidence — in
 that order, which is the order invariant 8 requires:
 
 1. `story:pty-sessions` — smallest, wholly local, exercises the successor-bundle path again.
 2. `story:sealed-secret-slots` — the capability design 05 § *Progress* names as the reason a live
    vendor harness is refused.
-3. `story:network-session-authority` — the last exit criterion.
+3. `story:destination-bound-egress` — the other half of the vendor-harness pair; secrets without
+   egress unlock nothing (added by the 2026-08-29 review against atlas).
+4. `story:network-session-authority` — the last exit criterion, and the one with no consumer named.
 
 Every story adds to a successor of `0.4.0`; no frozen byte changes (invariant 6). In sequence: PTY
 is `0.5.0`, slots `0.6.0`, network authority `0.7.0`; two landing together share a bundle and the
@@ -52,9 +54,8 @@ capability document omits the fact (invariants 3, 4). Nothing here opens a secon
 
 ## Out of Scope
 
-Reconnect (design 05 defines it as "a fresh authority", so it falls out of the network story),
-destination-bound egress (needs the operator-authority model design 04 § 6 only sketches), and the
-hosted trust-envelope verifier (design 06 § 1, phase 7).
+Reconnect (design 05 defines it as "a fresh authority", so it falls out of the network story), and
+the hosted trust-envelope verifier (design 06 § 1, phase 7).
 
 ## Risks
 

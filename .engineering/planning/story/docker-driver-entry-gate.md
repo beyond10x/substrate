@@ -15,36 +15,34 @@ relations:
 - depends_on: story:pty-sessions
 - depends_on: story:sealed-secret-slots
 - depends_on: story:network-session-authority
-revision: 2
+revision: 3
 ---
 # Story: The Docker driver entry gate is proven before any Docker code
 
 ## Outcome
 
-Plan 03's three unchecked entry criteria are proven mechanically, so a second driver tests the
-contract instead of the contract bending around it.
+Plan 03's remaining entry criteria are proven mechanically, so a second driver tests the contract
+instead of the contract bending around it. Plan 03 moves from *deferred* to *active* and
+`ROADMAP.md` phase 5 to *in progress* in the same change.
 
 ## Context
 
-`docs/plan/03-container-driver.md` § *Entry criteria* names four; the first (host conformance)
-is met per `STATUS.md`. The others are unchecked claims: driver ports contain no host library
-types; capability predicates and applied-enforcement observations are stable; the security design
-states which Docker authorities are root-equivalent. `ROADMAP.md` forbids starting phase 5 while
-a phase-4 exit criterion is open, so this story depends on the three byte-plane stories and stays
-`draft` until they are implemented.
+`docs/plan/03-container-driver.md` § *Entry criteria* names four. The first (host conformance) is
+met per `STATUS.md`; the second is `story:driver-port-carries-no-host-types`, split out on
+2026-08-29 because it does not wait for phase 4. This story keeps the two that do: a
+driver-parameterised conformance journey, and the security-design section naming root-equivalent
+Docker authorities — both of which shape the Docker driver itself, which `ROADMAP.md` holds
+behind phase 4's exit.
 
 ## Acceptance
 
-A structural test fails on the first `substrate-host` type crossing the driver port, the host
-driver passes the workspace/exec conformance journey through a driver-parameterised harness, and
-design 04 names root-equivalent Docker authorities — landed in the change that moves plan 03 to
-*active* and `ROADMAP.md` phase 5 to *in progress*.
+The host driver passes the workspace/exec conformance journey through a harness that takes the
+driver as a parameter, design 04 names root-equivalent Docker authorities, and plan 03 and
+`ROADMAP.md` phase 5 change together — not before phase 4 reads *complete*.
 
 Evidence that satisfies it:
 
-- `driver_port_has_no_host_types` in `crates/substrate-daemon` (only `substrate-wire` types cross);
 - the conformance harness takes the driver as a parameter and the host driver passes unchanged;
 - `docs/design/04-security-and-isolation.md` gains the section: daemon socket, `--privileged`,
   host network/PID namespaces, arbitrary bind mounts — visible deployment facts, never defaults;
-- plan 03 status and `ROADMAP.md` phase 5 change in the same commit, and not before phase 4
-  reads *complete*.
+- plan 03 status and `ROADMAP.md` phase 5 change in the same commit.
