@@ -68,7 +68,6 @@ The table is the gate's own order (`scripts/gate.sh`).
 | contract bundle 0.3.0 | `python3 scripts/check-contract-bundle-0.3.0.py` |
 | contract bundle 0.4.0 | `python3 scripts/check-contract-bundle-0.4.0.py` |
 | JSON gate self-test | `python3 scripts/test_contract_json_gate.py` |
-| bundle packager | `python3 scripts/test_package_contract_bundle.py` |
 | runtime vectors | `python3 scripts/check-runtime-vectors.py` |
 | toolchain | `cargo xtask check-toolchain` |
 
@@ -85,6 +84,11 @@ adversarial coverage grows.
 
 `scripts/contract_json_gate.py` fails closed on unclassified or schema-invalid contract JSON and
 meta-validates every Draft 2020-12 schema offline.
+
+`cargo xtask package-bundle <version> --out <dir>` packages a released contract bundle as a
+deterministic OCI image layout — `0.4.0` reproduces manifest
+`sha256:3758e80bc39f1eb03b15c69410608c9ef1d2ba8095c7e707c6988dbb5894ab00`. It reads
+`contracts/` read-only and is not a gate step of its own: its cases run in `cargo test`.
 
 ### Running the daemon
 

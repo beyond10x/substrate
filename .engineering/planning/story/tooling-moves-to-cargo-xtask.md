@@ -11,7 +11,7 @@ tags:
 - rust
 relations:
 - decomposes: epic:release-hardening
-revision: 5
+revision: 6
 ---
 # Story: Anything that runs is Rust — the gate's Python moves to `cargo xtask`
 
@@ -84,3 +84,16 @@ binary, and the gate already runs `cargo test`.
   `cargo test -p xtask --locked`: 28 passed. `bash scripts/gate.sh`: passed, 13 steps.
 - `gate.sh:18,19,27`, `AGENTS.md` § The gate, `README.md` § Build, `STATUS.md` (three links to the
   deleted files) updated. Remaining: steps 3–6 (packager, runtime vectors, `render-bundle 0.5.0`).
+
+## Progress — 2026-08-30, step 3
+
+- `cargo xtask package-bundle <version> --out <dir> [--force] [--source-date-epoch] [--contracts-root]`
+  (`xtask/src/package.rs`): hand-written ustar headers matching `tarfile.USTAR_FORMAT` byte for
+  byte, `serde_json` pretty output post-escaped to `json.dumps(ensure_ascii=True)`, epoch from
+  `git log -1 --format=%at -- .` or the flag. Differential against the Python on 0.4.0 before
+  deletion: identical stdout (`sha256:3758e80b…`, archive `sha256:91fb5524…`, 880,640 bytes),
+  `diff -r` empty, modes identical, eleven refusal cases with identical exit code and text.
+- 21 packager tests ported (49 in the crate); failing-first on a timestamp-embedding stub
+  (`45 passed; 4 failed`) then green. Both Python files deleted; `gate.sh` drops the packager
+  test line (it runs under `cargo test --workspace`); gate 12 steps, passed.
+- Remaining: steps 4–6.
