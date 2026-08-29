@@ -15,8 +15,8 @@ run() {
 run cargo test --workspace --locked
 run cargo fmt --all --check
 run cargo clippy --workspace --all-targets --locked -- -D warnings
-run python3 scripts/check-links.py
-run python3 scripts/check-adrs.py
+run cargo xtask check-links
+run cargo xtask check-adrs
 run python3 scripts/check-contract-bundle.py
 run python3 scripts/check-contract-bundle-0.2.0.py
 run python3 scripts/check-contract-bundle-0.3.0.py
@@ -24,7 +24,7 @@ run python3 scripts/check-contract-bundle-0.4.0.py
 run python3 scripts/test_contract_json_gate.py
 run python3 scripts/test_package_contract_bundle.py
 run python3 scripts/check-runtime-vectors.py
-run python3 scripts/check-toolchain.py
+run cargo xtask check-toolchain
 
 
 printf 'gate: passed\n'

@@ -2,7 +2,7 @@
 format: aep.planning-md/1
 id: story:tooling-moves-to-cargo-xtask
 kind: story
-status: draft
+status: active
 title: 'Anything that runs is Rust: the gate''s Python moves to cargo xtask'
 summary: 'atlas AGENTS.md section Language: gates, checkers, renderers and packagers are Rust. 23,916 lines of Python beside 30,768 of Rust; the four frozen bundle renderers stay as reproducibility proofs, everything else moves, and 0.5.0 is rendered from substrate-wire types.'
 owner: substrate
@@ -11,7 +11,7 @@ tags:
 - rust
 relations:
 - decomposes: epic:release-hardening
-revision: 2
+revision: 5
 ---
 # Story: Anything that runs is Rust — the gate's Python moves to `cargo xtask`
 
@@ -67,3 +67,20 @@ Whether `check-runtime-vectors` becomes an `xtask` verb or an integration test u
 `crates/substrate-daemon/tests/` (it drives a real daemon over a socket, which the daemon's tests
 already do). Decides: operator. Default if nobody answers: **integration test** — one fewer
 binary, and the gate already runs `cargo test`.
+
+## Progress — 2026-08-30, steps 1–2
+
+- `xtask/` (bin-only, clap derive; `anyhow`, `clap`, dev `tempfile` — no new crate, `Cargo.lock`
+  +9 lines, zero version bumps); `.cargo/config.toml` alias `cargo xtask`.
+- `check-toolchain --root`, `check-links`, `check-adrs` ported; the three Python files deleted in
+  the same change. Differential runs against the Python before deletion: check-links 19 cases +
+  whole repo byte-identical stdout/stderr; check-adrs 11 mutations of `adr/` 11/11 identical;
+  check-toolchain 12 mutations 12/12 identical. Two deliberate differences: the predecessor
+  monorepo escape hatch in check-links is gone (no ancestor has `scripts/check-monorepo.sh`), and
+  `[x](   )` is skipped where the Python raised `IndexError` (`check-links.py:33`).
+- Repo root at runtime is the nearest ancestor whose `Cargo.toml` has `[workspace]`
+  (`xtask/src/repo.rs`), not the binary's compile-time path.
+- Tests written failing-first (`2 passed; 26 failed` on `unimplemented!()` stubs) →
+  `cargo test -p xtask --locked`: 28 passed. `bash scripts/gate.sh`: passed, 13 steps.
+- `gate.sh:18,19,27`, `AGENTS.md` § The gate, `README.md` § Build, `STATUS.md` (three links to the
+  deleted files) updated. Remaining: steps 3–6 (packager, runtime vectors, `render-bundle 0.5.0`).

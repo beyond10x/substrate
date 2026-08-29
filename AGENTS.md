@@ -115,10 +115,16 @@ bash scripts/gate.sh
 ```
 
 In order: `cargo test --workspace --locked`, `cargo fmt --all --check`,
-`cargo clippy --workspace --all-targets --locked -- -D warnings`, then `check-links.py`,
-`check-adrs.py`, `check-contract-bundle.py`, `check-contract-bundle-0.2.0.py`, `-0.3.0.py`,
-`-0.4.0.py`, `test_contract_json_gate.py`, `test_package_contract_bundle.py`, `check-runtime-vectors.py` and `check-toolchain.py`. Green here is the bar for `main`.
+`cargo clippy --workspace --all-targets --locked -- -D warnings`, then `cargo xtask check-links`,
+`cargo xtask check-adrs`, `check-contract-bundle.py`, `check-contract-bundle-0.2.0.py`,
+`-0.3.0.py`, `-0.4.0.py`, `test_contract_json_gate.py`, `test_package_contract_bundle.py`,
+`check-runtime-vectors.py` and `cargo xtask check-toolchain`. Green here is the bar for `main`.
 The former brand is fenced org-wide by `scripts/check-org-brand.sh` in the **atlas** repo, not here.
+
+**The gate's own checks are `cargo xtask` verbs**, in the `xtask/` workspace member — anything that
+runs in a b10x foundation repository is Rust (`atlas/AGENTS.md` § *Language*) — while the four
+frozen `render-contract-bundle*.py` / `check-contract-bundle*.py` pairs stay Python as the released
+bundles' reproducibility proof (invariant 6), not as tooling.
 
 **The gate verifies every released bundle, not just `0.1.0`.** `scripts/gate.sh:20-23` runs the
 `0.1.0` checker and the `0.2.0`, `0.3.0` and `0.4.0` checkers, so a green gate *is* evidence that
@@ -130,7 +136,7 @@ from the next commit onward.
 `.github/workflows/gate.yml` runs the same `bash scripts/gate.sh` on push and pull request. The
 toolchain is pinned by `rust-toolchain.toml`, not by whatever `stable` is that day: bumping it is
 **one commit** that moves `rust-toolchain.toml`, the `rust-version` in `Cargo.toml` and the
-`Dockerfile` builder tag together, and `scripts/check-toolchain.py` fails the gate when the three
+`Dockerfile` builder tag together, and `cargo xtask check-toolchain` fails the gate when the three
 disagree. Read the gate's own exit status, never a pipeline's (`gate.sh 2>&1 | tail` reports
 `tail`'s status, not the gate's).
 
@@ -175,7 +181,7 @@ artifacts in `.engineering/planning/`, never a second ledger in prose.
 **Links.** Use repository-relative Markdown links for material in this repository and canonical HTTPS
 links only for reachable external sources. Cite material that lives outside this repository **by path
 in inline code**, not by URL into a predecessor repository. Never commit machine-local paths,
-sibling-checkout links, `file://` URLs or editor URIs. `scripts/check-links.py` is the gate.
+sibling-checkout links, `file://` URLs or editor URIs. `cargo xtask check-links` is the gate.
 
 ## Change discipline
 
