@@ -9,6 +9,7 @@
 mod adrs;
 mod links;
 mod package;
+mod render;
 mod repo;
 mod report;
 mod toolchain;
@@ -45,6 +46,9 @@ enum Command {
     /// Package a released contract bundle as a deterministic OCI image layout.
     #[command(name = "package-bundle")]
     PackageBundle(package::Args),
+    /// Render a contract bundle from substrate-wire and its authored source tree.
+    #[command(name = "render-bundle")]
+    RenderBundle(render::Args),
 }
 
 fn main() -> ExitCode {
@@ -70,6 +74,7 @@ fn dispatch() -> Result<ExitCode> {
         Command::Links => links::check(&repo::root()?)?,
         Command::Adrs => adrs::check(&repo::root()?)?,
         Command::PackageBundle(args) => return package::run(&args),
+        Command::RenderBundle(args) => return render::run(&args),
     };
     Ok(report.emit())
 }

@@ -13,6 +13,7 @@ clap.workspace = true
 hex.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
+substrate-wire = { path = "../crates/substrate-wire" }
 
 [dev-dependencies]
 tempfile.workspace = true

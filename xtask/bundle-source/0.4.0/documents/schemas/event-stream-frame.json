@@ -1,0 +1,119 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.4.0:event-stream-frame",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "events"
+        },
+        "page": {
+          "$ref": "results/event-list.json"
+        }
+      },
+      "required": [
+        "kind",
+        "page"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "enum": [
+            "event.stream-backpressure",
+            "event.catch-up-limit"
+          ]
+        },
+        "kind": {
+          "const": "backpressure"
+        },
+        "last_cursor": {
+          "oneOf": [
+            {
+              "$ref": "common.json#/$defs/event-cursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "recovery": {
+          "const": "pull"
+        }
+      },
+      "required": [
+        "kind",
+        "code",
+        "last_cursor",
+        "recovery"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "const": "event.cursor-gap"
+        },
+        "kind": {
+          "const": "gap"
+        },
+        "last_cursor": {
+          "oneOf": [
+            {
+              "$ref": "common.json#/$defs/event-cursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "recovery": {
+          "const": "pull"
+        }
+      },
+      "required": [
+        "kind",
+        "code",
+        "last_cursor",
+        "recovery"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "const": "event.store-failed"
+        },
+        "kind": {
+          "const": "failure"
+        },
+        "last_cursor": {
+          "oneOf": [
+            {
+              "$ref": "common.json#/$defs/event-cursor"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "recovery": {
+          "const": "pull"
+        }
+      },
+      "required": [
+        "kind",
+        "code",
+        "last_cursor",
+        "recovery"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "Bounded phase-3 event WebSocket frame"
+}

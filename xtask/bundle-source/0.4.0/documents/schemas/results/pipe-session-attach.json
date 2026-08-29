@@ -1,0 +1,23 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.4.0:result:pipe-session-attach",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "frame_schema": {
+      "const": "schemas/pipe-channel-frame.json"
+    },
+    "protocol": {
+      "const": "b10x.substrate-pipe.v1"
+    },
+    "single_attachment": {
+      "const": true
+    }
+  },
+  "required": [
+    "protocol",
+    "frame_schema",
+    "single_attachment"
+  ],
+  "title": "pipe-session-attach operation result",
+  "type": "object"
+}

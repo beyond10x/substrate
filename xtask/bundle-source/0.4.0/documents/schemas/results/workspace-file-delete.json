@@ -1,0 +1,31 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.4.0:result:workspace-file-delete",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "absent": {
+      "const": true
+    },
+    "kind": {
+      "const": "file"
+    },
+    "observed_at": {
+      "$ref": "../common.json#/$defs/timestamp"
+    },
+    "path": {
+      "$ref": "../common.json#/$defs/relative-path"
+    },
+    "workspace": {
+      "$ref": "../common.json#/$defs/workspace-id"
+    }
+  },
+  "required": [
+    "kind",
+    "workspace",
+    "path",
+    "absent",
+    "observed_at"
+  ],
+  "title": "workspace-file-delete operation result",
+  "type": "object"
+}
