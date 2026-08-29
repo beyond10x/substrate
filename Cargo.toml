@@ -5,6 +5,7 @@ members = [
     "crates/substrate-host",
     "crates/substrate-daemon",
     "crates/substrate-contract-check",
+    "xtask",
 ]
 resolver = "2"
 

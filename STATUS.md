@@ -16,7 +16,7 @@ repository publishes, signs or digest-pins anything yet.
 
 | Area | State | Next proof |
 |---|---|---|
-| Source | the standalone public repository `beyond10x/substrate` (`git remote -v`), public under atlas ADR 0003 ([CHANGELOG.md](CHANGELOG.md), 0.2.1); the latest annotated tag is `0.2.2`, cut at the `main` commit whose CI gate run concluded `success` | keep the portable-document and credential invariants enforced — [`scripts/check-links.py`](scripts/check-links.py) in the gate, [`scripts/check-secrets.sh`](scripts/check-secrets.sh) before a release |
+| Source | the standalone public repository `beyond10x/substrate` (`git remote -v`), public under atlas ADR 0003 ([CHANGELOG.md](CHANGELOG.md), 0.2.1); the latest annotated tag is `0.2.2`, cut at the `main` commit whose CI gate run concluded `success` | keep the portable-document and credential invariants enforced — `cargo xtask check-links` in the gate, [`scripts/check-secrets.sh`](scripts/check-secrets.sh) before a release |
 | CI | [`.github/workflows/gate.yml`](.github/workflows/gate.yml) runs `bash scripts/gate.sh` bare on push to `main`, on pull request and on dispatch, so the job's status is the gate's own; branch protection on `main` requires the `Full gate` check; the first green run is [33275398365](https://github.com/beyond10x/substrate/actions/runs/33275398365). The delegated lane is **absent** there, never reported as passed: a hosted runner has neither bubblewrap nor a delegated cgroup subtree | either give the delegated lane a runner that has both, or keep it the named local pre-release step it is today |
 | Release | [`Dockerfile`](Dockerfile) builds the daemon and [`scripts/package-contract-bundle.py`](scripts/package-contract-bundle.py) emits a deterministic OCI image layout from a frozen bundle (0.4.0 → manifest `sha256:3758e80bc39f1eb03b15c69410608c9ef1d2ba8095c7e707c6988dbb5894ab00`); **no** workflow builds, publishes, signs or digest-pins either artifact | publish and sign the daemon image (`story:signed-daemon-image`); publish and sign the 0.4.0 bundle layout (`story:contract-bundle-oci-artifact`) |
 | Boundary | accepted: standalone, generic execution data plane, Flux-free ([ADR 0001](adr/0001-substrate-is-standalone-and-flux-free.md)) | enforce ADRs 0001–0006 in dependency and conformance tests |
@@ -78,9 +78,8 @@ trust this page.
   caller, asserted by
   [`crates/substrate-daemon/tests/driver_port.rs`](crates/substrate-daemon/tests/driver_port.rs).
 - The toolchain is pinned, not floating: [`rust-toolchain.toml`](rust-toolchain.toml) declares the
-  channel, and [`scripts/check-toolchain.py`](scripts/check-toolchain.py) fails the gate unless it,
-  the `rust-version` in [`Cargo.toml`](Cargo.toml) and the [`Dockerfile`](Dockerfile) builder tag
-  agree.
+  channel, and `cargo xtask check-toolchain` fails the gate unless it, the `rust-version` in
+  [`Cargo.toml`](Cargo.toml) and the [`Dockerfile`](Dockerfile) builder tag agree.
 - Git, PTY, reconnect, workloads, images, volumes, endpoints, Docker and Kubernetes are absent
   rather than stubbed: `contracts/substrate-wire/0.4.0/operations.json` closes 26 operations and
   none of them is one of those. The development pipe session is the sole phase-4 byte-plane slice,
@@ -98,7 +97,7 @@ python3 scripts/check-contract-bundle-0.2.0.py       # 0.2.0 counts
 python3 scripts/check-contract-bundle-0.3.0.py       # 0.3.0 counts
 python3 scripts/check-contract-bundle-0.4.0.py       # the Wire contract row
 python3 scripts/check-runtime-vectors.py             # the clean-room case inventory
-python3 scripts/check-toolchain.py                   # the pinned channel
+cargo xtask check-toolchain                          # the pinned channel
 python3 scripts/package-contract-bundle.py 0.4.0 --out <dir>   # the OCI manifest digest
 ```
 

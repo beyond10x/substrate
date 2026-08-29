@@ -53,7 +53,7 @@ jobs:
           persist-credentials: false
 
       # The runner ships its own rustup, so no third-party Rust action is used. `rust-toolchain.toml`
-      # is the source of the version when it is present — `scripts/check-toolchain.py` keeps it equal
+      # is the source of the version when it is present — `cargo xtask check-toolchain` keeps it equal
       # to `rust-version` in Cargo.toml and the Dockerfile builder tag, and a bump there must reach
       # CI without editing this file. The literal below is the fallback for a tree without that file,
       # so this step is correct both before and after story:pinned-rust-toolchain lands. rustfmt and

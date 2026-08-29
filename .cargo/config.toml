@@ -1,0 +1,4 @@
+# `cargo xtask <verb>` runs this repository's own gate checks, which are Rust
+# (atlas AGENTS.md, section "Language": anything that runs is Rust).
+[alias]
+xtask = "run --quiet --package xtask --"
