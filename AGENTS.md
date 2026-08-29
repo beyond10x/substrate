@@ -126,9 +126,36 @@ runs in a b10x foundation repository is Rust (`atlas/AGENTS.md` § *Language*) �
 frozen `render-contract-bundle*.py` / `check-contract-bundle*.py` pairs stay Python as the released
 bundles' reproducibility proof (invariant 6), not as tooling.
 
+| verb | what it refuses, or produces | in `gate.sh`? |
+|---|---|---|
+| `check-toolchain [--root <dir>]` | a Rust version the three pinning files disagree on | yes |
+| `check-links` | a machine-local Markdown link, or a repository-relative target that is not there | yes |
+| `check-adrs` | an ADR whose identity, frontmatter, index row or supersession link does not agree | yes |
+| `package-bundle <version> --out <dir>` | produces a released bundle as a deterministic OCI image layout | no — under `cargo test` |
+| `render-bundle <version> --out <dir>` | produces a bundle tree from `substrate-wire` and `xtask/bundle-source/<version>/`; refuses to write anywhere under `contracts/` | no — under `cargo test` |
+
 **`cargo xtask package-bundle <version> --out <dir>`** packages a released bundle as a
 deterministic OCI image layout. It is not a gate step of its own: its cases run under
 `cargo test --workspace --locked`, the gate's first step.
+
+**`cargo xtask render-bundle <version>` is how a successor bundle is cut**, and the only renderer
+for `0.5.0` onward. `xtask/bundle-source/<version>/` holds what a human authored — one file per
+emitted path, plus `routes.json`, `coverage.json`, `hash-cases.json`, `vector-order.json` and
+`executable-vectors.json`; the renderer computes 30 of `0.4.0`'s 200 files whole and splices
+computed values into 14 more. It lives outside `contracts/` because every directory there is a
+released bundle and `scripts/contract_json_gate.py:301` fails closed on JSON beneath one. Rendering
+into `contracts/` is a named refusal, not a warning. A test asserts that rendering `0.4.0` still
+reproduces the frozen tree byte for byte, so the renderer cannot drift away from what shipped.
+
+**Not everything in a bundle is derivable, and the renderer says which parts are not.** No schema
+*shape* comes from the Rust types: `schemars` is not a workspace dependency, and the types are
+already ahead of `0.4.0` — `ExecStartInput::read_only_roots`
+(`crates/substrate-wire/src/lib.rs:761`) has no `0.4.0` schema — while the bounds the schemas state
+are literals in `crates/substrate-daemon/src/app/operations.rs:245-248` and
+`crates/substrate-host/src/process.rs:824-826`, not on the types. What the wire crate does own is
+taken from it: canonical hashing and 22 bounds constants. One derivation is recorded as **lost** at
+`xtask/src/render.rs:19-25` — the three unions in `schemas/vector.json` encode Python dict
+insertion order, which a sorted-key bundle preserves nowhere.
 
 **The clean-room runtime-vector runner is a gate step of its own no longer, for the same
 reason.** `crates/substrate-daemon/tests/runtime_vectors.rs` spawns the *shipped* binary
