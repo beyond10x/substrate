@@ -1,0 +1,6 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.4.0:result:operation-get",
+  "$ref": "../operation.json",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "operation-get operation result"
+}

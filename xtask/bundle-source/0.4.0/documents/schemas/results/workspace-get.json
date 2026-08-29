@@ -1,0 +1,6 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.4.0:result:workspace-get",
+  "$ref": "../resource.json#/$defs/workspace",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "workspace-get operation result"
+}

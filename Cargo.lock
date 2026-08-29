@@ -2113,6 +2113,7 @@ dependencies = [
  "hex",
  "serde_json",
  "sha2",
+ "substrate-wire",
  "tempfile",
 ]
 
