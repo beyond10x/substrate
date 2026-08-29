@@ -21,7 +21,7 @@ repository publishes, signs or digest-pins anything yet.
 | Release | [`Dockerfile`](Dockerfile) builds the daemon and `cargo xtask package-bundle <version> --out <dir>` emits a deterministic OCI image layout from a frozen bundle (0.4.0 → manifest `sha256:3758e80bc39f1eb03b15c69410608c9ef1d2ba8095c7e707c6988dbb5894ab00`); **no** workflow builds, publishes, signs or digest-pins either artifact | publish and sign the daemon image (`story:signed-daemon-image`); publish and sign the 0.4.0 bundle layout (`story:contract-bundle-oci-artifact`) |
 | Boundary | accepted: standalone, generic execution data plane, Flux-free ([ADR 0001](adr/0001-substrate-is-standalone-and-flux-free.md)) | enforce ADRs 0001–0006 in dependency and conformance tests |
 | Wire contract | 0.1.0, 0.2.0 and 0.3.0 remain byte-clean and reproducible; the development bundle 0.4.0 has 199 files, 200 classified JSON documents, 26 closed operations, 21 executable vectors, 71 design vectors, 112 requirements, 11 exact hash fixtures and a reproducible fixed point ([`scripts/check-contract-bundle-0.4.0.py`](scripts/check-contract-bundle-0.4.0.py)) | package, sign and digest-pin a complete runtime closure and a stable release without changing development authority implicitly |
-| Drivers | Linux host driver implemented; absent delegation keeps exec facts absent and answers `exec.sandbox-unavailable` (501, error class `unserved`) rather than degrading, proven by the portable lane of [`scripts/check-runtime-vectors.py`](scripts/check-runtime-vectors.py); the delegated lane runs only when that script is given `--cgroup-root`, which the gate and CI do not do | retain the delegated lane as a pre-release step and add no optimistic facts |
+| Drivers | Linux host driver implemented; absent delegation keeps exec facts absent and answers `exec.sandbox-unavailable` (501, error class `unserved`) rather than degrading, proven by the portable lane of [`crates/substrate-daemon/tests/runtime_vectors.rs`](crates/substrate-daemon/tests/runtime_vectors.rs); the delegated lane runs only when that test is given `SUBSTRATE_VECTORS_CGROUP_ROOT`, which the gate and CI do not do | retain the delegated lane as a pre-release step and add no optimistic facts |
 | Security | `openat2` beneath/no-link/no-mount I/O, atomic replacement, cleared/shaped environment, namespace no-egress, pids/memory+swap plus cumulatively observed CPU cgroup bounds, backend-identity-bound capability snapshots, output draining, timeout, whole-tree kill, exact capsule-byte verification, read-only `/runtime`, separate writable `/workspace`, owner-private durable state, and bounded normal/restart capsule cleanup are enforced; static-bearer TCP is explicitly development-only | implement the accepted short-lived scoped hosted trust-envelope profile and retain the inline capsule proof while defining a signed complete runtime closure separately |
 | Stack integration | trust, session, event, federation, and contract-release seams accepted in umbrella ADRs 0015–0019 | keep later features behind their named phases |
 | Implementation | the phase-4 raw-pipe slice has distinct durable session identity, session-native lifecycle operations, one scoped Unix-WebSocket attachment, atomic terminal/restart projection and verified execution capsules, proven by [`crates/substrate-daemon/tests`](crates/substrate-daemon/tests) — `pipe_session.rs`, `websocket.rs`, `contract_vectors.rs`. The delegated model-free harness lane with correlated hook evidence is a recorded prior observation ([Plan 04](docs/plan/04-direct-byte-plane.md)), not something this repository re-runs in its own gate | retain the raw-pipe and capsule evidence while adding only separately gated PTY, authority and release work |
@@ -41,11 +41,13 @@ trust this page.
 - No Flux package, type or checkout is required: `flux` appears in no
   [`Cargo.lock`](Cargo.lock) package and nowhere under [`crates/`](crates), as
   [ADR 0001](adr/0001-substrate-is-standalone-and-flux-free.md) requires.
-- The clean-room runner [`scripts/check-runtime-vectors.py`](scripts/check-runtime-vectors.py)
-  drives a real daemon over its Unix socket and reports its case inventory in fresh gate output.
-  Its portable lane proves the typed refusal without confinement; its delegated lane, selected by
-  `--cgroup-root`, adds bounded exec, capacity pressure, trapped TERM, output durability, and
-  idle-time whole-cgroup lease expiry.
+- The clean-room runner
+  [`crates/substrate-daemon/tests/runtime_vectors.rs`](crates/substrate-daemon/tests/runtime_vectors.rs)
+  spawns the shipped daemon binary, drives it over its Unix socket and prints its case inventory
+  under `cargo test -- --nocapture`. Its portable lane proves the typed refusal without
+  confinement; its delegated lane, selected by `SUBSTRATE_VECTORS_CGROUP_ROOT`, adds bounded
+  exec, capacity pressure, trapped TERM, output durability, and idle-time whole-cgroup lease
+  expiry.
 - The Rust tests prove provisional dispatch before host mutation, full first-terminal-wins behaviour
   across signal and expiry, exact post-commit event effects, subject-local wake hints,
   restart-to-unknown without redispatch, observed-effect and store-failure recovery, real WebSocket
@@ -96,7 +98,7 @@ python3 scripts/check-contract-bundle.py             # 0.1.0 counts
 python3 scripts/check-contract-bundle-0.2.0.py       # 0.2.0 counts
 python3 scripts/check-contract-bundle-0.3.0.py       # 0.3.0 counts
 python3 scripts/check-contract-bundle-0.4.0.py       # the Wire contract row
-python3 scripts/check-runtime-vectors.py             # the clean-room case inventory
+cargo test --workspace --locked -- --nocapture       # the clean-room case inventory
 cargo xtask check-toolchain                          # the pinned channel
 cargo xtask package-bundle 0.4.0 --out <dir>         # the OCI manifest digest
 ```

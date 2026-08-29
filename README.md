@@ -68,19 +68,25 @@ The table is the gate's own order (`scripts/gate.sh`).
 | contract bundle 0.3.0 | `python3 scripts/check-contract-bundle-0.3.0.py` |
 | contract bundle 0.4.0 | `python3 scripts/check-contract-bundle-0.4.0.py` |
 | JSON gate self-test | `python3 scripts/test_contract_json_gate.py` |
-| runtime vectors | `python3 scripts/check-runtime-vectors.py` |
 | toolchain | `cargo xtask check-toolchain` |
 
 Rust 1.97, edition 2024 — the toolchain is pinned by `rust-toolchain.toml`, and
 `cargo xtask check-toolchain` fails when it, `Cargo.toml`'s `rust-version` and the `Dockerfile`
 builder tag disagree. `.github/workflows/gate.yml` runs the same gate on push and pull request.
 
-`scripts/check-runtime-vectors.py` is an independent Unix-socket HTTP runner — a black-box lane that
-does not link the implementation. Pass `--cgroup-root <delegated-root>`, **while the runner itself
-is inside that delegation**, to add the real no-egress, shaped-environment, pids/memory, timeout,
-truncation and whole-tree cancellation cases. The runner reports its current portable and delegated
-case inventories from each fresh execution; this document deliberately pins no counts that drift as
-adversarial coverage grows.
+`crates/substrate-daemon/tests/runtime_vectors.rs` is the clean-room runner — an independent
+Unix-socket HTTP lane that spawns the shipped `substrate-daemon` binary and asserts only on the
+wire, linking no implementation. It has no gate step of its own because the gate's first step,
+`cargo test --workspace --locked`, runs it. Set `SUBSTRATE_VECTORS_CGROUP_ROOT=<delegated-root>`,
+**while the test process itself is inside that delegation**, to add the real no-egress,
+shaped-environment, pids/memory, timeout, truncation and whole-tree cancellation cases:
+
+```console
+cargo test --workspace --locked -- --nocapture   # the runner prints its case inventory
+```
+
+The runner prints its current portable or delegated case inventory from each fresh execution;
+this document deliberately pins no counts that drift as adversarial coverage grows.
 
 `scripts/contract_json_gate.py` fails closed on unclassified or schema-invalid contract JSON and
 meta-validates every Draft 2020-12 schema offline.

@@ -3,10 +3,11 @@
 # status is the gate's own exit status; it is never piped into `tail`, which would report `tail`'s
 # status instead (AGENTS.md § "The gate").
 #
-# Lanes. The suite has a portable lane and a delegated lane. `scripts/gate.sh` calls
-# `scripts/check-runtime-vectors.py` with no `--cgroup-root`, so that script takes its
-# `cgroup_root is None` branch and asserts the named refusal `exec.sandbox-unavailable` (501)
-# instead of confining anything. The delegated lane needs the runner to sit *inside* a delegated
+# Lanes. The suite has a portable lane and a delegated lane. `scripts/gate.sh` runs the clean-room
+# runner `crates/substrate-daemon/tests/runtime_vectors.rs` inside `cargo test --workspace`, with
+# no `SUBSTRATE_VECTORS_CGROUP_ROOT`, so it takes its portable branch and asserts the named
+# refusal `exec.sandbox-unavailable` (501) instead of confining anything. The delegated lane
+# needs the runner to sit *inside* a delegated
 # cgroup subtree carrying `cpu`/`memory`/`pids`, plus bubblewrap (README.md § "Serving exec"),
 # which a hosted GitHub runner does not provide — the ubuntu-24.04 image README lists no
 # bubblewrap among its installed apt packages, and the step below probes rather than assumes.
@@ -107,7 +108,7 @@ jobs:
           echo "this process cgroup: $(cat /proc/self/cgroup 2>/dev/null || echo '<unreadable>')"
           echo
           echo "== lanes this job will run =="
-          echo "portable lane:  RUNS   — scripts/gate.sh invokes check-runtime-vectors.py with no --cgroup-root"
+          echo "portable lane:  RUNS   — cargo test runs tests/runtime_vectors.rs with no SUBSTRATE_VECTORS_CGROUP_ROOT"
           echo "delegated lane: ABSENT — no delegated cgroup root is passed; the lane is not executed and is not claimed to pass"
 
       # Bare invocation: the job fails with the gate's own exit status. Do not add a pipeline here.

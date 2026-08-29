@@ -22,7 +22,6 @@ run python3 scripts/check-contract-bundle-0.2.0.py
 run python3 scripts/check-contract-bundle-0.3.0.py
 run python3 scripts/check-contract-bundle-0.4.0.py
 run python3 scripts/test_contract_json_gate.py
-run python3 scripts/check-runtime-vectors.py
 run cargo xtask check-toolchain
 
 
