@@ -1295,34 +1295,12 @@ fn split_parent(path: &str) -> Result<(&str, &str), DriverError> {
     }
 }
 
-/// Refuse any workspace root name that is not a single, safely spellable path component.
-///
-/// The `ws_` prefix this used to demand was never the containment. It is the **id scheme**
-/// (`docs/design/01-contract.md` §1, "Identity of resources") and a prefix check stops no
-/// attacker: containment is `workspace_fd` opening the name with `openat2` relative to the
-/// pinned root descriptor under `RESOLVE_BENEATH | RESOLVE_NO_SYMLINKS` and `O_NOFOLLOW`, so
-/// resolution cannot climb out of the root and cannot be redirected by a symlink. All this
-/// function has to carry is the other half of that argument — that the name really is one
-/// component, never `/`, `.` or `..` — because a single component under a pinned descriptor
-/// cannot address anything outside the root whatever it is called.
-///
-/// Dropping the prefix is what lets an operator hand over a directory they already have, say
-/// `harness` or `engineering-protocols`, and have it served as a confined workspace under its
-/// own name. The workspace id then *is* the directory name, so no path-to-id mapping has to be
-/// held anywhere, and there is no second record to drift out of step with the disk.
-/// `create_workspace` keeps minting `ws_…` ids; only adoption of an existing directory is new.
-///
-/// A leading `-` is refused as well: such a name is indistinguishable from an option to any
-/// tool that is ever handed it as an argv element.
 fn validate_root_name(name: &str) -> Result<(), DriverError> {
-    let single_component = !name.is_empty()
-        && name != "."
-        && name != ".."
-        && !name.starts_with('-')
+    if name.starts_with("ws_")
         && name
             .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-');
-    if single_component {
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+    {
         Ok(())
     } else {
         Err(path_escape())
@@ -1467,93 +1445,8 @@ mod tests {
 
     use super::{
         DESTROY_BATCH_ITEMS, GuardedFilesystem, WorkspaceDestroyBatch, openat2,
-        remove_children_batch, validate_root_name,
+        remove_children_batch,
     };
-
-    #[test]
-    fn a_directory_the_operator_already_owns_is_served_under_its_own_name() {
-        // Prevents the regression where only a `ws_`-prefixed directory could be served, so a
-        // harness could never be pointed at a real checkout, only at a renamed scratch copy.
-        validate_root_name("harness").expect("a plain project directory name is a workspace root");
-        let directory = tempdir().expect("tempdir");
-        let filesystem =
-            GuardedFilesystem::open(directory.path(), 1024, 1024, 100).expect("guarded filesystem");
-        if !filesystem.openat2_available() {
-            return;
-        }
-        std::fs::create_dir(directory.path().join("harness")).expect("operator directory");
-        filesystem
-            .observe_workspace("harness")
-            .expect("an adopted directory is observable as a workspace");
-        let observed = filesystem
-            .write_atomic("harness", "harness", "notes.txt", b"adopted")
-            .expect("atomic write inside the adopted root");
-        assert!(observed.atomic_replacement);
-        assert_eq!(
-            std::fs::read_to_string(directory.path().join("harness/notes.txt")).expect("content"),
-            "adopted"
-        );
-    }
-
-    #[test]
-    fn a_hyphenated_project_directory_name_is_a_legal_workspace_root() {
-        // Prevents adoption from working for `harness` and silently failing for every repository
-        // whose own name carries a hyphen, such as `engineering-protocols`.
-        validate_root_name("engineering-protocols").expect("hyphenated root name");
-        let directory = tempdir().expect("tempdir");
-        let filesystem =
-            GuardedFilesystem::open(directory.path(), 1024, 1024, 100).expect("guarded filesystem");
-        if !filesystem.openat2_available() {
-            return;
-        }
-        std::fs::create_dir(directory.path().join("engineering-protocols")).expect("directory");
-        filesystem
-            .workspace_fd("engineering-protocols")
-            .expect("hyphenated workspace fd");
-    }
-
-    #[test]
-    fn a_root_name_that_is_not_a_single_path_component_is_still_refused() {
-        // Prevents dropping the `ws_` prefix from also dropping the containment argument: only a
-        // single component may reach openat2, so traversal, separators, empty, NUL-bearing and
-        // option-shaped names must stay refused as a path escape.
-        for name in [
-            "",
-            ".",
-            "..",
-            "a/b",
-            "../escape",
-            "/absolute",
-            "ws%20test",
-            "ws_test\0",
-            "-rf",
-            ".hidden",
-        ] {
-            let error = validate_root_name(name).expect_err(name);
-            assert_eq!(error.code, "workspace.path-escape", "{name:?}");
-        }
-    }
-
-    #[test]
-    fn create_workspace_still_mints_and_accepts_the_server_prefixed_identity() {
-        // Prevents a widened root-name rule from being mistaken for a change to the id scheme:
-        // the server still names what it creates `ws_<ULID>`, and those names must keep working.
-        let directory = tempdir().expect("tempdir");
-        let filesystem =
-            GuardedFilesystem::open(directory.path(), 1024, 1024, 100).expect("guarded filesystem");
-        if !filesystem.openat2_available() {
-            return;
-        }
-        let minted = format!("ws_{}", ulid::Ulid::new());
-        assert!(minted.starts_with("ws_"));
-        filesystem
-            .create_workspace(&minted)
-            .expect("server-minted workspace");
-        filesystem
-            .workspace_fd(&minted)
-            .expect("minted workspace fd");
-        assert!(directory.path().join(&minted).is_dir());
-    }
 
     #[test]
     fn guarded_io_refuses_escape_and_observes_atomic_content() {
