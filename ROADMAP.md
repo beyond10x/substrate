@@ -1,5 +1,7 @@
 # Roadmap
 
+Serves **O1** of `atlas/ROADMAP.md`, the collection's objectives; this page orders the work inside this repository.
+
 The roadmap is ordered. A later phase does not begin while an earlier exit criterion remains open.
 
 | Phase | Outcome | Exit criterion | State |

@@ -8,6 +8,16 @@ and are not restated here.
 `README.md` orients a reader and shows how to run the daemon; `STATUS.md` records observed progress
 and `ROADMAP.md` ordered exit criteria. This file says what must not break.
 
+## Serves
+
+The objectives of the collection this repository moves, by id from `atlas/ROADMAP.md` — the only
+cross-repository roadmap, and the page that says what each id means and which evidence closes it:
+
+- **O1 — governed reach.** Confinement is where *may reach* becomes *can reach*: a confined workspace, argv-only exec, host roots read-only, and a named refusal for everything else.
+
+A change here that moves none of these is a question for the operator, not a task.
+`atlas/scripts/check-map.sh` fails a repository whose `AGENTS.md` names no objective.
+
 ## What this repository owns
 
 The standalone b10x execution data plane: confined workspaces, bounded processes, workloads, images,
