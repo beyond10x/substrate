@@ -7,6 +7,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- **A workspace root may be a directory the operator already owns.** A root name no longer has to
+  carry the `ws_` prefix, only to be a single path component; containment was always `openat2`
+  beneath the pinned root descriptor with symlinks refused, never the prefix. A harness can now run
+  against your actual checkout — `harness`, `engineering-protocols` — instead of only a `ws_`-named
+  scratch copy. Workspaces the server creates are still minted as `ws_…`.
+
 ## [0.2.1] — 2026-08-29
 
 Documentation and distribution release. This release changes no runtime behavior, route, schema,
