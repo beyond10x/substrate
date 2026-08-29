@@ -1,6 +1,6 @@
 # Design 11: sealed secret slots
 
-**Status:** proposed · **Date:** 2026-08-29
+**Status:** accepted as [ADR 0012](../../adr/0012-secret-slots-are-sealed-memfds.md) · **Date:** 2026-08-29
 
 ## 1. Problem
 

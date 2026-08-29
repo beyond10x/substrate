@@ -1,6 +1,6 @@
 # Design 09: delegated context and grant attribution
 
-**Status:** proposed · **Date:** 2026-08-29
+**Status:** accepted as [ADR 0011](../../adr/0011-delegated-context-and-grant-attribution.md) · **Date:** 2026-08-29
 
 Substrate can say which local subject ran a process, not under whose authority. This document fixes
 the one artifact that closes that gap without making substrate an authorization engine.

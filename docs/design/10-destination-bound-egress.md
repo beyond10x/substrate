@@ -1,6 +1,6 @@
 # Design 10: destination-bound egress apertures
 
-**Status:** proposed · **Date:** 2026-08-29
+**Status:** accepted as [ADR 0013](../../adr/0013-egress-apertures-are-declared-by-the-operator.md) · **Date:** 2026-08-29
 
 This document precedes the ADR that `story:destination-bound-egress` names as its first evidence. It
 fixes the aperture's shape, declaration surface, refusals and observation, and reports what the
