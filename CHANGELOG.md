@@ -7,6 +7,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.2.1] — 2026-08-29
+
+Documentation and distribution release. This release changes no runtime behavior, route, schema,
+wire identifier, capability, or contract-bundle byte.
+
+### Added
+
+- A self-contained public Docusaurus site with a project-specific landing page, eight reader-facing
+  documentation pages, responsive themes, a Substrate mark, and strict broken-link and
+  broken-anchor gates.
+- A GitHub Pages workflow that installs from the npm lockfile, type-checks, builds, uploads only
+  `website/build`, and deploys the resulting artifact from `main`.
+- A public-website working agreement that requires the Atlas `website-docs` skill and keeps
+  internal designs, ADRs, plans, reviews, work logs, contributor status material, and source links
+  out of the reader-facing site.
+
+### Changed
+
+- The repository is public under Atlas ADR 0003 after a full-history and working-tree credential
+  scan found no leaks. Public visibility does not change the proprietary licence and does not make
+  the development contract bundles stable.
+- The workspace crate version is `0.2.1`.
+
 ## [0.2.0] — 2026-08-24
 
 First release from the standalone repository. Substrate was extracted from the b10x monorepo

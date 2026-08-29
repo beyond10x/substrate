@@ -1533,7 +1533,7 @@ dependencies = [
 
 [[package]]
 name = "substrate-contract-check"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "jsonschema",
  "serde_json",
@@ -1541,7 +1541,7 @@ dependencies = [
 
 [[package]]
 name = "substrate-daemon"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1577,7 +1577,7 @@ dependencies = [
 
 [[package]]
 name = "substrate-host"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "async-trait",
  "base64",
@@ -1597,7 +1597,7 @@ dependencies = [
 
 [[package]]
 name = "substrate-store"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "chrono",
  "parking_lot",
@@ -1611,7 +1611,7 @@ dependencies = [
 
 [[package]]
 name = "substrate-wire"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "base64",
  "chrono",

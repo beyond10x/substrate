@@ -13,7 +13,7 @@ edition = "2024"
 license = "LicenseRef-B10x-Proprietary"
 repository = "https://github.com/beyond10x/substrate"
 rust-version = "1.97"
-version = "0.2.0"
+version = "0.2.1"
 
 [workspace.dependencies]
 anyhow = "1.0"

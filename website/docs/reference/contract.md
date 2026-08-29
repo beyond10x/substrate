@@ -1,0 +1,82 @@
+---
+title: Contract surface
+description: The current HTTP and WebSocket resource families exposed by Substrate.
+---
+
+# A small control plane with explicit recovery
+
+Substrate serves JSON over HTTP and bounded WebSocket channels. Resource responses carry observed
+state, and every response identifies the contract bundle and its digest in headers.
+
+This page summarizes the currently implemented public families. Capability facts remain the
+authority for what a particular daemon can serve.
+
+## Machine
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/v1/machine` | deployment, driver generation, verified capabilities, limits, contract identity |
+
+Query this first. Do not infer support from a version number or deployment label.
+
+## Workspaces
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/v1/workspaces` | create a workspace through a keyed operation |
+| `GET` | `/v1/workspaces/{workspace_id}` | read observed workspace state |
+| `DELETE` | `/v1/workspaces/{workspace_id}` | destroy a workspace through a keyed operation |
+| `GET` | `/v1/workspaces/{workspace_id}/files/{path}` | read a bounded file range |
+| `PUT` | `/v1/workspaces/{workspace_id}/files/{path}` | atomically replace a file |
+| `DELETE` | `/v1/workspaces/{workspace_id}/files/{path}` | delete a guarded path |
+| `POST` | `/v1/workspaces/{workspace_id}/lease/renew` | renew workspace liveness |
+
+The current host slice serves empty workspace creation. Git source materialization is absent.
+
+## Execs
+
+| Method | Path | Purpose |
+|---|---|---|
+| `POST` | `/v1/execs` | start a bounded exec through a keyed operation |
+| `GET` | `/v1/execs/{exec_id}` | read observed exec state |
+| `GET` | `/v1/execs/{exec_id}/output` | read persisted bounded output |
+| `POST` | `/v1/execs/{exec_id}/signal` | signal a running exec |
+| `POST` | `/v1/execs/{exec_id}/lease/renew` | renew exec liveness |
+| `DELETE` | `/v1/execs/{exec_id}` | retire an exec |
+
+Exec start is served only when the daemon verified its complete host confinement floor.
+
+## Raw-pipe sessions
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/v1/pipe-sessions` | read session capability information |
+| `POST` | `/v1/pipe-sessions` | start a leased raw-pipe session |
+| `GET` | `/v1/pipe-sessions/{session_id}` | read observed session state |
+| `GET` | `/v1/pipe-sessions/{session_id}/attach` | attach the one bounded WebSocket channel |
+| `POST` | `/v1/pipe-sessions/{session_id}/signal` | signal the underlying process |
+| `POST` | `/v1/pipe-sessions/{session_id}/lease/renew` | renew session liveness |
+| `DELETE` | `/v1/pipe-sessions/{session_id}` | retire a session |
+
+Raw-pipe sessions are a development slice. PTY and network session authority are not implemented.
+
+## Recovery and events
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/v1/ops/{operation_id}` | reconcile one caller-minted operation |
+| `GET` | `/v1/events` | page through retained typed events |
+| `GET` | `/v1/events/stream` | follow the same event sequence over WebSocket |
+| `POST` | `/v1/reconciliation-snapshots` | create a bounded state barrier |
+| `GET` | `/v1/reconciliation-snapshots/{snapshot_id}` | read the barriered recovery view |
+
+Event replay is bounded by the retention advertised in machine facts. Consumers must reconcile from
+a snapshot after a history gap.
+
+## Identity and operation IDs
+
+Resource IDs are opaque and server-minted. Mutation operation IDs are caller-minted and stable
+across retry. Resource and operation lookup stays within the authenticated subject namespace.
+
+Read [operations and observations](../concepts/operations.md) for retry semantics and
+[status](../status.md) for the implementation boundary.

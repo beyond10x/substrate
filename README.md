@@ -12,6 +12,8 @@ the machine cannot confine, it says so — an exec on a host with no delegated c
 
 It does not decide product policy, run agent loops, or understand connector vendors.
 
+Public documentation: <https://beyond10x.github.io/substrate/>
+
 ## Where it sits
 
 | direction | what |
@@ -31,8 +33,8 @@ prefix.
 
 ## Status
 
-**Tagged `0.2.0` (2026-08-24) — the first release from this repository. Development bundles, not a
-stable published contract.**
+**Tagged `0.2.1` (2026-08-29) — a public documentation and distribution release with no runtime or
+wire change. Development bundles, not a stable published contract.**
 
 | area | state |
 |---|---|

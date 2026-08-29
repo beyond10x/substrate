@@ -48,7 +48,9 @@ Each is a claim that can be checked. Breaking one is a design change, not a refa
 8. **Implementation follows the accepted design-closure gate** (`docs/plan/01-design-closure.md`). A
    contract or capability change beyond its named decisions and deferrals needs a design document or
    an ADR **before code**.
-9. **This repository is private**, and any future b10x repository stays private unless an accepted
+9. **This repository is public by explicit decision.** Atlas ADR 0003 authorises Substrate's public
+   visibility after a full-history secret scan. It does not change the proprietary licence or make a
+   development contract stable. Any other b10x repository stays private unless its own accepted
    architecture decision explicitly authorises otherwise.
 
 ## Safety envelope
@@ -140,6 +142,13 @@ separate release work. Do not describe a development bundle as stable.
 | Observed progress | `STATUS.md` |
 | Archived reviews, retained as immutable review input | `docs/reviews/archived/` |
 | What shipped | `CHANGELOG.md` |
+
+## Public website
+
+For any public documentation website change, read and follow the repository-local `website-docs`
+skill at `atlas/.agents/skills/website-docs/SKILL.md` before taking action. The public site is a
+self-contained projection: do not publish or link internal designs, ADRs, plans, reviews, work logs,
+contributor status material, or private source.
 
 **Document placement is a rule, not a habit.** Current architecture goes in `architecture/`;
 sequencing in `ROADMAP.md`; observed progress in `STATUS.md`. `docs/plan/` turns design into gates
