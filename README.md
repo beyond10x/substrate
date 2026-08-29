@@ -54,6 +54,8 @@ exit criteria are [`ROADMAP.md`](ROADMAP.md).
 The gate is **`bash scripts/gate.sh`**. It is the full component gate; green here is the bar for
 main.
 
+The table is the gate's own order (`scripts/gate.sh`).
+
 | step | command |
 |---|---|
 | tests | `cargo test --workspace --locked` |
@@ -61,11 +63,17 @@ main.
 | lint | `cargo clippy --workspace --all-targets --locked -- -D warnings` |
 | links | `python3 scripts/check-links.py` — rejects machine-local and broken repository-relative links |
 | ADRs | `python3 scripts/check-adrs.py` |
-| contract bundle | `python3 scripts/check-contract-bundle.py` |
+| contract bundle 0.1.0 | `python3 scripts/check-contract-bundle.py` |
+| contract bundle 0.2.0 | `python3 scripts/check-contract-bundle-0.2.0.py` |
+| contract bundle 0.3.0 | `python3 scripts/check-contract-bundle-0.3.0.py` |
+| contract bundle 0.4.0 | `python3 scripts/check-contract-bundle-0.4.0.py` |
+| bundle packager | `python3 scripts/test_package_contract_bundle.py` |
 | runtime vectors | `python3 scripts/check-runtime-vectors.py` |
-| brand | `bash scripts/check-brand.sh` |
+| toolchain | `python3 scripts/check-toolchain.py` |
 
-Rust 1.97, edition 2024.
+Rust 1.97, edition 2024 — the toolchain is pinned by `rust-toolchain.toml`, and
+`scripts/check-toolchain.py` fails when it, `Cargo.toml`'s `rust-version` and the `Dockerfile`
+builder tag disagree. `.github/workflows/gate.yml` runs the same gate on push and pull request.
 
 `scripts/check-runtime-vectors.py` is an independent Unix-socket HTTP runner — a black-box lane that
 does not link the implementation. Pass `--cgroup-root <delegated-root>`, **while the runner itself

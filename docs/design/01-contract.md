@@ -14,7 +14,9 @@ consumers (Flux, autodev, the platform) see only it.
   Nothing else: no gRPC, no signing, no cookies, no multi-leg handshakes.
 - **Identity of resources.** Server-minted prefixed ids: `ws_…` (workspace), `ex_…` (exec),
   `ses_…` (session), `wl_…` (workload), `vol_…` (volume), `ep_…` (endpoint); images go by
-  digest. Ids are opaque; labels (`key=value`, caller-owned) are the query surface.
+  digest. The prefix is the shape of an id **the server mints**; a workspace adopted from a
+  directory the operator already has is named by the operator, and its id is that directory name.
+  Ids are opaque; labels (`key=value`, caller-owned) are the query surface.
 - **Operation ids.** Every resource mutation takes a **client-minted** `op` id (recommended:
   ULID). Replaying the same `op` with the same body is a no-op returning the original outcome;
   replaying it with a different body is `conflict`. This is the reconciliation handle for the

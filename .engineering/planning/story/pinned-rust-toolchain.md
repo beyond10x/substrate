@@ -2,7 +2,7 @@
 format: aep.planning-md/1
 id: story:pinned-rust-toolchain
 kind: story
-status: draft
+status: implemented
 title: The Rust toolchain is pinned so local and CI clippy agree
 summary: rust-toolchain.toml pins 1.97, matching Cargo.toml rust-version and the Dockerfile builder; retires the 'rustup update before pushing' rule.
 owner: substrate
@@ -10,7 +10,7 @@ tags:
 - build
 relations:
 - decomposes: epic:release-hardening
-revision: 2
+revision: 6
 ---
 # Story: The Rust toolchain is pinned so local and CI clippy agree
 
@@ -39,3 +39,18 @@ Evidence that satisfies it:
 - the agreement check in `scripts/`, in `scripts/gate.sh`; verified failing-first by setting one of
   the three to `1.98`;
 - `bash scripts/gate.sh` exits 0 on the pinned toolchain.
+
+## Implemented — 2026-08-29
+
+- `rust-toolchain.toml`: `channel = "1.97"`, `components = ["rustfmt", "clippy"]`.
+  `rustup show active-toolchain` from the root → `1.97-x86_64-unknown-linux-gnu (overridden by
+  …/rust-toolchain.toml)`; `cargo 1.97.1`.
+- `scripts/check-toolchain.py` (stdlib, `--root`): exit 0 at HEAD — `Rust toolchain pinned at
+  1.97 in rust-toolchain.toml, Cargo.toml, Dockerfile`. Failing-first on scratch copies under
+  `~/.cache/claude-tmp/toolchain-check/`: Dockerfile tag 1.98 → exit 1 naming all three
+  `file:line` values; `Cargo.toml` 1.98 → exit 1; missing components → exit 1.
+- `scripts/gate.sh:26`: `run python3 scripts/check-toolchain.py`. `.github/workflows/gate.yml`
+  reads the channel from `rust-toolchain.toml`.
+- `cargo clippy --workspace --all-targets --locked -- -D warnings` on 1.97 → exit 0;
+  `Cargo.lock` unchanged. `AGENTS.md` § *The gate* carries the bump rule
+  (`story:agents-md-matches-the-scripts`).

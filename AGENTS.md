@@ -115,18 +115,24 @@ bash scripts/gate.sh
 ```
 
 In order: `cargo test --workspace --locked`, `cargo fmt --all --check`,
-`cargo clippy --workspace --all-targets --locked -- -D warnings`, then
-`check-links.py`, `check-adrs.py`, `check-contract-bundle.py`, `check-runtime-vectors.py`, and
-the workspace tests. Green here is the bar for `main`. The former brand is fenced org-wide by `scripts/check-org-brand.sh` in the **atlas** repo, not here.
+`cargo clippy --workspace --all-targets --locked -- -D warnings`, then `check-links.py`,
+`check-adrs.py`, `check-contract-bundle.py`, `check-contract-bundle-0.2.0.py`, `-0.3.0.py`,
+`-0.4.0.py`, `test_package_contract_bundle.py`, `check-runtime-vectors.py` and `check-toolchain.py`. Green here is the bar for `main`.
+The former brand is fenced org-wide by `scripts/check-org-brand.sh` in the **atlas** repo, not here.
 
-**`scripts/gate.sh` verifies the 0.1.0 bundle only.** `check-contract-bundle-0.2.0.py`,
-`-0.3.0.py` and `-0.4.0.py` exist and are **not** run by the gate. Touching a successor bundle means
-running its checker by hand; a green gate is not evidence that `0.4.0` still holds.
+**The gate verifies every released bundle, not just `0.1.0`.** `scripts/gate.sh:20-23` runs the
+`0.1.0` checker and the `0.2.0`, `0.3.0` and `0.4.0` checkers, so a green gate *is* evidence that
+all four still hold. Cutting a successor bundle therefore means **adding its checker to
+`scripts/gate.sh`** alongside those four — a bundle whose checker is not in the gate is unverified
+from the next commit onward.
 
-**A green local gate does not guarantee a green CI.** The steps mirror each other; the toolchain does
-not — CI installs whatever `stable` is that day, and a newer clippy can fail a commit that passed
-locally. Run `rustup update` before pushing, and read the gate's own exit status, never a pipeline's
-(`gate.sh 2>&1 | tail` reports `tail`'s status, not the gate's).
+**A green local gate does not guarantee a green CI.** The steps mirror each other, and
+`.github/workflows/gate.yml` runs the same `bash scripts/gate.sh` on push and pull request. The
+toolchain is pinned by `rust-toolchain.toml`, not by whatever `stable` is that day: bumping it is
+**one commit** that moves `rust-toolchain.toml`, the `rust-version` in `Cargo.toml` and the
+`Dockerfile` builder tag together, and `scripts/check-toolchain.py` fails the gate when the three
+disagree. Read the gate's own exit status, never a pipeline's (`gate.sh 2>&1 | tail` reports
+`tail`'s status, not the gate's).
 
 The monorepo-era cross-component suite (`scripts/check-local.sh` at the predecessor's root) no longer
 applies here.
@@ -180,9 +186,10 @@ consumer compatibility **before implementation begins**.
 ## Bot identity
 
 Automated commits and pushes use the GitHub App via `scripts/as-bot.sh` and `scripts/bot-gh.sh`,
-never a human identity. `scripts/bot-token.sh` mints the token, and **the bot-org default it applies
-at `scripts/bot-token.sh:8` is not the org this repository lives in** — set that variable explicitly
-to `beyond10x` rather than relying on the default.
+never a human identity. `scripts/bot-token.sh` mints the token, and the bot-org default it applies
+at `scripts/bot-token.sh:8` — `org="${B10X_BOT_ORG:-beyond10x}"` — **is** the org this repository
+lives in (`git remote -v` shows `github.com/beyond10x/substrate`), so the default is right here. Set
+`B10X_BOT_ORG` only to mint against a different org.
 
 ## Planning artifacts
 

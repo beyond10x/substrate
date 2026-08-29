@@ -1,0 +1,133 @@
+# Runs the full component gate — `bash scripts/gate.sh`, the bar for `main` per AGENTS.md § "The
+# gate" — on every push to main and every pull request. The gate is invoked bare, so the job's
+# status is the gate's own exit status; it is never piped into `tail`, which would report `tail`'s
+# status instead (AGENTS.md § "The gate").
+#
+# Lanes. The suite has a portable lane and a delegated lane. `scripts/gate.sh` calls
+# `scripts/check-runtime-vectors.py` with no `--cgroup-root`, so that script takes its
+# `cgroup_root is None` branch and asserts the named refusal `exec.sandbox-unavailable` (501)
+# instead of confining anything. The delegated lane needs the runner to sit *inside* a delegated
+# cgroup subtree carrying `cpu`/`memory`/`pids`, plus bubblewrap (README.md § "Serving exec"),
+# which a hosted GitHub runner does not provide — the ubuntu-24.04 image README lists no
+# bubblewrap among its installed apt packages, and the step below probes rather than assumes.
+# This workflow therefore reports the delegated lane **absent**, never passed —
+# invariant 3: a missing isolation guarantee is a named refusal, never silent degradation. Whether
+# it gets a self-hosted runner is the open question on `story:ci-runs-the-full-gate`; the default
+# is that it stays a local pre-release step.
+#
+# The lane statement appears twice in the log: the "Report execution lanes" step prints the probed
+# host facts before the gate, and "Lane summary" restates the outcome and writes it to the run's
+# job summary.
+name: Gate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  # A superseded pull-request run carries no evidence; a superseded push to main does — it is the
+  # gate record for that commit — so only pull-request runs are cancelled.
+  group: gate-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  gate:
+    name: Full gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      # The runner ships its own rustup, so no third-party Rust action is used. `rust-toolchain.toml`
+      # is the source of the version when it is present — `scripts/check-toolchain.py` keeps it equal
+      # to `rust-version` in Cargo.toml and the Dockerfile builder tag, and a bump there must reach
+      # CI without editing this file. The literal below is the fallback for a tree without that file,
+      # so this step is correct both before and after story:pinned-rust-toolchain lands. rustfmt and
+      # clippy are requested explicitly because the gate runs both.
+      - name: Install the pinned Rust toolchain
+        run: |
+          channel=1.97
+          if [ -f rust-toolchain.toml ]; then
+            channel=$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml | head -1)
+            if [ -z "$channel" ]; then
+              echo "rust-toolchain.toml exists but declares no [toolchain] channel" >&2
+              exit 1
+            fi
+            echo "toolchain channel from rust-toolchain.toml: $channel"
+          else
+            echo "no rust-toolchain.toml; using the Cargo.toml rust-version pin: $channel"
+          fi
+          rustup toolchain install "$channel" --profile minimal --component rustfmt --component clippy
+          rustup default "$channel"
+          rustc --version
+          cargo --version
+          cargo fmt --version
+          cargo clippy --version
+
+      # The key folds in both the lockfile and the toolchain pin, so the cache turns over when either
+      # changes. `hashFiles` tolerates a missing `rust-toolchain.toml` — a tree without it still
+      # hashes Cargo.lock.
+      - name: Cache cargo registry and build directory
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-
+
+      # Probed, not assumed: the ubuntu-24.04 image README lists no bubblewrap among its installed
+      # apt packages, and a hosted runner is not inside a delegated cgroup subtree. This step
+      # records what is actually there so the log carries evidence rather than a claim.
+      - name: Report execution lanes
+        run: |
+          echo "== host facts =="
+          if command -v bwrap >/dev/null 2>&1; then
+            echo "bubblewrap: present at $(command -v bwrap) — $(bwrap --version 2>&1 | head -1)"
+          else
+            echo "bubblewrap: absent"
+          fi
+          echo "cgroup v2 root controllers: $(cat /sys/fs/cgroup/cgroup.controllers 2>/dev/null || echo '<unreadable>')"
+          echo "this process cgroup: $(cat /proc/self/cgroup 2>/dev/null || echo '<unreadable>')"
+          echo
+          echo "== lanes this job will run =="
+          echo "portable lane:  RUNS   — scripts/gate.sh invokes check-runtime-vectors.py with no --cgroup-root"
+          echo "delegated lane: ABSENT — no delegated cgroup root is passed; the lane is not executed and is not claimed to pass"
+
+      # Bare invocation: the job fails with the gate's own exit status. Do not add a pipeline here.
+      - name: Run the full gate
+        id: gate
+        run: bash scripts/gate.sh
+
+      # The gate stops at its first failing step, so the portable lane's outcome is the gate step's
+      # outcome and nothing stronger is claimed. The delegated line is unconditional: it did not run.
+      - name: Lane summary
+        if: always()
+        run: |
+          {
+            echo "### Gate lanes"
+            echo
+            echo "| lane | outcome |"
+            echo "| --- | --- |"
+            echo "| portable | \`${{ steps.gate.outcome }}\` — carried by the gate step; its log shows how far the gate got |"
+            echo "| delegated (bubblewrap + cgroup delegation) | **absent** — not executed on a hosted runner, and never reported as passed |"
+            echo
+            echo "The delegated lane needs a runner inside a delegated cgroup subtree carrying \`cpu\`, \`memory\` and \`pids\`; see README.md, section \"Serving exec\"."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "portable lane: ${{ steps.gate.outcome }} (the gate step). delegated lane: absent — not executed, not passed."

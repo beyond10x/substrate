@@ -2,7 +2,7 @@
 format: aep.planning-md/1
 id: story:ci-runs-the-full-gate
 kind: story
-status: draft
+status: active
 title: CI runs the full gate on every push and pull request
 summary: Only pages.yml exists under .github/workflows/; nothing runs scripts/gate.sh on a push or PR.
 owner: substrate
@@ -10,7 +10,7 @@ tags:
 - ci
 relations:
 - decomposes: epic:release-hardening
-revision: 2
+revision: 5
 ---
 # Story: CI runs the full gate on every push and pull request
 
@@ -55,3 +55,22 @@ delegated lane as absent.
 
 Branch protection (require the `gate` check before merge) is a GitHub setting, not a file; it is a
 one-line "to try" for the operator after the first green run.
+
+## Progress — 2026-08-29
+
+- `.github/workflows/gate.yml` written: `push` to `main`, `pull_request`, `workflow_dispatch`;
+  `actions/checkout@3d3c42e…` (# v7, from `pages.yml:35`) and `actions/cache@55cc8345…` (# v6,
+  `gh api repos/actions/cache/git/ref/tags/v6`); `permissions: contents: read`;
+  `timeout-minutes`; `cancel-in-progress` only for pull requests.
+- Toolchain read from `rust-toolchain.toml` with `1.97` as fallback; runner `rustup`, no
+  third-party action.
+- Lanes: a probe step (`bwrap`, `/sys/fs/cgroup/cgroup.controllers`) before the gate and a
+  `Lane summary` step to `$GITHUB_STEP_SUMMARY` after; delegated lane stated **absent** on a
+  hosted runner (decision: stays a local pre-release step). The runner-images inventory for
+  ubuntu-24.04 lists no bubblewrap.
+- `actionlint 1.7.12` + `shellcheck 0.11.0` → exit 0; YAML parses.
+- **Open:** the red-then-green run URLs need a pushed branch. To try, as the bot:
+  1. `git switch -c ci-gate-smoke && printf '\n\n' >> crates/substrate-wire/src/lib.rs` (fails
+     `cargo fmt --all --check`, triggers no clippy lint) → commit, push, open a PR → expect red.
+  2. `cargo fmt --all` → commit, push → expect green; record both run URLs here.
+  3. After the first green run: branch protection on `main` requiring the `Full gate` check.
