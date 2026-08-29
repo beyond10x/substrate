@@ -2,7 +2,7 @@
 format: aep.planning-md/1
 id: story:destination-bound-egress
 kind: story
-status: draft
+status: proposed
 title: Destination-bound egress apertures are declared, verified and refused by name
 summary: 'Design 04 section 6: ordinary execution has no egress; an aperture is operator authority matched to a destination. With sealed secret slots this is what unlocks a confined vendor harness.'
 owner: substrate
@@ -13,7 +13,7 @@ tags:
 relations:
 - decomposes: epic:byte-plane-completion
 - depends_on: story:sealed-secret-slots
-revision: 4
+revision: 5
 ---
 # Story: Destination-bound egress apertures are declared, verified and refused by name
 

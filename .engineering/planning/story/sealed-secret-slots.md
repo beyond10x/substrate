@@ -2,7 +2,7 @@
 format: aep.planning-md/1
 id: story:sealed-secret-slots
 kind: story
-status: draft
+status: proposed
 title: Sealed secret slots reach a child only as a memfd descriptor
 summary: Design 06 decision 3 fixes the mechanism; a live vendor harness stays refused without it.
 owner: substrate
@@ -12,7 +12,7 @@ tags:
 - wire
 relations:
 - decomposes: epic:byte-plane-completion
-revision: 3
+revision: 4
 ---
 # Story: Sealed secret slots reach a child only as a memfd descriptor
 

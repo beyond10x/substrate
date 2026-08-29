@@ -16,3 +16,6 @@ with YAML frontmatter containing `date` and `status`. Draft design questions rem
 | [0008](0008-pipe-sessions-have-distinct-durable-identity.md) | Pipe sessions have distinct durable identity | accepted |
 | [0009](0009-execution-capsules-are-verified-read-only-inputs.md) | Execution capsules are verified read-only inputs | accepted |
 | [0010](0010-declared-host-roots-are-mounted-read-only.md) | Declared host roots are mounted read-only | accepted |
+| [0011](0011-delegated-context-and-grant-attribution.md) | Delegated context carries grant attribution | accepted |
+| [0012](0012-secret-slots-are-sealed-memfds.md) | Secret slots are sealed memfds | accepted |
+| [0013](0013-egress-apertures-are-declared-by-the-operator.md) | Egress apertures are declared by the operator and referenced by name | accepted |
