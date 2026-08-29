@@ -7,16 +7,25 @@ Every test that mutates bundle bytes works on a copy under $TMPDIR; nothing here
 writes into contracts/ (AGENTS.md invariant 6: a released bundle directory is
 immutable, and the packager reads the bundle rather than teaching it about the
 packager).
+
+`ArchiveLayerTests` holds the artifact to `packaging.json`: the layout ships the
+declared `posix-tar` source archive, its headers carry what `packaging.json.archive`
+declares, extracting it reproduces the bundle directory byte for byte, and
+SOURCE_DATE_EPOCH moves the archive and the manifest and nothing else. A copied
+bundle has no git history to date it, so those tests pin `--source-date-epoch`.
 """
 
 from __future__ import annotations
 
+import filecmp
 import hashlib
+import io
 import json
 import os
 import shutil
 import subprocess
 import sys
+import tarfile
 import tempfile
 import unittest
 from pathlib import Path
@@ -31,6 +40,20 @@ BUNDLE = CONTRACTS / "substrate-wire" / VERSION
 
 MANIFEST_MEDIA_TYPE = "application/vnd.oci.image.manifest.v1+json"
 CONFIG_MEDIA_TYPE = "application/vnd.b10x.substrate-wire.bundle.v1+json"
+ARCHIVE_MEDIA_TYPE = "application/vnd.b10x.substrate-wire.bundle.tar"
+TITLE_ANNOTATION = "org.opencontainers.image.title"
+
+# packaging.json § archive, the shape the source tar must have.
+ARCHIVE_UID = 0
+ARCHIVE_GID = 0
+ARCHIVE_OWNER_NAME = ""
+ARCHIVE_GROUP_NAME = ""
+ARCHIVE_FILE_MODE = 0o644
+ARCHIVE_DIRECTORY_MODE = 0o755
+
+# A bundle copied under $TMPDIR carries no git history, so tests that read a
+# scratch contracts root pin SOURCE_DATE_EPOCH instead of deriving it.
+SCRATCH_EPOCH = 1700000000
 
 
 def scratch_base() -> Path:
@@ -63,6 +86,41 @@ def read_manifest(layout: Path) -> dict:
     return json.loads(blob_path(layout, manifest_digest(layout)).read_bytes())
 
 
+def archive_layers(manifest: dict) -> list[dict]:
+    """Every layer that claims to be the declared posix-tar source archive."""
+    return [
+        layer
+        for layer in manifest["layers"]
+        if layer["mediaType"] == ARCHIVE_MEDIA_TYPE
+    ]
+
+
+def file_layers(manifest: dict) -> list[dict]:
+    """The per-file layers: everything that is not the source archive."""
+    return [
+        layer
+        for layer in manifest["layers"]
+        if layer["mediaType"] != ARCHIVE_MEDIA_TYPE
+    ]
+
+
+def stdout_fields(stdout: str) -> dict[str, str]:
+    """The packager's one stdout line: a bare digest then `key=value` fields."""
+    fields = {}
+    for token in stdout.split()[1:]:
+        key, _, value = token.partition("=")
+        fields[key] = value
+    return fields
+
+
+def tree_of(root: Path) -> dict[str, bytes | None]:
+    """Every path under `root`, mapped to its bytes (None for a directory)."""
+    return {
+        path.relative_to(root).as_posix(): None if path.is_dir() else path.read_bytes()
+        for path in root.rglob("*")
+    }
+
+
 class PackagerTestCase(unittest.TestCase):
     def scratch(self, prefix: str) -> Path:
         directory = Path(tempfile.mkdtemp(prefix=prefix, dir=scratch_base()))
@@ -77,10 +135,15 @@ class PackagerTestCase(unittest.TestCase):
         version: str = VERSION,
         extra: tuple[str, ...] = (),
         expect_exit: int = 0,
+        pin_epoch: bool = True,
     ) -> subprocess.CompletedProcess:
         argv = [sys.executable, str(PACKAGER), version, "--out", str(out)]
         if contracts_root is not None:
             argv += ["--contracts-root", str(contracts_root)]
+            if pin_epoch and "--source-date-epoch" not in extra:
+                # A scratch copy has no git history to date it, and the packager
+                # refuses to reach for the clock, so pin the epoch explicitly.
+                argv += ["--source-date-epoch", str(SCRATCH_EPOCH)]
         argv += list(extra)
         proc = subprocess.run(argv, capture_output=True, text=True, cwd=str(ROOT))
         self.assertEqual(
@@ -195,7 +258,11 @@ class ArtifactShapeTests(PackagerTestCase):
         manifest_blob = blob_path(self.layout, entry["digest"]).read_bytes()
         self.assertEqual(entry["size"], len(manifest_blob))
         self.assertEqual(entry["digest"], "sha256:" + digest_of(manifest_blob))
-        self.assertEqual(self.stdout.strip(), entry["digest"])
+        self.assertEqual(
+            self.stdout.split()[0],
+            entry["digest"],
+            "the manifest digest must stay the first field on stdout",
+        )
 
     def test_config_is_the_bundle_json_verbatim(self) -> None:
         config = self.manifest["config"]
@@ -228,8 +295,13 @@ class ArtifactShapeTests(PackagerTestCase):
             blob_path(self.layout, self.manifest["config"]["digest"]).read_bytes()
         )
         entries = {entry["path"]: entry for entry in bundle_json["files"]}
-        layers = self.manifest["layers"]
-        titles = [layer["annotations"]["org.opencontainers.image.title"] for layer in layers]
+        layers = file_layers(self.manifest)
+        self.assertEqual(
+            layers,
+            self.manifest["layers"][: len(layers)],
+            "the per-file layers must stay first; the archive layer is appended",
+        )
+        titles = [layer["annotations"][TITLE_ANNOTATION] for layer in layers]
         self.assertEqual(titles, sorted(titles), "layer order is not path-sorted")
         self.assertEqual(set(titles), set(entries), "layers do not cover bundle.json's files")
         self.assertNotIn("bundle.json", titles, "bundle.json is the config, not a layer")
@@ -260,6 +332,201 @@ class ArtifactShapeTests(PackagerTestCase):
         )
         self.assertNotIn(str(ROOT), manifest_text)
         self.assertNotIn("created", manifest_text)
+
+
+class ArchiveLayerTests(PackagerTestCase):
+    """`packaging.json` declares a posix-tar source archive; it must be shipped."""
+
+    def archive_of(self, layout: Path) -> tuple[dict, bytes]:
+        """The single source-archive layer descriptor and its blob bytes."""
+        layers = archive_layers(read_manifest(layout))
+        self.assertEqual(
+            len(layers),
+            1,
+            f"{layout} carries no single {ARCHIVE_MEDIA_TYPE} layer; "
+            "packaging.json declares a posix-tar source archive and the "
+            "artifact must ship it",
+        )
+        return layers[0], blob_path(layout, layers[0]["digest"]).read_bytes()
+
+    def test_two_runs_produce_a_byte_identical_archive(self) -> None:
+        work = self.scratch("pkg-bundle-archive-determinism-")
+        first, second = work / "first", work / "second"
+        self.package(first)
+        self.package(second)
+
+        _, one = self.archive_of(first)
+        _, two = self.archive_of(second)
+        self.assertEqual(one, two, "the source archive is not reproducible")
+        self.assertEqual(
+            manifest_digest(first),
+            manifest_digest(second),
+            "adding the archive must not make the manifest digest move on its own",
+        )
+
+    def test_archive_descriptor_and_stdout_agree_with_the_blob(self) -> None:
+        layout = self.scratch("pkg-bundle-archive-descriptor-") / "layout"
+        stdout = self.package(layout).stdout
+        layer, blob = self.archive_of(layout)
+        reported = stdout_fields(stdout)
+
+        self.assertEqual(layer["annotations"][TITLE_ANNOTATION], f"{VERSION}.tar")
+        self.assertEqual(layer["size"], len(blob))
+        self.assertEqual(layer["digest"], "sha256:" + digest_of(blob))
+        self.assertEqual(reported["archive"], layer["digest"])
+        self.assertEqual(reported["archive_bytes"], str(len(blob)))
+        self.assertEqual(
+            read_manifest(layout)["layers"][-1],
+            layer,
+            "the archive must be the last layer, so no per-file descriptor moves",
+        )
+
+    def test_archive_headers_match_packaging_json(self) -> None:
+        layout = self.scratch("pkg-bundle-archive-headers-") / "layout"
+        stdout = self.package(layout).stdout
+        epoch = int(stdout_fields(stdout)["source_date_epoch"])
+        _, blob = self.archive_of(layout)
+
+        declared = json.loads((BUNDLE / "packaging.json").read_text(encoding="utf-8"))
+        archive = declared["archive"]
+        self.assertEqual(archive["format"], "posix-tar")
+        self.assertEqual(archive["compression"], "none")
+        self.assertEqual(archive["mode"], "files-0644-directories-0755")
+        self.assertEqual(archive["path_order"], "utf8-bytewise")
+        self.assertEqual(archive["source_date_epoch"], "source-commit-author-seconds")
+
+        # compression "none": the bytes open as a plain tar, and the ustar magic
+        # sits in the first header. pax/GNU records would show up as extra member
+        # types below.
+        self.assertEqual(blob[257:265], b"ustar\x0000", "not a ustar header")
+        with tarfile.open(fileobj=io.BytesIO(blob), mode="r:") as tar:
+            members = tar.getmembers()
+
+        self.assertGreater(len(members), 0)
+        for member in members:
+            with self.subTest(name=member.name):
+                self.assertIn(
+                    member.type,
+                    (tarfile.REGTYPE, tarfile.DIRTYPE),
+                    "only files and directories belong in the archive",
+                )
+                self.assertEqual(member.uid, archive["uid"])
+                self.assertEqual(member.gid, archive["gid"])
+                self.assertEqual(member.uname, archive["owner_name"])
+                self.assertEqual(member.gname, archive["group_name"])
+                self.assertEqual(member.mtime, epoch)
+                self.assertEqual(
+                    member.mode,
+                    ARCHIVE_DIRECTORY_MODE if member.isdir() else ARCHIVE_FILE_MODE,
+                )
+
+        names = [member.name.rstrip("/") for member in members]
+        self.assertEqual(
+            names,
+            sorted(names, key=lambda name: name.encode("utf-8")),
+            "archive entries are not in UTF-8 bytewise path order",
+        )
+        self.assertEqual(
+            set(names),
+            {
+                path.relative_to(BUNDLE).as_posix()
+                for path in BUNDLE.rglob("*")
+                if path.is_file() or path.is_dir()
+            },
+            "the archive is not the whole bundle directory",
+        )
+        self.assertIn(
+            "bundle.json",
+            names,
+            "the archive is the source form of the directory, bundle.json included",
+        )
+        self.assertTrue(
+            any(member.isdir() for member in members),
+            "packaging.json declares a directory mode, so directories are entries",
+        )
+
+    def test_archive_extracts_to_the_bundle_byte_for_byte(self) -> None:
+        work = self.scratch("pkg-bundle-archive-extract-")
+        layout = work / "layout"
+        self.package(layout)
+        _, blob = self.archive_of(layout)
+
+        extracted = work / "extracted"
+        extracted.mkdir()
+        with tarfile.open(fileobj=io.BytesIO(blob), mode="r:") as tar:
+            tar.extractall(extracted, filter="data")
+
+        self.assertEqual(
+            tree_of(extracted),
+            tree_of(BUNDLE),
+            "extracting the archive does not reproduce the bundle byte for byte",
+        )
+        comparison = filecmp.dircmp(str(BUNDLE), str(extracted))
+        self.assertEqual(comparison.left_only, [])
+        self.assertEqual(comparison.right_only, [])
+        self.assertEqual(comparison.funny_files, [])
+
+    def test_source_date_epoch_moves_only_the_archive_and_the_manifest(self) -> None:
+        work = self.scratch("pkg-bundle-archive-epoch-")
+        early, late = work / "early", work / "late"
+        self.package(early, extra=("--source-date-epoch", "1000000000"))
+        self.package(late, extra=("--source-date-epoch", "2000000000"))
+
+        early_layer, early_blob = self.archive_of(early)
+        late_layer, late_blob = self.archive_of(late)
+        self.assertNotEqual(early_blob, late_blob)
+        self.assertNotEqual(
+            early_layer["digest"],
+            late_layer["digest"],
+            "a different SOURCE_DATE_EPOCH must change the archive digest",
+        )
+        self.assertNotEqual(
+            manifest_digest(early),
+            manifest_digest(late),
+            "the manifest pins the archive, so its digest must move too",
+        )
+        self.assertEqual(
+            file_layers(read_manifest(early)),
+            file_layers(read_manifest(late)),
+            "no per-file layer may depend on SOURCE_DATE_EPOCH",
+        )
+        for layout, seconds in ((early, 1000000000), (late, 2000000000)):
+            with self.subTest(epoch=seconds):
+                _, blob = self.archive_of(layout)
+                with tarfile.open(fileobj=io.BytesIO(blob), mode="r:") as tar:
+                    self.assertEqual(
+                        {member.mtime for member in tar.getmembers()}, {seconds}
+                    )
+
+    def test_default_epoch_is_the_bundle_source_commit(self) -> None:
+        expected = subprocess.run(
+            ["git", "log", "-1", "--format=%at", "--", str(BUNDLE)],
+            capture_output=True,
+            text=True,
+            cwd=str(ROOT),
+            check=False,
+        )
+        if expected.returncode != 0 or not expected.stdout.strip():
+            self.skipTest("no git history dates the bundle in this tree")
+        layout = self.scratch("pkg-bundle-archive-git-epoch-") / "layout"
+        reported = stdout_fields(self.package(layout).stdout)
+        self.assertEqual(
+            reported["source_date_epoch"],
+            expected.stdout.strip(),
+            "SOURCE_DATE_EPOCH must be the source commit's author seconds "
+            "(packaging.json: source-commit-author-seconds)",
+        )
+
+    def test_a_tree_without_git_and_without_an_epoch_is_refused(self) -> None:
+        work = self.scratch("pkg-bundle-archive-noepoch-")
+        contracts_root = self.copy_bundle(work)
+        out = work / "layout"
+        refused = self.package(
+            out, contracts_root=contracts_root, pin_epoch=False, expect_exit=2
+        )
+        self.assertIn("--source-date-epoch", refused.stderr)
+        self.assertFalse(out.exists(), "a refusal must write nothing")
+        self.package(out, contracts_root=contracts_root)
 
 
 class RefusalTests(PackagerTestCase):

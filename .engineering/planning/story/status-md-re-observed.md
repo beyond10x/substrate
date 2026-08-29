@@ -2,7 +2,7 @@
 format: aep.planning-md/1
 id: story:status-md-re-observed
 kind: story
-status: draft
+status: implemented
 title: STATUS.md is observed again from the standalone repository
 summary: STATUS.md is observed 2026-08-17, predates extraction, and still names the monorepo as the source.
 owner: substrate
@@ -12,7 +12,7 @@ relations:
 - decomposes: epic:release-hardening
 - depends_on: story:ci-runs-the-full-gate
 - depends_on: story:pinned-rust-toolchain
-revision: 2
+revision: 5
 ---
 # Story: STATUS.md is observed again from the standalone repository
 

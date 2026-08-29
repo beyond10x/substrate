@@ -1,6 +1,6 @@
 # AGENTS.md — substrate
 
-The contract for changing **this** repository. Org-wide rules — the naming convention, the
+The contract for changing **this** repository. Org-wide rules — the naming convention, the language rule (anything that runs is Rust, not Python), the
 former-brand rule (atlas ADR 0001) and its four exemption categories, and the rule that renaming
 anything another repo verifies is a coordinated migration with an ADR — live in `atlas/AGENTS.md`
 and are not restated here.
@@ -42,7 +42,7 @@ Each is a claim that can be checked. Breaking one is a design change, not a refa
    (`adr/0005-operations-are-durable-before-driver-dispatch.md`).
 6. **Every released contract bundle directory is immutable.** `contracts/substrate-wire/0.1.0`
    through `0.4.0` exist; `0.4.0` is the current development bundle and **every earlier directory is
-   frozen** (`STATUS.md:30`, `scripts/contract_json_gate.py:283`,
+   frozen** (`STATUS.md:36`, `scripts/contract_json_gate.py:283`,
    `contracts/substrate-wire/0.2.0/README.md:13`). A wire change **adds a successor bundle**; it
    never rewrites bytes in a released one. The compatibility block of a successor states its
    predecessor and its exact `adds_routes`/`preserves_routes` counts, and the checker pins them.
@@ -117,7 +117,7 @@ bash scripts/gate.sh
 In order: `cargo test --workspace --locked`, `cargo fmt --all --check`,
 `cargo clippy --workspace --all-targets --locked -- -D warnings`, then `check-links.py`,
 `check-adrs.py`, `check-contract-bundle.py`, `check-contract-bundle-0.2.0.py`, `-0.3.0.py`,
-`-0.4.0.py`, `test_package_contract_bundle.py`, `check-runtime-vectors.py` and `check-toolchain.py`. Green here is the bar for `main`.
+`-0.4.0.py`, `test_contract_json_gate.py`, `test_package_contract_bundle.py`, `check-runtime-vectors.py` and `check-toolchain.py`. Green here is the bar for `main`.
 The former brand is fenced org-wide by `scripts/check-org-brand.sh` in the **atlas** repo, not here.
 
 **The gate verifies every released bundle, not just `0.1.0`.** `scripts/gate.sh:20-23` runs the

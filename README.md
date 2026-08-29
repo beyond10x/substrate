@@ -67,6 +67,7 @@ The table is the gate's own order (`scripts/gate.sh`).
 | contract bundle 0.2.0 | `python3 scripts/check-contract-bundle-0.2.0.py` |
 | contract bundle 0.3.0 | `python3 scripts/check-contract-bundle-0.3.0.py` |
 | contract bundle 0.4.0 | `python3 scripts/check-contract-bundle-0.4.0.py` |
+| JSON gate self-test | `python3 scripts/test_contract_json_gate.py` |
 | bundle packager | `python3 scripts/test_package_contract_bundle.py` |
 | runtime vectors | `python3 scripts/check-runtime-vectors.py` |
 | toolchain | `python3 scripts/check-toolchain.py` |
