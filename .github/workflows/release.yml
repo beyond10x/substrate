@@ -482,12 +482,32 @@ jobs:
             if git \
               -c 'credential.https://github.com.helper=' \
               -c 'credential.https://github.com.helper=!f() { echo username=x-access-token; echo "password=${RELEASE_TOKEN}"; }; f' \
-              push origin HEAD:main; then
+              push origin HEAD:main 2> push-error.txt; then
               echo "recorded ${DIGEST} in CHANGELOG.md on main"
               exit 0
             fi
+            cat push-error.txt >&2
 
-            echo "push rejected (main moved?); retrying against a fresh origin/main (attempt ${attempt})"
+            # Two rejections that look alike in an exit code and are nothing alike in cause. A race
+            # is worth another attempt against a fresh `origin/main`; a protected branch is not --
+            # every retry fails identically, and three of them only bury the real message. Branch
+            # protection here requires the "Full gate" status check, which a direct push to `main`
+            # can never satisfy because no gate run exists for a commit that was never pushed.
+            if grep -qE 'GH006|protected branch' push-error.txt; then
+              echo "refused: \`main\` is a protected branch and a direct push cannot satisfy its" >&2
+              echo "required status check. This is not a race and retrying will not help." >&2
+              echo "" >&2
+              echo "The image IS published, signed and verified, and the GitHub release names the" >&2
+              echo "digest. Only CHANGELOG.md is behind. Record it with a pull request:" >&2
+              echo "" >&2
+              echo "  ## [${VERSION}] — <date>" >&2
+              echo "" >&2
+              echo "  ${digest_line}" >&2
+              exit 1
+            fi
+
+            echo "push rejected and the error is not branch protection; main may have moved." >&2
+            echo "retrying against a fresh origin/main (attempt ${attempt})" >&2
             attempt=$(( attempt + 1 ))
           done
 
