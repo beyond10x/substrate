@@ -1,0 +1,209 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.8.0:operation-registry",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "const": "schemas/operation-registry.json"
+    },
+    "api_major": {
+      "const": 1
+    },
+    "operations": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "address_schema": {
+            "pattern": "^schemas/addresses/[a-z0-9-]+\\.json$",
+            "type": "string"
+          },
+          "capability_predicates": {
+            "items": {
+              "additionalProperties": false,
+              "oneOf": [
+                {
+                  "required": [
+                    "value"
+                  ]
+                },
+                {
+                  "required": [
+                    "input_pointer"
+                  ]
+                }
+              ],
+              "properties": {
+                "fact": {
+                  "pattern": "^[a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*)+$",
+                  "type": "string"
+                },
+                "input_pointer": {
+                  "pattern": "^/",
+                  "type": "string"
+                },
+                "op": {
+                  "enum": [
+                    "eq",
+                    "one_of",
+                    "lte",
+                    "gte"
+                  ]
+                },
+                "transform": {
+                  "enum": [
+                    "base64-decoded-length"
+                  ]
+                },
+                "value": {},
+                "when": {
+                  "additionalProperties": false,
+                  "oneOf": [
+                    {
+                      "required": [
+                        "equals"
+                      ]
+                    },
+                    {
+                      "required": [
+                        "not_equals"
+                      ]
+                    }
+                  ],
+                  "properties": {
+                    "equals": {},
+                    "input_pointer": {
+                      "pattern": "^/",
+                      "type": "string"
+                    },
+                    "not_equals": {}
+                  },
+                  "required": [
+                    "input_pointer"
+                  ],
+                  "type": "object"
+                }
+              },
+              "required": [
+                "fact",
+                "op"
+              ],
+              "type": "object"
+            },
+            "type": "array"
+          },
+          "direction": {
+            "const": "outbound"
+          },
+          "effects": {
+            "items": {
+              "enum": [
+                "process",
+                "filesystem:workspace",
+                "filesystem:volume",
+                "network:egress",
+                "network:expose",
+                "image",
+                "workload"
+              ]
+            },
+            "type": "array",
+            "uniqueItems": true
+          },
+          "exposure": {
+            "enum": [
+              "callable",
+              "callable-direct",
+              "projected"
+            ]
+          },
+          "id": {
+            "pattern": "^[a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*)+$",
+            "type": "string"
+          },
+          "idempotency": {
+            "enum": [
+              "idempotent",
+              "keyed",
+              "none"
+            ]
+          },
+          "input_binding": {
+            "enum": [
+              "query",
+              "body",
+              "body.input"
+            ]
+          },
+          "input_schema": {
+            "pattern": "^schemas/inputs/[a-z0-9-]+\\.json$",
+            "type": "string"
+          },
+          "method": {
+            "enum": [
+              "GET",
+              "POST",
+              "PUT",
+              "DELETE"
+            ]
+          },
+          "path": {
+            "pattern": "^/v1/",
+            "type": "string"
+          },
+          "required_scope": {
+            "enum": [
+              "observe",
+              "workspaces",
+              "exec",
+              "session"
+            ]
+          },
+          "result_schema": {
+            "pattern": "^schemas/results/[a-z0-9-]+\\.json$",
+            "type": "string"
+          },
+          "risk": {
+            "enum": [
+              "read",
+              "write",
+              "destructive"
+            ]
+          }
+        },
+        "required": [
+          "id",
+          "method",
+          "path",
+          "direction",
+          "risk",
+          "idempotency",
+          "effects",
+          "exposure",
+          "required_scope",
+          "input_binding",
+          "address_schema",
+          "input_schema",
+          "result_schema",
+          "capability_predicates"
+        ],
+        "type": "object"
+      },
+      "maxItems": {
+        "$routes": "count"
+      },
+      "minItems": 19,
+      "type": "array"
+    },
+    "registry_format": {
+      "const": "b10x.substrate-operation-registry.v1"
+    }
+  },
+  "required": [
+    "$schema",
+    "registry_format",
+    "api_major",
+    "operations"
+  ],
+  "title": "Phase-3 operation registry",
+  "type": "object"
+}

@@ -506,6 +506,7 @@ impl ProcessRuntime {
             applied: Some(applied),
             exit: None,
             lease: None,
+            refusal: None,
         };
         let observation = ExecObservation {
             resource,
@@ -921,6 +922,15 @@ impl ProcessRuntime {
                         "sandbox.network.aperture",
                     )
                 }
+                // A ceiling is declared where reach is declared. Named apart from the destination
+                // refusal so a rejected escalation reads as one and not as a typo (ADR 0014).
+                substrate_wire::WireValidationError::ApertureCeilingInRequest => {
+                    DriverError::refused(
+                        "exec.aperture-ceiling-in-request",
+                        "An egress aperture byte ceiling is declared by the operator; it may not appear in a request.",
+                        "sandbox.network.aperture",
+                    )
+                }
                 substrate_wire::WireValidationError::InvalidApertureName => DriverError::refused(
                     "exec.aperture-name-invalid",
                     "An egress aperture name must match [a-z][a-z0-9_]{0,63}.",
@@ -1311,18 +1321,29 @@ async fn run_child(
         )
         .await
     });
-    let (status, timed_out, cpu_exhausted, cpu_measurement_failed) =
-        wait_for_child(&mut child, &cgroup, &execution, timeout, cpu_budget_micros).await;
+    let (status, timed_out, cpu_exhausted, cpu_measurement_failed, aperture_exhausted) =
+        wait_for_child(
+            &mut child,
+            &cgroup,
+            &execution,
+            timeout,
+            cpu_budget_micros,
+            aperture.as_ref(),
+        )
+        .await;
     let (stdout, stdout_truncated) = stdout_task.await.unwrap_or_else(|_| (Vec::new(), true));
     let (stderr, stderr_truncated) = stderr_task.await.unwrap_or_else(|_| (Vec::new(), true));
-    let forced_cancellation =
-        timed_out || cpu_exhausted || execution.cancellation_requested.load(Ordering::Acquire);
     // Read the counters while the forwarder is still alive, then let it go: the forwarder is in
     // this run's cgroup, so reconciliation would otherwise be racing the thing it is about to kill.
+    let aperture_exhausted = ceiling_reached(aperture_exhausted, aperture.as_ref());
     let applied_aperture = aperture
         .as_ref()
         .map(crate::egress::InstalledAperture::applied);
     drop(aperture);
+    let forced_cancellation = timed_out
+        || cpu_exhausted
+        || aperture_exhausted
+        || execution.cancellation_requested.load(Ordering::Acquire);
     let cgroup_reconciled = reconcile_cgroup(&cgroup).await;
     let capsule_reconciled = capsule.is_none_or(|capsule| capsule.directory.close().is_ok());
     let resolution_reconciled = resolution.is_none_or(crate::egress::GeneratedResolution::close);
@@ -1333,13 +1354,7 @@ async fn run_child(
     observation.stderr_truncated = stderr_truncated;
     observation.output_complete = true;
     observation.resource.observed_at = Utc::now();
-    // The bytes that crossed, counted where they crossed. An aperture with no traffic still
-    // reports itself: "installed and unused" and "never installed" are different observations.
-    if let Some(applied) = applied_aperture
-        && let Some(confinement) = observation.resource.applied.as_mut()
-    {
-        confinement.network = AppliedNetwork::Aperture(applied);
-    }
+    record_aperture(&mut observation, applied_aperture, aperture_exhausted);
     match status {
         _ if !cgroup_reconciled
             || !capsule_reconciled
@@ -1377,16 +1392,62 @@ async fn run_child(
     execution.notify.notify_waiters();
 }
 
+/// Whether this run reached its declared aperture ceiling — asked once more after the wait.
+///
+/// The supervision tick is not the only way to find out, and it must not be the only place that
+/// looks. The relay stops the bytes and closes both halves of the connection
+/// (`crate::egress::relay_body`); a child that notices the EOF and exits before the next 1 ms tick
+/// wins the `child.wait()` arm of the `select!` below, so `wait_for_child` returns with the flag
+/// still clear. The counters outlive that race — they are a shared page this process owns and the
+/// forwarder is still alive here — so the run would otherwise be reported byte for byte like one
+/// that finished on its own: `exited`, code 0, no refusal, with `bytes` summing to exactly the
+/// declared ceiling. That is the silent degradation invariant 3 forbids, and the field ADR 0014
+/// added exists precisely so it cannot happen.
+fn ceiling_reached(
+    observed_on_a_tick: bool,
+    aperture: Option<&crate::egress::InstalledAperture>,
+) -> bool {
+    observed_on_a_tick || aperture.is_some_and(crate::egress::InstalledAperture::ceiling_exceeded)
+}
+
+/// What the aperture did, and the bound it hit, on the run's own observation.
+///
+/// The bytes that crossed, counted where they crossed. An aperture with no traffic still reports
+/// itself: "installed and unused" and "never installed" are different observations. The refusal is
+/// the one bound that names itself — `state` is `Cancelled` for a ceiling exactly as it is for a
+/// timeout and a CPU budget, and what this adds is *which* bound, so an operator does not have to
+/// tell a ceiling from a client cancel by reading the byte counts (ADR 0014).
+fn record_aperture(
+    observation: &mut ExecObservation,
+    applied: Option<substrate_wire::AppliedAperture>,
+    exhausted: bool,
+) {
+    if let Some(applied) = applied
+        && let Some(confinement) = observation.resource.applied.as_mut()
+    {
+        confinement.network = AppliedNetwork::Aperture(applied);
+    }
+    if exhausted {
+        observation.resource.refusal = Some(substrate_wire::ExecRefusal {
+            class: substrate_wire::ErrorClass::Exhausted,
+            code: "exec.aperture-byte-limit".to_owned(),
+            message: "The declared egress aperture byte ceiling was reached.".to_owned(),
+        });
+    }
+}
+
 async fn wait_for_child(
     child: &mut Child,
     cgroup: &Cgroup,
     execution: &Execution,
     timeout: Duration,
     cpu_budget_micros: u64,
-) -> (io::Result<ExitStatus>, bool, bool, bool) {
+    aperture: Option<&crate::egress::InstalledAperture>,
+) -> (io::Result<ExitStatus>, bool, bool, bool, bool) {
     let mut timed_out = false;
     let mut cpu_exhausted = false;
     let mut cpu_measurement_failed = false;
+    let mut aperture_exhausted = false;
     let timeout_sleep = tokio::time::sleep(timeout);
     tokio::pin!(timeout_sleep);
     let mut cpu_poll = tokio::time::interval(Duration::from_millis(1));
@@ -1401,6 +1462,15 @@ async fn wait_for_child(
                 break child.wait().await;
             }
             _ = cpu_poll.tick() => {
+                // The ceiling before the CPU budget, on the same tick: a run that spends its
+                // budget waiting on an aperture it has already exhausted hit the ceiling, and the
+                // refusal has to say so (ADR 0014).
+                if aperture.is_some_and(crate::egress::InstalledAperture::ceiling_exceeded) {
+                    aperture_exhausted = true;
+                    let _ = cgroup.kill_all();
+                    close_live_output(execution).await;
+                    break child.wait().await;
+                }
                 match cgroup.cpu_usage_micros() {
                     Ok(usage) if usage >= cpu_budget_micros => {
                         cpu_exhausted = true;
@@ -1419,7 +1489,13 @@ async fn wait_for_child(
             }
         }
     };
-    (status, timed_out, cpu_exhausted, cpu_measurement_failed)
+    (
+        status,
+        timed_out,
+        cpu_exhausted,
+        cpu_measurement_failed,
+        aperture_exhausted,
+    )
 }
 
 async fn close_live_output(execution: &Execution) {
@@ -2020,6 +2096,7 @@ mod tests {
                 applied: None,
                 exit: None,
                 lease: None,
+                refusal: None,
             },
             stdout: Vec::new(),
             stderr: Vec::new(),

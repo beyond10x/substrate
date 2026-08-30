@@ -1,0 +1,42 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.8.0:result:workspace-file-write",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "atomic_replacement": {
+      "const": true
+    },
+    "kind": {
+      "const": "file"
+    },
+    "observed_at": {
+      "$ref": "../common.json#/$defs/timestamp"
+    },
+    "path": {
+      "$ref": "../common.json#/$defs/relative-path"
+    },
+    "sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "size": {
+      "maximum": 1048576,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "workspace": {
+      "$ref": "../common.json#/$defs/workspace-id"
+    }
+  },
+  "required": [
+    "kind",
+    "workspace",
+    "path",
+    "size",
+    "sha256",
+    "atomic_replacement",
+    "observed_at"
+  ],
+  "title": "workspace-file-write operation result",
+  "type": "object"
+}

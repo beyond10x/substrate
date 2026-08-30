@@ -789,6 +789,14 @@ pub struct AppliedAperture {
     pub mechanism: ApertureMechanism,
     /// What crossed, counted where the bytes are: in the forwarder and nowhere else.
     pub bytes: ApertureBytes,
+    /// The declared ceiling this run ran under, over both directions summed (ADR 0014).
+    ///
+    /// Absent is the shape every `0.7.0` reader already parses: an aperture declared without the
+    /// term reports exactly what it reported before the term existed. Present, it is what `bytes`
+    /// was measured against, so a reader auditing a stopped run does not have to go and find the
+    /// deployment's argv to know why it stopped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -991,6 +999,29 @@ pub struct Exec {
     pub exit: Option<ExecExit>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lease: Option<LeaseObservation>,
+    /// The named bound that ended this run, when one did (ADR 0014).
+    ///
+    /// `state` says a run was stopped; before this field nothing said by what. A timeout, a CPU
+    /// budget and a client cancel are all `cancelled` and stay that way — naming them here is a
+    /// later change with its own vectors. The declared aperture byte ceiling is this field's only
+    /// user, and a run that hit no bound carries nothing, so every observation a `0.7.0` reader
+    /// already parses is byte-identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refusal: Option<ExecRefusal>,
+}
+
+/// The class, code and message of the bound a run was stopped by (ADR 0014).
+///
+/// The same three fields an [`ErrorDetail`] carries, and deliberately not an `ErrorDetail`: this is
+/// an observation of a run that happened, not the failure of a request. There is no `address` —
+/// design 10 § 5 row 5 gives the byte ceiling none, because nothing in the request is at fault —
+/// and no `retriable`, because whether to run it again is not substrate's claim to make.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecRefusal {
+    pub class: ErrorClass,
+    pub code: String,
+    pub message: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1625,6 +1656,8 @@ pub enum WireValidationError {
     InvalidApertureName,
     #[error("an egress aperture name carries a destination where a name belongs")]
     ApertureDestinationInRequest,
+    #[error("an egress aperture selection carries a declared byte ceiling")]
+    ApertureCeilingInRequest,
     #[error("a network mode and an egress aperture selection disagree")]
     ApertureModeMismatch,
     #[error("execution capsule manifest does not match its digest")]
@@ -1874,6 +1907,12 @@ pub fn secret_slot_environment(slots: &[SecretSlotRequest]) -> Option<String> {
 pub struct EgressApertureFact {
     pub name: String,
     pub destination: String,
+    /// The declared byte ceiling, if this aperture carries one (ADR 0014).
+    ///
+    /// Published so `/v1/machine` answers "how much could this daemon ever pass" rather than only
+    /// "where could it reach". Absent means unbounded, which is what every aperture was before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<u64>,
 }
 
 /// An aperture name: `[a-z][a-z0-9_]{0,63}`, the same shape a secret slot name has.
@@ -1890,6 +1929,31 @@ pub fn valid_aperture_name(name: &str) -> bool {
 /// The successor input schema has no destination field at all, so a conforming client's raw
 /// destination is `schema-invalid` first. This exists for the one case the schema cannot see: a
 /// *name* that parses as `host:port`, which is a rejected escalation and not a configuration typo.
+/// Reads as a declared byte ceiling: any term spelling `max=`, at any position, in any case.
+///
+/// A ceiling is deployment vocabulary and `ConfinementRequest` is `deny_unknown_fields`, so a
+/// conforming client that adds a ceiling *field* is `schema-invalid` before this runs. This exists
+/// for the one shape the schema cannot see — a ceiling smuggled into the name — and it is checked
+/// before [`reads_as_destination`], which would otherwise answer "destination" for the `/` in
+/// `model/max=1MiB` and send an operator looking for the wrong escalation (ADR 0014).
+///
+/// **The comparison is on bytes, and it has to be.** `value` is whatever a client put in the
+/// request; this and [`reads_as_destination`] run *before* [`valid_aperture_name`], because a name
+/// that reads as an escalation must be refused as that escalation rather than as a name typo, and
+/// that ordering is the whole point of both codes. So neither may assume the name is ASCII: a
+/// `&str[..4]` here panics whenever byte index 4 lands inside a multi-byte character, turning a
+/// `422` into a dropped connection — invariant 3 inverted. `get(..4)` on the bytes is total for
+/// every input, including one shorter than the prefix.
+fn reads_as_ceiling(value: &str) -> bool {
+    value.split('/').any(|term| {
+        term.len() > 4
+            && term
+                .as_bytes()
+                .get(..4)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case(b"max="))
+    })
+}
+
 fn reads_as_destination(value: &str) -> bool {
     value.contains(':')
         || value.contains('/')
@@ -1916,6 +1980,9 @@ pub fn validate_aperture_request(
             Err(WireValidationError::ApertureModeMismatch)
         }
         (NetworkMode::Aperture, Some(name)) => {
+            if reads_as_ceiling(name) {
+                return Err(WireValidationError::ApertureCeilingInRequest);
+            }
             if reads_as_destination(name) {
                 return Err(WireValidationError::ApertureDestinationInRequest);
             }
@@ -2740,6 +2807,7 @@ mod egress_aperture_tests {
                 to_destination: 12,
                 from_destination: 34,
             },
+            max_bytes: None,
         });
         let rendered = serde_json::to_value(applied.clone()).unwrap();
         assert_eq!(rendered["mode"], "aperture");
@@ -2810,5 +2878,124 @@ mod egress_aperture_tests {
         assert_eq!(rendered["network"], "none");
         assert!(valid_aperture_name("model"));
         assert!(!valid_aperture_name("api.example.com"));
+    }
+    /// A ceiling is deployment vocabulary. A request that carries one is refused *as a ceiling*,
+    /// not as a destination and not as a name typo, so a rejected escalation reads as one
+    /// (ADR 0014).
+    #[test]
+    fn a_ceiling_where_a_name_belongs_is_refused_as_such() {
+        for escalation in ["model/max=1MiB", "model/max=1048576", "model/MAX=64MiB"] {
+            assert_eq!(
+                validate_aperture_request(NetworkMode::Aperture, Some(escalation))
+                    .expect_err("refused"),
+                WireValidationError::ApertureCeilingInRequest,
+                "{escalation}"
+            );
+        }
+        // A destination is still a destination: the ceiling refusal never swallows ADR 0013's.
+        assert_eq!(
+            validate_aperture_request(NetworkMode::Aperture, Some("api.example.com:443"))
+                .expect_err("refused"),
+            WireValidationError::ApertureDestinationInRequest
+        );
+    }
+
+    /// The run states the ceiling it ran under beside the bytes that crossed, and a run declared
+    /// without one serializes exactly the bytes a `0.7.0` reader already parses.
+    #[test]
+    fn the_applied_aperture_states_the_ceiling_it_ran_under() {
+        let mut applied = AppliedAperture {
+            mode: ApertureMode::Aperture,
+            name: "model".to_owned(),
+            destination: "203.0.113.7:443".to_owned(),
+            mechanism: ApertureMechanism::LoopbackForwarder,
+            bytes: ApertureBytes {
+                to_destination: 12,
+                from_destination: 34,
+            },
+            max_bytes: None,
+        };
+        let rendered = serde_json::to_value(&applied).unwrap();
+        assert!(
+            rendered.get("max_bytes").is_none(),
+            "an aperture declared without a ceiling reported one: {rendered}"
+        );
+        applied.max_bytes = Some(1_048_576);
+        let rendered = serde_json::to_value(&applied).unwrap();
+        assert_eq!(rendered["max_bytes"], 1_048_576);
+        assert_eq!(
+            serde_json::from_value::<AppliedAperture>(rendered).unwrap(),
+            applied
+        );
+    }
+
+    /// `/v1/machine` answers how much this daemon could ever pass, and answers nothing when no
+    /// ceiling was declared.
+    #[test]
+    fn the_capability_fact_publishes_the_declared_ceiling() {
+        let mut fact = super::EgressApertureFact {
+            name: "model".to_owned(),
+            destination: "203.0.113.7:443".to_owned(),
+            max_bytes: None,
+        };
+        assert!(
+            serde_json::to_value(&fact)
+                .unwrap()
+                .get("max_bytes")
+                .is_none(),
+            "an undeclared ceiling was published"
+        );
+        fact.max_bytes = Some(67_108_864);
+        assert_eq!(
+            serde_json::to_value(&fact).unwrap()["max_bytes"],
+            67_108_864
+        );
+    }
+
+    /// At `0.7.0` a mid-run bound had nowhere to live: a ceiling and a client cancel were both a
+    /// bare `cancelled`. The observation now carries the class, code and message beside that state
+    /// — and carries nothing at all for the runs that end the way they always did (ADR 0014).
+    #[test]
+    fn an_exec_names_the_bound_that_ended_it() {
+        let mut exec = super::Exec {
+            id: "exec_01JPCEIL".to_owned(),
+            kind: super::ExecKind::Exec,
+            workspace: "ws_01JPCEIL".to_owned(),
+            state: super::ExecState::Cancelled,
+            observed_at: chrono::Utc::now(),
+            requested: super::ConfinementRequest {
+                capability_snapshot: format!("sha256:{}", "0".repeat(64)),
+                network: NetworkMode::Aperture,
+                aperture: Some("model".to_owned()),
+                profile: super::SandboxProfile::Workspace,
+                required: true,
+            },
+            applied: None,
+            exit: None,
+            lease: None,
+            refusal: None,
+        };
+        let rendered = serde_json::to_value(&exec).unwrap();
+        assert!(
+            rendered.get("refusal").is_none(),
+            "a run that hit no bound named one: {rendered}"
+        );
+        exec.refusal = Some(super::ExecRefusal {
+            class: super::ErrorClass::Exhausted,
+            code: "exec.aperture-byte-limit".to_owned(),
+            message: "The declared egress aperture byte ceiling was reached.".to_owned(),
+        });
+        let rendered = serde_json::to_value(&exec).unwrap();
+        assert_eq!(rendered["state"], "cancelled");
+        assert_eq!(rendered["refusal"]["class"], "exhausted");
+        assert_eq!(rendered["refusal"]["code"], "exec.aperture-byte-limit");
+        assert!(
+            rendered["refusal"]["message"].is_string(),
+            "the refusal carries no message: {rendered}"
+        );
+        assert_eq!(
+            serde_json::from_value::<super::Exec>(rendered).unwrap(),
+            exec
+        );
     }
 }

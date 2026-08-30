@@ -136,6 +136,8 @@ pub(super) async fn exec_start(
             applied: None,
             exit: None,
             lease: lease.as_ref().map(NewLease::observation),
+            // An accepted exec has hit no bound: nothing has run yet.
+            refusal: None,
         },
         stdout: Vec::new(),
         stderr: Vec::new(),

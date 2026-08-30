@@ -156,6 +156,7 @@ fn exec(id: &str, workspace: &str, state: ExecState) -> StoredExec {
             applied: None,
             exit: None,
             lease: None,
+            refusal: None,
         },
         stdout: Vec::new(),
         stderr: Vec::new(),

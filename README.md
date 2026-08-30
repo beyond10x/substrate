@@ -117,7 +117,7 @@ The runner prints its current portable or delegated case inventory from each fre
 this document deliberately pins no counts that drift as adversarial coverage grows.
 
 `cargo xtask check-json` fails closed on unclassified or schema-invalid contract JSON and
-meta-validates every Draft 2020-12 schema offline, across all six released bundles. Classification
+meta-validates every Draft 2020-12 schema offline, across all eight released bundles. Classification
 used to live in a Python module the four checkers imported — shared live machinery, not any one
 bundle's reproducibility proof — so it moved with the rest of the tooling, and the four checkers no
 longer do it. They verify everything else about the bundles they froze.
@@ -176,8 +176,8 @@ name** — it never degrades to passing the value some other way (invariant 3). 
 
 Ordinary execution has no egress and that does not move: every run is under `--unshare-net` in a
 namespace with loopback and nothing else. An **aperture** is a separate, operator-declared authority
-to reach exactly one destination — `--egress-aperture <name>=<host>:<port>/tcp`, repeatable. A
-request selects one **by name** and can never carry a destination:
+to reach exactly one destination — `--egress-aperture <name>=<host>:<port>/tcp[/max=<size>]`,
+repeatable. A request selects one **by name** and can never carry a destination or a ceiling:
 
 ```console
 target/debug/substrate-daemon \
@@ -203,11 +203,20 @@ per-run snapshot of that anchor. The pinned address itself is **not** reachable 
 aperture is the only peer in the namespace.
 
 What was installed is reported rather than inferred — `applied.network` becomes
-`{mode, name, destination, mechanism, bytes}`, with the address the forwarder actually dialled and
-the bytes counted where they crossed. An aperture nobody declared is `unserved` **with the name in
-the message**; where the mechanism did not verify in a throwaway sandbox at startup, the capability
-fact `exec.egress-apertures` is absent and every aperture request is `unserved` — never a run that
-quietly got no network instead (invariant 3). ADR 0013.
+`{mode, name, destination, mechanism, bytes, max_bytes}`, with the address the forwarder actually
+dialled and the bytes counted where they crossed. An aperture nobody declared is `unserved` **with
+the name in the message**; where the mechanism did not verify in a throwaway sandbox at startup, the
+capability fact `exec.egress-apertures` is absent and every aperture request is `unserved` — never a
+run that quietly got no network instead (invariant 3). ADR 0013.
+
+The optional `/max=<size>` term bounds **how much** may cross, over both directions summed, for one
+run — `1048576`, `512KiB`, `64MiB`, `2GiB`, and never a decimal-power unit such as `MB`. An
+unrecognised term is a startup error, not an ignored one, and an aperture declared without the term
+passes exactly what it passed before. The relay stops relaying at the ceiling, so the total may
+exceed it by at most one 16 KiB relay buffer per live connection; the run is then ended and the
+observation carries `refusal: {class: "exhausted", code: "exec.aperture-byte-limit", …}` beside a
+state of `cancelled`. The child is told nothing — its socket closes mid-stream and the tree is
+killed. A ceiling in a request is refused `exec.aperture-ceiling-in-request`. ADR 0014.
 
 ### Grant attribution
 

@@ -1,0 +1,63 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.8.0:input:workspace-create",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "labels": {
+      "$ref": "../common.json#/$defs/labels"
+    },
+    "lease_ttl_ms": {
+      "maximum": 86400000,
+      "minimum": 1000,
+      "type": "integer"
+    },
+    "source": {
+      "oneOf": [
+        {
+          "const": "empty"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "git": {
+              "additionalProperties": false,
+              "properties": {
+                "depth": {
+                  "maximum": 1000,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "ref": {
+                  "maxLength": 512,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "source": {
+                  "maxLength": 128,
+                  "minLength": 1,
+                  "type": "string"
+                }
+              },
+              "required": [
+                "source",
+                "ref",
+                "depth"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "git"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "required": [
+    "source",
+    "labels"
+  ],
+  "title": "workspace-create operation input",
+  "type": "object"
+}
