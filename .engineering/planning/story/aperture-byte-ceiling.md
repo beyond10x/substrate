@@ -2,13 +2,13 @@
 format: aep.planning-md/1
 id: story:aperture-byte-ceiling
 kind: story
-status: draft
+status: implemented
 title: A declared aperture carries a byte ceiling that refuses mid-run
 summary: Design 10 § 5 row 5 names exec.aperture-byte-limit; the counter exists, the ceiling does not.
 relations:
 - decomposes: epic:byte-plane-completion
 - depends_on: story:destination-bound-egress
-revision: 5
+revision: 9
 ---
 # Story: A declared aperture carries a byte ceiling that refuses mid-run
 
@@ -167,3 +167,56 @@ from `substrate_host` (invariant 4), converted at the composition root (`:424`, 
 `docs/design/12-aperture-byte-ceiling.md` mention `runtime.rs` **zero times**. The ceiling has to
 land there too, or the declared value cannot reach the host type the ADR names. Verified:
 `grep -c runtime.rs` over both documents returns `0`.
+
+## Implemented — 2026-08-30, one-unit wave
+
+Merged on `wave/aperture-byte-ceiling` at `433ec68`, unit commit `5802e8d`.
+
+Evidence items 2-5 are met. `contracts/substrate-wire/0.8.0/`, 228 files, predecessor `0.7.0`,
+`adds_routes: 0`, `preserves_routes: 26`; every `0.7.0` vector, fixture and schema byte-identical in
+`0.8.0` except `$id` and one `contract` string. `PORTABLE_CASES` 33 → 34, `DELEGATED_CASES` 50 → 54.
+
+Verified by the orchestrator rather than taken on report: `bash scripts/gate.sh` → `gate: passed`,
+exit 0, run on the integration branch after the merge. `bash scripts/delegated-lane.sh` → exit 0,
+`54 HTTP cases … (delegated lane)`. `cargo xtask check-json` → `1544 documents in 8 bundles`.
+`git status --short contracts/` showed only the new `0.8.0`; `xtask/src/render.rs` untouched.
+
+**The surface ADR 0014 never named.** The ADR and design 12 mention `runtime.rs` zero times, but
+`crates/substrate-daemon/src/runtime.rs` declares the daemon's own three-field `EgressAperture`,
+deliberately not re-exported from `substrate_host` (invariant 4). The ceiling landed in both types
+and the conversion, and `configuration_generation` now formats `name=host:port/tcp[/max=N]` so a
+changed ceiling moves the snapshot digest — a published fact that does not move the snapshot is a
+stale fact. Found by `story-scoper` before dispatch, not at merge time.
+
+### Two defects the adversary found, both verified by the orchestrator before being routed back
+
+**A client-supplied aperture name could panic the handler.** `reads_as_ceiling` sliced `term[..4]`
+on the raw request string and ran before `valid_aperture_name`, so any name whose multi-byte
+character straddled byte index 4 panicked — `ab€cd`, `mo€del`, `ma€x`. Reproduced independently in
+isolation. At `0.7.0` that request was `422 exec.aperture-name-invalid`; with the slice it became a
+dropped connection carrying zero bytes, no status, no error class. Invariant 3 inverted: a refusal
+turned into a crash. The comparison is now on bytes via `get(..4)`, total for every input.
+
+**A run stopped at the ceiling could report no refusal at all.** `aperture_exhausted` was set only
+inside the supervision tick, which shares a `select!` with `child.wait()`. The relay closes the
+socket, the child exits cleanly on that EOF, `child.wait()` wins, and the flag was never read again
+— the run recorded `state: exited, exit 0, refusal: null`, byte-identical to a run that finished on
+its own. Measured at 4-6 of 20. The ceiling is now asked once more after the wait, while the
+forwarder is still alive. The implementor reports 200 runs across 10 executions with `refusal: null`
+zero times and the race window still hit 74 of 200, every one now `cancelled` with
+`exec.aperture-byte-limit`; the orchestrator re-ran the case 15 consecutive times, 0 failures.
+
+A third disagreement was fixed with them: the relay and the parent disagreed at
+`max_bytes: Some(0)` — unreachable through the daemon, reachable through the public
+`substrate_host::EgressAperture`.
+
+### Recorded, deliberately not fixed
+
+The same `select!` race can drop `cpu_exhausted`. It loses one state bit and has no refusal code
+today (ADR 0014 defers naming timeout and CPU exhaustion), where the ceiling lost the only field
+distinguishing a bounded run from an unbounded one. Widening the change was refused rather than
+forgotten.
+
+There is no bundle *vector* for the startup grammar refusal: the `vector.json` `startup` action
+shape has no configuration member to carry a malformed aperture declaration. The shipped binary is
+asserted instead, in `check_aperture_term_refusal`.
