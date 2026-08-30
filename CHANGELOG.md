@@ -7,6 +7,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.2.3] — 2026-08-30
+
+Three accepted ADRs implemented, and the gate's last Python removed. Additive throughout: no route
+is removed or changed, and every earlier contract bundle keeps its bytes.
+
 ### Added
 
 - **A tagged `main` publishes a signed, digest-pinned daemon image.**
