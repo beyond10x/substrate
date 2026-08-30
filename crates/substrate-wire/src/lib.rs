@@ -110,6 +110,161 @@ pub const SESSION_INPUT_CLOSE_UNSERVED: &str = "session.input-close-unserved";
 /// The declared output bound ended the session (ADR 0014's refusal field, design 13).
 pub const SESSION_OUTPUT_LIMIT: &str = "session.output-limit";
 
+/// A session attachment refused a client frame, and the loop could not name the reason more
+/// precisely than "the driver refused it". The driver's own code is carried in the message.
+pub const SESSION_DRIVER_REFUSED: &str = "session.driver-refused";
+/// A client frame is outside the closed vocabulary of the mode this attachment serves.
+pub const SESSION_FRAME_INVALID: &str = "session.frame-invalid";
+/// Client sequences must be contiguous and start at one.
+pub const SESSION_SEQUENCE_INVALID: &str = "session.sequence-invalid";
+/// Input content is not valid standard base64.
+pub const SESSION_BASE64_INVALID: &str = "session.base64-invalid";
+/// A signal frame is outside the closed signal or grace bounds.
+pub const SESSION_SIGNAL_INVALID: &str = "session.signal-invalid";
+/// Input is already closed and cannot be written or closed again.
+pub const SESSION_INPUT_CLOSED: &str = "session.input-closed";
+/// The exec this operation names is not a raw-pipe session.
+pub const SESSION_NOT_PIPE: &str = "session.not-pipe";
+/// One input frame is outside the admitted frame bound.
+pub const SESSION_FRAME_LIMIT: &str = "session.frame-limit";
+/// Cumulative input is outside the admitted byte bound.
+pub const SESSION_INPUT_LIMIT: &str = "session.input-limit";
+/// Substrate could not deliver input and does not pretend it arrived.
+pub const SESSION_WRITE_FAILED: &str = "session.write-failed";
+/// An output read deadline elapsed with no frame.
+pub const SESSION_READ_TIMEOUT: &str = "session.read-timeout";
+/// A read deadline of zero is not a deadline.
+pub const SESSION_TIMEOUT_INVALID: &str = "session.timeout-invalid";
+
+/// Every code a session attachment's `protocol-error` frame may carry.
+///
+/// This is closed **by construction**, not by convention: [`send a protocol
+/// error`](SessionProtocolErrorCode) takes this type and nothing else, so a code outside the set
+/// cannot be put on the wire, and [`SessionProtocolErrorCode::classify`] is the only door a driver
+/// error comes through. Before it existed the loop forwarded `DriverError::code` verbatim, which
+/// could put `exec.cgroup-missing`, `exec.observe-timeout`, `exec.sandbox-unavailable` or
+/// `resource.not-found` into a frame whose published `code` is `^session\.[a-z0-9-]+$` — a frame
+/// the bundle says cannot exist. Every member below matches that pattern.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionProtocolErrorCode {
+    Base64Invalid,
+    DriverRefused,
+    FrameInvalid,
+    FrameLimit,
+    InputCloseUnserved,
+    InputClosed,
+    InputLimit,
+    NotPipe,
+    NotPty,
+    OutputLimit,
+    PtyEnded,
+    PtyUnserved,
+    ReadTimeout,
+    ResizeFailed,
+    ResizeInvalid,
+    SequenceInvalid,
+    SignalInvalid,
+    TimeoutInvalid,
+    WriteFailed,
+}
+
+impl SessionProtocolErrorCode {
+    /// Every member, so a caller can enumerate the class rather than remember it.
+    pub const ALL: [Self; 19] = [
+        Self::Base64Invalid,
+        Self::DriverRefused,
+        Self::FrameInvalid,
+        Self::FrameLimit,
+        Self::InputCloseUnserved,
+        Self::InputClosed,
+        Self::InputLimit,
+        Self::NotPipe,
+        Self::NotPty,
+        Self::OutputLimit,
+        Self::PtyEnded,
+        Self::PtyUnserved,
+        Self::ReadTimeout,
+        Self::ResizeFailed,
+        Self::ResizeInvalid,
+        Self::SequenceInvalid,
+        Self::SignalInvalid,
+        Self::TimeoutInvalid,
+        Self::WriteFailed,
+    ];
+
+    /// The wire word.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Base64Invalid => SESSION_BASE64_INVALID,
+            Self::DriverRefused => SESSION_DRIVER_REFUSED,
+            Self::FrameInvalid => SESSION_FRAME_INVALID,
+            Self::FrameLimit => SESSION_FRAME_LIMIT,
+            Self::InputCloseUnserved => SESSION_INPUT_CLOSE_UNSERVED,
+            Self::InputClosed => SESSION_INPUT_CLOSED,
+            Self::InputLimit => SESSION_INPUT_LIMIT,
+            Self::NotPipe => SESSION_NOT_PIPE,
+            Self::NotPty => SESSION_NOT_PTY,
+            Self::OutputLimit => SESSION_OUTPUT_LIMIT,
+            Self::PtyEnded => SESSION_PTY_ENDED,
+            Self::PtyUnserved => SESSION_PTY_UNSERVED,
+            Self::ReadTimeout => SESSION_READ_TIMEOUT,
+            Self::ResizeFailed => SESSION_RESIZE_FAILED,
+            Self::ResizeInvalid => SESSION_RESIZE_INVALID,
+            Self::SequenceInvalid => SESSION_SEQUENCE_INVALID,
+            Self::SignalInvalid => SESSION_SIGNAL_INVALID,
+            Self::TimeoutInvalid => SESSION_TIMEOUT_INVALID,
+            Self::WriteFailed => SESSION_WRITE_FAILED,
+        }
+    }
+
+    /// The member a driver error belongs to, or [`Self::DriverRefused`] when it belongs to none.
+    ///
+    /// A driver may return any code at all — `exec.*` and `resource.*` among them — and an
+    /// attachment may not put those on the wire. Codes that *are* members keep their name, because
+    /// `session.input-limit` tells a client something `session.driver-refused` does not; everything
+    /// else is classified, and the driver's own code goes in the frame's human-readable message.
+    #[must_use]
+    pub fn classify(code: &str) -> Self {
+        let mut index = 0;
+        while index < Self::ALL.len() {
+            let member = Self::ALL[index];
+            if member.as_str() == code {
+                return member;
+            }
+            index += 1;
+        }
+        Self::DriverRefused
+    }
+}
+
+/// Every code a session attachment's `protocol-error` frame may carry, as wire words.
+///
+/// Derived from [`SessionProtocolErrorCode::ALL`] and checked against it by
+/// `every_protocol_error_variant_has_a_wire_word`, so a variant added without a word — or a word
+/// added without a variant — fails the suite rather than shipping.
+pub const SESSION_PROTOCOL_ERROR_CODES: [&str; 19] = [
+    SESSION_BASE64_INVALID,
+    SESSION_DRIVER_REFUSED,
+    SESSION_FRAME_INVALID,
+    SESSION_FRAME_LIMIT,
+    SESSION_INPUT_CLOSE_UNSERVED,
+    SESSION_INPUT_CLOSED,
+    SESSION_INPUT_LIMIT,
+    SESSION_NOT_PIPE,
+    SESSION_NOT_PTY,
+    SESSION_OUTPUT_LIMIT,
+    SESSION_PTY_ENDED,
+    SESSION_PTY_UNSERVED,
+    SESSION_READ_TIMEOUT,
+    SESSION_RESIZE_FAILED,
+    SESSION_RESIZE_INVALID,
+    SESSION_SEQUENCE_INVALID,
+    SESSION_SIGNAL_INVALID,
+    SESSION_TIMEOUT_INVALID,
+    SESSION_WRITE_FAILED,
+];
+
 /// Every refusal code a `pty` session can raise, in one place, sorted.
 ///
 /// This exists so the *class* is checkable rather than a list somebody remembers to extend. Each
@@ -2474,6 +2629,7 @@ mod tests {
         MAX_PTY_WINDOW_ROWS, MAX_READ_ONLY_ROOTS, ReadOnlyRoot, WireValidationError,
         validate_read_only_roots,
     };
+    use super::{SESSION_PROTOCOL_ERROR_CODES, SessionProtocolErrorCode};
     use serde::Deserialize as _;
     use serde_json::Value;
     use sha2::{Digest as _, Sha256};
@@ -2891,6 +3047,49 @@ mod tests {
             "secret_slots": [],
             "lease_ttl_ms": 60_000
         })
+    }
+
+    /// The class is closed by construction, and this proves the two halves of it agree.
+    ///
+    /// `SessionProtocolErrorCode::ALL` is what a caller enumerates and
+    /// `SESSION_PROTOCOL_ERROR_CODES` is what the contract publishes. A variant added without a
+    /// wire word, or a word added without a variant, fails here rather than shipping a code a
+    /// client cannot look up — which is the defect this type exists to make unrepresentable.
+    #[test]
+    fn every_protocol_error_variant_has_a_wire_word_and_the_reverse() {
+        let mut from_variants: Vec<&str> = SessionProtocolErrorCode::ALL
+            .iter()
+            .map(|member| member.as_str())
+            .collect();
+        from_variants.sort_unstable();
+        let mut published: Vec<&str> = SESSION_PROTOCOL_ERROR_CODES.to_vec();
+        published.sort_unstable();
+        assert_eq!(from_variants, published);
+        assert_eq!(
+            from_variants.len(),
+            SessionProtocolErrorCode::ALL.len(),
+            "two variants share one wire word"
+        );
+        for member in SessionProtocolErrorCode::ALL {
+            assert_eq!(SessionProtocolErrorCode::classify(member.as_str()), member);
+            assert!(
+                member.as_str().starts_with("session."),
+                "{} is outside the published protocol-error code pattern",
+                member.as_str()
+            );
+        }
+        // Anything a driver can return that is not a member classifies rather than escaping.
+        for outside in [
+            "exec.cgroup-missing",
+            "exec.observe-timeout",
+            "exec.sandbox-unavailable",
+            "resource.not-found",
+        ] {
+            assert_eq!(
+                SessionProtocolErrorCode::classify(outside),
+                SessionProtocolErrorCode::DriverRefused
+            );
+        }
     }
 
     /// The capsule hash domain is a wire-visible protocol byte string that another party

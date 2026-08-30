@@ -20,7 +20,7 @@ use substrate_wire::{
     ExecState, LeaseRenewInput, MAX_LEASE_TTL_MS, MAX_PTY_WINDOW_COLUMNS, MAX_PTY_WINDOW_ROWS,
     MIN_LEASE_TTL_MS, OutputStream, PipeClientFrame, PipeServerFrame, PipeSession,
     PipeSessionCapabilities, PipeSessionLimits, PipeSessionStartInput, SessionAttachmentState,
-    SessionKind, SessionMode, SessionState, Success,
+    SessionKind, SessionMode, SessionProtocolErrorCode, SessionState, Success,
 };
 use tokio::sync::Semaphore;
 
@@ -911,7 +911,7 @@ async fn run_pipe_attachment(
                             let _sent = send_pipe_protocol_error(
                                 &mut socket,
                                 &mut server_sequence,
-                                "session.frame-invalid",
+                                SessionProtocolErrorCode::FrameInvalid,
                                 "The client frame is outside the closed raw-pipe vocabulary.",
                                 policy,
                             ).await;
@@ -939,7 +939,7 @@ async fn run_pipe_attachment(
                         let _sent = send_pipe_protocol_error(
                             &mut socket,
                             &mut server_sequence,
-                            "session.frame-invalid",
+                            SessionProtocolErrorCode::FrameInvalid,
                             "Raw-pipe client frames use the closed JSON text encoding.",
                             policy,
                         ).await;
@@ -951,7 +951,7 @@ async fn run_pipe_attachment(
                     let _sent = send_pipe_protocol_error(
                         &mut socket,
                         &mut server_sequence,
-                        "session.sequence-invalid",
+                        SessionProtocolErrorCode::SequenceInvalid,
                         "Raw-pipe client sequences must be contiguous and start at one.",
                         policy,
                     ).await;
@@ -964,7 +964,7 @@ async fn run_pipe_attachment(
                             let _sent = send_pipe_protocol_error(
                                 &mut socket,
                                 &mut server_sequence,
-                                "session.input-closed",
+                                SessionProtocolErrorCode::InputClosed,
                                 "Raw-pipe stdin is already closed.",
                                 policy,
                             ).await;
@@ -974,7 +974,7 @@ async fn run_pipe_attachment(
                             let _sent = send_pipe_protocol_error(
                                 &mut socket,
                                 &mut server_sequence,
-                                "session.base64-invalid",
+                                SessionProtocolErrorCode::Base64Invalid,
                                 "Raw-pipe stdin content is not valid standard base64.",
                                 policy,
                             ).await;
@@ -984,8 +984,11 @@ async fn run_pipe_attachment(
                             let _sent = send_pipe_protocol_error(
                                 &mut socket,
                                 &mut server_sequence,
-                                error.code,
-                                "Substrate refused or failed the raw-pipe input frame.",
+                                SessionProtocolErrorCode::classify(error.code),
+                                &format!(
+                                    "Substrate refused or failed the raw-pipe input frame ({}).",
+                                    error.code
+                                ),
                                 policy,
                             ).await;
                             return false;
@@ -1019,7 +1022,7 @@ async fn run_pipe_attachment(
                             let _sent = send_pipe_protocol_error(
                                 &mut socket,
                                 &mut server_sequence,
-                                substrate_wire::SESSION_RESIZE_INVALID,
+                                SessionProtocolErrorCode::ResizeInvalid,
                                 "A resize names 1 to 1000 cells on each axis of a pty session.",
                                 policy,
                             ).await;
@@ -1029,8 +1032,11 @@ async fn run_pipe_attachment(
                             let _sent = send_pipe_protocol_error(
                                 &mut socket,
                                 &mut server_sequence,
-                                error.code,
-                                "Substrate refused or failed the terminal resize.",
+                                SessionProtocolErrorCode::classify(error.code),
+                                &format!(
+                                    "Substrate refused or failed the terminal resize ({}).",
+                                    error.code
+                                ),
                                 policy,
                             ).await;
                             return false;
@@ -1043,7 +1049,7 @@ async fn run_pipe_attachment(
                             let _sent = send_pipe_protocol_error(
                                 &mut socket,
                                 &mut server_sequence,
-                                "session.frame-invalid",
+                                SessionProtocolErrorCode::InputCloseUnserved,
                                 "A pty session has no half-close; send the terminal's own end-of-file character as input.",
                                 policy,
                             ).await;
@@ -1053,7 +1059,7 @@ async fn run_pipe_attachment(
                             let _sent = send_pipe_protocol_error(
                                 &mut socket,
                                 &mut server_sequence,
-                                "session.input-closed",
+                                SessionProtocolErrorCode::InputClosed,
                                 "Raw-pipe stdin cannot be closed again.",
                                 policy,
                             ).await;
@@ -1066,7 +1072,7 @@ async fn run_pipe_attachment(
                             let _sent = send_pipe_protocol_error(
                                 &mut socket,
                                 &mut server_sequence,
-                                "session.signal-invalid",
+                                SessionProtocolErrorCode::SignalInvalid,
                                 "Raw-pipe signal grace exceeds the closed bound.",
                                 policy,
                             ).await;
@@ -1081,8 +1087,11 @@ async fn run_pipe_attachment(
                                 let _sent = send_pipe_protocol_error(
                                     &mut socket,
                                     &mut server_sequence,
-                                    error.code,
-                                    "Substrate could not terminally observe the signalled raw-pipe process.",
+                                    SessionProtocolErrorCode::classify(error.code),
+                                    &format!(
+                                        "Substrate could not terminally observe the signalled raw-pipe process ({}).",
+                                        error.code
+                                    ),
                                     policy,
                                 ).await;
                                 return false;
@@ -1141,8 +1150,11 @@ async fn run_pipe_attachment(
                         let _sent = send_pipe_protocol_error(
                             &mut socket,
                             &mut server_sequence,
-                            error.code,
-                            "Substrate could not continue raw-pipe output observation.",
+                            SessionProtocolErrorCode::classify(error.code),
+                            &format!(
+                                "Substrate could not continue raw-pipe output observation ({}).",
+                                error.code
+                            ),
                             policy,
                         ).await;
                         return false;
@@ -1180,16 +1192,23 @@ async fn send_pipe_server_frame(
     .await
 }
 
+/// One `protocol-error` frame, in a code the contract publishes.
+///
+/// The parameter is [`SessionProtocolErrorCode`] and not a `&str` **on purpose**: that is what
+/// makes "every code a session attachment can send is one the bundle publishes" a property of the
+/// type system rather than of a list somebody keeps up to date. Before it, four codes reached a
+/// pty client that `x-b10x-codes` did not name, and a forwarded `DriverError::code` could put an
+/// `exec.*` word into a frame whose published `code` is `^session\.[a-z0-9-]+$`.
 async fn send_pipe_protocol_error(
     socket: &mut WebSocket,
     sequence: &mut u64,
-    code: &str,
+    code: SessionProtocolErrorCode,
     message: &str,
     policy: PipeSessionPolicy,
 ) -> Result<(), ()> {
     let frame = PipeServerFrame::ProtocolError {
         sequence: *sequence,
-        code: code.to_owned(),
+        code: code.as_str().to_owned(),
         message: message.to_owned(),
     };
     *sequence = sequence.saturating_add(1);
@@ -1218,7 +1237,14 @@ async fn send_pipe_terminal(
     if let Some(refusal) = &observation.resource.refusal
         && refusal.code == "session.output-backpressure"
     {
-        send_pipe_protocol_error(socket, sequence, &refusal.code, &refusal.message, policy).await?;
+        send_pipe_protocol_error(
+            socket,
+            sequence,
+            SessionProtocolErrorCode::classify(&refusal.code),
+            &refusal.message,
+            policy,
+        )
+        .await?;
     }
     let truncation_is_deliverable = mode == SessionMode::Pipes;
     if truncation_is_deliverable && observation.stdout_truncated {

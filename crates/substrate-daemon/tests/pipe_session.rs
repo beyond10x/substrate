@@ -1188,3 +1188,224 @@ async fn a_pty_attachment_is_never_sent_a_truncated_frame() {
     );
     assert_eq!(frame["state"], "cancelled", "{frame}");
 }
+
+// ---------------------------------------------------------------------------
+// Adversary pass 3. Added cases only; nothing above this line was altered.
+// ---------------------------------------------------------------------------
+
+/// The `protocol-error` codes `0.9.0` publishes for a pty attachment, read out of the bundle.
+///
+/// `schemas/pty-channel-frame.json`'s `protocol-error` branch carries `x-b10x-codes`, an annotation
+/// this wave introduced — the raw-pipe vocabulary next door has none. It is the only place a client
+/// can look up what a pty attachment may be told, and `xtask`'s `check_pty_refusal_class` treats a
+/// code's presence in it as proof that the code is readable.
+fn published_pty_protocol_error_codes() -> Vec<String> {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("contracts/substrate-wire/0.9.0/schemas/pty-channel-frame.json");
+    let document: Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("pty frame schema")).expect("JSON");
+    let codes = document
+        .get("oneOf")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|branch| {
+            branch
+                .pointer("/properties/kind/const")
+                .and_then(Value::as_str)
+                == Some("protocol-error")
+        })
+        .and_then(|branch| branch.get("x-b10x-codes"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(str::to_owned)
+        .collect::<Vec<String>>();
+    assert!(
+        !codes.is_empty(),
+        "the pty protocol-error branch publishes no code list to read"
+    );
+    codes
+}
+
+/// Drives one client frame at a fresh pty attachment and returns the `protocol-error` code it gets.
+async fn pty_protocol_error_code(frame: &Value) -> String {
+    let harness = Harness::with_terminals().await;
+    let (session_id, _exec) = harness.start_pty().await;
+    let mut socket = harness
+        .attach(&format!("/v1/pipe-sessions/{session_id}/attach"))
+        .await;
+    socket
+        .send_text(serde_json::to_vec(frame).expect("client frame").as_slice())
+        .await;
+    let answer = socket.next_json().await;
+    assert_eq!(
+        answer["kind"], "protocol-error",
+        "{frame} must be refused, not served: {answer}"
+    );
+    answer["code"]
+        .as_str()
+        .expect("protocol-error code")
+        .to_owned()
+}
+
+/// A pty attachment that sends `close-input` is told so in the code minted for exactly that.
+///
+/// `substrate_wire::SESSION_INPUT_CLOSE_UNSERVED` was minted in the round before this one for one
+/// condition — "a pty has no half-close; a client ends input with the terminal's own end-of-file
+/// character" (`crates/substrate-wire/src/lib.rs:106-107`) — and the driver port raises it for that
+/// condition (`crates/substrate-host/src/process.rs:742-749`). `0.9.0` publishes it on the pty
+/// vocabulary's `protocol-error` branch, so a client that reads the contract expects it. The
+/// attachment loop never reaches the driver: it short-circuits on `mode == SessionMode::Pty` and
+/// answers `session.frame-invalid`, a literal
+/// (`crates/substrate-daemon/src/app/sessions.rs:1040-1052`) that appears in **no** document of any
+/// released bundle. Two entry points, one condition, two codes — the shape round 1 found for the
+/// refusal *order* and round 2 fixed at the driver port, one level up.
+///
+/// Portable lane. No confinement backend, no cgroup delegation.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pty_attachment_that_closes_input_is_told_in_the_code_minted_for_it() {
+    let code = pty_protocol_error_code(&json!({"kind": "close-input", "sequence": 1})).await;
+    assert_eq!(
+        code,
+        substrate_wire::SESSION_INPUT_CLOSE_UNSERVED,
+        "the driver port and 0.9.0's pty protocol-error branch both name this condition \
+         session.input-close-unserved; the attachment loop answers something else"
+    );
+}
+
+/// Every code a pty attachment can be sent is one the bundle it speaks publishes.
+///
+/// `check_pty_refusal_class` (`xtask/src/bundle.rs:494`) asks the released bundle to name each entry
+/// of `substrate_wire::SESSION_PTY_REFUSAL_CODES`. It cannot ask the converse — that no code
+/// *outside* the set reaches a pty client — because it reads documents and not code. This asks it
+/// from the other end: drive each refusal an attachment can produce and check the code against the
+/// list the contract publishes. A code a client can receive and cannot look up is a code nobody can
+/// handle, which is the whole argument the class rule was built on.
+///
+/// Portable lane.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_protocol_error_code_a_pty_attachment_can_receive_is_published() {
+    let published = published_pty_protocol_error_codes();
+    let mut unpublished = Vec::new();
+    for frame in [
+        json!({"kind": "close-input", "sequence": 1}),
+        json!({"kind": "resize", "sequence": 9, "window": {"columns": 80, "rows": 24}}),
+        json!({
+            "kind": "stdin",
+            "sequence": 1,
+            "content": {"encoding": "base64", "data": "@@@@"}
+        }),
+        json!({"kind": "signal", "sequence": 1, "signal": "TERM", "grace_ms": 60_001}),
+        json!({"kind": "resize", "sequence": 1, "window": {"columns": 0, "rows": 24}}),
+    ] {
+        let code = pty_protocol_error_code(&frame).await;
+        if !published.contains(&code) {
+            unpublished.push(format!("{frame} is refused {code}"));
+        }
+    }
+    assert!(
+        unpublished.is_empty(),
+        "0.9.0/schemas/pty-channel-frame.json publishes {published:?} for a pty attachment, and \
+         these reach one anyway:\n{}",
+        unpublished.join("\n")
+    );
+}
+
+/// The same pty start, refused by name at both entry points — with the same name.
+///
+/// Round 1 found the two entry points disagreeing about which of two applicable refusals answers a
+/// `mode: "pty"` start, and round 2 fixed it for one pair: the `sessions.pty` fact now outranks the
+/// window shape at the driver port as well as at the daemon. The pair was fixed; the *class* was
+/// not. `ProcessRuntime::start_pipe` still answers `session.wait-invalid`
+/// (`crates/substrate-host/src/process.rs:284-290`) before it looks at the fact, while the daemon's
+/// mode gate is outermost by construction and answers `session.pty-unserved`
+/// (`crates/substrate-daemon/src/app/operations.rs:557-571`).
+///
+/// So a `wait: true` pty start on a deployment that has no terminals is told two different things
+/// by two implementations of one contract, and the driver port's answer is the one the recorded
+/// decision argues against in its own words: it invites the client to drop `wait` and retry into a
+/// refusal it can never get past. This asserts only that the two agree, which is the part neither
+/// port gets to decide alone.
+///
+/// Portable lane. `HostConfig::minimum` on a temporary directory is a host with no terminals, which
+/// is the deployment the ordering decision is about.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_two_entry_points_name_one_refusal_for_a_pty_start_that_earns_two() {
+    let harness = Harness::open().await;
+    let workspace = harness.create_workspace("01JPTYWORKSPACECREATE006").await;
+    let mut body = pty_start(&workspace, Some(json!({"columns": 80, "rows": 24})));
+    body["exec"]["wait"] = json!(true);
+    let (status, refusal) = harness
+        .call(
+            Method::POST,
+            "/v1/pipe-sessions",
+            mutation("01JPTYSESSIONWAIT0000001", body),
+        )
+        .await;
+    assert_ne!(status, StatusCode::ACCEPTED, "{refusal}");
+    let over_http = refusal["error"]["code"]
+        .as_str()
+        .expect("refusal code")
+        .to_owned();
+
+    let directory = tempfile::tempdir().expect("temporary host root");
+    let driver = HostDriver::open(HostConfig::minimum(directory.path().join("workspaces")))
+        .expect("host driver");
+    assert_eq!(
+        driver.machine().facts.sessions_pty,
+        None,
+        "this case is about a deployment that never proved it can give a terminal"
+    );
+    std::fs::create_dir_all(driver.root().join("ws_pty_order")).expect("workspace directory");
+    let input = PipeSessionStartInput {
+        exec: ExecStartInput {
+            workspace: "ws_pty_order".to_owned(),
+            argv: vec!["/bin/sh".to_owned()],
+            env: substrate_wire::ExecEnvironment {
+                allow: vec![],
+                set: std::collections::BTreeMap::new(),
+            },
+            sandbox: substrate_wire::ConfinementRequest {
+                capability_snapshot: driver.machine().snapshot.clone(),
+                network: substrate_wire::NetworkMode::None,
+                aperture: None,
+                profile: SandboxProfile::Workspace,
+                required: true,
+            },
+            limits: substrate_wire::ExecLimits {
+                timeout_ms: 10_000,
+                output_bytes: 1_048_576,
+                processes: 8,
+                memory_bytes: 67_108_864,
+                cpu_millis: 1_000,
+            },
+            wait: true,
+            read_only_roots: Vec::new(),
+            secret_slots: Vec::new(),
+            capsule: None,
+            lease_ttl_ms: Some(60_000),
+        },
+        input_limit_bytes: 1_048_576,
+        frame_limit_bytes: 65_536,
+        queued_frames: 16,
+        mode: substrate_wire::SessionMode::Pty,
+        window: Some(substrate_wire::PtyWindow {
+            columns: 80,
+            rows: 24,
+        }),
+    };
+    let DispatchOutcome::NotDispatched(error) = driver
+        .start_pipe_session("ex_ptywaitorder", "ws_pty_order", &input)
+        .await
+    else {
+        panic!("a terminal must never be served as a pipe session instead");
+    };
+    assert_eq!(
+        error.code, over_http,
+        "the driver port and the daemon are two implementations of one refusal order, and a \
+         request that earns several refusals must not be told a different one by each"
+    );
+}

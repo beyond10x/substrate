@@ -736,6 +736,54 @@ fn check_v1_file_catch_alls(operations: &[Value], failures: &mut Vec<String>) {
 /// nobody can handle; a code the source raises and the bundle never mentions does not exist as far
 /// as the contract is concerned.
 fn check_pty_refusal_class(released: &Tree, failures: &mut Vec<String>) {
+    // The other direction, and the one round 2 got wrong. That round proved every code is
+    // *readable* in the bundle and called it the class; it did not prove the published list is the
+    // set the crate can actually emit, so four codes reached a client that the list did not name
+    // and one code on the list had no emitter at all. `SessionProtocolErrorCode` closes the emitting
+    // half by construction — `send_pipe_protocol_error` takes nothing else — and this closes the
+    // published half against it, exactly, in both directions and for both modes.
+    let expected: BTreeSet<&str> = substrate_wire::SESSION_PROTOCOL_ERROR_CODES
+        .iter()
+        .copied()
+        .collect();
+    for vocabulary in [
+        "schemas/pty-channel-frame.json",
+        "schemas/pipe-channel-frame.json",
+    ] {
+        let Some(document) = json_at(released, vocabulary, failures) else {
+            continue;
+        };
+        let published: BTreeSet<&str> = document
+            .get("oneOf")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .find(|branch| {
+                branch
+                    .pointer("/properties/kind/const")
+                    .and_then(Value::as_str)
+                    == Some("protocol-error")
+            })
+            .and_then(|branch| branch.get("x-b10x-codes"))
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
+        for missing in expected.difference(&published) {
+            failures.push(format!(
+                "{vocabulary}: the attachment loop can send {missing} and this vocabulary does not \
+                 publish it"
+            ));
+        }
+        for extra in published.difference(&expected) {
+            failures.push(format!(
+                "{vocabulary}: publishes {extra}, which no attachment loop can send — a code with \
+                 no emitter is as unusable as an emitter with no code"
+            ));
+        }
+    }
+
     for code in substrate_wire::SESSION_PTY_REFUSAL_CODES {
         let named = released.iter().any(|(path, bytes)| {
             Path::new(path)
@@ -1713,6 +1761,33 @@ fn check_pty_frames(released: &Tree, failures: &mut Vec<String>) {
     let Some(document) = json_at(released, "schemas/pty-channel-frame.json", failures) else {
         return;
     };
+    // Before anything else: no `kind` twice. Draft 2020-12 `oneOf` requires *exactly one* subschema
+    // to match, so a duplicated branch does not widen the vocabulary — it inverts it. Two `resize`
+    // branches with different bounds make an in-bounds window match both and be **invalid**, and an
+    // out-of-bounds one match only the wide branch and be **valid**. Every question below is asked
+    // of a set or of one branch, and neither notices multiplicity, so it is asked here.
+    let mut seen: BTreeMap<String, usize> = BTreeMap::new();
+    for branch in document
+        .get("oneOf")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(kind) = branch
+            .pointer("/properties/kind/const")
+            .and_then(Value::as_str)
+        {
+            *seen.entry(kind.to_owned()).or_default() += 1;
+        }
+    }
+    for (kind, count) in &seen {
+        if *count > 1 {
+            failures.push(format!(
+                "schemas/pty-channel-frame.json: the {kind} frame appears {count} times in one \
+                 oneOf, which makes a conforming frame match more than one branch and so match none"
+            ));
+        }
+    }
     let kinds: BTreeSet<String> = document
         .get("oneOf")
         .and_then(Value::as_array)
@@ -1778,16 +1853,31 @@ fn check_pty_frames(released: &Tree, failures: &mut Vec<String>) {
 /// source. This makes the same claim from a file no bundle hashes, exactly as
 /// `check_aperture_additions` does for `MAX_EGRESS_APERTURES`.
 fn check_pty_window_bounds(released: &Tree, failures: &mut Vec<String>) {
-    if let Some(document) = json_at(released, "schemas/pty-channel-frame.json", failures)
-        && document
-            .pointer(&format!("/oneOf/{RESIZE_BRANCH}/properties/kind/const"))
-            .and_then(Value::as_str)
-            != Some("resize")
-    {
-        failures.push(format!(
-            "schemas/pty-channel-frame.json: oneOf branch {RESIZE_BRANCH} is not the resize frame"
-        ));
-        return;
+    // Found by asking which branch says `resize`, not by an index that a reordered `oneOf` would
+    // silently invalidate. When there is no such branch the frame checker above has already said
+    // so; this records the pointers it could not read and **carries on**, because the four bounds
+    // on `pipe-session-start.json` and the capability ceilings are a different claim and returning
+    // here used to drop all four.
+    let resize =
+        json_at(released, "schemas/pty-channel-frame.json", failures).and_then(|document| {
+            document
+                .get("oneOf")
+                .and_then(Value::as_array)
+                .into_iter()
+                .flatten()
+                .position(|branch| {
+                    branch
+                        .pointer("/properties/kind/const")
+                        .and_then(Value::as_str)
+                        == Some("resize")
+                })
+        });
+    if resize.is_none() {
+        failures.push(
+            "schemas/pty-channel-frame.json: no oneOf branch is the resize frame, so the live \
+             window bound is stated nowhere a client reads"
+                .to_owned(),
+        );
     }
     let columns = u64::from(substrate_wire::MAX_PTY_WINDOW_COLUMNS);
     let rows = u64::from(substrate_wire::MAX_PTY_WINDOW_ROWS);
@@ -1826,18 +1916,23 @@ fn check_pty_window_bounds(released: &Tree, failures: &mut Vec<String>) {
         // The document a WebSocket client reads to build a `resize` — the only place the *live*
         // bound is stated on the wire, and the one this table used to omit. A client that trusted
         // the frame schema alone would have believed 65535 was deliverable.
-        (
-            "schemas/pty-channel-frame.json",
-            &resize_window("columns", "maximum"),
-            columns,
-        ),
-        (
-            "schemas/pty-channel-frame.json",
-            &resize_window("rows", "maximum"),
-            rows,
-        ),
     ] {
         declared(path, pointer, expected, failures);
+    }
+    if let Some(branch) = resize {
+        for (axis, bound, expected) in [
+            ("columns", "maximum", columns),
+            ("rows", "maximum", rows),
+            ("columns", "minimum", 1),
+            ("rows", "minimum", 1),
+        ] {
+            declared(
+                "schemas/pty-channel-frame.json",
+                &resize_window(branch, axis, bound),
+                expected,
+                failures,
+            );
+        }
     }
     // Zero is refused rather than mapped to a default: a zero dimension is how a terminal says
     // *I do not know*, which is not what a client that sent a window meant (design 13).
@@ -1850,31 +1945,14 @@ fn check_pty_window_bounds(released: &Tree, failures: &mut Vec<String>) {
             "schemas/inputs/pipe-session-start.json",
             "/properties/window/properties/rows/minimum".to_owned(),
         ),
-        (
-            "schemas/pty-channel-frame.json",
-            resize_window("columns", "minimum"),
-        ),
-        (
-            "schemas/pty-channel-frame.json",
-            resize_window("rows", "minimum"),
-        ),
     ] {
         declared(path, &pointer, 1, failures);
     }
 }
 
-/// Where the `resize` frame sits in the authored `oneOf` — `stdin`, `resize`, `signal`, `output`,
-/// `exit`, `protocol-error`. `check_pty_frames` proves every one of those branches exists, so this
-/// index cannot point at a branch that vanished; `check_pty_window_bounds` reads the branch's own
-/// `kind` before trusting it, so it cannot point at one that moved either.
-const RESIZE_BRANCH: usize = 1;
-
-/// A pointer into the `resize` branch of the pty frame vocabulary.
-///
-/// The branch is selected by position, so this asks the schema where `resize` is rather than
-/// hard-coding an index that a reordered `oneOf` would silently invalidate.
-fn resize_window(axis: &str, bound: &str) -> String {
-    format!("/oneOf/{RESIZE_BRANCH}/properties/window/properties/{axis}/{bound}")
+/// A pointer into the `resize` branch of the pty frame vocabulary, at the position it was found.
+fn resize_window(branch: usize, axis: &str, bound: &str) -> String {
+    format!("/oneOf/{branch}/properties/window/properties/{axis}/{bound}")
 }
 
 /// The coverage half of `0.9.0`: every pty requirement carries evidence, and each refusal is read
@@ -2008,13 +2086,22 @@ fn check_pty_refusals(released: &Tree, failures: &mut Vec<String>) {
         // What is stated instead is what a case actually observes.
         (
             "vectors/driver/pty-session-hangup.json",
-            "/expected/outcome/hangup_ends_the_child",
+            "/expected/outcome/controlling_terminal",
             json!(true),
+        ),
+        // The layer the hangup is observed at, and — stated rather than assumed — that it is not
+        // observed through a session. No session API closes the master without first killing the
+        // tree, so a vector claiming a session-level hangup would be asserting something nothing in
+        // this tree can watch.
+        (
+            "vectors/driver/pty-session-hangup.json",
+            "/expected/outcome/hangup_observed_at",
+            json!("pty-allocation"),
         ),
         (
             "vectors/driver/pty-session-hangup.json",
-            "/expected/outcome/controlling_terminal",
-            json!(true),
+            "/expected/outcome/hangup_observed_through_a_session",
+            json!(false),
         ),
         (
             "vectors/driver/pty-session-output-bound-ends-the-session.json",

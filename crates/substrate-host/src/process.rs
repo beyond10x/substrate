@@ -355,19 +355,25 @@ impl ProcessRuntime {
         workspace: &Path,
         input: &PipeSessionStartInput,
     ) -> DispatchOutcome<ExecObservation> {
-        if input.exec.wait {
-            return DispatchOutcome::NotDispatched(DriverError::refused(
-                "session.wait-invalid",
-                "A raw-pipe session cannot use synchronous exec wait.",
-                "wait",
-            ));
-        }
-        // The fact first, then the window shape, then the bounds — the same order the daemon
-        // applies (`crates/substrate-daemon/src/app/operations.rs`) and the same one `0.9.0` states
-        // in `vectors/http/pty-session-unserved-outranks-a-missing-window.json`. A request can earn
-        // both refusals; only one is worth acting on. `session.window-invalid` invites a client on a
-        // terminal-less deployment to add a window and retry into a refusal it can never get past.
-        // In no case is a pipe session started instead (design 13, invariant 3).
+        // **The mode gate is outermost, and nothing precedes it at either entry point.** That is
+        // the whole ordering rule, and it is a rule rather than a preference because the two ports
+        // are two implementations of one contract: a request that earns several refusals must not
+        // be told a different one by each. `0.9.0` states it in
+        // `vectors/http/pty-session-unserved-outranks-a-missing-window.json` and in the
+        // `session.pty-refusal-order` coverage requirement.
+        //
+        // Four checks exist at both ports. Their relative order agrees member for member —
+        // `pty fact` < `window shape` < {`wait`, `session bounds`} — which is what
+        // `the_two_entry_points_name_one_refusal_for_a_pty_start_that_earns_two` and
+        // `the_overlapping_checks_rank_the_same_at_both_entry_points` assert. Everything after
+        // those four is each port's own business: the daemon owns request shape, this owns host
+        // capability, and the daemon is always reached first, so a driver refusal is only ever
+        // visible for something the daemon admitted.
+        //
+        // `session.window-invalid` and `session.wait-invalid` both invite a client on a
+        // terminal-less deployment to change the request and retry into a refusal it can never get
+        // past; `session.pty-unserved` says stop. In no case is a pipe session started instead
+        // (design 13, invariant 3).
         if input.mode == SessionMode::Pty && self.capability.facts.sessions_pty != Some(true) {
             return DispatchOutcome::NotDispatched(DriverError::unserved(
                 substrate_wire::SESSION_PTY_UNSERVED,
@@ -380,6 +386,13 @@ impl ProcessRuntime {
                 substrate_wire::SESSION_WINDOW_INVALID,
                 "A pty session declares an initial window within the closed cell bounds, and a raw-pipe session declares none.",
                 "window",
+            ));
+        }
+        if input.exec.wait {
+            return DispatchOutcome::NotDispatched(DriverError::refused(
+                "session.wait-invalid",
+                "A raw-pipe session cannot use synchronous exec wait.",
+                "wait",
             ));
         }
         if input.input_limit_bytes == 0
@@ -786,10 +799,25 @@ impl ProcessRuntime {
             ));
         }
         if let Some(terminal) = pipe.terminal.as_ref() {
+            // The same guard `resize_pty` carries, for the same reason: the master outlives the
+            // child, so its input queue keeps accepting bytes with no slave left to read them.
+            // Reporting that as delivered tells a client its input reached a process that has
+            // finished. The raw-pipe branch below gets this for free — its descriptor is gone — and
+            // a terminal has to be asked.
+            if is_terminal(execution.observation.lock().resource.state) {
+                return Err(DriverError::refused(
+                    substrate_wire::SESSION_PTY_ENDED,
+                    "The pty session has ended; its child already finished, so nothing can read this input.",
+                    "session",
+                ));
+            }
             // Straight at the master: the line discipline between it and the child is what turns
             // these bytes into what the child reads, and into the echo the client sees back.
             return terminal.write_all(bytes).await.map_err(|error| {
-                DriverError::failed("session.write-failed", format!("pty input: {error}"))
+                DriverError::failed(
+                    substrate_wire::SESSION_WRITE_FAILED,
+                    format!("pty input: {error}"),
+                )
             });
         }
         let mut stdin = pipe.stdin.lock().await;
@@ -1789,10 +1817,12 @@ fn record_aperture(
 
 /// The bound a terminal session ends at, named on the run's own observation (ADR 0014's field).
 ///
-/// `state` is already `Cancelled` here, exactly as for a timeout; what this adds is *which* bound,
-/// so a client reading an `exit` frame is not left to tell an output ceiling from a client cancel
-/// by counting bytes. An aperture ceiling keeps its own name where both could apply: it is the
-/// bound that stopped the bytes first.
+/// `state` is already `Cancelled` here, exactly as for a timeout; what this adds is *which* bound.
+/// The `exit` frame the attachment receives carries `state` and `exit` and no refusal — design 05
+/// gave it no field for one — so this is read from the durable exec the client fetches afterwards
+/// (`GET /v1/execs/{exec_id}`), which is the only place an output ceiling can be told from a client
+/// cancel without counting bytes. An aperture ceiling keeps its own name where both could apply: it
+/// is the bound that stopped the bytes first.
 fn record_terminal_output_bound(observation: &mut ExecObservation, exhausted: bool) {
     if exhausted && observation.resource.refusal.is_none() {
         observation.resource.refusal = Some(substrate_wire::ExecRefusal {
