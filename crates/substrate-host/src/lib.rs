@@ -342,7 +342,7 @@ pub trait Driver: Send + Sync {
         _input: &substrate_wire::PipeSessionStartInput,
     ) -> DispatchOutcome<ExecObservation> {
         DispatchOutcome::NotDispatched(DriverError::unserved(
-            "session.unserved",
+            substrate_wire::SESSION_UNSERVED,
             "The selected driver does not serve raw-pipe sessions.",
             "session",
         ))
@@ -351,7 +351,7 @@ pub trait Driver: Send + Sync {
     /// Writes one bounded frame to an admitted raw-pipe process.
     async fn write_pipe_session(&self, _id: &str, _bytes: &[u8]) -> Result<(), DriverError> {
         Err(DriverError::unserved(
-            "session.unserved",
+            substrate_wire::SESSION_UNSERVED,
             "The selected driver does not serve raw-pipe sessions.",
             "session",
         ))
@@ -364,7 +364,7 @@ pub trait Driver: Send + Sync {
         _timeout: std::time::Duration,
     ) -> Result<Option<PipeFrame>, DriverError> {
         Err(DriverError::unserved(
-            "session.unserved",
+            substrate_wire::SESSION_UNSERVED,
             "The selected driver does not serve raw-pipe sessions.",
             "session",
         ))
@@ -373,7 +373,7 @@ pub trait Driver: Send + Sync {
     /// Half-closes the admitted raw-pipe process input.
     async fn close_pipe_session_input(&self, _id: &str) -> Result<(), DriverError> {
         Err(DriverError::unserved(
-            "session.unserved",
+            substrate_wire::SESSION_UNSERVED,
             "The selected driver does not serve raw-pipe sessions.",
             "session",
         ))

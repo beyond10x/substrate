@@ -629,7 +629,7 @@ pub(super) fn validate_pipe_session_input(
             request_id,
             Some(&mutation.op),
             ErrorClass::Unserved,
-            "session.confinement-unavailable",
+            substrate_wire::SESSION_CONFINEMENT_UNAVAILABLE,
             "Raw-pipe sessions require complete namespaces and cgroup limits, whole-tree kill, explicit leases, no egress, and bounded output.",
             Some("session"),
             false,

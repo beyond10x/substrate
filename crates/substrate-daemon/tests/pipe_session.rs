@@ -783,7 +783,13 @@ async fn durable_pipe_start_single_attachment_and_terminal_output_are_scoped() {
         .call(Method::GET, "/v1/pipe-sessions", Body::empty())
         .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(capabilities["result"]["contract"], "substrate-wire/0.4.0");
+    // Round 5: the document names the bundle whose schema it conforms to, and it carries five
+    // properties `0.4.0`'s closed schema forbids. `the_capability_document_is_admitted_by_the_
+    // contract_it_names` is the case that decides this; here it is just read back.
+    assert_eq!(
+        capabilities["result"]["contract"],
+        substrate_wire::PIPE_SESSION_CAPABILITY_CONTRACT
+    );
     assert_eq!(capabilities["result"]["single_attachment"], true);
     assert_eq!(capabilities["result"]["network"], "none");
     let (session_id, exec_id) = harness.start_pipe().await;
@@ -1597,5 +1603,475 @@ async fn a_resize_over_the_control_rate_is_answered_in_the_published_vocabulary(
     assert!(
         answer["kind"] == "protocol-error" && published.contains(&code),
         "the refusal must be a protocol-error in the published code set {published:?}: {answer}"
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Fifth adversarial pass. Cases added below this line; nothing above it was changed.
+// ---------------------------------------------------------------------------------------------
+
+/// The released result schema for the contract version a capability document names.
+fn published_capability_schema(contract: &str) -> Value {
+    let version = contract.strip_prefix("substrate-wire/").unwrap_or_else(|| {
+        panic!("a capability document names a substrate-wire contract: {contract}")
+    });
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("contracts/substrate-wire")
+        .join(version)
+        .join("schemas/results/pipe-session-capabilities.json");
+    serde_json::from_slice(&std::fs::read(&path).unwrap_or_else(|error| {
+        panic!("{contract} names a bundle with no capability result schema: {error}")
+    }))
+    .expect("JSON")
+}
+
+/// `GET /v1/pipe-sessions` answers with a body the contract the body itself names admits.
+///
+/// The operation registry binds `session.capabilities` to
+/// `schemas/results/pipe-session-capabilities.json`, and the document answers with
+/// `"contract": "substrate-wire/0.4.0"` — pinned by
+/// `durable_pipe_start_single_attachment_and_terminal_output_are_scoped`
+/// (`crates/substrate-daemon/tests/pipe_session.rs:786`) and written at
+/// `crates/substrate-daemon/src/app/sessions.rs:190`. So the schema a client validates this body
+/// against is `0.4.0`'s, and `0.4.0`'s is `additionalProperties: false` over nine properties.
+///
+/// Before this unit the body had exactly those nine and validated. This unit added five —
+/// `modes`, `max_window_columns`, `max_window_rows`, `max_controls_per_window`, `control_window_ms`
+/// — and left `contract` at `0.4.0`. The body now validates against no released bundle: not
+/// `0.4.0`'s, which forbids the five, and not `0.9.0`'s, whose `contract` is
+/// `{"const": "substrate-wire/0.9.0"}`.
+///
+/// Nothing catches it because `session.capabilities` has no executable vector: the only vector
+/// naming it is `vectors/driver/pipe-session-capabilities.json`, which is absent from
+/// `/conformance/executable_vectors`, and which expects `"contract": "substrate-wire/0.9.0"`.
+///
+/// Portable lane.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_capability_document_is_admitted_by_the_contract_it_names() {
+    let harness = Harness::with_terminals().await;
+    let (status, capabilities) = harness
+        .call(Method::GET, "/v1/pipe-sessions", Body::empty())
+        .await;
+    assert_eq!(status, StatusCode::OK, "{capabilities}");
+    let result = capabilities["result"]
+        .as_object()
+        .expect("a capability result object");
+    let contract = result["contract"].as_str().expect("a named contract");
+    let schema = published_capability_schema(contract);
+    assert_eq!(
+        schema["additionalProperties"],
+        json!(false),
+        "{contract}'s capability result schema is meant to be closed"
+    );
+    assert_eq!(
+        schema
+            .pointer("/properties/contract/const")
+            .and_then(Value::as_str),
+        Some(contract),
+        "the body names {contract} and that bundle's schema names a different contract"
+    );
+    let declared: Vec<&String> = schema["properties"]
+        .as_object()
+        .expect("schema properties")
+        .keys()
+        .collect();
+    let undeclared: Vec<&String> = result
+        .keys()
+        .filter(|field| !declared.iter().any(|known| known == field))
+        .collect();
+    assert!(
+        undeclared.is_empty(),
+        "GET /v1/pipe-sessions answers {contract}, whose result schema is closed over \
+         {declared:?}. The body carries {undeclared:?} as well, so it is admitted by no released \
+         bundle: {contract}'s schema forbids these properties, and the bundle that declares them \
+         (0.9.0) requires \"contract\": \"substrate-wire/0.9.0\"."
+    );
+}
+
+/// `x-b10x-out-of-bounds` holds for every integer the resize branch declares out of bounds, not
+/// only for the ones that happen to be non-negative.
+///
+/// The sibling `every_window_the_pty_resize_branch_declares_out_of_bounds_earns_the_code_it_publishes`
+/// closed the top of the range by widening the axes to `u64`, and
+/// `PtyWindow::cells`'s own doc states the rule the widening was for: "every non-negative integer a
+/// client can write decodes, and the only rule is the published one"
+/// (`crates/substrate-wire/src/lib.rs:1512`). The published rule does not say non-negative. The
+/// branch says `{"type": "integer", "minimum": 1, "maximum": 1000}` and annotates the whole window
+/// `x-b10x-out-of-bounds: "session.resize-invalid"`, and JSON Schema's `integer` admits negatives —
+/// so `-1` and `1001` are the same kind of thing to a client reading the contract: a well-typed
+/// integer outside the declared range.
+///
+/// They are not the same thing to the daemon. `0` decodes and earns `session.resize-invalid`; `-1`
+/// fails `serde_json::from_slice::<PipeClientFrame>` on a `u64` axis and earns
+/// `session.frame-invalid` (`crates/substrate-daemon/src/app/sessions.rs:905-919`). The boundary
+/// between "your window is out of range" and "your frame is not a frame" moved from 65535 to -1;
+/// it is still a number no released document names, still inside a range the published schema
+/// describes with one rule and one refusal code.
+///
+/// Portable lane.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_integer_window_the_pty_resize_branch_declares_out_of_bounds_earns_that_code() {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("contracts/substrate-wire/0.9.0/schemas/pty-channel-frame.json");
+    let document: Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("pty frame schema")).expect("JSON");
+    let branch = document["oneOf"]
+        .as_array()
+        .expect("a frame vocabulary")
+        .iter()
+        .find(|branch| {
+            branch
+                .pointer("/properties/kind/const")
+                .and_then(Value::as_str)
+                == Some("resize")
+        })
+        .expect("a resize branch");
+    let published = branch
+        .get("x-b10x-out-of-bounds")
+        .and_then(Value::as_str)
+        .expect("the resize branch names the code an out-of-bounds window earns");
+    let minimum = branch
+        .pointer("/properties/window/properties/columns/minimum")
+        .and_then(Value::as_i64)
+        .expect("a declared column minimum");
+    assert_eq!(
+        branch
+            .pointer("/properties/window/properties/columns/type")
+            .and_then(Value::as_str),
+        Some("integer"),
+        "the axis is declared as a JSON Schema integer, which admits negatives"
+    );
+
+    let mut wrong = Vec::new();
+    for columns in [minimum - 1, minimum - 2, -1_000] {
+        let frame = json!({
+            "kind": "resize",
+            "sequence": 1,
+            "window": {"columns": columns, "rows": 24}
+        });
+        let code = pty_protocol_error_code(&frame).await;
+        if code != published {
+            wrong.push(format!("columns {columns} is refused {code}"));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "the pty resize branch declares columns as an integer in {minimum}..=1000 and publishes \
+         x-b10x-out-of-bounds: {published}, so every integer outside that range earns that code. \
+         columns {} does. These do not:\n{}",
+        minimum - 1,
+        wrong.join("\n")
+    );
+}
+
+/// One attach handshake that is refused before the upgrade, with its refusal body.
+///
+/// `Handshake::open` next door keeps only the status line; a refusal's code lives in the body.
+async fn refused_attach(address: SocketAddr, path: &str) -> (u16, Value) {
+    let mut stream = TcpStream::connect(address)
+        .await
+        .expect("connect attach client");
+    let request = format!(
+        "GET {path} HTTP/1.1\r\nHost: {address}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {HANDSHAKE_KEY}\r\n\r\n"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write attach handshake");
+    let mut head = Vec::new();
+    while !head.ends_with(b"\r\n\r\n") {
+        assert!(head.len() < 16 * 1_024, "bounded response head");
+        let mut byte = [0_u8; 1];
+        stream
+            .read_exact(&mut byte)
+            .await
+            .expect("read response head");
+        head.push(byte[0]);
+    }
+    let head = String::from_utf8(head).expect("ASCII response head");
+    let status = head
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|value| value.parse::<u16>().ok())
+        .expect("HTTP status");
+    let length: usize = head
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse().ok())?
+        })
+        .expect("a refusal carries a content-length");
+    let mut body = vec![0_u8; length];
+    stream
+        .read_exact(&mut body)
+        .await
+        .expect("read refusal body");
+    (status, serde_json::from_slice(&body).expect("JSON refusal"))
+}
+
+/// Every refusal a pty attach can raise has a row in the register that says it lists them all.
+///
+/// `refusals.json`'s own title is "Every refusal a session can raise, and what a client does with
+/// it", and the `0.9.0` CHANGELOG entry says it "gives every session refusal its class, where it
+/// arrives, whether it is worth retrying, the sentence substrate sends".
+///
+/// `check_pty_refusal_class` (`xtask/src/bundle.rs:494`) enforces that claim only over
+/// `substrate_wire::SESSION_PTY_REFUSAL_CODES` and `SESSION_PROTOCOL_ERROR_CODES` -- the codes
+/// bound to a wire constant. The four attach-preflight refusals are written as literals in the
+/// daemon -- `session.not-attachable` (`crates/substrate-daemon/src/app/sessions.rs:790`, `:863`),
+/// `session.already-attached` (`:808`, `:847`) and `session.attachment-capacity` (`:824`) -- so
+/// neither direction of that check sees them, and none of them has a row.
+///
+/// This is the refusal that enforces the `single_attachment: true` the capability document
+/// publishes: the first attach flips the stored attachment state off `Available`, and the second is
+/// refused at the gate above the capacity check. A terminal client whose websocket drops and
+/// reconnects gets it, reads the code off the wire, and has nothing to look up -- not its class,
+/// not whether retrying is worth anything, not whether waiting would help.
+///
+/// This same commit rewrote all four sentences to be mode-aware -- "The pty session is not running
+/// under an active lease." is new here -- which is the change asserting a terminal client reaches
+/// them.
+///
+/// Portable lane.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_refusal_a_pty_attach_can_raise_has_a_row_in_the_register() {
+    let harness = Harness::with_terminals().await;
+    let (session_id, _exec) = harness.start_pty().await;
+    let path = format!("/v1/pipe-sessions/{session_id}/attach");
+    let _held = harness.attach(&path).await;
+    let (status, refusal) = refused_attach(harness.server.address, &path).await;
+    assert_eq!(status, 409, "a second attach is refused: {refusal}");
+    let code = refusal["error"]["code"]
+        .as_str()
+        .expect("a refusal code")
+        .to_owned();
+
+    let register: Value = serde_json::from_slice(
+        &std::fs::read(
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join("contracts/substrate-wire/0.9.0/refusals.json"),
+        )
+        .expect("the refusal register"),
+    )
+    .expect("JSON");
+    let rows: Vec<&str> = register["refusals"]
+        .as_array()
+        .expect("register rows")
+        .iter()
+        .filter_map(|row| row["code"].as_str())
+        .collect();
+    assert!(
+        rows.contains(&code.as_str()),
+        "GET {path} refuses a second attachment with {code} and the message {:?}. \
+         0.9.0/refusals.json says it lists every refusal a session can raise, and it lists \
+         {rows:?} — {code} is not among them, so a client that receives it has nothing to look up.",
+        refusal["error"]["message"]
+    );
+}
+
+/// The same rule, on the request the pty workflow starts with.
+///
+/// `schemas/inputs/pipe-session-start.json` declares `window.columns` and `window.rows` as
+/// `{"type": "integer", "minimum": 1, "maximum": 1000}`, and `refusals.json` gives the one refusal a
+/// window outside that range earns: `session.window-invalid`, class `refused`, status 422, arriving
+/// as an HTTP response. `a_window_is_required_for_pty_refused_for_pipes_and_never_defaulted` pins
+/// `0` and `1001` on exactly that.
+///
+/// `-1` is the same kind of thing to the schema and a different thing to the daemon:
+/// `PipeSessionStartInput::window` is an `Option<PtyWindow>` whose axes are `u64`
+/// (`crates/substrate-wire/src/lib.rs:1490-1494`), so the body never reaches
+/// `validate_session_window` and the client is answered for the shape of its request instead of the
+/// value of its window. This is the start-path half of
+/// `every_integer_window_the_pty_resize_branch_declares_out_of_bounds_earns_that_code`: one root
+/// cause, two endpoints, and this is the one a terminal client meets first.
+///
+/// Portable lane.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pty_start_window_outside_the_declared_range_is_refused_in_the_published_code() {
+    let harness = Harness::with_terminals().await;
+    let workspace = harness.create_workspace("01JPTYWORKSPACECREATE009").await;
+    let mut wrong = Vec::new();
+    for (operation, columns) in [
+        ("01JPTYSTARTWINDOWZERO001", 0_i64),
+        ("01JPTYSTARTWINDOWNEG0001", -1_i64),
+        ("01JPTYSTARTWINDOWNEG0002", -1_000_i64),
+    ] {
+        let mut input = pty_start(&workspace, Some(json!({"columns": columns, "rows": 24})));
+        input["mode"] = json!("pty");
+        let (status, refusal) = harness
+            .call(
+                Method::POST,
+                "/v1/pipe-sessions",
+                mutation(operation, input),
+            )
+            .await;
+        let code = refusal["error"]["code"].as_str().unwrap_or_default();
+        if code != "session.window-invalid" {
+            wrong.push(format!(
+                "columns {columns} is refused {code} ({status}), address {}",
+                refusal["error"]["address"]
+            ));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "0.9.0/schemas/inputs/pipe-session-start.json declares the window axes as integers in \
+         1..=1000 and 0.9.0/refusals.json gives session.window-invalid as the 422 a bad window \
+         earns. columns 0 earns it. These do not:\n{}",
+        wrong.join("\n")
+    );
+}
+
+/// One masked, empty websocket ping from the client.
+async fn send_ping(client: &mut WebSocketClient) {
+    let mask = [0x11, 0x22, 0x33, 0x44];
+    let mut encoded = vec![0x89, 0x80];
+    encoded.extend_from_slice(&mask);
+    client
+        .stream
+        .write_all(&encoded)
+        .await
+        .expect("write websocket ping frame");
+}
+
+/// The budget the capability document publishes is one budget; crossing it must have one answer.
+///
+/// `a_resize_over_the_control_rate_is_answered_in_the_published_vocabulary` closed the resize half:
+/// crossing the rate with a `resize` now earns `session.control-rate-exceeded`, a code
+/// `refusals.json` gives a row and both frame vocabularies list in `x-b10x-codes`. The 1008 close
+/// was kept for websocket control frames on the stated ground that they "are not part of the
+/// published `oneOf` and have no frame to answer in"
+/// (`crates/substrate-daemon/src/app/sessions.rs:1051-1055`).
+///
+/// The loop contradicts that ground two arms above. A `Binary` client message is also outside the
+/// published client `oneOf`, and it is answered with a `protocol-error` text frame carrying
+/// `session.frame-invalid` (`:965-980`). The server's vocabulary is what the *server* sends; it does
+/// not need the client's message to have been a member.
+///
+/// And ping is the half a terminal client actually crosses. `PipeSessionCapabilities`'s own doc
+/// says so — "`Ping` shares the budget, so a client choosing a keepalive interval needs both
+/// numbers" (`crates/substrate-wire/src/lib.rs:1603-1610`) — and the `0.9.0` CHANGELOG repeats it.
+/// A client that reads `max_controls_per_window: 120` and `control_window_ms: 60000` off the
+/// document, picks a keepalive, and gets it slightly wrong crosses the rate with a ping. It is then
+/// answered with a bare 1008 close carrying "pty control-frame rate exceeded": not a branch of the
+/// published `oneOf`, not a code in `x-b10x-codes`, and not a word `refusals.json` has a row for —
+/// which is the exact shape of the defect the resize half was fixed for.
+///
+/// Portable lane.
+#[tokio::test(flavor = "multi_thread")]
+async fn crossing_the_control_rate_with_a_ping_is_answered_in_the_published_vocabulary() {
+    let harness = Harness::with_terminals().await;
+    let (session_id, _exec) = harness.start_pty().await;
+    let mut socket = harness
+        .attach(&format!("/v1/pipe-sessions/{session_id}/attach"))
+        .await;
+    // One more than the `max_controls_per_window` the capability document publishes, inside one
+    // published `control_window_ms`.
+    for _ping in 0..=substrate_wire::MAX_SESSION_CONTROLS_PER_WINDOW {
+        send_ping(&mut socket).await;
+    }
+    let frame = loop {
+        let frame = tokio::time::timeout(Duration::from_secs(5), socket.next_frame())
+            .await
+            .expect("a bounded server answer")
+            .expect("a server answer");
+        // The transport's own pong for each ping is not an answer to the rate.
+        if frame.opcode != 0xa {
+            break frame;
+        }
+    };
+    let described = if frame.opcode == 0x8 {
+        let code = frame
+            .payload
+            .get(0..2)
+            .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]));
+        format!(
+            "a websocket close, code {code:?}, reason {:?}",
+            String::from_utf8_lossy(frame.payload.get(2..).unwrap_or_default())
+        )
+    } else {
+        format!(
+            "opcode {:#x}, payload {:?}",
+            frame.opcode,
+            String::from_utf8_lossy(&frame.payload)
+        )
+    };
+    assert_eq!(
+        frame.opcode,
+        0x1,
+        "GET /v1/pipe-sessions publishes max_controls_per_window {} over control_window_ms {}, \
+         ping shares that budget, and 0.9.0/refusals.json gives crossing it exactly one row: \
+         {} arriving as a protocol-error-frame. Crossing it with a ping answered with {described}.",
+        substrate_wire::MAX_SESSION_CONTROLS_PER_WINDOW,
+        substrate_wire::SESSION_CONTROL_WINDOW_MS,
+        substrate_wire::SESSION_CONTROL_RATE_EXCEEDED,
+    );
+    let answer: Value = serde_json::from_slice(&frame.payload).expect("server JSON frame");
+    let published = published_pty_protocol_error_codes();
+    let code = answer["code"].as_str().unwrap_or_default().to_owned();
+    assert!(
+        answer["kind"] == "protocol-error" && published.contains(&code),
+        "the refusal must be a protocol-error in the published code set {published:?}: {answer}"
+    );
+}
+
+/// A frame the published pty vocabulary admits is not "outside the closed pty vocabulary".
+///
+/// JSON Schema 2020-12 defines `"type": "integer"` as "any number with a zero fractional part", so
+/// `80.0` is an integer to every conforming validator, and
+/// `0.9.0/schemas/pty-channel-frame.json`'s resize branch declares the axes
+/// `{"type": "integer", "minimum": 1, "maximum": 1000}`. `{"columns": 80.0, "rows": 24.0}` is
+/// therefore a valid member of the published client vocabulary, in bounds on both axes, and the
+/// only published answer to it is that the window is applied.
+///
+/// `PtyWindow`'s axes are `u64` (`crates/substrate-wire/src/lib.rs:1492-1493`), and `serde_json`
+/// will not read `80.0` into one, so the frame fails `from_slice::<PipeClientFrame>` and the client
+/// is told `session.frame-invalid` — whose published meaning is "The client frame is outside the
+/// closed vocabulary of the mode this attachment serves" (`0.9.0/refusals.json`). The frame is
+/// inside it. Any client whose window came out of a division rather than a literal writes this:
+/// `json.dumps({"columns": width / 2})` in Python is `80.0`.
+///
+/// Same root cause as the two cases above — the refusal is decided by a Rust integer type rather
+/// than by the published rule — and a different consequence: not a true refusal in the wrong code,
+/// but a false statement about an admitted frame.
+///
+/// Portable lane.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resize_whose_axes_have_a_zero_fractional_part_is_inside_the_published_vocabulary() {
+    let harness = Harness::with_terminals().await;
+    let (session_id, exec_id) = harness.start_pty().await;
+    let mut socket = harness
+        .attach(&format!("/v1/pipe-sessions/{session_id}/attach"))
+        .await;
+    let frame = "{\"kind\":\"resize\",\"sequence\":1,\"window\":{\"columns\":132.0,\"rows\":43.0}}";
+    socket.send_text(frame.as_bytes()).await;
+    // Scaffolding only, adapted in round 5: an *accepted* resize has no answer in the published
+    // server vocabulary — `output`, `exit`, `protocol-error` and nothing else — so waiting for a
+    // frame and unwrapping it made the case unreachable once the frame stopped being refused. The
+    // deadline is now one more thing `described` can report; every assertion below is unchanged.
+    let described = match tokio::time::timeout(Duration::from_secs(5), socket.next_frame()).await {
+        Err(_deadline) => "no frame at all, and the attachment stayed open".to_owned(),
+        Ok(None) => "the connection closed with no frame at all".to_owned(),
+        Ok(Some(frame)) if frame.opcode == 0x1 => {
+            format!("{}", String::from_utf8_lossy(&frame.payload))
+        }
+        Ok(Some(frame)) => format!("opcode {:#x}", frame.opcode),
+    };
+    assert_eq!(
+        harness.resizes(&exec_id),
+        vec![substrate_wire::PtyWindow {
+            columns: 132,
+            rows: 43
+        }],
+        "0.9.0/schemas/pty-channel-frame.json declares the resize axes as JSON Schema integers in \
+         1..=1000, and 132.0 and 43.0 are integers with a zero fractional part to every conforming \
+         validator. {frame} is an admitted member of the published client vocabulary with a window \
+         in bounds on both axes, so the only published outcome is that the window reaches the \
+         terminal. Substrate answered: {described}"
     );
 }

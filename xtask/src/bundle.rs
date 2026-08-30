@@ -759,11 +759,15 @@ fn check_pty_refusal_class(released: &Tree, failures: &mut Vec<String>) {
         })
         .collect();
 
-    let mut required: BTreeSet<&str> = substrate_wire::SESSION_PTY_REFUSAL_CODES
+    // The domain is every session refusal code, not the two narrower views of it. Ranging over
+    // `SESSION_PTY_REFUSAL_CODES ∪ SESSION_PROTOCOL_ERROR_CODES` let three attach refusals hide —
+    // `session.not-attachable`, `session.already-attached`, `session.attachment-capacity` were
+    // written as literals in the daemon, so neither direction of this check saw them, and the
+    // register that says it lists every refusal a session can raise had a row for none of them.
+    let required: BTreeSet<&str> = substrate_wire::SESSION_REFUSAL_CODES
         .iter()
         .copied()
         .collect();
-    required.extend(substrate_wire::SESSION_PROTOCOL_ERROR_CODES.iter().copied());
     for code in &required {
         let Some(row) = rows.get(*code) else {
             failures.push(format!(

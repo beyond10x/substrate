@@ -110,6 +110,35 @@ pub const SESSION_INPUT_CLOSE_UNSERVED: &str = "session.input-close-unserved";
 /// The declared output bound ended the session (ADR 0014's refusal field, design 13).
 pub const SESSION_OUTPUT_LIMIT: &str = "session.output-limit";
 
+/// The bundle whose result schema the session capability document conforms to.
+///
+/// **Not the same claim as the `x-b10x-contract` header.** The header is what the *server*
+/// advertises, and `AGENTS.md` invariant 6 scopes moving it as its own change with its own clients
+/// to notify. This is a field inside one result document, and every released bundle declares it
+/// `{"const": "substrate-wire/<that bundle's own version>"}` — `0.3.0` through `0.9.0`, without
+/// exception — so its value is definitionally *the bundle whose schema this document conforms to*.
+/// A document carrying `modes` and the window and control-rate ceilings is shaped by `0.9.0` and by
+/// no earlier bundle, so naming anything else is a false statement about its own shape: `0.4.0`'s
+/// schema is `additionalProperties: false` over nine properties and forbids all five.
+pub const PIPE_SESSION_CAPABILITY_CONTRACT: &str = "substrate-wire/0.9.0";
+
+/// The session is not attachable in its current state.
+pub const SESSION_NOT_ATTACHABLE: &str = "session.not-attachable";
+/// The session already has its single permitted attachment.
+pub const SESSION_ALREADY_ATTACHED: &str = "session.already-attached";
+/// The bounded attachment capacity is exhausted.
+pub const SESSION_ATTACHMENT_CAPACITY: &str = "session.attachment-capacity";
+/// The confinement floor sessions require is not available on this host.
+pub const SESSION_CONFINEMENT_UNAVAILABLE: &str = "session.confinement-unavailable";
+/// The declared session bounds exceed the host profile.
+pub const SESSION_LIMIT_UNSERVED: &str = "session.limit-unserved";
+/// A raw-pipe process did not expose stdin.
+pub const SESSION_STDIN_MISSING: &str = "session.stdin-missing";
+/// The selected driver does not serve sessions at all.
+pub const SESSION_UNSERVED: &str = "session.unserved";
+/// A session cannot use synchronous exec wait.
+pub const SESSION_WAIT_INVALID: &str = "session.wait-invalid";
+
 /// How many control frames one attachment may send inside [`SESSION_CONTROL_WINDOW_MS`].
 ///
 /// Published on the session capability document like every other bound a client has to obey. It was
@@ -308,6 +337,49 @@ pub const SESSION_PROTOCOL_ERROR_CODES: [&str; 18] = [
 /// `xtask`'s bundle checker requires the released bundle to name every entry, so a code cannot
 /// exist without being readable by a client of the contract. A code nobody can look up is a code
 /// nobody can handle.
+/// **Every** refusal code a session can raise, from either crate, in one place.
+///
+/// The two arrays below are views of this one — the pty-specific codes and the codes an attachment
+/// can put in a frame — and this is the domain the bundle checker ranges over. It exists because a
+/// narrower domain let three literals hide: `session.not-attachable`, `session.already-attached`
+/// and `session.attachment-capacity` were written out in the daemon rather than bound here, so
+/// neither direction of the check saw them and none had a row in the register that says it lists
+/// them all. `no_session_refusal_code_is_written_as_a_literal` keeps the class closed by refusing a
+/// literal anywhere in either crate's `src/`.
+pub const SESSION_REFUSAL_CODES: [&str; 31] = [
+    SESSION_ALREADY_ATTACHED,
+    SESSION_ATTACHMENT_CAPACITY,
+    SESSION_BASE64_INVALID,
+    SESSION_CONFINEMENT_UNAVAILABLE,
+    SESSION_CONTROL_RATE_EXCEEDED,
+    SESSION_DRIVER_REFUSED,
+    SESSION_FRAME_INVALID,
+    SESSION_FRAME_LIMIT,
+    SESSION_INPUT_CLOSED,
+    SESSION_INPUT_CLOSE_UNSERVED,
+    SESSION_INPUT_LIMIT,
+    SESSION_LIMIT_UNSERVED,
+    SESSION_NOT_ATTACHABLE,
+    SESSION_NOT_PIPE,
+    SESSION_NOT_PTY,
+    SESSION_OUTPUT_LIMIT,
+    SESSION_PTY_ENDED,
+    SESSION_PTY_EXHAUSTED,
+    SESSION_PTY_FAILED,
+    SESSION_PTY_UNSERVED,
+    SESSION_READ_TIMEOUT,
+    SESSION_RESIZE_FAILED,
+    SESSION_RESIZE_INVALID,
+    SESSION_SEQUENCE_INVALID,
+    SESSION_SIGNAL_INVALID,
+    SESSION_STDIN_MISSING,
+    SESSION_TIMEOUT_INVALID,
+    SESSION_UNSERVED,
+    SESSION_WAIT_INVALID,
+    SESSION_WINDOW_INVALID,
+    SESSION_WRITE_FAILED,
+];
+
 pub const SESSION_PTY_REFUSAL_CODES: [&str; 10] = [
     SESSION_INPUT_CLOSE_UNSERVED,
     SESSION_NOT_PTY,
@@ -1486,11 +1558,81 @@ pub enum SessionMode {
 }
 
 /// A terminal window in cells. Pixel dimensions are not on the wire and are set to zero.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
+///
+/// **Deserialization admits exactly what the published schema admits, and nothing decides the
+/// answer but [`Self::within_bounds`].** The axes are declared
+/// `{"type": "integer", "minimum": 1, "maximum": 1000}`, and JSON Schema 2020-12 defines `integer`
+/// as *any number with a zero fractional part* — so `-1`, `1001`, `1e30` and `80.0` are all
+/// well-typed members of the vocabulary, and the published answer to each is decided by the range
+/// alone. A Rust integer field decided it instead, three times running: `u16` cut the vocabulary at
+/// 65535, `u64` moved the cut to −1, and neither ever admitted `80.0` — which any client whose
+/// window came out of a division writes, because `json.dumps({"columns": width / 2})` is `80.0`.
+/// Refusing that as "outside the closed vocabulary" was a false statement about an admitted frame.
+///
+/// So the axis reads every JSON number with a zero fractional part. A value in bounds is carried
+/// exactly; one out of bounds is saturated to a value that is also out of bounds, because past the
+/// range the contract only cares *that* it is out. A number with a fractional part is refused,
+/// which is true: it is outside the vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct PtyWindow {
     pub columns: u64,
     pub rows: u64,
+}
+
+/// The two axes, read the way the published schema declares them.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PtyWindowFields {
+    columns: WindowAxis,
+    rows: WindowAxis,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WindowAxis(u64);
+
+impl<'de> Deserialize<'de> for WindowAxis {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let number = serde_json::Number::deserialize(deserializer)?;
+        if let Some(value) = number.as_u64() {
+            return Ok(Self(value));
+        }
+        // Negative and out of range are the same thing to the published rule, and `0` is an
+        // out-of-range value this type can hold. Nothing reads an out-of-range axis but
+        // `within_bounds`, which says no to both.
+        if number.as_i64().is_some_and(|value| value < 0) {
+            return Ok(Self(0));
+        }
+        let Some(value) = number.as_f64() else {
+            return Err(serde::de::Error::custom(
+                "a terminal window axis is a JSON number",
+            ));
+        };
+        if value.is_nan() || value.fract() != 0.0 {
+            return Err(serde::de::Error::custom(
+                "a terminal window axis is an integer: a number with a zero fractional part",
+            ));
+        }
+        if value < 0.0 {
+            return Ok(Self(0));
+        }
+        // Above the range, saturating is exact enough: `within_bounds` refuses everything here.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        Ok(Self(if value >= 18_446_744_073_709_551_615.0 {
+            u64::MAX
+        } else {
+            value as u64
+        }))
+    }
+}
+
+impl<'de> Deserialize<'de> for PtyWindow {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let fields = PtyWindowFields::deserialize(deserializer)?;
+        Ok(Self {
+            columns: fields.columns.0,
+            rows: fields.rows.0,
+        })
+    }
 }
 
 impl PtyWindow {
@@ -1513,8 +1655,9 @@ impl PtyWindow {
     /// — so a client is invited to try it, and a `u16` field made 65536 fail `serde` decoding
     /// before `within_bounds` ran. That put the boundary between "your window is out of range" and
     /// "your frame is not a frame" at 65535, a number no released document names, inside a range
-    /// the published schema describes with one rule and one refusal code. Now every non-negative
-    /// integer a client can write decodes, and the only rule is the published one.
+    /// the published schema describes with one rule and one refusal code. Now every integer a
+    /// client can write decodes — negative, fractional-zero or enormous — and the only rule is the
+    /// published one.
     #[must_use]
     pub const fn cells(&self) -> Option<(u16, u16)> {
         if !self.within_bounds() {

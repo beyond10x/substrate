@@ -396,7 +396,7 @@ impl ProcessRuntime {
         }
         if input.exec.wait {
             return DispatchOutcome::NotDispatched(DriverError::refused(
-                "session.wait-invalid",
+                substrate_wire::SESSION_WAIT_INVALID,
                 "A raw-pipe session cannot use synchronous exec wait.",
                 "wait",
             ));
@@ -409,7 +409,7 @@ impl ProcessRuntime {
                 > u32::try_from(PIPE_QUEUED_FRAMES).expect("queue ceiling fits u32")
         {
             return DispatchOutcome::NotDispatched(DriverError::exhausted(
-                "session.limit-unserved",
+                substrate_wire::SESSION_LIMIT_UNSERVED,
                 "Raw-pipe bounds exceed the host development profile.",
                 "session",
             ));
@@ -717,7 +717,7 @@ impl ProcessRuntime {
                 Some(stdin)
             } else {
                 let error = DriverError::failed(
-                    "session.stdin-missing",
+                    substrate_wire::SESSION_STDIN_MISSING,
                     "Raw-pipe process did not expose stdin.",
                 );
                 return contain_spawned(child, cgroup, error).await;
@@ -777,14 +777,14 @@ impl ProcessRuntime {
         let execution = self.execution(id)?;
         let pipe = execution.pipe.as_ref().ok_or_else(|| {
             DriverError::refused(
-                "session.not-pipe",
+                substrate_wire::SESSION_NOT_PIPE,
                 "Exec is not a raw-pipe session.",
                 "session",
             )
         })?;
         if bytes.is_empty() || bytes.len() > pipe.frame_limit {
             return Err(DriverError::exhausted(
-                "session.frame-limit",
+                substrate_wire::SESSION_FRAME_LIMIT,
                 "Raw-pipe input frame is outside the admitted bounds.",
                 "frame",
             ));
@@ -799,7 +799,7 @@ impl ProcessRuntime {
                 });
         if admitted.is_err() {
             return Err(DriverError::exhausted(
-                "session.input-limit",
+                substrate_wire::SESSION_INPUT_LIMIT,
                 "Raw-pipe input exceeds the admitted byte limit.",
                 "stdin",
             ));
@@ -829,16 +829,22 @@ impl ProcessRuntime {
         let mut stdin = pipe.stdin.lock().await;
         let Some(stdin) = stdin.as_mut() else {
             return Err(DriverError::refused(
-                "session.input-closed",
+                substrate_wire::SESSION_INPUT_CLOSED,
                 "Raw-pipe stdin is already closed.",
                 "stdin",
             ));
         };
         stdin.write_all(bytes).await.map_err(|error| {
-            DriverError::failed("session.write-failed", format!("raw-pipe stdin: {error}"))
+            DriverError::failed(
+                substrate_wire::SESSION_WRITE_FAILED,
+                format!("raw-pipe stdin: {error}"),
+            )
         })?;
         stdin.flush().await.map_err(|error| {
-            DriverError::failed("session.write-failed", format!("raw-pipe stdin: {error}"))
+            DriverError::failed(
+                substrate_wire::SESSION_WRITE_FAILED,
+                format!("raw-pipe stdin: {error}"),
+            )
         })
     }
 
@@ -846,7 +852,7 @@ impl ProcessRuntime {
         let execution = self.execution(id)?;
         let pipe = execution.pipe.as_ref().ok_or_else(|| {
             DriverError::refused(
-                "session.not-pipe",
+                substrate_wire::SESSION_NOT_PIPE,
                 "Exec is not a raw-pipe session.",
                 "session",
             )
@@ -933,7 +939,7 @@ impl ProcessRuntime {
     ) -> Result<Option<PipeFrame>, DriverError> {
         if timeout.is_zero() {
             return Err(DriverError::refused(
-                "session.timeout-invalid",
+                substrate_wire::SESSION_TIMEOUT_INVALID,
                 "Raw-pipe read timeout must be nonzero.",
                 "timeout",
             ));
@@ -941,7 +947,7 @@ impl ProcessRuntime {
         let execution = self.execution(id)?;
         let pipe = execution.pipe.as_ref().ok_or_else(|| {
             DriverError::refused(
-                "session.not-pipe",
+                substrate_wire::SESSION_NOT_PIPE,
                 "Exec is not a raw-pipe session.",
                 "session",
             )
@@ -950,7 +956,10 @@ impl ProcessRuntime {
         let frame = tokio::time::timeout(timeout, output.recv())
             .await
             .map_err(|_| {
-                DriverError::failed("session.read-timeout", "Raw-pipe read deadline elapsed.")
+                DriverError::failed(
+                    substrate_wire::SESSION_READ_TIMEOUT,
+                    "Raw-pipe read deadline elapsed.",
+                )
             })?;
         drop(output);
         if frame.is_none() {

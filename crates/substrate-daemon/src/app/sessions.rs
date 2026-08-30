@@ -24,7 +24,7 @@ use substrate_wire::{
 };
 use tokio::sync::Semaphore;
 
-use super::events::{ControlRate, enforce_stream_send_deadline, send_protocol_close};
+use super::events::{ControlRate, enforce_stream_send_deadline};
 use super::operations::{
     begin, decode_mutation, finish_driver_error, finish_lease_store_error,
     finish_pipe_session_dispatch_absence, finish_pipe_session_dispatch_unknown,
@@ -176,7 +176,7 @@ pub(super) async fn pipe_session_capabilities(
             &request_id,
             None,
             ErrorClass::Unserved,
-            "session.confinement-unavailable",
+            substrate_wire::SESSION_CONFINEMENT_UNAVAILABLE,
             "Raw-pipe sessions require namespaces, delegated cgroups, whole-tree kill, explicit leases, and no egress.",
             Some("session"),
             false,
@@ -187,7 +187,12 @@ pub(super) async fn pipe_session_capabilities(
         Success::observed(
             request_id,
             PipeSessionCapabilities {
-                contract: "substrate-wire/0.4.0".to_owned(),
+                // Bound, not written out, and `0.9.0` rather than `0.4.0`: this document carries
+                // `modes` and the window and control-rate ceilings, which `0.4.0`'s closed
+                // nine-property schema forbids, so naming `0.4.0` made the body validate against no
+                // released bundle at all. See `PIPE_SESSION_CAPABILITY_CONTRACT` for why this is not
+                // the `x-b10x-contract` header's claim.
+                contract: substrate_wire::PIPE_SESSION_CAPABILITY_CONTRACT.to_owned(),
                 transport: "unix-websocket-json".to_owned(),
                 capability_snapshot: machine.snapshot,
                 lease_required: true,
@@ -787,7 +792,7 @@ pub(super) async fn pipe_session_attach(
             &request_id,
             None,
             ErrorClass::Conflict,
-            "session.not-attachable",
+            substrate_wire::SESSION_NOT_ATTACHABLE,
             channel_message(
                 session.mode,
                 "The raw-pipe session is not running under an active lease.",
@@ -805,7 +810,7 @@ pub(super) async fn pipe_session_attach(
                 &request_id,
                 None,
                 ErrorClass::Conflict,
-                "session.already-attached",
+                substrate_wire::SESSION_ALREADY_ATTACHED,
                 channel_message(
                     session.mode,
                     "The raw-pipe session already has its single permitted attachment.",
@@ -821,7 +826,7 @@ pub(super) async fn pipe_session_attach(
                 &request_id,
                 None,
                 ErrorClass::Exhausted,
-                "session.attachment-capacity",
+                substrate_wire::SESSION_ATTACHMENT_CAPACITY,
                 channel_message(
                     session.mode,
                     "The bounded raw-pipe attachment capacity is exhausted.",
@@ -846,7 +851,7 @@ pub(super) async fn pipe_session_attach(
                 &request_id,
                 None,
                 ErrorClass::Conflict,
-                "session.already-attached",
+                substrate_wire::SESSION_ALREADY_ATTACHED,
                 channel_message(
                     session.mode,
                     "The raw-pipe session attachment right has already been consumed.",
@@ -862,7 +867,7 @@ pub(super) async fn pipe_session_attach(
                 &request_id,
                 None,
                 ErrorClass::Conflict,
-                "session.not-attachable",
+                substrate_wire::SESSION_NOT_ATTACHABLE,
                 channel_message(
                     session.mode,
                     "The raw-pipe session is not attachable.",
@@ -946,19 +951,29 @@ async fn run_pipe_attachment(
                         value
                     }
                     Some(Ok(Message::Ping(_) | Message::Pong(_))) => {
+                        // The same budget, so the same answer. The 1008 close was kept here on the
+                        // ground that a control frame "has no frame to answer in", and the `Binary`
+                        // arm below refutes it: a binary message is also outside the published
+                        // client `oneOf` and is answered with a `protocol-error`. What the server
+                        // sends is the *server's* vocabulary; it never required the client's message
+                        // to have been a member of the client's. And ping is the half a terminal
+                        // client actually crosses — `max_controls_per_window` is published for
+                        // choosing a keepalive, and a keepalive slightly too fast spends it.
                         if control_rate.exceeded(
                             policy.max_controls_per_window,
                             policy.control_window,
                         ) {
-                            let _sent = send_protocol_close(
+                            let _sent = send_pipe_protocol_error(
                                 &mut socket,
-                                1008,
-                                channel_message(
-                                    mode,
-                                    "raw-pipe control-frame rate exceeded",
-                                    "pty control-frame rate exceeded",
+                                &mut server_sequence,
+                                SessionProtocolErrorCode::ControlRateExceeded,
+                                &format!(
+                                    "A session attachment sends at most {} control frames per {} ms, \
+                                     and ping shares the budget.",
+                                    substrate_wire::MAX_SESSION_CONTROLS_PER_WINDOW,
+                                    substrate_wire::SESSION_CONTROL_WINDOW_MS,
                                 ),
-                                policy.send_timeout,
+                                policy,
                             ).await;
                             return false;
                         }
