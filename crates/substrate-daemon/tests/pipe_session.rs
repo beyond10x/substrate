@@ -198,6 +198,7 @@ impl Driver for PipeFixtureDriver {
                 }),
                 exit: None,
                 lease: None,
+                refusal: None,
             },
             stdout: Vec::new(),
             stderr: Vec::new(),

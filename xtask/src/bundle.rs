@@ -381,6 +381,10 @@ fn check_classification(version: &str, released: &Tree, failures: &mut Vec<Strin
 /// A successor that rendered, verified and preserved everything while adding nothing is the failure
 /// this catches; the entries are the acceptance list of the story that cut the bundle.
 fn check_additions(version: &str, released: &Tree, failures: &mut Vec<String>) {
+    if version == "0.8.0" {
+        check_ceiling_additions(released, failures);
+        return;
+    }
     if version == "0.7.0" {
         check_delegation_additions(released, failures);
         return;
@@ -701,6 +705,260 @@ fn check_aperture_coverage(released: &Tree, failures: &mut Vec<String>) {
     }
 }
 
+/// What `0.8.0` exists for: a declared aperture byte ceiling (ADR 0014).
+///
+/// The declaration published, the ceiling observed, the bound named, and the refusal that keeps a
+/// ceiling out of a request — each read out of the bundle rather than out of prose, so a successor
+/// that renders and preserves everything but adds none of this fails here.
+fn check_ceiling_additions(released: &Tree, failures: &mut Vec<String>) {
+    check_published_ceiling(released, failures);
+    check_observed_ceiling(released, failures);
+    check_named_bound(released, failures);
+    check_ceiling_coverage(released, failures);
+}
+
+/// `/v1/machine` answers how much this daemon could ever pass, and the member stays optional: an
+/// aperture declared without a ceiling is unbounded, which is what every aperture was at `0.7.0`.
+fn check_published_ceiling(released: &Tree, failures: &mut Vec<String>) {
+    let Some(capability) = json_at(released, "schemas/capability.json", failures) else {
+        return;
+    };
+    let items = "/properties/facts/properties/exec.egress-apertures/items";
+    if capability
+        .pointer(&format!("{items}/properties/max_bytes"))
+        .is_none()
+    {
+        failures.push(
+            "schemas/capability.json: the declared aperture ceiling is absent from \
+             exec.egress-apertures (ADR 0014)"
+                .to_owned(),
+        );
+    }
+    if capability
+        .pointer(&format!("{items}/required"))
+        .and_then(Value::as_array)
+        .is_some_and(|required| required.iter().any(|name| name == "max_bytes"))
+    {
+        failures.push(
+            "schemas/capability.json: exec.egress-apertures requires max_bytes; an aperture \
+             declared without a ceiling is unbounded"
+                .to_owned(),
+        );
+    }
+}
+
+/// The applied observation states the ceiling the run ran under beside the bytes that crossed.
+fn check_observed_ceiling(released: &Tree, failures: &mut Vec<String>) {
+    let Some(resource) = json_at(released, "schemas/resource.json", failures) else {
+        return;
+    };
+    let aperture = resource
+        .pointer("/$defs/applied-network/oneOf")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|branch| branch.pointer("/properties/mode/const") == Some(&json!("aperture")))
+        .cloned();
+    match aperture {
+        None => failures.push(
+            "schemas/resource.json: no applied-aperture branch to carry a ceiling".to_owned(),
+        ),
+        Some(branch) => {
+            if branch.pointer("/properties/max_bytes").is_none() {
+                failures.push(
+                    "schemas/resource.json: the applied aperture states no max_bytes (ADR 0014)"
+                        .to_owned(),
+                );
+            }
+            if branch
+                .get("required")
+                .and_then(Value::as_array)
+                .is_some_and(|required| required.iter().any(|name| name == "max_bytes"))
+            {
+                failures.push(
+                    "schemas/resource.json: the applied aperture requires max_bytes; a run with \
+                     no declared ceiling reports none"
+                        .to_owned(),
+                );
+            }
+            // The bytes did not move to make room for the ceiling: a reader auditing what crossed
+            // still reads the same pair it read at `0.6.0`.
+            if branch
+                .pointer("/properties/bytes/properties/to_destination")
+                .is_none()
+                || branch
+                    .pointer("/properties/bytes/properties/from_destination")
+                    .is_none()
+            {
+                failures.push(
+                    "schemas/resource.json: the applied aperture lost a byte counter".to_owned(),
+                );
+            }
+        }
+    }
+}
+
+/// The refusal has somewhere to live, and it lives only where a run can have hit a bound.
+///
+/// `accepted` and `running` stay closed against it: a run that has not ended cannot name what
+/// ended it, and `additionalProperties: false` is what makes that a contract rather than a habit.
+fn check_named_bound(released: &Tree, failures: &mut Vec<String>) {
+    let Some(resource) = json_at(released, "schemas/resource.json", failures) else {
+        return;
+    };
+    let refusal = resource.pointer("/$defs/exec-refusal");
+    match refusal {
+        None => failures.push(
+            "schemas/resource.json: no exec-refusal definition at /$defs/exec-refusal (ADR 0014)"
+                .to_owned(),
+        ),
+        Some(refusal) => {
+            for (pointer, expected) in [
+                ("/properties/class/const", json!("exhausted")),
+                ("/properties/code/const", json!("exec.aperture-byte-limit")),
+            ] {
+                if refusal.pointer(pointer) != Some(&expected) {
+                    failures.push(format!(
+                        "schemas/resource.json: exec-refusal{pointer} is not {expected} \
+                         (design 10 section 5 row 5)"
+                    ));
+                }
+            }
+            if refusal.pointer("/properties/message").is_none() {
+                failures.push("schemas/resource.json: exec-refusal carries no message".to_owned());
+            }
+            if refusal.pointer("/properties/address").is_some() {
+                failures.push(
+                    "schemas/resource.json: exec-refusal carries an address; the byte ceiling \
+                     names none, because nothing in the request is at fault"
+                        .to_owned(),
+                );
+            }
+        }
+    }
+    let mut branches_naming_a_bound = 0;
+    for branch in resource
+        .pointer("/$defs/exec/oneOf")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+    {
+        let terminal = matches!(
+            branch.pointer("/properties/state"),
+            Some(shape)
+                if shape.get("const") == Some(&json!("unknown"))
+                    || shape
+                        .get("enum")
+                        .and_then(Value::as_array)
+                        .is_some_and(|states| states.iter().any(|name| name == "cancelled"))
+        );
+        let carries = branch.pointer("/properties/refusal").is_some();
+        if carries {
+            branches_naming_a_bound += 1;
+        }
+        if carries != terminal {
+            failures.push(format!(
+                "schemas/resource.json: an exec branch with state {:?} {} a refusal; only a run \
+                 that ended may name the bound that ended it",
+                branch.pointer("/properties/state"),
+                if carries { "carries" } else { "carries no" }
+            ));
+        }
+    }
+    if branches_naming_a_bound == 0 {
+        failures
+            .push("schemas/resource.json: no exec branch carries a refusal (ADR 0014)".to_owned());
+    }
+}
+
+/// The coverage half of `0.8.0`: every ceiling requirement carries evidence, and both refusals are
+/// read out of the vectors that assert them rather than out of prose.
+fn check_ceiling_coverage(released: &Tree, failures: &mut Vec<String>) {
+    let required_requirements = [
+        "security.egress-aperture-ceiling-absent",
+        "security.egress-aperture-ceiling-declared",
+        "security.egress-aperture-ceiling-enforced",
+        "security.egress-aperture-ceiling-not-requested",
+    ];
+    let Some(coverage) = json_at(released, "coverage.json", failures) else {
+        return;
+    };
+    let rows = coverage
+        .get("requirements")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for requirement in required_requirements {
+        let covered = rows.iter().any(|row| {
+            row.get("id").and_then(Value::as_str) == Some(requirement)
+                && row
+                    .get("evidence")
+                    .and_then(Value::as_array)
+                    .is_some_and(|evidence| !evidence.is_empty())
+        });
+        if !covered {
+            failures.push(format!(
+                "coverage.json: requirement {requirement} is absent or carries no evidence"
+            ));
+        }
+    }
+
+    if let Some(vector) = json_at(
+        released,
+        "vectors/http/aperture-ceiling-in-request-refused.json",
+        failures,
+    ) && vector.pointer("/expected/response/body/error/code")
+        != Some(&json!("exec.aperture-ceiling-in-request"))
+    {
+        failures.push(
+            "vectors/http/aperture-ceiling-in-request-refused.json: does not assert the \
+             refusal exec.aperture-ceiling-in-request"
+                .to_owned(),
+        );
+    }
+    if let Some(vector) = json_at(
+        released,
+        "vectors/http/aperture-ceiling-refuses-mid-run.json",
+        failures,
+    ) {
+        if vector.pointer("/expected/response/body/result/refusal/code")
+            != Some(&json!("exec.aperture-byte-limit"))
+        {
+            failures.push(
+                "vectors/http/aperture-ceiling-refuses-mid-run.json: the run ends without naming \
+                 exec.aperture-byte-limit"
+                    .to_owned(),
+            );
+        }
+        // The observation states the ceiling it ran under: a byte count with nothing to compare it
+        // against is the report `0.7.0` already had.
+        if vector
+            .pointer("/expected/response/body/result/applied/network/max_bytes")
+            .is_none()
+        {
+            failures.push(
+                "vectors/http/aperture-ceiling-refuses-mid-run.json: the applied aperture states \
+                 no ceiling"
+                    .to_owned(),
+            );
+        }
+    }
+    // The floor did not move: an aperture declared without a ceiling is still the run `0.6.0`
+    // proved, and the vector that proves it still asserts a completed one.
+    if let Some(vector) = json_at(
+        released,
+        "vectors/driver/aperture-without-a-ceiling-is-unbounded.json",
+        failures,
+    ) && vector.pointer("/expected/outcome/state") != Some(&json!("exited"))
+    {
+        failures.push(
+            "vectors/driver/aperture-without-a-ceiling-is-unbounded.json: an aperture with no \
+             declared ceiling did not run to completion"
+                .to_owned(),
+        );
+    }
+}
+
 /// What `0.7.0` exists for: delegated context and grant attribution (ADR 0011).
 ///
 /// The request member, the two ledger members, the refusal classes and the conformance vector pair
@@ -995,9 +1253,9 @@ mod tests {
     use serde_json::Value;
     use std::path::PathBuf;
 
-    const VERSION: &str = "0.6.0";
+    const VERSION: &str = "0.8.0";
     /// The predecessor is checked too: the gate runs both, and so does this module.
-    const PREDECESSOR: &str = "0.5.0";
+    const PREDECESSOR: &str = "0.7.0";
 
     fn root() -> PathBuf {
         repo::root().expect("workspace root")
@@ -1090,6 +1348,32 @@ mod tests {
             "an edited byte must be named, got {text}"
         );
         assert!(text.contains("re-render rather than editing"), "{text}");
+    }
+
+    /// `0.8.0`'s additions are a claim about `0.8.0` and about no bundle before it.
+    ///
+    /// Run the same check against the predecessor and every one of them must come back absent. A
+    /// check that passes on the tree that predates the change proves nothing about the tree that
+    /// carries it.
+    #[test]
+    fn the_predecessor_carries_none_of_the_successors_additions() {
+        let predecessor =
+            super::tree_of(&root().join("contracts/substrate-wire").join(PREDECESSOR))
+                .expect("the predecessor reads");
+        let mut failures = Vec::new();
+        super::check_ceiling_additions(&predecessor, &mut failures);
+        for absent in [
+            "schemas/capability.json",
+            "schemas/resource.json",
+            "coverage.json",
+            "vectors/http/aperture-ceiling-in-request-refused.json",
+            "vectors/http/aperture-ceiling-refuses-mid-run.json",
+        ] {
+            assert!(
+                failures.iter().any(|failure| failure.contains(absent)),
+                "{PREDECESSOR} was not reported missing {absent}: {failures:?}"
+            );
+        }
     }
 
     /// A `$schema` that climbs out of the bundle is not a classification.

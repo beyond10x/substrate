@@ -307,6 +307,7 @@ pub(super) async fn pipe_session_start(
             applied: None,
             exit: None,
             lease: Some(lease.observation()),
+            refusal: None,
         },
         stdout: Vec::new(),
         stderr: Vec::new(),

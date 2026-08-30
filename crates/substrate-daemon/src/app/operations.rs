@@ -416,6 +416,13 @@ fn check_egress_aperture(
                 "An egress aperture is selected by name; a destination may not appear in a request.",
                 "sandbox.network.aperture",
             ),
+            // Named apart from the destination refusal for the same reason that one exists: an
+            // escalation an operator can read is worth more than a schema complaint (ADR 0014).
+            substrate_wire::WireValidationError::ApertureCeilingInRequest => (
+                "exec.aperture-ceiling-in-request",
+                "An egress aperture byte ceiling is declared by the operator; it may not appear in a request.",
+                "sandbox.network.aperture",
+            ),
             substrate_wire::WireValidationError::InvalidApertureName => (
                 "exec.aperture-name-invalid",
                 "An egress aperture name must match [a-z][a-z0-9_]{0,63}.",
