@@ -586,24 +586,11 @@ pub(super) fn validate_pipe_session_input(
         request_hash: mutation.request_hash.clone(),
         attribution: mutation.attribution.clone(),
     };
-    validate_exec_input(app, &exec_mutation, request_id)?;
-    if !pipe_confinement_available(&app.driver.machine().facts) {
-        return Err(failure(
-            StatusCode::NOT_IMPLEMENTED,
-            request_id,
-            Some(&mutation.op),
-            ErrorClass::Unserved,
-            "session.confinement-unavailable",
-            "Raw-pipe sessions require complete namespaces and cgroup limits, whole-tree kill, explicit leases, no egress, and bounded output.",
-            Some("session"),
-            false,
-        ));
-    }
+    // The mode gate is outermost, because the mode decides which contract the rest of the request
+    // is read under. A terminal this deployment never proved it can give is refused by name — not
+    // as the confinement refusal a pipe session would also get, and never served as pipes instead
+    // (design 13, invariant 3). The window rule comes first because it is pure request shape.
     let input = &mutation.input;
-    // The window rule, then the fact. Both refusals are named and neither degrades to the other
-    // mode: a `pty` start without a window is refused rather than given 80x24, and a terminal this
-    // daemon never proved it can allocate is `unserved` rather than served as pipes (design 13,
-    // invariant 3).
     if substrate_wire::validate_session_window(input.mode, input.window.as_ref()).is_err() {
         return Err(failure(
             StatusCode::UNPROCESSABLE_ENTITY,
@@ -630,6 +617,20 @@ pub(super) fn validate_pipe_session_input(
             false,
         ));
     }
+    validate_exec_input(app, &exec_mutation, request_id)?;
+    if !pipe_confinement_available(&app.driver.machine().facts) {
+        return Err(failure(
+            StatusCode::NOT_IMPLEMENTED,
+            request_id,
+            Some(&mutation.op),
+            ErrorClass::Unserved,
+            "session.confinement-unavailable",
+            "Raw-pipe sessions require complete namespaces and cgroup limits, whole-tree kill, explicit leases, no egress, and bounded output.",
+            Some("session"),
+            false,
+        ));
+    }
+    let input = &mutation.input;
     if input.exec.wait
         || input.exec.lease_ttl_ms.is_none()
         || input.input_limit_bytes == 0

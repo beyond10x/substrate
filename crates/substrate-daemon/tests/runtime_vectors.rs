@@ -257,6 +257,112 @@ impl EventStream {
     }
 }
 
+/// The session attachment, which unlike the event stream also speaks client to server.
+struct SessionChannel {
+    stream: EventStream,
+    sequence: u64,
+    transcript: Vec<u8>,
+}
+
+impl SessionChannel {
+    async fn open(socket: &Path, path: &str) -> Self {
+        Self {
+            stream: EventStream::open(socket, path).await,
+            sequence: 1,
+            transcript: Vec::new(),
+        }
+    }
+
+    /// One masked client text frame, with the contiguous sequence the attachment requires.
+    async fn send(&mut self, frame: &mut Value) {
+        frame["sequence"] = json!(self.sequence);
+        self.sequence = self.sequence.saturating_add(1);
+        let payload = serde_json::to_vec(frame).expect("client frame JSON");
+        let mut encoded = vec![0x81_u8];
+        assert!(payload.len() <= 125, "bounded client frame");
+        encoded.push(0x80 | u8::try_from(payload.len()).expect("short frame length"));
+        let mask = [0x11_u8, 0x22, 0x33, 0x44];
+        encoded.extend_from_slice(&mask);
+        encoded.extend(
+            payload
+                .iter()
+                .enumerate()
+                .map(|(index, byte)| byte ^ mask[index % mask.len()]),
+        );
+        self.stream
+            .stream
+            .write_all(&encoded)
+            .await
+            .expect("write the client frame");
+    }
+
+    async fn input(&mut self, bytes: &str) {
+        self.send(&mut json!({
+            "kind": "stdin",
+            "content": {"encoding": "base64", "data": BASE64.encode(bytes.as_bytes())}
+        }))
+        .await;
+    }
+
+    /// Reads output frames until the transcript carries `needle`, or the deadline passes.
+    ///
+    /// A terminal transcript is a stream, not a sequence of answers: the line discipline's echo of
+    /// what the client typed is interleaved with what the child printed, so a case waits for a
+    /// substring rather than for the n-th frame.
+    async fn wait_for(&mut self, needle: &str) -> String {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while find(&self.transcript, needle.as_bytes()).is_none() {
+            assert!(
+                Instant::now() < deadline,
+                "waiting for {needle:?} in {}",
+                self.text()
+            );
+            let frame = tokio::time::timeout(Duration::from_secs(20), self.stream.frame())
+                .await
+                .expect("a bounded server frame");
+            assert_eq!(
+                frame.0, 0x1,
+                "the session speaks the closed JSON text encoding"
+            );
+            let value: Value = serde_json::from_slice(&frame.1).expect("server frame JSON");
+            assert_eq!(value["kind"], "output", "{value}");
+            assert_eq!(
+                value["stream"], "stdout",
+                "a terminal has one file: {value}"
+            );
+            self.transcript.extend_from_slice(
+                &BASE64
+                    .decode(text(&value["content"]["data"]))
+                    .expect("base64 output"),
+            );
+            assert!(self.transcript.len() < 256 * 1024, "bounded transcript");
+        }
+        self.text()
+    }
+
+    /// The next frame that is not output — the terminal `exit`, or a protocol error.
+    async fn wait_for_terminal(&mut self) -> Value {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            assert!(Instant::now() < deadline, "waiting for the terminal frame");
+            let frame = tokio::time::timeout(Duration::from_secs(20), self.stream.frame())
+                .await
+                .expect("a bounded server frame");
+            if frame.0 != 0x1 {
+                continue;
+            }
+            let value: Value = serde_json::from_slice(&frame.1).expect("server frame JSON");
+            if value["kind"] != "output" {
+                return value;
+            }
+        }
+    }
+
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.transcript).into_owned()
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // The daemon under test
 // ---------------------------------------------------------------------------------------------
@@ -1484,6 +1590,159 @@ async fn check_phase3_journey(
     passed
 }
 
+/// A `pty` session start body, with the window the caller wants to try.
+fn pty_session_input(workspace: &str, snapshot: &str, window: Option<Value>) -> Value {
+    let mut exec = ExecInput::new(workspace, snapshot, &["/bin/sh"], false)
+        .timeout_ms(30_000)
+        .build();
+    exec["lease_ttl_ms"] = json!(60_000);
+    let mut input = json!({
+        "exec": exec,
+        "input_limit_bytes": 65_536,
+        "frame_limit_bytes": 16_384,
+        "queued_frames": 8,
+        "mode": "pty"
+    });
+    if let Some(window) = window {
+        input["window"] = window;
+    }
+    input
+}
+
+/// The acceptance of `story:pty-sessions`, over the wire, against the shipped binary.
+///
+/// An interactive shell on a real terminal inside the confinement floor: the line discipline echoes
+/// what the client typed, the child reads the declared window back with `TIOCGWINSZ`, a resize
+/// applied on the master is observed by the same call, and the session ends with a terminal `exit`
+/// frame. `stty size` *is* `TIOCGWINSZ`; nothing here reads `COLUMNS`, which the sandbox does not
+/// have and which would go stale at the first resize anyway (design 13).
+#[allow(clippy::too_many_lines)] // One session lifecycle; splitting it would lose the ordering.
+async fn check_confined_pty(daemon: &Daemon, workspace: &str, snapshot: &str) -> usize {
+    let mut passed = 0;
+    let (status, capabilities) = daemon
+        .call("GET", "/v1/pipe-sessions", "req_clean_pty_modes", None)
+        .await;
+    assert_eq!(status, 200, "{capabilities}");
+    assert_eq!(
+        capabilities["result"]["modes"],
+        json!(["pipes", "pty"]),
+        "a probed terminal is advertised as a served mode"
+    );
+    assert_eq!(capabilities["result"]["max_window_columns"], json!(1000));
+    assert_eq!(capabilities["result"]["max_window_rows"], json!(1000));
+    passed += 1;
+
+    // A window is required, never defaulted to 80x24: substrate has nothing to observe here.
+    expect_error(
+        &daemon
+            .call(
+                "POST",
+                "/v1/pipe-sessions",
+                "req_clean_pty_nowindow",
+                Some(&mutation(
+                    "01JPHASE2CLEANPTY000003",
+                    &pty_session_input(workspace, snapshot, None),
+                )),
+            )
+            .await,
+        422,
+        "session.window-invalid",
+    );
+    passed += 1;
+
+    let (status, session) = daemon
+        .call(
+            "POST",
+            "/v1/pipe-sessions",
+            "req_clean_pty_start",
+            Some(&mutation(
+                "01JPHASE2CLEANPTY000001",
+                &pty_session_input(
+                    workspace,
+                    snapshot,
+                    Some(json!({"columns": 80, "rows": 24})),
+                ),
+            )),
+        )
+        .await;
+    assert_eq!(status, 202, "{session}");
+    assert_eq!(session["result"]["mode"], "pty", "{session}");
+    assert_eq!(session["result"]["kind"], "session", "{session}");
+    let session_id = text(&session["result"]["id"]);
+    let exec_id = text(&session["result"]["exec"]);
+    passed += 1;
+
+    let mut channel = SessionChannel::open(
+        &daemon.socket,
+        &format!("/v1/pipe-sessions/{session_id}/attach"),
+    )
+    .await;
+    // Echo: the line discipline sends the typed bytes back before the child has done anything with
+    // them, and the child's own answer follows.
+    channel.input("stty size\n").await;
+    let transcript = channel.wait_for("24 80").await;
+    assert!(
+        transcript.contains("stty size"),
+        "the terminal echoed what the client typed: {transcript}"
+    );
+    passed += 1;
+
+    // A resize the child observes, through the ioctl the acceptance names.
+    channel
+        .send(&mut json!({"kind": "resize", "window": {"columns": 132, "rows": 43}}))
+        .await;
+    channel.input("stty size\n").await;
+    channel.wait_for("43 132").await;
+    passed += 1;
+
+    // Out of bounds is a protocol error and the attachment ends; the session is still alive.
+    channel
+        .send(&mut json!({"kind": "resize", "window": {"columns": 0, "rows": 43}}))
+        .await;
+    let refusal = channel.wait_for_terminal().await;
+    assert_eq!(refusal["kind"], "protocol-error", "{refusal}");
+    assert_eq!(refusal["code"], "session.resize-invalid", "{refusal}");
+    drop(channel);
+    passed += 1;
+
+    // Losing the attachment ends the session and the whole tree with it.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let (status, observed) = daemon
+            .call(
+                "GET",
+                &format!("/v1/execs/{exec_id}"),
+                "req_clean_pty_observed",
+                None,
+            )
+            .await;
+        assert_eq!(status, 200, "{observed}");
+        if observed["result"]["state"] == "cancelled" {
+            assert_eq!(observed["result"]["exit"]["signal"], "KILL", "{observed}");
+            break;
+        }
+        assert!(Instant::now() < deadline, "{observed}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    passed += 1;
+
+    // One terminal, one file: the durable stderr of a pty session is genuinely empty, because
+    // stderr *was* the same descriptor (design 13).
+    let (status, slice) = daemon
+        .call(
+            "GET",
+            &format!("/v1/execs/{exec_id}/output?stream=stderr&offset=0&limit_bytes=4096"),
+            "req_clean_pty_stderr",
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{slice}");
+    assert_eq!(slice["result"]["returned_bytes"], 0, "{slice}");
+    passed += 1;
+
+    passed
+}
+
 /// The delegated exec-lease sequence: idle-time whole-cgroup expiry, replay, conflict and retire.
 #[allow(clippy::too_many_lines)] // One sequential journey; splitting it would lose the ordering.
 async fn check_exec_lease(daemon: &Daemon, workspace: &str, snapshot: &str, cgroup_root: &Path) {
@@ -1913,6 +2172,7 @@ async fn check_http_journey(
         passed += check_confined_apertures(daemon, &workspace, &snapshot, inside, outside).await;
         passed += check_confined_aperture_ceiling(daemon, &workspace, &snapshot, firehose).await;
         passed += check_confined_secret_slots(daemon, &workspace, &snapshot).await;
+        passed += check_confined_pty(daemon, &workspace, &snapshot).await;
     } else {
         // No confinement means no verified mechanism, so the capability is absent and every
         // aperture request is `unserved` — never a run that quietly got no network instead.
@@ -1968,6 +2228,36 @@ async fn check_http_journey(
                 .await,
             501,
             "exec.sandbox-unavailable",
+        );
+        passed += 1;
+        // A terminal this host never proved it can allocate is `unserved` by name, and the
+        // capability document does not advertise the mode either. Never a pipe session instead
+        // (design 13, invariant 3).
+        let (status, capabilities) = daemon
+            .call("GET", "/v1/pipe-sessions", "req_clean_pty_modes", None)
+            .await;
+        assert_eq!(status, 501, "{capabilities}");
+        expect_error(
+            &daemon
+                .call(
+                    "POST",
+                    "/v1/pipe-sessions",
+                    "req_clean_pty_unserved",
+                    Some(&mutation(
+                        "01JPHASE2CLEANPTY000002",
+                        &pty_session_input(
+                            &workspace,
+                            &snapshot,
+                            Some(json!({
+                                "columns": 80,
+                                "rows": 24
+                            })),
+                        ),
+                    )),
+                )
+                .await,
+            501,
+            "session.pty-unserved",
         );
         passed += 1;
     }
@@ -3096,8 +3386,8 @@ async fn delegated_context_bound_to_another_subject_is_refused() {
 // ---------------------------------------------------------------------------------------------
 
 /// The predecessor printed its case count; the port asserts it, so a case cannot vanish quietly.
-const PORTABLE_CASES: usize = 34;
-const DELEGATED_CASES: usize = 54;
+const PORTABLE_CASES: usize = 35;
+const DELEGATED_CASES: usize = 62;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {

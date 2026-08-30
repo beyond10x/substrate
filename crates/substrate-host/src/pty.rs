@@ -46,6 +46,38 @@ pub(crate) const CONTROLLING_TERMINAL_ARGV: [&str; 2] = ["/usr/bin/setsid", "--c
 /// How long the startup probe waits for the confined child at each step.
 const PROBE_DEADLINE: Duration = Duration::from_secs(10);
 
+/// The throwaway sandbox the probe proves the mechanism in — the same confinement floor an
+/// admitted session gets, minus the cgroup and the workspace this probe has no use for.
+const SANDBOX_ARGV: [&str; 27] = [
+    "--unshare-user",
+    "--unshare-ipc",
+    "--unshare-pid",
+    "--unshare-net",
+    "--unshare-uts",
+    "--new-session",
+    "--die-with-parent",
+    "--clearenv",
+    "--ro-bind",
+    "/usr",
+    "/usr",
+    "--ro-bind-try",
+    "/bin",
+    "/bin",
+    "--ro-bind-try",
+    "/lib",
+    "/lib",
+    "--ro-bind-try",
+    "/lib64",
+    "/lib64",
+    "--proc",
+    "/proc",
+    "--dev",
+    "/dev",
+    "--tmpfs",
+    "/tmp",
+    "--",
+];
+
 /// One allocated pseudoterminal. The parent keeps `master`; the child inherits `slave`.
 pub(crate) struct PtyPair {
     pub(crate) master: OwnedFd,
@@ -284,35 +316,7 @@ pub(crate) fn observe_sandboxed_terminal(
         .stdin(Stdio::from(pair.slave.try_clone().ok()?))
         .stdout(Stdio::from(pair.slave.try_clone().ok()?))
         .stderr(Stdio::from(pair.slave.try_clone().ok()?))
-        .args([
-            "--unshare-user",
-            "--unshare-ipc",
-            "--unshare-pid",
-            "--unshare-net",
-            "--unshare-uts",
-            "--new-session",
-            "--die-with-parent",
-            "--clearenv",
-            "--ro-bind",
-            "/usr",
-            "/usr",
-            "--ro-bind-try",
-            "/bin",
-            "/bin",
-            "--ro-bind-try",
-            "/lib",
-            "/lib",
-            "--ro-bind-try",
-            "/lib64",
-            "/lib64",
-            "--proc",
-            "/proc",
-            "--dev",
-            "/dev",
-            "--tmpfs",
-            "/tmp",
-            "--",
-        ])
+        .args(SANDBOX_ARGV)
         .args(CONTROLLING_TERMINAL_ARGV)
         .args([
             "/bin/sh",
@@ -464,6 +468,48 @@ pub(crate) fn observe_sandboxed_window(
         .map(|observed| (observed.initial, observed.resized))
 }
 
+/// Runs a confined child on a fresh terminal, closes the master, and reports how it ended.
+///
+/// The child leaves `SIGHUP` at its default disposition, so a hangup is the only way it can stop
+/// before its own deadline. Bubblewrap reports a signalled child as `128 + signal`.
+#[cfg(test)]
+pub(crate) fn observe_sandboxed_hangup(bubblewrap: &Path) -> Option<i32> {
+    if !bubblewrap.is_file() {
+        return None;
+    }
+    let window = PtyWindow {
+        columns: 80,
+        rows: 24,
+    };
+    let pair = open(window).ok()?;
+    let mut command = Command::new(bubblewrap);
+    command
+        .env_clear()
+        .stdin(Stdio::from(pair.slave.try_clone().ok()?))
+        .stdout(Stdio::from(pair.slave.try_clone().ok()?))
+        .stderr(Stdio::from(pair.slave.try_clone().ok()?))
+        .args(SANDBOX_ARGV)
+        .args(CONTROLLING_TERMINAL_ARGV)
+        .args(["/bin/sh", "-c", "printf 'READY\n'; exec /usr/bin/sleep 300"]);
+    let master_number = pair.master.as_raw_fd();
+    // SAFETY: the closure runs after fork and closes one plain descriptor number.
+    unsafe {
+        command.pre_exec(move || {
+            let _closed = libc::close(master_number);
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().ok()?;
+    drop(pair.slave);
+    let master = pair.master;
+    let mut transcript = Vec::new();
+    read_line_with_prefix(master.as_raw_fd(), b"READY", &mut transcript)?;
+    // The hangup itself: the parent lets go of the only remaining master.
+    drop(master);
+    let status = child.wait().ok()?;
+    status.code()
+}
+
 #[cfg(test)]
 pub(crate) fn observe_sandboxed_controlling_terminal(bubblewrap: &Path) -> Option<u64> {
     let window = PtyWindow {
@@ -521,6 +567,26 @@ mod tests {
             "the child read back the declared window and then the applied resize"
         );
         assert!(crate::pty::mechanism_is_provable(&bubblewrap));
+    }
+
+    /// The acceptance's last clause: a confined child exits when the terminal hangs up.
+    ///
+    /// `sleep(1)` leaves `SIGHUP` at its default disposition, so it cannot exit for any other
+    /// reason; bubblewrap reports a signalled child as `128 + signal`, which makes 129 the exact
+    /// claim "the kernel hung up this terminal's foreground process group". That path exists only
+    /// because the controlling terminal was acquired inside the sandbox: without one there is no
+    /// foreground process group to signal, and the child would sit out its whole timeout.
+    #[test]
+    fn a_confined_terminal_hangs_up_when_the_master_closes() {
+        let bubblewrap = std::path::PathBuf::from("/usr/bin/bwrap");
+        if !bubblewrap.is_file() {
+            return;
+        }
+        assert_eq!(
+            crate::pty::observe_sandboxed_hangup(&bubblewrap),
+            Some(128 + libc::SIGHUP),
+            "closing the master must hang the child up, not leave it running"
+        );
     }
 
     /// Design 13: the controlling terminal is taken **inside** the sandbox, after bubblewrap's
