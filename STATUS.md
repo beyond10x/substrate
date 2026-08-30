@@ -51,6 +51,16 @@ trust this page.
   aperture cases in
   [`crates/substrate-daemon/tests/runtime_vectors.rs`](crates/substrate-daemon/tests/runtime_vectors.rs)
   are **absent** without `SUBSTRATE_VECTORS_CGROUP_ROOT`, never reported as passed.
+- **A credential reaches a confined run as a sealed `memfd` and as nothing else.** Where an operator
+  declares `--secret-slot <name>=<path>` and the probe proves sealing and descriptor pass-through, a
+  start names the slot and the descriptor it must arrive at
+  ([`crates/substrate-host/src/secrets.rs`](crates/substrate-host/src/secrets.rs), ADR 0012). The
+  delegated lane proves it against the shipped binary: the confined child reads the value from the
+  declared descriptor and returns a digest of it, reads back the declared seal set, holds exactly
+  stdio plus its slot, and the value is in no captured argv, environment, stdout, stderr, event,
+  ledger row, applied record, refusal body or daemon diagnostic; `/proc/<daemon>/fd` holds no slot
+  `memfd` while the child is still running. Those cases are **absent** without
+  `SUBSTRATE_VECTORS_CGROUP_ROOT`; the portable lane asserts `exec.secret-slots-unserved` instead.
 - No Flux package, type or checkout is required: `flux` appears in no
   [`Cargo.lock`](Cargo.lock) package and nowhere under [`crates/`](crates), as
   [ADR 0001](adr/0001-substrate-is-standalone-and-flux-free.md) requires.

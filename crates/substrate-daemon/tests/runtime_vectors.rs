@@ -12,8 +12,9 @@
 //! refusal, never silent degradation. The delegated lane is selected by
 //! `SUBSTRATE_VECTORS_CGROUP_ROOT`, which must name a delegated cgroup v2 subtree carrying
 //! `cpu`/`memory`/`pids` **that this test process is itself inside**; it adds the confined exec,
-//! no-egress, pids/memory, timeout, truncation and whole-tree cancellation cases. When the
-//! variable is unset the delegated cases are *absent*: they are not run and are not counted.
+//! no-egress, pids/memory, timeout, truncation, whole-tree cancellation, egress-aperture and
+//! sealed-secret-slot cases. When the variable is unset the delegated cases are *absent*: they are
+//! not run and are not counted.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -225,7 +226,12 @@ struct Daemon {
 }
 
 impl Daemon {
-    async fn start(root: &Path, cgroup_root: Option<&Path>, apertures: &[String]) -> Self {
+    async fn start(
+        root: &Path,
+        cgroup_root: Option<&Path>,
+        apertures: &[String],
+        secret_slots: &[String],
+    ) -> Self {
         let socket = root.join("substrate.sock");
         let workspaces = root.join("workspaces");
         let mut command = vec![
@@ -251,12 +257,18 @@ impl Daemon {
             command.push("--egress-aperture".to_owned());
             command.push(aperture.clone());
         }
+        // `name=path`, never a value: the daemon's own argv is one of the surfaces the secret-slot
+        // cases search, so the declaration has to be the kind of thing that may appear in it.
+        for slot in secret_slots {
+            command.push("--secret-slot".to_owned());
+            command.push(slot.clone());
+        }
         let mut child = Command::new(&command[0])
             .args(&command[1..])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::piped())
-            .env("SUBSTRATE_TEST_SECRET_SENTINEL", "must-not-reach-child")
+            .env(DAEMON_ONLY_VARIABLE, "must-not-reach-child")
             .kill_on_drop(true)
             .spawn()
             .expect("spawn substrate-daemon");
@@ -301,7 +313,37 @@ impl Daemon {
         EventStream::open(&self.socket, path).await
     }
 
-    async fn close(mut self) {
+    /// Every `memfd:substrate-slot-*` descriptor the daemon process still holds.
+    ///
+    /// Read from outside the daemon, out of `/proc/<pid>/fd`, because "the daemon closed its copy"
+    /// is a claim about the process and not about the code that says so (ADR 0012).
+    fn held_slot_memfds(&self) -> Vec<String> {
+        let pid = self.child.id().expect("daemon process id");
+        let directory = format!("/proc/{pid}/fd");
+        std::fs::read_dir(&directory)
+            .unwrap_or_else(|error| panic!("list {directory}: {error}"))
+            .filter_map(Result::ok)
+            .filter_map(|entry| std::fs::read_link(entry.path()).ok())
+            .map(|target| target.display().to_string())
+            .filter(|target| target.contains("memfd:substrate-slot-"))
+            .collect()
+    }
+
+    /// The daemon's own argv, as the kernel holds it.
+    ///
+    /// A declaration is `name=path`; a value is not in it, and this is where that is checked
+    /// rather than assumed.
+    fn cmdline(&self) -> String {
+        let pid = self.child.id().expect("daemon process id");
+        let raw = std::fs::read(format!("/proc/{pid}/cmdline")).expect("read the daemon's argv");
+        String::from_utf8_lossy(&raw).into_owned()
+    }
+
+    /// Stops the daemon and hands back everything it wrote to stderr.
+    ///
+    /// Returned rather than dropped: the daemon's own diagnostic stream is one of the surfaces a
+    /// secret slot must never appear in, and it is only readable once the pipe has closed.
+    async fn close(mut self) -> String {
         if self.child.try_wait().expect("daemon status").is_none() {
             let pid = self.child.id().expect("daemon process id");
             let pid = Pid::from_raw(i32::try_from(pid).expect("process id fits in pid_t"));
@@ -316,6 +358,7 @@ impl Daemon {
             status.success(),
             "substrate-daemon shutdown failed: {error}"
         );
+        error
     }
 }
 
@@ -429,6 +472,7 @@ struct ExecInput<'a> {
     timeout_ms: u64,
     environment: Value,
     aperture: Option<&'a str>,
+    secret_slot: Option<(&'a str, u32)>,
 }
 
 impl<'a> ExecInput<'a> {
@@ -441,7 +485,17 @@ impl<'a> ExecInput<'a> {
             timeout_ms: 5000,
             environment: json!({}),
             aperture: None,
+            secret_slot: None,
         }
+    }
+
+    /// Names one operator-declared secret slot and the descriptor it must arrive at (ADR 0012).
+    ///
+    /// A name and a number, never a value, a path or a length — which is why the request this
+    /// builds can be printed in a failure message without printing a credential.
+    fn secret_slot(mut self, slot: &'a str, fd: u32) -> Self {
+        self.secret_slot = Some((slot, fd));
+        self
     }
 
     /// Selects a declared egress aperture by name — never a destination (ADR 0013).
@@ -476,7 +530,7 @@ impl<'a> ExecInput<'a> {
                 "require": true,
             }),
         };
-        json!({
+        let mut input = json!({
             "workspace": self.workspace,
             "argv": self.argv,
             "env": { "allow": [], "set": self.environment },
@@ -489,7 +543,13 @@ impl<'a> ExecInput<'a> {
                 "cpu_millis": 1000,
             },
             "wait": self.wait,
-        })
+        });
+        // Absent when no slot is named, so every request this file already sent stays byte-identical
+        // and keeps hashing to what the ledger recorded for it.
+        if let Some((slot, fd)) = self.secret_slot {
+            input["secret_slots"] = json!([{ "slot": slot, "fd": fd }]);
+        }
+        input
     }
 }
 
@@ -1651,9 +1711,31 @@ async fn check_http_journey(
     );
     passed += 1;
 
+    // Shape before capability, in both lanes: a descriptor outside `3..=63` is refused by name
+    // whether or not this host could have delivered a slot at all (ADR 0012).
+    expect_error(
+        &daemon
+            .call(
+                "POST",
+                "/v1/execs",
+                "req_clean_secret_slot_descriptor",
+                Some(&mutation(
+                    "01JPHASE2CLEANSLOT00004",
+                    &ExecInput::new(&workspace, &snapshot, &["/usr/bin/true"], true)
+                        .secret_slot(SECRET_SLOT_NAME, 2)
+                        .build(),
+                )),
+            )
+            .await,
+        422,
+        "exec.secret-slot-descriptor-invalid",
+    );
+    passed += 1;
+
     if let Some(cgroup_root) = cgroup_root {
         passed += check_confined_execs(daemon, &workspace, &snapshot, cgroup_root).await;
         passed += check_confined_apertures(daemon, &workspace, &snapshot, inside, outside).await;
+        passed += check_confined_secret_slots(daemon, &workspace, &snapshot).await;
     } else {
         // No confinement means no verified mechanism, so the capability is absent and every
         // aperture request is `unserved` — never a run that quietly got no network instead.
@@ -1673,6 +1755,26 @@ async fn check_http_journey(
                 .await,
             501,
             "exec.egress-apertures-unserved",
+        );
+        passed += 1;
+        // A declared slot this host cannot prove it can seal and pass through is `unserved`, never
+        // a run that quietly got the value some weaker way (invariant 3).
+        expect_error(
+            &daemon
+                .call(
+                    "POST",
+                    "/v1/execs",
+                    "req_clean_secret_slot_unserved",
+                    Some(&mutation(
+                        "01JPHASE2CLEANSLOT00005",
+                        &ExecInput::new(&workspace, &snapshot, &["/usr/bin/true"], true)
+                            .secret_slot(SECRET_SLOT_NAME, SECRET_SLOT_FD)
+                            .build(),
+                    )),
+                )
+                .await,
+            501,
+            "exec.secret-slots-unserved",
         );
         passed += 1;
         expect_error(
@@ -1897,12 +1999,359 @@ async fn check_confined_apertures(
 }
 
 // ---------------------------------------------------------------------------------------------
+// The delegated lane: sealed secret slots
+// ---------------------------------------------------------------------------------------------
+
+/// The slot this deployment declares, and the descriptor a start asks for it at.
+const SECRET_SLOT_NAME: &str = "vendor_api_key";
+const SECRET_SLOT_FD: u32 = 7;
+
+/// The declared value, and the one string here that must appear in nothing the daemon emits.
+///
+/// An obvious synthetic — this repository is public, so anything that read like a real credential
+/// would be the leak these cases exist to refuse — and high-entropy, so a substring hit in a
+/// captured surface is a finding and never a coincidence.
+const SECRET_SLOT_VALUE: &str = "not-a-credential-4f2c9a17b6d84e05c3719ad0e46b8f29";
+
+/// Set on the daemon process and on nothing else, so a child that can read it has been handed an
+/// environment substrate did not shape. [`SECRET_SLOT_PROGRAM`] repeats the name as a literal,
+/// because `concat!` takes literals only; a case asserts the two still agree.
+const DAEMON_ONLY_VARIABLE: &str = "SUBSTRATE_TEST_SECRET_SENTINEL";
+
+/// What the confined child reports about its slot: a digest and observations, never the bytes.
+///
+/// The child is the only observer holding the value, so it is the only one that can search the
+/// surfaces only it can see — its own `/proc/self/cmdline` and `/proc/self/environ`. It reports the
+/// *position* of a hit, so a leak fails the case without the case printing what leaked.
+const SECRET_SLOT_PROGRAM: &str = concat!(
+    "import fcntl,hashlib,json,os\n",
+    "mapping=os.environ['SUBSTRATE_SECRET_SLOTS']\n",
+    "name,number=mapping.split(',')[0].split('=')\n",
+    "fd=int(number)\n",
+    "value=b''\n",
+    "while True:\n",
+    "    chunk=os.read(fd,4096)\n",
+    "    if not chunk:\n",
+    "        break\n",
+    "    value+=chunk\n",
+    "seals=fcntl.fcntl(fd,fcntl.F_GET_SEALS)\n",
+    "try:\n",
+    "    os.pwrite(fd,b'x',0)\n",
+    "    write_errno=0\n",
+    "except OSError as error:\n",
+    "    write_errno=error.errno\n",
+    "held=[]\n",
+    "for entry in os.listdir('/proc/self/fd'):\n",
+    "    try:\n",
+    "        target=os.readlink('/proc/self/fd/'+entry)\n",
+    "    except OSError:\n",
+    "        continue\n",
+    "    if target.endswith('/fd'):\n",
+    "        continue\n",
+    "    held.append((int(entry),target))\n",
+    "held.sort()\n",
+    "print('SLOTREPORT '+json.dumps({\n",
+    "    'slot':name,'fd':fd,'mapping':mapping,\n",
+    "    'digest':hashlib.sha256(value).hexdigest(),\n",
+    "    'seals':seals,'write_errno':write_errno,\n",
+    "    'link':os.readlink('/proc/self/fd/%d'%fd),\n",
+    "    'fds':[n for n,_ in held],\n",
+    "    'memfds':[n for n,t in held if 'memfd:' in t],\n",
+    "    'argv_leak':open('/proc/self/cmdline','rb').read().find(value),\n",
+    "    'environ_leak':open('/proc/self/environ','rb').read().find(value),\n",
+    "    'daemon_variable':'SUBSTRATE_TEST_SECRET_SENTINEL' in os.environ,\n",
+    "}))\n",
+);
+
+/// The `SLOTREPORT` line the confined child printed.
+fn slot_report(stdout: &[u8]) -> Value {
+    let captured = String::from_utf8_lossy(stdout);
+    let line = captured
+        .lines()
+        .find_map(|line| line.strip_prefix("SLOTREPORT "))
+        .unwrap_or_else(|| panic!("the confined child reported nothing: {captured}"));
+    serde_json::from_str(line).expect("the child's report is JSON")
+}
+
+/// Lowercase hex SHA-256, so a case can name a value's digest without naming the value.
+fn sha256_hex(value: &[u8]) -> String {
+    use sha2::{Digest as _, Sha256};
+    Sha256::digest(value)
+        .iter()
+        .fold(String::new(), |mut hex, byte| {
+            write!(hex, "{byte:02x}").expect("format one digest byte");
+            hex
+        })
+}
+
+/// Polls one exec until it leaves `running`, and refuses to wait forever.
+async fn await_exec(daemon: &Daemon, exec_id: &str, request_id: &str) -> Value {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let (status, observed) = daemon
+            .call("GET", &format!("/v1/execs/{exec_id}"), request_id, None)
+            .await;
+        assert_eq!(status, 200, "{observed}");
+        if observed["result"]["state"] != "running" {
+            return observed;
+        }
+        assert!(Instant::now() < deadline, "{exec_id} never left running");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// The delegated secret-slot cases (ADR 0012), proved on the wire against the shipped binary.
+#[allow(clippy::too_many_lines)] // One sequential journey; splitting it would lose the ordering.
+async fn check_confined_secret_slots(daemon: &Daemon, workspace: &str, snapshot: &str) -> usize {
+    let mut passed = 0;
+    assert!(
+        SECRET_SLOT_PROGRAM.contains(DAEMON_ONLY_VARIABLE),
+        "the child looks for a daemon variable this harness no longer sets"
+    );
+
+    let operation = "01JPHASE2CLEANSLOT00001";
+    let (status, run) = daemon
+        .call(
+            "POST",
+            "/v1/execs",
+            "req_clean_secret_slot",
+            Some(&mutation(
+                operation,
+                &ExecInput::new(
+                    workspace,
+                    snapshot,
+                    &["/usr/bin/python3", "-c", SECRET_SLOT_PROGRAM],
+                    true,
+                )
+                .secret_slot(SECRET_SLOT_NAME, SECRET_SLOT_FD)
+                .build(),
+            )),
+        )
+        .await;
+    assert_eq!(status, 200, "{run}");
+    let exec_id = text(&run["result"]["id"]);
+    let stdout = decoded(&read_output(daemon, &exec_id, "stdout").await);
+    let stderr = decoded(&read_output(daemon, &exec_id, "stderr").await);
+    assert_eq!(run["result"]["state"], "exited", "{run}");
+    assert_eq!(
+        run["result"]["exit"],
+        EXITED_CLEANLY(),
+        "the confined child failed: {}",
+        String::from_utf8_lossy(&stderr)
+    );
+    let report = slot_report(&stdout);
+
+    // The child read the declared bytes off the declared descriptor. A digest, so the proof of a
+    // successful read is not itself a copy of the value.
+    assert_eq!(report["slot"], SECRET_SLOT_NAME, "{report}");
+    assert_eq!(report["fd"], SECRET_SLOT_FD, "{report}");
+    assert_eq!(
+        report["mapping"],
+        format!("{SECRET_SLOT_NAME}={SECRET_SLOT_FD}"),
+        "the shaped environment carries something other than the mapping: {report}"
+    );
+    assert_eq!(
+        report["digest"],
+        sha256_hex(SECRET_SLOT_VALUE.as_bytes()),
+        "the child did not read the declared value from its declared descriptor: {report}"
+    );
+    assert_eq!(
+        run["result"]["applied"]["secret_slots"],
+        json!([{ "slot": SECRET_SLOT_NAME, "fd": SECRET_SLOT_FD }]),
+        "the applied record does not name the slot that was placed: {run}"
+    );
+    passed += 1;
+
+    // The seal set is exactly ADR 0012's, read back inside the sandbox rather than claimed outside
+    // it, and the descriptor is the named anonymous memfd and the only one the child holds.
+    assert_eq!(
+        report["seals"], 0xf,
+        "the child reads back a seal set that is not F_SEAL_WRITE|SHRINK|GROW|SEAL: {report}"
+    );
+    assert_eq!(
+        report["write_errno"],
+        nix::errno::Errno::EPERM as i32,
+        "a sealed slot accepted a write: {report}"
+    );
+    assert!(
+        text(&report["link"]).contains(&format!("memfd:substrate-slot-{SECRET_SLOT_NAME}")),
+        "the descriptor is not the named anonymous memfd: {report}"
+    );
+    assert_eq!(
+        report["memfds"],
+        json!([SECRET_SLOT_FD]),
+        "the child holds a memfd that is not its declared slot: {report}"
+    );
+    // Exactly `{0,1,2} ∪ {declared}` — bubblewrap adds none of its own on the far side
+    // (`docs/design/11-sealed-secret-slots.md` § 6), so a second start's slot cannot be here.
+    assert_eq!(
+        report["fds"],
+        json!([0, 1, 2, SECRET_SLOT_FD]),
+        "the child holds descriptors beyond stdio and its declared slot: {report}"
+    );
+    passed += 1;
+
+    // A name this deployment never declared, refused by name and never by material.
+    let (status, unknown) = daemon
+        .call(
+            "POST",
+            "/v1/execs",
+            "req_clean_secret_slot_unknown",
+            Some(&mutation(
+                "01JPHASE2CLEANSLOT00002",
+                &ExecInput::new(workspace, snapshot, &["/usr/bin/true"], true)
+                    .secret_slot("absent_slot", SECRET_SLOT_FD)
+                    .build(),
+            )),
+        )
+        .await;
+    assert_eq!(status, 422, "{unknown}");
+    assert_eq!(
+        unknown["error"]["code"], "exec.secret-slot-unknown",
+        "{unknown}"
+    );
+    assert!(
+        text(&unknown["error"]["message"]).contains("absent_slot"),
+        "the refusal did not name the slot: {unknown}"
+    );
+    passed += 1;
+
+    // Every surface this run produced, searched for the value. Each is checked for a hit *and* for
+    // being the surface it claims to be, because an empty page carries no value either.
+    let (status, recorded) = daemon
+        .call(
+            "GET",
+            &format!("/v1/execs/{exec_id}"),
+            "req_clean_secret_slot_get",
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{recorded}");
+    let (status, ledger) = daemon
+        .call(
+            "GET",
+            &format!("/v1/ops/{operation}"),
+            "req_clean_secret_slot_op",
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{ledger}");
+    assert_eq!(ledger["result"]["resource"], exec_id, "{ledger}");
+    let (status, events) = daemon
+        .call(
+            "GET",
+            "/v1/events?limit=100",
+            "req_clean_secret_slot_events",
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{events}");
+    let events = events.to_string();
+    assert!(
+        events.contains(&exec_id),
+        "the event page does not cover the run, so finding nothing in it proves nothing"
+    );
+    let cmdline = daemon.cmdline();
+    assert!(
+        cmdline.contains("--secret-slot"),
+        "this is not the argv of a daemon that declares a slot: {cmdline}"
+    );
+    for (surface, bytes) in [
+        ("the exec response", run.to_string()),
+        ("the recorded exec", recorded.to_string()),
+        ("the ledger row", ledger.to_string()),
+        ("the event page", events),
+        ("the refusal body", unknown.to_string()),
+        (
+            "captured stdout",
+            String::from_utf8_lossy(&stdout).into_owned(),
+        ),
+        (
+            "captured stderr",
+            String::from_utf8_lossy(&stderr).into_owned(),
+        ),
+        ("the daemon's argv", cmdline),
+    ] {
+        assert!(
+            !bytes.contains(SECRET_SLOT_VALUE),
+            "{surface} carries the declared value"
+        );
+    }
+    // The two surfaces only the child can see, reported as positions rather than substrings.
+    assert_eq!(
+        report["argv_leak"], -1,
+        "the child's argv carries the value"
+    );
+    assert_eq!(
+        report["environ_leak"], -1,
+        "the child's environment carries the value"
+    );
+    assert_eq!(
+        report["daemon_variable"], false,
+        "the child inherited the daemon's environment instead of a shaped one"
+    );
+    passed += 1;
+
+    // The daemon has already let go — checked while the child is still running and has not yet
+    // read, so the descriptor it later reads from is demonstrably not a copy the daemon held open.
+    let deferred = format!("import time\ntime.sleep(2)\n{SECRET_SLOT_PROGRAM}");
+    let (status, started) = daemon
+        .call(
+            "POST",
+            "/v1/execs",
+            "req_clean_secret_slot_closed",
+            Some(&mutation(
+                "01JPHASE2CLEANSLOT00003",
+                &ExecInput::new(
+                    workspace,
+                    snapshot,
+                    &["/usr/bin/python3", "-c", &deferred],
+                    false,
+                )
+                .secret_slot(SECRET_SLOT_NAME, SECRET_SLOT_FD)
+                .build(),
+            )),
+        )
+        .await;
+    assert_eq!(status, 202, "{started}");
+    let deferred_id = text(&started["result"]["id"]);
+    let (status, running) = daemon
+        .call(
+            "GET",
+            &format!("/v1/execs/{deferred_id}"),
+            "req_clean_secret_slot_running",
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{running}");
+    assert_eq!(
+        running["result"]["state"], "running",
+        "the deferred child was gone before the daemon's descriptors could be read: {running}"
+    );
+    assert_eq!(
+        daemon.held_slot_memfds(),
+        Vec::<String>::new(),
+        "the daemon still holds a slot memfd after spawn"
+    );
+    let finished = await_exec(daemon, &deferred_id, "req_clean_secret_slot_closed_get").await;
+    assert_eq!(finished["result"]["state"], "exited", "{finished}");
+    let deferred_stdout = decoded(&read_output(daemon, &deferred_id, "stdout").await);
+    assert_eq!(
+        slot_report(&deferred_stdout)["digest"],
+        sha256_hex(SECRET_SLOT_VALUE.as_bytes()),
+        "the child could not read the value the daemon had already let go of"
+    );
+    passed += 1;
+    passed
+}
+
+// ---------------------------------------------------------------------------------------------
 // The lane
 // ---------------------------------------------------------------------------------------------
 
 /// The predecessor printed its case count; the port asserts it, so a case cannot vanish quietly.
-const PORTABLE_CASES: usize = 29;
-const DELEGATED_CASES: usize = 42;
+const PORTABLE_CASES: usize = 31;
+const DELEGATED_CASES: usize = 48;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {
@@ -1919,11 +2368,24 @@ async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {
     let (inside, inside_server) = fake_app_server().await;
     let (outside, outside_server) = fake_app_server().await;
     let declared = vec![format!("model=127.0.0.1:{}/tcp", inside.port())];
-    let daemon = Daemon::start(root, delegated.as_deref(), &declared).await;
+    // The declared slot file: one bounded, owner-private regular file, written before the daemon
+    // that must be able to read it exists. Its path is argv; its bytes never are.
+    let slot_file = root.join("declared.slot");
+    std::fs::write(&slot_file, SECRET_SLOT_VALUE).expect("write the declared slot file");
+    std::fs::set_permissions(&slot_file, std::fs::Permissions::from_mode(0o600))
+        .expect("restrict the declared slot file");
+    let slots = vec![format!("{SECRET_SLOT_NAME}={}", slot_file.display())];
+    let daemon = Daemon::start(root, delegated.as_deref(), &declared, &slots).await;
     check_dual_daemon_refusal(&daemon).await;
     let passed =
         check_http_journey(&daemon, delegated.as_deref(), inside.port(), outside.port()).await;
-    daemon.close().await;
+    // The daemon's own diagnostic stream, readable only once its pipe has closed. Uncounted on
+    // purpose: it belongs to the process, not to any one HTTP case.
+    let diagnostics = daemon.close().await;
+    assert!(
+        !diagnostics.contains(SECRET_SLOT_VALUE),
+        "the daemon's stderr carries the declared value"
+    );
     inside_server.abort();
     outside_server.abort();
     let (lane, expected) = if delegated.is_some() {

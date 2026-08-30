@@ -12,7 +12,7 @@ tags:
 - wire
 relations:
 - decomposes: epic:byte-plane-completion
-revision: 2
+revision: 3
 ---
 # Story: PTY sessions are a distinct session kind with resize
 
@@ -37,11 +37,14 @@ resize the child observes, and exits on hangup — while the portable lane prove
 
 Evidence that satisfies it, in order:
 
-1. `adr/0011-pty-sessions-are-a-distinct-session-kind.md`: kind, frame set, resize bounds, never a
-   substitute for pipes, and the named refusal when the host cannot allocate a pty.
-2. `contracts/substrate-wire/0.5.0/` adds the `pty` kind and `resize` frame; compatibility block
-   names `0.4.0` with exact `adds_routes`/`preserves_routes`; `render-contract-bundle-0.5.0.py`
-   and `check-contract-bundle-0.5.0.py` exist and the checker is in `scripts/gate.sh`.
+1. A design document in `docs/design/`, proposed, fixing kind, frame set, resize bounds, never a
+   substitute for pipes, and the named refusal when the host cannot allocate a pty. It claims no
+   ADR number: `adr/` admits `accepted` and `superseded` only (`xtask/src/adrs.rs:12`), so the
+   number is assigned at acceptance.
+2. The next free successor bundle under `contracts/substrate-wire/` adds the `pty` kind and
+   `resize` frame; compatibility block names its predecessor with exact
+   `adds_routes`/`preserves_routes`; authored source under `xtask/bundle-source/<version>/` and
+   `cargo xtask check-bundle <version>` in `scripts/gate.sh`.
 3. `crates/substrate-host`: pty opened with `nix::pty::openpty` inside the existing
    bubblewrap/cgroup/cleared-environment path. Failing-first tests:
    `pty_session_refused_without_confinement`, `pty_resize_is_applied_and_observed` (child reads
@@ -55,3 +58,16 @@ Evidence that satisfies it, in order:
 ## Open Questions
 
 Bundle number: `0.5.0` if this lands first in the epic; the ADR states the actual number.
+
+## Correction — 2026-08-30
+
+Three claims in the evidence list above had gone stale and are rewritten, not deleted, so the
+change is visible:
+
+| Claimed | Actually |
+|---|---|
+| `adr/0011-pty-sessions-are-a-distinct-session-kind.md` | `0011` is `adr/0011-delegated-context-and-grant-attribution.md`; the number was taken while this story sat in draft |
+| `contracts/substrate-wire/0.5.0/` | `0.5.0` is sealed secret slots and `0.6.0` is destination-bound egress; both are frozen (invariant 6) |
+| `render-contract-bundle-0.5.0.py`, `check-contract-bundle-0.5.0.py` | the Python renderer/checker pairs stop at `0.4.0`; from `0.5.0` on the check is `cargo xtask check-bundle <version>` (`scripts/gate.sh:24-28`) |
+
+The story pins no numbers now, so it cannot go stale the same way again.

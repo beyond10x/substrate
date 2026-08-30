@@ -66,6 +66,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - **The capability fact `secrets.slots`**, the sorted list of declared slot names, published only
   from a probe that proved sealing in-process and descriptor pass-through through a real bubblewrap
   child. Absent otherwise: a start naming a slot is then `unserved`, never delivered by weaker means.
+- **The delegated clean-room lane proves the slot guarantee on the wire**, against the shipped
+  binary rather than in process. A confined child reads its slot from the declared descriptor and
+  returns a SHA-256 of the bytes; it reports `F_GET_SEALS` as the declared set, a write refused with
+  `EPERM`, and a descriptor table of exactly `{0,1,2}` plus its slot; the value is found in no
+  captured argv, shaped environment, stdout, stderr, event page, ledger row, applied record, refusal
+  body or daemon diagnostic; and `/proc/<daemon>/fd` holds no slot `memfd` while the child is still
+  running and has not yet read. `bash scripts/delegated-lane.sh` now counts 48 cases and the
+  portable lane 31, where it asserts `exec.secret-slots-unserved` and
+  `exec.secret-slot-descriptor-invalid`.
 - **Contract bundle `contracts/substrate-wire/0.5.0`**, an additive successor to `0.4.0`
   (`preserves_routes: 26`, `adds_routes: 0`) carrying `secret_slots` on exec and pipe-session start,
   the `secrets.slots` fact, the applied-confinement slot record and six conformance vectors.
