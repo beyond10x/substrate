@@ -96,6 +96,17 @@ Substrate is confinement. Everything below is the reason it can be trusted with 
   atlas' org-wide fence). Renaming one is a **coordinated migration with an ADR in atlas**, done
   by cutting a new bundle version — never by rewriting a frozen one.
 - **Never commit credentials, tokens or key files.** `scripts/check-secrets.sh` exists for this.
+  It scans the **whole history** with a checksum-pinned Gitleaks and reads `.gitleaks.toml`, which
+  keeps the default rule set (`useDefault = true`) and adds exactly one exception: the `jwt` rule is
+  allowed in the delegated-context conformance vectors, and nowhere else. Those vectors are JWTs by
+  definition — ADR 0011 fixes the document as a compact JWS, so a vector proving substrate verifies
+  one has to contain one — and they carry no credential: each is signed by a key whose seed is the
+  SHA-256 of a sentence published in this repository
+  (`crates/substrate-daemon/tests/runtime_vectors.rs:2405-2409`). The exception is scoped by rule
+  **and** by path; a JWT anywhere else, including any other vector, is still a finding. Proven, not
+  asserted: the same token in `contracts/substrate-wire/0.7.0/vectors/http/delegated-context-*.json`
+  is allowed and in `crates/substrate-daemon/src/` is caught. **Widening this allowlist is a
+  security change, not a fix for a red scan.**
 
 ## Out of scope
 
@@ -218,8 +229,23 @@ Maintain `CHANGELOG.md` in Keep a Changelog form and cut it under a version head
 tag is the bare version — `0.2.0`, the version and nothing else (atlas § *Naming*) — annotated, at a
 fully gated `main` commit. The full gate comes first; component steps alone are not enough.
 
-The bundle is **not** a published stable release: OCI packaging, signing and digest pinning are
-separate release work. Do not describe a development bundle as stable.
+**Pushing that tag runs [`.github/workflows/release.yml`](.github/workflows/release.yml)**, which
+builds the `Dockerfile`, publishes `ghcr.io/beyond10x/b10x-substrate-daemon:<version>`, signs it
+keylessly, verifies the signature **before** it announces anything, and only then writes the digest
+to the GitHub release and to `CHANGELOG.md` under that version's heading. It refuses — publishing
+nothing — a tag that is not the bare version form (so `0.2.2-rc.0` produces nothing), a lightweight
+tag, a commit that is not an ancestor of `main`, a version that disagrees with
+`[workspace.package] version`, and a commit for which `gate.yml` has not concluded `success`: it
+reads that workflow's own recorded conclusion for the tagged SHA rather than re-running a lookalike.
+`packages: write` and `id-token: write` exist on its release job and nowhere else. The GitHub
+release and the changelog commit go through the b10x-bot App (§ *Bot identity*), so they need the
+repository secrets `B10X_BOT_APP_ID` and `B10X_BOT_PRIVATE_KEY` and an installation with
+`contents: write`. **Neither secret is set yet and no image has been published** — the workflow
+exists and has never run.
+
+The bundle is **not** a published stable release: OCI packaging, signing and digest pinning of the
+contract bundle are separate release work, and a signed daemon image makes no bundle stable. Do not
+describe a development bundle as stable.
 
 ## Where work is tracked
 

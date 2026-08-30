@@ -42,7 +42,8 @@ wire change. Development bundles, not a stable published contract.**
 | 0.2.0 bundle, runtime, portable lane, delegated Linux lane | green |
 | 0.4.0 successor development bundle | adds independently verified read-only execution capsules; the delegated model-free lane proves capsule/config/hook binding and correlated native hook evidence before model dispatch |
 | phase 4, [raw pipe sessions](adr/0007-protocol-processes-use-raw-pipe-sessions.md) | source-typed bounded raw-pipe primitive, distinct durable session identity, leased start, single-attachment Unix-WebSocket route ([plan 04](docs/plan/04-direct-byte-plane.md)) |
-| stable publication | **not done.** OCI packaging, signing and digest pinning are separate release work |
+| daemon image release | [`.github/workflows/release.yml`](.github/workflows/release.yml) publishes, keyless-signs and digest-pins `ghcr.io/beyond10x/b10x-substrate-daemon:<version>` on an annotated bare-version tag whose commit has a green gate run; a pre-release tag publishes nothing. **No image is published yet** — the workflow has never run, and it needs the `B10X_BOT_APP_ID` and `B10X_BOT_PRIVATE_KEY` repository secrets |
+| stable publication | **not done.** The contract bundles' OCI packaging, signing and digest pinning are separate release work; no bundle is a stable published contract |
 | PTY, network session authority, Git sources | **absent** |
 | hosted trust envelope | accepted in design, **not implemented**; the TCP static bearer is explicitly development-only |
 

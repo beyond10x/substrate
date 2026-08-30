@@ -1,0 +1,511 @@
+# Publishes the daemon image for a release tag: an **annotated bare-version tag** on `main`
+# (AGENTS.md § "Releases" — "the bare version … annotated, at a fully gated `main` commit").
+# The result is `ghcr.io/beyond10x/b10x-substrate-daemon:<version>`, keyless-signed with cosign,
+# with the image digest written to the GitHub release and to `CHANGELOG.md` under that version's
+# heading. `b10x-substrate-*` is the published-package prefix fixed by README.md:31.
+#
+# What this workflow refuses, and why each refusal is a refusal rather than a warning:
+#
+#   * a tag that is not the bare version form. `0.2.2-rc.0` must produce nothing. The ref filter
+#     below is a GitHub glob, not a regex, so it is a coarse first cut; the "Refuse a tag that is
+#     not the bare version form" step re-checks with a real anchored regex. Two mechanisms because
+#     the glob dialect is the part this file cannot prove offline.
+#   * a lightweight tag, or a tag whose commit is not an ancestor of `origin/main`.
+#   * a tag whose version disagrees with `[workspace.package] version` in `Cargo.toml`.
+#   * a commit for which `.github/workflows/gate.yml` has not concluded `success`. The gate is the
+#     bar for `main` (AGENTS.md § "The gate"); this workflow reads that workflow's own conclusion
+#     for the exact tagged SHA rather than re-running a lookalike, so "the gate was green for this
+#     commit" means the recorded run, not a second opinion.
+#   * a signature that does not verify. Signing and `cosign verify` both run **before** the GitHub
+#     release is created and before `CHANGELOG.md` is touched, so a Sigstore failure fails the job
+#     with nothing announced. The image bytes are in the registry at that point — untagged pushes
+#     cannot be undone from here — but no release, no changelog entry and no digest claim exist.
+#
+# Permissions. `contents: read` at workflow level. `preflight` adds `actions: read`, which is the
+# only scope that can read another workflow's conclusion for a SHA; there is no way to ask "was
+# gate.yml green for this commit" with `contents: read` alone. `release` adds `packages: write`
+# (push to GHCR) and `id-token: write` (the OIDC token keyless cosign signs with) and nothing else.
+# Neither write scope exists anywhere but that one job.
+#
+# Identity. The `GITHUB_TOKEN` pushes the image; every **git push and API write** — the GitHub
+# release and the `CHANGELOG.md` commit — goes through the b10x-bot GitHub App instead, per
+# AGENTS.md § "Bot identity" ("automated commits and pushes use the GitHub App … never a human
+# identity"). The author line is assembled the same way `scripts/as-bot.sh:14-20` assembles it.
+# This needs two repository secrets that do not exist yet — `B10X_BOT_APP_ID` and
+# `B10X_BOT_PRIVATE_KEY` — and the app's installation needs `contents: write` on this repository.
+# Without them the job fails at "Mint a b10x-bot installation token", after the image is pushed and
+# signed and before anything is announced.
+#
+# Platform. `linux/amd64` only: the hosted runner is amd64 and a cross-built or emulated Rust
+# release build is not something this job can honestly claim to have exercised. An arm64 image is
+# separate work with its own runner. Build provenance and SBOM attestations are disabled so the
+# pushed digest is the image manifest's own digest and not an index that wraps it; SLSA provenance
+# is a later milestone, not something to bolt on here.
+name: Release
+
+on:
+  push:
+    tags:
+      # Coarse filter. GitHub ref filters understand `*`, `**`, `?`, `+` and `[]` — not anchors,
+      # not alternation — so this is "digits, dot, digits, dot, digits" and the anchored regex in
+      # the preflight job is what actually decides. `0.2.2-rc.0` fails both.
+      - '[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: read
+
+concurrency:
+  # Never cancel a release in flight: a cancelled run can leave a pushed image with no signature
+  # and no release. One group per tag, so two different tags do not serialise behind each other.
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/beyond10x/b10x-substrate-daemon
+  GATE_WORKFLOW: gate.yml
+
+jobs:
+  preflight:
+    name: Preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      # Reading `gate.yml`'s conclusion for a SHA is an Actions API read. It is a read-only scope
+      # on a job that builds nothing, pushes nothing and holds no write scope of any kind.
+      actions: read
+    outputs:
+      version: ${{ steps.tag.outputs.version }}
+      source-sha: ${{ steps.tag.outputs.source-sha }}
+      gate-run-url: ${{ steps.gate.outputs.run-url }}
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # Full history: the `main`-ancestry check below is a real ancestry walk, not a guess
+          # from a shallow clone.
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Anchored regex, not the ref glob. This is the step that makes `0.2.2-rc.0`, `v0.2.2`,
+      # `0.2` and `0.2.2.1` produce nothing.
+      - name: Refuse a tag that is not the bare version form
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s' "$TAG" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "refused: '$TAG' is not the bare version form MAJOR.MINOR.PATCH." >&2
+            echo "AGENTS.md, section \"Releases\": the tag is the bare version and nothing else." >&2
+            echo "A pre-release tag publishes nothing." >&2
+            exit 1
+          fi
+          echo "tag form: '$TAG' is the bare version form"
+
+      # Three separate claims, each checked rather than assumed: the ref names a tag *object*
+      # (annotated), that object peels to a commit, and that commit is on `main`.
+      - name: Require an annotated tag at a main commit
+        id: tag
+        env:
+          TAG: ${{ github.ref_name }}
+          EVENT_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --force --no-tags origin "+refs/tags/${TAG}:refs/tags/${TAG}"
+          git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+
+          object_type=$(git cat-file -t "refs/tags/${TAG}")
+          if [ "$object_type" != "tag" ]; then
+            echo "refused: refs/tags/${TAG} is a ${object_type}, not an annotated tag object." >&2
+            echo "AGENTS.md, section \"Releases\": the tag is annotated." >&2
+            exit 1
+          fi
+
+          source_sha=$(git rev-parse "refs/tags/${TAG}^{commit}")
+
+          # SOURCE_SHA is the tag's commit. The event's own SHA is checked against it rather than
+          # trusted: the label the image carries must be the commit the tag names.
+          if [ "$source_sha" != "$EVENT_SHA" ]; then
+            echo "refused: the tag peels to ${source_sha} but the event reports ${EVENT_SHA}." >&2
+            exit 1
+          fi
+
+          if ! git merge-base --is-ancestor "$source_sha" origin/main; then
+            echo "refused: ${source_sha} is not an ancestor of origin/main." >&2
+            echo "AGENTS.md, section \"Releases\": the tag sits at a fully gated main commit." >&2
+            exit 1
+          fi
+
+          # The version the image is tagged with and the version the binary reports must be one
+          # number. `[workspace.package] version` is the manifest's single source (Cargo.toml:17).
+          manifest_version=$(awk '
+            /^\[workspace\.package\]$/ { in_block = 1; next }
+            /^\[/                      { in_block = 0 }
+            in_block && /^version[[:space:]]*=/ {
+              gsub(/^version[[:space:]]*=[[:space:]]*"|"[[:space:]]*$/, "")
+              print
+              exit
+            }
+          ' Cargo.toml)
+          if [ "$manifest_version" != "$TAG" ]; then
+            echo "refused: tag ${TAG} disagrees with Cargo.toml [workspace.package] version ${manifest_version}." >&2
+            exit 1
+          fi
+
+          echo "annotated tag ${TAG} -> ${source_sha}, on main, matching Cargo.toml ${manifest_version}"
+          {
+            echo "version=${TAG}"
+            echo "source-sha=${source_sha}"
+          } >> "$GITHUB_OUTPUT"
+
+      # The gate's own recorded conclusion for this exact commit, read from the Actions API. Not a
+      # re-run: a second run of `scripts/gate.sh` here would prove that the gate passes *now*, on
+      # this runner, which is a different claim from "gate.yml was green for this commit" and would
+      # let a release proceed on a commit whose real gate run failed.
+      #
+      # It waits rather than failing immediately when no conclusion exists yet, because tagging a
+      # commit the moment it lands on `main` is the normal case and the gate takes up to 45 minutes
+      # (gate.yml:41 `timeout-minutes: 45`). A recorded `failure` or `cancelled` with no successful
+      # run alongside it refuses at once — waiting cannot turn a red gate green.
+      - name: Require a green gate run for this commit
+        id: gate
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_SHA: ${{ steps.tag.outputs.source-sha }}
+        run: |
+          set -euo pipefail
+          deadline=$(( $(date +%s) + 50 * 60 ))
+
+          while :; do
+            runs=$(gh api --paginate \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/${GATE_WORKFLOW}/runs?head_sha=${SOURCE_SHA}&per_page=100" \
+              --jq '.workflow_runs[] | [.status, (.conclusion // "-"), .html_url] | @tsv')
+
+            success_url=$(printf '%s\n' "$runs" \
+              | awk -F'\t' '$1 == "completed" && $2 == "success" { print $3; exit }')
+            if [ -n "$success_url" ]; then
+              echo "gate green for ${SOURCE_SHA}: ${success_url}"
+              echo "run-url=${success_url}" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            pending=$(printf '%s\n' "$runs" | awk -F'\t' 'NF && $1 != "completed" { c++ } END { print c + 0 }')
+            if [ "$pending" -eq 0 ]; then
+              if [ -n "${runs//[[:space:]]/}" ]; then
+                echo "refused: every ${GATE_WORKFLOW} run for ${SOURCE_SHA} is completed and none concluded success:" >&2
+                printf '%s\n' "$runs" >&2
+                exit 1
+              fi
+              echo "no ${GATE_WORKFLOW} run recorded for ${SOURCE_SHA} yet; waiting"
+            else
+              echo "${pending} ${GATE_WORKFLOW} run(s) for ${SOURCE_SHA} still running; waiting"
+            fi
+
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "refused: no successful ${GATE_WORKFLOW} run for ${SOURCE_SHA} within the wait window." >&2
+              echo "The gate is the bar for main (AGENTS.md, section \"The gate\"); nothing is published without it." >&2
+              exit 1
+            fi
+            sleep 30
+          done
+
+      - name: Preflight summary
+        env:
+          VERSION: ${{ steps.tag.outputs.version }}
+          SOURCE_SHA: ${{ steps.tag.outputs.source-sha }}
+          GATE_RUN_URL: ${{ steps.gate.outputs.run-url }}
+        run: |
+          {
+            echo "### Release preflight"
+            echo
+            echo "| fact | value |"
+            echo "| --- | --- |"
+            echo "| version | \`${VERSION}\` |"
+            echo "| SOURCE_SHA | \`${SOURCE_SHA}\` |"
+            echo "| gate run | ${GATE_RUN_URL} |"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  release:
+    name: Build, sign and publish
+    needs: preflight
+    runs-on: ubuntu-latest
+    # A release build is a cold `cargo build --release` of the whole workspace inside the image;
+    # there is deliberately no build cache here (a release runs rarely, and a warm cache is one
+    # more input to trust in the artifact an operator is asked to verify).
+    timeout-minutes: 120
+    permissions:
+      # Restated because a job-level block replaces the workflow-level one outright rather than
+      # merging with it — without this line the job would have no `contents` scope at all.
+      contents: read
+      packages: write
+      id-token: write
+    env:
+      VERSION: ${{ needs.preflight.outputs.version }}
+      SOURCE_SHA: ${{ needs.preflight.outputs.source-sha }}
+      GATE_RUN_URL: ${{ needs.preflight.outputs.gate-run-url }}
+
+    steps:
+      - name: Check out the tagged source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ needs.preflight.outputs.source-sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      # Probed, not assumed, in the manner of gate.yml's "Report execution lanes": the Dockerfile
+      # declares `# syntax=docker/dockerfile:1.7` and uses `--mount=type=cache`, so it needs
+      # BuildKit. A `docker-container` builder is created explicitly rather than relying on
+      # whatever the default builder happens to be on the image that day.
+      - name: Prepare a BuildKit builder
+        run: |
+          set -euo pipefail
+          if ! docker buildx version >/dev/null 2>&1; then
+            echo "refused: docker buildx is not available on this runner." >&2
+            exit 1
+          fi
+          docker buildx version
+          docker buildx create --name b10x-release --driver docker-container --use
+          docker buildx inspect --bootstrap
+
+      # `packages: write` on the GITHUB_TOKEN is what pushes the image. The bot App identity below
+      # is for git and API writes, which is what AGENTS.md, section "Bot identity", governs.
+      - name: Log in to GHCR
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.repository_owner }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" \
+            | docker login ghcr.io --username "$GHCR_USER" --password-stdin
+
+      # SOURCE_SHA becomes `org.opencontainers.image.revision` on the published image
+      # (Dockerfile:13-14), so the image says which commit produced it.
+      - name: Build and push the daemon image
+        id: build
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --file Dockerfile \
+            --platform linux/amd64 \
+            --build-arg "SOURCE_SHA=${SOURCE_SHA}" \
+            --tag "${IMAGE}:${VERSION}" \
+            --provenance=false \
+            --sbom=false \
+            --metadata-file image-metadata.json \
+            --push \
+            .
+          digest=$(jq -er '."containerimage.digest"' image-metadata.json)
+          case "$digest" in
+            sha256:*) ;;
+            *) echo "refused: buildx reported no image digest ('${digest}')." >&2; exit 1 ;;
+          esac
+          echo "pushed ${IMAGE}:${VERSION} -> ${digest}"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      # Keyless: the certificate is issued against this job's OIDC token (`id-token: write`), so
+      # the identity bound into the signature is this workflow file at this ref, not a key anyone
+      # holds. Signed by digest, never by tag — a tag is a mutable pointer and signing one signs
+      # nothing durable.
+      - name: Sign the image keylessly
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      # The verification an operator will run, run here first. `--certificate-identity` is exact,
+      # not a regex: it is this file, at this tag, and a signature from any other workflow, ref or
+      # repository fails. This step is the last thing before anything is announced, so a Sigstore
+      # or verification failure leaves no release and no changelog claim behind.
+      - name: Verify the signature with the workflow identity
+        id: verify
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          identity="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}"
+          echo "certificate identity: ${identity}"
+          cosign verify \
+            --certificate-identity "${identity}" \
+            --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+            "${IMAGE}@${DIGEST}" > cosign-verify.json
+          jq -e 'length > 0' cosign-verify.json > /dev/null
+          echo "identity=${identity}" >> "$GITHUB_OUTPUT"
+
+      # Everything below announces. Nothing above it did.
+
+      - name: Mint a b10x-bot installation token
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          app-id: ${{ secrets.B10X_BOT_APP_ID }}
+          private-key: ${{ secrets.B10X_BOT_PRIVATE_KEY }}
+
+      # The release notes state what the artifact is and, as explicitly, what it is not. The wire
+      # contract bundles under `contracts/substrate-wire/` are **development** bundles: publishing
+      # a signed daemon image does not make any of them a stable contract, and a stable-contract
+      # decision is its own ADR under atlas ADR 0019
+      # (`architecture/adr/0019-contract-release-and-conformance.md`, cited by path because it
+      # lives outside this repository — AGENTS.md, section "Links"). The image's `VOLUME` and
+      # `EXPOSE 8080` (Dockerfile:16-17) describe the development-only TCP posture that
+      # `docs/design/06-authentication-secrets-and-trust.md`, section 1, marks `development_only`;
+      # the notes must not read as a hosted posture.
+      - name: Compose release notes
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IDENTITY: ${{ steps.verify.outputs.identity }}
+        run: |
+          set -euo pipefail
+          cat > release-notes.md <<NOTES
+          Built by b10x-bot from \`${SOURCE_SHA}\`, the commit this tag names, after
+          \`.github/workflows/gate.yml\` concluded \`success\` for it: ${GATE_RUN_URL}
+
+          ## Image
+
+          | | |
+          | --- | --- |
+          | image | \`${IMAGE}:${VERSION}\` |
+          | digest | \`${DIGEST}\` |
+          | revision label | \`${SOURCE_SHA}\` (\`org.opencontainers.image.revision\`) |
+          | platform | \`linux/amd64\` |
+
+          Pull by digest, never by tag:
+
+          \`\`\`console
+          docker pull ${IMAGE}@${DIGEST}
+          \`\`\`
+
+          ## Verify the signature
+
+          The image is signed keylessly through Sigstore. The certificate identity is the workflow
+          that built it, so a signature from any other workflow, ref or repository fails:
+
+          \`\`\`console
+          cosign verify \\
+            --certificate-identity ${IDENTITY} \\
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \\
+            ${IMAGE}@${DIGEST}
+          \`\`\`
+
+          ## What this release does not claim
+
+          - **The wire contract bundles remain development bundles.** Every bundle under
+            \`contracts/substrate-wire/\` is a development bundle; a signed daemon image makes none
+            of them a stable published contract. A stable-contract decision is its own ADR under
+            atlas ADR 0019 (\`architecture/adr/0019-contract-release-and-conformance.md\`).
+          - **The image's posture is development, not hosted.** Its \`EXPOSE 8080\` and \`VOLUME\`
+            describe the static-bearer TCP posture that design 06, section 1, marks
+            \`development_only\`. The hosted trust envelope is accepted in design and not
+            implemented; do not run this image as a hosted deployment.
+          - **The binary is not bit-for-bit reproducible.** The digest above is recorded;
+            reproducing it from source independently is a later milestone.
+          - **The delegated execution lane is not exercised by CI.** A host without a delegated
+            cgroup v2 subtree answers \`exec.sandbox-unavailable\` rather than running unconfined.
+          NOTES
+          echo '--- release notes ---'
+          cat release-notes.md
+
+      # `gh release create` under the bot App token, so the release is authored by the App and not
+      # by whoever pushed the tag. `--verify-tag` refuses if the tag vanished between preflight and
+      # here.
+      - name: Publish the GitHub release
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          gh release create "${VERSION}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --title "${VERSION}" \
+            --notes-file release-notes.md \
+            --verify-tag
+
+      # The digest also belongs in `CHANGELOG.md` under this version's heading, on `main`
+      # (AGENTS.md, section "Releases": the changelog is cut under a version heading at release).
+      # The commit is authored by the App, with the author line assembled exactly as
+      # `scripts/as-bot.sh:14-20` assembles it, and pushed through the same credential helper shape
+      # so the token never reaches argv or a remote URL.
+      #
+      # Idempotent: re-running replaces this version's digest line rather than stacking a second
+      # one. Retried against a fresh `origin/main` because `main` can move while a release builds.
+      - name: Record the digest in CHANGELOG.md on main
+        env:
+          B10X_BOT_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+
+          bot_user="${APP_SLUG}[bot]"
+          bot_id=$(gh api "/users/${APP_SLUG}%5Bbot%5D" --jq '.id')
+          digest_line="Image: \`${IMAGE}:${VERSION}\` at \`${DIGEST}\`, keyless-signed; verify with \`cosign verify\`."
+
+          attempt=1
+          while [ "$attempt" -le 3 ]; do
+            git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
+            git checkout --force -B release-changelog origin/main
+
+            awk -v heading="## [${VERSION}]" -v line="$digest_line" '
+              index($0, heading) == 1 { print; print ""; print line; inserted = 1; state = 1; next }
+              # Eat the blank line and any digest line a previous run left under this heading,
+              # then restore exactly one blank before the section body.
+              state == 1 && $0 == "" { next }
+              state == 1 && index($0, "Image: `" ) == 1 { next }
+              state == 1 { print ""; state = 0; print; next }
+              { print }
+              END { if (!inserted) { print "refused: no \"" heading "\" heading in CHANGELOG.md" > "/dev/stderr"; exit 1 } }
+            ' CHANGELOG.md > CHANGELOG.next
+            mv CHANGELOG.next CHANGELOG.md
+
+            if git diff --quiet -- CHANGELOG.md; then
+              echo "CHANGELOG.md on main already records ${DIGEST}; nothing to push"
+              exit 0
+            fi
+
+            git -c "user.name=${bot_user}" \
+                -c "user.email=${bot_id}+${bot_user}@users.noreply.github.com" \
+                commit --only CHANGELOG.md --file - <<COMMIT
+          docs(changelog): record the ${VERSION} daemon image digest
+
+          - ${IMAGE}:${VERSION} is ${DIGEST}
+          - Built from ${SOURCE_SHA} and keyless-signed; cosign verify passed in the release run
+          COMMIT
+
+            if git \
+              -c 'credential.https://github.com.helper=' \
+              -c 'credential.https://github.com.helper=!f() { echo username=x-access-token; echo "password=${B10X_BOT_TOKEN}"; }; f' \
+              push origin HEAD:main; then
+              echo "recorded ${DIGEST} in CHANGELOG.md on main"
+              exit 0
+            fi
+
+            echo "push rejected (main moved?); retrying against a fresh origin/main (attempt ${attempt})"
+            attempt=$(( attempt + 1 ))
+          done
+
+          echo "refused: could not record the digest in CHANGELOG.md on main after 3 attempts." >&2
+          echo "The image is published and signed; add the digest line by hand." >&2
+          exit 1
+
+      - name: Release summary
+        if: always()
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          {
+            echo "### Release ${VERSION}"
+            echo
+            echo "| fact | value |"
+            echo "| --- | --- |"
+            echo "| image | \`${IMAGE}:${VERSION}\` |"
+            echo "| digest | \`${DIGEST:-<not built>}\` |"
+            echo "| SOURCE_SHA | \`${SOURCE_SHA}\` |"
+            echo "| gate run | ${GATE_RUN_URL} |"
+            echo "| signature | keyless, verified against the workflow identity before announcing |"
+            echo
+            echo "The wire contract bundles remain **development** bundles; this release makes none of them a stable contract."
+          } >> "$GITHUB_STEP_SUMMARY"
