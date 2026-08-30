@@ -218,19 +218,36 @@ fn read_declared(name: &str, path: &Path) -> Result<Zeroizing<Vec<u8>>, DriverEr
     Ok(material)
 }
 
+/// The name `memfd_create` gives a slot's memory, and so what `/proc/<pid>/fd/<n>` links to for it
+/// inside a child.
+///
+/// One place, because the pass-through probe compares the link a child reports against it
+/// (`crates/substrate-host/src/probe.rs`).
+pub(crate) fn memfd_name(name: &str) -> String {
+    format!("substrate-slot-{name}")
+}
+
+/// Copies `material` into an anonymous `memfd` and seals it with exactly [`SEAL_SET`].
+fn seal(name: &str, material: &[u8]) -> Result<OwnedFd, DriverError> {
+    seal_with(name, material, SEAL_SET)
+}
+
 /// Copies `material` into an anonymous `memfd` and seals it, then proves the seal from the outside.
 ///
 /// The proof is deliberately not the return value of `F_ADD_SEALS`: the seals are read back and a
 /// write is attempted, because a guarantee substrate only asserts is not a guarantee (invariant 3).
-fn seal(name: &str, material: &[u8]) -> Result<OwnedFd, DriverError> {
+///
+/// `seals` is [`SEAL_SET`] everywhere but the pass-through probe's cases, which need the descriptor
+/// a host with a *weaker* seal set would hand a child in order to prove the probe refuses it.
+fn seal_with(name: &str, material: &[u8], seals: i32) -> Result<OwnedFd, DriverError> {
     let unsealed = |reason: &str| {
         DriverError::failed(
             "exec.secret-slot-unsealed",
             format!("Secret slot {name} could not be proven sealed: {reason}."),
         )
     };
-    let memfd_name = std::ffi::CString::new(format!("substrate-slot-{name}"))
-        .map_err(|_| unsealed("has an unusable name"))?;
+    let memfd_name =
+        std::ffi::CString::new(memfd_name(name)).map_err(|_| unsealed("has an unusable name"))?;
     // SAFETY: `memfd_name` is a NUL-terminated C string that outlives the call, and the returned
     // descriptor is taken into an `OwnedFd` immediately.
     let raw = unsafe {
@@ -264,12 +281,12 @@ fn seal(name: &str, material: &[u8]) -> Result<OwnedFd, DriverError> {
         return Err(unsealed("could not be rewound before sealing"));
     }
     // SAFETY: `memfd` is a live descriptor this function owns.
-    if unsafe { libc::fcntl(memfd.as_raw_fd(), libc::F_ADD_SEALS, SEAL_SET) } != 0 {
+    if unsafe { libc::fcntl(memfd.as_raw_fd(), libc::F_ADD_SEALS, seals) } != 0 {
         return Err(unsealed("the kernel refused the seal set"));
     }
     // SAFETY: as above.
     let readback = unsafe { libc::fcntl(memfd.as_raw_fd(), libc::F_GET_SEALS) };
-    if readback != SEAL_SET {
+    if readback != seals {
         return Err(unsealed("the seals read back are not the declared set"));
     }
     let refused = b"\0";
@@ -403,13 +420,53 @@ pub(crate) fn sealing_is_provable() -> bool {
     }
 }
 
-/// A sealed descriptor placed for a child, for the pass-through probe.
+/// A sealed descriptor placed for a child, and everything the parent declares about it *before*
+/// the child runs.
 ///
-/// Returns the staged source and the number the child must find it at.
-pub(crate) fn probe_slot(sentinel: &str) -> Option<(OwnedFd, RawFd)> {
-    let memfd = seal("probe", sentinel.as_bytes()).ok()?;
-    let staged = stage("probe", &memfd).ok()?;
-    Some((staged, PROBE_DESCRIPTOR))
+/// The pass-through probe compares what its child reports against these fields and nothing else, so
+/// they are gathered here rather than rebuilt from constants at the comparison
+/// (`crates/substrate-host/src/probe.rs`).
+pub(crate) struct ProbeSlot {
+    /// The staged source the fork inherits.
+    pub(crate) source: OwnedFd,
+    /// The number the child must find it at.
+    pub(crate) target: RawFd,
+    /// What `/proc/<pid>/fd/<target>` must link to inside the child. The kernel appends
+    /// ` (deleted)` to a memfd's link, so this is the prefix of the link and not the whole of it.
+    pub(crate) link: String,
+    /// The inode of the sealed memory, so a child can prove its descriptor is *this* file and not
+    /// another one that also reads back the sentinel.
+    pub(crate) inode: u64,
+    /// The seal word `F_GET_SEALS` reads off that inode. Seals are inode state and [`SEAL_SET`]
+    /// contains `F_SEAL_SEAL`, so this is the word every holder of the inode sees, for good.
+    pub(crate) seals: i32,
+}
+
+/// A sealed descriptor placed for a child, for the pass-through probe.
+pub(crate) fn probe_slot(sentinel: &str) -> Option<ProbeSlot> {
+    probe_slot_sealed_with(sentinel, SEAL_SET)
+}
+
+/// [`probe_slot`], sealed with `seals` rather than the declared set.
+///
+/// `seals` is [`SEAL_SET`] in the daemon. The probe's own cases pass a shorter word to build the
+/// descriptor a host whose sealing is weaker than ADR 0012 declares would hand a child.
+pub(crate) fn probe_slot_sealed_with(sentinel: &str, seals: i32) -> Option<ProbeSlot> {
+    let memfd = seal_with("probe", sentinel.as_bytes(), seals).ok()?;
+    let source = stage("probe", &memfd).ok()?;
+    // SAFETY: the borrowed `File` is forgotten rather than dropped, so `source` stays open.
+    let borrowed =
+        std::mem::ManuallyDrop::new(unsafe { std::fs::File::from_raw_fd(source.as_raw_fd()) });
+    let inode = borrowed.metadata().ok()?.ino();
+    // SAFETY: `source` is a live descriptor this function owns.
+    let readback = unsafe { libc::fcntl(source.as_raw_fd(), libc::F_GET_SEALS) };
+    Some(ProbeSlot {
+        source,
+        target: PROBE_DESCRIPTOR,
+        link: format!("/memfd:{}", memfd_name("probe")),
+        inode,
+        seals: readback,
+    })
 }
 
 /// The descriptor the pass-through probe places its sealed memfd at.
