@@ -31,20 +31,75 @@ fn parse_secret_slot(value: &str) -> Result<SecretSlot, String> {
     })
 }
 
-/// Parses one `--egress-aperture name=host:port/tcp`.
+/// A decimal byte count with an optional **binary** suffix: `1048576`, `512KiB`, `64MiB`, `2GiB`.
+///
+/// Never a decimal-power unit. `MB` means 1,000,000 bytes to a disk vendor and 1,048,576 to most
+/// of the people who would write it in a configuration file, and a bound that means two things is
+/// an operator error waiting to happen — so `1MB` is refused rather than guessed at (ADR 0014).
+fn parse_byte_ceiling(value: &str) -> Result<u64, String> {
+    let (digits, scale) = [
+        ("KiB", 1_u64 << 10),
+        ("MiB", 1 << 20),
+        ("GiB", 1 << 30),
+        ("TiB", 1 << 40),
+    ]
+    .into_iter()
+    .find_map(|(suffix, scale)| value.strip_suffix(suffix).map(|digits| (digits, scale)))
+    .unwrap_or((value, 1));
+    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
+        return Err(
+            "a byte ceiling is a decimal count with an optional KiB/MiB/GiB/TiB suffix".to_owned(),
+        );
+    }
+    let count: u64 = digits
+        .parse()
+        .map_err(|_| "a byte ceiling is out of range".to_owned())?;
+    let bytes = count
+        .checked_mul(scale)
+        .ok_or_else(|| "a byte ceiling is out of range".to_owned())?;
+    if bytes == 0 {
+        return Err("a byte ceiling of zero passes nothing".to_owned());
+    }
+    Ok(bytes)
+}
+
+/// Parses one `--egress-aperture name=host:port/tcp[/max=<size>]`.
 ///
 /// The protocol suffix is required and is `tcp`, so a later slice that serves another one does not
-/// silently reinterpret a declaration written today (design 10 § 9 decision 3).
+/// silently reinterpret a declaration written today (design 10 § 9 decision 3). The ceiling is a
+/// second term in the same place, and an **unrecognised term is a startup error rather than an
+/// ignored one** — a term the daemon reads past would give back exactly the silent
+/// reinterpretation `/tcp` exists to prevent (ADR 0014). A comma cannot be the separator: it
+/// splits repeated declarations at `value_delimiter` below.
 fn parse_egress_aperture(value: &str) -> Result<EgressAperture, String> {
-    let (name, destination) = value
-        .split_once('=')
-        .ok_or_else(|| "an egress aperture is declared as name=host:port/tcp".to_owned())?;
+    let (name, declaration) = value.split_once('=').ok_or_else(|| {
+        "an egress aperture is declared as name=host:port/tcp[/max=<size>]".to_owned()
+    })?;
     if !substrate_wire::valid_aperture_name(name) {
         return Err("an egress aperture name must match [a-z][a-z0-9_]{0,63}".to_owned());
     }
-    let destination = destination
-        .strip_suffix("/tcp")
-        .ok_or_else(|| format!("egress aperture {name} must declare a /tcp destination"))?;
+    let mut terms = declaration.split('/');
+    let destination = terms.next().unwrap_or_default();
+    if terms.next() != Some("tcp") {
+        return Err(format!(
+            "egress aperture {name} must declare a /tcp destination"
+        ));
+    }
+    let mut max_bytes = None;
+    for term in terms {
+        let ceiling = term.strip_prefix("max=").ok_or_else(|| {
+            format!("egress aperture {name} declares an unrecognised term /{term}")
+        })?;
+        if max_bytes.is_some() {
+            return Err(format!(
+                "egress aperture {name} declares more than one byte ceiling"
+            ));
+        }
+        max_bytes = Some(
+            parse_byte_ceiling(ceiling)
+                .map_err(|reason| format!("egress aperture {name}: {reason}"))?,
+        );
+    }
     let (host, port) = destination
         .rsplit_once(':')
         .ok_or_else(|| format!("egress aperture {name} must declare host:port"))?;
@@ -61,6 +116,7 @@ fn parse_egress_aperture(value: &str) -> Result<EgressAperture, String> {
         name: name.to_owned(),
         host: host.to_owned(),
         port,
+        max_bytes,
     })
 }
 
@@ -141,14 +197,17 @@ struct Arguments {
     )]
     secret_slots: Vec<SecretSlot>,
 
-    /// Declare an egress aperture as `name=host:port/tcp` (repeatable). ADR 0013.
+    /// Declare an egress aperture as `name=host:port/tcp[/max=<size>]` (repeatable).
+    /// ADR 0013, ADR 0014.
     ///
-    /// This is where reach is decided. A request may name one of these and may never carry a
-    /// destination; the host is resolved once, here, and pinned for this process's lifetime.
+    /// This is where reach is decided, and now how much of it. A request may name one of these and
+    /// may never carry a destination or a ceiling; the host is resolved once, here, and pinned for
+    /// this process's lifetime. The optional ceiling bounds `to_destination + from_destination` for
+    /// one run, and an aperture declared without it passes what it always passed.
     #[arg(
         long = "egress-aperture",
         env = "SUBSTRATE_EGRESS_APERTURE",
-        value_name = "NAME=HOST:PORT/tcp",
+        value_name = "NAME=HOST:PORT/tcp[/max=SIZE]",
         value_delimiter = ',',
         value_parser = parse_egress_aperture
     )]
@@ -256,4 +315,72 @@ async fn main() -> anyhow::Result<()> {
         )
         .init();
     serve(Arguments::parse().into()).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_egress_aperture;
+
+    /// The declaration that exists today parses exactly as it does today, and declares no ceiling.
+    #[test]
+    fn an_aperture_without_the_term_declares_no_ceiling() {
+        let declared = parse_egress_aperture("model=127.0.0.1:443/tcp").expect("declared");
+        assert_eq!(declared.name, "model");
+        assert_eq!(declared.host, "127.0.0.1");
+        assert_eq!(declared.port, 443);
+        assert_eq!(declared.max_bytes, None);
+    }
+
+    /// `<size>` is a decimal byte count with an optional **binary** suffix (ADR 0014).
+    #[test]
+    fn the_ceiling_takes_a_byte_count_or_a_binary_suffix() {
+        for (declared, expected) in [
+            ("model=app.example.invalid:443/tcp/max=1048576", 1_048_576),
+            ("model=app.example.invalid:443/tcp/max=512KiB", 524_288),
+            ("model=app.example.invalid:443/tcp/max=64MiB", 67_108_864),
+            ("model=app.example.invalid:443/tcp/max=2GiB", 2_147_483_648),
+            ("model=app.example.invalid:443/tcp/max=1", 1),
+        ] {
+            assert_eq!(
+                parse_egress_aperture(declared).expect(declared).max_bytes,
+                Some(expected),
+                "{declared}"
+            );
+        }
+    }
+
+    /// A `MB` that means two things is an operator error waiting in a configuration file, so it
+    /// is refused rather than guessed at.
+    #[test]
+    fn a_decimal_power_unit_is_refused() {
+        for declared in [
+            "model=app.example.invalid:443/tcp/max=1MB",
+            "model=app.example.invalid:443/tcp/max=1M",
+            "model=app.example.invalid:443/tcp/max=1kB",
+            "model=app.example.invalid:443/tcp/max=1GB",
+            "model=app.example.invalid:443/tcp/max=1gb",
+        ] {
+            parse_egress_aperture(declared).expect_err(declared);
+        }
+    }
+
+    /// An unrecognised term is a startup error rather than an ignored one: the `/tcp` term exists
+    /// so that a declaration written today cannot be silently reinterpreted later, and a term
+    /// nobody reads would give that back.
+    #[test]
+    fn an_unrecognised_term_is_a_startup_error() {
+        for declared in [
+            "model=app.example.invalid:443/tcp/turbo",
+            "model=app.example.invalid:443/tcp/max=1MiB/turbo",
+            "model=app.example.invalid:443/tcp/max=1MiB/max=2MiB",
+            "model=app.example.invalid:443/tcp/max=",
+            "model=app.example.invalid:443/tcp/max=0",
+            "model=app.example.invalid:443/tcp/max=-1",
+            "model=app.example.invalid:443/tcp/max=1MiB extra",
+            "model=app.example.invalid:443/udp",
+            "model=app.example.invalid:443",
+        ] {
+            parse_egress_aperture(declared).expect_err(declared);
+        }
+    }
 }

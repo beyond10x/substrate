@@ -438,6 +438,56 @@ async fn check_startup_refusal(root: &Path) {
         "{error}"
     );
     assert!(!socket.exists());
+    check_aperture_term_refusal(root).await;
+}
+
+/// An unrecognised term in an aperture declaration is a **startup** error, never an ignored one.
+///
+/// The `/tcp` term exists so that a declaration written today cannot be silently reinterpreted by
+/// a later slice (design 10 § 9 decision 3); a term the daemon reads past would hand that back,
+/// and an operator who wrote `max=` where the daemon expects `/max=` would get an unbounded
+/// aperture and no word about it (ADR 0014).
+async fn check_aperture_term_refusal(root: &Path) {
+    let socket = root.join("unparsed.sock");
+    for declaration in [
+        "model=127.0.0.1:443/tcp/turbo",
+        "model=127.0.0.1:443/tcp/max=1MB",
+        "model=127.0.0.1:443/tcp/max=0",
+    ] {
+        let output = tokio::time::timeout(
+            Duration::from_secs(10),
+            Command::new(DAEMON)
+                .args([
+                    "--socket",
+                    &socket.display().to_string(),
+                    "--state",
+                    &root.join("unparsed.db").display().to_string(),
+                    "--workspaces",
+                    &root.join("unparsed-workspaces").display().to_string(),
+                    "--deployment",
+                    "dep_unparsed",
+                    "--allow-uid",
+                    &nix::unistd::getuid().as_raw().to_string(),
+                    "--egress-aperture",
+                    declaration,
+                ])
+                .stdin(Stdio::null())
+                .output(),
+        )
+        .await
+        .expect("unparsed daemon timed out")
+        .expect("unparsed daemon output");
+        assert!(
+            !output.status.success(),
+            "the daemon started with {declaration}"
+        );
+        let error = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            error.contains("egress aperture"),
+            "the refusal did not name the declaration ({declaration}): {error}"
+        );
+        assert!(!socket.exists(), "{declaration}");
+    }
 }
 
 async fn check_dual_daemon_refusal(daemon: &Daemon) {
@@ -1470,6 +1520,7 @@ async fn check_http_journey(
     cgroup_root: Option<&Path>,
     inside: u16,
     outside: u16,
+    firehose: u16,
 ) -> usize {
     let mut passed = 0;
     let (status, machine) = daemon
@@ -1725,6 +1776,29 @@ async fn check_http_journey(
     );
     passed += 1;
 
+    // A ceiling is deployment vocabulary, never request data. `ConfinementRequest` is
+    // `deny_unknown_fields`, so a conforming client's ceiling field is `schema-invalid` first; this
+    // is the one shape the schema cannot see — a *name* carrying one — and it is refused as the
+    // rejected escalation it is rather than as a destination or a typo (ADR 0014).
+    expect_error(
+        &daemon
+            .call(
+                "POST",
+                "/v1/execs",
+                "req_clean_aperture_ceiling",
+                Some(&mutation(
+                    "01JPHASE2CLEANAPERTURE5",
+                    &ExecInput::new(&workspace, &snapshot, &["/usr/bin/true"], true)
+                        .aperture("model/max=1MiB")
+                        .build(),
+                )),
+            )
+            .await,
+        422,
+        "exec.aperture-ceiling-in-request",
+    );
+    passed += 1;
+
     // Shape before capability, in both lanes: a descriptor outside `3..=63` is refused by name
     // whether or not this host could have delivered a slot at all (ADR 0012).
     expect_error(
@@ -1749,6 +1823,7 @@ async fn check_http_journey(
     if let Some(cgroup_root) = cgroup_root {
         passed += check_confined_execs(daemon, &workspace, &snapshot, cgroup_root).await;
         passed += check_confined_apertures(daemon, &workspace, &snapshot, inside, outside).await;
+        passed += check_confined_aperture_ceiling(daemon, &workspace, &snapshot, firehose).await;
         passed += check_confined_secret_slots(daemon, &workspace, &snapshot).await;
     } else {
         // No confinement means no verified mechanism, so the capability is absent and every
@@ -2026,6 +2101,174 @@ async fn check_confined_apertures(
     assert!(
         text(&undeclared["error"]["message"]).contains("registry"),
         "the refusal did not name the aperture: {undeclared}"
+    );
+    passed += 1;
+    passed
+}
+
+// ---------------------------------------------------------------------------------------------
+// The delegated lane: the declared byte ceiling (ADR 0014)
+// ---------------------------------------------------------------------------------------------
+
+/// What the firehose offers one connection. Far more than the declared ceiling, so a run that
+/// stops short of it stopped because substrate stopped it and not because the stream ran out.
+const FIREHOSE_BYTES: u64 = 1 << 20;
+/// The ceiling `capped` carries, and the one `uncapped` does not. A whole number of relay buffers.
+const CEILING_BYTES: u64 = 128 * 1024;
+/// The apertures the ceiling cases use: one destination, two declarations, one term between them.
+const CAPPED_APERTURE: &str = "capped";
+const UNCAPPED_APERTURE: &str = "uncapped";
+
+/// A destination that answers every connection with [`FIREHOSE_BYTES`] bytes and then closes.
+async fn fake_firehose_server() -> (std::net::SocketAddr, JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind the firehose");
+    let address = listener.local_addr().expect("firehose address");
+    let handle = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            tokio::spawn(async move {
+                let chunk = vec![b'x'; 65_536];
+                let mut sent = 0_u64;
+                while sent < FIREHOSE_BYTES {
+                    // A relay that stopped is a closed socket here: that is the ceiling holding,
+                    // so the write error ends this connection and nothing else.
+                    if stream.write_all(&chunk).await.is_err() {
+                        break;
+                    }
+                    sent += chunk.len() as u64;
+                }
+                let _ = stream.flush().await;
+            });
+        }
+    });
+    (address, handle)
+}
+
+/// Reads the aperture until the whole stream has arrived, reconnecting when it has not.
+///
+/// The child is told nothing: it sees a stream that ends early and tries again, exactly as a
+/// harness would (ADR 0014, "the child gets a closed socket"). Under a ceiling it never reaches
+/// `expect` and the parent ends the run; without one it reaches it on the first connection and
+/// exits 0.
+fn firehose_program(port: u16, expect: u64) -> String {
+    format!(
+        "\nimport socket, time\n\
+         total = 0\n\
+         while total < {expect}:\n\
+         \x20   try:\n\
+         \x20       link = socket.create_connection(('127.0.0.1', {port}), 3)\n\
+         \x20   except OSError:\n\
+         \x20       time.sleep(0.05)\n\
+         \x20       continue\n\
+         \x20   while True:\n\
+         \x20       chunk = link.recv(65536)\n\
+         \x20       if not chunk:\n\
+         \x20           break\n\
+         \x20       total += len(chunk)\n\
+         \x20   link.close()\n\
+         \x20   time.sleep(0.05)\n\
+         print(total)\n"
+    )
+}
+
+/// The two halves of ADR 0014's acceptance, against one destination and one program.
+///
+/// The ceiling refuses the run by name, and the same declaration without the term passes the same
+/// traffic to completion — which is what "an aperture declared without the term keeps working byte
+/// for byte" has to mean if it means anything.
+async fn check_confined_aperture_ceiling(
+    daemon: &Daemon,
+    workspace: &str,
+    snapshot: &str,
+    firehose: u16,
+) -> usize {
+    let mut passed = 0;
+    let program = firehose_program(firehose, FIREHOSE_BYTES);
+    let (status, run) = daemon
+        .call(
+            "POST",
+            "/v1/execs",
+            "req_clean_aperture_capped",
+            Some(&mutation(
+                "01JPHASE2CLEANCEILING01",
+                &ExecInput::new(
+                    workspace,
+                    snapshot,
+                    &["/usr/bin/python3", "-c", &program],
+                    true,
+                )
+                .aperture(CAPPED_APERTURE)
+                .build(),
+            )),
+        )
+        .await;
+    assert_eq!(status, 200, "{run}");
+    // The state a mid-run bound has always had, and the name it never had before this bundle.
+    assert_eq!(run["result"]["state"], "cancelled", "{run}");
+    assert_eq!(run["result"]["refusal"]["class"], "exhausted", "{run}");
+    assert_eq!(
+        run["result"]["refusal"]["code"], "exec.aperture-byte-limit",
+        "the run was ended without naming the bound it hit: {run}"
+    );
+    passed += 1;
+
+    // Reported, not inferred: the ceiling the run ran under, beside the bytes that crossed.
+    let applied = &run["result"]["applied"]["network"];
+    assert_eq!(applied["name"], CAPPED_APERTURE, "{run}");
+    assert_eq!(applied["max_bytes"], CEILING_BYTES, "{run}");
+    let crossed = applied["bytes"]["to_destination"].as_u64().expect("bytes")
+        + applied["bytes"]["from_destination"]
+            .as_u64()
+            .expect("bytes");
+    assert!(
+        crossed >= CEILING_BYTES,
+        "the run was ended before the declared ceiling: {run}"
+    );
+    assert!(
+        crossed < FIREHOSE_BYTES,
+        "the whole stream crossed a bounded aperture: {run}"
+    );
+    passed += 1;
+
+    // The negative. Same destination, same program, no declared term: nothing is stopped, nothing
+    // is named, and the observation is the one `0.7.0` already produced.
+    let (status, open) = daemon
+        .call(
+            "POST",
+            "/v1/execs",
+            "req_clean_aperture_uncapped",
+            Some(&mutation(
+                "01JPHASE2CLEANCEILING02",
+                &ExecInput::new(
+                    workspace,
+                    snapshot,
+                    &["/usr/bin/python3", "-c", &program],
+                    true,
+                )
+                .aperture(UNCAPPED_APERTURE)
+                .build(),
+            )),
+        )
+        .await;
+    assert_eq!(status, 200, "{open}");
+    assert_eq!(open["result"]["state"], "exited", "{open}");
+    assert_eq!(open["result"]["exit"]["code"], 0, "{open}");
+    assert!(
+        open["result"].get("refusal").is_none(),
+        "an aperture with no declared ceiling named a bound: {open}"
+    );
+    let applied = &open["result"]["applied"]["network"];
+    assert!(
+        applied.get("max_bytes").is_none(),
+        "an aperture declared without a ceiling published one: {open}"
+    );
+    assert_eq!(
+        applied["bytes"]["from_destination"]
+            .as_u64()
+            .expect("byte accounting"),
+        FIREHOSE_BYTES,
+        "the same traffic did not cross an aperture with no ceiling: {open}"
     );
     passed += 1;
     passed
@@ -2765,8 +3008,8 @@ async fn delegated_context_bound_to_another_subject_is_refused() {
 // ---------------------------------------------------------------------------------------------
 
 /// The predecessor printed its case count; the port asserts it, so a case cannot vanish quietly.
-const PORTABLE_CASES: usize = 33;
-const DELEGATED_CASES: usize = 50;
+const PORTABLE_CASES: usize = 34;
+const DELEGATED_CASES: usize = 54;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {
@@ -2782,7 +3025,17 @@ async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {
     // at declaration: the daemon must be told a destination it can resolve at startup.
     let (inside, inside_server) = fake_app_server().await;
     let (outside, outside_server) = fake_app_server().await;
-    let declared = vec![format!("model=127.0.0.1:{}/tcp", inside.port())];
+    // One destination, two declarations, one optional term between them: the ceiling case and its
+    // negative differ by the term and by nothing else (ADR 0014).
+    let (firehose, firehose_server) = fake_firehose_server().await;
+    let declared = vec![
+        format!("model=127.0.0.1:{}/tcp", inside.port()),
+        format!(
+            "{CAPPED_APERTURE}=127.0.0.1:{}/tcp/max={CEILING_BYTES}",
+            firehose.port()
+        ),
+        format!("{UNCAPPED_APERTURE}=127.0.0.1:{}/tcp", firehose.port()),
+    ];
     // The declared slot file: one bounded, owner-private regular file, written before the daemon
     // that must be able to read it exists. Its path is argv; its bytes never are.
     let slot_file = root.join("declared.slot");
@@ -2800,8 +3053,14 @@ async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {
     )
     .await;
     check_dual_daemon_refusal(&daemon).await;
-    let passed =
-        check_http_journey(&daemon, delegated.as_deref(), inside.port(), outside.port()).await;
+    let passed = check_http_journey(
+        &daemon,
+        delegated.as_deref(),
+        inside.port(),
+        outside.port(),
+        firehose.port(),
+    )
+    .await;
     // The daemon's own diagnostic stream, readable only once its pipe has closed. Uncounted on
     // purpose: it belongs to the process, not to any one HTTP case.
     let diagnostics = daemon.close().await;
@@ -2811,6 +3070,7 @@ async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {
     );
     inside_server.abort();
     outside_server.abort();
+    firehose_server.abort();
     let (lane, expected) = if delegated.is_some() {
         ("delegated", DELEGATED_CASES)
     } else {
@@ -2821,4 +3081,202 @@ async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {
         "runtime clean-room: {passed} HTTP cases, startup refusal, \
          and dual-daemon refusal passed ({lane} lane)"
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Adversarial: the bound the observation does not name (ADR 0014)
+// ---------------------------------------------------------------------------------------------
+
+/// The ceiling this adversarial case declares. Small enough that the relay stops well inside
+/// [`FIREHOSE_BYTES`], so a run that stops has been stopped by substrate.
+const ADVERSARIAL_CEILING_BYTES: u64 = 128 * 1024;
+const ADVERSARIAL_APERTURE: &str = "bounded";
+
+/// One connection, drained to whatever end it comes to, and then a prompt exit.
+///
+/// The realistic confined client: it reads until the stream stops and exits. It does not loop
+/// reconnecting, because nothing tells it to — ADR 0014, "the child gets a closed socket".
+fn exiting_firehose_program(port: u16) -> String {
+    format!(
+        "\nimport socket, os\n\
+         link = socket.create_connection(('127.0.0.1', {port}), 3)\n\
+         total = 0\n\
+         while True:\n\
+         \x20   chunk = link.recv(65536)\n\
+         \x20   if not chunk:\n\
+         \x20       break\n\
+         \x20   total += len(chunk)\n\
+         os._exit(0)\n"
+    )
+}
+
+/// A run stopped at the declared ceiling names the bound that stopped it — whatever the child did
+/// next.
+///
+/// ADR 0014 gives the refusal somewhere to live so that an operator "does not have to tell a
+/// ceiling from a client cancel by reading the byte counts"
+/// (`crates/substrate-host/src/process.rs:1394-1400`). But the relay stops the bytes
+/// (`crates/substrate-host/src/egress.rs:774`) while only the parent's 1 ms supervision tick
+/// names the bound (`crates/substrate-host/src/process.rs:1449`), and that tick shares a
+/// `tokio::select!` with `child.wait()` (`:1437`). A child that notices its closed socket and
+/// exits before the next tick wins that arm, so `aperture_exhausted` is never set and
+/// `record_aperture` (`:1401`) writes no refusal.
+///
+/// Twenty runs rather than one: the window is the phase of a 1 ms interval against the sandbox's
+/// teardown, so a single run is a coin toss. Observed on this tree: roughly one run in five comes
+/// back `state: "exited"`, `exit.code: 0`, `refusal: null` — indistinguishable from a run that
+/// finished on its own — with `applied.network.bytes` summing to exactly the declared ceiling.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_stopped_at_the_ceiling_names_the_bound_even_when_its_child_exits_first() {
+    let Some(delegated) = std::env::var_os(CGROUP_ROOT_VARIABLE).map(PathBuf::from) else {
+        return;
+    };
+    let temporary = TempDir::with_prefix("substrate-adversarial-").expect("clean-room directory");
+    let root = temporary.path();
+    std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))
+        .expect("owner-private clean-room directory");
+    let (firehose, firehose_server) = fake_firehose_server().await;
+    let declared = vec![format!(
+        "{ADVERSARIAL_APERTURE}=127.0.0.1:{}/tcp/max={ADVERSARIAL_CEILING_BYTES}",
+        firehose.port()
+    )];
+    let daemon = Daemon::start(root, Some(delegated.as_path()), &declared, &[], &[], false).await;
+
+    let (status, machine) = daemon
+        .call("GET", "/v1/machine", "req_adversarial_machine", None)
+        .await;
+    assert_eq!(status, 200, "{machine}");
+    let snapshot = text(&machine["result"]["snapshot"]);
+    assert_eq!(
+        machine["result"]["facts"]["exec.egress-apertures"][0]["max_bytes"],
+        ADVERSARIAL_CEILING_BYTES,
+        "the declared ceiling is not published: {machine}"
+    );
+
+    let (status, created) = daemon
+        .call(
+            "POST",
+            "/v1/workspaces",
+            "req_adversarial_create",
+            Some(&mutation(
+                "01JPADVERSARIALCEILINGWS",
+                &json!({ "source": "empty", "labels": {} }),
+            )),
+        )
+        .await;
+    assert_eq!(status, 201, "{created}");
+    let workspace = text(&created["result"]["id"]);
+
+    let program = exiting_firehose_program(firehose.port());
+    let mut unnamed = Vec::new();
+    for attempt in 0..20 {
+        let (status, run) = daemon
+            .call(
+                "POST",
+                "/v1/execs",
+                &format!("req_adversarial_run_{attempt}"),
+                Some(&mutation(
+                    &format!("01JPADVERSARIALCEILING{attempt:02}"),
+                    &ExecInput::new(
+                        &workspace,
+                        &snapshot,
+                        &["/usr/bin/python3", "-c", &program],
+                        true,
+                    )
+                    .aperture(ADVERSARIAL_APERTURE)
+                    .build(),
+                )),
+            )
+            .await;
+        assert_eq!(status, 200, "{run}");
+        let applied = &run["result"]["applied"]["network"];
+        let crossed = applied["bytes"]["to_destination"].as_u64().unwrap_or(0)
+            + applied["bytes"]["from_destination"].as_u64().unwrap_or(0);
+        // The premise: substrate stopped this run's egress at the declared ceiling. Without that
+        // the case says nothing, so it is asserted rather than assumed.
+        assert!(
+            (ADVERSARIAL_CEILING_BYTES..FIREHOSE_BYTES).contains(&crossed),
+            "attempt {attempt} was not stopped at the ceiling ({crossed} bytes): {run}"
+        );
+        eprintln!(
+            "adversarial attempt {attempt}: state={} exit={} refusal={} crossed={crossed}",
+            run["result"]["state"], run["result"]["exit"], run["result"]["refusal"]
+        );
+        if run["result"]["refusal"]["code"] != "exec.aperture-byte-limit" {
+            unnamed.push(format!(
+                "attempt {attempt}: state={} refusal={} crossed={crossed}",
+                run["result"]["state"], run["result"]["refusal"]
+            ));
+        }
+    }
+    let diagnostics = daemon.close().await;
+    firehose_server.abort();
+    assert!(
+        unnamed.is_empty(),
+        "a run whose egress substrate stopped at the declared ceiling did not name \
+         exec.aperture-byte-limit:\n{}\n(daemon stderr: {diagnostics})",
+        unnamed.join("\n")
+    );
+}
+
+/// A client-supplied aperture *name* is refused over the wire, not answered with a dropped
+/// connection.
+///
+/// ADR 0014's request-side guard `reads_as_ceiling` slices the first four **bytes** of every
+/// `/`-separated term of the name (`crates/substrate-wire/src/lib.rs:1942`) and it runs before
+/// `valid_aperture_name` (`:1971-1977`), so a name whose byte index 4 lands inside a multi-byte
+/// character is a `String` slice panic inside the request handler. This lane is the clean room:
+/// it asks the shipped binary over its socket, so what it asserts is what a client sees. Portable
+/// — the guard runs before any capability check, so no cgroup delegation is needed to reach it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_non_ascii_aperture_name_is_refused_over_the_wire() {
+    let temporary = TempDir::with_prefix("substrate-adversarial-utf8-").expect("clean-room");
+    let root = temporary.path();
+    std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))
+        .expect("owner-private clean-room directory");
+    let daemon = Daemon::start(root, None, &[], &[], &[], false).await;
+    let (status, machine) = daemon
+        .call("GET", "/v1/machine", "req_adversarial_utf8_machine", None)
+        .await;
+    assert_eq!(status, 200, "{machine}");
+    let snapshot = text(&machine["result"]["snapshot"]);
+    let (status, created) = daemon
+        .call(
+            "POST",
+            "/v1/workspaces",
+            "req_adversarial_utf8_create",
+            Some(&mutation(
+                "01JPADVERSARIALUTF8WS001",
+                &json!({ "source": "empty", "labels": {} }),
+            )),
+        )
+        .await;
+    assert_eq!(status, 201, "{created}");
+    let workspace = text(&created["result"]["id"]);
+
+    let answered = tokio::time::timeout(
+        Duration::from_secs(10),
+        daemon.call(
+            "POST",
+            "/v1/execs",
+            "req_adversarial_utf8_start",
+            Some(&mutation(
+                "01JPADVERSARIALUTF8RUN01",
+                &ExecInput::new(&workspace, &snapshot, &["/usr/bin/true"], false)
+                    .aperture("ab\u{20ac}cd")
+                    .build(),
+            )),
+        ),
+    )
+    .await
+    .expect("the daemon answered a request carrying a non-ASCII aperture name");
+    expect_error(&answered, 422, "exec.aperture-name-invalid");
+
+    // Still serving: a refusal that takes the connection with it is a different failure from a
+    // refusal that takes the daemon with it, and the report has to say which.
+    let (status, again) = daemon
+        .call("GET", "/v1/machine", "req_adversarial_utf8_again", None)
+        .await;
+    assert_eq!(status, 200, "{again}");
+    daemon.close().await;
 }

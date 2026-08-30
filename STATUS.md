@@ -33,10 +33,10 @@ trust this page.
 
 - The Rust workspace has five crates — `substrate-wire`, `substrate-store`, `substrate-host`,
   `substrate-daemon` and the offline `substrate-contract-check` ([`Cargo.toml`](Cargo.toml),
-  `[workspace] members`). 0.7.0 is the current development bundle and every earlier bundle
+  `[workspace] members`). 0.8.0 is the current development bundle and every earlier bundle
   directory is frozen; [`scripts/gate.sh`](scripts/gate.sh) runs the four Python bundle checkers
-  plus `cargo xtask check-bundle` for 0.5.0, 0.6.0 and 0.7.0 on every invocation, so a green gate is
-  evidence that all six still hold. 0.5.0 is the first bundle whose checker is a `cargo xtask` verb
+  plus `cargo xtask check-bundle` for 0.5.0, 0.6.0, 0.7.0 and 0.8.0 on every invocation, so a green
+  gate is evidence that all eight still hold. 0.5.0 is the first bundle whose checker is a `cargo xtask` verb
   rather than a Python script; the four frozen pairs stay Python as the reproducibility proof of the bundles they
   froze. The one recorded exception to immutability is the 2026-08-24 brand rename, which
   re-rendered every bundle in place (AGENTS.md invariant 6). No development bundle becomes a stable
@@ -51,6 +51,15 @@ trust this page.
   aperture cases in
   [`crates/substrate-daemon/tests/runtime_vectors.rs`](crates/substrate-daemon/tests/runtime_vectors.rs)
   are **absent** without `SUBSTRATE_VECTORS_CGROUP_ROOT`, never reported as passed.
+- **A declared aperture can carry a byte ceiling, and it stops the bytes.**
+  `--egress-aperture <name>=<host>:<port>/tcp/max=<size>` bounds `to_destination + from_destination`
+  for one run; the relay stops relaying at the ceiling and the parent's 1 ms supervision loop ends
+  the run and names the refusal `exhausted` / `exec.aperture-byte-limit` on the exec observation
+  ([`crates/substrate-host/src/egress.rs`](crates/substrate-host/src/egress.rs),
+  [`crates/substrate-host/src/process.rs`](crates/substrate-host/src/process.rs), ADR 0014). An
+  aperture declared without the term passes what it always passed, and a request that carries a
+  ceiling is refused `exec.aperture-ceiling-in-request`. The mid-run cases are in the delegated
+  lane and are **absent** without `SUBSTRATE_VECTORS_CGROUP_ROOT`.
 - **A credential reaches a confined run as a sealed `memfd` and as nothing else.** Where an operator
   declares `--secret-slot <name>=<path>` and the probe proves sealing and descriptor pass-through, a
   start names the slot and the descriptor it must arrive at

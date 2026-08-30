@@ -177,6 +177,7 @@ impl VectorDriver {
                     signal: Some(substrate_wire::Signal::Term),
                 }),
                 lease: None,
+                refusal: None,
             },
             stdout: Vec::new(),
             stderr: Vec::new(),

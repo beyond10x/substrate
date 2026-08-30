@@ -225,6 +225,7 @@ async fn twelve_route_vertical_slice_is_scoped_durable_and_observed() {
             signal: None,
         }),
         lease: None,
+        refusal: None,
     };
     let scope = Scope {
         deployment: "dep_http_test".to_owned(),

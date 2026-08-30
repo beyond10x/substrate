@@ -1,0 +1,2592 @@
+{
+  "$defs": {
+    "applied-network": {
+      "oneOf": [
+        {
+          "const": "none"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "bytes": {
+              "additionalProperties": false,
+              "properties": {
+                "from_destination": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "to_destination": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "to_destination",
+                "from_destination"
+              ],
+              "type": "object"
+            },
+            "destination": {
+              "maxLength": 64,
+              "minLength": 3,
+              "type": "string"
+            },
+            "max_bytes": {
+              "description": "The declared ceiling this run ran under, over both directions summed. Absent means the aperture was declared without one (ADR 0014).",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "mechanism": {
+              "const": "loopback-forwarder"
+            },
+            "mode": {
+              "const": "aperture"
+            },
+            "name": {
+              "maxLength": 64,
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode",
+            "name",
+            "destination",
+            "mechanism",
+            "bytes"
+          ],
+          "type": "object",
+          "x-b10x-ceiling-is": "declared-by-the-operator-never-requested",
+          "x-b10x-destination-is": "the-pinned-address-not-the-configured-host"
+        }
+      ],
+      "title": "applied network: the floor, or the aperture that was installed"
+    },
+    "confinement-applied": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "capability_snapshot": {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "cgroup": {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            "filesystem": {
+              "const": "workspace-rw-system-ro"
+            },
+            "network": {
+              "$ref": "#/$defs/applied-network"
+            },
+            "profile": {
+              "const": "workspace"
+            },
+            "secret_slots": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "fd": {
+                    "maximum": 63,
+                    "minimum": 3,
+                    "type": "integer"
+                  },
+                  "slot": {
+                    "maxLength": 64,
+                    "pattern": "^[a-z][a-z0-9_]{0,63}$",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "slot",
+                  "fd"
+                ],
+                "type": "object"
+              },
+              "maxItems": 8,
+              "minItems": 1,
+              "type": "array",
+              "x-b10x-applied-not-requested": "what-was-placed"
+            }
+          },
+          "required": [
+            "capability_snapshot",
+            "profile",
+            "filesystem",
+            "network",
+            "cgroup"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "capability_snapshot": {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "capsule": {
+              "additionalProperties": false,
+              "properties": {
+                "entrypoint": {
+                  "pattern": "^/runtime/(?!.*(?:^|/)\\.\\.(?:/|$))[^\\u0000]+$",
+                  "type": "string"
+                },
+                "file_count": {
+                  "maximum": 32,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "manifest_sha256": {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "mount": {
+                  "const": "/runtime"
+                },
+                "total_bytes": {
+                  "maximum": 524288,
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "manifest_sha256",
+                "entrypoint",
+                "mount",
+                "file_count",
+                "total_bytes"
+              ],
+              "type": "object"
+            },
+            "cgroup": {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            "filesystem": {
+              "const": "workspace-rw-capsule-ro-system-ro"
+            },
+            "network": {
+              "$ref": "#/$defs/applied-network"
+            },
+            "profile": {
+              "const": "workspace"
+            },
+            "secret_slots": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "fd": {
+                    "maximum": 63,
+                    "minimum": 3,
+                    "type": "integer"
+                  },
+                  "slot": {
+                    "maxLength": 64,
+                    "pattern": "^[a-z][a-z0-9_]{0,63}$",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "slot",
+                  "fd"
+                ],
+                "type": "object"
+              },
+              "maxItems": 8,
+              "minItems": 1,
+              "type": "array",
+              "x-b10x-applied-not-requested": "what-was-placed"
+            }
+          },
+          "required": [
+            "capability_snapshot",
+            "profile",
+            "filesystem",
+            "network",
+            "cgroup",
+            "capsule"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "confinement-request": {
+      "additionalProperties": false,
+      "properties": {
+        "capability_snapshot": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "network": {
+          "enum": [
+            "none",
+            "aperture"
+          ]
+        },
+        "profile": {
+          "const": "workspace"
+        },
+        "require": {
+          "const": true
+        }
+      },
+      "required": [
+        "capability_snapshot",
+        "profile",
+        "network",
+        "require"
+      ],
+      "type": "object"
+    },
+    "exec": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "applied": {
+              "type": "null"
+            },
+            "exit": {
+              "type": "null"
+            },
+            "id": {
+              "$ref": "common.json#/$defs/exec-id"
+            },
+            "kind": {
+              "const": "exec"
+            },
+            "lease": {
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "actor": {
+                      "maxLength": 256,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "authorizing_operation": {
+                      "$ref": "common.json#/$defs/operation-id"
+                    },
+                    "clock_tolerance_ms": {
+                      "const": 30000
+                    },
+                    "principal": {
+                      "maxLength": 256,
+                      "minLength": 1,
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "renew_by": {
+                      "$ref": "common.json#/$defs/timestamp"
+                    },
+                    "state": {
+                      "enum": [
+                        "active",
+                        "expiring",
+                        "expired"
+                      ]
+                    },
+                    "ttl_ms": {
+                      "maximum": 86400000,
+                      "minimum": 1000,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "ttl_ms",
+                    "renew_by",
+                    "state",
+                    "clock_tolerance_ms",
+                    "authorizing_operation",
+                    "actor",
+                    "principal"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "observed_at": {
+              "$ref": "common.json#/$defs/timestamp"
+            },
+            "requested": {
+              "additionalProperties": false,
+              "properties": {
+                "capability_snapshot": {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "network": {
+                  "enum": [
+                    "none",
+                    "aperture"
+                  ]
+                },
+                "profile": {
+                  "const": "workspace"
+                },
+                "require": {
+                  "const": true
+                }
+              },
+              "required": [
+                "capability_snapshot",
+                "profile",
+                "network",
+                "require"
+              ],
+              "type": "object"
+            },
+            "state": {
+              "const": "accepted"
+            },
+            "workspace": {
+              "$ref": "common.json#/$defs/workspace-id"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "workspace",
+            "state",
+            "observed_at",
+            "requested",
+            "applied",
+            "exit"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "applied": {
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "capability_snapshot": {
+                      "pattern": "^sha256:[0-9a-f]{64}$",
+                      "type": "string"
+                    },
+                    "cgroup": {
+                      "maxLength": 512,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "filesystem": {
+                      "const": "workspace-rw-system-ro"
+                    },
+                    "network": {
+                      "const": "none"
+                    },
+                    "profile": {
+                      "const": "workspace"
+                    }
+                  },
+                  "required": [
+                    "capability_snapshot",
+                    "profile",
+                    "filesystem",
+                    "network",
+                    "cgroup"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "capability_snapshot": {
+                      "pattern": "^sha256:[0-9a-f]{64}$",
+                      "type": "string"
+                    },
+                    "capsule": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "entrypoint": {
+                          "pattern": "^/runtime/(?!.*(?:^|/)\\.\\.(?:/|$))[^\\u0000]+$",
+                          "type": "string"
+                        },
+                        "file_count": {
+                          "maximum": 32,
+                          "minimum": 1,
+                          "type": "integer"
+                        },
+                        "manifest_sha256": {
+                          "pattern": "^[0-9a-f]{64}$",
+                          "type": "string"
+                        },
+                        "mount": {
+                          "const": "/runtime"
+                        },
+                        "total_bytes": {
+                          "maximum": 524288,
+                          "minimum": 0,
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "manifest_sha256",
+                        "entrypoint",
+                        "mount",
+                        "file_count",
+                        "total_bytes"
+                      ],
+                      "type": "object"
+                    },
+                    "cgroup": {
+                      "maxLength": 512,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "filesystem": {
+                      "const": "workspace-rw-capsule-ro-system-ro"
+                    },
+                    "network": {
+                      "const": "none"
+                    },
+                    "profile": {
+                      "const": "workspace"
+                    }
+                  },
+                  "required": [
+                    "capability_snapshot",
+                    "profile",
+                    "filesystem",
+                    "network",
+                    "cgroup",
+                    "capsule"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "exit": {
+              "type": "null"
+            },
+            "id": {
+              "$ref": "common.json#/$defs/exec-id"
+            },
+            "kind": {
+              "const": "exec"
+            },
+            "lease": {
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "actor": {
+                      "maxLength": 256,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "authorizing_operation": {
+                      "$ref": "common.json#/$defs/operation-id"
+                    },
+                    "clock_tolerance_ms": {
+                      "const": 30000
+                    },
+                    "principal": {
+                      "maxLength": 256,
+                      "minLength": 1,
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "renew_by": {
+                      "$ref": "common.json#/$defs/timestamp"
+                    },
+                    "state": {
+                      "enum": [
+                        "active",
+                        "expiring",
+                        "expired"
+                      ]
+                    },
+                    "ttl_ms": {
+                      "maximum": 86400000,
+                      "minimum": 1000,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "ttl_ms",
+                    "renew_by",
+                    "state",
+                    "clock_tolerance_ms",
+                    "authorizing_operation",
+                    "actor",
+                    "principal"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "observed_at": {
+              "$ref": "common.json#/$defs/timestamp"
+            },
+            "requested": {
+              "additionalProperties": false,
+              "properties": {
+                "capability_snapshot": {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "network": {
+                  "const": "none"
+                },
+                "profile": {
+                  "const": "workspace"
+                },
+                "require": {
+                  "const": true
+                }
+              },
+              "required": [
+                "capability_snapshot",
+                "profile",
+                "network",
+                "require"
+              ],
+              "type": "object"
+            },
+            "state": {
+              "const": "running"
+            },
+            "workspace": {
+              "$ref": "common.json#/$defs/workspace-id"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "workspace",
+            "state",
+            "observed_at",
+            "requested",
+            "applied",
+            "exit"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "applied": {
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "capability_snapshot": {
+                      "pattern": "^sha256:[0-9a-f]{64}$",
+                      "type": "string"
+                    },
+                    "cgroup": {
+                      "maxLength": 512,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "filesystem": {
+                      "const": "workspace-rw-system-ro"
+                    },
+                    "network": {
+                      "const": "none"
+                    },
+                    "profile": {
+                      "const": "workspace"
+                    }
+                  },
+                  "required": [
+                    "capability_snapshot",
+                    "profile",
+                    "filesystem",
+                    "network",
+                    "cgroup"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "capability_snapshot": {
+                      "pattern": "^sha256:[0-9a-f]{64}$",
+                      "type": "string"
+                    },
+                    "capsule": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "entrypoint": {
+                          "pattern": "^/runtime/(?!.*(?:^|/)\\.\\.(?:/|$))[^\\u0000]+$",
+                          "type": "string"
+                        },
+                        "file_count": {
+                          "maximum": 32,
+                          "minimum": 1,
+                          "type": "integer"
+                        },
+                        "manifest_sha256": {
+                          "pattern": "^[0-9a-f]{64}$",
+                          "type": "string"
+                        },
+                        "mount": {
+                          "const": "/runtime"
+                        },
+                        "total_bytes": {
+                          "maximum": 524288,
+                          "minimum": 0,
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "manifest_sha256",
+                        "entrypoint",
+                        "mount",
+                        "file_count",
+                        "total_bytes"
+                      ],
+                      "type": "object"
+                    },
+                    "cgroup": {
+                      "maxLength": 512,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "filesystem": {
+                      "const": "workspace-rw-capsule-ro-system-ro"
+                    },
+                    "network": {
+                      "const": "none"
+                    },
+                    "profile": {
+                      "const": "workspace"
+                    }
+                  },
+                  "required": [
+                    "capability_snapshot",
+                    "profile",
+                    "filesystem",
+                    "network",
+                    "cgroup",
+                    "capsule"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "exit": {
+              "additionalProperties": false,
+              "oneOf": [
+                {
+                  "properties": {
+                    "code": {
+                      "maximum": 255,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "signal": {
+                      "type": "null"
+                    }
+                  }
+                },
+                {
+                  "properties": {
+                    "code": {
+                      "type": "null"
+                    },
+                    "signal": {
+                      "enum": [
+                        "INT",
+                        "TERM",
+                        "KILL"
+                      ]
+                    }
+                  }
+                }
+              ],
+              "properties": {
+                "code": {
+                  "maximum": 255,
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "signal": {
+                  "enum": [
+                    "INT",
+                    "TERM",
+                    "KILL",
+                    null
+                  ]
+                }
+              },
+              "required": [
+                "code",
+                "signal"
+              ],
+              "type": "object"
+            },
+            "id": {
+              "$ref": "common.json#/$defs/exec-id"
+            },
+            "kind": {
+              "const": "exec"
+            },
+            "lease": {
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "actor": {
+                      "maxLength": 256,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "authorizing_operation": {
+                      "$ref": "common.json#/$defs/operation-id"
+                    },
+                    "clock_tolerance_ms": {
+                      "const": 30000
+                    },
+                    "principal": {
+                      "maxLength": 256,
+                      "minLength": 1,
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "renew_by": {
+                      "$ref": "common.json#/$defs/timestamp"
+                    },
+                    "state": {
+                      "enum": [
+                        "active",
+                        "expiring",
+                        "expired"
+                      ]
+                    },
+                    "ttl_ms": {
+                      "maximum": 86400000,
+                      "minimum": 1000,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "ttl_ms",
+                    "renew_by",
+                    "state",
+                    "clock_tolerance_ms",
+                    "authorizing_operation",
+                    "actor",
+                    "principal"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "observed_at": {
+              "$ref": "common.json#/$defs/timestamp"
+            },
+            "refusal": {
+              "$ref": "#/$defs/exec-refusal"
+            },
+            "requested": {
+              "additionalProperties": false,
+              "properties": {
+                "capability_snapshot": {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "network": {
+                  "const": "none"
+                },
+                "profile": {
+                  "const": "workspace"
+                },
+                "require": {
+                  "const": true
+                }
+              },
+              "required": [
+                "capability_snapshot",
+                "profile",
+                "network",
+                "require"
+              ],
+              "type": "object"
+            },
+            "state": {
+              "enum": [
+                "exited",
+                "cancelled"
+              ]
+            },
+            "workspace": {
+              "$ref": "common.json#/$defs/workspace-id"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "workspace",
+            "state",
+            "observed_at",
+            "requested",
+            "applied",
+            "exit"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "applied": {
+              "oneOf": [
+                {
+                  "oneOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "capability_snapshot": {
+                          "pattern": "^sha256:[0-9a-f]{64}$",
+                          "type": "string"
+                        },
+                        "cgroup": {
+                          "maxLength": 512,
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "filesystem": {
+                          "const": "workspace-rw-system-ro"
+                        },
+                        "network": {
+                          "const": "none"
+                        },
+                        "profile": {
+                          "const": "workspace"
+                        }
+                      },
+                      "required": [
+                        "capability_snapshot",
+                        "profile",
+                        "filesystem",
+                        "network",
+                        "cgroup"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "capability_snapshot": {
+                          "pattern": "^sha256:[0-9a-f]{64}$",
+                          "type": "string"
+                        },
+                        "capsule": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "entrypoint": {
+                              "pattern": "^/runtime/(?!.*(?:^|/)\\.\\.(?:/|$))[^\\u0000]+$",
+                              "type": "string"
+                            },
+                            "file_count": {
+                              "maximum": 32,
+                              "minimum": 1,
+                              "type": "integer"
+                            },
+                            "manifest_sha256": {
+                              "pattern": "^[0-9a-f]{64}$",
+                              "type": "string"
+                            },
+                            "mount": {
+                              "const": "/runtime"
+                            },
+                            "total_bytes": {
+                              "maximum": 524288,
+                              "minimum": 0,
+                              "type": "integer"
+                            }
+                          },
+                          "required": [
+                            "manifest_sha256",
+                            "entrypoint",
+                            "mount",
+                            "file_count",
+                            "total_bytes"
+                          ],
+                          "type": "object"
+                        },
+                        "cgroup": {
+                          "maxLength": 512,
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "filesystem": {
+                          "const": "workspace-rw-capsule-ro-system-ro"
+                        },
+                        "network": {
+                          "const": "none"
+                        },
+                        "profile": {
+                          "const": "workspace"
+                        }
+                      },
+                      "required": [
+                        "capability_snapshot",
+                        "profile",
+                        "filesystem",
+                        "network",
+                        "cgroup",
+                        "capsule"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "exit": {
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "oneOf": [
+                    {
+                      "properties": {
+                        "code": {
+                          "maximum": 255,
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "signal": {
+                          "type": "null"
+                        }
+                      }
+                    },
+                    {
+                      "properties": {
+                        "code": {
+                          "type": "null"
+                        },
+                        "signal": {
+                          "enum": [
+                            "INT",
+                            "TERM",
+                            "KILL"
+                          ]
+                        }
+                      }
+                    }
+                  ],
+                  "properties": {
+                    "code": {
+                      "maximum": 255,
+                      "minimum": 0,
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "signal": {
+                      "enum": [
+                        "INT",
+                        "TERM",
+                        "KILL",
+                        null
+                      ]
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "signal"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "id": {
+              "$ref": "common.json#/$defs/exec-id"
+            },
+            "kind": {
+              "const": "exec"
+            },
+            "lease": {
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "actor": {
+                      "maxLength": 256,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "authorizing_operation": {
+                      "$ref": "common.json#/$defs/operation-id"
+                    },
+                    "clock_tolerance_ms": {
+                      "const": 30000
+                    },
+                    "principal": {
+                      "maxLength": 256,
+                      "minLength": 1,
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "renew_by": {
+                      "$ref": "common.json#/$defs/timestamp"
+                    },
+                    "state": {
+                      "enum": [
+                        "active",
+                        "expiring",
+                        "expired"
+                      ]
+                    },
+                    "ttl_ms": {
+                      "maximum": 86400000,
+                      "minimum": 1000,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "ttl_ms",
+                    "renew_by",
+                    "state",
+                    "clock_tolerance_ms",
+                    "authorizing_operation",
+                    "actor",
+                    "principal"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "observed_at": {
+              "$ref": "common.json#/$defs/timestamp"
+            },
+            "requested": {
+              "additionalProperties": false,
+              "properties": {
+                "capability_snapshot": {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "network": {
+                  "enum": [
+                    "none",
+                    "aperture"
+                  ]
+                },
+                "profile": {
+                  "const": "workspace"
+                },
+                "require": {
+                  "const": true
+                }
+              },
+              "required": [
+                "capability_snapshot",
+                "profile",
+                "network",
+                "require"
+              ],
+              "type": "object"
+            },
+            "state": {
+              "const": "expired"
+            },
+            "workspace": {
+              "$ref": "common.json#/$defs/workspace-id"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "workspace",
+            "state",
+            "observed_at",
+            "requested",
+            "applied",
+            "exit"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "applied": {
+              "oneOf": [
+                {
+                  "oneOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "capability_snapshot": {
+                          "pattern": "^sha256:[0-9a-f]{64}$",
+                          "type": "string"
+                        },
+                        "cgroup": {
+                          "maxLength": 512,
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "filesystem": {
+                          "const": "workspace-rw-system-ro"
+                        },
+                        "network": {
+                          "const": "none"
+                        },
+                        "profile": {
+                          "const": "workspace"
+                        }
+                      },
+                      "required": [
+                        "capability_snapshot",
+                        "profile",
+                        "filesystem",
+                        "network",
+                        "cgroup"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "capability_snapshot": {
+                          "pattern": "^sha256:[0-9a-f]{64}$",
+                          "type": "string"
+                        },
+                        "capsule": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "entrypoint": {
+                              "pattern": "^/runtime/(?!.*(?:^|/)\\.\\.(?:/|$))[^\\u0000]+$",
+                              "type": "string"
+                            },
+                            "file_count": {
+                              "maximum": 32,
+                              "minimum": 1,
+                              "type": "integer"
+                            },
+                            "manifest_sha256": {
+                              "pattern": "^[0-9a-f]{64}$",
+                              "type": "string"
+                            },
+                            "mount": {
+                              "const": "/runtime"
+                            },
+                            "total_bytes": {
+                              "maximum": 524288,
+                              "minimum": 0,
+                              "type": "integer"
+                            }
+                          },
+                          "required": [
+                            "manifest_sha256",
+                            "entrypoint",
+                            "mount",
+                            "file_count",
+                            "total_bytes"
+                          ],
+                          "type": "object"
+                        },
+                        "cgroup": {
+                          "maxLength": 512,
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "filesystem": {
+                          "const": "workspace-rw-capsule-ro-system-ro"
+                        },
+                        "network": {
+                          "const": "none"
+                        },
+                        "profile": {
+                          "const": "workspace"
+                        }
+                      },
+                      "required": [
+                        "capability_snapshot",
+                        "profile",
+                        "filesystem",
+                        "network",
+                        "cgroup",
+                        "capsule"
+                      ],
+                      "type": "object"
+                    }
+                  ]
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "exit": {
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "oneOf": [
+                    {
+                      "properties": {
+                        "code": {
+                          "maximum": 255,
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "signal": {
+                          "type": "null"
+                        }
+                      }
+                    },
+                    {
+                      "properties": {
+                        "code": {
+                          "type": "null"
+                        },
+                        "signal": {
+                          "enum": [
+                            "INT",
+                            "TERM",
+                            "KILL"
+                          ]
+                        }
+                      }
+                    }
+                  ],
+                  "properties": {
+                    "code": {
+                      "maximum": 255,
+                      "minimum": 0,
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "signal": {
+                      "enum": [
+                        "INT",
+                        "TERM",
+                        "KILL",
+                        null
+                      ]
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "signal"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "id": {
+              "$ref": "common.json#/$defs/exec-id"
+            },
+            "kind": {
+              "const": "exec"
+            },
+            "lease": {
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "actor": {
+                      "maxLength": 256,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "authorizing_operation": {
+                      "$ref": "common.json#/$defs/operation-id"
+                    },
+                    "clock_tolerance_ms": {
+                      "const": 30000
+                    },
+                    "principal": {
+                      "maxLength": 256,
+                      "minLength": 1,
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "renew_by": {
+                      "$ref": "common.json#/$defs/timestamp"
+                    },
+                    "state": {
+                      "enum": [
+                        "active",
+                        "expiring",
+                        "expired"
+                      ]
+                    },
+                    "ttl_ms": {
+                      "maximum": 86400000,
+                      "minimum": 1000,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "ttl_ms",
+                    "renew_by",
+                    "state",
+                    "clock_tolerance_ms",
+                    "authorizing_operation",
+                    "actor",
+                    "principal"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "observed_at": {
+              "$ref": "common.json#/$defs/timestamp"
+            },
+            "refusal": {
+              "$ref": "#/$defs/exec-refusal"
+            },
+            "requested": {
+              "additionalProperties": false,
+              "properties": {
+                "capability_snapshot": {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "network": {
+                  "enum": [
+                    "none",
+                    "aperture"
+                  ]
+                },
+                "profile": {
+                  "const": "workspace"
+                },
+                "require": {
+                  "const": true
+                }
+              },
+              "required": [
+                "capability_snapshot",
+                "profile",
+                "network",
+                "require"
+              ],
+              "type": "object"
+            },
+            "state": {
+              "const": "unknown"
+            },
+            "workspace": {
+              "$ref": "common.json#/$defs/workspace-id"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "workspace",
+            "state",
+            "observed_at",
+            "requested",
+            "applied",
+            "exit"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "exec-refusal": {
+      "additionalProperties": false,
+      "description": "The named bound that ended this run. No address: nothing in the request is at fault (design 10 section 5 row 5).",
+      "properties": {
+        "class": {
+          "const": "exhausted"
+        },
+        "code": {
+          "const": "exec.aperture-byte-limit"
+        },
+        "message": {
+          "maxLength": 512,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "class",
+        "code",
+        "message"
+      ],
+      "type": "object"
+    },
+    "exit": {
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "properties": {
+            "code": {
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "signal": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "code": {
+              "type": "null"
+            },
+            "signal": {
+              "enum": [
+                "INT",
+                "TERM",
+                "KILL"
+              ]
+            }
+          }
+        }
+      ],
+      "properties": {
+        "code": {
+          "maximum": 255,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "signal": {
+          "enum": [
+            "INT",
+            "TERM",
+            "KILL",
+            null
+          ]
+        }
+      },
+      "required": [
+        "code",
+        "signal"
+      ],
+      "type": "object"
+    },
+    "lease": {
+      "additionalProperties": false,
+      "properties": {
+        "actor": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "authorizing_operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "clock_tolerance_ms": {
+          "const": 30000
+        },
+        "principal": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "renew_by": {
+          "$ref": "common.json#/$defs/timestamp"
+        },
+        "state": {
+          "enum": [
+            "active",
+            "expiring",
+            "expired"
+          ]
+        },
+        "ttl_ms": {
+          "maximum": 86400000,
+          "minimum": 1000,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "ttl_ms",
+        "renew_by",
+        "state",
+        "clock_tolerance_ms",
+        "authorizing_operation",
+        "actor",
+        "principal"
+      ],
+      "type": "object"
+    },
+    "pipe-session": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "attachment": {
+              "const": "pending"
+            },
+            "capability_snapshot": {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "exec": {
+              "$ref": "common.json#/$defs/exec-id"
+            },
+            "exit": {
+              "type": "null"
+            },
+            "id": {
+              "$ref": "common.json#/$defs/session-id"
+            },
+            "kind": {
+              "const": "session"
+            },
+            "lease": {
+              "additionalProperties": false,
+              "properties": {
+                "actor": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "authorizing_operation": {
+                  "$ref": "common.json#/$defs/operation-id"
+                },
+                "clock_tolerance_ms": {
+                  "const": 30000
+                },
+                "principal": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "renew_by": {
+                  "$ref": "common.json#/$defs/timestamp"
+                },
+                "state": {
+                  "enum": [
+                    "active",
+                    "expiring",
+                    "expired"
+                  ]
+                },
+                "ttl_ms": {
+                  "maximum": 86400000,
+                  "minimum": 1000,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "ttl_ms",
+                "renew_by",
+                "state",
+                "clock_tolerance_ms",
+                "authorizing_operation",
+                "actor",
+                "principal"
+              ],
+              "type": "object"
+            },
+            "limits": {
+              "additionalProperties": false,
+              "properties": {
+                "frame_bytes": {
+                  "maximum": 65536,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "input_bytes": {
+                  "maximum": 16777216,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "queued_frames": {
+                  "maximum": 16,
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "input_bytes",
+                "frame_bytes",
+                "queued_frames"
+              ],
+              "type": "object"
+            },
+            "mode": {
+              "const": "pipes"
+            },
+            "observed_at": {
+              "$ref": "common.json#/$defs/timestamp"
+            },
+            "state": {
+              "const": "accepted"
+            },
+            "workspace": {
+              "$ref": "common.json#/$defs/workspace-id"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "mode",
+            "exec",
+            "workspace",
+            "state",
+            "attachment",
+            "observed_at",
+            "capability_snapshot",
+            "limits",
+            "exit",
+            "lease"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "attachment": {
+              "const": "available"
+            },
+            "capability_snapshot": {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "exec": {
+              "$ref": "common.json#/$defs/exec-id"
+            },
+            "exit": {
+              "type": "null"
+            },
+            "id": {
+              "$ref": "common.json#/$defs/session-id"
+            },
+            "kind": {
+              "const": "session"
+            },
+            "lease": {
+              "additionalProperties": false,
+              "properties": {
+                "actor": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "authorizing_operation": {
+                  "$ref": "common.json#/$defs/operation-id"
+                },
+                "clock_tolerance_ms": {
+                  "const": 30000
+                },
+                "principal": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "renew_by": {
+                  "$ref": "common.json#/$defs/timestamp"
+                },
+                "state": {
+                  "enum": [
+                    "active",
+                    "expiring",
+                    "expired"
+                  ]
+                },
+                "ttl_ms": {
+                  "maximum": 86400000,
+                  "minimum": 1000,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "ttl_ms",
+                "renew_by",
+                "state",
+                "clock_tolerance_ms",
+                "authorizing_operation",
+                "actor",
+                "principal"
+              ],
+              "type": "object"
+            },
+            "limits": {
+              "additionalProperties": false,
+              "properties": {
+                "frame_bytes": {
+                  "maximum": 65536,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "input_bytes": {
+                  "maximum": 16777216,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "queued_frames": {
+                  "maximum": 16,
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "input_bytes",
+                "frame_bytes",
+                "queued_frames"
+              ],
+              "type": "object"
+            },
+            "mode": {
+              "const": "pipes"
+            },
+            "observed_at": {
+              "$ref": "common.json#/$defs/timestamp"
+            },
+            "state": {
+              "const": "ready"
+            },
+            "workspace": {
+              "$ref": "common.json#/$defs/workspace-id"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "mode",
+            "exec",
+            "workspace",
+            "state",
+            "attachment",
+            "observed_at",
+            "capability_snapshot",
+            "limits",
+            "exit",
+            "lease"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "attachment": {
+              "const": "attached"
+            },
+            "capability_snapshot": {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "exec": {
+              "$ref": "common.json#/$defs/exec-id"
+            },
+            "exit": {
+              "type": "null"
+            },
+            "id": {
+              "$ref": "common.json#/$defs/session-id"
+            },
+            "kind": {
+              "const": "session"
+            },
+            "lease": {
+              "additionalProperties": false,
+              "properties": {
+                "actor": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "authorizing_operation": {
+                  "$ref": "common.json#/$defs/operation-id"
+                },
+                "clock_tolerance_ms": {
+                  "const": 30000
+                },
+                "principal": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "renew_by": {
+                  "$ref": "common.json#/$defs/timestamp"
+                },
+                "state": {
+                  "enum": [
+                    "active",
+                    "expiring",
+                    "expired"
+                  ]
+                },
+                "ttl_ms": {
+                  "maximum": 86400000,
+                  "minimum": 1000,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "ttl_ms",
+                "renew_by",
+                "state",
+                "clock_tolerance_ms",
+                "authorizing_operation",
+                "actor",
+                "principal"
+              ],
+              "type": "object"
+            },
+            "limits": {
+              "additionalProperties": false,
+              "properties": {
+                "frame_bytes": {
+                  "maximum": 65536,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "input_bytes": {
+                  "maximum": 16777216,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "queued_frames": {
+                  "maximum": 16,
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "input_bytes",
+                "frame_bytes",
+                "queued_frames"
+              ],
+              "type": "object"
+            },
+            "mode": {
+              "const": "pipes"
+            },
+            "observed_at": {
+              "$ref": "common.json#/$defs/timestamp"
+            },
+            "state": {
+              "const": "attached"
+            },
+            "workspace": {
+              "$ref": "common.json#/$defs/workspace-id"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "mode",
+            "exec",
+            "workspace",
+            "state",
+            "attachment",
+            "observed_at",
+            "capability_snapshot",
+            "limits",
+            "exit",
+            "lease"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "attachment": {
+              "const": "consumed"
+            },
+            "capability_snapshot": {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "exec": {
+              "$ref": "common.json#/$defs/exec-id"
+            },
+            "exit": {
+              "additionalProperties": false,
+              "oneOf": [
+                {
+                  "properties": {
+                    "code": {
+                      "maximum": 255,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "signal": {
+                      "type": "null"
+                    }
+                  }
+                },
+                {
+                  "properties": {
+                    "code": {
+                      "type": "null"
+                    },
+                    "signal": {
+                      "enum": [
+                        "INT",
+                        "TERM",
+                        "KILL"
+                      ]
+                    }
+                  }
+                }
+              ],
+              "properties": {
+                "code": {
+                  "maximum": 255,
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "signal": {
+                  "enum": [
+                    "INT",
+                    "TERM",
+                    "KILL",
+                    null
+                  ]
+                }
+              },
+              "required": [
+                "code",
+                "signal"
+              ],
+              "type": "object"
+            },
+            "id": {
+              "$ref": "common.json#/$defs/session-id"
+            },
+            "kind": {
+              "const": "session"
+            },
+            "lease": {
+              "additionalProperties": false,
+              "properties": {
+                "actor": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "authorizing_operation": {
+                  "$ref": "common.json#/$defs/operation-id"
+                },
+                "clock_tolerance_ms": {
+                  "const": 30000
+                },
+                "principal": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "renew_by": {
+                  "$ref": "common.json#/$defs/timestamp"
+                },
+                "state": {
+                  "enum": [
+                    "active",
+                    "expiring",
+                    "expired"
+                  ]
+                },
+                "ttl_ms": {
+                  "maximum": 86400000,
+                  "minimum": 1000,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "ttl_ms",
+                "renew_by",
+                "state",
+                "clock_tolerance_ms",
+                "authorizing_operation",
+                "actor",
+                "principal"
+              ],
+              "type": "object"
+            },
+            "limits": {
+              "additionalProperties": false,
+              "properties": {
+                "frame_bytes": {
+                  "maximum": 65536,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "input_bytes": {
+                  "maximum": 16777216,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "queued_frames": {
+                  "maximum": 16,
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "input_bytes",
+                "frame_bytes",
+                "queued_frames"
+              ],
+              "type": "object"
+            },
+            "mode": {
+              "const": "pipes"
+            },
+            "observed_at": {
+              "$ref": "common.json#/$defs/timestamp"
+            },
+            "state": {
+              "enum": [
+                "exited",
+                "cancelled"
+              ]
+            },
+            "workspace": {
+              "$ref": "common.json#/$defs/workspace-id"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "mode",
+            "exec",
+            "workspace",
+            "state",
+            "attachment",
+            "observed_at",
+            "capability_snapshot",
+            "limits",
+            "exit",
+            "lease"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "attachment": {
+              "const": "consumed"
+            },
+            "capability_snapshot": {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "exec": {
+              "$ref": "common.json#/$defs/exec-id"
+            },
+            "exit": {
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "oneOf": [
+                    {
+                      "properties": {
+                        "code": {
+                          "maximum": 255,
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "signal": {
+                          "type": "null"
+                        }
+                      }
+                    },
+                    {
+                      "properties": {
+                        "code": {
+                          "type": "null"
+                        },
+                        "signal": {
+                          "enum": [
+                            "INT",
+                            "TERM",
+                            "KILL"
+                          ]
+                        }
+                      }
+                    }
+                  ],
+                  "properties": {
+                    "code": {
+                      "maximum": 255,
+                      "minimum": 0,
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "signal": {
+                      "enum": [
+                        "INT",
+                        "TERM",
+                        "KILL",
+                        null
+                      ]
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "signal"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "id": {
+              "$ref": "common.json#/$defs/session-id"
+            },
+            "kind": {
+              "const": "session"
+            },
+            "lease": {
+              "additionalProperties": false,
+              "properties": {
+                "actor": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "authorizing_operation": {
+                  "$ref": "common.json#/$defs/operation-id"
+                },
+                "clock_tolerance_ms": {
+                  "const": 30000
+                },
+                "principal": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "renew_by": {
+                  "$ref": "common.json#/$defs/timestamp"
+                },
+                "state": {
+                  "enum": [
+                    "active",
+                    "expiring",
+                    "expired"
+                  ]
+                },
+                "ttl_ms": {
+                  "maximum": 86400000,
+                  "minimum": 1000,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "ttl_ms",
+                "renew_by",
+                "state",
+                "clock_tolerance_ms",
+                "authorizing_operation",
+                "actor",
+                "principal"
+              ],
+              "type": "object"
+            },
+            "limits": {
+              "additionalProperties": false,
+              "properties": {
+                "frame_bytes": {
+                  "maximum": 65536,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "input_bytes": {
+                  "maximum": 16777216,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "queued_frames": {
+                  "maximum": 16,
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "input_bytes",
+                "frame_bytes",
+                "queued_frames"
+              ],
+              "type": "object"
+            },
+            "mode": {
+              "const": "pipes"
+            },
+            "observed_at": {
+              "$ref": "common.json#/$defs/timestamp"
+            },
+            "state": {
+              "const": "expired"
+            },
+            "workspace": {
+              "$ref": "common.json#/$defs/workspace-id"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "mode",
+            "exec",
+            "workspace",
+            "state",
+            "attachment",
+            "observed_at",
+            "capability_snapshot",
+            "limits",
+            "exit",
+            "lease"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "attachment": {
+              "const": "uncertain"
+            },
+            "capability_snapshot": {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "exec": {
+              "$ref": "common.json#/$defs/exec-id"
+            },
+            "exit": {
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "oneOf": [
+                    {
+                      "properties": {
+                        "code": {
+                          "maximum": 255,
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "signal": {
+                          "type": "null"
+                        }
+                      }
+                    },
+                    {
+                      "properties": {
+                        "code": {
+                          "type": "null"
+                        },
+                        "signal": {
+                          "enum": [
+                            "INT",
+                            "TERM",
+                            "KILL"
+                          ]
+                        }
+                      }
+                    }
+                  ],
+                  "properties": {
+                    "code": {
+                      "maximum": 255,
+                      "minimum": 0,
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "signal": {
+                      "enum": [
+                        "INT",
+                        "TERM",
+                        "KILL",
+                        null
+                      ]
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "signal"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "id": {
+              "$ref": "common.json#/$defs/session-id"
+            },
+            "kind": {
+              "const": "session"
+            },
+            "lease": {
+              "additionalProperties": false,
+              "properties": {
+                "actor": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "authorizing_operation": {
+                  "$ref": "common.json#/$defs/operation-id"
+                },
+                "clock_tolerance_ms": {
+                  "const": 30000
+                },
+                "principal": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "renew_by": {
+                  "$ref": "common.json#/$defs/timestamp"
+                },
+                "state": {
+                  "enum": [
+                    "active",
+                    "expiring",
+                    "expired"
+                  ]
+                },
+                "ttl_ms": {
+                  "maximum": 86400000,
+                  "minimum": 1000,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "ttl_ms",
+                "renew_by",
+                "state",
+                "clock_tolerance_ms",
+                "authorizing_operation",
+                "actor",
+                "principal"
+              ],
+              "type": "object"
+            },
+            "limits": {
+              "additionalProperties": false,
+              "properties": {
+                "frame_bytes": {
+                  "maximum": 65536,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "input_bytes": {
+                  "maximum": 16777216,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "queued_frames": {
+                  "maximum": 16,
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "input_bytes",
+                "frame_bytes",
+                "queued_frames"
+              ],
+              "type": "object"
+            },
+            "mode": {
+              "const": "pipes"
+            },
+            "observed_at": {
+              "$ref": "common.json#/$defs/timestamp"
+            },
+            "state": {
+              "const": "unknown"
+            },
+            "workspace": {
+              "$ref": "common.json#/$defs/workspace-id"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "mode",
+            "exec",
+            "workspace",
+            "state",
+            "attachment",
+            "observed_at",
+            "capability_snapshot",
+            "limits",
+            "exit",
+            "lease"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "workspace": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "common.json#/$defs/workspace-id"
+        },
+        "kind": {
+          "const": "workspace"
+        },
+        "labels": {
+          "$ref": "common.json#/$defs/labels"
+        },
+        "lease": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "actor": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "authorizing_operation": {
+                  "$ref": "common.json#/$defs/operation-id"
+                },
+                "clock_tolerance_ms": {
+                  "const": 30000
+                },
+                "principal": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "renew_by": {
+                  "$ref": "common.json#/$defs/timestamp"
+                },
+                "state": {
+                  "enum": [
+                    "active",
+                    "expiring",
+                    "expired"
+                  ]
+                },
+                "ttl_ms": {
+                  "maximum": 86400000,
+                  "minimum": 1000,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "ttl_ms",
+                "renew_by",
+                "state",
+                "clock_tolerance_ms",
+                "authorizing_operation",
+                "actor",
+                "principal"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observed_at": {
+          "$ref": "common.json#/$defs/timestamp"
+        },
+        "state": {
+          "enum": [
+            "ready",
+            "destroying",
+            "destroyed",
+            "expired",
+            "unknown"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "id",
+        "state",
+        "observed_at",
+        "labels"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "urn:b10x:substrate-wire:0.8.0:resource",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/workspace"
+    },
+    {
+      "$ref": "#/$defs/exec"
+    },
+    {
+      "$ref": "#/$defs/pipe-session"
+    }
+  ],
+  "title": "Phase-2 observed resource"
+}

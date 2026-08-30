@@ -336,6 +336,12 @@ pub struct EgressAperture {
     pub name: String,
     pub host: String,
     pub port: u16,
+    /// The declared byte ceiling over both directions summed, per run (ADR 0014).
+    ///
+    /// The daemon's vocabulary again, and again not the driver's: `serve` carries it across at the
+    /// composition root with the rest of the declaration. `None` is what every aperture declared
+    /// before ADR 0014 is, and installs exactly what it installed then.
+    pub max_bytes: Option<u64>,
 }
 
 /// One operator-declared secret slot: a name, and the file behind it (ADR 0012).
@@ -607,6 +613,15 @@ fn resolve_egress_apertures(
         if aperture.port == 0 {
             bail!("egress aperture {} declares no port", aperture.name);
         }
+        // A ceiling of zero passes nothing, which no operator means and no run could use. Said
+        // here rather than served, because an aperture that refuses its first byte is an outage
+        // with a declaration behind it (ADR 0014).
+        if aperture.max_bytes == Some(0) {
+            bail!(
+                "egress aperture {} declares a byte ceiling of zero",
+                aperture.name
+            );
+        }
         let pinned =
             std::net::ToSocketAddrs::to_socket_addrs(&(aperture.host.as_str(), aperture.port))
                 .with_context(|| {
@@ -623,6 +638,7 @@ fn resolve_egress_apertures(
                     )
                 })?;
         resolved.push(substrate_host::EgressAperture {
+            max_bytes: aperture.max_bytes,
             name: aperture.name.clone(),
             host: aperture.host.clone(),
             port: aperture.port,
@@ -712,7 +728,19 @@ fn configuration_generation(config: &DaemonConfig) -> u64 {
     let mut apertures: Vec<String> = config
         .egress_apertures
         .iter()
-        .map(|aperture| format!("{}={}:{}/tcp", aperture.name, aperture.host, aperture.port))
+        .map(|aperture| {
+            // The declaration as written, ceiling included: the fact publishes the ceiling, so a
+            // ceiling that changed without moving the generation would leave a client holding a
+            // snapshot that states a bound the daemon no longer enforces (ADR 0014).
+            let ceiling = aperture
+                .max_bytes
+                .map(|max| format!("/max={max}"))
+                .unwrap_or_default();
+            format!(
+                "{}={}:{}/tcp{ceiling}",
+                aperture.name, aperture.host, aperture.port
+            )
+        })
         .collect();
     apertures.sort_unstable();
     for aperture in apertures {

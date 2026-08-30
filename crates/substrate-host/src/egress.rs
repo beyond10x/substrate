@@ -85,6 +85,11 @@ pub struct EgressAperture {
     pub host: String,
     pub port: u16,
     pub pinned: SocketAddr,
+    /// The declared byte ceiling over both directions summed, per run (ADR 0014).
+    ///
+    /// `None` installs exactly what installed before the term existed: no comparison in the relay,
+    /// nothing for the parent to read, and no field on the observation.
+    pub max_bytes: Option<u64>,
 }
 
 impl EgressAperture {
@@ -93,6 +98,7 @@ impl EgressAperture {
         EgressApertureFact {
             name: self.name.clone(),
             destination: self.pinned.to_string(),
+            max_bytes: self.max_bytes,
         }
     }
 
@@ -282,6 +288,7 @@ pub(crate) struct InstalledAperture {
     counters: SharedCounters,
     name: String,
     destination: String,
+    max_bytes: Option<u64>,
 }
 
 impl InstalledAperture {
@@ -293,7 +300,22 @@ impl InstalledAperture {
             destination: self.destination.clone(),
             mechanism: ApertureMechanism::LoopbackForwarder,
             bytes: self.counters.read(),
+            max_bytes: self.max_bytes,
         }
+    }
+
+    /// Whether the declared ceiling has been reached, over both directions summed (ADR 0014).
+    ///
+    /// The same two relaxed loads the relay makes against the same page, so the parent classifies
+    /// the run from the numbers that stopped it rather than from a second, weaker account — and
+    /// answers the same for every declared value, including `Some(0)`, which the relay enforces at
+    /// byte zero. An aperture declared without a ceiling is never exceeded: there is nothing to
+    /// exceed.
+    pub(crate) fn ceiling_exceeded(&self) -> bool {
+        self.max_bytes.is_some_and(|ceiling| {
+            let bytes = self.counters.read();
+            bytes.to_destination.saturating_add(bytes.from_destination) >= ceiling
+        })
     }
 }
 
@@ -328,13 +350,20 @@ pub(crate) fn install(
     let counters =
         SharedCounters::new().map_err(|error| install_failed("aperture byte counters", &error))?;
     let cgroup = open_cgroup(cgroup_procs)?;
-    let forwarder = spawn_forwarder(&listener, aperture.pinned, &counters, cgroup.as_ref())?;
+    let forwarder = spawn_forwarder(
+        &listener,
+        aperture.pinned,
+        &counters,
+        cgroup.as_ref(),
+        aperture.max_bytes,
+    )?;
     drop(listener);
     Ok(InstalledAperture {
         forwarder,
         counters,
         name: aperture.name.clone(),
         destination: aperture.pinned.to_string(),
+        max_bytes: aperture.max_bytes,
     })
 }
 
@@ -608,6 +637,7 @@ fn spawn_forwarder(
     destination: SocketAddr,
     counters: &SharedCounters,
     cgroup: Option<&File>,
+    max_bytes: Option<u64>,
 ) -> Result<libc::pid_t, DriverError> {
     let SocketAddr::V4(destination) = destination else {
         return Err(DriverError::failed(
@@ -620,6 +650,12 @@ fn spawn_forwarder(
     let cgroup_fd = cgroup.map_or(-1, AsRawFd::as_raw_fd);
     let to_destination: *const AtomicU64 = std::ptr::from_ref(counters.outbound());
     let from_destination: *const AtomicU64 = std::ptr::from_ref(counters.inbound());
+    // Fixed before the fork, like every other value the forked children read. `u64::MAX` is "no
+    // declared ceiling" and `0` is a ceiling of zero, so every value an operator can declare means
+    // the same thing to the relay as it does to `InstalledAperture::ceiling_exceeded`. A sentinel
+    // of `0` made those two disagree exactly at zero: the parent called the run exhausted at byte
+    // zero and the relay passed everything (ADR 0014).
+    let ceiling = max_bytes.unwrap_or(u64::MAX);
 
     // SAFETY: as in `listen_inside` — the child runs post-fork with libc calls only, over
     // descriptors, a `sockaddr_in` and a shared mapping that all existed before the fork.
@@ -639,6 +675,7 @@ fn spawn_forwarder(
                 &address,
                 to_destination,
                 from_destination,
+                ceiling,
             ));
         }
     }
@@ -660,6 +697,7 @@ unsafe fn forwarder_body(
     destination: &libc::sockaddr_in,
     to_destination: *const AtomicU64,
     from_destination: *const AtomicU64,
+    ceiling: u64,
 ) -> i32 {
     unsafe {
         // As in the helper: the daemon's whole fd table came across the fork, and the run's own
@@ -692,6 +730,7 @@ unsafe fn forwarder_body(
                     destination,
                     to_destination,
                     from_destination,
+                    ceiling,
                 ));
             }
             // A failed fork means the run is out of process budget. Refusing this one connection
@@ -715,6 +754,7 @@ unsafe fn relay_body(
     destination: &libc::sockaddr_in,
     to_destination: *const AtomicU64,
     from_destination: *const AtomicU64,
+    ceiling: u64,
 ) -> i32 {
     unsafe {
         let upstream = libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
@@ -734,6 +774,11 @@ unsafe fn relay_body(
         let mut client_open = true;
         let mut upstream_open = true;
         while client_open || upstream_open {
+            // Checked before each pump rather than once per iteration, which is what bounds the
+            // overshoot at one relay buffer per live relay rather than two (ADR 0014).
+            if ceiling_reached(ceiling, to_destination, from_destination) {
+                break;
+            }
             let mut fds = [
                 libc::pollfd {
                     fd: if client_open { client } else { -1 },
@@ -763,6 +808,9 @@ unsafe fn relay_body(
             {
                 libc::shutdown(upstream, libc::SHUT_WR);
             }
+            if ceiling_reached(ceiling, to_destination, from_destination) {
+                break;
+            }
             if fds[1].revents != 0
                 && !pump(
                     upstream,
@@ -778,6 +826,33 @@ unsafe fn relay_body(
         libc::close(upstream);
         libc::close(client);
         0
+    }
+}
+
+/// Whether the declared ceiling has been reached, over both directions summed (ADR 0014).
+///
+/// `u64::MAX` is "no declared ceiling" and returns `false` without loading anything, so a run that
+/// declared none pays one integer comparison and nothing else. It is the sentinel rather than `0`
+/// because `0` is a ceiling an operator can write, and the parent enforces it at byte zero; a
+/// ceiling of `u64::MAX` is not distinguishable from unbounded by any relay that would have to move
+/// sixteen exabytes to tell them apart. Two relaxed loads otherwise, from the page this relay
+/// already writes: there is no lock, because a relay can be killed by `cgroup.kill` at any
+/// instruction and a lock it held would be a lock nobody releases.
+///
+/// # Safety
+///
+/// Post-fork child only.
+unsafe fn ceiling_reached(
+    ceiling: u64,
+    to_destination: *const AtomicU64,
+    from_destination: *const AtomicU64,
+) -> bool {
+    unsafe {
+        ceiling != u64::MAX
+            && (*to_destination)
+                .load(Ordering::Relaxed)
+                .saturating_add((*from_destination).load(Ordering::Relaxed))
+                >= ceiling
     }
 }
 
@@ -942,12 +1017,15 @@ fn probe_through_sandbox(bubblewrap: &Path, destination: SocketAddr) -> bool {
         // aperture is installed — and then reached from inside the sandbox, which is the claim.
         let installed = SharedCounters::new().ok().and_then(|counters| {
             let listener = listen_inside(sandbox_pid, destination.port(), None).ok()?;
-            let forwarder = spawn_forwarder(&listener, destination, &counters, None).ok()?;
+            // The probe proves the *mechanism*, never a declaration: no ceiling, because there is
+            // no operator statement here to enforce.
+            let forwarder = spawn_forwarder(&listener, destination, &counters, None, None).ok()?;
             Some(InstalledAperture {
                 forwarder,
                 counters,
                 name: String::new(),
                 destination: destination.to_string(),
+                max_bytes: None,
             })
         });
         installed.is_some_and(|installed| {
@@ -1383,6 +1461,15 @@ mod tests {
             host: "app.example.invalid".to_owned(),
             port: pinned.port(),
             pinned,
+            max_bytes: None,
+        }
+    }
+
+    /// The same declaration with the one optional term ADR 0014 adds.
+    fn capped_aperture(name: &str, pinned: SocketAddr, max_bytes: u64) -> EgressAperture {
+        EgressAperture {
+            max_bytes: Some(max_bytes),
+            ..aperture(name, pinned)
         }
     }
 
@@ -1476,6 +1563,7 @@ mod tests {
         let published = vec![substrate_wire::EgressApertureFact {
             name: "model".to_owned(),
             destination: "127.0.0.1:1".to_owned(),
+            max_bytes: None,
         }];
         let refusal = crate::process::ProcessRuntime::admit_egress_aperture(
             &config,
@@ -1682,6 +1770,288 @@ mod tests {
         let fact = egress_apertures_fact(&declared, true).expect("a proven mechanism publishes");
         assert_eq!(fact[0].name, "audit", "the fact is sorted");
         assert_eq!(fact[1].destination, "127.0.0.1:443");
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // The declared byte ceiling (ADR 0014)
+    // ---------------------------------------------------------------------------------------
+
+    /// What the firehose offers a run: far more than any ceiling these cases declare, so a run
+    /// that stops short stopped because substrate stopped it.
+    const FIREHOSE_BYTES: u64 = 1 << 20;
+    /// The ceiling these cases declare. A whole number of relay buffers, so "the ceiling" and
+    /// "the ceiling plus one buffer" are unambiguous numbers rather than an off-by-a-chunk.
+    const DECLARED_CEILING: u64 = 64 * 1024;
+
+    /// A destination that answers every connection with [`FIREHOSE_BYTES`] bytes and then closes.
+    ///
+    /// [`AppServer`] sends 39 bytes, which no ceiling worth declaring would ever reach; a ceiling
+    /// is only observable against a destination willing to send past it.
+    struct Firehose {
+        address: SocketAddr,
+        handle: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl Firehose {
+        fn start() -> Self {
+            let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind firehose");
+            let address = listener.local_addr().expect("firehose address");
+            let handle = std::thread::spawn(move || {
+                while let Ok((mut stream, _)) = listener.accept() {
+                    let chunk = [b'x'; 4096];
+                    let mut sent = 0_u64;
+                    while sent < FIREHOSE_BYTES {
+                        // A relay that stopped is a closed socket here; that is the case passing,
+                        // not a failure, so the error ends this connection and nothing else.
+                        if stream.write_all(&chunk).is_err() {
+                            break;
+                        }
+                        sent += chunk.len() as u64;
+                    }
+                    let _ = stream.flush();
+                }
+            });
+            Self {
+                address,
+                handle: Some(handle),
+            }
+        }
+    }
+
+    impl Drop for Firehose {
+        fn drop(&mut self) {
+            self.handle.take();
+        }
+    }
+
+    /// Reads from `address` inside the sandbox's own namespace until the connection ends.
+    ///
+    /// The confined child's view: it is told nothing, it just runs out of stream (ADR 0014, "the
+    /// child gets a closed socket"). What it read is not the claim — what the relay counted is —
+    /// so this reports only that the connection ended.
+    fn drain(sandbox_pid: u32, address: SocketAddr) {
+        let SocketAddr::V4(address) = address else {
+            panic!("the aperture serves IPv4 only");
+        };
+        let target = super::sockaddr_in(*address.ip(), address.port());
+        let netns = std::fs::File::open(format!("/proc/{sandbox_pid}/ns/net")).expect("netns");
+        // SAFETY: an ioctl on a namespace descriptor this process opened.
+        let owner = unsafe { libc::ioctl(netns.as_raw_fd(), super::NS_GET_USERNS) };
+        assert!(owner >= 0, "owning user namespace");
+        let netns_fd = netns.as_raw_fd();
+        // SAFETY: forked child is single-threaded, which `setns(CLONE_NEWUSER)` requires.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "fork");
+        if pid == 0 {
+            // SAFETY: post-fork child, async-signal-safe calls only.
+            unsafe {
+                let code = drain_body(owner, netns_fd, &target);
+                libc::_exit(code);
+            }
+        }
+        let mut status = 0;
+        // SAFETY: reaping a child this process forked.
+        unsafe {
+            libc::waitpid(pid, &raw mut status, 0);
+        }
+        // SAFETY: the ioctl descriptor is owned here and closed exactly once.
+        unsafe {
+            libc::close(owner);
+        }
+        assert_eq!(
+            libc::WEXITSTATUS(status),
+            0,
+            "the drain never reached the aperture"
+        );
+    }
+
+    /// # Safety
+    ///
+    /// Post-fork child only.
+    unsafe fn drain_body(owner: i32, netns: i32, target: &libc::sockaddr_in) -> i32 {
+        unsafe {
+            if libc::setns(owner, libc::CLONE_NEWUSER) != 0 {
+                return 10;
+            }
+            if libc::setns(netns, libc::CLONE_NEWNET) != 0 {
+                return 11;
+            }
+            let socket = libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
+            if socket < 0 {
+                return 12;
+            }
+            if libc::connect(
+                socket,
+                std::ptr::from_ref(target).cast(),
+                u32::try_from(std::mem::size_of::<libc::sockaddr_in>()).unwrap_or(16),
+            ) != 0
+            {
+                libc::close(socket);
+                return 13;
+            }
+            let mut buffer = [0_u8; 4096];
+            loop {
+                let read = libc::read(socket, buffer.as_mut_ptr().cast(), buffer.len());
+                if read <= 0 {
+                    break;
+                }
+            }
+            libc::close(socket);
+            0
+        }
+    }
+
+    /// Waits until the counters stop moving, which is the relay having stopped or the stream done.
+    fn settled(installed: &InstalledAperture) -> substrate_wire::ApertureBytes {
+        let mut last = installed.applied().bytes;
+        for _ in 0..200 {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            let now = installed.applied().bytes;
+            if now == last && (now.to_destination + now.from_destination) > 0 {
+                return now;
+            }
+            last = now;
+        }
+        last
+    }
+
+    /// The ceiling is a stop, not a report: the relay stops relaying, and the overshoot is the one
+    /// stated bound — at most one relay buffer (ADR 0014, *Consequences*).
+    #[test]
+    fn a_declared_ceiling_stops_the_relay() {
+        let Some(sandbox) = Sandbox::open() else {
+            return;
+        };
+        let firehose = Firehose::start();
+        let declared = capped_aperture("model", firehose.address, DECLARED_CEILING);
+        let installed = install(&declared, sandbox.pid, None).expect("install the aperture");
+        drain(
+            sandbox.pid,
+            SocketAddr::from((Ipv4Addr::LOCALHOST, declared.port)),
+        );
+        let bytes = settled(&installed);
+        let total = bytes.to_destination + bytes.from_destination;
+        assert!(
+            total >= DECLARED_CEILING,
+            "the relay stopped short of the declared ceiling: {total} < {DECLARED_CEILING}"
+        );
+        assert!(
+            total <= DECLARED_CEILING + super::RELAY_BUFFER as u64,
+            "the overshoot is larger than one relay buffer: {total} > {}",
+            DECLARED_CEILING + super::RELAY_BUFFER as u64
+        );
+        assert!(
+            installed.ceiling_exceeded(),
+            "the parent cannot see the ceiling the relay stopped at"
+        );
+        let applied = installed.applied();
+        assert_eq!(
+            applied.max_bytes,
+            Some(DECLARED_CEILING),
+            "the observation does not state the ceiling the run ran under"
+        );
+        drop(installed);
+    }
+
+    /// The negative, which is the whole of "an aperture declared without the term keeps working
+    /// byte for byte": the same destination, the same traffic, no ceiling, nothing stopped.
+    #[test]
+    fn an_aperture_without_a_ceiling_passes_the_same_traffic() {
+        let Some(sandbox) = Sandbox::open() else {
+            return;
+        };
+        let firehose = Firehose::start();
+        let declared = aperture("model", firehose.address);
+        let installed = install(&declared, sandbox.pid, None).expect("install the aperture");
+        drain(
+            sandbox.pid,
+            SocketAddr::from((Ipv4Addr::LOCALHOST, declared.port)),
+        );
+        let bytes = settled(&installed);
+        assert_eq!(
+            bytes.from_destination, FIREHOSE_BYTES,
+            "an aperture with no declared ceiling did not pass the whole stream"
+        );
+        assert!(
+            !installed.ceiling_exceeded(),
+            "an aperture with no ceiling reported one exceeded"
+        );
+        assert_eq!(
+            installed.applied().max_bytes,
+            None,
+            "an aperture with no ceiling published one"
+        );
+        drop(installed);
+    }
+
+    /// The relay and the parent answer the same question the same way, including at zero.
+    ///
+    /// The daemon refuses `max=0` at startup, but `substrate_host::EgressAperture` is public and a
+    /// caller may build one directly. A ceiling the parent treats as reached at byte zero while the
+    /// relay treats it as absent is a bound that exists in the observation and nowhere on the byte
+    /// path — the silent degradation invariant 3 forbids, and worse than either answer alone.
+    #[test]
+    fn a_zero_ceiling_binds_the_relay_and_the_parent_alike() {
+        let Some(sandbox) = Sandbox::open() else {
+            return;
+        };
+        let firehose = Firehose::start();
+        let declared = capped_aperture("model", firehose.address, 0);
+        let installed = install(&declared, sandbox.pid, None).expect("install the aperture");
+        drain(
+            sandbox.pid,
+            SocketAddr::from((Ipv4Addr::LOCALHOST, declared.port)),
+        );
+        let bytes = settled(&installed);
+        assert_eq!(
+            bytes.to_destination + bytes.from_destination,
+            0,
+            "a ceiling of zero let bytes cross the relay"
+        );
+        assert!(
+            installed.ceiling_exceeded(),
+            "the parent does not see the ceiling the relay stopped at"
+        );
+        drop(installed);
+    }
+
+    /// A ceiling is deployment vocabulary. A request that carries one is refused by its own name,
+    /// so a rejected escalation is not read as a configuration typo.
+    #[test]
+    fn a_ceiling_in_a_request_is_refused_by_name() {
+        let mut config = HostConfig::minimum("/does/not/exist");
+        config.egress_apertures = vec![aperture(
+            "model",
+            SocketAddr::from((Ipv4Addr::LOCALHOST, 9)),
+        )];
+        let published = vec![config.egress_apertures[0].fact()];
+        let escalation = crate::process::ProcessRuntime::admit_egress_aperture(
+            &config,
+            Some(&published),
+            &sandbox_request(NetworkMode::Aperture, Some("model/max=1MiB")),
+        )
+        .expect_err("a ceiling where a name belongs is refused");
+        assert_eq!(escalation.class, DriverErrorClass::Refused);
+        assert_eq!(escalation.code, "exec.aperture-ceiling-in-request");
+    }
+
+    /// The published fact answers "how much could this daemon ever pass", and answers nothing for
+    /// an aperture declared without a ceiling.
+    #[test]
+    fn the_apertures_fact_publishes_the_declared_ceiling() {
+        let declared = vec![
+            capped_aperture(
+                "model",
+                SocketAddr::from((Ipv4Addr::LOCALHOST, 443)),
+                67_108_864,
+            ),
+            aperture("audit", SocketAddr::from((Ipv4Addr::LOCALHOST, 8443))),
+        ];
+        let fact = egress_apertures_fact(&declared, true).expect("a proven mechanism publishes");
+        assert_eq!(fact[0].name, "audit");
+        assert_eq!(fact[0].max_bytes, None);
+        assert_eq!(fact[1].name, "model");
+        assert_eq!(fact[1].max_bytes, Some(67_108_864));
     }
 
     fn _unused(_: PathBuf) {}

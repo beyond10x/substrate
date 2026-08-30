@@ -1,0 +1,51 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.8.0:compatibility",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "const": "schemas/compatibility.json"
+    },
+    "contract": {
+      "const": "substrate-wire"
+    },
+    "development_constraints": {
+      "items": {
+        "maxLength": 1024,
+        "minLength": 1,
+        "type": "string"
+      },
+      "minItems": 3,
+      "type": "array"
+    },
+    "request_policy": {
+      "const": "closed"
+    },
+    "response_policy": {
+      "const": "closed-route-selected-envelopes"
+    },
+    "status": {
+      "const": "development"
+    },
+    "supported_api_majors": {
+      "const": [
+        1
+      ]
+    },
+    "version": {
+      "const": "0.8.0"
+    }
+  },
+  "required": [
+    "$schema",
+    "contract",
+    "version",
+    "status",
+    "supported_api_majors",
+    "request_policy",
+    "response_policy",
+    "development_constraints"
+  ],
+  "title": "Development compatibility declaration",
+  "type": "object"
+}

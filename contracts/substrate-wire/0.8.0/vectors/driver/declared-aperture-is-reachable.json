@@ -1,0 +1,78 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "command": {
+      "aperture": "model",
+      "argv": [
+        "/fixture/probe-aperture"
+      ],
+      "network": "aperture",
+      "operation": "exec.start"
+    },
+    "kind": "driver",
+    "port": "exec"
+  },
+  "context": {
+    "authority": "driver-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000"
+  },
+  "covers": [
+    "security.egress-aperture-reach"
+  ],
+  "expected": {
+    "kind": "driver-outcome",
+    "outcome": {
+      "reached": [
+        "aperture"
+      ],
+      "refused": [],
+      "state": "exited"
+    }
+  },
+  "id": "a-declared-aperture-reaches-its-pinned-destination",
+  "layer": "driver",
+  "phase": 2,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/applied_aperture_name",
+      "expected": "model",
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/distinct_network_namespace",
+      "expected": true,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/sandbox_interface_count",
+      "expected": 1,
+      "operator": "equals"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "egress-aperture",
+      "name": "model",
+      "state": {
+        "declared_by": "operator",
+        "destination": "203.0.113.7:443",
+        "protocol": "tcp"
+      }
+    },
+    {
+      "kind": "network",
+      "name": "all-address-classes",
+      "state": {
+        "control_socket": true,
+        "dns": true
+      }
+    }
+  ]
+}

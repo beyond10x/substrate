@@ -7,6 +7,36 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- **An egress aperture can carry a declared byte ceiling, and crossing it refuses the run by name.**
+  `--egress-aperture <name>=<host>:<port>/tcp[/max=<size>]` bounds one run's
+  `to_destination + from_destination` over that aperture; `<size>` is a decimal byte count with an
+  optional binary suffix (`1048576`, `512KiB`, `64MiB`, `2GiB`) and never a decimal-power unit, and
+  an unrecognised term is a startup error rather than an ignored one. The relay stops relaying at
+  the ceiling, so the overshoot is at most one 16 KiB relay buffer per live relay; the parent's
+  existing 1 ms supervision loop reads the same counters, ends the run and names the refusal.
+  Accepted as [ADR 0014](adr/0014-apertures-carry-a-declared-byte-ceiling.md).
+- **An exec observation can name the bound that ended it.** One optional `refusal` member carrying
+  `class`, `code` and `message` beside the state that is already `cancelled`. The declared aperture
+  byte ceiling — `exhausted` / `exec.aperture-byte-limit` — is its only user; a timeout and a CPU
+  budget are unchanged.
+- **A ceiling is deployment vocabulary, never request data.** A request carrying one is refused
+  `exec.aperture-ceiling-in-request` at `sandbox.network.aperture`, told apart from
+  `exec.aperture-destination-in-request` so a rejected escalation does not read as a schema typo.
+- **Published and observed.** The `exec.egress-apertures` capability fact and the applied-aperture
+  observation each gain an optional `max_bytes`, so `/v1/machine` answers how much this daemon could
+  ever pass and a run states the ceiling it actually ran under beside the bytes that crossed.
+- **Contract bundle [`contracts/substrate-wire/0.8.0`](contracts/substrate-wire/0.8.0)**, 228 files,
+  an additive successor to `0.7.0`: `adds_routes: 0`, `preserves_routes: 26`. Every earlier bundle
+  directory keeps its bytes, and `cargo xtask check-bundle 0.8.0` is in
+  [`scripts/gate.sh`](scripts/gate.sh).
+
+### Unchanged
+
+- An aperture declared without the term behaves byte for byte as it did: no ceiling in the relay,
+  no `max_bytes` on the fact or the observation, and no `refusal` on the run.
+
 ## [0.2.3] — 2026-08-30
 
 Image: `ghcr.io/beyond10x/b10x-substrate-daemon:0.2.3` at `sha256:ab10158266b579d705ce8422c7d2a6e783cde950d30e100f61ca6befc4d0beda`, keyless-signed; verify with `cosign verify`.
