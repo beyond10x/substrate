@@ -45,6 +45,28 @@ pub const MAX_SECRET_SLOT_BYTES: u64 = 65_536;
 /// A caller cannot collide with it: every caller-set name containing `secret` is already refused
 /// (`crates/substrate-daemon/src/app/operations.rs`, `crates/substrate-host/src/process.rs`).
 pub const SECRET_SLOTS_ENV: &str = "SUBSTRATE_SECRET_SLOTS";
+/// How many egress apertures one deployment may declare (ADR 0013).
+///
+/// An aperture is outbound authority. A deployment that needs many of them is a deployment whose
+/// reach nobody reviewed, and design 10 § 9 decision 5 gives one run exactly one of them anyway.
+pub const MAX_EGRESS_APERTURES: u32 = 4;
+/// The address the per-run forwarder listens on inside the run's own network namespace.
+///
+/// Loopback in a namespace whose only interface is loopback: nothing outside the sandbox can reach
+/// it, and the sandbox can reach nothing else (`docs/design/10a-egress-mechanism-spike.md` § 3.1).
+pub const APERTURE_LOOPBACK_ADDRESS: &str = "127.0.0.1";
+/// Where a generated per-run host mapping is bound, so a declared name resolves to the forwarder.
+///
+/// The sandbox has no `/etc` (`docs/design/10-destination-bound-egress.md` § 2). This is the whole
+/// resolver a run gets: exactly the declared name, exactly loopback, and no `resolv.conf`.
+pub const APERTURE_HOSTS_PATH: &str = "/etc/hosts";
+/// Where a generated per-run certificate authority bundle is bound.
+///
+/// TLS is byte-transparent through the forwarder but unverifiable without a trust anchor, which is
+/// the open question `docs/design/10a-egress-mechanism-spike.md` § 6 row 4 left. The bytes are
+/// snapshotted per run rather than bound from a live host path, so a rotation mid-run cannot change
+/// what a running child trusts — the same shape design 10 § 9 decision 2 gives `/etc/hosts`.
+pub const APERTURE_CA_BUNDLE_PATH: &str = "/etc/ssl/certs/ca-certificates.crt";
 pub const EXECUTION_CAPSULE_MOUNT: &str = "/runtime";
 /// Hash-domain separator for the capsule manifest. A wire-visible protocol byte string:
 /// `contracts/substrate-wire/0.4.0/hashing.json` const-pins the same value, and
@@ -626,6 +648,13 @@ pub enum SandboxProfile {
 pub struct ConfinementRequest {
     pub capability_snapshot: String,
     pub network: NetworkMode,
+    /// The operator-declared aperture this start selects, by name (ADR 0013).
+    ///
+    /// A name and never a destination, at any depth, in any field: configuration owns reach and a
+    /// request only selects among what configuration already permitted. Absent is the default and
+    /// the floor — `--unshare-net` and no interface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub aperture: Option<String>,
     pub profile: SandboxProfile,
     #[serde(rename = "require")]
     pub required: bool,
@@ -676,10 +705,93 @@ pub struct AppliedExecutionCapsule {
     pub total_bytes: u64,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// What the network actually was, reported and never inferred (ADR 0013).
+///
+/// `"none"` is the floor and stays a bare string, so every 0.4.0 and 0.5.0 reader keeps parsing
+/// every run that used no aperture. An applied aperture is an object, because "which aperture, to
+/// what address, by what mechanism, and how many bytes" are four separate observations and a
+/// reader that only has the name cannot audit any of the other three.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(from = "AppliedNetworkRepr", into = "AppliedNetworkRepr")]
 pub enum AppliedNetwork {
+    None,
+    Aperture(AppliedAperture),
+}
+
+/// The serialized shape of [`AppliedNetwork`]: a bare `"none"`, or the applied-aperture object.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+enum AppliedNetworkRepr {
+    None(AppliedNoNetwork),
+    Aperture(AppliedAperture),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+enum AppliedNoNetwork {
     #[serde(rename = "none")]
     None,
+}
+
+impl From<AppliedNetworkRepr> for AppliedNetwork {
+    fn from(value: AppliedNetworkRepr) -> Self {
+        match value {
+            AppliedNetworkRepr::None(AppliedNoNetwork::None) => Self::None,
+            AppliedNetworkRepr::Aperture(aperture) => Self::Aperture(aperture),
+        }
+    }
+}
+
+impl From<AppliedNetwork> for AppliedNetworkRepr {
+    fn from(value: AppliedNetwork) -> Self {
+        match value {
+            AppliedNetwork::None => Self::None(AppliedNoNetwork::None),
+            AppliedNetwork::Aperture(aperture) => Self::Aperture(aperture),
+        }
+    }
+}
+
+/// The aperture a run actually got: name, pinned destination, mechanism and bytes (ADR 0013).
+///
+/// `destination` is the address the forwarder dialled, not the configured host string. Both exist
+/// because they can differ and `docs/design/04-security-and-isolation.md` matches on the resolved
+/// one; a reader auditing where a credential was spent needs the resolved one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AppliedAperture {
+    pub mode: ApertureMode,
+    /// The operator-declared name the request selected.
+    pub name: String,
+    /// The pinned `address:port` the forwarder dialled, resolved once at declaration.
+    pub destination: String,
+    pub mechanism: ApertureMechanism,
+    /// What crossed, counted where the bytes are: in the forwarder and nowhere else.
+    pub bytes: ApertureBytes,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ApertureMode {
+    #[serde(rename = "aperture")]
+    Aperture,
+}
+
+/// How the aperture was installed. One value today, and named rather than assumed: a client that
+/// reads this is reading an observation, not selecting an implementation (invariant 4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ApertureMechanism {
+    /// A per-run forwarder listening inside the run's own network namespace
+    /// (`docs/design/10-destination-bound-egress.md` § 4 option (c)).
+    #[serde(rename = "loopback-forwarder")]
+    LoopbackForwarder,
+}
+
+/// Byte accounting for one applied aperture, from the only place that sees the bytes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ApertureBytes {
+    /// Bytes the confined process sent towards the pinned destination.
+    pub to_destination: u64,
+    /// Bytes the pinned destination sent back.
+    pub from_destination: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1302,6 +1414,18 @@ pub struct CapabilityFacts {
         skip_serializing_if = "Option::is_none"
     )]
     pub exec_inline_capsule: Option<ExecutionCapsuleFacts>,
+    /// The apertures this deployment declared, by name and pinned destination (ADR 0013).
+    ///
+    /// Answers "what could this daemon ever reach" — deployment vocabulary, not secret material
+    /// (`docs/design/04-security-and-isolation.md` § 6). Published **only** after the mechanism was
+    /// exercised in a throwaway sandbox, never after reading configuration: configured intent is
+    /// not a fact. Absent leaves every aperture request `unserved`, because a run that cannot get
+    /// the aperture it asked for must not get a quieter one instead (invariant 3).
+    #[serde(
+        rename = "exec.egress-apertures",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub exec_egress_apertures: Option<Vec<EgressApertureFact>>,
     /// The sorted names of the slots this driver can deliver sealed (ADR 0012).
     ///
     /// Names only — never a path, a length or a digest of a value — so adding or removing a slot
@@ -1345,6 +1469,7 @@ impl Default for CapabilityFacts {
             exec_max_current: None,
             exec_signals: None,
             exec_inline_capsule: None,
+            exec_egress_apertures: None,
             secrets_slots: None,
             snapshot_provenance_events: None,
         }
@@ -1460,6 +1585,12 @@ pub enum WireValidationError {
     DuplicateSecretSlotDescriptor,
     #[error("one secret slot is named twice in the same start")]
     DuplicateSecretSlotName,
+    #[error("the selected egress aperture is not a legal aperture name")]
+    InvalidApertureName,
+    #[error("an egress aperture name carries a destination where a name belongs")]
+    ApertureDestinationInRequest,
+    #[error("a network mode and an egress aperture selection disagree")]
+    ApertureModeMismatch,
     #[error("execution capsule manifest does not match its digest")]
     CapsuleManifestMismatch,
 }
@@ -1694,6 +1825,70 @@ pub fn secret_slot_environment(slots: &[SecretSlotRequest]) -> Option<String> {
             .collect::<Vec<_>>()
             .join(","),
     )
+}
+
+/// One declared egress aperture as a capability fact: a name and the address it is pinned to.
+///
+/// Deployment vocabulary, published so `/v1/machine` can answer "what could this daemon ever
+/// reach". `destination` is the resolved `address:port`, not the configured host string, because
+/// the resolved one is what the kernel would actually be asked for
+/// (`docs/design/04-security-and-isolation.md` § 4).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct EgressApertureFact {
+    pub name: String,
+    pub destination: String,
+}
+
+/// An aperture name: `[a-z][a-z0-9_]{0,63}`, the same shape a secret slot name has.
+///
+/// Deliberately excludes `.` and `:`, so a destination can never be spelled as a name by accident
+/// — `api.example.com:443` fails this and is then refused *by name* rather than reported as an
+/// aperture nobody declared (design 10 § 5, row 3).
+pub fn valid_aperture_name(name: &str) -> bool {
+    valid_secret_slot_name(name)
+}
+
+/// Reads as a destination rather than a name: anything carrying a host separator or a port.
+///
+/// The successor input schema has no destination field at all, so a conforming client's raw
+/// destination is `schema-invalid` first. This exists for the one case the schema cannot see: a
+/// *name* that parses as `host:port`, which is a rejected escalation and not a configuration typo.
+fn reads_as_destination(value: &str) -> bool {
+    value.contains(':')
+        || value.contains('/')
+        || value.contains('.')
+        || value.parse::<std::net::IpAddr>().is_ok()
+}
+
+/// Checks the aperture half of one sandbox request against every rule ADR 0013 names.
+///
+/// Shape only. Whether *this* deployment declared the name is the driver's question, and whether
+/// the mechanism verified is the capability's; both are answered after this and neither here.
+///
+/// # Errors
+///
+/// Returns the rule that was broken. Nothing is adjusted: a start that cannot have the aperture it
+/// named gets a refusal, never a quieter network.
+pub fn validate_aperture_request(
+    network: NetworkMode,
+    aperture: Option<&str>,
+) -> Result<(), WireValidationError> {
+    match (network, aperture) {
+        (NetworkMode::None, None) => Ok(()),
+        (NetworkMode::None, Some(_)) | (NetworkMode::Aperture, None) => {
+            Err(WireValidationError::ApertureModeMismatch)
+        }
+        (NetworkMode::Aperture, Some(name)) => {
+            if reads_as_destination(name) {
+                return Err(WireValidationError::ApertureDestinationInRequest);
+            }
+            if !valid_aperture_name(name) {
+                return Err(WireValidationError::InvalidApertureName);
+            }
+            Ok(())
+        }
+    }
 }
 
 /// An absolute path with no `.`, no `..`, no empty component and no trailing slash.
@@ -2480,5 +2675,104 @@ mod secret_slot_tests {
             )
             .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod egress_aperture_tests {
+    use super::{
+        ApertureBytes, ApertureMechanism, ApertureMode, AppliedAperture, AppliedNetwork,
+        NetworkMode, WireValidationError, valid_aperture_name, validate_aperture_request,
+    };
+
+    /// `"none"` stays a bare string, so every reader of an earlier bundle keeps parsing every run
+    /// that used no aperture; the aperture branch is an object because it carries four claims.
+    #[test]
+    fn applied_network_is_a_string_or_an_object_and_round_trips() {
+        let none = serde_json::to_value(AppliedNetwork::None).unwrap();
+        assert_eq!(none, serde_json::json!("none"));
+        assert_eq!(
+            serde_json::from_value::<AppliedNetwork>(none).unwrap(),
+            AppliedNetwork::None
+        );
+        let applied = AppliedNetwork::Aperture(AppliedAperture {
+            mode: ApertureMode::Aperture,
+            name: "model".to_owned(),
+            destination: "203.0.113.7:443".to_owned(),
+            mechanism: ApertureMechanism::LoopbackForwarder,
+            bytes: ApertureBytes {
+                to_destination: 12,
+                from_destination: 34,
+            },
+        });
+        let rendered = serde_json::to_value(applied.clone()).unwrap();
+        assert_eq!(rendered["mode"], "aperture");
+        assert_eq!(rendered["destination"], "203.0.113.7:443");
+        assert_eq!(rendered["mechanism"], "loopback-forwarder");
+        assert_eq!(rendered["bytes"]["from_destination"], 34);
+        assert_eq!(
+            serde_json::from_value::<AppliedNetwork>(rendered).unwrap(),
+            applied
+        );
+    }
+
+    /// A name is a name. Anything that reads as a destination is a rejected escalation, told apart
+    /// from a configuration typo by name so an operator is not sent looking for the wrong bug.
+    #[test]
+    fn a_destination_where_a_name_belongs_is_refused_as_such() {
+        for escalation in [
+            "api.example.com:443",
+            "10.0.0.1",
+            "10.0.0.1:443",
+            "example.com",
+            "http://example.com/",
+        ] {
+            assert_eq!(
+                validate_aperture_request(NetworkMode::Aperture, Some(escalation))
+                    .expect_err("refused"),
+                WireValidationError::ApertureDestinationInRequest,
+                "{escalation}"
+            );
+        }
+        assert_eq!(
+            validate_aperture_request(NetworkMode::Aperture, Some("Model")).expect_err("refused"),
+            WireValidationError::InvalidApertureName
+        );
+    }
+
+    /// The floor is the default, and the two halves of a selection may not disagree.
+    #[test]
+    fn the_mode_and_the_name_are_one_statement() {
+        assert!(validate_aperture_request(NetworkMode::None, None).is_ok());
+        assert!(validate_aperture_request(NetworkMode::Aperture, Some("model")).is_ok());
+        assert_eq!(
+            validate_aperture_request(NetworkMode::None, Some("model")).expect_err("refused"),
+            WireValidationError::ApertureModeMismatch
+        );
+        assert_eq!(
+            validate_aperture_request(NetworkMode::Aperture, None).expect_err("refused"),
+            WireValidationError::ApertureModeMismatch
+        );
+    }
+
+    /// A start that names no aperture serializes no aperture field, so its ledger hash is the hash
+    /// it had before this bundle existed.
+    #[test]
+    fn egress_defaults_to_none() {
+        let request = super::ConfinementRequest {
+            capability_snapshot: format!("sha256:{}", "0".repeat(64)),
+            network: NetworkMode::None,
+            aperture: None,
+            profile: super::SandboxProfile::Workspace,
+            required: true,
+        };
+        let rendered = serde_json::to_value(&request).unwrap();
+        assert!(
+            rendered.get("aperture").is_none(),
+            "an absent aperture appeared on the wire: {rendered}"
+        );
+        assert_eq!(rendered["network"], "none");
+        assert!(valid_aperture_name("model"));
+        assert!(!valid_aperture_name("api.example.com"));
     }
 }

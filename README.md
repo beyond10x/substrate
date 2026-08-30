@@ -149,15 +149,54 @@ target/debug/substrate-daemon \
   --workspaces ./run/workspaces \
   --deployment personal \
   --allow-uid 1000 \
-  --secret-slot model-key=/etc/substrate/model-key
+  --secret-slot model_key=/etc/substrate/model-key
 ```
 
-The **path** never leaves the daemon process — it is not a capability fact, not an event field and
+A slot **name** is lowercase ASCII, digits and `_`, first character a letter, at most 64 bytes
+(`crates/substrate-wire/src/lib.rs:1766`) — a hyphen is refused. The **path** never leaves the
+daemon process — it is not a capability fact, not an event field and
 not an error message. An error may name a slot; it never names a value. Rotating the file behind a
 declared name needs no restart and invalidates no admitted operation. The ledger request hash covers
 slot **names** only, so two requests differing only in a slot's value hash identically. Where sealing
 is unavailable the capability fact `secrets.slots` is **absent and the operation is refused by
 name** — it never degrades to passing the value some other way (invariant 3). ADR 0012.
+
+### Egress apertures
+
+Ordinary execution has no egress and that does not move: every run is under `--unshare-net` in a
+namespace with loopback and nothing else. An **aperture** is a separate, operator-declared authority
+to reach exactly one destination — `--egress-aperture <name>=<host>:<port>/tcp`, repeatable. A
+request selects one **by name** and can never carry a destination:
+
+```console
+target/debug/substrate-daemon \
+  --socket ./run/substrate.sock \
+  --state ./run/state.db \
+  --workspaces ./run/workspaces \
+  --deployment personal \
+  --allow-uid 1000 \
+  --cgroup-root /sys/fs/cgroup/…/substrate \
+  --egress-aperture model=api.example.com:443/tcp \
+  --ca-bundle /etc/ssl/certs/ca-certificates.crt
+```
+
+```json
+{ "sandbox": { "network": "aperture", "aperture": "model", "profile": "workspace", "…": "…" } }
+```
+
+The host is resolved **once**, at declaration, and pinned; the sandbox gets no resolver and performs
+no lookup. Inside the run, the declared name maps to loopback through a generated read-only
+`/etc/hosts` and the forwarder listens on the declared port, so `https://api.example.com/…` is the
+URL a child uses unchanged — and, where `--ca-bundle` is configured, verifies against a private
+per-run snapshot of that anchor. The pinned address itself is **not** reachable directly: the
+aperture is the only peer in the namespace.
+
+What was installed is reported rather than inferred — `applied.network` becomes
+`{mode, name, destination, mechanism, bytes}`, with the address the forwarder actually dialled and
+the bytes counted where they crossed. An aperture nobody declared is `unserved` **with the name in
+the message**; where the mechanism did not verify in a throwaway sandbox at startup, the capability
+fact `exec.egress-apertures` is absent and every aperture request is `unserved` — never a run that
+quietly got no network instead (invariant 3). ADR 0013.
 
 ### Serving exec
 

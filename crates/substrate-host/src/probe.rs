@@ -64,6 +64,15 @@ pub fn probe(config: &HostConfig, openat2: bool) -> CapabilitySnapshot {
         exec && !config.secret_slots.is_empty() && crate::secrets::sealing_is_provable(),
         exec && !config.secret_slots.is_empty() && probe_descriptor_passthrough(config),
     );
+    // The mechanism, in a throwaway sandbox, and never a declared destination's liveness: a
+    // readiness check that dialled somebody else's endpoint would make this daemon's readiness
+    // their uptime (`docs/design/10-destination-bound-egress.md` § 9 decision 6). Nothing is probed
+    // at all when no aperture is declared, so a daemon that wants none pays nothing.
+    let egress_apertures = crate::egress::egress_apertures_fact(
+        &config.egress_apertures,
+        exec && !config.egress_apertures.is_empty()
+            && crate::egress::mechanism_is_provable(&config.bubblewrap),
+    );
     let facts = CapabilityFacts {
         events_pull: Some(true),
         events_stream: Some(true),
@@ -107,6 +116,7 @@ pub fn probe(config: &HostConfig, openat2: bool) -> CapabilitySnapshot {
             max_file_bytes: MAX_EXECUTION_CAPSULE_FILE_BYTES,
             max_total_bytes: MAX_EXECUTION_CAPSULE_BYTES,
         }),
+        exec_egress_apertures: egress_apertures,
         secrets_slots,
         snapshot_provenance_events: Some(config.snapshot_provenance_events),
     };

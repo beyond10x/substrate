@@ -285,7 +285,30 @@ pub struct DaemonConfig {
     /// Never request data. An empty list means the `secrets.slots` capability is absent and a start
     /// naming a slot is `unserved` — there is no weaker delivery to fall back to.
     pub secret_slots: Vec<SecretSlot>,
+    /// Operator-declared egress apertures (ADR 0013), each one destination tuple.
+    ///
+    /// Never request data. An empty list means the `exec.egress-apertures` capability is absent and
+    /// a start naming an aperture is `unserved`; the sandbox keeps `--unshare-net` and there is no
+    /// weaker reach to fall back to.
+    pub egress_apertures: Vec<EgressAperture>,
+    /// The certificate bundle a run with an aperture gets a private read-only snapshot of.
+    ///
+    /// `None` gives a sandbox no trust anchor. TLS still crosses the aperture byte for byte, and a
+    /// child that verifies will refuse rather than trust something it cannot check.
+    pub ca_bundle: Option<PathBuf>,
     pub tcp: Option<TcpDaemonConfig>,
+}
+
+/// One operator-declared egress aperture: a name and one destination tuple (ADR 0013).
+///
+/// The daemon's own configuration vocabulary, not the driver's — invariant 4 is why it is declared
+/// here rather than re-exported from `substrate_host`. `serve` resolves the host once and converts
+/// it at the composition root, and nowhere else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EgressAperture {
+    pub name: String,
+    pub host: String,
+    pub port: u16,
 }
 
 /// One operator-declared secret slot: a name, and the file behind it (ADR 0012).
@@ -332,6 +355,8 @@ impl DaemonConfig {
             bubblewrap: PathBuf::from("/usr/bin/bwrap"),
             event_retention: 10_000,
             secret_slots: Vec::new(),
+            egress_apertures: Vec::new(),
+            ca_bundle: None,
             tcp: None,
         }
     }
@@ -365,6 +390,10 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
         bail!("event retention must be nonzero");
     }
     check_secret_slots(&config.secret_slots)?;
+    // Resolved once, here, and pinned for the process's lifetime: the sandbox gets no resolver, so
+    // a name that only resolves later resolves nowhere at all (ADR 0013).
+    let egress_apertures = resolve_egress_apertures(&config.egress_apertures)?;
+    check_ca_bundle(config.ca_bundle.as_deref())?;
     let store = Arc::new(
         Store::open_with_event_retention(&config.state, config.event_retention)
             .context("open durable state")?,
@@ -384,6 +413,8 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
             path: slot.path,
         })
         .collect();
+    host_config.egress_apertures = egress_apertures;
+    host_config.ca_bundle = config.ca_bundle;
     let driver = HostDriver::open(host_config).context("open host driver")?;
     let app = App::new(store, driver, config.deployment);
     app.sweep_expired().await;
@@ -502,6 +533,82 @@ fn check_secret_slots(slots: &[SecretSlot]) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Resolves every declared aperture exactly once, at declaration, and pins what it resolved to.
+///
+/// DNS is outside the aperture. A run gets no resolver and performs no lookup, so a destination
+/// that is not an address by the time the daemon is ready is a destination this daemon cannot
+/// reach — said here, at startup, rather than by a run failing later for a reason nobody logged.
+///
+/// # Errors
+///
+/// Returns the first rule broken, naming the aperture.
+fn resolve_egress_apertures(
+    declared: &[EgressAperture],
+) -> anyhow::Result<Vec<substrate_host::EgressAperture>> {
+    if declared.len() > substrate_wire::MAX_EGRESS_APERTURES as usize {
+        bail!(
+            "at most {} egress apertures may be declared",
+            substrate_wire::MAX_EGRESS_APERTURES
+        );
+    }
+    let mut names: BTreeSet<&str> = BTreeSet::new();
+    let mut resolved = Vec::with_capacity(declared.len());
+    for aperture in declared {
+        if !substrate_wire::valid_aperture_name(&aperture.name) {
+            bail!("egress aperture names must match [a-z][a-z0-9_]{{0,63}}");
+        }
+        if !names.insert(aperture.name.as_str()) {
+            bail!(
+                "egress aperture {} is declared more than once",
+                aperture.name
+            );
+        }
+        if aperture.port == 0 {
+            bail!("egress aperture {} declares no port", aperture.name);
+        }
+        let pinned =
+            std::net::ToSocketAddrs::to_socket_addrs(&(aperture.host.as_str(), aperture.port))
+                .with_context(|| {
+                    format!(
+                        "resolve the destination of egress aperture {}",
+                        aperture.name
+                    )
+                })?
+                .find(std::net::SocketAddr::is_ipv4)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "egress aperture {} resolved to no IPv4 destination",
+                        aperture.name
+                    )
+                })?;
+        resolved.push(substrate_host::EgressAperture {
+            name: aperture.name.clone(),
+            host: aperture.host.clone(),
+            port: aperture.port,
+            pinned,
+        });
+    }
+    Ok(resolved)
+}
+
+/// The trust anchor must exist and be readable now, not on the first run that needs it.
+///
+/// # Errors
+///
+/// Returns why the configured bundle cannot be snapshotted per run.
+fn check_ca_bundle(path: Option<&std::path::Path>) -> anyhow::Result<()> {
+    let Some(path) = path else {
+        return Ok(());
+    };
+    let metadata = std::fs::symlink_metadata(path)
+        .or_else(|_| std::fs::metadata(path))
+        .with_context(|| "inspect the configured certificate bundle".to_owned())?;
+    if !metadata.is_file() || metadata.len() == 0 {
+        bail!("the certificate bundle must name one non-empty regular file");
+    }
+    Ok(())
+}
+
 fn configuration_generation(config: &DaemonConfig) -> u64 {
     let mut material = Vec::new();
     for value in [
@@ -531,6 +638,19 @@ fn configuration_generation(config: &DaemonConfig) -> u64 {
     for name in names {
         material.extend_from_slice(&(name.len() as u64).to_be_bytes());
         material.extend_from_slice(name.as_bytes());
+    }
+    // Apertures whole — name *and* destination. Unlike a secret slot, what is behind an aperture is
+    // exactly what a client is told (`exec.egress-apertures` publishes it), so changing it must
+    // move the generation and invalidate every snapshot (design 02 V1 decision 5).
+    let mut apertures: Vec<String> = config
+        .egress_apertures
+        .iter()
+        .map(|aperture| format!("{}={}:{}/tcp", aperture.name, aperture.host, aperture.port))
+        .collect();
+    apertures.sort_unstable();
+    for aperture in apertures {
+        material.extend_from_slice(&(aperture.len() as u64).to_be_bytes());
+        material.extend_from_slice(aperture.as_bytes());
     }
     let digest = Sha256::digest(material);
     u64::from_be_bytes(

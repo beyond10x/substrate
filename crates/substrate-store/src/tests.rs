@@ -147,6 +147,7 @@ fn exec(id: &str, workspace: &str, state: ExecState) -> StoredExec {
             requested: ConfinementRequest {
                 capability_snapshot: format!("sha256:{}", "7".repeat(64)),
                 network: NetworkMode::None,
+                aperture: None,
                 profile: SandboxProfile::Workspace,
                 required: true,
             },

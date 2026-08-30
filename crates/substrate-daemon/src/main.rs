@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use clap::Parser;
-use substrate_daemon::{DaemonConfig, SecretSlot, TcpDaemonConfig, serve};
+use substrate_daemon::{DaemonConfig, EgressAperture, SecretSlot, TcpDaemonConfig, serve};
 use tracing_subscriber::EnvFilter;
 
 /// Parses one `--secret-slot name=path`.
@@ -24,6 +24,39 @@ fn parse_secret_slot(value: &str) -> Result<SecretSlot, String> {
     Ok(SecretSlot {
         name: name.to_owned(),
         path: PathBuf::from(path),
+    })
+}
+
+/// Parses one `--egress-aperture name=host:port/tcp`.
+///
+/// The protocol suffix is required and is `tcp`, so a later slice that serves another one does not
+/// silently reinterpret a declaration written today (design 10 § 9 decision 3).
+fn parse_egress_aperture(value: &str) -> Result<EgressAperture, String> {
+    let (name, destination) = value
+        .split_once('=')
+        .ok_or_else(|| "an egress aperture is declared as name=host:port/tcp".to_owned())?;
+    if !substrate_wire::valid_aperture_name(name) {
+        return Err("an egress aperture name must match [a-z][a-z0-9_]{0,63}".to_owned());
+    }
+    let destination = destination
+        .strip_suffix("/tcp")
+        .ok_or_else(|| format!("egress aperture {name} must declare a /tcp destination"))?;
+    let (host, port) = destination
+        .rsplit_once(':')
+        .ok_or_else(|| format!("egress aperture {name} must declare host:port"))?;
+    if host.is_empty() {
+        return Err(format!("egress aperture {name} declares no host"));
+    }
+    let port: u16 = port
+        .parse()
+        .map_err(|_| format!("egress aperture {name} declares no usable port"))?;
+    if port == 0 {
+        return Err(format!("egress aperture {name} declares no usable port"));
+    }
+    Ok(EgressAperture {
+        name: name.to_owned(),
+        host: host.to_owned(),
+        port,
     })
 }
 
@@ -71,6 +104,27 @@ struct Arguments {
         value_parser = parse_secret_slot
     )]
     secret_slots: Vec<SecretSlot>,
+
+    /// Declare an egress aperture as `name=host:port/tcp` (repeatable). ADR 0013.
+    ///
+    /// This is where reach is decided. A request may name one of these and may never carry a
+    /// destination; the host is resolved once, here, and pinned for this process's lifetime.
+    #[arg(
+        long = "egress-aperture",
+        env = "SUBSTRATE_EGRESS_APERTURE",
+        value_name = "NAME=HOST:PORT/tcp",
+        value_delimiter = ',',
+        value_parser = parse_egress_aperture
+    )]
+    egress_apertures: Vec<EgressAperture>,
+
+    /// A certificate bundle a run with an aperture gets a private read-only snapshot of.
+    ///
+    /// Without it a sandbox has no trust anchor — it has no `/etc` at all — so TLS crosses the
+    /// aperture intact and fails verification inside. Absent and unverifiable, never present and
+    /// unverified.
+    #[arg(long, env = "SUBSTRATE_CA_BUNDLE", value_name = "PATH")]
+    ca_bundle: Option<PathBuf>,
 
     #[arg(
         long,
@@ -125,6 +179,8 @@ impl From<Arguments> for DaemonConfig {
             bubblewrap: arguments.bubblewrap,
             event_retention: arguments.event_retention,
             secret_slots: arguments.secret_slots,
+            egress_apertures: arguments.egress_apertures,
+            ca_bundle: arguments.ca_bundle,
             tcp,
         }
     }

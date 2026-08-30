@@ -33,14 +33,24 @@ trust this page.
 
 - The Rust workspace has five crates — `substrate-wire`, `substrate-store`, `substrate-host`,
   `substrate-daemon` and the offline `substrate-contract-check` ([`Cargo.toml`](Cargo.toml),
-  `[workspace] members`). 0.5.0 is the current development bundle and every earlier bundle
+  `[workspace] members`). 0.6.0 is the current development bundle and every earlier bundle
   directory is frozen; [`scripts/gate.sh`](scripts/gate.sh) runs the four Python bundle checkers
-  plus `cargo xtask check-bundle 0.5.0` on every invocation, so a green gate is evidence that all
-  five still hold. 0.5.0 is the first bundle whose checker is a `cargo xtask` verb rather than a
-  Python script; the four frozen pairs stay Python as the reproducibility proof of the bundles they
+  plus `cargo xtask check-bundle` for 0.5.0 and 0.6.0 on every invocation, so a green gate is
+  evidence that all six still hold. 0.5.0 is the first bundle whose checker is a `cargo xtask` verb
+  rather than a Python script; the four frozen pairs stay Python as the reproducibility proof of the bundles they
   froze. The one recorded exception to immutability is the 2026-08-24 brand rename, which
   re-rendered every bundle in place (AGENTS.md invariant 6). No development bundle becomes a stable
   release without packaging and signing.
+- **Egress is destination-bound and operator-declared.** Ordinary execution still has no egress;
+  where an operator declares `--egress-aperture <name>=<host>:<port>/tcp` and the mechanism verifies
+  in a throwaway sandbox at startup, a run may select it **by name** and reach that one pinned
+  address. The sandbox namespace still has loopback and no other interface — the aperture is a
+  listening socket inside it, served by a per-run forwarder in the run's own cgroup
+  ([`crates/substrate-host/src/egress.rs`](crates/substrate-host/src/egress.rs), ADR 0013). The
+  mechanism cases in `egress::tests` run wherever bubblewrap is present; the delegated lane's
+  aperture cases in
+  [`crates/substrate-daemon/tests/runtime_vectors.rs`](crates/substrate-daemon/tests/runtime_vectors.rs)
+  are **absent** without `SUBSTRATE_VECTORS_CGROUP_ROOT`, never reported as passed.
 - No Flux package, type or checkout is required: `flux` appears in no
   [`Cargo.lock`](Cargo.lock) package and nowhere under [`crates/`](crates), as
   [ADR 0001](adr/0001-substrate-is-standalone-and-flux-free.md) requires.

@@ -381,6 +381,10 @@ fn check_classification(version: &str, released: &Tree, failures: &mut Vec<Strin
 /// A successor that rendered, verified and preserved everything while adding nothing is the failure
 /// this catches; the entries are the acceptance list of the story that cut the bundle.
 fn check_additions(version: &str, released: &Tree, failures: &mut Vec<String>) {
+    if version == "0.6.0" {
+        check_aperture_additions(released, failures);
+        return;
+    }
     if version != "0.5.0" {
         return;
     }
@@ -551,6 +555,148 @@ fn resolve(from: &str, declaration: &str) -> Option<String> {
     Some(resolved.join("/"))
 }
 
+/// What `0.6.0` exists for: destination-bound egress apertures (ADR 0013).
+///
+/// The request field, the capability fact, the applied observation and the refusals — each read out
+/// of the bundle rather than out of prose, so a successor that renders and preserves everything but
+/// adds none of this fails here.
+fn check_aperture_additions(released: &Tree, failures: &mut Vec<String>) {
+    let require = |path: &str, pointer: &str, what: &str, failures: &mut Vec<String>| {
+        let Some(document) = json_at(released, path, failures) else {
+            return;
+        };
+        if document.pointer(pointer).is_none() {
+            failures.push(format!("{path}: {what} is absent at {pointer}"));
+        }
+    };
+    require(
+        "schemas/inputs/exec-start.json",
+        "/properties/sandbox/properties/aperture",
+        "the aperture start field (ADR 0013)",
+        failures,
+    );
+    require(
+        "schemas/inputs/pipe-session-start.json",
+        "/properties/exec/properties/sandbox/properties/aperture",
+        "the aperture session-start field (ADR 0013)",
+        failures,
+    );
+    require(
+        "schemas/capability.json",
+        "/properties/facts/properties/exec.egress-apertures",
+        "the exec.egress-apertures capability fact (ADR 0013)",
+        failures,
+    );
+    require(
+        "schemas/resource.json",
+        "/$defs/applied-network",
+        "the applied-aperture observation (ADR 0013)",
+        failures,
+    );
+
+    // Bound to the wire constant here rather than through a `{"$wire": …}` marker in the authored
+    // source, because binding it there would mean editing `xtask/src/render.rs` — and every
+    // released bundle records the digest of the renderer that produced it, so one edit to that file
+    // stops `0.5.0` being a fixed point of its own source. This check makes the same claim from a
+    // file no bundle hashes: change the constant and the bundle fails, exactly as intended.
+    if let Some(document) = json_at(released, "schemas/capability.json", failures) {
+        let declared = document
+            .pointer("/properties/facts/properties/exec.egress-apertures/maxItems")
+            .and_then(Value::as_u64);
+        if declared != Some(u64::from(substrate_wire::MAX_EGRESS_APERTURES)) {
+            failures.push(format!(
+                "schemas/capability.json: exec.egress-apertures maxItems is {declared:?}, \
+                 and substrate_wire::MAX_EGRESS_APERTURES is {}",
+                substrate_wire::MAX_EGRESS_APERTURES
+            ));
+        }
+    }
+
+    // A request may never carry a destination. This is the schema saying so, not a comment.
+    if let Some(document) = json_at(released, "schemas/inputs/exec-start.json", failures) {
+        let rendered = document.to_string();
+        for forbidden in ["\"host\"", "\"destination\"", "\"port\""] {
+            if rendered.contains(forbidden) {
+                failures.push(format!(
+                    "schemas/inputs/exec-start.json: a start input names {forbidden}; \
+                     configuration owns reach and a request selects a declared name"
+                ));
+            }
+        }
+    }
+
+    check_aperture_coverage(released, failures);
+}
+
+/// The coverage half of `0.6.0`: every aperture requirement carries evidence, and every refusal is
+/// read out of the vector that asserts it rather than out of prose.
+fn check_aperture_coverage(released: &Tree, failures: &mut Vec<String>) {
+    let required_requirements = [
+        "security.egress-aperture-declared",
+        "security.egress-aperture-default",
+        "security.egress-aperture-exclusive",
+        "security.egress-aperture-named",
+        "security.egress-aperture-observed",
+        "security.egress-aperture-probed",
+        "security.egress-aperture-reach",
+    ];
+    let Some(coverage) = json_at(released, "coverage.json", failures) else {
+        return;
+    };
+    let rows = coverage
+        .get("requirements")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for requirement in required_requirements {
+        let covered = rows.iter().any(|row| {
+            row.get("id").and_then(Value::as_str) == Some(requirement)
+                && row
+                    .get("evidence")
+                    .and_then(Value::as_array)
+                    .is_some_and(|evidence| !evidence.is_empty())
+        });
+        if !covered {
+            failures.push(format!(
+                "coverage.json: requirement {requirement} is absent or carries no evidence"
+            ));
+        }
+    }
+
+    // The refusal classes, read out of the vectors that assert them rather than out of prose.
+    for (path, code) in [
+        (
+            "vectors/http/aperture-undeclared-is-unserved.json",
+            "exec.aperture-undeclared",
+        ),
+        (
+            "vectors/http/aperture-fact-absent-refuses.json",
+            "exec.egress-apertures-unserved",
+        ),
+        (
+            "vectors/http/aperture-destination-in-request-refused.json",
+            "exec.aperture-destination-in-request",
+        ),
+    ] {
+        let Some(vector) = json_at(released, path, failures) else {
+            continue;
+        };
+        if vector.pointer("/expected/response/body/error/code") != Some(&json!(code)) {
+            failures.push(format!("{path}: does not assert the refusal {code}"));
+        }
+    }
+    // The floor did not move: the predecessor's own egress vector is still here, still answering
+    // an aperture request from a driver that serves none exactly as it did.
+    if let Some(vector) = json_at(released, "vectors/http/egress-unserved.json", failures)
+        && vector.pointer("/expected/response/body/error/code")
+            != Some(&json!("exec.network-unserved"))
+    {
+        failures.push(
+            "vectors/http/egress-unserved.json: the pre-aperture refusal changed shape".to_owned(),
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{Args, check, resolve, run};
@@ -559,7 +705,9 @@ mod tests {
     use serde_json::Value;
     use std::path::PathBuf;
 
-    const VERSION: &str = "0.5.0";
+    const VERSION: &str = "0.6.0";
+    /// The predecessor is checked too: the gate runs both, and so does this module.
+    const PREDECESSOR: &str = "0.5.0";
 
     fn root() -> PathBuf {
         repo::root().expect("workspace root")
@@ -581,7 +729,17 @@ mod tests {
     fn the_released_successor_bundle_holds() {
         let report = check(&inputs()).expect("the bundle reads");
         assert!(report.failures().is_empty(), "{}", report.failure_text());
-        assert!(report.summary().contains("0.5.0"));
+        assert!(report.summary().contains(VERSION));
+    }
+
+    /// And so does the one before it. Every released bundle rendered by this renderer is a fixed
+    /// point of its own source, or the whole tree stops being the output of a reviewable program.
+    #[test]
+    fn the_predecessor_bundle_still_holds() {
+        let mut inputs = inputs();
+        inputs.version = PREDECESSOR.to_owned();
+        let report = check(&inputs).expect("the bundle reads");
+        assert!(report.failures().is_empty(), "{}", report.failure_text());
     }
 
     /// The command surface runs the same check.

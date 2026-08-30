@@ -41,8 +41,8 @@ Each is a claim that can be checked. Breaking one is a design change, not a refa
 5. **Operations are durable before driver dispatch**
    (`adr/0005-operations-are-durable-before-driver-dispatch.md`).
 6. **Every released contract bundle directory is immutable.** `contracts/substrate-wire/0.1.0`
-   through `0.5.0` exist; `0.5.0` is the current development bundle, adding sealed secret slots
-   (ADR 0012), and **every earlier directory is frozen** (`STATUS.md:36`,
+   through `0.6.0` exist; `0.6.0` is the current development bundle, adding destination-bound egress
+   apertures (ADR 0013), and **every earlier directory is frozen** (`STATUS.md:36`,
    `scripts/contract_json_gate.py:283`, `contracts/substrate-wire/0.2.0/README.md:13`).
    The daemon still advertises `substrate-wire/0.4.0` in `x-b10x-contract`
    (`crates/substrate-daemon/src/app.rs:3`): a bundle exists to be pinned by a consumer before the
@@ -120,8 +120,8 @@ bash scripts/gate.sh
 In order: `cargo test --workspace --locked`, `cargo fmt --all --check`,
 `cargo clippy --workspace --all-targets --locked -- -D warnings`, then `cargo xtask check-links`,
 `cargo xtask check-adrs`, `check-contract-bundle.py`, `check-contract-bundle-0.2.0.py`,
-`-0.3.0.py`, `-0.4.0.py`, `cargo xtask check-bundle 0.5.0`, `test_contract_json_gate.py` and
-`cargo xtask check-toolchain`.
+`-0.3.0.py`, `-0.4.0.py`, `cargo xtask check-bundle 0.5.0`, `check-bundle 0.6.0`,
+`test_contract_json_gate.py` and `cargo xtask check-toolchain`.
 Green here is the bar for `main`.
 The former brand is fenced org-wide by `scripts/check-org-brand.sh` in the **atlas** repo, not here.
 
@@ -137,7 +137,7 @@ bundles' reproducibility proof (invariant 6), not as tooling.
 | `check-adrs` | an ADR whose identity, frontmatter, index row or supersession link does not agree | yes |
 | `package-bundle <version> --out <dir>` | produces a released bundle as a deterministic OCI image layout | no — under `cargo test` |
 | `render-bundle <version> --out <dir>` | produces a bundle tree from `substrate-wire` and `xtask/bundle-source/<version>/`; refuses to write anywhere under `contracts/` | no — under `cargo test` |
-| `check-bundle <version>` | a released bundle whose bytes are not the fixed point of `xtask/bundle-source/<version>/` | yes, from `0.5.0` on |
+| `check-bundle <version>` | a released bundle whose bytes are not the fixed point of `xtask/bundle-source/<version>/` | yes, `0.5.0` and `0.6.0` |
 
 **`cargo xtask package-bundle <version> --out <dir>`** packages a released bundle as a
 deterministic OCI image layout. It is not a gate step of its own: its cases run under
@@ -172,10 +172,18 @@ refusal `exec.sandbox-unavailable` (501). Its delegated lane runs only when
 unset, those cases are **absent, never reported as passed** (invariant 3).
 
 **The gate verifies every released bundle, not just `0.1.0`.** `scripts/gate.sh:20-23` runs the
-four frozen Python checkers, and `:27` runs `cargo xtask check-bundle 0.5.0`, so a green gate *is*
-evidence that all five still hold. Cutting a successor bundle therefore means **adding its check to
-`scripts/gate.sh`** — a bundle whose check is not in the gate is unverified from the next commit
-onward.
+four frozen Python checkers, and `:27-28` run `cargo xtask check-bundle` for `0.5.0` and `0.6.0`, so
+a green gate *is* evidence that all six still hold. Cutting a successor bundle therefore means
+**adding its check to `scripts/gate.sh`** — a bundle whose check is not in the gate is unverified
+from the next commit onward.
+
+**Editing `xtask/src/render.rs` breaks every bundle it has already rendered.** A rendered
+`bundle.json` carries `generator.digest`, which is the sha256 of the file named at
+`generator.name` (`xtask/src/render.rs:308-312`) — so one byte changed there and `0.5.0` stops being
+a fixed point of its own source, with no way to fix it that does not rewrite a frozen directory.
+A successor that needs a new `{"$wire": …}` binding therefore **cannot have one**: bind the constant
+from `xtask/src/bundle.rs` instead, which no bundle hashes (`check_aperture_additions`, added for
+`0.6.0`, does exactly this for `MAX_EGRESS_APERTURES`).
 
 **From `0.5.0` on, that check is `cargo xtask check-bundle <version>`, not a fifth Python checker.**
 It re-renders the bundle from `xtask/bundle-source/<version>/` and compares bytes, so it verifies
