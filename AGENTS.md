@@ -240,7 +240,16 @@ reads that workflow's own recorded conclusion for the tagged SHA rather than re-
 `packages: write` and `id-token: write` exist on its release job and nowhere else, and that job
 holds `contents: write` because it creates the release and pushes the changelog commit. Everything
 it does uses the run's own `GITHUB_TOKEN`; **the release needs no repository secret at all**
-(§ *Bot identity*). **No image has been published** — the workflow exists and has never run.
+(§ *Bot identity*). **`0.2.3` is published**: `ghcr.io/beyond10x/b10x-substrate-daemon:0.2.3` at
+`sha256:ab10158266b579d705ce8422c7d2a6e783cde950d30e100f61ca6befc4d0beda`, keyless-signed and
+`cosign verify`-ed in the run before anything announced.
+
+**The last step cannot succeed and this is by design, not a bug to route around.** `main` is a
+protected branch requiring the `Full gate` status check, so the workflow's direct push of the
+changelog digest line is declined `GH006`. A direct push can never satisfy that check, because no
+gate run exists for a commit that was never pushed. The digest goes in through a pull request like
+any other change; the workflow now says exactly that instead of retrying three times and blaming a
+race.
 
 The bundle is **not** a published stable release: OCI packaging, signing and digest pinning of the
 contract bundle are separate release work, and a signed daemon image makes no bundle stable. Do not

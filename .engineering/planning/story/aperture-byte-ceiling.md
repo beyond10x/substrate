@@ -8,7 +8,7 @@ summary: Design 10 § 5 row 5 names exec.aperture-byte-limit; the counter exists
 relations:
 - decomposes: epic:byte-plane-completion
 - depends_on: story:destination-bound-egress
-revision: 4
+revision: 5
 ---
 # Story: A declared aperture carries a byte ceiling that refuses mid-run
 
@@ -120,3 +120,50 @@ number went to ADR 0011's grant attribution. The successor is **`0.8.0`**, prede
 Remaining evidence: items 2-5 — the successor bundle, the two delegated-lane vectors (the ceiling
 refuses; an aperture without one is unchanged) and the request-side refusal
 `exec.aperture-ceiling-in-request`.
+
+## Scope
+
+Derived 2026-08-30 by `story-scoper`, verified against HEAD `34b219a`. Every line is **cited** or
+**inferred**.
+
+- **Primary surface:** `crates/substrate-host` — the aperture byte path — cited (ADR 0014
+  § *Decision*, "Enforced in the relay, classified by the parent").
+- **Files, cited and exact at HEAD:** `crates/substrate-host/src/egress.rs:83-88`
+  (`EgressAperture`, gains `Option<u64>`), `:68` (`RELAY_BUFFER`, the stated overshoot bound),
+  `:713-818` (`relay_body`/`forward_once`, where the comparison lands), `:252-256`
+  (`SharedCounters::read`), `:322` (`install`, per-run counter lifetime), `:92-93`
+  (`EgressAperture::fact`).
+- **Files, cited:** `crates/substrate-host/src/process.rs:1318-1319` (`forced_cancellation`),
+  `:1366` (`ExecState::Cancelled`), `:1392-1414` (1 ms supervision poll and `cgroup.kill_all`),
+  `:919` (driver-side aperture refusal mapping).
+- **Files, cited with positions corrected:** `crates/substrate-wire/src/lib.rs:783`
+  (`AppliedAperture`), `:813` (`ApertureBytes`), `:1874` (`EgressApertureFact`), `:983-990`
+  (`Exec`, gains the optional class/code/message field), `:1577` and `:1627`
+  (`WireValidationError`), `:1909` (`validate_aperture_request`), `:155` (`Exhausted`).
+- **Files, cited with positions corrected:** `crates/substrate-daemon/src/main.rs:34-60`
+  (`parse_egress_aperture`, gains `/max=<size>`), `:144-155` (the clap arg; `value_delimiter = ','`
+  at `:152` is why the separator cannot be a comma).
+- **Contract surface, cited:** new `contracts/substrate-wire/0.8.0/` (predecessor `0.7.0`,
+  `adds_routes: 0`, `preserves_routes: 26`, mirroring
+  `contracts/substrate-wire/0.7.0/bundle.json:5-10`), new `xtask/bundle-source/0.8.0/`, and a
+  `check-bundle 0.8.0` line after `scripts/gate.sh:29`.
+- **Also likely:** `xtask/src/bundle.rs:384` (per-version branch) and its census functions at
+  `:681-682`, `:704`, `:865` — inferred; no document names the file.
+- **Also likely:** `crates/substrate-daemon/tests/runtime_vectors.rs` and `tests/contract_vectors.rs`
+  for evidence items 3-5 — inferred by analogy with `vectors/http/aperture-destination-in-request-refused.json`,
+  the only aperture vector that exists.
+- **Confidence:** **high** — ADR 0014 and design 12 name the declaration, enforcement, contract and
+  bundle sites with `file:line`, and every host-side citation reproduces exactly at HEAD.
+- **Would collide with:** any unit touching `crates/substrate-wire/src/lib.rs` (this story edits it
+  in six places), the egress byte path, the supervision loop, the daemon CLI flag surface, or the
+  bundle gate. **Hard exclusion:** any other unit cutting a successor bundle — `0.8.0` is one
+  directory and one gate line, and two stories cannot both own it.
+
+### Gap found while scoping, not present in either document
+
+`crates/substrate-daemon/src/runtime.rs:335-339` declares a **second** `EgressAperture` — the
+daemon's own three-field config vocabulary (`name`, `host`, `port`), deliberately not re-exported
+from `substrate_host` (invariant 4), converted at the composition root (`:424`, `:451`). ADR 0014 and
+`docs/design/12-aperture-byte-ceiling.md` mention `runtime.rs` **zero times**. The ceiling has to
+land there too, or the declared value cannot reach the host type the ADR names. Verified:
+`grep -c runtime.rs` over both documents returns `0`.

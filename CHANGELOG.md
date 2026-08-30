@@ -9,6 +9,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [0.2.3] — 2026-08-30
 
+Image: `ghcr.io/beyond10x/b10x-substrate-daemon:0.2.3` at `sha256:ab10158266b579d705ce8422c7d2a6e783cde950d30e100f61ca6befc4d0beda`, keyless-signed; verify with `cosign verify`.
+
 Three accepted ADRs implemented, and the gate's last Python removed. Additive throughout: no route
 is removed or changed, and every earlier contract bundle keeps its bytes.
 

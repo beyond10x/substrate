@@ -11,7 +11,7 @@ tags:
 - wire
 relations:
 - decomposes: epic:byte-plane-completion
-revision: 2
+revision: 3
 ---
 # Story: Network session transport over TLS with single-use proof-bound authority
 
@@ -52,3 +52,47 @@ Evidence that satisfies it, in order:
 
 The hosted trust-envelope verifier (design 06 § 1, atlas ADR 0015; phase 7): this story issues
 the authority from the local bearer subject.
+
+## Scope
+
+Derived 2026-08-30 by `story-scoper`. Every line is **cited** or **inferred**.
+
+- **Primary surface:** `crates/substrate-daemon` — cited; both the listener and the attach route
+  live there.
+- **Files, cited:** `crates/substrate-daemon/src/runtime.rs:736` (`serve_tcp`), `:856`
+  (`require_tcp_bearer`), `src/app/routes.rs:33` (`router`), `src/app/sessions.rs:735`
+  (`pipe_session_attach`).
+- **Symbols, cited:** `serve_tcp`, `TcpAuthState`, `require_tcp_bearer`, `router`,
+  `pipe_session_attach`, `PipeAttachmentPermit`, `PipeAttachmentRefusal`.
+- **Also likely, inferred:** `crates/substrate-wire/src/lib.rs:1274`/`:1291` (`PipeClientFrame`,
+  `PipeServerFrame`), where an authority-redemption frame would be added;
+  `crates/substrate-store/src/schema.rs:154` and `src/sessions.rs:526`
+  (`claim_pipe_session_attachment`), where redeem-exactly-once becomes durable;
+  `crates/substrate-daemon/src/main.rs:192-222`, the clap flags beside the `--tcp-*` group.
+- **Dependency, cited:** the workspace has **no** TLS crate — `rustls`/`tokio-rustls` grep to
+  nothing — so the dependency and its configuration surface are unmade.
+- **Confidence:** **medium.** The crate and the two code sites are cited and certain, but there is
+  no accepted ADR (`adr/` holds 0001–0014) and `docs/design/05-streams-sessions-and-endpoints.md:65`
+  points at `architecture/adr/0016-operation-scoped-session-authority.md`, which does not exist in
+  this repository. The proof binding — TLS exporter or client key — is undecided, so every TLS-side
+  file above is a guess at an unmade decision.
+- **Would collide with:** any unit touching the listener surface (`runtime.rs` `serve`/`serve_tcp`)
+  or the shared `app/routes.rs` `router`; and any unit cutting a successor
+  `contracts/substrate-wire/` version — that bump is a single serialising surface across the epic.
+
+### Two corrections found while scoping
+
+**1. A cited line is stale.** This story cites `crates/substrate-daemon/src/main.rs:63-64` as the
+development-only TCP listener. Those two lines are `port,` and `})` — the tail of
+`parse_egress_aperture`. The listener is `crates/substrate-daemon/src/runtime.rs:736`.
+
+**2. Acceptance 5 is already false at HEAD.** This story says the development-only TCP transport
+"must not gain this route". It has it: `serve_tcp` builds its service with the same `router(app)`
+as the Unix path (`crates/substrate-daemon/src/runtime.rs:757` against `:508`), and that router
+registers `/v1/pipe-sessions/{session_id}/attach` (`crates/substrate-daemon/src/app/routes.rs:76-77`).
+
+Not an open exposure: `serve_tcp` bails unless both `--tcp-development-only` and
+`--tcp-private-overlay` are set (`crates/substrate-daemon/src/runtime.rs:737-743`), so the route is
+reachable only in an explicitly acknowledged development profile on a private overlay. But the story
+asserts a property the code does not have, so either the acceptance must change or the router must
+split — and nothing in the tree specifies a split. Decide it in the ADR this story still owes.
