@@ -9,6 +9,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- **A tagged `main` publishes a signed, digest-pinned daemon image.**
+  [`.github/workflows/release.yml`](.github/workflows/release.yml) triggers only on an annotated
+  bare-version tag, refuses to build unless [`.github/workflows/gate.yml`](.github/workflows/gate.yml)
+  has concluded `success` for that exact commit, builds the `Dockerfile` with `SOURCE_SHA` set to the
+  tag's commit, pushes `ghcr.io/beyond10x/b10x-substrate-daemon:<version>`, signs it keylessly and
+  runs `cosign verify` against the workflow identity **before** anything is announced. Only then does
+  it create the GitHub release and write the digest under that version's heading here. A pre-release
+  tag such as `0.2.2-rc.0` publishes nothing. `permissions` are `contents: read` at workflow level,
+  with `packages: write` and `id-token: write` on the release job alone; every action is SHA-pinned;
+  the release and the changelog commit are made by the b10x-bot App. No image is published yet — the
+  workflow has never run, and its `B10X_BOT_APP_ID` and `B10X_BOT_PRIVATE_KEY` secrets are unset.
+  A signed daemon image does not make any wire contract bundle stable; the bundles under
+  `contracts/substrate-wire/` remain development bundles.
+
 - **An operation's ledger row carries the declared grant it ran under.** A start may present a
   signed delegated-context document; substrate verifies it and records `grant_ref` and
   `platform_principal` on the operation's ledger row and its `operation.*` events, so a reader can
