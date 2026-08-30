@@ -736,12 +736,104 @@ fn check_v1_file_catch_alls(operations: &[Value], failures: &mut Vec<String>) {
 /// nobody can handle; a code the source raises and the bundle never mentions does not exist as far
 /// as the contract is concerned.
 fn check_pty_refusal_class(released: &Tree, failures: &mut Vec<String>) {
-    // The other direction, and the one round 2 got wrong. That round proved every code is
-    // *readable* in the bundle and called it the class; it did not prove the published list is the
-    // set the crate can actually emit, so four codes reached a client that the list did not name
-    // and one code on the list had no emitter at all. `SessionProtocolErrorCode` closes the emitting
-    // half by construction — `send_pipe_protocol_error` takes nothing else — and this closes the
-    // published half against it, exactly, in both directions and for both modes.
+    // **Not a substring search.** The rule used to be "the code appears somewhere in the bundle",
+    // and for five of the ten codes the only occurrence anywhere was the `x-b10x-codes` array this
+    // very function derives from the crate — the check read back what it wrote, and a sixth
+    // occurred once with no class, no status and no vector. "A client can look it up" has to mean
+    // something a client can *use*, so it means a row in `refusals.json` carrying the class, where
+    // the refusal arrives, whether it is worth retrying and the sentence substrate sends — none of
+    // which this function synthesizes — cross-checked against the vector that asserts it wherever
+    // one exists.
+    let Some(register) = json_at(released, "refusals.json", failures) else {
+        return;
+    };
+    let rows: BTreeMap<String, Value> = register
+        .get("refusals")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|row| {
+            row.get("code")
+                .and_then(Value::as_str)
+                .map(|code| (code.to_owned(), row.clone()))
+        })
+        .collect();
+
+    let mut required: BTreeSet<&str> = substrate_wire::SESSION_PTY_REFUSAL_CODES
+        .iter()
+        .copied()
+        .collect();
+    required.extend(substrate_wire::SESSION_PROTOCOL_ERROR_CODES.iter().copied());
+    for code in &required {
+        let Some(row) = rows.get(*code) else {
+            failures.push(format!(
+                "refusals.json: no row for {code}, so a client that receives it has nothing to \
+                 look up — not its class, not where it arrives, not what it means"
+            ));
+            continue;
+        };
+        if row.get("class").and_then(Value::as_str).is_none() {
+            failures.push(format!("refusals.json: {code} states no error class"));
+        }
+        let arrives = row.get("arrives").and_then(Value::as_str);
+        if arrives.is_none() {
+            failures.push(format!(
+                "refusals.json: {code} does not say where it arrives"
+            ));
+        }
+        if row
+            .get("message")
+            .and_then(Value::as_str)
+            .is_none_or(|message| message.trim().is_empty())
+        {
+            failures.push(format!("refusals.json: {code} states no message"));
+        }
+        // An HTTP refusal without a status is not usable by a client that has to branch on one.
+        if arrives == Some("http-response") && row.get("status").and_then(Value::as_u64).is_none() {
+            failures.push(format!(
+                "refusals.json: {code} arrives as an HTTP response and states no status"
+            ));
+        }
+        // Where a vector asserts the code, the two authored documents must agree — this is the
+        // half that cannot be satisfied by anything this function wrote.
+        if let Some(evidence) = row.get("evidence").and_then(Value::as_str) {
+            let matched = released.iter().any(|(path, bytes)| {
+                path.starts_with("vectors/")
+                    && serde_json::from_slice::<Value>(bytes).is_ok_and(|vector| {
+                        vector.get("id").and_then(Value::as_str) == Some(evidence)
+                            && (vector
+                                .pointer("/expected/response/body/error/code")
+                                .and_then(Value::as_str)
+                                == Some(*code)
+                                || vector
+                                    .pointer("/expected/outcome/code")
+                                    .and_then(Value::as_str)
+                                    == Some(*code))
+                    })
+            });
+            if !matched {
+                failures.push(format!(
+                    "refusals.json: {code} names evidence {evidence}, and no vector with that id \
+                     asserts that code"
+                ));
+            }
+        }
+    }
+    for code in rows.keys() {
+        if !required.contains(code.as_str()) {
+            failures.push(format!(
+                "refusals.json: {code} has a row and nothing in the crate raises it"
+            ));
+        }
+    }
+
+    check_published_frame_codes(released, failures);
+}
+
+/// The per-vocabulary view, exact in both directions and admitted by the branch's own pattern.
+///
+/// A member with no emitter fails as loudly as an emitter with no member.
+fn check_published_frame_codes(released: &Tree, failures: &mut Vec<String>) {
     let expected: BTreeSet<&str> = substrate_wire::SESSION_PROTOCOL_ERROR_CODES
         .iter()
         .copied()
@@ -753,7 +845,7 @@ fn check_pty_refusal_class(released: &Tree, failures: &mut Vec<String>) {
         let Some(document) = json_at(released, vocabulary, failures) else {
             continue;
         };
-        let published: BTreeSet<&str> = document
+        let Some(branch) = document
             .get("oneOf")
             .and_then(Value::as_array)
             .into_iter()
@@ -764,7 +856,12 @@ fn check_pty_refusal_class(released: &Tree, failures: &mut Vec<String>) {
                     .and_then(Value::as_str)
                     == Some("protocol-error")
             })
-            .and_then(|branch| branch.get("x-b10x-codes"))
+        else {
+            failures.push(format!("{vocabulary}: no protocol-error branch"));
+            continue;
+        };
+        let published: BTreeSet<&str> = branch
+            .get("x-b10x-codes")
             .and_then(Value::as_array)
             .into_iter()
             .flatten()
@@ -782,22 +879,34 @@ fn check_pty_refusal_class(released: &Tree, failures: &mut Vec<String>) {
                  no emitter is as unusable as an emitter with no code"
             ));
         }
-    }
-
-    for code in substrate_wire::SESSION_PTY_REFUSAL_CODES {
-        let named = released.iter().any(|(path, bytes)| {
-            Path::new(path)
-                .extension()
-                .is_some_and(|extension| extension == "json")
-                && bytes
-                    .windows(code.len())
-                    .any(|window| window == code.as_bytes())
-        });
-        if !named {
+        // Red case 4: the pattern the branch publishes must admit the codes it publishes. A
+        // `^exec\\.` pattern beside `session.*` codes makes a client generated from the released
+        // schema reject every frame the daemon can send — a total failure, invisible in exactly the
+        // document a client reads.
+        let Some(pattern) = branch
+            .pointer("/properties/code/pattern")
+            .and_then(Value::as_str)
+        else {
             failures.push(format!(
-                "no document names the refusal code {code}, which substrate raises and no reader \
-                 of this bundle could look up"
+                "{vocabulary}: the protocol-error branch states no code pattern"
             ));
+            continue;
+        };
+        match fancy_regex::Regex::new(pattern) {
+            Ok(compiled) => {
+                for code in &published {
+                    if !compiled.is_match(code).unwrap_or(false) {
+                        failures.push(format!(
+                            "{vocabulary}: publishes {code} and its own code pattern {pattern} \
+                             rejects it, so a client validating against this schema rejects the \
+                             frame"
+                        ));
+                    }
+                }
+            }
+            Err(error) => failures.push(format!(
+                "{vocabulary}: the protocol-error code pattern does not compile: {error}"
+            )),
         }
     }
 }

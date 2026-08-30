@@ -203,6 +203,8 @@ pub(super) async fn pipe_session_capabilities(
                 modes: served_session_modes(facts),
                 max_window_columns: MAX_PTY_WINDOW_COLUMNS,
                 max_window_rows: MAX_PTY_WINDOW_ROWS,
+                max_controls_per_window: substrate_wire::MAX_SESSION_CONTROLS_PER_WINDOW,
+                control_window_ms: substrate_wire::SESSION_CONTROL_WINDOW_MS,
             },
         ),
     )
@@ -786,7 +788,11 @@ pub(super) async fn pipe_session_attach(
             None,
             ErrorClass::Conflict,
             "session.not-attachable",
-            "The raw-pipe session is not running under an active lease.",
+            channel_message(
+                session.mode,
+                "The raw-pipe session is not running under an active lease.",
+                "The pty session is not running under an active lease.",
+            ),
             Some("session"),
             false,
         );
@@ -800,7 +806,11 @@ pub(super) async fn pipe_session_attach(
                 None,
                 ErrorClass::Conflict,
                 "session.already-attached",
-                "The raw-pipe session already has its single permitted attachment.",
+                channel_message(
+                    session.mode,
+                    "The raw-pipe session already has its single permitted attachment.",
+                    "The pty session already has its single permitted attachment.",
+                ),
                 Some("session"),
                 false,
             );
@@ -812,7 +822,11 @@ pub(super) async fn pipe_session_attach(
                 None,
                 ErrorClass::Exhausted,
                 "session.attachment-capacity",
-                "The bounded raw-pipe attachment capacity is exhausted.",
+                channel_message(
+                    session.mode,
+                    "The bounded raw-pipe attachment capacity is exhausted.",
+                    "The bounded session attachment capacity is exhausted.",
+                ),
                 Some("session"),
                 true,
             );
@@ -833,7 +847,11 @@ pub(super) async fn pipe_session_attach(
                 None,
                 ErrorClass::Conflict,
                 "session.already-attached",
-                "The raw-pipe session attachment right has already been consumed.",
+                channel_message(
+                    session.mode,
+                    "The raw-pipe session attachment right has already been consumed.",
+                    "The pty session attachment right has already been consumed.",
+                ),
                 Some("session"),
                 false,
             );
@@ -845,7 +863,11 @@ pub(super) async fn pipe_session_attach(
                 None,
                 ErrorClass::Conflict,
                 "session.not-attachable",
-                "The raw-pipe session is not attachable.",
+                channel_message(
+                    session.mode,
+                    "The raw-pipe session is not attachable.",
+                    "The pty session is not attachable.",
+                ),
                 Some("session"),
                 false,
             );
@@ -912,7 +934,11 @@ async fn run_pipe_attachment(
                                 &mut socket,
                                 &mut server_sequence,
                                 SessionProtocolErrorCode::FrameInvalid,
-                                "The client frame is outside the closed raw-pipe vocabulary.",
+                                channel_message(
+                                    mode,
+                                    "The client frame is outside the closed raw-pipe vocabulary.",
+                                    "The client frame is outside the closed pty vocabulary.",
+                                ),
                                 policy,
                             ).await;
                             return false;
@@ -927,7 +953,11 @@ async fn run_pipe_attachment(
                             let _sent = send_protocol_close(
                                 &mut socket,
                                 1008,
-                                "raw-pipe control-frame rate exceeded",
+                                channel_message(
+                                    mode,
+                                    "raw-pipe control-frame rate exceeded",
+                                    "pty control-frame rate exceeded",
+                                ),
                                 policy.send_timeout,
                             ).await;
                             return false;
@@ -940,7 +970,11 @@ async fn run_pipe_attachment(
                             &mut socket,
                             &mut server_sequence,
                             SessionProtocolErrorCode::FrameInvalid,
-                            "Raw-pipe client frames use the closed JSON text encoding.",
+                            channel_message(
+                                mode,
+                                "Raw-pipe client frames use the closed JSON text encoding.",
+                                "Pty client frames use the closed JSON text encoding.",
+                            ),
                             policy,
                         ).await;
                         return false;
@@ -952,7 +986,11 @@ async fn run_pipe_attachment(
                         &mut socket,
                         &mut server_sequence,
                         SessionProtocolErrorCode::SequenceInvalid,
-                        "Raw-pipe client sequences must be contiguous and start at one.",
+                        channel_message(
+                            mode,
+                            "Raw-pipe client sequences must be contiguous and start at one.",
+                            "Pty client sequences must be contiguous and start at one.",
+                        ),
                         policy,
                     ).await;
                     return false;
@@ -975,7 +1013,11 @@ async fn run_pipe_attachment(
                                 &mut socket,
                                 &mut server_sequence,
                                 SessionProtocolErrorCode::Base64Invalid,
-                                "Raw-pipe stdin content is not valid standard base64.",
+                                channel_message(
+                                    mode,
+                                    "Raw-pipe stdin content is not valid standard base64.",
+                                    "Pty input content is not valid standard base64.",
+                                ),
                                 policy,
                             ).await;
                             return false;
@@ -986,7 +1028,8 @@ async fn run_pipe_attachment(
                                 &mut server_sequence,
                                 SessionProtocolErrorCode::classify(error.code),
                                 &format!(
-                                    "Substrate refused or failed the raw-pipe input frame ({}).",
+                                    "Substrate refused or failed the {} input frame ({}).",
+                                    channel_message(mode, "raw-pipe", "pty"),
                                     error.code
                                 ),
                                 policy,
@@ -1005,20 +1048,43 @@ async fn run_pipe_attachment(
                     // observation is where it reads the outcome.
                     PipeClientFrame::Resize { window, .. } => {
                         // Rated on the control window that already exists, so a resize storm
-                        // cannot become a free ioctl loop (design 13).
+                        // cannot become a free ioctl loop (design 13). Answered as a
+                        // `protocol-error` in a published code and not as a bare WebSocket close:
+                        // the close named a bound no document published, in a word no document
+                        // named. The 1008 close stays for WebSocket *control* frames, which are
+                        // not part of the published `oneOf` and have no frame to answer in.
                         if control_rate.exceeded(
                             policy.max_controls_per_window,
                             policy.control_window,
                         ) {
-                            let _sent = send_protocol_close(
+                            let _sent = send_pipe_protocol_error(
                                 &mut socket,
-                                1008,
-                                "session control-frame rate exceeded",
-                                policy.send_timeout,
+                                &mut server_sequence,
+                                SessionProtocolErrorCode::ControlRateExceeded,
+                                &format!(
+                                    "A session attachment sends at most {} control frames per {} ms, \
+                                     and ping shares the budget.",
+                                    substrate_wire::MAX_SESSION_CONTROLS_PER_WINDOW,
+                                    substrate_wire::SESSION_CONTROL_WINDOW_MS,
+                                ),
+                                policy,
                             ).await;
                             return false;
                         }
-                        if mode != SessionMode::Pty || !window.within_bounds() {
+                        // Two conditions, two answers. Collapsed into one they told a raw-pipe
+                        // client its 80x24 window was out of range, when the window was fine and
+                        // the channel was wrong — the one thing it cannot act on.
+                        if mode != SessionMode::Pty {
+                            let _sent = send_pipe_protocol_error(
+                                &mut socket,
+                                &mut server_sequence,
+                                SessionProtocolErrorCode::NotPty,
+                                "A resize frame belongs to a pty session; this attachment serves raw pipes.",
+                                policy,
+                            ).await;
+                            return false;
+                        }
+                        if !window.within_bounds() {
                             let _sent = send_pipe_protocol_error(
                                 &mut socket,
                                 &mut server_sequence,
@@ -1073,7 +1139,11 @@ async fn run_pipe_attachment(
                                 &mut socket,
                                 &mut server_sequence,
                                 SessionProtocolErrorCode::SignalInvalid,
-                                "Raw-pipe signal grace exceeds the closed bound.",
+                                channel_message(
+                                    mode,
+                                    "Raw-pipe signal grace exceeds the closed bound.",
+                                    "Pty signal grace exceeds the closed bound.",
+                                ),
                                 policy,
                             ).await;
                             return false;
@@ -1089,7 +1159,8 @@ async fn run_pipe_attachment(
                                     &mut server_sequence,
                                     SessionProtocolErrorCode::classify(error.code),
                                     &format!(
-                                        "Substrate could not terminally observe the signalled raw-pipe process ({}).",
+                                        "Substrate could not terminally observe the signalled {} process ({}).",
+                                        channel_message(mode, "raw-pipe", "pty"),
                                         error.code
                                     ),
                                     policy,
@@ -1113,9 +1184,14 @@ async fn run_pipe_attachment(
             output = app.driver.read_pipe_session(&exec_id, policy.read_poll) => {
                 match output {
                     Ok(Some(frame)) => {
-                        let stream = match frame.stream {
-                            PipeStream::Stdout => OutputStream::Stdout,
-                            PipeStream::Stderr => OutputStream::Stderr,
+                        // One file on a terminal, so one attribution — the same gate the
+                        // `truncated` frame beside this one already has. `HostDriver` never
+                        // attributes a pty frame to stderr, and a driver that did would make the
+                        // daemon send what `x-b10x-one-file` and the published
+                        // `"stream": {"const": "stdout"}` both forbid.
+                        let stream = match (mode, frame.stream) {
+                            (SessionMode::Pty, _) | (_, PipeStream::Stdout) => OutputStream::Stdout,
+                            (_, PipeStream::Stderr) => OutputStream::Stderr,
                         };
                         let server_frame = PipeServerFrame::Output {
                             sequence: server_sequence,
@@ -1145,14 +1221,18 @@ async fn run_pipe_attachment(
                             policy,
                         ).await.is_ok();
                     }
-                    Err(error) if error.code == "session.read-timeout" => {}
+                    // Bound, not written out: renaming the constant used to compile here and
+                    // silently turn every 250 ms poll timeout into a `protocol-error` that ends the
+                    // attachment.
+                    Err(error) if error.code == substrate_wire::SESSION_READ_TIMEOUT => {}
                     Err(error) => {
                         let _sent = send_pipe_protocol_error(
                             &mut socket,
                             &mut server_sequence,
                             SessionProtocolErrorCode::classify(error.code),
                             &format!(
-                                "Substrate could not continue raw-pipe output observation ({}).",
+                                "Substrate could not continue {} output observation ({}).",
+                                channel_message(mode, "raw-pipe", "pty"),
                                 error.code
                             ),
                             policy,
@@ -1192,6 +1272,24 @@ async fn send_pipe_server_frame(
     .await
 }
 
+/// The sentence for the channel this attachment actually serves.
+///
+/// `SESSION_FRAME_INVALID`'s own definition is "outside the closed vocabulary of **the mode this
+/// attachment serves**", and eight messages said "raw-pipe" to whoever was listening. Same class as
+/// the raw-pipe truncation sentence an earlier pass took out of a terminal transcript: a message is
+/// the half of a refusal a human reads, and telling a terminal client about raw pipes is telling it
+/// about a channel it is not on.
+const fn channel_message(
+    mode: SessionMode,
+    pipes: &'static str,
+    pty: &'static str,
+) -> &'static str {
+    match mode {
+        SessionMode::Pipes => pipes,
+        SessionMode::Pty => pty,
+    }
+}
+
 /// One `protocol-error` frame, in a code the contract publishes.
 ///
 /// The parameter is [`SessionProtocolErrorCode`] and not a `&str` **on purpose**: that is what
@@ -1208,7 +1306,7 @@ async fn send_pipe_protocol_error(
 ) -> Result<(), ()> {
     let frame = PipeServerFrame::ProtocolError {
         sequence: *sequence,
-        code: code.as_str().to_owned(),
+        code,
         message: message.to_owned(),
     };
     *sequence = sequence.saturating_add(1);

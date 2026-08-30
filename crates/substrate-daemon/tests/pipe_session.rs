@@ -927,9 +927,9 @@ async fn invalid_sequence_fails_closed_and_disconnect_cancels_the_session() {
         error,
         PipeServerFrame::ProtocolError {
             sequence: 1,
-            ref code,
+            code: substrate_wire::SessionProtocolErrorCode::SequenceInvalid,
             ..
-        } if code == "session.sequence-invalid"
+        }
     ));
     drop(client);
 
@@ -1407,5 +1407,195 @@ async fn the_two_entry_points_name_one_refusal_for_a_pty_start_that_earns_two() 
         error.code, over_http,
         "the driver port and the daemon are two implementations of one refusal order, and a \
          request that earns several refusals must not be told a different one by each"
+    );
+}
+
+/// Drives one client frame at a fresh **raw-pipe** attachment and returns the code it gets.
+///
+/// The mirror of `pty_protocol_error_code` next door, for the channel whose published vocabulary is
+/// `schemas/pipe-channel-frame.json`.
+async fn pipe_protocol_error_code(frame: &Value) -> String {
+    let harness = Harness::open().await;
+    let (session_id, _exec) = harness.start_pipe().await;
+    let mut socket = harness
+        .attach(&format!("/v1/pipe-sessions/{session_id}/attach"))
+        .await;
+    socket
+        .send_text(serde_json::to_vec(frame).expect("client frame").as_slice())
+        .await;
+    let answer = socket.next_json().await;
+    assert_eq!(
+        answer["kind"], "protocol-error",
+        "{frame} must be refused, not served: {answer}"
+    );
+    answer["code"]
+        .as_str()
+        .expect("protocol-error code")
+        .to_owned()
+}
+
+/// The mirror of `a_pty_attachment_that_closes_input_is_told_in_the_code_minted_for_it`, one channel
+/// over — and the half of that class round 3 did not close.
+///
+/// `schemas/pipe-channel-frame.json` has no `resize` branch in any released bundle (`0.4.0` through
+/// `0.9.0`: `stdin`, `close-input`, `signal`, `output`, `truncated`, `exit`, `protocol-error`), so a
+/// `resize` reaching a raw-pipe attachment is a frame outside the closed vocabulary of the mode that
+/// attachment serves. `substrate_wire::SESSION_FRAME_INVALID` is defined as exactly that
+/// (`crates/substrate-wire/src/lib.rs:117`), and `substrate_wire::SESSION_NOT_PTY` as "The exec this
+/// operation names is not a pty session at all" (`:104`) — either is a true statement here.
+///
+/// The attachment loop says neither. It collapses the mode gate and the cell bound into one
+/// condition — `if mode != SessionMode::Pty || !window.within_bounds()`
+/// (`crates/substrate-daemon/src/app/sessions.rs:1017-1027`) — and answers
+/// `session.resize-invalid`, whose published meaning is "A resize named a window outside 1..=1000
+/// cells on an axis" (`crates/substrate-wire/src/lib.rs:101`) and whose message says "A resize names
+/// 1 to 1000 cells on each axis of a pty session". The window below is 80x24: inside those bounds on
+/// both axes. The client is told its window is out of range when the window is fine and the channel
+/// is wrong, which is the one thing it cannot act on.
+///
+/// `session.not-pty` is published in this very vocabulary's `x-b10x-codes` and no path in this tree
+/// emits it — the daemon's mode gate is the only caller of `resize_pty_session` and it never lets a
+/// non-pty exec reach the driver's own `SESSION_NOT_PTY` branch (`process.rs:815-822`). This
+/// condition is the emitter it was minted for.
+///
+/// Portable lane. No confinement backend, no cgroup delegation.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resize_on_a_raw_pipe_attachment_is_not_answered_as_an_out_of_bounds_window() {
+    let code = pipe_protocol_error_code(
+        &json!({"kind": "resize", "sequence": 1, "window": {"columns": 80, "rows": 24}}),
+    )
+    .await;
+    assert!(
+        code == substrate_wire::SESSION_FRAME_INVALID || code == substrate_wire::SESSION_NOT_PTY,
+        "a raw-pipe attachment has no resize frame in any released vocabulary, and this window is \
+         80x24 — inside 1..={}x1..={} on both axes. The answer must be a true statement: \
+         {} (the frame is outside this mode's vocabulary) or {} (this exec is not a pty session). \
+         It was {code}, whose published meaning is that the window is out of range.",
+        substrate_wire::MAX_PTY_WINDOW_COLUMNS,
+        substrate_wire::MAX_PTY_WINDOW_ROWS,
+        substrate_wire::SESSION_FRAME_INVALID,
+        substrate_wire::SESSION_NOT_PTY,
+    );
+}
+
+/// `0.9.0`'s pty resize branch carries `x-b10x-out-of-bounds: "session.resize-invalid"`, and it
+/// holds only for out-of-bounds windows that happen to fit in a `u16`.
+///
+/// The branch declares `columns` and `rows` as `{"type": "integer", "minimum": 1, "maximum": 1000}`
+/// (`contracts/substrate-wire/0.9.0/schemas/pty-channel-frame.json`), and the annotation next to
+/// them names the one code a window outside that range earns. 1001 earns it. 65536 does not:
+/// `PipeClientFrame::Resize` carries a `PtyWindow` whose axes are `u16`
+/// (`crates/substrate-wire/src/lib.rs:1456-1459`), so the frame fails `serde_json::from_slice`
+/// before the loop's own bound is reached and the client is answered `session.frame-invalid`
+/// (`crates/substrate-daemon/src/app/sessions.rs:907-916`).
+///
+/// So the boundary between "your window is out of bounds" and "your frame is not a frame" is at
+/// 65535, a number no document in any released bundle names, and it sits inside a range the
+/// published schema describes with one rule and one refusal code.
+///
+/// Portable lane.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_window_the_pty_resize_branch_declares_out_of_bounds_earns_the_code_it_publishes() {
+    let mut wrong = Vec::new();
+    for columns in [
+        u64::from(substrate_wire::MAX_PTY_WINDOW_COLUMNS) + 1,
+        u64::from(u16::MAX),
+        u64::from(u16::MAX) + 1,
+        100_000,
+    ] {
+        let frame = json!({
+            "kind": "resize",
+            "sequence": 1,
+            "window": {"columns": columns, "rows": 24}
+        });
+        let code = pty_protocol_error_code(&frame).await;
+        if code != substrate_wire::SESSION_RESIZE_INVALID {
+            wrong.push(format!("columns {columns} is refused {code}"));
+        }
+    }
+    assert!(
+        wrong.is_empty(),
+        "the pty resize branch declares columns 1..=1000 and publishes \
+         x-b10x-out-of-bounds: {}, so every window outside that range earns that code; these do \
+         not:\n{}",
+        substrate_wire::SESSION_RESIZE_INVALID,
+        wrong.join("\n")
+    );
+}
+
+/// The one member of the pty client vocabulary whose refusal is not in the pty server vocabulary.
+///
+/// Design 13 rates the new `resize` frame on the control window that already existed
+/// (`docs/design/13-pty-sessions.md:97-99`), and `schemas/pty-channel-frame.json` says so on the
+/// branch itself: `x-b10x-rated-on: "the-control-window"`. Everything else that branch's siblings
+/// can get wrong — a window out of bounds, a bad sequence, a grace over the bound, an input frame
+/// the driver refuses — is answered with a `protocol-error` frame carrying a code from that same
+/// document's `x-b10x-codes`. Crossing the rate is answered with a WebSocket close, code 1008 and a
+/// reason string (`crates/substrate-daemon/src/app/sessions.rs:1010-1016`): not a branch of the
+/// published `oneOf`, not a code in `x-b10x-codes`, and not a word a client can look up.
+///
+/// The bound is unpublished too. `GET /v1/pipe-sessions` publishes every other bound a client has
+/// to obey — `max_input_bytes`, `max_frame_bytes`, `max_queued_frames`, `max_window_columns`,
+/// `max_window_rows` — and not `max_controls_per_window` / `control_window`
+/// (`crates/substrate-daemon/src/app/sessions.rs:50-51`, `:65-66`). So the one bound a terminal
+/// client is most likely to cross is the one it cannot read, and `Ping` shares the same budget:
+/// a 500 ms keepalive spends all 120 of them in a minute and leaves a single resize to be closed on.
+///
+/// Portable lane.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resize_over_the_control_rate_is_answered_in_the_published_vocabulary() {
+    let harness = Harness::with_terminals().await;
+    let (session_id, _exec) = harness.start_pty().await;
+    let mut socket = harness
+        .attach(&format!("/v1/pipe-sessions/{session_id}/attach"))
+        .await;
+    // One more than `PipeSessionPolicy::production().max_controls_per_window`, inside one window.
+    for sequence in 1..=121_u64 {
+        socket
+            .send_text(
+                serde_json::to_vec(&json!({
+                    "kind": "resize",
+                    "sequence": sequence,
+                    "window": {"columns": 80, "rows": 24}
+                }))
+                .expect("resize frame")
+                .as_slice(),
+            )
+            .await;
+    }
+    let frame = tokio::time::timeout(Duration::from_secs(5), socket.next_frame())
+        .await
+        .expect("a bounded server answer")
+        .expect("a server answer");
+    let described = if frame.opcode == 0x8 {
+        let code = frame
+            .payload
+            .get(0..2)
+            .map(|bytes| u16::from_be_bytes([bytes[0], bytes[1]]));
+        format!(
+            "a websocket close, code {code:?}, reason {:?}",
+            String::from_utf8_lossy(frame.payload.get(2..).unwrap_or_default())
+        )
+    } else {
+        format!(
+            "opcode {:#x}, payload {:?}",
+            frame.opcode,
+            String::from_utf8_lossy(&frame.payload)
+        )
+    };
+    assert_eq!(
+        frame.opcode, 0x1,
+        "0.9.0/schemas/pty-channel-frame.json publishes a closed server vocabulary of output, exit \
+         and protocol-error, and every other way a client frame can be refused answers with a \
+         protocol-error carrying a published code. Crossing the rate the resize branch says it is \
+         rated on answers with {described} — a bound no document publishes, refused in a word no \
+         document names."
+    );
+    let answer: Value = serde_json::from_slice(&frame.payload).expect("server JSON frame");
+    let published = published_pty_protocol_error_codes();
+    let code = answer["code"].as_str().unwrap_or_default().to_owned();
+    assert!(
+        answer["kind"] == "protocol-error" && published.contains(&code),
+        "the refusal must be a protocol-error in the published code set {published:?}: {answer}"
     );
 }

@@ -87,9 +87,15 @@ pub(crate) struct PtyPair {
 /// Allocates a pair with the declared window already set, so the child's first `TIOCGWINSZ`
 /// answers with what the client asked for rather than with a kernel default.
 pub(crate) fn open(window: PtyWindow) -> io::Result<PtyPair> {
+    let (columns, rows) = window.cells().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a pty window is 1 to 1000 cells on each axis",
+        )
+    })?;
     let size = nix::pty::Winsize {
-        ws_row: window.rows,
-        ws_col: window.columns,
+        ws_row: rows,
+        ws_col: columns,
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
@@ -133,9 +139,15 @@ fn set_nonblocking(fd: RawFd) -> io::Result<()> {
 /// Sets the window on the master. The kernel signals the foreground process group of the terminal,
 /// which is what makes the child observe the change instead of being told about it.
 pub(crate) fn set_window(fd: RawFd, window: PtyWindow) -> io::Result<()> {
+    let (columns, rows) = window.cells().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "a pty window is 1 to 1000 cells on each axis",
+        )
+    })?;
     let size = libc::winsize {
-        ws_row: window.rows,
-        ws_col: window.columns,
+        ws_row: rows,
+        ws_col: columns,
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
@@ -159,8 +171,8 @@ fn read_window(fd: RawFd) -> io::Result<PtyWindow> {
         return Err(io::Error::last_os_error());
     }
     Ok(PtyWindow {
-        columns: size.ws_col,
-        rows: size.ws_row,
+        columns: u64::from(size.ws_col),
+        rows: u64::from(size.ws_row),
     })
 }
 
@@ -353,8 +365,8 @@ fn observe_through(master: RawFd, resized: PtyWindow) -> Option<SandboxedTermina
     let mut transcript = Vec::new();
     let first = read_line_with_prefix(master, b"A:", &mut transcript)?;
     let mut fields = first.split_whitespace();
-    let rows: u16 = fields.next()?.parse().ok()?;
-    let columns: u16 = fields.next()?.parse().ok()?;
+    let rows: u64 = fields.next()?.parse().ok()?;
+    let columns: u64 = fields.next()?.parse().ok()?;
     let controlling_terminal: u64 = fields.next()?.parse().ok()?;
     set_window(master, resized).ok()?;
     // Read back through the same ioctl the child will use, so a kernel that took the size and a
@@ -365,8 +377,8 @@ fn observe_through(master: RawFd, resized: PtyWindow) -> Option<SandboxedTermina
     write_all_blocking(master, b"\n")?;
     let second = read_line_with_prefix(master, b"B:", &mut transcript)?;
     let mut fields = second.split_whitespace();
-    let resized_rows: u16 = fields.next()?.parse().ok()?;
-    let resized_columns: u16 = fields.next()?.parse().ok()?;
+    let resized_rows: u64 = fields.next()?.parse().ok()?;
+    let resized_columns: u64 = fields.next()?.parse().ok()?;
     Some(SandboxedTerminal {
         initial: PtyWindow { columns, rows },
         resized: PtyWindow {

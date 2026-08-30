@@ -110,6 +110,15 @@ pub const SESSION_INPUT_CLOSE_UNSERVED: &str = "session.input-close-unserved";
 /// The declared output bound ended the session (ADR 0014's refusal field, design 13).
 pub const SESSION_OUTPUT_LIMIT: &str = "session.output-limit";
 
+/// How many control frames one attachment may send inside [`SESSION_CONTROL_WINDOW_MS`].
+///
+/// Published on the session capability document like every other bound a client has to obey. It was
+/// the one bound a terminal client is most likely to cross and the only one it could not read.
+pub const MAX_SESSION_CONTROLS_PER_WINDOW: u32 = 120;
+/// The window [`MAX_SESSION_CONTROLS_PER_WINDOW`] is counted over, in milliseconds.
+pub const SESSION_CONTROL_WINDOW_MS: u64 = 60_000;
+/// The attachment sent more control frames than the published rate admits.
+pub const SESSION_CONTROL_RATE_EXCEEDED: &str = "session.control-rate-exceeded";
 /// A session attachment refused a client frame, and the loop could not name the reason more
 /// precisely than "the driver refused it". The driver's own code is carried in the message.
 pub const SESSION_DRIVER_REFUSED: &str = "session.driver-refused";
@@ -148,7 +157,13 @@ pub const SESSION_TIMEOUT_INVALID: &str = "session.timeout-invalid";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionProtocolErrorCode {
     Base64Invalid,
+    ControlRateExceeded,
     DriverRefused,
+    // `ReadTimeout` and `OutputLimit` are deliberately **not** members. The attachment loop matches
+    // `SESSION_READ_TIMEOUT` and continues before anything is classified, so no driver can put it
+    // in a frame; and `SESSION_OUTPUT_LIMIT` is only ever an `ExecRefusal` on the durable exec,
+    // which a client fetches rather than receives. Publishing either would be the mirror of the
+    // dead published code this type was introduced to prevent.
     FrameInvalid,
     FrameLimit,
     InputCloseUnserved,
@@ -156,10 +171,8 @@ pub enum SessionProtocolErrorCode {
     InputLimit,
     NotPipe,
     NotPty,
-    OutputLimit,
     PtyEnded,
     PtyUnserved,
-    ReadTimeout,
     ResizeFailed,
     ResizeInvalid,
     SequenceInvalid,
@@ -170,8 +183,9 @@ pub enum SessionProtocolErrorCode {
 
 impl SessionProtocolErrorCode {
     /// Every member, so a caller can enumerate the class rather than remember it.
-    pub const ALL: [Self; 19] = [
+    pub const ALL: [Self; 18] = [
         Self::Base64Invalid,
+        Self::ControlRateExceeded,
         Self::DriverRefused,
         Self::FrameInvalid,
         Self::FrameLimit,
@@ -180,10 +194,8 @@ impl SessionProtocolErrorCode {
         Self::InputLimit,
         Self::NotPipe,
         Self::NotPty,
-        Self::OutputLimit,
         Self::PtyEnded,
         Self::PtyUnserved,
-        Self::ReadTimeout,
         Self::ResizeFailed,
         Self::ResizeInvalid,
         Self::SequenceInvalid,
@@ -197,6 +209,7 @@ impl SessionProtocolErrorCode {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Base64Invalid => SESSION_BASE64_INVALID,
+            Self::ControlRateExceeded => SESSION_CONTROL_RATE_EXCEEDED,
             Self::DriverRefused => SESSION_DRIVER_REFUSED,
             Self::FrameInvalid => SESSION_FRAME_INVALID,
             Self::FrameLimit => SESSION_FRAME_LIMIT,
@@ -205,10 +218,8 @@ impl SessionProtocolErrorCode {
             Self::InputLimit => SESSION_INPUT_LIMIT,
             Self::NotPipe => SESSION_NOT_PIPE,
             Self::NotPty => SESSION_NOT_PTY,
-            Self::OutputLimit => SESSION_OUTPUT_LIMIT,
             Self::PtyEnded => SESSION_PTY_ENDED,
             Self::PtyUnserved => SESSION_PTY_UNSERVED,
-            Self::ReadTimeout => SESSION_READ_TIMEOUT,
             Self::ResizeFailed => SESSION_RESIZE_FAILED,
             Self::ResizeInvalid => SESSION_RESIZE_INVALID,
             Self::SequenceInvalid => SESSION_SEQUENCE_INVALID,
@@ -238,13 +249,39 @@ impl SessionProtocolErrorCode {
     }
 }
 
+impl Serialize for SessionProtocolErrorCode {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for SessionProtocolErrorCode {
+    /// Exact match only.
+    ///
+    /// Deliberately **not** [`Self::classify`]: that maps an unknown word onto `DriverRefused`,
+    /// which is right for a driver error the loop is naming and wrong for bytes off the wire — it
+    /// would let a peer put any word at all into a frame and have it read back as a member.
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let word = String::deserialize(deserializer)?;
+        Self::ALL
+            .into_iter()
+            .find(|member| member.as_str() == word)
+            .ok_or_else(|| {
+                serde::de::Error::custom(format!(
+                    "{word} is outside the closed session protocol-error vocabulary"
+                ))
+            })
+    }
+}
+
 /// Every code a session attachment's `protocol-error` frame may carry, as wire words.
 ///
 /// Derived from [`SessionProtocolErrorCode::ALL`] and checked against it by
 /// `every_protocol_error_variant_has_a_wire_word`, so a variant added without a word — or a word
 /// added without a variant — fails the suite rather than shipping.
-pub const SESSION_PROTOCOL_ERROR_CODES: [&str; 19] = [
+pub const SESSION_PROTOCOL_ERROR_CODES: [&str; 18] = [
     SESSION_BASE64_INVALID,
+    SESSION_CONTROL_RATE_EXCEEDED,
     SESSION_DRIVER_REFUSED,
     SESSION_FRAME_INVALID,
     SESSION_FRAME_LIMIT,
@@ -253,10 +290,8 @@ pub const SESSION_PROTOCOL_ERROR_CODES: [&str; 19] = [
     SESSION_INPUT_LIMIT,
     SESSION_NOT_PIPE,
     SESSION_NOT_PTY,
-    SESSION_OUTPUT_LIMIT,
     SESSION_PTY_ENDED,
     SESSION_PTY_UNSERVED,
-    SESSION_READ_TIMEOUT,
     SESSION_RESIZE_FAILED,
     SESSION_RESIZE_INVALID,
     SESSION_SEQUENCE_INVALID,
@@ -1454,8 +1489,8 @@ pub enum SessionMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PtyWindow {
-    pub columns: u16,
-    pub rows: u16,
+    pub columns: u64,
+    pub rows: u64,
 }
 
 impl PtyWindow {
@@ -1466,9 +1501,27 @@ impl PtyWindow {
     #[must_use]
     pub const fn within_bounds(&self) -> bool {
         self.columns >= 1
-            && self.columns <= MAX_PTY_WINDOW_COLUMNS
+            && self.columns <= MAX_PTY_WINDOW_COLUMNS as u64
             && self.rows >= 1
-            && self.rows <= MAX_PTY_WINDOW_ROWS
+            && self.rows <= MAX_PTY_WINDOW_ROWS as u64
+    }
+
+    /// The window as the `TIOCSWINSZ` field pair, once it is known to be in bounds.
+    ///
+    /// The axes are `u64` on the wire and `unsigned short` at the kernel **on purpose**. Design 13
+    /// discusses 65535 by name — "the kernel field is an `unsigned short`, so 65535 is deliverable"
+    /// — so a client is invited to try it, and a `u16` field made 65536 fail `serde` decoding
+    /// before `within_bounds` ran. That put the boundary between "your window is out of range" and
+    /// "your frame is not a frame" at 65535, a number no released document names, inside a range
+    /// the published schema describes with one rule and one refusal code. Now every non-negative
+    /// integer a client can write decodes, and the only rule is the published one.
+    #[must_use]
+    pub const fn cells(&self) -> Option<(u16, u16)> {
+        if !self.within_bounds() {
+            return None;
+        }
+        #[allow(clippy::cast_possible_truncation)] // `within_bounds` bounds both axes by 1000.
+        Some((self.columns as u16, self.rows as u16))
     }
 }
 
@@ -1547,6 +1600,14 @@ pub struct PipeSessionCapabilities {
     pub modes: Vec<SessionMode>,
     pub max_window_columns: u16,
     pub max_window_rows: u16,
+    /// The control-frame rate an attachment is held to, and the window it is counted over.
+    ///
+    /// Every other bound a client must obey is on this document; these two were enforced and
+    /// unpublished, which made the one bound a terminal client is most likely to cross the only one
+    /// it could not read. `Ping` shares the budget, so a client choosing a keepalive interval needs
+    /// both numbers to choose it safely.
+    pub max_controls_per_window: u32,
+    pub control_window_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1590,9 +1651,13 @@ pub enum PipeServerFrame {
         state: ExecState,
         exit: Option<ExecExit>,
     },
+    /// The code is [`SessionProtocolErrorCode`] and not a `String`, so "a session attachment can
+    /// only send a code the contract publishes" is a property of this type rather than of the one
+    /// function that used to be the only door. A `String` here was the same convention the enum was
+    /// introduced to replace.
     ProtocolError {
         sequence: u64,
-        code: String,
+        code: SessionProtocolErrorCode,
         message: String,
     },
 }
@@ -3065,10 +3130,17 @@ mod tests {
         let mut published: Vec<&str> = SESSION_PROTOCOL_ERROR_CODES.to_vec();
         published.sort_unstable();
         assert_eq!(from_variants, published);
+        // Dedup *before* counting. Comparing `from_variants.len()` with `ALL.len()` was a
+        // tautology — the first is built by mapping the second — so two variants sharing one wire
+        // word passed it, and `check_pty_refusal_class` collects into a `BTreeSet`, which loses the
+        // duplicate too. `classify` would then return whichever came first and the other variant
+        // would be unreachable.
+        let mut distinct = from_variants.clone();
+        distinct.dedup();
         assert_eq!(
-            from_variants.len(),
+            distinct.len(),
             SessionProtocolErrorCode::ALL.len(),
-            "two variants share one wire word"
+            "two variants share one wire word: {from_variants:?}"
         );
         for member in SessionProtocolErrorCode::ALL {
             assert_eq!(SessionProtocolErrorCode::classify(member.as_str()), member);

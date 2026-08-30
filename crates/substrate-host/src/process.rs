@@ -388,6 +388,12 @@ impl ProcessRuntime {
                 "window",
             ));
         }
+        // Rank 3, to match the daemon. The driver used to reach this only inside `start_inner`,
+        // after the exec shape, so the two ports ranked the confinement floor and the exec shape in
+        // opposite orders — the same defect as the `wait` pair, one member over.
+        if self.config.cgroup_root.is_none() {
+            return DispatchOutcome::NotDispatched(sandbox_unavailable());
+        }
         if input.exec.wait {
             return DispatchOutcome::NotDispatched(DriverError::refused(
                 "session.wait-invalid",

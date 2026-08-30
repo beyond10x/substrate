@@ -182,3 +182,45 @@ fn a_second_output_branch_attributing_stderr_is_refused() {
          x-b10x-one-file says a terminal has no way to mean:\n{said}"
     );
 }
+
+/// The `code` pattern the closed-code argument is *stated in* is not checked by anything.
+///
+/// `SessionProtocolErrorCode`'s own documentation gives the reason the type exists as
+/// "a frame whose published `code` is `^session\.[a-z0-9-]+$` — a frame the bundle says cannot
+/// exist" (`crates/substrate-wire/src/lib.rs:146-147`), and the same sentence is repeated on
+/// `send_pipe_protocol_error` (`crates/substrate-daemon/src/app/sessions.rs:1197-1201`). Two halves
+/// of that claim are mechanised: the crate cannot emit a non-member because the parameter is the
+/// enum, and `check_pty_refusal_class` (`xtask/src/bundle.rs:494`) compares `x-b10x-codes` against
+/// `substrate_wire::SESSION_PROTOCOL_ERROR_CODES` in both directions. The third half — that the
+/// pattern the frame publishes admits those codes — is mechanised nowhere: `check_pty_frames`
+/// (`:794`) reads `kind` consts and the `output` branch's `stream`, and never looks at `code`.
+///
+/// So the bundle may publish a `protocol-error` branch whose `code` pattern rejects every entry of
+/// its own `x-b10x-codes`, and `check-bundle` exits 0. A client generating a validator from the
+/// released schema would then reject every `protocol-error` frame the daemon can send — which is
+/// worse than the defect the enum was introduced to prevent, because it is a total failure rather
+/// than a per-code one, and it is invisible in exactly the document a client reads.
+#[test]
+fn a_protocol_error_code_pattern_that_rejects_the_published_codes_is_refused() {
+    let (accepted, said) = check_bundle_after(|document| {
+        let branch = document
+            .get_mut("oneOf")
+            .and_then(Value::as_array_mut)
+            .expect("the pty vocabulary is a oneOf")
+            .iter_mut()
+            .find(|candidate| {
+                candidate
+                    .pointer("/properties/kind/const")
+                    .and_then(Value::as_str)
+                    == Some("protocol-error")
+            })
+            .expect("the pty vocabulary has a protocol-error branch");
+        branch["properties"]["code"]["pattern"] = Value::from("^exec\\.[a-z0-9-]+$");
+    });
+    assert!(
+        !accepted,
+        "check-bundle accepted a pty vocabulary whose protocol-error code pattern is \
+         ^exec\\.[a-z0-9-]+$ while its own x-b10x-codes are all session.*, so a client validating \
+         against the released schema rejects every protocol-error frame the daemon can send:\n{said}"
+    );
+}

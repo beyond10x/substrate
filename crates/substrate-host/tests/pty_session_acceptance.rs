@@ -564,8 +564,8 @@ async fn the_driver_port_refuses_a_resize_outside_the_declared_cell_bounds() {
         }
     }
     let huge = PtyWindow {
-        columns: u16::MAX,
-        rows: u16::MAX,
+        columns: u64::from(u16::MAX),
+        rows: u64::from(u16::MAX),
     };
     let outcome = lane.driver.resize_pty_session("ex_ptyhuge", huge);
     if outcome.is_err() {
@@ -593,7 +593,7 @@ async fn the_driver_port_refuses_a_resize_outside_the_declared_cell_bounds() {
          {}x{}; the confined child read it back: {observed}. transcript: {}",
         huge.columns,
         huge.rows,
-        u32::from(huge.columns) / u32::from(substrate_wire::MAX_PTY_WINDOW_COLUMNS),
+        huge.columns / u64::from(substrate_wire::MAX_PTY_WINDOW_COLUMNS),
         substrate_wire::MAX_PTY_WINDOW_COLUMNS,
         substrate_wire::MAX_PTY_WINDOW_ROWS,
         String::from_utf8_lossy(&transcript)

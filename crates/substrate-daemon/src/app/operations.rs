@@ -623,7 +623,6 @@ pub(super) fn validate_pipe_session_input(
             false,
         ));
     }
-    validate_exec_input(app, &exec_mutation, request_id)?;
     if !pipe_confinement_available(&app.driver.machine().facts) {
         return Err(failure(
             StatusCode::NOT_IMPLEMENTED,
@@ -648,6 +647,13 @@ pub(super) fn validate_pipe_session_input(
     {
         return Err(schema_invalid(request_id, Some(&mutation.op), "input"));
     }
+    // **Last, so the two ports rank it the same.** The exec shape is checked here *and* by
+    // `ProcessRuntime::admit`, which the driver reaches only after its own `wait` and session-bound
+    // checks — so with this call where it used to be (before them) the two implementations of one
+    // contract ranked the same pair of refusals in opposite orders. It was invisible only because
+    // this port answers `request.schema-invalid` for both, differing in `address`, which is
+    // precisely why a pin that read the code could not see it.
+    validate_exec_input(app, &exec_mutation, request_id)?;
     Ok(())
 }
 
