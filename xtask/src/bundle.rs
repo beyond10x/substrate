@@ -214,6 +214,11 @@ fn check_compatibility(inputs: &Inputs, released: &Tree, failures: &mut Vec<Stri
         failures.push("bundle.json: no compatibility.predecessor".to_owned());
         return;
     };
+    // An inventory that cannot be read at all — a repeated id, one method and path reaching two
+    // operations — stops the rest of this function, so the counts, the drops and the moves go
+    // unreported for that bundle. That is fail-closed rather than a second defect: the verb exits
+    // non-zero and names what has to be fixed before anything else about the successor relationship
+    // can be believed. It does mean a first run reports one thing and a second run more.
     let current = match routes_of(released) {
         Ok(routes) => routes,
         Err(error) => {
@@ -273,27 +278,64 @@ fn check_compatibility(inputs: &Inputs, released: &Tree, failures: &mut Vec<Stri
              successor never drops one"
         ));
     }
+    check_route_paths(&previous, &current, released, inputs, predecessor, failures);
+}
+
+/// No operation both bundles serve answers at a different path, unless the move is declared.
+///
+/// This is the half of compatibility the id inventories cannot state. Their difference is
+/// empty when a path moves, so the counts are the predecessor's own and nothing is dropped —
+/// the gate could not tell a rename from a no-op.
+fn check_route_paths(
+    previous: &Routes,
+    current: &Routes,
+    released: &Tree,
+    inputs: &Inputs,
+    predecessor: &str,
+    failures: &mut Vec<String>,
+) {
+    let previous_ids = previous.ids();
+    let predecessor_root = inputs.contracts_root.join(predecessor);
     // A path is pinned as firmly as an id, and moving one is invisible to everything above: the id
     // difference is empty, so the counts are the predecessor's own and nothing is dropped. A
     // deliberate move stays expressible — `docs/design/16-sessions-are-not-pipe-sessions.md` needs
-    // one — by keeping the predecessor's path answering through an entry whose `alias_of` names the
-    // operation that moved. That declaration is *read* here, not a switch: an alias serving some
-    // other path leaves the old one unanswered and fails exactly as an undeclared move does.
+    // one — by keeping the predecessor's path answering through a new entry whose `alias_of` names
+    // the operation that moved, and which answers there as the predecessor did. That declaration is
+    // *read*, never a switch.
     for (id, was) in &previous.served {
         let Some(now) = current.served.get(id) else {
             continue;
         };
-        if current.still_answers(was, &previous_ids) {
+        if now.path == was.path {
             continue;
         }
+        let shims = current.shims_for(was, &previous_ids);
+        let offered: Vec<(&str, Vec<String>)> = shims
+            .iter()
+            .map(|shim| {
+                (
+                    shim.id.as_str(),
+                    declaration_differences(was, shim, released, &predecessor_root),
+                )
+            })
+            .collect();
+        if offered.iter().any(|(_, differing)| differing.is_empty()) {
+            continue;
+        }
+        // Say what is missing rather than only that something is: with no shim the move was never
+        // declared, and with one that differs the old URL resolves but does not answer what it did.
+        let unmet = match offered.first() {
+            None => format!("no new entry whose alias_of is {id} serves {}", was.path),
+            Some((shim, differing)) => format!(
+                "the entry {shim} standing at {} differs from what {predecessor} served there in {}",
+                was.path,
+                differing.join(", ")
+            ),
+        };
         failures.push(format!(
-            "operations.json: route {id} served by {predecessor} at {} is served at {}; a \
-             successor that moves a path keeps {} answering through a new entry whose alias_of is \
-             {id}, serving it with the same {} — or it has moved a path a consumer pinned",
-            was.path,
-            now.path,
-            was.path,
-            ANSWERED_BY.join(", ")
+            "operations.json: route {id} served by {predecessor} at {} is served at {}; a path a \
+         consumer pinned moves only while the old one keeps answering as before, and {unmet}",
+            was.path, now.path
         ));
     }
 }
@@ -552,32 +594,43 @@ fn json_at(released: &Tree, path: &str, failures: &mut Vec<String>) -> Option<Va
     }
 }
 
-/// What a request to one route is answered by.
+/// The three members a declaration exists to change. **Everything else is compared.**
 ///
-/// These are the registry fields that decide whether a request a consumer already sends is answered
-/// at all, and answered the same way: the wrong `method` is a 405, the wrong `required_scope` is a
-/// 403 against a token that used to work, and `idempotency`, `input_binding`, `input_schema` and
-/// `result_schema` are the request envelope the consumer builds and the response it parses. An
-/// entry that differs in any of them is serving something else at that URL.
+/// There is no whitelist of members that matter, because every attempt to write one was wrong. The
+/// first named `method` and `required_scope`, and a shim gated on a capability predicate the moved
+/// operation never carried slipped past it — `docs/design/13-pty-sessions.md:140-145` says what
+/// that costs in as many words, that hanging a fact on a route "would take the whole route away
+/// from a daemon that serves pipes perfectly well", and `docs/design/07-specification-and-\
+/// conformance.md:126-128` makes an unknown required fact an unserved request. The second added
+/// `address_schema` on the theory that it follows from the path; it does not, and five paths in
+/// `0.8.0` carry two or three different values of it.
 ///
-/// It stops there deliberately. `risk`, `effects` and `exposure` describe an operation to a reader
-/// rather than to a client; `capability_predicates` decide a refusal the driver owns, not the shape
-/// of the exchange; and `address_schema` follows from the path, which is compared exactly. The
-/// stronger rule — that a declared alias is byte-identical to the operation it stands in for in
-/// every field but `id`, `path` and `alias_of` — is a claim about one successor's own additions
-/// (`docs/design/16-sessions-are-not-pipe-sessions.md`), and belongs in that version's arm of
-/// [`check_additions`], not in the cross-version compatibility check.
-const ANSWERED_BY: [&str; 6] = [
-    "method",
-    "required_scope",
-    "idempotency",
-    "input_binding",
-    "input_schema",
-    "result_schema",
-];
+/// So the rule is the one `docs/design/16-sessions-are-not-pipe-sessions.md` states for an alias,
+/// applied across the version boundary instead of within one bundle: a shim is the predecessor's
+/// own entry, with a new `id`, the `path` it stands on, and the `alias_of` that says what it stands
+/// for. A member the predecessor's entry does not have is a difference like any other — a successor
+/// that wants a new one on a shim has to say why, in a review, rather than in silence.
+const DECLARED_MEMBERS: [&str; 3] = ["id", "path", "alias_of"];
 
-/// One entry of a bundle's operation registry, kept whole so a declaration can be compared field by
-/// field against the operation it stands in for.
+/// Registry members naming a schema document inside the bundle.
+///
+/// These are compared as the **documents they resolve to**, never as the strings. The same relative
+/// name means a different document in every version — `$id` alone differs by construction, and
+/// nothing else does: of the 96 schema documents `0.7.0` and `0.8.0` share, 89 differ at `/$id` and
+/// nowhere else, and the seven that differ elsewhere are exactly the ones `0.8.0` was cut to
+/// change. String equality here would compare two file *names* across two bundles and never what
+/// they say, so a shim could keep the name while the successor narrowed the document under it and
+/// every request a pinned consumer already sends would stop being valid at the path it was promised
+/// would keep answering.
+///
+/// Comparing documents also buys the escape hatch string equality would have taken away: a version
+/// that moves a route *and* changes that route's schema in the same cut gives the shim its own
+/// document, saying the old path keeps answering under the contract the predecessor published,
+/// which is what a pinned consumer was promised.
+const SCHEMA_MEMBERS: [&str; 3] = ["address_schema", "input_schema", "result_schema"];
+
+/// One entry of a bundle's operation registry, kept whole so a declaration can be compared member
+/// by member against the operation it stands in for.
 #[derive(Debug, Clone)]
 struct Route {
     id: String,
@@ -586,8 +639,20 @@ struct Route {
 }
 
 impl Route {
-    fn field(&self, name: &str) -> Option<&str> {
-        self.entry.get(name).and_then(Value::as_str)
+    /// The member as it stands, whatever its type.
+    ///
+    /// Deliberately **not** `and_then(Value::as_str)`: `capability_predicates` and `effects` are
+    /// arrays, and a string-only reader would hand back `None` for both sides of a comparison and
+    /// call two different predicate lists equal.
+    fn member(&self, name: &str) -> Option<&Value> {
+        self.entry.get(name)
+    }
+
+    fn members(&self) -> impl Iterator<Item = &str> {
+        self.entry
+            .as_object()
+            .into_iter()
+            .flat_map(|entry| entry.keys().map(String::as_str))
     }
 }
 
@@ -618,6 +683,7 @@ impl Routes {
             .and_then(Value::as_array)
             .ok_or_else(|| anyhow!("no operations array"))?;
         let mut routes = Self::default();
+        let mut dispatch: BTreeMap<(&str, &str), &str> = BTreeMap::new();
         for entry in entries {
             let (Some(id), Some(path)) = (
                 entry.get("id").and_then(Value::as_str),
@@ -636,6 +702,23 @@ impl Routes {
                     .entry(target.to_owned())
                     .or_default()
                     .push(route.clone());
+            }
+            // A router dispatches one request to one operation. Two routes may share a path —
+            // `0.8.0` has five such paths, `GET` and `DELETE` on one resource — but never a path
+            // *and* a method: which operation the request reaches would be a property of the
+            // router rather than of the registry. It is also how a declared move launders itself
+            // into a collision, satisfying every condition on the path the operation left while
+            // the operation lands on a path somebody else still serves.
+            let method = entry.get("method").and_then(Value::as_str).unwrap_or("");
+            if let Some(other) = dispatch.insert((method, path), id) {
+                let mut both = [other, id];
+                both.sort_unstable();
+                return Err(anyhow!(
+                    "{method} {path} is served by two operations, {} and {}; one method and path \
+                     reach one operation",
+                    both[0],
+                    both[1]
+                ));
             }
             if let Some(first) = routes.served.insert(id.to_owned(), route) {
                 // Named in sorted order, not in array order: the verdict on a registry has to be a
@@ -658,40 +741,86 @@ impl Routes {
         self.served.keys().map(String::as_str).collect()
     }
 
-    /// Whether a request the predecessor answered at `was.path` is still answered there, the same
-    /// way, by this successor.
+    /// The entries offered as the declaration that `was` moved: new ids, standing on the path the
+    /// operation left, naming it in `alias_of`. Ordered by id, so the report does not depend on
+    /// where in the registry they were authored.
     ///
-    /// Either the operation has not moved, or the path it left is served by a **declaration**, and
-    /// a declaration is three things read out of the registry, never one:
-    ///
-    /// 1. **The declaring entry is new.** An id the predecessor already served may not stand in for
-    ///    somebody else's move — two existing operations naming each other as `alias_of` would
-    ///    trade paths and each "declare" the other, with every id preserved and nothing added.
-    /// 2. **It is served at exactly the path the operation left**, so the URL a consumer pinned
-    ///    still resolves.
-    /// 3. **It answers there as the predecessor did**, in every field of [`ANSWERED_BY`]. An entry
-    ///    parked on the old path under another method or another scope resolves the URL and refuses
-    ///    the request, which is the withdrawal this check exists to catch, not a declaration of it.
-    fn still_answers(&self, was: &Route, previous_ids: &BTreeSet<&str>) -> bool {
-        if self
-            .served
-            .get(&was.id)
-            .is_some_and(|now| now.path == was.path)
-        {
-            return true;
-        }
-        self.aliased
+    /// "New" is load-bearing. An id the predecessor already served may not stand in for somebody
+    /// else's move: two existing operations naming each other as `alias_of` would trade paths and
+    /// each "declare" the other, with every id preserved, nothing added and nothing to report.
+    fn shims_for<'a>(&'a self, was: &Route, previous_ids: &BTreeSet<&str>) -> Vec<&'a Route> {
+        let mut shims: Vec<&Route> = self
+            .aliased
             .get(&was.id)
             .into_iter()
             .flatten()
-            .any(|alias| {
-                !previous_ids.contains(alias.id.as_str())
-                    && alias.path == was.path
-                    && ANSWERED_BY
-                        .iter()
-                        .all(|field| alias.field(field) == was.field(field))
-            })
+            .filter(|alias| !previous_ids.contains(alias.id.as_str()) && alias.path == was.path)
+            .collect();
+        shims.sort_by(|left, right| left.id.cmp(&right.id));
+        shims
     }
+}
+
+/// Every member in which a declaration differs from what the predecessor served at that path.
+///
+/// Empty means the shim answers as the predecessor did, which is the only thing that makes a path
+/// move a move rather than a withdrawal. A [`SCHEMA_MEMBERS`] reference is compared as the document
+/// it names in each bundle; every other member is compared as it stands.
+fn declaration_differences(
+    was: &Route,
+    shim: &Route,
+    successor: &Tree,
+    predecessor_root: &Path,
+) -> Vec<String> {
+    let members: BTreeSet<&str> = was
+        .members()
+        .chain(shim.members())
+        .filter(|member| !DECLARED_MEMBERS.contains(member))
+        .collect();
+    let mut differing = Vec::new();
+    for member in members {
+        let same = if SCHEMA_MEMBERS.contains(&member) {
+            let published = was
+                .member(member)
+                .and_then(Value::as_str)
+                .and_then(|reference| read_json(&predecessor_root.join(reference)));
+            let offered = shim
+                .member(member)
+                .and_then(Value::as_str)
+                .and_then(|reference| successor.get(reference))
+                .and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok());
+            match (published, offered) {
+                (Some(published), Some(offered)) => without_id(&published) == without_id(&offered),
+                // A reference that resolves in neither bundle, or in only one of them, is not a
+                // document a consumer can be shown to still get.
+                _ => false,
+            }
+        } else {
+            was.member(member) == shim.member(member)
+        };
+        if !same {
+            differing.push(member.to_owned());
+        }
+    }
+    differing
+}
+
+/// A schema document with its `$id` removed.
+///
+/// `$id` carries the bundle version — `urn:b10x:substrate-wire:0.7.0:input:…` against `…:0.8.0:…` —
+/// so two versions of one document differ there by construction and nowhere else unless the
+/// successor changed what it says. It is the only member removed, because it is the only one the
+/// two released bundles show as differing everywhere.
+fn without_id(document: &Value) -> Value {
+    let mut stripped = document.clone();
+    if let Some(object) = stripped.as_object_mut() {
+        object.remove("$id");
+    }
+    stripped
+}
+
+fn read_json(path: &Path) -> Option<Value> {
+    serde_json::from_slice(&std::fs::read(path).ok()?).ok()
 }
 
 fn routes_of(released: &Tree) -> Result<Routes> {
@@ -2025,6 +2154,358 @@ mod tests {
             .expect("the duplicated successor reads")
             .failures()
             .to_vec()
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Adversarial pass 2. Added against 969817f. The three cases above that guard the declaration
+    // (`a_move_declared_by_an_alias_at_the_old_path_is_accepted` and the two `an_alias_answering_…`
+    // cases) all hold the *vacated* path still. These attack what the declaration says about the
+    // path the operation moved *to*, and what the six-field whitelist leaves out of "answers there
+    // as the predecessor did".
+    // ------------------------------------------------------------------------------------------
+
+    /// The operation `MOVED_ID` is moved onto a path the predecessor already served, and *keeps
+    /// serving*, with another operation.
+    const OCCUPIED_ID: &str = "session.get";
+    const OCCUPIED_PATH: &str = "/v1/pipe-sessions/{session_id}";
+
+    /// Authors a declared move of `MOVED_ID` onto `to`, with the shim `declare_alias` builds
+    /// sitting at `MOVED_FROM` and answering there exactly as the predecessor did.
+    fn declare_a_move_to(authored: &std::path::Path, to: &str) {
+        let to = to.to_owned();
+        edit_json(&authored.join("routes.json"), |routes| {
+            for route in routes.as_array_mut().expect("routes.json is an array") {
+                if route.get("id").and_then(Value::as_str) == Some(MOVED_ID) {
+                    assert_eq!(route["path"], json!(MOVED_FROM), "{MOVED_ID} moved already");
+                    route["path"] = json!(to);
+                }
+            }
+        });
+        declare_alias(authored, MOVED_FROM);
+    }
+
+    /// A **declared** move onto a path another preserved operation still serves.
+    ///
+    /// Every condition the declaration asks for is met: `pipe-session.attach` is new, it sits at
+    /// exactly the path `session.attach` left, and it matches on all six of `ANSWERED_BY`. So
+    /// `still_answers` says yes and the successor verifies — while `GET
+    /// /v1/pipe-sessions/{session_id}` is now claimed by two operations at once, `session.get` and
+    /// `session.attach`. Which one a request reaches is not a property of the registry any more,
+    /// and `session.attach` is the duplex byte channel whose arrival at that URL is the harm the
+    /// path-trade fix was written for. Nothing in the gate compares two entries of the *same*
+    /// bundle for a `(method, path)` collision, so the escape hatch launders one move into one.
+    ///
+    /// By the story's own acceptance statement this successor serves an existing operation id at a
+    /// different path and must fail.
+    #[test]
+    fn a_declared_move_onto_an_occupied_path_is_refused() {
+        let (_scratch, inputs) = author_a_successor("declared-move-onto-occupied", |authored| {
+            declare_a_move_to(authored, OCCUPIED_PATH);
+        });
+        let registry: Value = serde_json::from_slice(
+            &std::fs::read(inputs.contracts_root.join(VERSION).join("operations.json"))
+                .expect("read the rendered registry"),
+        )
+        .expect("the rendered registry parses");
+        let mut claimants: Vec<&str> = registry["operations"]
+            .as_array()
+            .expect("an operations array")
+            .iter()
+            .filter(|entry| {
+                entry.get("path").and_then(Value::as_str) == Some(OCCUPIED_PATH)
+                    && entry.get("method").and_then(Value::as_str) == Some("GET")
+            })
+            .filter_map(|entry| entry.get("id").and_then(Value::as_str))
+            .collect();
+        claimants.sort_unstable();
+        let mut expected = vec![MOVED_ID, OCCUPIED_ID];
+        expected.sort_unstable();
+        assert_eq!(
+            claimants, expected,
+            "the fixture must actually put two operations on one GET path"
+        );
+
+        let report = check(&inputs).expect("the successor reads");
+        let text = report.failure_text();
+        assert!(
+            text.contains(MOVED_ID),
+            "{MOVED_ID} is served at {OCCUPIED_PATH}, which {OCCUPIED_ID} also serves under the \
+             same method; a bundle in which one GET path reaches two operations is not a \
+             declaration of anything: {text}"
+        );
+    }
+
+    /// The same successor through the verb the acceptance statement names.
+    #[test]
+    fn the_command_refuses_a_declared_move_onto_an_occupied_path() {
+        let (_scratch, inputs) =
+            author_a_successor("declared-move-onto-occupied-cli", |authored| {
+                declare_a_move_to(authored, OCCUPIED_PATH);
+            });
+        let code = run(&Args {
+            version: VERSION.to_owned(),
+            contracts_root: Some(inputs.contracts_root.clone()),
+            source: Some(inputs.source_root.clone()),
+        })
+        .expect("the command runs");
+        assert_ne!(
+            format!("{code:?}"),
+            format!("{:?}", std::process::ExitCode::SUCCESS),
+            "check-bundle accepted a successor that moved {MOVED_ID} onto {OCCUPIED_PATH}, which \
+             {OCCUPIED_ID} still serves under the same method"
+        );
+    }
+
+    /// Two shims, both new, both parked on the path `MOVED_ID` left, both naming it.
+    ///
+    /// `still_answers` is an `any` over `aliased[&was.id]`, so one qualifying shim is enough and a
+    /// second is never looked at. The result is a registry that answers `GET
+    /// /v1/pipe-sessions/{session_id}/attach` with two different operation ids — produced by the
+    /// declaration mechanism alone, with no other edit.
+    #[test]
+    fn two_shims_on_one_vacated_path_are_refused() {
+        let (_scratch, inputs) = author_a_successor("two-shims", |authored| {
+            declare_a_move_to(authored, MOVED_TO);
+            edit_json(&authored.join("routes.json"), |routes| {
+                let routes = routes.as_array_mut().expect("routes.json is an array");
+                let mut second = routes
+                    .iter()
+                    .find(|route| route.get("id").and_then(Value::as_str) == Some(ALIAS_ID))
+                    .cloned()
+                    .expect("the first shim");
+                second["id"] = json!("legacy-session.attach");
+                routes.push(second);
+            });
+            edit_json(&authored.join("documents/schemas/bundle.json"), |bundle| {
+                bundle["properties"]["compatibility"]["properties"]["adds_routes"] =
+                    json!({ "const": 2 });
+            });
+        });
+        let report = check(&inputs).expect("the successor reads");
+        let text = report.failure_text();
+        assert!(
+            !report.failures().is_empty(),
+            "two entries answer GET {MOVED_FROM}; a declaration that admits a second claimant on \
+             the vacated path declares nothing determinate: {text}"
+        );
+    }
+
+    /// `ANSWERED_BY` omits `capability_predicates` because they "decide a refusal the driver owns,
+    /// not the shape of the exchange" (`bundle.rs:563-565`). That is the same sentence that was
+    /// already rejected for `required_scope`, and this repository's own design says so in as many
+    /// words: "hanging `sessions.pty` on `POST /v1/pipe-sessions` would take the whole route away
+    /// from a daemon that serves pipes perfectly well"
+    /// (`docs/design/13-pty-sessions.md:140-145`), and design 07 §4 makes an unknown required fact
+    /// an `unserved` request.
+    ///
+    /// So a shim carrying a predicate the moved operation never carried resolves the vacated URL
+    /// and refuses every request a pinned consumer sends to it, on every host that does not
+    /// publish that fact — which is exactly the withdrawal-dressed-as-a-declaration the method and
+    /// scope cases refuse.
+    #[test]
+    fn an_alias_gated_on_a_fact_the_moved_operation_never_needed_declares_nothing() {
+        let report = check_with_the_route_moved("alias-extra-predicate", |authored| {
+            declare_alias(authored, MOVED_FROM);
+            edit_json(&authored.join("routes.json"), |routes| {
+                for route in routes.as_array_mut().expect("routes.json is an array") {
+                    if route.get("id").and_then(Value::as_str) == Some(ALIAS_ID) {
+                        route["capability_predicates"] = json!([
+                            { "fact": "sessions.pty", "op": "eq", "value": true }
+                        ]);
+                    }
+                }
+            });
+        });
+        let text = report.failure_text();
+        assert!(
+            text.contains(MOVED_ID),
+            "no host without the sessions.pty fact answers {MOVED_FROM} any more, so the move is \
+             undeclared: {text}"
+        );
+    }
+
+    /// `ANSWERED_BY` omits `address_schema` because it "follows from the path, which is compared
+    /// exactly" (`bundle.rs:565-566`). It does not follow from the path: five paths in `0.8.0`
+    /// carry two or three different `address_schema` values already, so the field is authored, not
+    /// derived, and a shim may name one that contradicts the template it sits on.
+    ///
+    /// Here the shim sits at `/v1/pipe-sessions/{session_id}/attach` and names
+    /// `schemas/addresses/workspace-get.json`, which requires `workspace_id` and forbids anything
+    /// else. No request to that path can produce an address that validates, so the declaration
+    /// hands back a URL nothing can be sent to.
+    #[test]
+    fn an_alias_naming_an_address_schema_the_path_cannot_fill_declares_nothing() {
+        let report = check_with_the_route_moved("alias-wrong-address", |authored| {
+            declare_alias(authored, MOVED_FROM);
+            edit_json(&authored.join("routes.json"), |routes| {
+                for route in routes.as_array_mut().expect("routes.json is an array") {
+                    if route.get("id").and_then(Value::as_str) == Some(ALIAS_ID) {
+                        assert_eq!(
+                            route["address_schema"],
+                            json!("schemas/addresses/pipe-session-attach.json"),
+                            "the shim no longer copies the moved operation's address schema"
+                        );
+                        route["address_schema"] = json!("schemas/addresses/workspace-get.json");
+                    }
+                }
+            });
+        });
+        let text = report.failure_text();
+        assert!(
+            text.contains(MOVED_ID),
+            "the shim's address schema requires workspace_id and the path it sits on offers \
+             session_id, so nothing reaches {MOVED_FROM}: {text}"
+        );
+    }
+
+    /// `ANSWERED_BY` compares `input_schema` and `result_schema` as **strings**, and those strings
+    /// are bundle-relative paths — `schemas/inputs/pipe-session-attach.json` names one document
+    /// inside `0.7.0` and a different one inside `0.8.0` (their `$id`s alone already differ). So
+    /// the equality that is documented as "the request envelope the consumer builds and the
+    /// response it parses" (`bundle.rs:552-556`) compares two file *names* across two bundles and
+    /// never the documents they name.
+    ///
+    /// Here the shim sits on the vacated path with a byte-identical `input_schema` string, and the
+    /// successor's copy of that schema requires a member `0.7.0`'s copy did not have. Every
+    /// attach request a pinned consumer already sends — the empty object `0.7.0` specified — is
+    /// now invalid at the path it was promised would keep answering, and the declaration is
+    /// accepted.
+    #[test]
+    fn an_alias_whose_input_schema_names_a_narrowed_document_declares_nothing() {
+        let report = check_with_the_route_moved("alias-narrowed-input", |authored| {
+            declare_alias(authored, MOVED_FROM);
+            edit_json(
+                &authored.join("documents/schemas/inputs/pipe-session-attach.json"),
+                |schema| {
+                    assert_eq!(
+                        schema["required"],
+                        json!([]),
+                        "0.8.0's attach input is no longer the empty object 0.7.0 published"
+                    );
+                    schema["properties"]["client_key"] = json!({ "type": "string" });
+                    schema["required"] = json!(["client_key"]);
+                },
+            );
+        });
+        let text = report.failure_text();
+        assert!(
+            text.contains(MOVED_ID),
+            "the shim's input_schema string is unchanged and the document it names is not, so \
+             the empty attach input 0.7.0 published no longer reaches {MOVED_FROM}: {text}"
+        );
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // The mutation gap. Every member a shim carries is compared, and every one of them is pinned
+    // here: without a case per member, moving a name into `DECLARED_MEMBERS` stops it being
+    // compared and no test notices. Verified by doing exactly that, member by member, and watching
+    // this case go red for each.
+    // ------------------------------------------------------------------------------------------
+
+    /// Each member of a shim, and a value for it the registry schema admits and the moved operation
+    /// does not have. `direction` is absent: the renderer writes `outbound` on every entry
+    /// (`xtask/src/render.rs:436-441`) and no authored source can vary it.
+    const PERTURBATIONS: [(&str, &str); 9] = [
+        ("method", r#""DELETE""#),
+        ("required_scope", r#""workspaces""#),
+        ("idempotency", r#""keyed""#),
+        ("input_binding", r#""body.input""#),
+        ("risk", r#""read""#),
+        ("exposure", r#""callable""#),
+        ("effects", r#"["process", "network:egress"]"#),
+        (
+            "capability_predicates",
+            r#"[{ "fact": "sessions.pty", "op": "eq", "value": true }]"#,
+        ),
+        ("result_schema", r#""schemas/results/machine-get.json""#),
+    ];
+
+    /// A shim that differs from the predecessor's entry in **any** member declares nothing, and the
+    /// report names the member.
+    ///
+    /// One case per member rather than one shim carrying all nine: a single perturbed shim would go
+    /// on failing with eight of the nine comparisons deleted, which is precisely the hole this
+    /// closes. `address_schema` and `input_schema` have their own cases above, written by the
+    /// adversarial pass and left alone.
+    #[test]
+    fn a_shim_differing_in_any_member_declares_nothing() {
+        for (member, perturbation) in PERTURBATIONS {
+            let value: Value = serde_json::from_str(perturbation).expect("a perturbation parses");
+            let report = check_with_the_route_moved(&format!("shim-{member}"), |authored| {
+                declare_alias(authored, MOVED_FROM);
+                edit_json(&authored.join("routes.json"), |routes| {
+                    for route in routes.as_array_mut().expect("routes.json is an array") {
+                        if route.get("id").and_then(Value::as_str) == Some(ALIAS_ID) {
+                            assert_ne!(
+                                route[member], value,
+                                "{member} is already the perturbed value; the case proves nothing"
+                            );
+                            route[member] = value.clone();
+                        }
+                    }
+                });
+            });
+            let text = report.failure_text();
+            assert!(
+                text.contains(MOVED_ID),
+                "a shim differing in {member} must not declare the move: {text}"
+            );
+            assert!(
+                text.contains(member),
+                "the report must name {member} as the difference: {text}"
+            );
+        }
+    }
+
+    /// Two existing operations that swap **everything** but their ids, and declare each other.
+    ///
+    /// Found by mutating `shims_for` to drop its "a shim is new" filter and watching the suite stay
+    /// green: the path-trade case above no longer needs that filter, because the two entries differ
+    /// in nine members and the member comparison refuses them on its own. Nothing was left pinning
+    /// the filter. This pins it. Here each entry carries the *other* operation's members, so every
+    /// member comparison passes and only "a shim is new" stands between the registry and a
+    /// successor in which `session.attach` and `session.get` have exchanged identities with every
+    /// id preserved, `adds_routes: 0` and no entry added.
+    #[test]
+    fn two_existing_operations_may_not_declare_each_others_moves() {
+        let (_scratch, inputs) = author_a_successor("swapped-identities", |authored| {
+            admit_alias_of(authored);
+            edit_json(&authored.join("routes.json"), |routes| {
+                let routes = routes.as_array_mut().expect("routes.json is an array");
+                let find = |routes: &Vec<Value>, id: &str| {
+                    routes
+                        .iter()
+                        .find(|route| route.get("id").and_then(Value::as_str) == Some(id))
+                        .cloned()
+                        .expect("the route to swap")
+                };
+                let (a, b) = (find(routes, TRADE_A), find(routes, TRADE_B));
+                for route in routes.iter_mut() {
+                    match route.get("id").and_then(Value::as_str) {
+                        // Everything but the id: the entry keeps its name and takes on the other
+                        // operation's whole contract, including the path it is served at.
+                        Some(TRADE_A) => {
+                            *route = b.clone();
+                            route["id"] = json!(TRADE_A);
+                            route["alias_of"] = json!(TRADE_B);
+                        }
+                        Some(TRADE_B) => {
+                            *route = a.clone();
+                            route["id"] = json!(TRADE_B);
+                            route["alias_of"] = json!(TRADE_A);
+                        }
+                        _ => {}
+                    }
+                }
+            });
+        });
+        let report = check(&inputs).expect("the swapped successor reads");
+        let text = report.failure_text();
+        assert!(
+            text.contains(TRADE_A) && text.contains(TRADE_B),
+            "both operations moved and neither is declared by an entry the predecessor already \
+             served: {text}"
+        );
     }
 
     fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
