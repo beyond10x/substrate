@@ -169,7 +169,11 @@ hand-written HTTP/1.1 and WebSocket client, so it links no implementation and as
 the wire; `cargo test --workspace --locked` runs it. Its portable lane asserts the named
 refusal `exec.sandbox-unavailable` (501). Its delegated lane runs only when
 `SUBSTRATE_VECTORS_CGROUP_ROOT` names a delegated cgroup v2 subtree the test process is inside;
-unset, those cases are **absent, never reported as passed** (invariant 3).
+unset, those cases are **absent, never reported as passed** (invariant 3). **`bash scripts/delegated-lane.sh`
+runs that lane and needs no privilege** — it asks systemd for a delegated scope, moves itself into a
+child group so the delegation root stays process-free, and sets the variable. Do not conclude the
+delegated lane cannot run here: a user session's own scope is root-owned, so `mkdir` in it fails,
+and an absent lane looks identical to a green one if you only read `cargo test`.
 
 **The gate verifies every released bundle, not just `0.1.0`.** `scripts/gate.sh:20-23` runs the
 four frozen Python checkers, and `:27-28` run `cargo xtask check-bundle` for `0.5.0` and `0.6.0`, so
