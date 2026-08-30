@@ -79,6 +79,15 @@ pub const OPERATION_LEDGER_GLOBAL_MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 pub const MIN_LEASE_TTL_MS: u64 = 1_000;
 pub const MAX_LEASE_TTL_MS: u64 = 86_400_000;
 pub const LEASE_CLOCK_TOLERANCE_MS: u64 = 30_000;
+/// The widest terminal a pty session may declare or resize to, in cells (design 13).
+///
+/// The kernel field is an `unsigned short`, so 65535 is deliverable; a 65535x65535 window is not a
+/// display but an amplification knob, because programs allocate per-cell buffers when the size
+/// changes and that allocation is spent from the run's own memory bound. 1000 is above any real
+/// terminal — a 4K display at a small font is roughly 400 columns by 100 rows.
+pub const MAX_PTY_WINDOW_COLUMNS: u16 = 1_000;
+/// The tallest terminal a pty session may declare or resize to, in cells (design 13).
+pub const MAX_PTY_WINDOW_ROWS: u16 = 1_000;
 
 /// The one audience a delegated-context document may name (ADR 0011).
 ///
@@ -1214,6 +1223,13 @@ pub struct PipeSessionStartInput {
     pub input_limit_bytes: u64,
     pub frame_limit_bytes: u64,
     pub queued_frames: u32,
+    /// The channel this session carries. Omitted means [`SessionMode::Pipes`], and that default is
+    /// what enforces design 05 section 2 mechanically: no existing client can be handed a terminal.
+    #[serde(default)]
+    pub mode: SessionMode,
+    /// The initial terminal window, required for `pty` and refused for `pipes` (design 13).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<PtyWindow>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1222,10 +1238,41 @@ pub enum SessionKind {
     Session,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// The channel a session carries, never the kind of resource it is (design 13).
+///
+/// `SessionKind` is the *resource* axis and holds one variant; growing it would make a terminal a
+/// different kind of resource from a pipe session, which is the split ADR 0008 refused. This is the
+/// channel axis, already carried as `mode` on the durable resource, and it is what grows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SessionMode {
+    /// Three descriptors, separately attributed, and a machine protocol may run on them (ADR 0007).
+    #[default]
     Pipes,
+    /// One terminal: merged output, a line discipline, a window and a hangup (design 13).
+    Pty,
+}
+
+/// A terminal window in cells. Pixel dimensions are not on the wire and are set to zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PtyWindow {
+    pub columns: u16,
+    pub rows: u16,
+}
+
+impl PtyWindow {
+    /// Whether both axes are within 1..=1000 cells.
+    ///
+    /// Zero is outside the bounds rather than a request for a default: a zero dimension is how a
+    /// terminal says *I do not know*, which is not what a client that sent a window meant.
+    #[must_use]
+    pub const fn within_bounds(&self) -> bool {
+        self.columns >= 1
+            && self.columns <= MAX_PTY_WINDOW_COLUMNS
+            && self.rows >= 1
+            && self.rows <= MAX_PTY_WINDOW_ROWS
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1298,6 +1345,11 @@ pub struct PipeSessionCapabilities {
     pub max_input_bytes: u64,
     pub max_frame_bytes: u64,
     pub max_queued_frames: u32,
+    /// The modes this daemon serves, derived from the capability facts and never a second source
+    /// of truth. `pty` appears only when `sessions.pty` was probe-verified (design 13).
+    pub modes: Vec<SessionMode>,
+    pub max_window_columns: u16,
+    pub max_window_rows: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1314,6 +1366,13 @@ pub enum PipeClientFrame {
         sequence: u64,
         signal: Signal,
         grace_ms: u64,
+    },
+    /// A new terminal window for a `pty` session (design 13). There is no `close-input` companion:
+    /// a pty has no half-close, so a client ends input by sending the terminal's own EOF character
+    /// as ordinary input bytes.
+    Resize {
+        sequence: u64,
+        window: PtyWindow,
     },
 }
 
@@ -1488,6 +1547,14 @@ pub struct CapabilityFacts {
     /// a missing guarantee is a named refusal and never a weaker delivery (invariant 3).
     #[serde(rename = "secrets.slots", skip_serializing_if = "Option::is_none")]
     pub secrets_slots: Option<Vec<String>>,
+    /// Whether this driver proved it can give a confined process a controlling terminal.
+    ///
+    /// Published **only** after a startup probe allocated a pty pair, made it controlling inside a
+    /// throwaway sandbox and round-tripped a window size through the child — never from a constant
+    /// and never from configuration (invariant 4, design 13). Absent leaves every `mode: "pty"`
+    /// request `unserved` by name; it never falls back to pipes (invariant 3).
+    #[serde(rename = "sessions.pty", skip_serializing_if = "Option::is_none")]
+    pub sessions_pty: Option<bool>,
     #[serde(
         rename = "snapshot.provenance-events",
         skip_serializing_if = "Option::is_none"
@@ -1525,6 +1592,7 @@ impl Default for CapabilityFacts {
             exec_inline_capsule: None,
             exec_egress_apertures: None,
             secrets_slots: None,
+            sessions_pty: None,
             snapshot_provenance_events: None,
         }
     }
@@ -1664,6 +1732,8 @@ pub enum WireValidationError {
     ApertureModeMismatch,
     #[error("execution capsule manifest does not match its digest")]
     CapsuleManifestMismatch,
+    #[error("a session window is absent, unwanted, or outside the closed cell bounds")]
+    InvalidSessionWindow,
 }
 
 fn valid_sha256(value: &str) -> bool {
@@ -2011,6 +2081,36 @@ pub fn validate_aperture_request(
     }
 }
 
+/// Validates the initial window a session start declares against the mode it declared.
+///
+/// A `pty` start states its window and a `pipes` start states none: substrate has nothing to
+/// observe about a client's terminal, the client does, and inventing 80x24 would be manufacturing a
+/// fact (design 13). The same bounds decide a `resize` frame, so a window admitted at start and a
+/// window admitted mid-session are the same rule read from one place.
+///
+/// # Errors
+///
+/// Returns [`WireValidationError::InvalidSessionWindow`] when a `pty` start carries no window, a
+/// `pipes` start carries one, or either axis is outside 1..=1000 cells.
+pub fn validate_session_window(
+    mode: SessionMode,
+    window: Option<&PtyWindow>,
+) -> Result<(), WireValidationError> {
+    match (mode, window) {
+        (SessionMode::Pipes, None) => Ok(()),
+        (SessionMode::Pipes, Some(_)) | (SessionMode::Pty, None) => {
+            Err(WireValidationError::InvalidSessionWindow)
+        }
+        (SessionMode::Pty, Some(window)) => {
+            if window.within_bounds() {
+                Ok(())
+            } else {
+                Err(WireValidationError::InvalidSessionWindow)
+            }
+        }
+    }
+}
+
 /// An absolute path with no `.`, no `..`, no empty component and no trailing slash.
 ///
 /// Canonical in the textual sense only. Whether the host path exists and is a directory is the
@@ -2325,8 +2425,12 @@ mod tests {
         canonical_request_hash_v2, validate_execution_capsule, validate_relative_path,
     };
     use super::{
-        EXECUTION_CAPSULE_HASH_DOMAIN, EXECUTION_CAPSULE_MOUNT, MAX_READ_ONLY_ROOTS, ReadOnlyRoot,
-        WireValidationError, validate_read_only_roots,
+        CapabilityFacts, PipeSessionStartInput, PtyWindow, SessionMode, validate_session_window,
+    };
+    use super::{
+        EXECUTION_CAPSULE_HASH_DOMAIN, EXECUTION_CAPSULE_MOUNT, MAX_PTY_WINDOW_COLUMNS,
+        MAX_PTY_WINDOW_ROWS, MAX_READ_ONLY_ROOTS, ReadOnlyRoot, WireValidationError,
+        validate_read_only_roots,
     };
     use serde::Deserialize as _;
     use serde_json::Value;
@@ -2578,6 +2682,173 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    /// Design 13: `SessionMode` grows, `SessionKind` does not, and an omitted `mode` can only ever
+    /// mean `pipes` — the mechanical half of design 05 § 2's "a PTY is never substituted for
+    /// pipes". A `0.4.0` client that never heard of a terminal cannot be handed one.
+    #[test]
+    fn an_omitted_session_mode_is_pipes_and_a_pty_start_carries_its_own_window() {
+        let start: PipeSessionStartInput = serde_json::from_value(serde_json::json!({
+            "exec": exec_start_value(),
+            "input_limit_bytes": 65_536,
+            "frame_limit_bytes": 4_096,
+            "queued_frames": 4
+        }))
+        .expect("a start without a mode decodes");
+        assert_eq!(start.mode, SessionMode::Pipes);
+        assert_eq!(start.window, None);
+
+        let pty: PipeSessionStartInput = serde_json::from_value(serde_json::json!({
+            "exec": exec_start_value(),
+            "input_limit_bytes": 65_536,
+            "frame_limit_bytes": 4_096,
+            "queued_frames": 4,
+            "mode": "pty",
+            "window": {"columns": 132, "rows": 40}
+        }))
+        .expect("a pty start decodes");
+        assert_eq!(pty.mode, SessionMode::Pty);
+        assert_eq!(
+            pty.window,
+            Some(PtyWindow {
+                columns: 132,
+                rows: 40
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(SessionMode::Pty).expect("mode serialises"),
+            serde_json::json!("pty")
+        );
+    }
+
+    /// Design 13: the client half of the pty vocabulary is `input`, `resize` and `signal`. The
+    /// resize frame carries a window and nothing else, and a resize without one stays outside the
+    /// closed vocabulary.
+    #[test]
+    fn the_resize_frame_carries_a_window_and_joins_the_closed_client_vocabulary() {
+        let frame: PipeClientFrame = serde_json::from_value(serde_json::json!({
+            "kind": "resize",
+            "sequence": 3,
+            "window": {"columns": 100, "rows": 30}
+        }))
+        .expect("a resize frame decodes");
+        assert!(matches!(
+            frame,
+            PipeClientFrame::Resize {
+                sequence: 3,
+                window: PtyWindow {
+                    columns: 100,
+                    rows: 30
+                }
+            }
+        ));
+        assert!(
+            serde_json::from_value::<PipeClientFrame>(serde_json::json!({
+                "kind": "resize",
+                "sequence": 3,
+                "window": {"columns": 100, "rows": 30, "pixels": 4}
+            }))
+            .is_err(),
+            "pixel dimensions are not on the wire"
+        );
+    }
+
+    /// Design 13: 1–1000 cells on each axis, and **zero is refused rather than mapped to 80×24** —
+    /// a zero dimension is how a terminal says *I do not know*, which is not what a client that
+    /// sent a resize meant. A `pty` start without a window is refused for the same reason.
+    #[test]
+    fn a_window_is_one_to_one_thousand_cells_and_is_never_defaulted() {
+        assert_eq!(MAX_PTY_WINDOW_COLUMNS, 1_000);
+        assert_eq!(MAX_PTY_WINDOW_ROWS, 1_000);
+        for (columns, rows) in [(1, 1), (80, 24), (1_000, 1_000)] {
+            assert!(
+                PtyWindow { columns, rows }.within_bounds(),
+                "{columns}x{rows}"
+            );
+        }
+        for (columns, rows) in [(0, 24), (80, 0), (0, 0), (1_001, 24), (80, 1_001)] {
+            assert!(
+                !PtyWindow { columns, rows }.within_bounds(),
+                "{columns}x{rows}"
+            );
+        }
+        let window = PtyWindow {
+            columns: 80,
+            rows: 24,
+        };
+        assert_eq!(
+            validate_session_window(SessionMode::Pty, None),
+            Err(WireValidationError::InvalidSessionWindow),
+            "a pty start with no window is refused, never defaulted to 80x24"
+        );
+        assert_eq!(
+            validate_session_window(SessionMode::Pipes, Some(&window)),
+            Err(WireValidationError::InvalidSessionWindow),
+            "a pipes start carrying a window is refused"
+        );
+        assert_eq!(
+            validate_session_window(
+                SessionMode::Pty,
+                Some(&PtyWindow {
+                    columns: 0,
+                    rows: 24
+                })
+            ),
+            Err(WireValidationError::InvalidSessionWindow)
+        );
+        assert_eq!(
+            validate_session_window(SessionMode::Pty, Some(&window)),
+            Ok(())
+        );
+        assert_eq!(validate_session_window(SessionMode::Pipes, None), Ok(()));
+    }
+
+    /// Invariant 4 and design 13: `sessions.pty` is a driver fact, absent by default, and carries
+    /// its own wire name. Absent means every terminal request is refused by name; it never means
+    /// "probably yes".
+    #[test]
+    fn the_sessions_pty_fact_is_absent_by_default_and_carries_its_wire_name() {
+        let facts = CapabilityFacts::default();
+        assert_eq!(facts.sessions_pty, None);
+        let rendered = serde_json::to_value(&facts).expect("facts serialise");
+        assert!(
+            rendered.get("sessions.pty").is_none(),
+            "an absent fact is absent from the document, not false"
+        );
+        let published = CapabilityFacts {
+            sessions_pty: Some(true),
+            ..CapabilityFacts::default()
+        };
+        assert_eq!(
+            serde_json::to_value(&published).expect("facts serialise")["sessions.pty"],
+            serde_json::json!(true)
+        );
+    }
+
+    fn exec_start_value() -> Value {
+        serde_json::json!({
+            "workspace": "ws_test",
+            "argv": ["/bin/sh"],
+            "env": {"allow": [], "set": {}},
+            "sandbox": {
+                "capability_snapshot": format!("sha256:{}", "7".repeat(64)),
+                "network": "none",
+                "profile": "workspace",
+                "require": true
+            },
+            "limits": {
+                "timeout_ms": 5_000,
+                "output_bytes": 65_536,
+                "processes": 16,
+                "memory_bytes": 67_108_864,
+                "cpu_millis": 1_000
+            },
+            "wait": false,
+            "read_only_roots": [],
+            "secret_slots": [],
+            "lease_ttl_ms": 60_000
+        })
     }
 
     /// The capsule hash domain is a wire-visible protocol byte string that another party

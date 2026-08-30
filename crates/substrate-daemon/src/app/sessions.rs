@@ -17,9 +17,10 @@ use substrate_store::{
 };
 use substrate_wire::{
     Base64Content, Base64Encoding, EmptyInput, ErrorClass, Exec, ExecKind, ExecSignalInput,
-    ExecState, LeaseRenewInput, MAX_LEASE_TTL_MS, MIN_LEASE_TTL_MS, OutputStream, PipeClientFrame,
-    PipeServerFrame, PipeSession, PipeSessionCapabilities, PipeSessionLimits,
-    PipeSessionStartInput, SessionAttachmentState, SessionKind, SessionMode, SessionState, Success,
+    ExecState, LeaseRenewInput, MAX_LEASE_TTL_MS, MAX_PTY_WINDOW_COLUMNS, MAX_PTY_WINDOW_ROWS,
+    MIN_LEASE_TTL_MS, OutputStream, PipeClientFrame, PipeServerFrame, PipeSession,
+    PipeSessionCapabilities, PipeSessionLimits, PipeSessionStartInput, SessionAttachmentState,
+    SessionKind, SessionMode, SessionState, Success,
 };
 use tokio::sync::Semaphore;
 
@@ -144,6 +145,19 @@ impl Drop for PipeAttachmentPermit {
     }
 }
 
+/// The modes this daemon serves, derived from the capability facts and nothing else.
+///
+/// `pty` appears only where a probe proved a controlling terminal end to end (invariant 4). Sorted
+/// so the document is stable, and `pipes` is always there because the confinement gate above has
+/// already refused a daemon that cannot serve it.
+fn served_session_modes(facts: &substrate_wire::CapabilityFacts) -> Vec<SessionMode> {
+    let mut modes = vec![SessionMode::Pipes];
+    if facts.sessions_pty == Some(true) {
+        modes.push(SessionMode::Pty);
+    }
+    modes
+}
+
 pub(super) async fn pipe_session_capabilities(
     State(app): State<Arc<App>>,
     Extension(_identity): Extension<Identity>,
@@ -182,6 +196,13 @@ pub(super) async fn pipe_session_capabilities(
                 max_input_bytes: PIPE_MAX_INPUT_BYTES,
                 max_frame_bytes: PIPE_MAX_FRAME_BYTES,
                 max_queued_frames: PIPE_MAX_QUEUED_FRAMES,
+                // The per-mode gate lives here rather than in the operation registry: a
+                // `capability_predicate` on `POST /v1/pipe-sessions` would take the whole route
+                // away from a daemon that serves pipes perfectly well (design 13). Derived from the
+                // fact, so a host that loses the ability stops advertising the mode.
+                modes: served_session_modes(facts),
+                max_window_columns: MAX_PTY_WINDOW_COLUMNS,
+                max_window_rows: MAX_PTY_WINDOW_ROWS,
             },
         ),
     )
@@ -320,7 +341,7 @@ pub(super) async fn pipe_session_start(
     let provisional_session = PipeSession {
         id: session_id.clone(),
         kind: SessionKind::Session,
-        mode: SessionMode::Pipes,
+        mode: mutation.input.mode,
         exec: exec_id.clone(),
         workspace: mutation.input.exec.workspace.clone(),
         state: SessionState::Accepted,
@@ -833,6 +854,7 @@ pub(super) async fn pipe_session_attach(
         Err(error) => return store_failure(&request_id, None, &error),
     }
     let exec_id = session.exec;
+    let mode = session.mode;
     let policy = app.pipe_session_policy;
     ws.read_buffer_size(policy.max_message_bytes)
         .write_buffer_size(policy.write_buffer_bytes)
@@ -851,6 +873,7 @@ pub(super) async fn pipe_session_attach(
                     Arc::clone(&app),
                     scope.clone(),
                     exec_id.clone(),
+                    mode,
                     &permit,
                     policy,
                     socket,
@@ -870,6 +893,7 @@ async fn run_pipe_attachment(
     app: Arc<App>,
     scope: Scope,
     exec_id: String,
+    mode: SessionMode,
     _permit: &PipeAttachmentPermit,
     policy: PipeSessionPolicy,
     mut socket: WebSocket,
@@ -967,7 +991,55 @@ async fn run_pipe_attachment(
                             return false;
                         }
                     }
+                    PipeClientFrame::Resize { window, .. } => {
+                        // Rated on the control window that already exists, so a resize storm
+                        // cannot become a free ioctl loop (design 13).
+                        if control_rate.exceeded(
+                            policy.max_controls_per_window,
+                            policy.control_window,
+                        ) {
+                            let _sent = send_protocol_close(
+                                &mut socket,
+                                1008,
+                                "session control-frame rate exceeded",
+                                policy.send_timeout,
+                            ).await;
+                            return false;
+                        }
+                        if mode != SessionMode::Pty || !window.within_bounds() {
+                            let _sent = send_pipe_protocol_error(
+                                &mut socket,
+                                &mut server_sequence,
+                                "session.resize-invalid",
+                                "A resize names 1 to 1000 cells on each axis of a pty session.",
+                                policy,
+                            ).await;
+                            return false;
+                        }
+                        if let Err(error) = app.driver.resize_pty_session(&exec_id, window).await {
+                            let _sent = send_pipe_protocol_error(
+                                &mut socket,
+                                &mut server_sequence,
+                                error.code,
+                                "Substrate refused or failed the terminal resize.",
+                                policy,
+                            ).await;
+                            return false;
+                        }
+                    }
                     PipeClientFrame::CloseInput { .. } => {
+                        // A pty has no half-close: a client ends input by sending the terminal's
+                        // own end-of-file character as ordinary input bytes (design 13).
+                        if mode == SessionMode::Pty {
+                            let _sent = send_pipe_protocol_error(
+                                &mut socket,
+                                &mut server_sequence,
+                                "session.frame-invalid",
+                                "A pty session has no half-close; send the terminal's own end-of-file character as input.",
+                                policy,
+                            ).await;
+                            return false;
+                        }
                         if input_closed || app.driver.close_pipe_session_input(&exec_id).await.is_err() {
                             let _sent = send_pipe_protocol_error(
                                 &mut socket,
@@ -1074,7 +1146,8 @@ const fn pipe_client_sequence(frame: &PipeClientFrame) -> u64 {
     match frame {
         PipeClientFrame::Stdin { sequence, .. }
         | PipeClientFrame::CloseInput { sequence }
-        | PipeClientFrame::Signal { sequence, .. } => *sequence,
+        | PipeClientFrame::Signal { sequence, .. }
+        | PipeClientFrame::Resize { sequence, .. } => *sequence,
     }
 }
 

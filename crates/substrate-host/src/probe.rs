@@ -73,6 +73,13 @@ pub fn probe(config: &HostConfig, openat2: bool) -> CapabilitySnapshot {
         exec && !config.egress_apertures.is_empty()
             && crate::egress::mechanism_is_provable(&config.bubblewrap),
     );
+    // The whole mechanism in a throwaway sandbox, and never an optimistic constant: a pair
+    // allocated, made controlling *inside* the sandbox after bubblewrap's `setsid`, and a size
+    // round-tripped through the child before and after a resize. Gated on `exec` because a
+    // terminal is delivered through the same confinement path — a fact never outruns the floor it
+    // stands on. Absent leaves every `mode: "pty"` request refused by name (invariant 3, 4).
+    let sessions_pty =
+        (exec && crate::pty::mechanism_is_provable(&config.bubblewrap)).then_some(true);
     let facts = CapabilityFacts {
         events_pull: Some(true),
         events_stream: Some(true),
@@ -118,6 +125,7 @@ pub fn probe(config: &HostConfig, openat2: bool) -> CapabilitySnapshot {
         }),
         exec_egress_apertures: egress_apertures,
         secrets_slots,
+        sessions_pty,
         snapshot_provenance_events: Some(config.snapshot_provenance_events),
     };
     let driver_version = env!("CARGO_PKG_VERSION");
@@ -568,6 +576,43 @@ mod tests {
         std::fs::write(&bubblewrap, b"replacement backend").unwrap();
         let second = backend_binding(&config).unwrap();
         assert_ne!(first, second);
+    }
+
+    /// Invariant 4: `sessions.pty` is published only after a probe that observed what it publishes.
+    ///
+    /// A file that is not the confinement backend cannot prove a terminal, and a host with no
+    /// delegated cgroup has no `exec` floor to hang one on. Both leave the fact **absent** — never
+    /// `Some(false)` and never an optimistic `Some(true)` — because absent is what makes every
+    /// terminal request a named refusal instead of a quieter service (design 13).
+    #[test]
+    fn sessions_pty_is_absent_until_a_probe_proved_a_terminal() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = HostConfig::minimum(directory.path());
+        config.bubblewrap = directory.path().join("not-a-backend");
+        std::fs::write(&config.bubblewrap, b"#!/bin/false\n").unwrap();
+        assert_eq!(probe(&config, true).facts.sessions_pty, None);
+
+        // The real backend, and still no fact: `exec` is false without a delegated cgroup, and a
+        // capability fact never outruns the floor it stands on.
+        let mut real = HostConfig::minimum(directory.path());
+        real.cgroup_root = None;
+        assert_eq!(probe(&real, true).facts.sessions_pty, None);
+    }
+
+    /// The published fact and the mechanism are the same claim, so they cannot disagree.
+    ///
+    /// Absent, never reported as passed: where the configured backend is not on the machine the
+    /// case makes no claim at all.
+    #[test]
+    fn the_published_pty_fact_agrees_with_the_probed_mechanism() {
+        let config = HostConfig::minimum("/does/not/exist");
+        if !config.bubblewrap.is_file() {
+            return;
+        }
+        assert!(
+            crate::pty::mechanism_is_provable(&config.bubblewrap),
+            "the configured backend could not give a confined child a controlling terminal"
+        );
     }
 
     /// A sealed descriptor crosses bubblewrap at the number it was placed at, still sealed.

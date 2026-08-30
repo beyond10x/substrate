@@ -17,8 +17,8 @@ use substrate_wire::{
     AppliedConfinement, AppliedExecutionCapsule, AppliedFilesystem, AppliedNetwork, Base64Content,
     Base64Encoding, BaselineEnvironment, CapabilitySnapshot, EXECUTION_CAPSULE_MOUNT, Exec,
     ExecExit, ExecKind, ExecOutputQuery, ExecSignalInput, ExecStartInput, ExecState,
-    ExecutionCapsuleInput, OutputSlice, OutputStream, PipeSessionStartInput, SandboxProfile,
-    Signal,
+    ExecutionCapsuleInput, OutputSlice, OutputStream, PipeSessionStartInput, PtyWindow,
+    SandboxProfile, SessionMode, Signal,
 };
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::process::{Child, ChildStdin, Command};
@@ -69,6 +69,11 @@ struct PipeState {
     input_bytes: AtomicU64,
     input_limit: u64,
     frame_limit: usize,
+    /// The master end, when this session carries a terminal rather than three pipes.
+    ///
+    /// Input goes here instead of to `stdin`, because a terminal has one descriptor and the line
+    /// discipline on it is what turns a client's bytes into what the child reads.
+    terminal: Option<Arc<crate::pty::PtyMaster>>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -76,6 +81,19 @@ struct PipeSettings {
     input_limit: u64,
     frame_limit: usize,
     queued_frames: usize,
+    /// The initial window, present exactly when this start asked for `mode: "pty"`.
+    window: Option<PtyWindow>,
+}
+
+/// What the confined child's three standard descriptors are.
+enum ChildChannel {
+    /// No live channel: stdin is `/dev/null` and output is captured through pipes.
+    Quiet,
+    /// Three separately attributed pipes (ADR 0007).
+    Pipes,
+    /// One terminal, inherited as descriptors 0, 1 and 2. Stdout and stderr *are* the same file
+    /// here, which is the mechanical reason ADR 0007 forbids running a machine protocol on one.
+    Terminal(Box<[OwnedFd; 3]>),
 }
 
 struct PreparedCapsule {
@@ -344,6 +362,23 @@ impl ProcessRuntime {
                 "wait",
             ));
         }
+        // The window rule before the bounds, and the fact before either: a request for a terminal
+        // this driver never proved it can give is refused by name, and in no case is a pipe session
+        // started instead (design 13, invariant 3).
+        if substrate_wire::validate_session_window(input.mode, input.window.as_ref()).is_err() {
+            return DispatchOutcome::NotDispatched(DriverError::refused(
+                "session.window-invalid",
+                "A pty session declares an initial window within the closed cell bounds, and a raw-pipe session declares none.",
+                "window",
+            ));
+        }
+        if input.mode == SessionMode::Pty && self.capability.facts.sessions_pty != Some(true) {
+            return DispatchOutcome::NotDispatched(DriverError::unserved(
+                "session.pty-unserved",
+                "This driver did not prove it can give a confined process a controlling terminal.",
+                "mode",
+            ));
+        }
         if input.input_limit_bytes == 0
             || input.frame_limit_bytes == 0
             || input.frame_limit_bytes > PIPE_FRAME_BYTES as u64
@@ -362,6 +397,10 @@ impl ProcessRuntime {
             frame_limit: usize::try_from(input.frame_limit_bytes)
                 .expect("bounded frame fits usize"),
             queued_frames: usize::try_from(input.queued_frames).expect("bounded queue fits usize"),
+            window: match input.mode {
+                SessionMode::Pipes => None,
+                SessionMode::Pty => input.window,
+            },
         };
         self.start_inner(id, workspace, &input.exec, Some(settings))
             .await
@@ -455,11 +494,38 @@ impl ProcessRuntime {
             Ok(slots) => slots,
             Err(error) => return contain_cgroup(&cgroup, error),
         };
+        // Allocated last, so a start that will not run never takes a pty off the host's global
+        // count. Failure is `exhausted` and retriable: that count is a resource other tenants can
+        // fill and free, which is not the same claim as "this host cannot do terminals".
+        let terminal = match pipe_settings.and_then(|settings| settings.window) {
+            Some(window) => match crate::pty::open(window) {
+                Ok(pair) => Some(pair),
+                Err(error) => {
+                    return contain_cgroup(
+                        &cgroup,
+                        DriverError::exhausted(
+                            "session.pty-exhausted",
+                            format!("pty allocation: {error}"),
+                            "session",
+                        ),
+                    );
+                }
+            },
+            None => None,
+        };
+        let channel = match terminal.as_ref() {
+            Some(pair) => match child_terminal_descriptors(pair) {
+                Ok(descriptors) => ChildChannel::Terminal(descriptors),
+                Err(error) => return contain_cgroup(&cgroup, error),
+            },
+            None if pipe_settings.is_some() => ChildChannel::Pipes,
+            None => ChildChannel::Quiet,
+        };
         let (mut command, seccomp) = match self.command(
             workspace,
             input,
             sync_fd,
-            pipe_settings.is_some(),
+            channel,
             capsule.as_ref(),
             &slots,
             resolution.as_ref(),
@@ -494,7 +560,11 @@ impl ProcessRuntime {
                 Ok(())
             });
         }
-        let mut child = match command.spawn() {
+        let spawned = command.spawn();
+        // The parent's copies of the terminal go with the builder: while any of them is open the
+        // master never sees the child's exit, so a session that ended would read as one that stalled.
+        drop(command);
+        let mut child = match spawned {
             Ok(child) => child,
             Err(error) => {
                 return contain_cgroup(
@@ -507,6 +577,26 @@ impl ProcessRuntime {
             }
         };
         drop(sync_read);
+        let terminal = match terminal {
+            Some(pair) => {
+                drop(pair.slave);
+                match crate::pty::PtyMaster::new(pair.master) {
+                    Ok(master) => Some(Arc::new(master)),
+                    Err(error) => {
+                        return contain_spawned(
+                            child,
+                            cgroup,
+                            DriverError::failed(
+                                "session.pty-failed",
+                                format!("pty master: {error}"),
+                            ),
+                        )
+                        .await;
+                    }
+                }
+            }
+            None => None,
+        };
         // The child now holds the only copy. A memfd has no name in any filesystem, so this is the
         // whole release: when the last descriptor goes, the kernel frees the memory.
         let applied_slots = slots.applied();
@@ -599,7 +689,11 @@ impl ProcessRuntime {
             leader_pid: Some(leader_pid),
         };
         let (pipe_sender, pipe) = if let Some(settings) = pipe_settings {
-            let Some(stdin) = child.stdin.take() else {
+            let stdin = if terminal.is_some() {
+                None
+            } else if let Some(stdin) = child.stdin.take() {
+                Some(stdin)
+            } else {
                 let error = DriverError::failed(
                     "session.stdin-missing",
                     "Raw-pipe process did not expose stdin.",
@@ -610,16 +704,18 @@ impl ProcessRuntime {
             (
                 Some(sender),
                 Some(PipeState {
-                    stdin: tokio::sync::Mutex::new(Some(stdin)),
+                    stdin: tokio::sync::Mutex::new(stdin),
                     output: tokio::sync::Mutex::new(receiver),
                     input_bytes: AtomicU64::new(0),
                     input_limit: settings.input_limit,
                     frame_limit: settings.frame_limit,
+                    terminal: terminal.clone(),
                 }),
             )
         } else {
             (None, None)
         };
+        let output_bound = Arc::new(AtomicBool::new(false));
         let execution = Arc::new(Execution::new(observation.clone(), pipe));
         tracking.install(Arc::clone(&execution));
         let timeout = Duration::from_millis(input.limits.timeout_ms);
@@ -640,6 +736,8 @@ impl ProcessRuntime {
             installed,
             resolution,
             permit,
+            terminal,
+            output_bound,
         ));
         if input.wait {
             if let Err(error) =
@@ -684,6 +782,13 @@ impl ProcessRuntime {
                 "stdin",
             ));
         }
+        if let Some(terminal) = pipe.terminal.as_ref() {
+            // Straight at the master: the line discipline between it and the child is what turns
+            // these bytes into what the child reads, and into the echo the client sees back.
+            return terminal.write_all(bytes).await.map_err(|error| {
+                DriverError::failed("session.write-failed", format!("pty input: {error}"))
+            });
+        }
         let mut stdin = pipe.stdin.lock().await;
         let Some(stdin) = stdin.as_mut() else {
             return Err(DriverError::refused(
@@ -709,8 +814,42 @@ impl ProcessRuntime {
                 "session",
             )
         })?;
+        if pipe.terminal.is_some() {
+            // A pty has no half-close (design 13). A client ends input by sending the terminal's
+            // own end-of-file character as ordinary input bytes, which is line-discipline
+            // behaviour and not a frame.
+            return Err(DriverError::refused(
+                "session.input-close-unserved",
+                "A pty session has no half-close; send the terminal's own end-of-file character as input.",
+                "session",
+            ));
+        }
         pipe.stdin.lock().await.take();
         Ok(())
+    }
+
+    /// Applies a new window to a live terminal.
+    ///
+    /// The kernel signals the foreground process group; the child observes the change with
+    /// `TIOCGWINSZ` the way any process does. Nothing is injected into the environment: `COLUMNS`
+    /// and `LINES` would go stale at exactly this call (design 13).
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed refusal when the exec is not a live pty session, and a failure when the
+    /// kernel refuses the resize.
+    pub fn resize_pty(&self, id: &str, window: PtyWindow) -> Result<(), DriverError> {
+        let execution = self.execution(id)?;
+        let terminal = execution
+            .pipe
+            .as_ref()
+            .and_then(|pipe| pipe.terminal.as_ref())
+            .ok_or_else(|| {
+                DriverError::refused("session.not-pty", "Exec is not a pty session.", "session")
+            })?;
+        terminal.resize(window).map_err(|error| {
+            DriverError::failed("session.resize-failed", format!("pty resize: {error}"))
+        })
     }
 
     pub async fn read_pipe(
@@ -1162,12 +1301,13 @@ impl ProcessRuntime {
     // Nine, because nine separate things shape one argv and a struct of them would be a second
     // name for this function's parameter list.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_lines)] // One argv, built in one place, in the order bwrap reads it.
     fn command(
         &self,
         workspace: &Path,
         input: &ExecStartInput,
         sync_fd: RawFd,
-        interactive: bool,
+        channel: ChildChannel,
         capsule: Option<&PreparedCapsule>,
         slots: &crate::secrets::SecretSlotSet,
         resolution: Option<&crate::egress::GeneratedResolution>,
@@ -1176,44 +1316,58 @@ impl ProcessRuntime {
         let seccomp = crate::seccomp::profile()?;
         let seccomp_fd = seccomp.as_raw_fd();
         let mut command = Command::new(&self.config.bubblewrap);
-        command
-            .env_clear()
-            .kill_on_drop(true)
-            .stdin(if interactive {
-                Stdio::piped()
-            } else {
-                Stdio::null()
-            })
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .args([
-                "--unshare-user",
-                "--unshare-ipc",
-                "--unshare-pid",
-                "--unshare-net",
-                "--unshare-uts",
-                "--new-session",
-                "--die-with-parent",
-                "--clearenv",
-                "--ro-bind",
-                "/usr",
-                "/usr",
-                "--ro-bind-try",
-                "/bin",
-                "/bin",
-                "--ro-bind-try",
-                "/lib",
-                "/lib",
-                "--ro-bind-try",
-                "/lib64",
-                "/lib64",
-                "--proc",
-                "/proc",
-                "--dev",
-                "/dev",
-                "--tmpfs",
-                "/tmp",
-            ]);
+        let mut terminal = false;
+        command.env_clear().kill_on_drop(true);
+        match channel {
+            ChildChannel::Quiet => {
+                command
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
+            }
+            ChildChannel::Pipes => {
+                command
+                    .stdin(Stdio::piped())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
+            }
+            ChildChannel::Terminal(descriptors) => {
+                let [input, output, diagnostics] = *descriptors;
+                command
+                    .stdin(Stdio::from(input))
+                    .stdout(Stdio::from(output))
+                    .stderr(Stdio::from(diagnostics));
+                terminal = true;
+            }
+        }
+        command.args([
+            "--unshare-user",
+            "--unshare-ipc",
+            "--unshare-pid",
+            "--unshare-net",
+            "--unshare-uts",
+            "--new-session",
+            "--die-with-parent",
+            "--clearenv",
+            "--ro-bind",
+            "/usr",
+            "/usr",
+            "--ro-bind-try",
+            "/bin",
+            "/bin",
+            "--ro-bind-try",
+            "/lib",
+            "/lib",
+            "--ro-bind-try",
+            "/lib64",
+            "/lib64",
+            "--proc",
+            "/proc",
+            "--dev",
+            "/dev",
+            "--tmpfs",
+            "/tmp",
+        ]);
         command.arg("--seccomp").arg(seccomp_fd.to_string());
         if let Some(capsule) = capsule {
             command
@@ -1268,9 +1422,17 @@ impl ProcessRuntime {
                 substrate_wire::APERTURE_CA_BUNDLE_PATH,
             ]);
         }
+        command.arg("--");
+        // Design 13: after bubblewrap's own `setsid`, and never instead of it. `--new-session`
+        // stays on every exec; this takes the inherited slave as the controlling terminal from
+        // inside the sandbox, which is what gives the child a foreground process group — and so a
+        // `SIGWINCH` on a resize and a hangup when the master closes.
+        if terminal {
+            command.args(crate::pty::CONTROLLING_TERMINAL_ARGV);
+        }
         // Bubblewrap injects PWD after `--clearenv`; remove that implementation detail before
         // exec, then restore it only when the closed request explicitly supplied PWD.
-        command.arg("--").args(["/usr/bin/env", "-u", "PWD", "--"]);
+        command.args(["/usr/bin/env", "-u", "PWD", "--"]);
         if let Some(value) = input.env.set.get("PWD") {
             command.args(["/usr/bin/env", "--"]);
             command.arg(format!("PWD={value}"));
@@ -1367,6 +1529,7 @@ impl ProcessRuntime {
 }
 
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_lines)] // Drain, wait and terminal observation stay in one audit unit.
 async fn run_child(
     mut child: Child,
     cgroup: Cgroup,
@@ -1380,44 +1543,78 @@ async fn run_child(
     aperture: Option<crate::egress::InstalledAperture>,
     resolution: Option<crate::egress::GeneratedResolution>,
     _permit: ActivePermit,
+    terminal: Option<Arc<crate::pty::PtyMaster>>,
+    output_bound: Arc<AtomicBool>,
 ) {
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    let stdout_sender = pipe_sender.clone();
-    let stdout_execution = pipe_sender.as_ref().map(|_| Arc::clone(&execution));
-    let stdout_task = tokio::spawn(async move {
-        drain_capped(
-            stdout,
-            output_limit,
-            stdout_sender,
-            PipeStream::Stdout,
-            frame_limit,
-            stdout_execution,
+    // A terminal has one file. Stdout and stderr *are* the same descriptor on a pty, so the merged
+    // stream is captured as `stdout` and the durable stderr is genuinely empty — reported, not
+    // inferred (design 13).
+    let (stdout_task, stderr_task) = if let Some(master) = terminal {
+        let reached = Some(Arc::clone(&output_bound));
+        let terminal_execution = pipe_sender.as_ref().map(|_| Arc::clone(&execution));
+        let merged = tokio::spawn(async move {
+            drain_capped(
+                Some(crate::pty::PtyOutput(master)),
+                output_limit,
+                pipe_sender,
+                PipeStream::Stdout,
+                frame_limit,
+                terminal_execution,
+                reached,
+            )
+            .await
+        });
+        (merged, tokio::spawn(async { (Vec::new(), false) }))
+    } else {
+        let stdout_sender = pipe_sender.clone();
+        let stdout_execution = stdout_sender.as_ref().map(|_| Arc::clone(&execution));
+        let stderr_execution = pipe_sender.as_ref().map(|_| Arc::clone(&execution));
+        (
+            tokio::spawn(async move {
+                drain_capped(
+                    stdout,
+                    output_limit,
+                    stdout_sender,
+                    PipeStream::Stdout,
+                    frame_limit,
+                    stdout_execution,
+                    None,
+                )
+                .await
+            }),
+            tokio::spawn(async move {
+                drain_capped(
+                    stderr,
+                    output_limit,
+                    pipe_sender,
+                    PipeStream::Stderr,
+                    frame_limit,
+                    stderr_execution,
+                    None,
+                )
+                .await
+            }),
         )
-        .await
-    });
-    let stderr_execution = pipe_sender.as_ref().map(|_| Arc::clone(&execution));
-    let stderr_task = tokio::spawn(async move {
-        drain_capped(
-            stderr,
-            output_limit,
-            pipe_sender,
-            PipeStream::Stderr,
-            frame_limit,
-            stderr_execution,
-        )
-        .await
-    });
-    let (status, timed_out, cpu_exhausted, cpu_measurement_failed, aperture_exhausted) =
-        wait_for_child(
-            &mut child,
-            &cgroup,
-            &execution,
-            timeout,
-            cpu_budget_micros,
-            aperture.as_ref(),
-        )
-        .await;
+    };
+    let (
+        status,
+        timed_out,
+        cpu_exhausted,
+        cpu_measurement_failed,
+        aperture_exhausted,
+        output_exhausted,
+    ) = wait_for_child(
+        &mut child,
+        &cgroup,
+        &execution,
+        timeout,
+        cpu_budget_micros,
+        aperture.as_ref(),
+        &output_bound,
+    )
+    .await;
     let (stdout, stdout_truncated) = stdout_task.await.unwrap_or_else(|_| (Vec::new(), true));
     let (stderr, stderr_truncated) = stderr_task.await.unwrap_or_else(|_| (Vec::new(), true));
     // Quiesce the whole run tree before the terminal counter sample. The shared mapping remains
@@ -1432,6 +1629,7 @@ async fn run_child(
     let forced_cancellation = timed_out
         || cpu_exhausted
         || aperture_exhausted
+        || output_exhausted
         || execution.cancellation_requested.load(Ordering::Acquire);
     let capsule_reconciled = capsule.is_none_or(|capsule| capsule.directory.close().is_ok());
     let resolution_reconciled = resolution.is_none_or(crate::egress::GeneratedResolution::close);
@@ -1444,6 +1642,7 @@ async fn run_child(
     observation.resource.observed_at = Utc::now();
     record_aperture(&mut observation, applied_aperture, aperture_exhausted);
     record_pipe_backpressure(&mut observation, &execution);
+    record_terminal_output_bound(&mut observation, output_exhausted);
     match status {
         _ if !cgroup_reconciled
             || !capsule_reconciled
@@ -1536,6 +1735,22 @@ fn record_aperture(
     }
 }
 
+/// The bound a terminal session ends at, named on the run's own observation (ADR 0014's field).
+///
+/// `state` is already `Cancelled` here, exactly as for a timeout; what this adds is *which* bound,
+/// so a client reading an `exit` frame is not left to tell an output ceiling from a client cancel
+/// by counting bytes. An aperture ceiling keeps its own name where both could apply: it is the
+/// bound that stopped the bytes first.
+fn record_terminal_output_bound(observation: &mut ExecObservation, exhausted: bool) {
+    if exhausted && observation.resource.refusal.is_none() {
+        observation.resource.refusal = Some(substrate_wire::ExecRefusal {
+            class: substrate_wire::ErrorClass::Exhausted,
+            code: "session.output-limit".to_owned(),
+            message: "The declared output bound ended the terminal session.".to_owned(),
+        });
+    }
+}
+
 async fn wait_for_child(
     child: &mut Child,
     cgroup: &Cgroup,
@@ -1543,11 +1758,13 @@ async fn wait_for_child(
     timeout: Duration,
     cpu_budget_micros: u64,
     aperture: Option<&crate::egress::InstalledAperture>,
-) -> (io::Result<ExitStatus>, bool, bool, bool, bool) {
+    output_bound: &AtomicBool,
+) -> (io::Result<ExitStatus>, bool, bool, bool, bool, bool) {
     let mut timed_out = false;
     let mut cpu_exhausted = false;
     let mut cpu_measurement_failed = false;
     let mut aperture_exhausted = false;
+    let mut output_exhausted = false;
     let timeout_sleep = tokio::time::sleep(timeout);
     tokio::pin!(timeout_sleep);
     let mut cpu_poll = tokio::time::interval(Duration::from_millis(1));
@@ -1576,6 +1793,16 @@ async fn wait_for_child(
                     close_live_output(execution).await;
                     break child.wait().await;
                 }
+                // Reaching the output bound *ends* a pty session; it does not truncate it. Design
+                // 05 gave the pty no `truncated` frame to deliver the statement on, and a terminal
+                // stream has no per-stream offset for a client to rejoin at, so a transcript that
+                // silently stopped would be unrecoverable. The client declared this bound.
+                if output_bound.load(Ordering::Acquire) {
+                    output_exhausted = true;
+                    let _ = cgroup.kill_all();
+                    close_live_output(execution).await;
+                    break child.wait().await;
+                }
                 match cgroup.cpu_usage_micros() {
                     Ok(usage) if usage >= cpu_budget_micros => {
                         cpu_exhausted = true;
@@ -1600,6 +1827,7 @@ async fn wait_for_child(
         cpu_exhausted,
         cpu_measurement_failed,
         aperture_exhausted,
+        output_exhausted,
     )
 }
 
@@ -1742,6 +1970,24 @@ where
     }
 }
 
+/// Three clones of the slave, one for each of the child's standard descriptors.
+///
+/// The master is not among them and never is: it is close-on-exec from allocation, so no fork of
+/// this process can carry the terminal's other end into a sandbox.
+fn child_terminal_descriptors(
+    pair: &crate::pty::PtyPair,
+) -> Result<Box<[OwnedFd; 3]>, DriverError> {
+    let clone = || {
+        pair.slave.try_clone().map_err(|error| {
+            DriverError::failed(
+                "session.pty-failed",
+                format!("pty slave descriptor: {error}"),
+            )
+        })
+    };
+    Ok(Box::new([clone()?, clone()?, clone()?]))
+}
+
 fn contain_cgroup(cgroup: &Cgroup, error: DriverError) -> DispatchOutcome<ExecObservation> {
     if cgroup.prove_empty_and_remove().is_ok() {
         DispatchOutcome::ContainedAbsent(error)
@@ -1757,6 +2003,7 @@ async fn drain_capped<R>(
     stream: PipeStream,
     frame_limit: usize,
     execution: Option<Arc<Execution>>,
+    bound_reached: Option<Arc<AtomicBool>>,
 ) -> (Vec<u8>, bool)
 where
     R: AsyncRead + Unpin,
@@ -1781,6 +2028,9 @@ where
         stored.extend_from_slice(&buffer[..retained]);
         if retained < count {
             truncated = true;
+            if let Some(reached) = bound_reached.as_ref() {
+                reached.store(true, Ordering::Release);
+            }
         }
         if let Some(sender) = &sender
             && execution
@@ -2538,6 +2788,8 @@ mod tests {
                     input_limit_bytes: 65_536,
                     frame_limit_bytes: 4_096,
                     queued_frames: 4,
+                    mode: substrate_wire::SessionMode::Pipes,
+                    window: None,
                 },
             )
             .await
@@ -2545,6 +2797,253 @@ mod tests {
             panic!("raw pipes must not fall back to an unconfined process");
         };
         assert_eq!(error.code, "exec.sandbox-unavailable");
+    }
+
+    /// A terminal is never quietly downgraded to pipes, in either direction.
+    ///
+    /// Two refusals, and the second is the one that matters: a driver whose `sessions.pty` fact was
+    /// never published refuses `session.pty-unserved` *before* it looks at anything else, and a
+    /// driver that has the fact but has lost the confinement floor refuses
+    /// `exec.sandbox-unavailable`. Neither answer is a pipe session (design 13, invariant 3).
+    #[tokio::test]
+    async fn pty_session_refused_without_confinement() {
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("ws_test");
+        std::fs::create_dir(&workspace).unwrap();
+        let snapshot = format!("sha256:{}", "7".repeat(64));
+        let facts = |pty: Option<bool>| CapabilityFacts {
+            exec_argv_only: Some(true),
+            exec_namespaces: Some(NamespaceFacts {
+                user: true,
+                mount: true,
+                pid: true,
+                ipc: true,
+                uts: true,
+                network: true,
+            }),
+            exec_no_egress: Some(true),
+            exec_cgroup_limits: Some(CgroupLimitFacts {
+                processes: true,
+                memory: true,
+                cpu: true,
+            }),
+            exec_cgroup_kill: Some(true),
+            exec_output_limit_bytes: Some(65_536),
+            sessions_pty: pty,
+            ..CapabilityFacts::default()
+        };
+        for (published, expected) in [
+            (None, "session.pty-unserved"),
+            (Some(true), "exec.sandbox-unavailable"),
+        ] {
+            let capability = CapabilitySnapshot {
+                snapshot: snapshot.clone(),
+                driver: HostDriverKind::Host,
+                driver_version: "test".to_owned(),
+                config_generation: 7,
+                probed_at: chrono::Utc::now(),
+                valid_until: None,
+                facts: facts(published),
+            };
+            let mut config = HostConfig::minimum(root.path());
+            config.bubblewrap = std::env::current_exe().expect("test executable");
+            let runtime = ProcessRuntime::new(config, capability).unwrap();
+            let DispatchOutcome::NotDispatched(error) = runtime
+                .start_pipe(
+                    "ex_pty",
+                    &workspace,
+                    &substrate_wire::PipeSessionStartInput {
+                        exec: pty_exec_input(&snapshot),
+                        input_limit_bytes: 65_536,
+                        frame_limit_bytes: 4_096,
+                        queued_frames: 4,
+                        mode: substrate_wire::SessionMode::Pty,
+                        window: Some(substrate_wire::PtyWindow {
+                            columns: 80,
+                            rows: 24,
+                        }),
+                    },
+                )
+                .await
+            else {
+                panic!("a terminal must never be served as a pipe session instead");
+            };
+            assert_eq!(error.code, expected);
+        }
+    }
+
+    /// Losing the attachment kills the whole tree, not the process the client was talking to.
+    ///
+    /// This is `terminate_pipe_session`'s driver call — `KILL` with no grace — against a pty
+    /// session whose shell has forked a child of its own. What must be true afterwards: a terminal
+    /// observation of `cancelled`, an empty cgroup, and a master that reads end of file rather than
+    /// a transcript that simply stops.
+    ///
+    /// Delegated only. Without `SUBSTRATE_VECTORS_CGROUP_ROOT` naming a cgroup v2 subtree this
+    /// process is inside, the case is **absent, never reported as passed** (invariant 3).
+    #[tokio::test(flavor = "multi_thread")]
+    #[allow(clippy::too_many_lines)] // One delegated session lifecycle, start to terminal.
+    async fn pty_session_kills_tree_on_attachment_loss() {
+        let Some(delegated) = delegated_cgroup_root("attachment-loss") else {
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("ws_test");
+        std::fs::create_dir(&workspace).unwrap();
+        let snapshot = format!("sha256:{}", "7".repeat(64));
+        let mut config = HostConfig::minimum(root.path());
+        config.cgroup_root = Some(delegated.clone());
+        let capability = CapabilitySnapshot {
+            snapshot: snapshot.clone(),
+            driver: HostDriverKind::Host,
+            driver_version: "test".to_owned(),
+            config_generation: 7,
+            probed_at: chrono::Utc::now(),
+            valid_until: None,
+            facts: CapabilityFacts {
+                exec_argv_only: Some(true),
+                exec_namespaces: Some(NamespaceFacts {
+                    user: true,
+                    mount: true,
+                    pid: true,
+                    ipc: true,
+                    uts: true,
+                    network: true,
+                }),
+                exec_no_egress: Some(true),
+                exec_cgroup_limits: Some(CgroupLimitFacts {
+                    processes: true,
+                    memory: true,
+                    cpu: true,
+                }),
+                exec_cgroup_kill: Some(true),
+                exec_output_limit_bytes: Some(65_536),
+                sessions_pty: Some(true),
+                ..CapabilityFacts::default()
+            },
+        };
+        let runtime = ProcessRuntime::new(config, capability).expect("runtime");
+        let mut input = pty_exec_input(&snapshot);
+        input.argv = vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "sleep 300 & printf 'ready\\n'; sleep 300".to_owned(),
+        ];
+        input.limits.timeout_ms = 60_000;
+        let observed = match runtime
+            .start_pipe(
+                "ex_ptykill",
+                &workspace,
+                &substrate_wire::PipeSessionStartInput {
+                    exec: input,
+                    input_limit_bytes: 65_536,
+                    frame_limit_bytes: 4_096,
+                    queued_frames: 4,
+                    mode: substrate_wire::SessionMode::Pty,
+                    window: Some(substrate_wire::PtyWindow {
+                        columns: 80,
+                        rows: 24,
+                    }),
+                },
+            )
+            .await
+        {
+            DispatchOutcome::Observed(observed) => observed,
+            DispatchOutcome::NotDispatched(error)
+            | DispatchOutcome::ContainedAbsent(error)
+            | DispatchOutcome::OutcomeUnknown(error) => {
+                panic!(
+                    "the delegated lane must dispatch a pty session: {} {}",
+                    error.code, error.message
+                )
+            }
+        };
+        let cgroup = delegated.join(observed.cgroup.clone().expect("a pty session has a cgroup"));
+        let mut transcript = Vec::new();
+        while !transcript.windows(5).any(|window| window == b"ready") {
+            let frame = runtime
+                .read_pipe("ex_ptykill", Duration::from_secs(10))
+                .await
+                .expect("the terminal reads")
+                .expect("the shell announced itself");
+            transcript.extend_from_slice(&frame.bytes);
+        }
+
+        let terminal = runtime
+            .signal(
+                "ex_ptykill",
+                &substrate_wire::ExecSignalInput {
+                    signal: substrate_wire::Signal::Kill,
+                    grace_ms: 0,
+                },
+            )
+            .await
+            .expect("losing the attachment terminates the session");
+        assert_eq!(terminal.resource.state, ExecState::Cancelled);
+        assert_eq!(
+            std::fs::read_to_string(cgroup.join("cgroup.procs"))
+                .unwrap_or_default()
+                .trim(),
+            "",
+            "the whole tree is gone, not just the shell the client was talking to"
+        );
+        assert!(
+            runtime
+                .read_pipe("ex_ptykill", Duration::from_secs(5))
+                .await
+                .expect("the terminal reads")
+                .is_none(),
+            "a killed terminal reads end of file, it does not simply stop"
+        );
+    }
+
+    /// A private, controller-carrying child of the delegated cgroup v2 subtree, or nothing.
+    ///
+    /// The daemon's own lane hands `--cgroup-root` the delegation root and lets the startup probe
+    /// enable the controllers; this test constructs the runtime directly, so it does the same two
+    /// writes itself. Absent when the variable is unset — the case then makes no claim at all,
+    /// rather than reporting a green it did not earn (invariant 3).
+    fn delegated_cgroup_root(name: &str) -> Option<std::path::PathBuf> {
+        let root = std::path::PathBuf::from(std::env::var_os("SUBSTRATE_VECTORS_CGROUP_ROOT")?);
+        let path = root.join(format!("host-pty-{name}"));
+        if path.is_dir() {
+            let _replaced = std::fs::remove_dir_all(&path);
+        }
+        std::fs::create_dir(&path).ok()?;
+        let controllers = "+cpu +memory +pids";
+        std::fs::write(root.join("cgroup.subtree_control"), controllers).ok()?;
+        std::fs::write(path.join("cgroup.subtree_control"), controllers).ok()?;
+        Some(path)
+    }
+
+    fn pty_exec_input(snapshot: &str) -> ExecStartInput {
+        ExecStartInput {
+            read_only_roots: Vec::new(),
+            secret_slots: Vec::new(),
+            workspace: "ws_test".to_owned(),
+            argv: vec!["/bin/sh".to_owned()],
+            env: ExecEnvironment {
+                allow: vec![],
+                set: BTreeMap::new(),
+            },
+            sandbox: substrate_wire::ConfinementRequest {
+                capability_snapshot: snapshot.to_owned(),
+                network: NetworkMode::None,
+                aperture: None,
+                profile: SandboxProfile::Workspace,
+                required: true,
+            },
+            limits: ExecLimits {
+                timeout_ms: 5_000,
+                output_bytes: 65_536,
+                processes: 16,
+                memory_bytes: 67_108_864,
+                cpu_millis: 1_000,
+            },
+            wait: false,
+            capsule: None,
+            lease_ttl_ms: Some(60_000),
+        }
     }
 
     #[tokio::test]
@@ -2586,6 +3085,7 @@ mod tests {
                 input_bytes: AtomicU64::new(0),
                 input_limit: 1_024,
                 frame_limit: 1,
+                terminal: None,
             }),
         ));
         let drain = tokio::spawn(drain_capped(
@@ -2595,6 +3095,7 @@ mod tests {
             PipeStream::Stdout,
             1,
             Some(std::sync::Arc::clone(&execution)),
+            None,
         ));
         writer
             .write_all(b"queue saturation must not block timeout")

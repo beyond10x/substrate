@@ -48,13 +48,19 @@ struct FixturePipe {
 struct PipeFixtureDriver {
     host: Arc<HostDriver>,
     pipes: Mutex<HashMap<String, FixturePipe>>,
+    /// What this fixture's capability document publishes for `sessions.pty`.
+    terminals: bool,
+    /// Every window that reached the driver, in order. A refused resize leaves nothing here.
+    resizes: Mutex<HashMap<String, Vec<substrate_wire::PtyWindow>>>,
 }
 
 impl PipeFixtureDriver {
-    fn open(root: &std::path::Path) -> Arc<Self> {
+    fn with_terminals(root: &std::path::Path, terminals: bool) -> Arc<Self> {
         Arc::new(Self {
             host: HostDriver::open(HostConfig::minimum(root)).expect("host fixture driver"),
             pipes: Mutex::new(HashMap::new()),
+            terminals,
+            resizes: Mutex::new(HashMap::new()),
         })
     }
 
@@ -94,6 +100,7 @@ impl Driver for PipeFixtureDriver {
         });
         capability.facts.exec_cgroup_kill = Some(true);
         capability.facts.exec_no_egress = Some(true);
+        capability.facts.sessions_pty = self.terminals.then_some(true);
         capability
     }
 
@@ -267,6 +274,28 @@ impl Driver for PipeFixtureDriver {
         Ok(())
     }
 
+    async fn resize_pty_session(
+        &self,
+        id: &str,
+        window: substrate_wire::PtyWindow,
+    ) -> Result<(), DriverError> {
+        if !self
+            .pipes
+            .lock()
+            .expect("pipe fixture lock")
+            .contains_key(id)
+        {
+            return Err(DriverError::not_found());
+        }
+        self.resizes
+            .lock()
+            .expect("pipe fixture lock")
+            .entry(id.to_owned())
+            .or_default()
+            .push(window);
+        Ok(())
+    }
+
     async fn observe_exec(&self, id: &str) -> Result<ExecObservation, DriverError> {
         self.pipes
             .lock()
@@ -336,6 +365,7 @@ impl Driver for PipeFixtureDriver {
 }
 
 struct Harness {
+    driver: Arc<PipeFixtureDriver>,
     _directory: TempDir,
     app: Arc<App>,
     server: TestServer,
@@ -343,18 +373,87 @@ struct Harness {
 
 impl Harness {
     async fn open() -> Self {
+        Self::opened(false).await
+    }
+
+    /// A daemon whose driver published `sessions.pty` after a verified allocation.
+    async fn with_terminals() -> Self {
+        Self::opened(true).await
+    }
+
+    async fn opened(terminals: bool) -> Self {
         let directory = tempfile::tempdir().expect("temporary pipe harness");
         let store = Arc::new(
             substrate_store::Store::open(directory.path().join("state.db")).expect("state store"),
         );
-        let driver = PipeFixtureDriver::open(&directory.path().join("workspaces"));
-        let app = App::new(store, driver, DEPLOYMENT);
+        let driver =
+            PipeFixtureDriver::with_terminals(&directory.path().join("workspaces"), terminals);
+        let app = App::new(store, Arc::clone(&driver) as Arc<dyn Driver>, DEPLOYMENT);
         let server = TestServer::spawn(Arc::clone(&app)).await;
         Self {
+            driver,
             _directory: directory,
             app,
             server,
         }
+    }
+
+    fn resizes(&self, exec_id: &str) -> Vec<substrate_wire::PtyWindow> {
+        self.driver
+            .resizes
+            .lock()
+            .expect("pipe fixture lock")
+            .get(exec_id)
+            .cloned()
+            .unwrap_or_default()
+    }
+
+    async fn create_workspace(&self, operation: &str) -> String {
+        let (status, workspace) = self
+            .call(
+                Method::POST,
+                "/v1/workspaces",
+                mutation(
+                    operation,
+                    json!({"source": "empty", "labels": {"fixture": "pty"}}),
+                ),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{workspace}");
+        workspace["result"]["id"]
+            .as_str()
+            .expect("workspace id")
+            .to_owned()
+    }
+
+    async fn start_pty(&self) -> (String, String) {
+        let workspace = self.create_workspace("01JPTYWORKSPACECREATE003").await;
+        let (status, session) = self
+            .call(
+                Method::POST,
+                "/v1/pipe-sessions",
+                mutation(
+                    "01JPTYSESSIONSTART000001",
+                    pty_start(&workspace, Some(json!({"columns": 80, "rows": 24}))),
+                ),
+            )
+            .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{session}");
+        assert_eq!(session["result"]["mode"], "pty", "{session}");
+        (
+            session["result"]["id"]
+                .as_str()
+                .expect("pty session id")
+                .to_owned(),
+            session["result"]["exec"]
+                .as_str()
+                .expect("pty exec id")
+                .to_owned(),
+        )
+    }
+
+    async fn attach(&self, path: &str) -> WebSocketClient {
+        Handshake::open(self.server.address, path).await.upgraded()
     }
 
     async fn call(&self, method: Method, uri: &str, body: Body) -> (StatusCode, Value) {
@@ -443,6 +542,40 @@ fn mutation(operation: &str, input: Value) -> Body {
     Body::from(
         serde_json::to_vec(&json!({"op": operation, "input": input})).expect("mutation JSON"),
     )
+}
+
+/// A `pty` start body, with the window the caller wants to try.
+fn pty_start(workspace: &str, window: Option<Value>) -> Value {
+    let mut input = json!({
+        "exec": {
+            "workspace": workspace,
+            "argv": ["/bin/sh"],
+            "env": {"allow": [], "set": {}},
+            "limits": {
+                "timeout_ms": 10_000,
+                "output_bytes": 1_048_576,
+                "processes": 8,
+                "memory_bytes": 67_108_864,
+                "cpu_millis": 1_000
+            },
+            "sandbox": {
+                "require": true,
+                "profile": "workspace",
+                "network": "none",
+                "capability_snapshot": SNAPSHOT
+            },
+            "wait": false,
+            "lease_ttl_ms": 60_000
+        },
+        "input_limit_bytes": 1_048_576,
+        "frame_limit_bytes": 65_536,
+        "queued_frames": 16,
+        "mode": "pty"
+    });
+    if let Some(window) = window {
+        input["window"] = window;
+    }
+    input
 }
 
 fn identity() -> Identity {
@@ -824,4 +957,154 @@ async fn capability_inspection_refuses_without_delegated_confinement() {
         .expect("refusal body");
     let refusal: Value = serde_json::from_slice(&bytes).expect("refusal JSON");
     assert_eq!(refusal["error"]["code"], "session.confinement-unavailable");
+}
+
+// ------------------------------------------------------------------------------------------------
+// pty sessions (design 13)
+// ------------------------------------------------------------------------------------------------
+
+/// Invariant 3, on the request side: a terminal this daemon never proved it can give is refused by
+/// name, with the class and status design 13 fixes — and **never** served as a pipe session.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pty_start_is_unserved_when_the_capability_fact_is_absent() {
+    let harness = Harness::open().await;
+    let workspace = harness.create_workspace("01JPTYWORKSPACECREATE001").await;
+    let (status, refusal) = harness
+        .call(
+            Method::POST,
+            "/v1/pipe-sessions",
+            mutation(
+                "01JPTYSESSIONUNSERVED001",
+                pty_start(&workspace, Some(json!({"columns": 80, "rows": 24}))),
+            ),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{refusal}");
+    assert_eq!(refusal["error"]["class"], "unserved");
+    assert_eq!(refusal["error"]["code"], "session.pty-unserved");
+    assert_eq!(refusal["error"]["address"], "mode");
+    assert_eq!(refusal["error"]["retriable"], false);
+}
+
+/// Design 13: `mode: "pty"` without a window is refused rather than defaulted to 80x24 — substrate
+/// has nothing to observe here and inventing the number would manufacture a fact — and a `pipes`
+/// start carrying a window is refused for the mirror reason.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_window_is_required_for_pty_refused_for_pipes_and_never_defaulted() {
+    let harness = Harness::with_terminals().await;
+    let workspace = harness.create_workspace("01JPTYWORKSPACECREATE002").await;
+    let cases = [
+        ("01JPTYSESSIONNOWINDOW001", "pty", None),
+        (
+            "01JPTYSESSIONPIPEWINDOW1",
+            "pipes",
+            Some(json!({"columns": 80, "rows": 24})),
+        ),
+        (
+            "01JPTYSESSIONZEROWINDOW1",
+            "pty",
+            Some(json!({"columns": 0, "rows": 24})),
+        ),
+        (
+            "01JPTYSESSIONHUGEWINDOW1",
+            "pty",
+            Some(json!({"columns": 1001, "rows": 24})),
+        ),
+    ];
+    for (operation, mode, window) in cases {
+        let mut input = pty_start(&workspace, window);
+        input["mode"] = json!(mode);
+        let (status, refusal) = harness
+            .call(
+                Method::POST,
+                "/v1/pipe-sessions",
+                mutation(operation, input),
+            )
+            .await;
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{operation}: {refusal}"
+        );
+        assert_eq!(refusal["error"]["class"], "refused", "{operation}");
+        assert_eq!(
+            refusal["error"]["code"], "session.window-invalid",
+            "{operation}"
+        );
+        assert_eq!(refusal["error"]["address"], "window", "{operation}");
+    }
+}
+
+/// The capability document is the per-mode gate, because the registry's own gate cannot be: a
+/// `capability_predicate` on `POST /v1/pipe-sessions` would take the route away from a daemon that
+/// serves pipes perfectly well (design 13). The ceilings are derived from the wire constants and
+/// are never a second source of truth.
+#[tokio::test(flavor = "multi_thread")]
+async fn session_capabilities_publish_the_served_modes_and_the_window_ceilings() {
+    let harness = Harness::open().await;
+    let (status, capabilities) = harness
+        .call(Method::GET, "/v1/pipe-sessions", Body::empty())
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(capabilities["result"]["modes"], json!(["pipes"]));
+    assert_eq!(
+        capabilities["result"]["max_window_columns"],
+        json!(substrate_wire::MAX_PTY_WINDOW_COLUMNS)
+    );
+    assert_eq!(
+        capabilities["result"]["max_window_rows"],
+        json!(substrate_wire::MAX_PTY_WINDOW_ROWS)
+    );
+
+    let terminals = Harness::with_terminals().await;
+    let (status, capabilities) = terminals
+        .call(Method::GET, "/v1/pipe-sessions", Body::empty())
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(capabilities["result"]["modes"], json!(["pipes", "pty"]));
+}
+
+/// Design 13: a resize outside 1..=1000 cells is a `protocol-error` frame carrying
+/// `session.resize-invalid`, joining the vocabulary the attachment already speaks — and an admitted
+/// resize reaches the driver as the window the client asked for, not as a clamped one.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_resize_outside_the_declared_bounds_is_a_protocol_error() {
+    let harness = Harness::with_terminals().await;
+    let (session_id, exec_id) = harness.start_pty().await;
+    let mut socket = harness
+        .attach(&format!("/v1/pipe-sessions/{session_id}/attach"))
+        .await;
+    socket
+        .send_text(
+            serde_json::to_vec(&json!({
+                "kind": "resize",
+                "sequence": 1,
+                "window": {"columns": 132, "rows": 43}
+            }))
+            .expect("resize frame")
+            .as_slice(),
+        )
+        .await;
+    socket
+        .send_text(
+            serde_json::to_vec(&json!({
+                "kind": "resize",
+                "sequence": 2,
+                "window": {"columns": 0, "rows": 43}
+            }))
+            .expect("resize frame")
+            .as_slice(),
+        )
+        .await;
+    let frame = socket.next_json().await;
+    assert_eq!(frame["kind"], "protocol-error", "{frame}");
+    assert_eq!(frame["code"], "session.resize-invalid");
+    assert_eq!(
+        harness.resizes(&exec_id),
+        vec![substrate_wire::PtyWindow {
+            columns: 132,
+            rows: 43
+        }],
+        "the admitted resize reached the driver and the refused one did not"
+    );
 }

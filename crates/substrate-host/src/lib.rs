@@ -5,6 +5,7 @@ mod egress;
 mod fs;
 mod probe;
 mod process;
+mod pty;
 mod seccomp;
 mod secrets;
 
@@ -378,6 +379,19 @@ pub trait Driver: Send + Sync {
         ))
     }
 
+    /// Applies a new window to an admitted `pty` session.
+    async fn resize_pty_session(
+        &self,
+        _id: &str,
+        _window: substrate_wire::PtyWindow,
+    ) -> Result<(), DriverError> {
+        Err(DriverError::unserved(
+            "session.pty-unserved",
+            "The selected driver does not serve pty sessions.",
+            "session",
+        ))
+    }
+
     async fn observe_exec(&self, id: &str) -> Result<ExecObservation, DriverError>;
 
     async fn output(&self, id: &str, query: &ExecOutputQuery) -> Result<OutputSlice, DriverError>;
@@ -570,6 +584,20 @@ impl HostDriver {
     /// Refuses missing resources and execs which were not started as pipe sessions.
     pub async fn close_pipe_session_input(&self, id: &str) -> Result<(), DriverError> {
         self.processes.close_pipe_input(id).await
+    }
+
+    /// Applies a new window to a live terminal.
+    ///
+    /// # Errors
+    ///
+    /// Refuses missing resources and execs which were not started as pty sessions, and reports a
+    /// kernel refusal without pretending the child saw the new size.
+    pub fn resize_pty_session(
+        &self,
+        id: &str,
+        window: substrate_wire::PtyWindow,
+    ) -> Result<(), DriverError> {
+        self.processes.resize_pty(id, window)
     }
 
     async fn filesystem_io<T, F>(&self, operation: F) -> Result<T, DriverError>
@@ -869,6 +897,14 @@ impl Driver for HostDriver {
 
     async fn close_pipe_session_input(&self, id: &str) -> Result<(), DriverError> {
         HostDriver::close_pipe_session_input(self, id).await
+    }
+
+    async fn resize_pty_session(
+        &self,
+        id: &str,
+        window: substrate_wire::PtyWindow,
+    ) -> Result<(), DriverError> {
+        HostDriver::resize_pty_session(self, id, window)
     }
 
     async fn observe_exec(&self, id: &str) -> Result<ExecObservation, DriverError> {

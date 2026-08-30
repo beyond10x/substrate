@@ -600,6 +600,36 @@ pub(super) fn validate_pipe_session_input(
         ));
     }
     let input = &mutation.input;
+    // The window rule, then the fact. Both refusals are named and neither degrades to the other
+    // mode: a `pty` start without a window is refused rather than given 80x24, and a terminal this
+    // daemon never proved it can allocate is `unserved` rather than served as pipes (design 13,
+    // invariant 3).
+    if substrate_wire::validate_session_window(input.mode, input.window.as_ref()).is_err() {
+        return Err(failure(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            request_id,
+            Some(&mutation.op),
+            ErrorClass::Refused,
+            "session.window-invalid",
+            "A pty session declares an initial window within the closed cell bounds, and a raw-pipe session declares none.",
+            Some("window"),
+            false,
+        ));
+    }
+    if input.mode == substrate_wire::SessionMode::Pty
+        && app.driver.machine().facts.sessions_pty != Some(true)
+    {
+        return Err(failure(
+            StatusCode::NOT_IMPLEMENTED,
+            request_id,
+            Some(&mutation.op),
+            ErrorClass::Unserved,
+            "session.pty-unserved",
+            "This deployment did not prove it can give a confined process a controlling terminal.",
+            Some("mode"),
+            false,
+        ));
+    }
     if input.exec.wait
         || input.exec.lease_ttl_ms.is_none()
         || input.input_limit_bytes == 0
