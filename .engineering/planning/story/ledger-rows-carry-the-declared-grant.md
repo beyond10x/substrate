@@ -2,7 +2,7 @@
 format: aep.planning-md/1
 id: story:ledger-rows-carry-the-declared-grant
 kind: story
-status: proposed
+status: active
 title: An operation's ledger row carries the declared grant it ran under
 summary: 'Atlas O1 exit evidence: every effectful call attributable to a declared grant, verified across the connectors/identity seam from substrate''s own record; design 06 section 2 fixes the shape.'
 owner: substrate
@@ -10,7 +10,7 @@ tags:
 - ledger
 - o1
 - trust
-revision: 4
+revision: 5
 ---
 # Story: An operation's ledger row carries the declared grant it ran under
 

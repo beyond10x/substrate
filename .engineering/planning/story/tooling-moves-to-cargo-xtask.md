@@ -2,7 +2,7 @@
 format: aep.planning-md/1
 id: story:tooling-moves-to-cargo-xtask
 kind: story
-status: active
+status: implemented
 title: 'Anything that runs is Rust: the gate''s Python moves to cargo xtask'
 summary: 'atlas AGENTS.md section Language: gates, checkers, renderers and packagers are Rust. 23,916 lines of Python beside 30,768 of Rust; the four frozen bundle renderers stay as reproducibility proofs, everything else moves, and 0.5.0 is rendered from substrate-wire types.'
 owner: substrate
@@ -11,7 +11,7 @@ tags:
 - rust
 relations:
 - decomposes: epic:release-hardening
-revision: 9
+revision: 11
 ---
 # Story: Anything that runs is Rust — the gate's Python moves to `cargo xtask`
 
@@ -205,3 +205,54 @@ the Rust replacement before the Python is deleted.
 acceptance; name it separately if it should move.
 
 Of the 21,298 Python lines left, 20,683 are the four frozen renderer/checker pairs, which stay.
+
+## Progress — 2026-08-30, the last Python leaves the gate
+
+`scripts/contract_json_gate.py` (377 lines) and `scripts/test_contract_json_gate.py` (199) are
+deleted; `cargo xtask check-json` replaces them (`xtask/src/json.rs`, 2,292 lines with tests).
+
+Acceptance, checked line by line:
+
+- **No Python in the gate except the four frozen checkers.** `grep -n python scripts/gate.sh` →
+  lines 20-23 only, the four `check-contract-bundle*.py`.
+- **`bash scripts/gate.sh` → `gate: passed`, exit 0**, 47.4s, re-run by the orchestrator rather
+  than taken on report. Its last three steps: `check-bundle 0.6.0` → 213 files;
+  `check-json` → `contract JSON classified: 0.1.0 114, 0.2.0 165, 0.3.0 194, 0.4.0 200, 0.5.0 206,
+  0.6.0 213 (1092 documents in 6 bundles)`; `check-toolchain` → `Rust toolchain pinned at 1.97`.
+- **`0.4.0` still verifies byte-clean** — `substrate-wire 0.4.0: 199 files, 26 closed operations,
+  21 executable vectors, 71 design vectors, 112 requirements, and 11 exact hash fixtures verified`.
+  `git status --short contracts/` is empty.
+- Failing-first: 7 `unimplemented!()` stubs failed (`69 passed; 7 failed`), then **87 passed**.
+
+**Differential before deletion, and again afterwards from an archived copy: 33 of 36 cases
+byte-identical** in stdout, stderr and exit code — six untouched bundles plus 30 mutations. The
+three that differ, each decided rather than absorbed:
+
+| case | Python | Rust | why |
+|---|---|---|---|
+| malformed document | `Expecting property name enclosed in double quotes: line 3 column 1 (char 12)` | `EOF while parsing a value at line 3 column 0` | different parsers; same path, prefix, position and exit code |
+| `additionalProperties` order | `'b'` then `'a'` | `'a'` then `'b'` | reachable only for a document that already failed the deterministic-source-form check; one that passes it has file order == sorted order |
+| cyclic `$ref` | `RecursionError` and a 1,000-frame traceback | named refusal, `MAX_REFERENCE_DEPTH = 64` | **a behaviour change, on purpose**: Python guarded cycles in `dereference_schema` but not on the `validate` path, and a crash is not a refusal (invariant 3) |
+
+**Coverage widened, not narrowed.** The Python classified four bundles — `check_json_authority` was
+only ever called by the four checkers, each closing over its own `BUNDLE`, and `0.5.0`/`0.6.0` had
+no Python at all. `check-json` covers all six.
+
+**The four frozen checkers changed**, minimally and only where they imported the deleted module:
+7 lines each — the `from contract_json_gate import …` line, the call, and the
+`N classified JSON documents` field of the summary string. `check_renderer_reproducibility` and
+every bundle assertion are untouched, so their role as the frozen bundles' reproducibility proof
+(invariant 6) is intact; verified by diff and by the gate.
+
+**Two new direct dependencies, zero new packages** (`Cargo.lock` +2 lines), both already in the
+lock under `jsonschema`: `fancy-regex`, because three bundle patterns use negative lookahead that
+`regex` cannot compile and one is reached on a released tree; `serde`, because rejecting duplicate
+object keys needs a `Deserialize` visitor. `fancy-regex`'s `delegate_size_limit` is raised to
+256 MiB so `common.json`'s `[A-Za-z0-9+/]{1398102}==` compiles.
+
+**Dropped on purpose:** the subprocess-protocol refusals at the old `contract_json_gate.py:206-218`
+— a 16 MiB pipe ceiling and label/URI uniqueness. The standards pass runs in process now; the pipe
+they guarded does not exist and uniqueness holds by construction.
+
+`git grep contract_json_gate` finds one hit, `docs/reviews/archived/2026-08-13-…md:80`, which is
+immutable review input and correctly left alone.

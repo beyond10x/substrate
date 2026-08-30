@@ -68,7 +68,8 @@ The table is the gate's own order (`scripts/gate.sh`).
 | contract bundle 0.3.0 | `python3 scripts/check-contract-bundle-0.3.0.py` |
 | contract bundle 0.4.0 | `python3 scripts/check-contract-bundle-0.4.0.py` |
 | contract bundle 0.5.0 | `cargo xtask check-bundle 0.5.0` — re-renders from its authored source and compares bytes |
-| JSON gate self-test | `python3 scripts/test_contract_json_gate.py` |
+| contract bundle 0.6.0 | `cargo xtask check-bundle 0.6.0` |
+| contract JSON | `cargo xtask check-json` — every JSON under `contracts/` is classified by exactly one bundled schema, or it fails closed |
 | toolchain | `cargo xtask check-toolchain` |
 
 Rust 1.97, edition 2024 — the toolchain is pinned by `rust-toolchain.toml`, and
@@ -114,8 +115,11 @@ cargo test --workspace --locked -- --nocapture   # the runner prints its case in
 The runner prints its current portable or delegated case inventory from each fresh execution;
 this document deliberately pins no counts that drift as adversarial coverage grows.
 
-`scripts/contract_json_gate.py` fails closed on unclassified or schema-invalid contract JSON and
-meta-validates every Draft 2020-12 schema offline.
+`cargo xtask check-json` fails closed on unclassified or schema-invalid contract JSON and
+meta-validates every Draft 2020-12 schema offline, across all six released bundles. Classification
+used to live in a Python module the four checkers imported — shared live machinery, not any one
+bundle's reproducibility proof — so it moved with the rest of the tooling, and the four checkers no
+longer do it. They verify everything else about the bundles they froze.
 
 `cargo xtask package-bundle <version> --out <dir>` packages a released contract bundle as a
 deterministic OCI image layout — `0.4.0` reproduces manifest

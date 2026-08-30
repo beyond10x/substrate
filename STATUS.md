@@ -77,10 +77,10 @@ trust this page.
   limits, capped fair maintenance across reopen, lease clocks, symlink escape refusal, and strict
   minimum host limits. `cargo test --workspace --locked` is the command that counts them; this page
   does not restate the number.
-- All four bundle trees classify every JSON document and meta-validate their declared Draft 2020-12
+- All six bundle trees classify every JSON document and meta-validate their declared Draft 2020-12
   schemas with the pinned standards validator. Semantic relations and fixed authorities are checked
-  offline, and [`scripts/test_contract_json_gate.py`](scripts/test_contract_json_gate.py) holds
-  seven negative tests proving unclassified JSON, invalid payloads, invalid schemas and invalid
+  offline, and `cargo xtask check-json` ([`xtask/src/json.rs`](xtask/src/json.rs)) carries the
+  negative tests proving unclassified JSON, invalid payloads, invalid schemas and invalid
   authority targets fail closed.
 - Runtime SQLite and guarded filesystem calls use separately bounded 16-slot blocking lanes
   (`crates/substrate-host/src/lib.rs:453`, `crates/substrate-daemon/src/app/service.rs:204`);
