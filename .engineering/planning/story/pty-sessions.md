@@ -12,7 +12,7 @@ tags:
 - wire
 relations:
 - decomposes: epic:byte-plane-completion
-revision: 5
+revision: 6
 ---
 # Story: PTY sessions are a distinct session kind with resize
 
@@ -79,7 +79,7 @@ Derived 2026-08-30 by `story-scoper`. Every line is **cited** or **inferred**.
 - **Primary surface:** `crates/substrate-host` and the `crates/substrate-daemon` session surface —
   cited, evidence items 3 and 4 assign work to each by name.
 - **Files, inferred:** `crates/substrate-host/src/process.rs:260` (`start_pipe`, the analogue a pty
-  allocation sits beside); `crates/substrate-wire/src/lib.rs:1196` (`SessionMode`);
+  allocation sits beside); `crates/substrate-wire/src/lib.rs:1227` (`SessionMode`);
   `crates/substrate-daemon/src/app/sessions.rs` and `app/routes.rs:69-85`;
   `crates/substrate-store/src/sessions.rs` (ADR 0008 durable identity).
 - **Files, cited:** `scripts/gate.sh:24-28`, `xtask/src/adrs.rs:12`.
@@ -143,3 +143,7 @@ first.
 Not established, and left to the implementing work: which interposition acquires the controlling
 terminal. Kernel `SIGWINCH`/`TIOCSCTTY`/hangup semantics are labelled as kernel behaviour rather
 than verified in this tree.
+
+## Citation refresh — 2026-08-30
+
+`SessionMode` was cited at `lib.rs:1196`; it is `:1227` at `5749353`. Line numbers in this store drift with every wire change — the symbol name is what survives, so cite both and trust the name.

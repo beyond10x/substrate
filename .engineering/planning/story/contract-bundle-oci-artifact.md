@@ -12,7 +12,7 @@ tags:
 relations:
 - decomposes: epic:release-hardening
 - depends_on: story:signed-daemon-image
-revision: 7
+revision: 8
 ---
 # Story: The 0.4.0 contract bundle is a signed, digest-pinned OCI artifact
 
@@ -94,3 +94,23 @@ tests), and `cargo test --workspace` at `scripts/gate.sh:15` runs them. There is
 `ghcr.io/beyond10x/b10x-substrate-wire`, cosign, digest in `CHANGELOG.md`. It waits on
 `story:signed-daemon-image`, which is a draft. This story cannot reach `implemented` until that
 one is designed and built.
+
+## Unblocked — 2026-08-30
+
+The paragraph above says this waits on `story:signed-daemon-image`, "which is a draft". It is
+`implemented` (closed at `9131c95`). `.github/workflows/release.yml` exists, has run, and published
+`ghcr.io/beyond10x/b10x-substrate-daemon:0.2.3` at
+`sha256:ab10158266b579d705ce8422c7d2a6e783cde950d30e100f61ca6befc4d0beda`, keyless-signed and
+`cosign verify`-ed (run 33304493276).
+
+**Nothing blocks this story.** What remains is its own second half: a bundle publish-and-sign job in
+`release.yml`, publishing `ghcr.io/beyond10x/b10x-substrate-wire:<bundle-version>` from
+`cargo xtask package-bundle`, with the digest in `CHANGELOG.md` and the artifact annotated
+`development` — a development bundle does not become a stable contract by being published (atlas
+ADR 0019).
+
+One thing the daemon release proved that this story must plan around: the workflow's final step
+cannot push to `main`, because `main` is protected and requires the `Full gate` check, which a
+direct push can never satisfy. The daemon digest landed by pull request instead
+(`68d226f`). A bundle digest will need the same route or a different one, and the story should say
+which before the job is written.

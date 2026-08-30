@@ -9,7 +9,7 @@ owner: substrate
 tags:
 - phase-4
 - wire
-revision: 3
+revision: 4
 ---
 # Epic: Byte-plane completion
 
@@ -36,7 +36,7 @@ under invariant 8 with an ADR each and no new design document:
 
 ## Scope
 
-Four stories, each an ADR, a successor bundle, host/daemon work and delegated-lane evidence — in
+Six stories now decompose this epic, each an ADR, a successor bundle, host/daemon work and delegated-lane evidence — in
 that order, which is the order invariant 8 requires:
 
 1. `story:pty-sessions` — smallest, wholly local, exercises the successor-bundle path again.
@@ -46,9 +46,13 @@ that order, which is the order invariant 8 requires:
    egress unlock nothing (added by the 2026-08-29 review against atlas).
 4. `story:network-session-authority` — the last exit criterion, and the one with no consumer named.
 
-Every story adds to a successor of `0.4.0`; no frozen byte changes (invariant 6). In sequence: PTY
-is `0.5.0`, slots `0.6.0`, network authority `0.7.0`; two landing together share a bundle and the
-ADRs say so. Each successor ships its renderer and checker and joins `scripts/gate.sh`. Each
+Every story adds to **the next free successor** at the time it lands; no frozen byte changes
+(invariant 6). Two landing together share a bundle and the ADRs say so. This paragraph once named
+the numbers — PTY `0.5.0`, slots `0.6.0`, network authority `0.7.0` — and every one of them was
+wrong within a day, because the order stories land in is not the order they were listed in. What
+actually happened: `0.5.0` sealed secret slots, `0.6.0` destination-bound egress, `0.7.0` delegated
+context and grant attribution, `0.8.0` the aperture byte ceiling (`CHANGELOG.md:30`, `:83`, `:119`,
+`:155`). A plan that pins a successor number is a plan that is wrong as soon as anything reorders. Each successor ships its renderer and checker and joins `scripts/gate.sh`. Each
 capability is a fact the host verifies at startup; absent verification is a named refusal and the
 capability document omits the fact (invariants 3, 4). Nothing here opens a second spawn path.
 
@@ -69,3 +73,18 @@ the hosted trust-envelope verifier (design 06 § 1, phase 7).
 
 Plan 04 § *Exit evidence* is met, `README.md` § *Status* no longer lists PTY or network session
 authority as absent, and `ROADMAP.md` phase 4 reads *complete*.
+
+## Correction — 2026-08-30
+
+Two claims above were false and are rewritten rather than deleted, so the drift is visible.
+
+The bundle sequence named three numbers and got all three wrong; the paragraph now says *next free
+successor* and records what actually landed.
+
+The scope said four stories. Six decompose this epic: the original four plus
+`story:aperture-byte-ceiling` (ADR 0014, implemented) and
+`story:secret-slot-probe-observes-what-it-claims` (implemented), both filed after the original
+scope was written. Four of the six are implemented; `story:pty-sessions` and
+`story:network-session-authority` remain drafts, each now carrying a proposed design
+(`docs/design/13-pty-sessions.md`, `docs/design/14-network-session-authority.md`) and each awaiting
+operator acceptance before code.
