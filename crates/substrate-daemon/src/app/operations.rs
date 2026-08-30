@@ -15,7 +15,7 @@ use substrate_store::{
 };
 use substrate_wire::{
     Base64Content, Base64Encoding, ErrorClass, ErrorDetail, ExecOutputQuery, ExecStartInput,
-    MAX_LEASE_TTL_MS, MIN_LEASE_TTL_MS, NetworkMode, OperationOutcome, OutputSlice, PipeSession,
+    MAX_LEASE_TTL_MS, MIN_LEASE_TTL_MS, OperationOutcome, OutputSlice, PipeSession,
     PipeSessionStartInput, SessionAttachmentState, SessionState, Success, WorkspaceCreateInput,
     WorkspaceSource, canonical_request_hash_v2, validate_operation_id,
 };
@@ -287,18 +287,7 @@ pub(super) fn validate_exec_input(
             false,
         ));
     }
-    if input.sandbox.network == NetworkMode::Aperture {
-        return Err(failure(
-            StatusCode::NOT_IMPLEMENTED,
-            request_id,
-            Some(&mutation.op),
-            ErrorClass::Unserved,
-            "exec.network-unserved",
-            "Requested network aperture is not served by this host.",
-            Some("exec.network-aperture"),
-            false,
-        ));
-    }
+    check_egress_aperture(&facts, &input.sandbox, mutation, request_id)?;
     check_secret_slots(&facts, mutation, request_id)?;
     if facts.exec_namespaces.is_none()
         || facts.exec_cgroup_limits.is_none()
@@ -313,6 +302,81 @@ pub(super) fn validate_exec_input(
             "exec.sandbox-unavailable",
             "Required host confinement is not available.",
             Some("exec.namespaces"),
+            false,
+        ));
+    }
+    Ok(())
+}
+
+/// Daemon-side admission for the aperture a start selects, by name (ADR 0013).
+///
+/// Shape, then capability, then declaration — the same order the driver uses independently, so a
+/// caller hears the same answer whichever layer sees the request first. The published fact is the
+/// declared names and their pinned destinations, so this needs no access to daemon configuration
+/// and gets none.
+fn check_egress_aperture(
+    facts: &substrate_wire::CapabilityFacts,
+    sandbox: &substrate_wire::ConfinementRequest,
+    mutation: &BoundMutation<ExecStartInput>,
+    request_id: &str,
+) -> Result<(), Response> {
+    if let Err(error) =
+        substrate_wire::validate_aperture_request(sandbox.network, sandbox.aperture.as_deref())
+    {
+        let (code, message, address) = match error {
+            substrate_wire::WireValidationError::ApertureDestinationInRequest => (
+                "exec.aperture-destination-in-request",
+                "An egress aperture is selected by name; a destination may not appear in a request.",
+                "sandbox.network.aperture",
+            ),
+            substrate_wire::WireValidationError::InvalidApertureName => (
+                "exec.aperture-name-invalid",
+                "An egress aperture name must match [a-z][a-z0-9_]{0,63}.",
+                "sandbox.network.aperture",
+            ),
+            _ => (
+                "exec.aperture-mode-mismatch",
+                "A sandbox asks for network \"aperture\" with a name, or \"none\" without one.",
+                "sandbox.network",
+            ),
+        };
+        return Err(failure(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            request_id,
+            Some(&mutation.op),
+            ErrorClass::Refused,
+            code,
+            message,
+            Some(address),
+            false,
+        ));
+    }
+    let Some(name) = sandbox.aperture.as_deref() else {
+        return Ok(());
+    };
+    let Some(published) = facts.exec_egress_apertures.as_ref() else {
+        return Err(failure(
+            StatusCode::NOT_IMPLEMENTED,
+            request_id,
+            Some(&mutation.op),
+            ErrorClass::Unserved,
+            "exec.egress-apertures-unserved",
+            "Egress apertures are not served by this host.",
+            Some("exec.network-aperture"),
+            false,
+        ));
+    };
+    if !published.iter().any(|fact| fact.name == name) {
+        return Err(failure(
+            StatusCode::NOT_IMPLEMENTED,
+            request_id,
+            Some(&mutation.op),
+            ErrorClass::Unserved,
+            "exec.aperture-undeclared",
+            // The name, never a destination: an operator debugging a harness needs to know which
+            // aperture was asked for, and a name is deployment vocabulary.
+            &format!("Egress aperture {name} is not declared on this host."),
+            Some("exec.network-aperture"),
             false,
         ));
     }

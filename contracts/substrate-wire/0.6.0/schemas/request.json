@@ -1,0 +1,216 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.6.0:request",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "input": {
+          "$ref": "inputs/workspace-create.json"
+        },
+        "op": {
+          "$ref": "common.json#/$defs/operation-id"
+        }
+      },
+      "required": [
+        "op",
+        "input"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "input": {
+          "$ref": "inputs/workspace-file-write.json"
+        },
+        "op": {
+          "$ref": "common.json#/$defs/operation-id"
+        }
+      },
+      "required": [
+        "op",
+        "input"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "input": {
+          "$ref": "inputs/workspace-file-delete.json"
+        },
+        "op": {
+          "$ref": "common.json#/$defs/operation-id"
+        }
+      },
+      "required": [
+        "op",
+        "input"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "input": {
+          "$ref": "inputs/workspace-destroy.json"
+        },
+        "op": {
+          "$ref": "common.json#/$defs/operation-id"
+        }
+      },
+      "required": [
+        "op",
+        "input"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "input": {
+          "$ref": "inputs/exec-start.json"
+        },
+        "op": {
+          "$ref": "common.json#/$defs/operation-id"
+        }
+      },
+      "required": [
+        "op",
+        "input"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "input": {
+          "$ref": "inputs/exec-signal.json"
+        },
+        "op": {
+          "$ref": "common.json#/$defs/operation-id"
+        }
+      },
+      "required": [
+        "op",
+        "input"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "input": {
+          "$ref": "inputs/exec-retire.json"
+        },
+        "op": {
+          "$ref": "common.json#/$defs/operation-id"
+        }
+      },
+      "required": [
+        "op",
+        "input"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "input": {
+          "$ref": "inputs/pipe-session-start.json"
+        },
+        "op": {
+          "$ref": "common.json#/$defs/operation-id"
+        }
+      },
+      "required": [
+        "op",
+        "input"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "input": {
+          "$ref": "inputs/exec-signal.json"
+        },
+        "op": {
+          "$ref": "common.json#/$defs/operation-id"
+        }
+      },
+      "required": [
+        "op",
+        "input"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "input": {
+          "$ref": "inputs/pipe-session-retire.json"
+        },
+        "op": {
+          "$ref": "common.json#/$defs/operation-id"
+        }
+      },
+      "required": [
+        "op",
+        "input"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "input": {
+          "$ref": "inputs/lease-renew.json"
+        },
+        "op": {
+          "$ref": "common.json#/$defs/operation-id"
+        }
+      },
+      "required": [
+        "op",
+        "input"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "input": {
+          "$ref": "inputs/lease-renew.json"
+        },
+        "op": {
+          "$ref": "common.json#/$defs/operation-id"
+        }
+      },
+      "required": [
+        "op",
+        "input"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "input": {
+          "$ref": "inputs/lease-renew.json"
+        },
+        "op": {
+          "$ref": "common.json#/$defs/operation-id"
+        }
+      },
+      "required": [
+        "op",
+        "input"
+      ],
+      "type": "object"
+    }
+  ],
+  "description": "The route registry selects one branch; no generic input object is authoritative.",
+  "title": "Closed phase-3 mutation request union"
+}

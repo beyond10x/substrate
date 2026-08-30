@@ -1,0 +1,16 @@
+{
+  "$schema": "schemas/compatibility.json",
+  "contract": "substrate-wire",
+  "development_constraints": [
+    "This development bundle is contract-execution-ready but cannot satisfy a stable dependency.",
+    "Passing the bundle gate proves bundle integrity; it does not claim producer or host-driver conformance.",
+    "No compatibility promise begins before a signed stable release."
+  ],
+  "request_policy": "closed",
+  "response_policy": "closed-route-selected-envelopes",
+  "status": "development",
+  "supported_api_majors": [
+    1
+  ],
+  "version": "0.6.0"
+}

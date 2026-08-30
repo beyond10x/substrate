@@ -17,8 +17,8 @@ use substrate_wire::{
     AppliedConfinement, AppliedExecutionCapsule, AppliedFilesystem, AppliedNetwork, Base64Content,
     Base64Encoding, BaselineEnvironment, CapabilitySnapshot, EXECUTION_CAPSULE_MOUNT, Exec,
     ExecExit, ExecKind, ExecOutputQuery, ExecSignalInput, ExecStartInput, ExecState,
-    ExecutionCapsuleInput, NetworkMode, OutputSlice, OutputStream, PipeSessionStartInput,
-    SandboxProfile, Signal,
+    ExecutionCapsuleInput, OutputSlice, OutputStream, PipeSessionStartInput, SandboxProfile,
+    Signal,
 };
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::process::{Child, ChildStdin, Command};
@@ -330,6 +330,30 @@ impl ProcessRuntime {
             Ok(value) => value,
             Err(outcome) => return outcome,
         };
+        // Selected again rather than carried out of `admit`, because it is a pure function of the
+        // request and the configuration and re-asking is cheaper than threading a borrow through
+        // every early return above.
+        let aperture = match Self::admit_egress_aperture(
+            &self.config,
+            self.capability.facts.exec_egress_apertures.as_ref(),
+            &input.sandbox,
+        ) {
+            Ok(value) => value.cloned(),
+            Err(error) => return contain_cgroup(&cgroup, error),
+        };
+        // Generated before the spawn because bubblewrap binds it, and installed after, because the
+        // namespace it points into does not exist yet.
+        let resolution = match aperture.as_ref() {
+            Some(aperture) => match crate::egress::GeneratedResolution::prepare(
+                aperture,
+                self.config.ca_bundle.as_deref(),
+                &self.config.capsule_root,
+            ) {
+                Ok(value) => Some(value),
+                Err(error) => return contain_cgroup(&cgroup, error),
+            },
+            None => None,
+        };
         let (sync_read, sync_write) = match pipe() {
             Ok(pipe) => pipe,
             Err(error) => {
@@ -337,6 +361,16 @@ impl ProcessRuntime {
             }
         };
         let sync_fd = sync_read.as_raw_fd();
+        // Trap 2: the namespace to bind the aperture in belongs to the pid bubblewrap *reports*,
+        // never to the bubblewrap process itself.
+        let info = match aperture.as_ref() {
+            Some(_) => match pipe() {
+                Ok(pipe) => Some(pipe),
+                Err(error) => return contain_cgroup(&cgroup, error),
+            },
+            None => None,
+        };
+        let info_fd = info.as_ref().map(|(_, write)| write.as_raw_fd());
         // Last thing before spawn, first thing released after it. Every admission check and the
         // backend recheck are behind us, so a start that will not run never reads a credential
         // (`docs/design/11-sealed-secret-slots.md` § 4).
@@ -354,10 +388,17 @@ impl ProcessRuntime {
             pipe_settings.is_some(),
             capsule.as_ref(),
             &slots,
+            resolution.as_ref(),
+            info_fd,
         );
         let write_fd = sync_write.as_raw_fd();
         let placements = slots.placements();
-        let retained = slots.retained(Some(sync_fd));
+        let mut retained = slots.retained(Some(sync_fd));
+        if let Some(fd) = info_fd.and_then(|fd| u32::try_from(fd).ok()) {
+            retained.push(fd);
+            retained.sort_unstable();
+            retained.dedup();
+        }
         // SAFETY: pre_exec runs after fork; it invokes only async-signal-safe libc calls and does
         // not allocate. The captured descriptors are plain integers owned by the parent until spawn,
         // and the two vectors are built before the fork and only read after it.
@@ -398,6 +439,32 @@ impl ProcessRuntime {
         if let Err(error) = cgroup.attach_tree(leader_pid) {
             return contain_spawned(child, cgroup, error).await;
         }
+        // Between the namespace existing and the child running: the aperture is there for every
+        // instruction the child executes, and for none before it (ADR 0013).
+        let installed = match (aperture.as_ref(), info) {
+            (Some(aperture), Some((info_read, info_write))) => {
+                drop(info_write);
+                let mut reader = std::fs::File::from(info_read);
+                let Some(sandbox_pid) = crate::egress::read_sandbox_pid(&mut reader) else {
+                    return contain_spawned(
+                        child,
+                        cgroup,
+                        DriverError::failed(
+                            "exec.aperture-install-failed",
+                            "The confinement backend reported no sandbox process identity.",
+                        ),
+                    )
+                    .await;
+                };
+                match crate::egress::install(aperture, sandbox_pid, Some(&cgroup.procs())) {
+                    Ok(installed) => Some(installed),
+                    // Nothing partial: the aperture either exists exactly as declared or the
+                    // dispatch is refused with the sandbox torn down around it.
+                    Err(error) => return contain_spawned(child, cgroup, error).await,
+                }
+            }
+            _ => None,
+        };
         if let Err(error) = release_barrier(&sync_write) {
             return contain_spawned(child, cgroup, error).await;
         }
@@ -412,7 +479,13 @@ impl ProcessRuntime {
             } else {
                 AppliedFilesystem::WorkspaceReadWriteSystemReadOnly
             },
-            network: AppliedNetwork::None,
+            // Reported, never inferred: what is here is what the forwarder was actually given,
+            // and the destination is the pinned address rather than the configured host string.
+            network: installed
+                .as_ref()
+                .map_or(AppliedNetwork::None, |installed| {
+                    AppliedNetwork::Aperture(installed.applied())
+                }),
             profile: SandboxProfile::Workspace,
             capsule: applied_capsule,
             // What was mounted, not what was asked for: `admit` refused anything it could not
@@ -483,6 +556,8 @@ impl ProcessRuntime {
             pipe_sender,
             pipe_settings.map_or(PIPE_FRAME_BYTES, |settings| settings.frame_limit),
             capsule,
+            installed,
+            resolution,
             permit,
         ));
         if input.wait {
@@ -823,6 +898,73 @@ impl ProcessRuntime {
         Ok(())
     }
 
+    /// Which declared aperture this start selected, if any, and why it may not have one
+    /// (ADR 0013).
+    ///
+    /// Shape, then capability, then declaration — the order `admit_secret_slots` uses, so a caller
+    /// hears the same answer whichever layer sees the request first. Nothing here reads a
+    /// destination out of the request, because there is no destination in a request: a name is the
+    /// only thing a caller may say, and configuration owns everything the name stands for.
+    pub(crate) fn admit_egress_aperture<'a>(
+        config: &'a HostConfig,
+        published: Option<&Vec<substrate_wire::EgressApertureFact>>,
+        sandbox: &substrate_wire::ConfinementRequest,
+    ) -> Result<Option<&'a crate::egress::EgressAperture>, DriverError> {
+        substrate_wire::validate_aperture_request(sandbox.network, sandbox.aperture.as_deref())
+            .map_err(|error| match error {
+                // A *name* that parses as a destination is a rejected escalation, not a typo, and
+                // saying so is the difference between "you may not" and "no such thing".
+                substrate_wire::WireValidationError::ApertureDestinationInRequest => {
+                    DriverError::refused(
+                        "exec.aperture-destination-in-request",
+                        "An egress aperture is selected by name; a destination may not appear in a request.",
+                        "sandbox.network.aperture",
+                    )
+                }
+                substrate_wire::WireValidationError::InvalidApertureName => DriverError::refused(
+                    "exec.aperture-name-invalid",
+                    "An egress aperture name must match [a-z][a-z0-9_]{0,63}.",
+                    "sandbox.network.aperture",
+                ),
+                _ => DriverError::refused(
+                    "exec.aperture-mode-mismatch",
+                    "A sandbox asks for network \"aperture\" with a name, or \"none\" without one.",
+                    "sandbox.network",
+                ),
+            })?;
+        let Some(name) = sandbox.aperture.as_deref() else {
+            return Ok(None);
+        };
+        // Configured intent is not a fact. An unverified mechanism leaves the capability absent,
+        // and every aperture request is then `unserved` rather than quietly getting no network.
+        let Some(published) = published else {
+            return Err(DriverError::unserved(
+                "exec.egress-apertures-unserved",
+                "Egress apertures are not served by this host.",
+                "exec.network-aperture",
+            ));
+        };
+        let declared = published
+            .iter()
+            .any(|fact| fact.name == name)
+            .then(|| {
+                config
+                    .egress_apertures
+                    .iter()
+                    .find(|aperture| aperture.name == name)
+            })
+            .flatten();
+        declared.map(Some).ok_or_else(|| {
+            DriverError::unserved(
+                // The name, because an operator debugging a harness needs to know which one was
+                // asked for, and a name is deployment vocabulary rather than secret material.
+                "exec.aperture-undeclared",
+                format!("Egress aperture {name} is not declared on this host."),
+                "exec.network-aperture",
+            )
+        })
+    }
+
     fn admit(&self, id: &str, workspace: &Path, input: &ExecStartInput) -> Result<(), DriverError> {
         if !id.starts_with("ex_")
             || !id
@@ -858,13 +1000,11 @@ impl ProcessRuntime {
                 "sandbox",
             ));
         }
-        if input.sandbox.network == NetworkMode::Aperture {
-            return Err(DriverError::unserved(
-                "exec.network-unserved",
-                "Requested network aperture is not served by this host.",
-                "exec.network-aperture",
-            ));
-        }
+        Self::admit_egress_aperture(
+            &self.config,
+            self.capability.facts.exec_egress_apertures.as_ref(),
+            &input.sandbox,
+        )?;
         if self.capability.facts.exec_namespaces.is_none()
             || self.capability.facts.exec_cgroup_limits.is_none()
             || self.capability.facts.exec_cgroup_kill.is_none()
@@ -929,6 +1069,9 @@ impl ProcessRuntime {
         Ok(())
     }
 
+    // Nine, because nine separate things shape one argv and a struct of them would be a second
+    // name for this function's parameter list.
+    #[allow(clippy::too_many_arguments)]
     fn command(
         &self,
         workspace: &Path,
@@ -937,6 +1080,8 @@ impl ProcessRuntime {
         interactive: bool,
         capsule: Option<&PreparedCapsule>,
         slots: &crate::secrets::SecretSlotSet,
+        resolution: Option<&crate::egress::GeneratedResolution>,
+        info_fd: Option<RawFd>,
     ) -> Command {
         let mut command = Command::new(&self.config.bubblewrap);
         command
@@ -993,11 +1138,22 @@ impl ProcessRuntime {
                 .arg(&root.host_path)
                 .arg(&root.mount);
         }
+        // The whole of `/etc` a run ever gets, and only when it has an aperture: exactly the
+        // declared name mapped to the forwarder, and — where the operator configured one — a
+        // snapshot of a trust anchor. Read-only, generated, and gone with the run.
+        if let Some(resolution) = resolution {
+            for (source, mount) in resolution.binds() {
+                command.arg("--ro-bind").arg(source).arg(mount);
+            }
+        }
         command
             .arg("--bind")
             .arg(workspace)
             .args(["/workspace", "--chdir", "/workspace", "--block-fd"])
             .arg(sync_fd.to_string());
+        if let Some(info_fd) = info_fd {
+            command.arg("--info-fd").arg(info_fd.to_string());
+        }
         for name in &input.env.allow {
             command.args(["--setenv", name.as_str(), baseline_value(*name)]);
         }
@@ -1008,6 +1164,16 @@ impl ProcessRuntime {
         // start named no slot, so a child can tell "no slots" from "an empty list".
         if let Some(mapping) = slots.environment() {
             command.args(["--setenv", substrate_wire::SECRET_SLOTS_ENV, &mapping]);
+        }
+        // Where the generated anchor is, because the conventional path is not a convention every
+        // TLS stack follows. Absent when no anchor was generated: a child that cannot verify must
+        // find out by failing to verify, never by being pointed at an empty file.
+        if resolution.is_some_and(crate::egress::GeneratedResolution::has_ca_bundle) {
+            command.args([
+                "--setenv",
+                "SSL_CERT_FILE",
+                substrate_wire::APERTURE_CA_BUNDLE_PATH,
+            ]);
         }
         // Bubblewrap injects PWD after `--clearenv`; remove that implementation detail before
         // exec, then restore it only when the closed request explicitly supplied PWD.
@@ -1118,6 +1284,8 @@ async fn run_child(
     pipe_sender: Option<mpsc::Sender<PipeFrame>>,
     frame_limit: usize,
     capsule: Option<PreparedCapsule>,
+    aperture: Option<crate::egress::InstalledAperture>,
+    resolution: Option<crate::egress::GeneratedResolution>,
     _permit: ActivePermit,
 ) {
     let stdout = child.stdout.take();
@@ -1149,8 +1317,15 @@ async fn run_child(
     let (stderr, stderr_truncated) = stderr_task.await.unwrap_or_else(|_| (Vec::new(), true));
     let forced_cancellation =
         timed_out || cpu_exhausted || execution.cancellation_requested.load(Ordering::Acquire);
+    // Read the counters while the forwarder is still alive, then let it go: the forwarder is in
+    // this run's cgroup, so reconciliation would otherwise be racing the thing it is about to kill.
+    let applied_aperture = aperture
+        .as_ref()
+        .map(crate::egress::InstalledAperture::applied);
+    drop(aperture);
     let cgroup_reconciled = reconcile_cgroup(&cgroup).await;
     let capsule_reconciled = capsule.is_none_or(|capsule| capsule.directory.close().is_ok());
+    let resolution_reconciled = resolution.is_none_or(crate::egress::GeneratedResolution::close);
     let mut observation = execution.observation.lock();
     observation.stdout = stdout;
     observation.stderr = stderr;
@@ -1158,8 +1333,19 @@ async fn run_child(
     observation.stderr_truncated = stderr_truncated;
     observation.output_complete = true;
     observation.resource.observed_at = Utc::now();
+    // The bytes that crossed, counted where they crossed. An aperture with no traffic still
+    // reports itself: "installed and unused" and "never installed" are different observations.
+    if let Some(applied) = applied_aperture
+        && let Some(confinement) = observation.resource.applied.as_mut()
+    {
+        confinement.network = AppliedNetwork::Aperture(applied);
+    }
     match status {
-        _ if !cgroup_reconciled || !capsule_reconciled || cpu_measurement_failed => {
+        _ if !cgroup_reconciled
+            || !capsule_reconciled
+            || !resolution_reconciled
+            || cpu_measurement_failed =>
+        {
             observation.resource.state = ExecState::Unknown;
             observation.resource.exit = None;
         }
@@ -1638,6 +1824,11 @@ impl Cgroup {
         Ok(())
     }
 
+    /// This cgroup's `cgroup.procs`, which is how a forked process joins it by writing `0`.
+    fn procs(&self) -> PathBuf {
+        self.path.join("cgroup.procs")
+    }
+
     fn kill_all(&self) -> Result<(), DriverError> {
         write_control(&self.path, "cgroup.kill", "1")
     }
@@ -1822,6 +2013,7 @@ mod tests {
                 requested: substrate_wire::ConfinementRequest {
                     capability_snapshot: format!("sha256:{}", "7".repeat(64)),
                     network: NetworkMode::None,
+                    aperture: None,
                     profile: SandboxProfile::Workspace,
                     required: true,
                 },
@@ -2032,6 +2224,7 @@ mod tests {
             sandbox: substrate_wire::ConfinementRequest {
                 capability_snapshot: format!("sha256:{}", "8".repeat(64)),
                 network: NetworkMode::None,
+                aperture: None,
                 profile: SandboxProfile::Workspace,
                 required: true,
             },
@@ -2104,6 +2297,7 @@ mod tests {
             sandbox: substrate_wire::ConfinementRequest {
                 capability_snapshot: snapshot,
                 network: NetworkMode::None,
+                aperture: None,
                 profile: SandboxProfile::Workspace,
                 required: true,
             },

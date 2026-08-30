@@ -134,7 +134,7 @@ One extra loopback hop; the p95 ranges overlap, and the internet destination cos
 | 1 | **The forwarder dies with the run.** Observed failure to copy: after the sandbox exited, `forwarder alive? yes`, still holding 2 sockets pinning the dead netns. Join the run's cgroup **before** opening the listening socket, so `cgroup.kill` reaps it |
 | 2 | **The listener is created at the existing spawn barrier** `--block-fd` (`crates/substrate-host/src/process.rs:947-948`, `:398-402`) — never before the aperture exists or after it is gone |
 | 3 | **The probe exercises the mechanism** in a throwaway sandbox at startup and publishes `exec.egress-apertures` only then, never the destination's liveness (design 10 § 9 decision 6) |
-| 4 | **A CA bundle decision.** § 3.1 shows TLS verification failing for want of `/etc`; an HTTPS endpoint needs a read-only CA bundle mount or the aperture unlocks nothing. Design 10 § 9 decision 2 covered the `/etc/hosts` half only |
+| 4 | **A CA bundle decision.** § 3.1 shows TLS verification failing for want of `/etc`; an HTTPS endpoint needs a read-only CA bundle mount or the aperture unlocks nothing. Design 10 § 9 decision 2 covered the `/etc/hosts` half only. **Answered: a generated per-run snapshot of an operator-configured anchor — [design 10 § 11](10-destination-bound-egress.md#11-what-shipped-and-what-did-not)** |
 | 5 | **The delegated-lane vectors** of design 10 § 7 — `declared-aperture-is-reachable` and `undeclared-destination-is-unreachable` as one run with two connects in the § 3.1 shape, plus `applied-aperture-is-observed` |
 | 6 | **Byte accounting lives in the forwarder** — the only place that sees the bytes, and what `exec.aperture-byte-limit` refuses on |
 | 7 | **The aperture pins a TCP tuple, not an HTTP identity.** A child may send any `Host` header; the bytes still go to the pinned address |
@@ -148,3 +148,38 @@ One extra loopback hop; the p95 ranges overlap, and the internet destination cos
 | Kernels older than 4.9 | `NS_GET_USERNS` does not exist there and the mechanism has no fallback |
 | The delegated cgroup lane | Forwarder-in-cgroup and whole-tree kill were not exercised; § 6 row 1 is the case to write |
 | IPv6 destinations and a real model endpoint | Only IPv4 and `example.com` were used |
+
+## 8 What the implementation proved, and where
+
+`story:destination-bound-egress` landed on 2026-08-30. Row by row against § 6, and honest about the
+one lane this host cannot run:
+
+| § 6 | Proved by | Executed here? |
+|---|---|---|
+| 1 forwarder dies with the run | the forwarder writes `0` to the run's `cgroup.procs` before the listening socket exists, and `InstalledAperture::drop` kills it besides | **no** — the cgroup half needs a delegated subtree |
+| 2 listener at the `--block-fd` barrier | installed between `cgroup.attach_tree` and `release_barrier` (`crates/substrate-host/src/process.rs`) | yes — `egress::tests` open a real sandbox at that barrier |
+| 3 probe exercises the mechanism | `egress::mechanism_is_provable` runs a throwaway sandbox and connects through it from inside | yes |
+| 4 CA bundle | § 7 above | yes, as a file-generation case; no TLS handshake was run |
+| 5 delegated-lane vectors | `check_confined_apertures` in `crates/substrate-daemon/tests/runtime_vectors.rs` | **no** — absent without `SUBSTRATE_VECTORS_CGROUP_ROOT` |
+| 6 byte accounting in the forwarder | a shared page the relays `fetch_add` into; asserted non-zero in `applied_aperture_is_observed` | yes |
+| 7 a TCP tuple, not an HTTP identity | the relay dials a `sockaddr_in` fixed before the fork; nothing a child sends can reach it | yes, by construction — no `Host`-header case was written |
+
+**Trap 2 bites, and a test catches it.** Pointing the install at `child.id()` — the bubblewrap pid,
+whose `ns/net` is the host namespace — makes
+`egress::tests::the_mechanism_is_proven_in_a_throwaway_sandbox` fail: the aperture is bound on host
+loopback, and nothing inside the sandbox can reach it.
+
+**Trap 1 did not reproduce for the sandbox argv used here, and the implementation takes the safe
+route anyway.** Swapping `ioctl(netns_fd, NS_GET_USERNS)` for `/proc/<child>/ns/user` left all nine
+cases green, so bubblewrap did *not* nest a second user namespace for the throwaway argv — fewer
+binds than a real run. `NS_GET_USERNS` returns the owning namespace in both cases and
+`/proc/<pid>/ns/user` only sometimes does, so the ioctl stays: this is a trap that would appear on
+some argv and not others, which is exactly the kind that ships.
+
+**One trap this spike did not name, found while implementing.** `std::io::pipe` sets `O_CLOEXEC`, so
+a sandbox handed `--info-fd` or `--block-fd` from one reports **nothing** and blocks **forever** —
+and both failures are silent, because a harness that reads no `child-pid` looks exactly like a
+harness that decided not to run. The first version of these tests "passed" in 0.00 s while opening no
+sandbox at all. `pipe2` with no flags is what the daemon's own barrier already uses, and is what the
+probe and the cases use now; releasing that barrier is a **written byte**, never a close, because
+a close only releases the sandbox if every forked copy of the write end is gone.

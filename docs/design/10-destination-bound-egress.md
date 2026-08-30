@@ -169,6 +169,11 @@ gate. Per § 2, CI proves rows one to four and reports five to seven absent.
 
 ## 8. Compatibility
 
+**Superseded by what shipped: the successor is `0.6.0`, not `0.5.0`.** The sibling design this
+document's preamble anticipated did land first — `0.5.0` carries sealed secret slots (ADR 0012) — so
+this change moved to that bundle's successor, exactly as the preamble said it would. Everything
+below holds with `0.5.0` read as the predecessor and `0.6.0` as the successor.
+
 A successor bundle `0.5.0`: predecessor `0.4.0`, `adds_routes: 0`, `preserves_routes: 26`, its own
 checker added to the gate — a bundle whose checker is not in the gate is unverified from the next
 commit onward (`AGENTS.md` § *The gate*). Earlier directories keep their bytes (invariant 6).
@@ -189,7 +194,7 @@ release boundary and is re-pinned, not hot-swapped.
 | # | Decision | Owner | DEFAULT if nobody answers |
 |---|---|---|---|
 | 1 | Enforcement mechanism | operator, in the ADR | **Settled: (c).** The § 4 spike ran and passed — see [10a](10a-egress-mechanism-spike.md). Option (a) is refuted on this host by real output: `ip link add veth` and `RTM_SETLINK(IFLA_NET_NS_FD)` both return EPERM at uid 1000. |
-| 2 | DNS inside the aperture | operator | Outside. Resolve at declaration, pin the address, give the sandbox no resolver. If a named destination is required for TLS, bind a generated read-only `/etc/hosts` with exactly the declared mapping — the sandbox has no `/etc` today. |
+| 2 | DNS inside the aperture | operator | Outside. Resolve at declaration, pin the address, give the sandbox no resolver. If a named destination is required for TLS, bind a generated read-only `/etc/hosts` with exactly the declared mapping — the sandbox has no `/etc` today. **Taken, and extended to the trust anchor: see § 11.** |
 | 3 | Protocol set | this design | `tcp` only. |
 | 4 | Re-resolution mid-run | this design | Pinned for the run's lifetime. A re-resolve is a later decision with its own vectors. |
 | 5 | Apertures per run | this design | One named aperture per run in the first slice. |
@@ -250,3 +255,33 @@ half: reachability of a declared destination and unreachability of an undeclared
 delegated lane on a self-hosted runner. CI proves the typed refusals and the schema shape and
 reports the rest absent rather than passed.
 ```
+
+## 11. What shipped, and what did not
+
+Implemented on 2026-08-30 under `story:destination-bound-egress`, by mechanism (c). Three defaults
+were taken rather than asked about, and one row of § 5 was deferred.
+
+**The certificate anchor, which § 9 decision 2 covered only half of.** The spike's open question
+([10a](10a-egress-mechanism-spike.md) § 6 row 4) is answered the way decision 2 answers `/etc/hosts`:
+a run with an aperture gets a **generated per-run read-only snapshot** of an operator-configured
+bundle at `/etc/ssl/certs/ca-certificates.crt`, plus `SSL_CERT_FILE`. A snapshot rather than a bind
+of the live host path, because a rotation mid-run must not change what a running child already
+trusts. `--ca-bundle` is optional and unset by default: with no anchor a child that verifies
+certificates refuses the connection, which is absent-and-unverifiable rather than
+present-and-unverified (invariant 3).
+
+**The forwarder listens on the declared port**, so with the generated `/etc/hosts` a child uses the
+operator's own URL unchanged and TLS verifies the name the operator declared. Nothing tells the
+child a port; there is no aperture environment variable, and adding one is a later decision.
+
+**`network: "aperture"` with no name keeps its old answer.** § 5 says a driver serving no apertures
+answers exactly as today, and the frozen vector `contracts/substrate-wire/0.4.0/vectors/http/
+egress-unserved.json` is that answer: `unserved`, `exec.network-unserved`, at `exec.network-aperture`.
+A *name* alongside `network: "none"` is the new refusal, `exec.aperture-mode-mismatch`, because that
+is a request trying to widen itself. Two codes § 5 left unnamed are
+`exec.egress-apertures-unserved` (the fact is absent) and `exec.aperture-name-invalid`.
+
+**Deferred: `exec.aperture-byte-limit` (§ 5, row 5).** There is no declared byte ceiling in the
+configuration surface, so there is nothing to exceed. The forwarder already counts the bytes and
+publishes them in the applied observation, which is the half that a ceiling would read; the ceiling
+itself, its declaration surface and its mid-run refusal are a later slice with their own vectors.

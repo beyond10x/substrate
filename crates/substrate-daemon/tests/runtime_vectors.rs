@@ -225,7 +225,7 @@ struct Daemon {
 }
 
 impl Daemon {
-    async fn start(root: &Path, cgroup_root: Option<&Path>) -> Self {
+    async fn start(root: &Path, cgroup_root: Option<&Path>, apertures: &[String]) -> Self {
         let socket = root.join("substrate.sock");
         let workspaces = root.join("workspaces");
         let mut command = vec![
@@ -246,6 +246,10 @@ impl Daemon {
         if let Some(cgroup_root) = cgroup_root {
             command.push("--cgroup-root".to_owned());
             command.push(cgroup_root.display().to_string());
+        }
+        for aperture in apertures {
+            command.push("--egress-aperture".to_owned());
+            command.push(aperture.clone());
         }
         let mut child = Command::new(&command[0])
             .args(&command[1..])
@@ -424,6 +428,7 @@ struct ExecInput<'a> {
     wait: bool,
     timeout_ms: u64,
     environment: Value,
+    aperture: Option<&'a str>,
 }
 
 impl<'a> ExecInput<'a> {
@@ -435,7 +440,14 @@ impl<'a> ExecInput<'a> {
             wait,
             timeout_ms: 5000,
             environment: json!({}),
+            aperture: None,
         }
+    }
+
+    /// Selects a declared egress aperture by name — never a destination (ADR 0013).
+    fn aperture(mut self, name: &'a str) -> Self {
+        self.aperture = Some(name);
+        self
     }
 
     fn timeout_ms(mut self, timeout_ms: u64) -> Self {
@@ -449,16 +461,26 @@ impl<'a> ExecInput<'a> {
     }
 
     fn build(&self) -> Value {
-        json!({
-            "workspace": self.workspace,
-            "argv": self.argv,
-            "env": { "allow": [], "set": self.environment },
-            "sandbox": {
+        let sandbox = match self.aperture {
+            Some(name) => json!({
+                "capability_snapshot": self.snapshot,
+                "network": "aperture",
+                "aperture": name,
+                "profile": "workspace",
+                "require": true,
+            }),
+            None => json!({
                 "capability_snapshot": self.snapshot,
                 "network": "none",
                 "profile": "workspace",
                 "require": true,
-            },
+            }),
+        };
+        json!({
+            "workspace": self.workspace,
+            "argv": self.argv,
+            "env": { "allow": [], "set": self.environment },
+            "sandbox": sandbox,
             "limits": {
                 "timeout_ms": self.timeout_ms,
                 "output_bytes": 65536,
@@ -1369,7 +1391,12 @@ async fn check_exec_lease(daemon: &Daemon, workspace: &str, snapshot: &str, cgro
 // ---------------------------------------------------------------------------------------------
 
 #[allow(clippy::too_many_lines)] // One sequential journey; splitting it would lose the ordering.
-async fn check_http_journey(daemon: &Daemon, cgroup_root: Option<&Path>) -> usize {
+async fn check_http_journey(
+    daemon: &Daemon,
+    cgroup_root: Option<&Path>,
+    inside: u16,
+    outside: u16,
+) -> usize {
     let mut passed = 0;
     let (status, machine) = daemon
         .call("GET", "/v1/machine", "req_clean_machine", None)
@@ -1603,9 +1630,51 @@ async fn check_http_journey(daemon: &Daemon, cgroup_root: Option<&Path>) -> usiz
     );
     passed += 1;
 
+    // A destination where a name belongs is a rejected escalation in every lane, and it is told
+    // apart from an unknown name so an operator is not sent looking for a configuration typo.
+    expect_error(
+        &daemon
+            .call(
+                "POST",
+                "/v1/execs",
+                "req_clean_aperture_destination",
+                Some(&mutation(
+                    "01JPHASE2CLEANAPERTURE3",
+                    &ExecInput::new(&workspace, &snapshot, &["/usr/bin/true"], true)
+                        .aperture("127.0.0.1:443")
+                        .build(),
+                )),
+            )
+            .await,
+        422,
+        "exec.aperture-destination-in-request",
+    );
+    passed += 1;
+
     if let Some(cgroup_root) = cgroup_root {
         passed += check_confined_execs(daemon, &workspace, &snapshot, cgroup_root).await;
+        passed += check_confined_apertures(daemon, &workspace, &snapshot, inside, outside).await;
     } else {
+        // No confinement means no verified mechanism, so the capability is absent and every
+        // aperture request is `unserved` — never a run that quietly got no network instead.
+        expect_error(
+            &daemon
+                .call(
+                    "POST",
+                    "/v1/execs",
+                    "req_clean_aperture_unserved",
+                    Some(&mutation(
+                        "01JPHASE2CLEANAPERTURE4",
+                        &ExecInput::new(&workspace, &snapshot, &["/usr/bin/true"], true)
+                            .aperture("model")
+                            .build(),
+                    )),
+                )
+                .await,
+            501,
+            "exec.egress-apertures-unserved",
+        );
+        passed += 1;
         expect_error(
             &daemon
                 .call(
@@ -1696,12 +1765,144 @@ async fn check_http_journey(daemon: &Daemon, cgroup_root: Option<&Path>) -> usiz
 }
 
 // ---------------------------------------------------------------------------------------------
+// The delegated lane: egress apertures
+// ---------------------------------------------------------------------------------------------
+
+/// What the model-free fake app-server answers. Not a model and not a protocol: bytes, so the case
+/// proves reach and never somebody's API.
+const APP_SERVER_BODY: &[u8] = b"substrate-aperture-served";
+
+/// A listener that answers every connection with [`APP_SERVER_BODY`] and nothing else.
+async fn fake_app_server() -> (std::net::SocketAddr, JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind the fake app server");
+    let address = listener.local_addr().expect("app server address");
+    let handle = tokio::spawn(async move {
+        while let Ok((mut stream, _)) = listener.accept().await {
+            let _ = stream.write_all(APP_SERVER_BODY).await;
+            let _ = stream.flush().await;
+        }
+    });
+    (address, handle)
+}
+
+/// One run, three connects: the aperture serves, and two destinations outside it do not.
+///
+/// The same installed aperture answers all three, so "reachable" and "unreachable" are proven
+/// against one configuration rather than two (design 10 § 7).
+fn aperture_program(inside: u16, outside: u16) -> String {
+    format!(
+        "\nimport socket\n\
+         served = socket.create_connection(('127.0.0.1', {inside}), 3).recv(64)\n\
+         assert served == b'substrate-aperture-served', served\n\
+         for target in (('127.0.0.1', {outside}), ('1.1.1.1', 443)):\n\
+         \x20   try:\n\
+         \x20       socket.create_connection(target, 3)\n\
+         \x20   except OSError:\n\
+         \x20       continue\n\
+         \x20   raise SystemExit('reached ' + repr(target))\n\
+         print('served')\n"
+    )
+}
+
+/// The delegated aperture cases: reach, refusal of everything else, and the observation.
+async fn check_confined_apertures(
+    daemon: &Daemon,
+    workspace: &str,
+    snapshot: &str,
+    inside: u16,
+    outside: u16,
+) -> usize {
+    let mut passed = 0;
+    let program = aperture_program(inside, outside);
+    let (status, run) = daemon
+        .call(
+            "POST",
+            "/v1/execs",
+            "req_clean_aperture",
+            Some(&mutation(
+                "01JPHASE2CLEANAPERTURE1",
+                &ExecInput::new(
+                    workspace,
+                    snapshot,
+                    &["/usr/bin/python3", "-c", &program],
+                    true,
+                )
+                .aperture("model")
+                .build(),
+            )),
+        )
+        .await;
+    assert_eq!(status, 200, "{run}");
+    assert_eq!(run["result"]["state"], "exited", "{run}");
+    assert_eq!(
+        run["result"]["exit"]["code"], 0,
+        "the declared destination was not reachable, or one outside it was: {run}"
+    );
+    passed += 1;
+
+    // Applied, not requested: the name the operator declared and the address it was pinned to.
+    let applied = &run["result"]["applied"]["network"];
+    assert_eq!(applied["mode"], "aperture", "{run}");
+    assert_eq!(applied["name"], "model", "{run}");
+    assert_eq!(applied["mechanism"], "loopback-forwarder", "{run}");
+    assert_eq!(
+        applied["destination"],
+        format!("127.0.0.1:{inside}"),
+        "the observation is not the pinned destination: {run}"
+    );
+    assert!(
+        applied["bytes"]["from_destination"]
+            .as_u64()
+            .expect("byte accounting")
+            >= APP_SERVER_BODY.len() as u64,
+        "the forwarder counted no bytes: {run}"
+    );
+    let id = text(&run["result"]["id"]);
+    let (status, recorded) = daemon
+        .call(
+            "GET",
+            &format!("/v1/execs/{id}"),
+            "req_clean_aperture_get",
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{recorded}");
+    assert_eq!(recorded["result"]["applied"]["network"]["name"], "model");
+    passed += 1;
+
+    // A name this deployment never declared, named in the refusal.
+    let (status, undeclared) = daemon
+        .call(
+            "POST",
+            "/v1/execs",
+            "req_clean_aperture_undeclared",
+            Some(&mutation(
+                "01JPHASE2CLEANAPERTURE2",
+                &ExecInput::new(workspace, snapshot, &["/usr/bin/true"], true)
+                    .aperture("registry")
+                    .build(),
+            )),
+        )
+        .await;
+    assert_eq!(status, 501, "{undeclared}");
+    assert_eq!(undeclared["error"]["code"], "exec.aperture-undeclared");
+    assert!(
+        text(&undeclared["error"]["message"]).contains("registry"),
+        "the refusal did not name the aperture: {undeclared}"
+    );
+    passed += 1;
+    passed
+}
+
+// ---------------------------------------------------------------------------------------------
 // The lane
 // ---------------------------------------------------------------------------------------------
 
 /// The predecessor printed its case count; the port asserts it, so a case cannot vanish quietly.
-const PORTABLE_CASES: usize = 27;
-const DELEGATED_CASES: usize = 38;
+const PORTABLE_CASES: usize = 29;
+const DELEGATED_CASES: usize = 42;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {
@@ -1713,10 +1914,18 @@ async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {
     std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))
         .expect("owner-private clean-room directory");
     check_startup_refusal(root).await;
-    let daemon = Daemon::start(root, delegated.as_deref()).await;
+    // Both endpoints exist before the daemon does, because an aperture is resolved and pinned once
+    // at declaration: the daemon must be told a destination it can resolve at startup.
+    let (inside, inside_server) = fake_app_server().await;
+    let (outside, outside_server) = fake_app_server().await;
+    let declared = vec![format!("model=127.0.0.1:{}/tcp", inside.port())];
+    let daemon = Daemon::start(root, delegated.as_deref(), &declared).await;
     check_dual_daemon_refusal(&daemon).await;
-    let passed = check_http_journey(&daemon, delegated.as_deref()).await;
+    let passed =
+        check_http_journey(&daemon, delegated.as_deref(), inside.port(), outside.port()).await;
     daemon.close().await;
+    inside_server.abort();
+    outside_server.abort();
     let (lane, expected) = if delegated.is_some() {
         ("delegated", DELEGATED_CASES)
     } else {

@@ -1,0 +1,6 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.6.0:result:exec-get",
+  "$ref": "../resource.json#/$defs/exec",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "exec-get operation result"
+}

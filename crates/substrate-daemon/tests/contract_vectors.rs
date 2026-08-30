@@ -158,6 +158,7 @@ impl VectorDriver {
                 requested: ConfinementRequest {
                     capability_snapshot: SNAPSHOT.to_owned(),
                     network: NetworkMode::None,
+                    aperture: None,
                     profile: SandboxProfile::Workspace,
                     required: true,
                 },

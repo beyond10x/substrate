@@ -9,6 +9,52 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- **Destination-bound egress apertures.** A confined run can now reach exactly one
+  operator-declared destination and nothing else. `--egress-aperture <name>=<host>:<port>/tcp`
+  (repeatable) declares one; a start selects it **by name** — `sandbox.network: "aperture"` plus
+  `sandbox.aperture: "<name>"` — and may never carry a destination, at any depth, in any field.
+  Accepted as [ADR 0013](adr/0013-egress-apertures-are-declared-by-the-operator.md); the mechanism
+  is the one [design 10a](docs/design/10a-egress-mechanism-spike.md) proved.
+- **The mechanism keeps the kernel floor literally intact.** The sandbox still runs under
+  `--unshare-net` with loopback and no other interface, no route and no resolver. What an aperture
+  adds is one listening socket **inside that namespace**, created by a short-lived helper that joins
+  the namespace bubblewrap created (through `ioctl(netns_fd, NS_GET_USERNS)`, and against the
+  `child-pid` bubblewrap reports on `--info-fd` — not the bubblewrap pid, which lives in the host
+  namespace) and handed back over `SCM_RIGHTS`. A per-run forwarder in the run's own cgroup dials
+  the pinned address from the host namespace, one relay process per connection, and dies with the
+  run. Everything else is still `ENETUNREACH`.
+- **The capability fact `exec.egress-apertures`**, the declared names and their pinned destinations,
+  published only after the mechanism was exercised in a throwaway sandbox at startup — never after
+  reading configuration, and never by dialling a declared destination, which would make readiness
+  somebody else's uptime. Absent otherwise: a start naming an aperture is then `unserved`.
+- **The applied aperture is an observation**, not an echo: `applied.network` becomes
+  `{mode, name, destination, mechanism, bytes}` on the aperture branch, where `destination` is the
+  address the forwarder dialled and `bytes` is counted in the forwarder, the only thing that sees
+  them. A run with no aperture still reports `"none"`.
+- **DNS stays outside the aperture.** The daemon resolves each declared host once, at declaration,
+  and pins the address for the process's lifetime. A run with an aperture is given a generated
+  read-only `/etc/hosts` holding exactly the declared name mapped to loopback — the whole of `/etc`
+  it ever gets — so a child uses the URL the operator declared and the forwarder is what answers.
+- **`--ca-bundle <path>`**, optional. TLS crosses the aperture byte for byte, but a sandbox has no
+  trust anchor because it has no `/etc`; where one is configured, each run gets a private read-only
+  **snapshot** of it, so rotating the source cannot change what a running child already trusts.
+  Absent and unverifiable, never present and unverified.
+- **Contract bundle `contracts/substrate-wire/0.6.0`**, an additive successor to `0.5.0`
+  (`preserves_routes: 26`, `adds_routes: 0`) carrying the `aperture` start field on exec and
+  pipe-session start, the `exec.egress-apertures` fact, the applied-network object and seven
+  conformance vectors. `cargo xtask check-bundle 0.6.0` is in the gate.
+
+### Changed
+
+- `network: "aperture"` **with a declared name** is now served where the mechanism verified. Without
+  a name it answers exactly as before — `exec.network-unserved`, the refusal
+  `contracts/substrate-wire/0.4.0/vectors/http/egress-unserved.json` froze — so no earlier vector
+  changes shape.
+- `AppliedNetwork` gains a variant, which breaks exhaustive matches in Rust consumers.
+- The capability snapshot's configuration generation now covers declared apertures **whole**, name
+  and destination. Unlike a secret slot, what is behind an aperture is exactly what a client is
+  told, so changing it must invalidate every snapshot.
+
 - **Sealed secret slots.** A confined process can now be handed an operator-declared credential
   without the value existing in any byte substrate can emit. `--secret-slot <name>=<path>` declares
   one; a start names `secret_slots: [{"slot": …, "fd": …}]` and the driver copies the declared bytes

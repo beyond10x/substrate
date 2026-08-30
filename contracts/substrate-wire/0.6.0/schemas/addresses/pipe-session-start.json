@@ -1,0 +1,9 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.6.0:address:pipe-session-start",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {},
+  "required": [],
+  "title": "pipe-session-start normalized route address",
+  "type": "object"
+}

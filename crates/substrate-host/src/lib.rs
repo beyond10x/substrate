@@ -1,6 +1,7 @@
 #![allow(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
 
+mod egress;
 mod fs;
 mod probe;
 mod process;
@@ -24,6 +25,7 @@ use substrate_wire::{
 use thiserror::Error;
 use tokio::sync::Semaphore;
 
+pub use egress::EgressAperture;
 pub use process::{ExecObservation, PipeFrame, PipeStream};
 
 /// One operator-declared secret slot: a name, and the bounded owner-private file behind it
@@ -58,6 +60,15 @@ pub struct HostConfig {
     /// Every slot this operator declared. Empty means the capability is absent, not that slots
     /// degrade to something weaker.
     pub secret_slots: Vec<SecretSlot>,
+    /// Every egress aperture this operator declared, each already resolved to a pinned address
+    /// (ADR 0013). Empty means the capability is absent and the sandbox keeps `--unshare-net`.
+    pub egress_apertures: Vec<EgressAperture>,
+    /// The certificate bundle a run with an aperture gets a private read-only copy of.
+    ///
+    /// `None` means no trust anchor: TLS still crosses the forwarder byte for byte, and a child
+    /// that verifies certificates will refuse the connection rather than trust something it cannot
+    /// check. Absent and unverifiable, never present and unverified (invariant 3).
+    pub ca_bundle: Option<PathBuf>,
 }
 
 impl HostConfig {
@@ -93,6 +104,8 @@ impl HostConfig {
             max_current_execs: substrate_wire::MAX_CURRENT_EXECS,
             snapshot_provenance_events: substrate_wire::MAX_SNAPSHOT_PROVENANCE_EVENTS,
             secret_slots: Vec::new(),
+            egress_apertures: Vec::new(),
+            ca_bundle: None,
         }
     }
 }

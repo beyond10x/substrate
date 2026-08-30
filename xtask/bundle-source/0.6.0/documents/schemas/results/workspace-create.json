@@ -1,0 +1,17 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.6.0:result:workspace-create",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "allOf": [
+    {
+      "$ref": "../resource.json#/$defs/workspace"
+    },
+    {
+      "properties": {
+        "state": {
+          "const": "ready"
+        }
+      }
+    }
+  ],
+  "title": "workspace-create operation result"
+}

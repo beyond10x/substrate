@@ -215,6 +215,7 @@ async fn twelve_route_vertical_slice_is_scoped_durable_and_observed() {
         requested: ConfinementRequest {
             capability_snapshot: snapshot.clone(),
             network: NetworkMode::None,
+            aperture: None,
             profile: SandboxProfile::Workspace,
             required: true,
         },
