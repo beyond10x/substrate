@@ -107,8 +107,23 @@ complete that reconciliation reports `secrets.slots` absent.
 
 The probe publishes `secrets.slots` only when all of it holds: at least one declared slot; a
 `memfd_create` + `F_ADD_SEALS` round trip whose `F_GET_SEALS` reads back exactly `0xf` and whose
-write attempt fails; a bubblewrap child reporting the probe descriptor at its declared number with
-the same seals and nothing else above 2; and successful orphan reconciliation. The fact is the
+write attempt fails; a bubblewrap child reporting the probe descriptor at its declared number, on
+the sealed inode and with nothing else above 2; and successful orphan reconciliation.
+
+**How the child proves the seals, and why not directly.** The child reports the descriptor's inode
+from `/proc/$$/fdinfo/<fd>` together with its `/memfd:substrate-slot-probe` link, the sentinel bytes
+it read back and a refused write; the parent then reads `F_GET_SEALS` on the inode the child named.
+The child does not issue `fcntl(F_GET_SEALS)` itself, and cannot: no shell has the call, and
+`/proc/<pid>/fdinfo` carries only `pos`, `flags`, `mnt_id` and `ino` for a memfd — measured on
+6.6.144, where a sealed memfd's fdinfo has no `seals:` line. The only child that could issue it is
+an interpreter, and the shipped image is `gcr.io/distroless/cc-debian12` (`Dockerfile:12`), so
+requiring one would withhold `secrets.slots` on every shell-only host.
+
+The identity is what makes this equivalent rather than weaker: seals are state of the **inode**, not
+of a descriptor, so a parent reading the word off the inode the child proved it holds is reading the
+child's seals. `SEAL_SET` contains `F_SEAL_SEAL`, so that word cannot change afterwards. What was
+unobserved before is now observed — a descriptor sealed `F_SEAL_WRITE` alone, or a child holding a
+descriptor above the declared set, each withhold the fact, and a test proves each does. The fact is the
 sorted list of declared **names** — never a path, a length or a digest of a value. Adding or
 removing a slot changes the fact and so the snapshot digest (`probe.rs:98-115`); **rotating a value
 changes nothing observable**, which keeps § 7 true.

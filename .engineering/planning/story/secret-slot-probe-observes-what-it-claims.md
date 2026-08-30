@@ -2,13 +2,13 @@
 format: aep.planning-md/1
 id: story:secret-slot-probe-observes-what-it-claims
 kind: story
-status: draft
+status: implemented
 title: The secret-slot probe observes the seals and descriptor set it publishes a fact about
 summary: Design 11 § 5 requires the probe child report the seals and nothing else above 2; the probe checks neither.
 relations:
 - decomposes: epic:byte-plane-completion
 - depends_on: story:sealed-secret-slots
-revision: 2
+revision: 6
 ---
 # Story: The secret-slot probe observes the seals and descriptor set it publishes a fact about
 
@@ -74,3 +74,38 @@ Evidence that satisfies it:
 
 Changing the seal set, the slot naming rule, or anything about how a slot reaches a child. This
 story is only about what the probe observes before it publishes the fact.
+
+## Implemented — 2026-08-30
+
+The probe now observes both properties it publishes a fact about.
+
+| property | how the child reports it | perturbation | failure |
+|---|---|---|---|
+| the seal word | reports `inode=` from `/proc/$$/fdinfo/<fd>` plus its `/memfd:substrate-slot-probe` link, the sentinel bytes and a refused write; the parent reads `F_GET_SEALS` off that inode (`crates/substrate-host/src/probe.rs:419-421`) | drop the `slot.seals == SEAL_SET` term | `a_short_seal_word_withholds_the_fact ... FAILED` |
+| the descriptor set | `fds= 0 1 2 7` from a `/proc/$$/fd/*` glob filtered by `[ -L ]`; the parent compares to `{0,1,2,target}` (`crates/substrate-host/src/probe.rs:422`) | drop the `observed.descriptors == retained` term | `a_child_holding_an_extra_descriptor_withholds_the_fact ... FAILED` |
+
+Both perturbations were applied by the orchestrator and reverted; `crates/substrate-host/src/probe.rs`
+is byte-identical to its backup and `cargo test -p substrate-host --lib` is `46 passed`.
+
+**The child does not call `fcntl(F_GET_SEALS)` itself, and cannot.** No shell has the call, and
+`/proc/<pid>/fdinfo` carries only `pos`, `flags`, `mnt_id` and `ino` for a memfd. Measured on this
+host rather than assumed: a sealed memfd's fdinfo on 6.6.144-3-MANJARO prints exactly those four
+lines and no `seals:`. The only child that could issue it is an interpreter, and the shipped image
+is `gcr.io/distroless/cc-debian12` (`Dockerfile:12`), so requiring one would withhold
+`secrets.slots` on every shell-only host — trading a real capability for a literal reading.
+
+**Why the inode form is equivalent and not weaker.** Seals are state of the *inode*, not of a
+descriptor. The child proves it holds that inode — inode number, the memfd link name, the sentinel
+bytes and a refused write — and the parent reads the seal word off the same inode. `SEAL_SET`
+contains `F_SEAL_SEAL`, so the word cannot move afterwards. What was unobserved before is observed
+now: a descriptor sealed `F_SEAL_WRITE` alone withholds the fact, and so does a child holding a
+descriptor above the declared set.
+
+`docs/design/11-sealed-secret-slots.md` § 5 is rewritten to describe this, so acceptance item 4 —
+design and code agree — holds. ADR 0012 needed no amendment: it says the probe "proves sealing,
+descriptor isolation across bubblewrap, and orphan reconciliation"
+(`adr/0012-secret-slots-are-sealed-memfds.md:30`) and never fixed how the child reports.
+
+`secrets.slots` is still published here: `bash scripts/delegated-lane.sh` → `runtime clean-room:
+50 HTTP cases, startup refusal, and dual-daemon refusal passed (delegated lane)`, exit 0.
+`bash scripts/gate.sh` → `gate: passed`, exit 0.

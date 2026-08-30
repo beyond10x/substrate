@@ -129,6 +129,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - The capability snapshot's configuration generation now covers declared slot **names**. Adding or
   removing a slot moves the snapshot; rotating the material behind one moves nothing observable, so
   an operator can rotate a credential without invalidating an admitted operation.
+- **The `secrets.slots` probe now observes the two properties it publishes a fact about.** Design 11
+  § 5 requires a bubblewrap child reporting the probe descriptor at its declared number *with the
+  same seals and nothing else above 2*; the probe checked neither, accepting any child whose stdout
+  was the sentinel followed by `sealed` — so a descriptor sealed `F_SEAL_WRITE` alone, or one handed
+  over beside leaked descriptors, published the capability. The child now reports the inode behind
+  its declared number, the memfd's link, and every descriptor it holds; the parent compares the
+  inode against the memory it staged, the seal word `F_GET_SEALS` reads off that inode against
+  `F_SEAL_WRITE|F_SEAL_SHRINK|F_SEAL_GROW|F_SEAL_SEAL`, and the descriptor set against `{0,1,2}`
+  plus the declared number. Any disagreement withholds `secrets.slots` (invariant 3), and nothing is
+  compared against a substring of the child's output any more.
 
 ## [0.2.2] — 2026-08-30
 

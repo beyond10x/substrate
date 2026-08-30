@@ -242,24 +242,122 @@ fn probe_bubblewrap(config: &HostConfig) -> bool {
     command.status().is_ok_and(|status| status.success())
 }
 
-/// Proves that a sealed `memfd` crosses bubblewrap at the number it was placed at, and is still
-/// sealed on the far side.
+/// The fixed, non-secret string the pass-through probe puts in its sealed memory.
+///
+/// A constant and never a declared slot value: the probe runs on every capability snapshot, and a
+/// probe that carried real material would be the leak ADR 0012 exists to rule out.
+const PASSTHROUGH_SENTINEL: &str = "substrate-secret-slot-passthrough";
+
+/// What a probe child reported about the descriptor bubblewrap handed it.
+///
+/// Every field is read by the child from inside the sandbox and compared against a value the parent
+/// declared before the spawn (`crate::secrets::ProbeSlot`). A report that does not parse is a probe
+/// that observed nothing, which is why [`ChildObservation::parse`] returns `None` rather than a
+/// default.
+#[derive(Debug, PartialEq, Eq)]
+struct ChildObservation {
+    /// The bytes read straight off the declared descriptor.
+    value: String,
+    /// `sealed` when the child's write to the descriptor was refused, `writable` when it was not.
+    write: String,
+    /// `readlink /proc/<self>/fd/<target>`: the memfd's name for sealed memory, a path or a socket
+    /// for anything bubblewrap might have put there instead.
+    link: String,
+    /// The inode behind the declared number, from `/proc/<self>/fdinfo/<target>`.
+    inode: u64,
+    /// Every descriptor the child holds, ascending.
+    descriptors: Vec<u32>,
+}
+
+impl ChildObservation {
+    /// Parses the child's `key=value` lines, or `None` when any of them is missing or unreadable.
+    fn parse(stdout: &[u8]) -> Option<Self> {
+        let stdout = std::str::from_utf8(stdout).ok()?;
+        let field = |name: &str| {
+            stdout
+                .lines()
+                .find_map(|line| line.strip_prefix(name)?.strip_prefix('='))
+        };
+        let mut descriptors: Vec<u32> = field("fds")?
+            .split_whitespace()
+            .map(str::parse)
+            .collect::<Result<_, _>>()
+            .ok()?;
+        descriptors.sort_unstable();
+        Some(Self {
+            value: field("value")?.to_owned(),
+            write: field("write")?.to_owned(),
+            link: field("link")?.to_owned(),
+            // The kernel writes `ino:\t<n>`; the child forwards the field verbatim.
+            inode: field("inode")?.trim().parse().ok()?,
+            descriptors,
+        })
+    }
+}
+
+/// The shell the probe child runs, reporting one `key=value` line per observation.
+///
+/// The child cannot issue `fcntl(F_GET_SEALS)` itself — no shell has the call, and
+/// `/proc/<pid>/fdinfo` does not carry the seal word — so it reports the *inode* behind its
+/// descriptor instead, and the parent reads the seal word off that same inode. Seals are inode
+/// state and the declared set closes itself with `F_SEAL_SEAL`, so a child that proves it holds
+/// this inode has proved the whole word: no holder, substrate included, can change it afterwards.
+/// Requiring an interpreter in the sandbox to make the child issue the call itself would buy no
+/// stronger claim and would withhold the fact on every host that has only a shell.
+///
+/// `/proc/$$` and never `/proc/self`: `readlink` runs in a forked subprocess, where `/proc/self` is
+/// that subprocess and not the child.
+///
+/// `prelude` is empty in the daemon. It is the seam the cases use to build a child the pre-change
+/// acceptance passed — one holding a descriptor above the declared set — without a second copy of
+/// this script drifting away from the one that runs on every snapshot.
+fn probe_child_command(target: std::os::fd::RawFd, prelude: &str) -> String {
+    format!(
+        r#"{prelude}printf 'value='
+cat <&{target}
+printf '\nwrite='
+if echo x >&{target}; then printf 'writable'; else printf 'sealed'; fi
+printf '\nlink=%s\n' "$(readlink /proc/$$/fd/{target})"
+printf 'inode='
+while IFS= read -r line; do
+case $line in ino:*) printf '%s' "${{line#ino:}}";; esac
+done < /proc/$$/fdinfo/{target}
+printf '\nfds='
+for entry in /proc/$$/fd/*; do
+[ -L "$entry" ] && printf ' %s' "${{entry##*/}}"
+done
+printf '\n'
+"#
+    )
+}
+
+/// Proves that a sealed `memfd` crosses bubblewrap at the number it was placed at, carrying the
+/// declared seals and nothing else above 2.
 ///
 /// Bubblewrap passing an inherited descriptor through at the same number is *behaviour*, not a
 /// documented contract, so it is probed on every capability snapshot rather than assumed
-/// (ADR 0012). The child reads the sentinel back from the declared descriptor and then fails to
-/// write to it, which is the seal observed from inside the sandbox rather than claimed from
-/// outside.
+/// (ADR 0012).
 fn probe_descriptor_passthrough(config: &HostConfig) -> bool {
     if !config.bubblewrap.is_file() {
         return false;
     }
-    // Non-secret by construction: a fixed probe string, never a declared slot value.
-    let sentinel = "substrate-secret-slot-passthrough";
-    let Some((staged, target)) = crate::secrets::probe_slot(sentinel) else {
+    let Some(slot) = crate::secrets::probe_slot(PASSTHROUGH_SENTINEL) else {
         return false;
     };
-    let source = staged.as_raw_fd();
+    descriptor_passthrough_holds(config, &slot, "")
+}
+
+/// The pass-through condition of `docs/design/11-sealed-secret-slots.md` § 5, clause by clause.
+///
+/// Every clause compares an observation the child made inside the sandbox against a value the
+/// parent declared before the spawn — never a substring of the child's output.
+fn descriptor_passthrough_holds(
+    config: &HostConfig,
+    slot: &crate::secrets::ProbeSlot,
+    prelude: &str,
+) -> bool {
+    let target = slot.target;
+    let source = slot.source.as_raw_fd();
     let mut command = Command::new(&config.bubblewrap);
     command
         .env_clear()
@@ -293,9 +391,7 @@ fn probe_descriptor_passthrough(config: &HostConfig) -> bool {
             "--",
             "/bin/sh",
             "-c",
-            &format!(
-                "cat <&{target}; if echo x >&{target} 2>/dev/null; then printf writable; else printf sealed; fi"
-            ),
+            &probe_child_command(target, prelude),
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -310,7 +406,21 @@ fn probe_descriptor_passthrough(config: &HostConfig) -> bool {
     let Ok(output) = command.output() else {
         return false;
     };
-    output.status.success() && output.stdout == format!("{sentinel}sealed").into_bytes()
+    let Some(observed) = ChildObservation::parse(&output.stdout) else {
+        return false;
+    };
+    output.status.success()
+        // The declared number carries the declared bytes, and refuses a write from inside.
+        && observed.value == PASSTHROUGH_SENTINEL
+        && observed.write == "sealed"
+        // It is *this* sealed memory and not another file that also reads back the sentinel.
+        && observed.inode == slot.inode
+        && observed.link.starts_with(&slot.link)
+        // The same seals: the word read off the inode the child proved it holds, against the set
+        // ADR 0012 declares. `F_SEAL_SEAL` is in that set, so the word cannot move afterwards.
+        && slot.seals == crate::secrets::SEAL_SET
+        // And nothing else above 2.
+        && observed.descriptors == retained
 }
 
 fn probe_cgroup(config: &HostConfig) -> bool {
@@ -450,6 +560,55 @@ mod tests {
         assert!(
             probe_descriptor_passthrough(&config),
             "the configured backend did not deliver a sealed descriptor at its declared number"
+        );
+    }
+
+    /// A child holding one descriptor more than the declared set withholds the fact.
+    ///
+    /// This child reads the sentinel and is refused its write, so the acceptance before this case
+    /// existed — the sentinel followed by `sealed` — passed it. Design 11 § 5 requires *nothing
+    /// else above 2*, and this child holds a ninth descriptor.
+    ///
+    /// Absent, never reported as passed: where the configured backend is not on the machine the
+    /// case makes no claim at all.
+    #[test]
+    fn a_child_holding_an_extra_descriptor_withholds_the_fact() {
+        let config = HostConfig::minimum("/does/not/exist");
+        if !config.bubblewrap.is_file() {
+            return;
+        }
+        let slot =
+            crate::secrets::probe_slot(PASSTHROUGH_SENTINEL).expect("stage a sealed probe slot");
+        assert!(
+            !descriptor_passthrough_holds(&config, &slot, "exec 9</dev/null\n"),
+            "a child holding a descriptor above the declared set proved pass-through"
+        );
+    }
+
+    /// A descriptor carrying a shorter seal word than ADR 0012 declares withholds the fact.
+    ///
+    /// `F_SEAL_WRITE` alone still refuses the child's write and still reads back the sentinel, so
+    /// this is exactly the descriptor the acceptance before this case existed would have taken for
+    /// the declared set of four seals.
+    ///
+    /// Absent, never reported as passed: where the configured backend is not on the machine the
+    /// case makes no claim at all.
+    #[test]
+    fn a_short_seal_word_withholds_the_fact() {
+        let config = HostConfig::minimum("/does/not/exist");
+        if !config.bubblewrap.is_file() {
+            return;
+        }
+        let slot = crate::secrets::probe_slot_sealed_with(PASSTHROUGH_SENTINEL, libc::F_SEAL_WRITE)
+            .expect("stage a write-only sealed probe slot");
+        assert_eq!(
+            slot.seals,
+            libc::F_SEAL_WRITE,
+            "the case built the wrong slot"
+        );
+        assert!(
+            !descriptor_passthrough_holds(&config, &slot, ""),
+            "a descriptor sealed F_SEAL_WRITE alone proved the declared seal set"
         );
     }
 
