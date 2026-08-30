@@ -237,11 +237,10 @@ nothing — a tag that is not the bare version form (so `0.2.2-rc.0` produces no
 tag, a commit that is not an ancestor of `main`, a version that disagrees with
 `[workspace.package] version`, and a commit for which `gate.yml` has not concluded `success`: it
 reads that workflow's own recorded conclusion for the tagged SHA rather than re-running a lookalike.
-`packages: write` and `id-token: write` exist on its release job and nowhere else. The GitHub
-release and the changelog commit go through the b10x-bot App (§ *Bot identity*), so they need the
-repository secrets `B10X_BOT_APP_ID` and `B10X_BOT_PRIVATE_KEY` and an installation with
-`contents: write`. **Neither secret is set yet and no image has been published** — the workflow
-exists and has never run.
+`packages: write` and `id-token: write` exist on its release job and nowhere else, and that job
+holds `contents: write` because it creates the release and pushes the changelog commit. Everything
+it does uses the run's own `GITHUB_TOKEN`; **the release needs no repository secret at all**
+(§ *Bot identity*). **No image has been published** — the workflow exists and has never run.
 
 The bundle is **not** a published stable release: OCI packaging, signing and digest pinning of the
 contract bundle are separate release work, and a signed daemon image makes no bundle stable. Do not
@@ -291,6 +290,20 @@ never a human identity. `scripts/bot-token.sh` mints the token, and the bot-org 
 at `scripts/bot-token.sh:8` — `org="${B10X_BOT_ORG:-beyond10x}"` — **is** the org this repository
 lives in (`git remote -v` shows `github.com/beyond10x/substrate`), so the default is right here. Set
 `B10X_BOT_ORG` only to mint against a different org.
+
+**One exception, and it is narrower rather than looser: CI releases commit as
+`github-actions[bot]`.** `.github/workflows/release.yml` uses the run's own `GITHUB_TOKEN` for the
+image push, the GitHub release and the changelog commit, and holds no App key. The App is installed
+org-wide with `administration:write` and `workflows:write` on every repository in `beyond10x`, and
+**this repository is public** (invariant 9): its private key as an Actions secret here would put an
+org-wide credential in the repository with the widest audience for proposing workflow changes.
+`GITHUB_TOKEN` cannot leave this repository, is minted per run and expires with it. The rule above
+exists to keep *human* identities out of automated commits; this keeps that and drops the reach.
+
+The cost is the author line — a release commit reads `github-actions[bot]`, not `b10x-bot[bot]`.
+Do not "fix" it by adding `B10X_BOT_PRIVATE_KEY` to this repository's secrets. Anything that needs
+the App's identity or its cross-repository reach runs from a workstation through `as-bot.sh`, or
+from a private repository.
 
 ## Planning artifacts
 
