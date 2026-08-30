@@ -15,9 +15,13 @@
 //! 2. **Manifest integrity.** `bundle.json` lists every other file once, with its exact length,
 //!    digest and media type — the same self-description a consumer verifies after unpacking.
 //! 3. **Compatibility.** The declared predecessor exists, the declared `preserves_routes` and
-//!    `adds_routes` are the counts the two route inventories actually produce, and no route the
-//!    predecessor served has been dropped. An additive successor that quietly removed a route would
-//!    otherwise still pass its own schema.
+//!    `adds_routes` are the counts the two route inventories actually produce, no route the
+//!    predecessor served has been dropped, and no operation both bundles serve answers at a
+//!    different path. An additive successor that quietly removed a route would otherwise still pass
+//!    its own schema, and one that quietly *moved* a route would pass with `adds_routes: 0` and
+//!    nothing at all to report — the inventories are compared on id **and** path for that reason. A
+//!    deliberate move is declared by keeping the predecessor's path answering, through an entry
+//!    whose `alias_of` names the operation that moved.
 //! 4. **Classification** (invariant 7). Every JSON under `schemas/` declares the pinned Draft
 //!    2020-12 meta-schema and validates against it; every other JSON declares exactly one `$schema`
 //!    pointing under `schemas/`, and validates against it. Unclassified JSON fails closed.
@@ -207,8 +211,8 @@ fn check_compatibility(inputs: &Inputs, released: &Tree, failures: &mut Vec<Stri
         failures.push("bundle.json: no compatibility.predecessor".to_owned());
         return;
     };
-    let current = match route_ids(released) {
-        Ok(ids) => ids,
+    let current = match routes_of(released) {
+        Ok(routes) => routes,
         Err(error) => {
             failures.push(format!("operations.json: {error}"));
             return;
@@ -229,17 +233,17 @@ fn check_compatibility(inputs: &Inputs, released: &Tree, failures: &mut Vec<Stri
         failures.push(format!("{predecessor}/operations.json does not parse"));
         return;
     };
-    let previous: BTreeSet<String> = previous_registry
-        .get("operations")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .filter_map(|entry| entry.get("id").and_then(Value::as_str))
-        .map(str::to_owned)
-        .collect();
+    let previous = match Routes::read(&previous_registry) {
+        Ok(routes) => routes,
+        Err(error) => {
+            failures.push(format!("{predecessor}/operations.json: {error}"));
+            return;
+        }
+    };
 
-    let preserves = previous.intersection(&current).count() as u64;
-    let adds = current.difference(&previous).count() as u64;
+    let (previous_ids, current_ids) = (previous.ids(), current.ids());
+    let preserves = previous_ids.intersection(&current_ids).count() as u64;
+    let adds = current_ids.difference(&previous_ids).count() as u64;
     if bundle
         .pointer("/compatibility/preserves_routes")
         .and_then(Value::as_u64)
@@ -260,10 +264,29 @@ fn check_compatibility(inputs: &Inputs, released: &Tree, failures: &mut Vec<Stri
     }
     // Additive means additive. A dropped route would still satisfy the counts above if a new one
     // were added in the same commit.
-    for dropped in previous.difference(&current) {
+    for dropped in previous_ids.difference(&current_ids) {
         failures.push(format!(
             "operations.json: route {dropped} served by {predecessor} is absent; an additive \
              successor never drops one"
+        ));
+    }
+    // A path is pinned as firmly as an id, and moving one is invisible to everything above: the id
+    // difference is empty, so the counts are the predecessor's own and nothing is dropped. A
+    // deliberate move stays expressible — `docs/design/16-sessions-are-not-pipe-sessions.md` needs
+    // one — by keeping the predecessor's path answering through an entry whose `alias_of` names the
+    // operation that moved. That declaration is *read* here, not a switch: an alias serving some
+    // other path leaves the old one unanswered and fails exactly as an undeclared move does.
+    for (id, was) in &previous.served {
+        let Some(now) = current.served.get(id) else {
+            continue;
+        };
+        if current.answers(id, was) {
+            continue;
+        }
+        failures.push(format!(
+            "operations.json: route {id} served by {predecessor} at {was} is served at {now}; a \
+             successor that moves a path keeps the old one answering through an entry whose \
+             alias_of is {id}, or it has moved a path a consumer pinned"
         ));
     }
 }
@@ -522,19 +545,66 @@ fn json_at(released: &Tree, path: &str, failures: &mut Vec<String>) -> Option<Va
     }
 }
 
-fn route_ids(released: &Tree) -> Result<BTreeSet<String>> {
+/// One bundle's route inventory: which operation id is served, at which path, and which entries
+/// stand in for another operation.
+///
+/// The id alone was all this used to read, so the only property the compatibility check could state
+/// was *no id disappeared*. A path is pinned by a consumer exactly as an id is, and a successor that
+/// keeps every id while moving a path is a rename an id-only inventory cannot see.
+#[derive(Debug, Default)]
+struct Routes {
+    /// Operation id to the path it is served at.
+    served: BTreeMap<String, String>,
+    /// For each operation id, the paths that entries declaring `alias_of: <id>` are served at.
+    aliased: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl Routes {
+    fn read(registry: &Value) -> Result<Self> {
+        let entries = registry
+            .get("operations")
+            .and_then(Value::as_array)
+            .ok_or_else(|| anyhow!("no operations array"))?;
+        let mut routes = Self::default();
+        for entry in entries {
+            let (Some(id), Some(path)) = (
+                entry.get("id").and_then(Value::as_str),
+                entry.get("path").and_then(Value::as_str),
+            ) else {
+                continue;
+            };
+            if let Some(target) = entry.get("alias_of").and_then(Value::as_str) {
+                routes
+                    .aliased
+                    .entry(target.to_owned())
+                    .or_default()
+                    .insert(path.to_owned());
+            }
+            routes.served.insert(id.to_owned(), path.to_owned());
+        }
+        Ok(routes)
+    }
+
+    fn ids(&self) -> BTreeSet<&str> {
+        self.served.keys().map(String::as_str).collect()
+    }
+
+    /// Whether a request to `path` still reaches `id` — either because `id` is served there, or
+    /// because an entry declaring itself an alias of `id` is.
+    fn answers(&self, id: &str, path: &str) -> bool {
+        self.served.get(id).is_some_and(|served| served == path)
+            || self
+                .aliased
+                .get(id)
+                .is_some_and(|paths| paths.contains(path))
+    }
+}
+
+fn routes_of(released: &Tree) -> Result<Routes> {
     let bytes = released
         .get("operations.json")
         .ok_or_else(|| anyhow!("absent from the bundle"))?;
-    let registry: Value = serde_json::from_slice(bytes)?;
-    Ok(registry
-        .get("operations")
-        .and_then(Value::as_array)
-        .ok_or_else(|| anyhow!("no operations array"))?
-        .iter()
-        .filter_map(|entry| entry.get("id").and_then(Value::as_str))
-        .map(str::to_owned)
-        .collect())
+    Routes::read(&serde_json::from_slice(bytes)?)
 }
 
 fn resource_uri(version: &str, path: &str) -> String {
@@ -1250,7 +1320,8 @@ mod tests {
     use super::{Args, check, resolve, run};
     use crate::render::wire_constants;
     use crate::repo;
-    use serde_json::Value;
+    use crate::report::Report;
+    use serde_json::{Value, json};
     use std::path::PathBuf;
 
     const VERSION: &str = "0.8.0";
@@ -1388,6 +1459,164 @@ mod tests {
             Some("schemas/bundle.json")
         );
         assert_eq!(resolve("bundle.json", "../outside.json"), None);
+    }
+
+    /// The route `docs/design/16-sessions-are-not-pipe-sessions.md` moves: it keeps its operation
+    /// id and changes only the path it is served at.
+    const MOVED_ID: &str = "session.attach";
+    const MOVED_FROM: &str = "/v1/pipe-sessions/{session_id}/attach";
+    const MOVED_TO: &str = "/v1/sessions/{session_id}/attach";
+    /// The legacy entry a declared move keeps answering at `MOVED_FROM`.
+    const ALIAS_ID: &str = "pipe-session.attach";
+
+    /// A successor that keeps every operation id and moves one route's path is a rename no
+    /// consumer can see: the id difference is empty, so `preserves_routes` and `adds_routes` are
+    /// the predecessor's own numbers and nothing is dropped.
+    #[test]
+    fn a_successor_that_moves_a_route_path_is_refused() {
+        let report = check_with_the_route_moved("moved-route", |_| {});
+        let text = report.failure_text();
+        assert!(
+            text.contains(MOVED_ID),
+            "the moved id must be named: {text}"
+        );
+        assert!(
+            text.contains(MOVED_FROM),
+            "the path it left must be named: {text}"
+        );
+        assert!(
+            text.contains(MOVED_TO),
+            "the path it moved to must be named: {text}"
+        );
+        assert_eq!(
+            report.failures().len(),
+            1,
+            "the move is the only thing wrong with this successor: {text}"
+        );
+    }
+
+    /// A move is *declarable*, because design 16 needs one: the predecessor's path keeps answering
+    /// through an entry whose `alias_of` names the operation that moved. The check reads that
+    /// declaration — it is not switched off for the version.
+    #[test]
+    fn a_move_declared_by_an_alias_at_the_old_path_is_accepted() {
+        let report =
+            check_with_the_route_moved("declared-move", |source| declare_alias(source, MOVED_FROM));
+        assert!(report.failures().is_empty(), "{}", report.failure_text());
+    }
+
+    /// And `alias_of` is not a switch. An alias serving some *other* path leaves the predecessor's
+    /// path unanswered, which is the rename the check exists to refuse.
+    #[test]
+    fn an_alias_that_does_not_serve_the_old_path_declares_nothing() {
+        let report = check_with_the_route_moved("stale-alias", |source| {
+            declare_alias(source, "/v1/legacy-sessions/{session_id}/attach");
+        });
+        let text = report.failure_text();
+        assert!(
+            text.contains(MOVED_ID),
+            "the moved id must be named: {text}"
+        );
+        assert!(
+            text.contains(MOVED_FROM),
+            "the path it left must be named: {text}"
+        );
+        assert!(
+            text.contains(MOVED_TO),
+            "the path it moved to must be named: {text}"
+        );
+    }
+
+    /// Renders a successor from `0.8.0`'s authored source with `MOVED_ID` moved to `MOVED_TO`,
+    /// after `author` has had its say over the copied source tree, and checks what came out.
+    ///
+    /// Everything happens in a scratch copy: `contracts/` and `xtask/bundle-source/` are read and
+    /// never written, because a released bundle directory is immutable (AGENTS.md invariant 6).
+    fn check_with_the_route_moved(prefix: &str, author: impl FnOnce(&std::path::Path)) -> Report {
+        let scratch = tempfile::Builder::new()
+            .prefix(prefix)
+            .tempdir()
+            .expect("scratch");
+        let source = scratch.path().join("bundle-source");
+        let contracts = scratch.path().join("substrate-wire");
+        copy_tree(
+            &root().join("xtask/bundle-source").join(VERSION),
+            &source.join(VERSION),
+        );
+        copy_tree(
+            &root().join("contracts/substrate-wire").join(PREDECESSOR),
+            &contracts.join(PREDECESSOR),
+        );
+
+        let authored = source.join(VERSION);
+        edit_json(&authored.join("routes.json"), |routes| {
+            for route in routes.as_array_mut().expect("routes.json is an array") {
+                if route.get("id").and_then(Value::as_str) == Some(MOVED_ID) {
+                    assert_eq!(route["path"], json!(MOVED_FROM), "{MOVED_ID} moved already");
+                    route["path"] = json!(MOVED_TO);
+                }
+            }
+        });
+        author(&authored);
+
+        let inputs = crate::render::Inputs {
+            source_root: source,
+            contracts_root: contracts.clone(),
+            ..inputs()
+        };
+        let rendered = crate::render::render(&inputs).expect("the authored successor renders");
+        for (path, bytes) in &rendered {
+            let target = contracts.join(VERSION).join(path);
+            std::fs::create_dir_all(target.parent().expect("a parent")).expect("create");
+            std::fs::write(&target, bytes).expect("write");
+        }
+        check(&inputs).expect("the rendered successor reads")
+    }
+
+    /// Authors the declared form of the move, the way design 16 does it: a new operation at `at`,
+    /// naming the operation it stands in for, and a successor schema that admits the field.
+    fn declare_alias(authored: &std::path::Path, at: &str) {
+        let at = at.to_owned();
+        edit_json(&authored.join("routes.json"), |routes| {
+            let routes = routes.as_array_mut().expect("routes.json is an array");
+            let mut alias = routes
+                .iter()
+                .find(|route| route.get("id").and_then(Value::as_str) == Some(MOVED_ID))
+                .cloned()
+                .expect("the moved route");
+            alias["id"] = json!(ALIAS_ID);
+            alias["path"] = json!(at);
+            alias["alias_of"] = json!(MOVED_ID);
+            routes.push(alias);
+        });
+        // The successor's own registry schema admits the field; every earlier bundle stays closed
+        // against it.
+        edit_json(
+            &authored.join("documents/schemas/operation-registry.json"),
+            |registry| {
+                registry["properties"]["operations"]["items"]["properties"]["alias_of"] = json!({
+                    "pattern": "^[a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*)+$",
+                    "type": "string",
+                });
+            },
+        );
+        // One route added, so the successor's own bundle schema states one.
+        edit_json(&authored.join("documents/schemas/bundle.json"), |bundle| {
+            bundle["properties"]["compatibility"]["properties"]["adds_routes"] = json!({
+                "const": 1,
+            });
+        });
+    }
+
+    fn edit_json(path: &std::path::Path, edit: impl FnOnce(&mut Value)) {
+        let mut document: Value =
+            serde_json::from_slice(&std::fs::read(path).expect("read")).expect("parse");
+        edit(&mut document);
+        std::fs::write(
+            path,
+            serde_json::to_vec_pretty(&document).expect("serialize"),
+        )
+        .expect("write");
     }
 
     fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
