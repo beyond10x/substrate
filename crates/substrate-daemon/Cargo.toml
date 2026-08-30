@@ -22,6 +22,7 @@ base64.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
 clap.workspace = true
+ed25519-dalek.workspace = true
 http.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true

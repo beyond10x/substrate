@@ -381,6 +381,10 @@ fn check_classification(version: &str, released: &Tree, failures: &mut Vec<Strin
 /// A successor that rendered, verified and preserved everything while adding nothing is the failure
 /// this catches; the entries are the acceptance list of the story that cut the bundle.
 fn check_additions(version: &str, released: &Tree, failures: &mut Vec<String>) {
+    if version == "0.7.0" {
+        check_delegation_additions(released, failures);
+        return;
+    }
     if version == "0.6.0" {
         check_aperture_additions(released, failures);
         return;
@@ -694,6 +698,292 @@ fn check_aperture_coverage(released: &Tree, failures: &mut Vec<String>) {
         failures.push(
             "vectors/http/egress-unserved.json: the pre-aperture refusal changed shape".to_owned(),
         );
+    }
+}
+
+/// What `0.7.0` exists for: delegated context and grant attribution (ADR 0011).
+///
+/// The request member, the two ledger members, the refusal classes and the conformance vector pair
+/// — each read out of the bundle rather than out of prose, so a successor that renders and
+/// preserves everything but adds none of this fails here.
+fn check_delegation_additions(released: &Tree, failures: &mut Vec<String>) {
+    check_delegated_request_member(released, failures);
+    check_delegated_ledger_members(released, failures);
+    check_delegated_vector_key_shape(released, failures);
+    check_delegation_coverage(released, failures);
+}
+
+/// The request member is on *every* keyed arm, and the schema never requires it: whether a
+/// deployment requires one is configuration, not contract (ADR 0011, "the field is optional
+/// everywhere and the hosted requirement cannot be turned on").
+fn check_delegated_request_member(released: &Tree, failures: &mut Vec<String>) {
+    if let Some(request) = json_at(released, "schemas/request.json", failures) {
+        if request.pointer("/$defs/delegated-context").is_none() {
+            failures.push(
+                "schemas/request.json: the delegated-context definition is absent at \
+                 /$defs/delegated-context (ADR 0011)"
+                    .to_owned(),
+            );
+        }
+        let branches = request
+            .get("anyOf")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if branches.is_empty() {
+            failures.push("schemas/request.json: the keyed request union is empty".to_owned());
+        }
+        for (index, branch) in branches.iter().enumerate() {
+            if branch.pointer("/properties/delegated_context").is_none() {
+                failures.push(format!(
+                    "schemas/request.json: branch {index} does not admit delegated_context"
+                ));
+            }
+            if branch
+                .get("required")
+                .and_then(Value::as_array)
+                .is_some_and(|required| required.iter().any(|name| name == "delegated_context"))
+            {
+                failures.push(format!(
+                    "schemas/request.json: branch {index} makes delegated_context required; \
+                     the member is optional everywhere in the contract"
+                ));
+            }
+            if branch.get("additionalProperties") != Some(&json!(false)) {
+                failures.push(format!(
+                    "schemas/request.json: branch {index} is no longer a closed object"
+                ));
+            }
+        }
+        // Bound to the wire constant from a file no bundle hashes, for the reason
+        // `check_aperture_additions` gives: a `{"$wire": …}` marker would mean editing
+        // `xtask/src/render.rs`, whose sha256 is every released bundle's `generator.digest`.
+        let declared = request
+            .pointer("/$defs/delegated-context/maxLength")
+            .and_then(Value::as_u64);
+        if declared != Some(substrate_wire::MAX_DELEGATED_CONTEXT_BYTES as u64) {
+            failures.push(format!(
+                "schemas/request.json: delegated-context maxLength is {declared:?}, \
+                 and substrate_wire::MAX_DELEGATED_CONTEXT_BYTES is {}",
+                substrate_wire::MAX_DELEGATED_CONTEXT_BYTES
+            ));
+        }
+    }
+}
+
+/// The ledger row. `principal` keeps its process-id meaning and is not reused: collapsing the two is
+/// the confusion ADR 0011 exists to prevent, so both members must be present *beside* it.
+fn check_delegated_ledger_members(released: &Tree, failures: &mut Vec<String>) {
+    if let Some(operation) = json_at(released, "schemas/operation.json", failures) {
+        let branches = operation
+            .get("oneOf")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for (index, branch) in branches.iter().enumerate() {
+            for member in ["grant_ref", "platform_principal"] {
+                if branch.pointer(&format!("/properties/{member}")).is_none() {
+                    failures.push(format!(
+                        "schemas/operation.json: state branch {index} carries no {member} \
+                         (ADR 0011)"
+                    ));
+                }
+                if branch
+                    .get("required")
+                    .and_then(Value::as_array)
+                    .is_some_and(|required| required.iter().any(|name| name == member))
+                {
+                    failures.push(format!(
+                        "schemas/operation.json: state branch {index} requires {member}; \
+                         both members are nullable"
+                    ));
+                }
+            }
+            if branch.pointer("/properties/principal").is_none() {
+                failures.push(format!(
+                    "schemas/operation.json: state branch {index} lost principal; the process id \
+                     keeps its own column"
+                ));
+            }
+        }
+    }
+}
+
+/// The conformance vector pair carries public key material and nothing else.
+///
+/// The setup shape is closed here rather than trusted: a private member added to it later would
+/// otherwise validate, and the pair is the artifact connectors holds byte-identically.
+fn check_delegated_vector_key_shape(released: &Tree, failures: &mut Vec<String>) {
+    if let Some(vector) = json_at(released, "schemas/vector.json", failures) {
+        let branch = vector
+            .pointer("/properties/setup/items/oneOf")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .find(|branch| {
+                branch.pointer("/properties/kind/const") == Some(&json!("delegated-context-key"))
+            })
+            .cloned();
+        match branch {
+            None => failures.push(
+                "schemas/vector.json: no delegated-context-key setup shape (ADR 0011)".to_owned(),
+            ),
+            Some(branch) => {
+                if branch.pointer("/properties/state/additionalProperties") != Some(&json!(false)) {
+                    failures.push(
+                        "schemas/vector.json: the delegated-context-key state is open; \
+                         a vector could carry material this bundle never reviews"
+                            .to_owned(),
+                    );
+                }
+                let members: BTreeSet<String> = branch
+                    .pointer("/properties/state/properties")
+                    .and_then(Value::as_object)
+                    .into_iter()
+                    .flatten()
+                    .map(|(name, _)| name.clone())
+                    .collect();
+                for forbidden in ["private_key", "secret_key", "seed", "d", "signing_key"] {
+                    if members.contains(forbidden) {
+                        failures.push(format!(
+                            "schemas/vector.json: the delegated-context-key state names \
+                             {forbidden}; the pair carries verifying material only"
+                        ));
+                    }
+                }
+                if !members.contains("public_key") {
+                    failures.push(
+                        "schemas/vector.json: the delegated-context-key state names no public_key"
+                            .to_owned(),
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The coverage half of `0.7.0`: every trust requirement carries evidence, and every refusal is read
+/// out of the vector that asserts it rather than out of prose.
+fn check_delegation_coverage(released: &Tree, failures: &mut Vec<String>) {
+    let required_requirements = [
+        "trust.caller-written-identity-ignored",
+        "trust.delegated-context-absent",
+        "trust.delegated-context-audience",
+        "trust.delegated-context-expiry",
+        "trust.delegated-context-grant-conflict",
+        "trust.delegated-context-malformed",
+        "trust.delegated-context-optional",
+        "trust.delegated-context-recorded",
+        "trust.delegated-context-signature",
+        "trust.delegated-context-subject-binding",
+        "trust.delegated-context-unknown-key",
+    ];
+    let Some(coverage) = json_at(released, "coverage.json", failures) else {
+        return;
+    };
+    let rows = coverage
+        .get("requirements")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for requirement in required_requirements {
+        let covered = rows.iter().any(|row| {
+            row.get("id").and_then(Value::as_str) == Some(requirement)
+                && row
+                    .get("evidence")
+                    .and_then(Value::as_array)
+                    .is_some_and(|evidence| !evidence.is_empty())
+        });
+        if !covered {
+            failures.push(format!(
+                "coverage.json: requirement {requirement} is absent or carries no evidence"
+            ));
+        }
+    }
+
+    check_delegation_refusal_vectors(released, failures);
+}
+
+/// Every refusal class design 09 section 5 names, read out of the vector that asserts it.
+fn check_delegation_refusal_vectors(released: &Tree, failures: &mut Vec<String>) {
+    for (path, code) in [
+        (
+            "vectors/http/delegated-context-absent-when-required.json",
+            "delegated-context.absent",
+        ),
+        (
+            "vectors/http/delegated-context-malformed.json",
+            "delegated-context.malformed",
+        ),
+        (
+            "vectors/http/delegated-context-unknown-key.json",
+            "delegated-context.unknown-key",
+        ),
+        (
+            "vectors/http/delegated-context-signature-invalid.json",
+            "delegated-context.signature-invalid",
+        ),
+        (
+            "vectors/http/delegated-context-audience-mismatch.json",
+            "delegated-context.audience-mismatch",
+        ),
+        (
+            "vectors/http/delegated-context-subject-mismatch.json",
+            "delegated-context.subject-mismatch",
+        ),
+        (
+            "vectors/http/delegated-context-expired.json",
+            "delegated-context.expired",
+        ),
+        (
+            "vectors/http/delegated-context-grant-conflict.json",
+            "delegated-context.grant-conflict",
+        ),
+    ] {
+        let Some(vector) = json_at(released, path, failures) else {
+            continue;
+        };
+        if vector.pointer("/expected/response/body/error/code") != Some(&json!(code)) {
+            failures.push(format!("{path}: does not assert the refusal {code}"));
+        }
+        // None of them degrades to "ran, unattributed" (invariant 3): every refusal vector states
+        // that the ledger row it left carries no grant.
+        let unattributed = vector
+            .get("postconditions")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .any(|row| {
+                row.get("actual") == Some(&json!("/ledger/grant_ref"))
+                    && row.get("operator") == Some(&json!("equals"))
+            });
+        if !unattributed {
+            failures.push(format!(
+                "{path}: states nothing about the grant its refusal left on the ledger"
+            ));
+        }
+    }
+
+    // The accepting half of the pair: the row carries the grant, and the platform principal is not
+    // the process id.
+    let accepting = "vectors/http/delegated-context-records-grant.json";
+    if let Some(vector) = json_at(released, accepting, failures) {
+        let rows = vector
+            .get("postconditions")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        for member in ["/ledger/grant_ref", "/ledger/platform_principal"] {
+            let stated = rows.iter().any(|row| {
+                row.get("actual") == Some(&json!(member))
+                    && row.get("expected").is_some_and(|value| !value.is_null())
+            });
+            if !stated {
+                failures.push(format!(
+                    "{accepting}: does not state the {member} the verified context recorded"
+                ));
+            }
+        }
     }
 }
 

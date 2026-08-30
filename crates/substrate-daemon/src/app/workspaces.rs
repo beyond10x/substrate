@@ -574,6 +574,7 @@ pub(super) async fn workspace_file_replace_v2(
             op: mutation.op,
             input: V2FileMutation::Replace(mutation.input),
             request_hash: mutation.request_hash,
+            attribution: mutation.attribution,
         },
     )
     .await
@@ -617,6 +618,7 @@ pub(super) async fn workspace_file_edit_v2(
             op: mutation.op,
             input: V2FileMutation::Edit(mutation.input),
             request_hash: mutation.request_hash,
+            attribution: mutation.attribution,
         },
     )
     .await
@@ -660,6 +662,7 @@ pub(super) async fn workspace_file_patch_v2(
             op: mutation.op,
             input: V2FileMutation::Patch(mutation.input),
             request_hash: mutation.request_hash,
+            attribution: mutation.attribution,
         },
     )
     .await

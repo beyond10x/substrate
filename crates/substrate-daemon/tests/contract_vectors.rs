@@ -1307,6 +1307,8 @@ fn seed_workspace_named(store: &Store, id: &str, operation_id: &str, actor: &str
         capability_snapshot: Some(SNAPSHOT.to_owned()),
         actor: actor.to_owned(),
         principal: None,
+        grant_ref: None,
+        platform_principal: None,
         resource: Some(id.to_owned()),
     };
     let provisional = Workspace {
@@ -1348,6 +1350,8 @@ fn seed_workspace_state(store: &Store, state: WorkspaceState) {
         capability_snapshot: Some(SNAPSHOT.to_owned()),
         actor: "vector-seed".to_owned(),
         principal: None,
+        grant_ref: None,
+        platform_principal: None,
         resource: Some("ws_vector".to_owned()),
     };
     let provisional = Workspace {
@@ -1386,6 +1390,8 @@ fn seed_workspace_state(store: &Store, state: WorkspaceState) {
             capability_snapshot: Some(SNAPSHOT.to_owned()),
             actor: "vector-seed".to_owned(),
             principal: None,
+            grant_ref: None,
+            platform_principal: None,
             resource: Some("ws_vector".to_owned()),
         };
         assert!(matches!(
@@ -1430,6 +1436,8 @@ fn seed_running_exec_named(store: &Store, id: &str) {
         capability_snapshot: Some(SNAPSHOT.to_owned()),
         actor: "vector-seed".to_owned(),
         principal: None,
+        grant_ref: None,
+        platform_principal: None,
         resource: Some(id.to_owned()),
     };
     let mut provisional = proposed.clone();
@@ -1458,6 +1466,8 @@ fn seed_accepted_operation(store: &Store, operation: &str, request_hash: &str) -
         capability_snapshot: Some(SNAPSHOT.to_owned()),
         actor: "vector-client".to_owned(),
         principal: None,
+        grant_ref: None,
+        platform_principal: None,
         resource: Some("ws_vector".to_owned()),
     };
     assert_eq!(
@@ -1540,6 +1550,8 @@ fn admit_exec(store: &Store, proposed: &StoredExec) -> NewOperation {
         capability_snapshot: Some(SNAPSHOT.to_owned()),
         actor: "vector-fixture".to_owned(),
         principal: None,
+        grant_ref: None,
+        platform_principal: None,
         resource: Some(proposed.resource.id.clone()),
     };
     assert_eq!(
@@ -1632,6 +1644,8 @@ async fn disputed_review_vectors_execute_at_declared_bundle_versions() {
         capability_snapshot: None,
         actor: "other".to_owned(),
         principal: None,
+        grant_ref: None,
+        platform_principal: None,
         resource: None,
     };
     harness.store.reserve(&other).expect("seed other subject");
@@ -1667,6 +1681,8 @@ async fn disputed_review_vectors_execute_at_declared_bundle_versions() {
         capability_snapshot: None,
         actor: "vector-client".to_owned(),
         principal: None,
+        grant_ref: None,
+        platform_principal: None,
         resource: Some("ws_vector".to_owned()),
     };
     harness.store.reserve(&operation).expect("accepted commit");
@@ -1754,6 +1770,8 @@ async fn crash_after_destroying_resumes_cleanup_and_terminalizes_original_operat
         capability_snapshot: None,
         actor: "vector-client".to_owned(),
         principal: None,
+        grant_ref: None,
+        platform_principal: None,
         resource: Some("ws_vector".to_owned()),
     };
     assert!(matches!(
@@ -1976,6 +1994,8 @@ async fn typed_dispatch_posture_preserves_or_removes_provisional_membership_exac
         capability_snapshot: Some(SNAPSHOT.to_owned()),
         actor: "vector-client".to_owned(),
         principal: None,
+        grant_ref: None,
+        platform_principal: None,
         resource: Some("ws_vector".to_owned()),
     };
     let WorkspaceDestroyReservation::Refused { answer, .. } = unknown

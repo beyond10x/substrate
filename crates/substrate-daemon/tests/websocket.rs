@@ -63,6 +63,8 @@ impl Harness {
             capability_snapshot: None,
             actor: "websocket-test".to_owned(),
             principal: None,
+            grant_ref: None,
+            platform_principal: None,
             resource: None,
         };
         let detail = ErrorDetail {

@@ -20,6 +20,8 @@ use substrate_wire::{
 use tokio::sync::{Mutex, Notify, OwnedMutexGuard, Semaphore};
 use ulid::Ulid;
 
+use crate::delegation::DelegatedContextPolicy;
+
 use super::events::{EventStreamLimits, EventStreamPolicy, EventWakeups};
 use super::operations::{driver_detail, linux_lease_clock, stored_exec};
 use super::sessions::{PipeAttachmentLimits, PipeSessionPolicy};
@@ -142,6 +144,11 @@ pub struct App {
     pub store: Arc<Store>,
     pub driver: Arc<dyn Driver>,
     pub deployment: String,
+    /// What this deployment will accept as a delegated context, and whether it insists on one.
+    ///
+    /// Immutable for the process's lifetime and resolved at startup, like an egress aperture: a
+    /// trust anchor a request could move is not a trust anchor (ADR 0011).
+    pub(super) delegated_context: DelegatedContextPolicy,
     pub(super) authority: Arc<dyn Authority>,
     restart_cutoff: DateTime<Utc>,
     pub(super) event_wakeups: Arc<EventWakeups>,
@@ -174,6 +181,28 @@ impl App {
         deployment: impl Into<String>,
         authority: Arc<dyn Authority>,
     ) -> Arc<Self> {
+        Self::with_delegated_context(
+            store,
+            driver,
+            deployment,
+            authority,
+            DelegatedContextPolicy::none(),
+        )
+    }
+
+    /// The composition root's constructor: everything above, plus the configured trust anchor.
+    ///
+    /// Separate rather than a fifth parameter on `with_authority`, because a test that says nothing
+    /// about delegated context should keep meaning "no trust anchor configured" — which is a real
+    /// posture (ADR 0011: until an issuer ships, the field is optional everywhere), not a default
+    /// standing in for one.
+    pub fn with_delegated_context(
+        store: Arc<Store>,
+        driver: Arc<dyn Driver>,
+        deployment: impl Into<String>,
+        authority: Arc<dyn Authority>,
+        delegated_context: DelegatedContextPolicy,
+    ) -> Arc<Self> {
         let restart_cutoff = authority.now();
         let event_wakeups = Arc::new(EventWakeups::default());
         let event_stream_policy = EventStreamPolicy::production();
@@ -184,6 +213,7 @@ impl App {
             store,
             driver,
             deployment: deployment.into(),
+            delegated_context,
             authority,
             restart_cutoff,
             event_wakeups,

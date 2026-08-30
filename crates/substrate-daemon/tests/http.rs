@@ -239,6 +239,8 @@ async fn twelve_route_vertical_slice_is_scoped_durable_and_observed() {
         capability_snapshot: Some(snapshot.clone()),
         actor: "http-test-fixture".to_owned(),
         principal: None,
+        grant_ref: None,
+        platform_principal: None,
         resource: Some(exec_id.to_owned()),
     };
     let mut provisional = exec.clone();

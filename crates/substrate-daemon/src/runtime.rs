@@ -7,13 +7,15 @@ use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _, PermissionsExt as _}
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::{App, Identity, router};
-use anyhow::{Context as _, bail};
+use crate::delegation::{DelegatedContextPolicy, TrustedKey};
+use crate::{App, Identity, SystemAuthority, router};
+use anyhow::{Context as _, anyhow, bail};
 use axum::extract::{Request, State};
 use axum::http::{StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::{Extension, Router};
+use ed25519_dalek::VerifyingKey;
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::service::TowerToHyperService;
@@ -296,7 +298,32 @@ pub struct DaemonConfig {
     /// `None` gives a sandbox no trust anchor. TLS still crosses the aperture byte for byte, and a
     /// child that verifies will refuse rather than trust something it cannot check.
     pub ca_bundle: Option<PathBuf>,
+    /// Operator-declared trusted keys for delegated context (ADR 0011).
+    ///
+    /// Verifying material only, resolved once at startup. An empty list is a real posture, not a
+    /// gap: no context can be verified, so presenting one is a named refusal and omitting one is
+    /// the operation 0.6.0 already served.
+    pub delegated_context_keys: Vec<DelegatedContextKey>,
+    /// Whether an effectful operation must present a verified delegated context.
+    ///
+    /// Startup refuses `true` with no key: a deployment that requires what it can never verify
+    /// refuses every mutation, and that is a configuration mistake, not a runtime one.
+    pub require_delegated_context: bool,
     pub tcp: Option<TcpDaemonConfig>,
+}
+
+/// One operator-declared trusted key for delegated context: a `kid`, its issuer, public material.
+///
+/// The daemon's own configuration vocabulary. Which service signs is exactly this declaration and
+/// nothing else in the codebase (ADR 0011), so identity-signed and connectors-signed differ here
+/// and nowhere else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DelegatedContextKey {
+    pub kid: String,
+    pub issuer: String,
+    /// A 32-byte Ed25519 verifying key. Never a seed and never a signing key: substrate mints no
+    /// delegated context and holds nothing that could.
+    pub public_key: [u8; 32],
 }
 
 /// One operator-declared egress aperture: a name and one destination tuple (ADR 0013).
@@ -357,6 +384,8 @@ impl DaemonConfig {
             secret_slots: Vec::new(),
             egress_apertures: Vec::new(),
             ca_bundle: None,
+            delegated_context_keys: Vec::new(),
+            require_delegated_context: false,
             tcp: None,
         }
     }
@@ -394,6 +423,12 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
     // a name that only resolves later resolves nowhere at all (ADR 0013).
     let egress_apertures = resolve_egress_apertures(&config.egress_apertures)?;
     check_ca_bundle(config.ca_bundle.as_deref())?;
+    // Resolved before any listener exists: a trust anchor that only becomes usable later would let
+    // the daemon serve mutations it could not attribute (ADR 0011).
+    let delegated_context = resolve_delegated_context(
+        &config.delegated_context_keys,
+        config.require_delegated_context,
+    )?;
     let store = Arc::new(
         Store::open_with_event_retention(&config.state, config.event_retention)
             .context("open durable state")?,
@@ -416,7 +451,13 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
     host_config.egress_apertures = egress_apertures;
     host_config.ca_bundle = config.ca_bundle;
     let driver = HostDriver::open(host_config).context("open host driver")?;
-    let app = App::new(store, driver, config.deployment);
+    let app = App::with_delegated_context(
+        store,
+        driver,
+        config.deployment,
+        Arc::new(SystemAuthority),
+        delegated_context,
+    );
     app.sweep_expired().await;
     let sweeper_app = Arc::clone(&app);
     let lease_sweeper = tokio::spawn(async move {
@@ -607,6 +648,32 @@ fn check_ca_bundle(path: Option<&std::path::Path>) -> anyhow::Result<()> {
         bail!("the certificate bundle must name one non-empty regular file");
     }
     Ok(())
+}
+
+/// Turns declared trusted keys into the policy the admission path uses.
+///
+/// Deliberately absent from [`configuration_generation`]: nothing about delegated context is a
+/// published capability fact in `substrate-wire/0.7.0`, so rotating a key tells no client anything
+/// and must not invalidate a capability snapshot or an admitted operation — the same reasoning that
+/// keeps a secret slot's *file* out of the generation.
+fn resolve_delegated_context(
+    declared: &[DelegatedContextKey],
+    required: bool,
+) -> anyhow::Result<DelegatedContextPolicy> {
+    let mut keys = Vec::with_capacity(declared.len());
+    for key in declared {
+        if key.kid.is_empty() || key.issuer.is_empty() {
+            bail!("a delegated-context key needs a kid and an issuer");
+        }
+        let verifying_key = VerifyingKey::from_bytes(&key.public_key)
+            .with_context(|| format!("delegated-context key {} is not an Ed25519 key", key.kid))?;
+        keys.push(TrustedKey {
+            kid: key.kid.clone(),
+            issuer: key.issuer.clone(),
+            verifying_key,
+        });
+    }
+    DelegatedContextPolicy::new(keys, required).map_err(|error| anyhow!(error))
 }
 
 fn configuration_generation(config: &DaemonConfig) -> u64 {

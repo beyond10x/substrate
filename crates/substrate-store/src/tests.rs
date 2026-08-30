@@ -121,6 +121,8 @@ fn operation_named(
         capability_snapshot: Some(format!("sha256:{}", "7".repeat(64))),
         actor: "test".to_owned(),
         principal: None,
+        grant_ref: None,
+        platform_principal: None,
         resource: Some(resource.to_owned()),
     }
 }

@@ -208,6 +208,32 @@ the message**; where the mechanism did not verify in a throwaway sandbox at star
 fact `exec.egress-apertures` is absent and every aperture request is `unserved` — never a run that
 quietly got no network instead (invariant 3). ADR 0013.
 
+### Grant attribution
+
+`--delegated-context-key <kid>=<issuer>=<base64url>` (repeatable) declares a key substrate will
+**verify** delegated-context documents against. Substrate holds a verifying key and never a signing
+key: which service signs is a configuration of the trusted key and changes no substrate code.
+
+A start may then carry `delegated_context`, a compact JWS, alongside `op` and `input` — never inside
+`input`, so it stays outside the canonical request hash. Replaying the same `op` with a *fresh*
+context is the same operation and returns the original outcome, and a request without one serializes
+exactly as a `0.6.0` client's did.
+
+```console
+substrate-daemon \
+  --delegated-context-key k1=https://identity.example.com=g5Iv…A0
+```
+
+What a verified document contributes is two columns and nothing else: `grant_ref` and
+`platform_principal`, on the ledger row and on the `operation.*` events. Substrate verifies
+signature, issuer, exact audience, time window and binding to the authenticated subject; it never
+evaluates the grant — connectors decides, substrate records. Identity-shaped strings a caller may
+legitimately write reach the resource and never the attribution; writing one into the envelope is
+`request.schema-invalid`, not a quiet drop. Every failure is a named refusal, never a weaker run:
+`delegated-context.absent`, `.malformed`, `.unknown-key`, `.signature-invalid`,
+`.audience-mismatch`, `.subject-mismatch`, `.expired`, `.grant-conflict`
+(`crates/substrate-daemon/src/delegation.rs:209-256`). ADR 0011.
+
 ### Serving exec
 
 Without a delegated cgroup root, workspace operations are still served, exec confinement facts are

@@ -20,9 +20,11 @@ use substrate_wire::{
     WorkspaceSource, canonical_request_hash_v2, validate_operation_id,
 };
 
+use crate::delegation::{ContextRefusal, VerifiedContext};
+
 use super::responses::{
-    conflict, failure, failure_detail, operation_ledger_capacity, outcome_unknown, query_is_empty,
-    schema_invalid, store_failure, success,
+    conflict, delegated_context_refusal, failure, failure_detail, operation_ledger_capacity,
+    outcome_unknown, query_is_empty, schema_invalid, store_failure, success,
 };
 use super::{
     App, BODY_LIMIT, Identity, PIPE_MAX_FRAME_BYTES, PIPE_MAX_INPUT_BYTES, PIPE_MAX_QUEUED_FRAMES,
@@ -34,6 +36,12 @@ pub(super) struct BoundMutation<T> {
     pub(super) op: String,
     pub(super) input: T,
     pub(super) request_hash: String,
+    /// What a verified delegated context contributed, or `None` when none was presented.
+    ///
+    /// Carried on the bound mutation rather than re-derived per route, so every ledger row this
+    /// request writes — accepted, refused before dispatch, or terminal — records the same
+    /// attribution (ADR 0011).
+    pub(super) attribution: Option<VerifiedContext>,
 }
 
 pub(super) async fn read_bounded_body(
@@ -93,10 +101,23 @@ pub(super) async fn decode_mutation<T: DeserializeOwned>(
     let Some(raw_input) = object.get("input") else {
         return Err(schema_invalid(request_id, Some(operation), "input"));
     };
+    let presented = presented_context(object, request_id, operation)?;
     let request_hash = canonical_request_hash_v2(method, address, raw_input, raw_query)
         .map_err(|_| schema_invalid(request_id, Some(operation), "input"))?;
     let operation = operation.to_owned();
     let scope = app.scope(identity);
+    // Pure computation, before any store read and before any driver authority exists (design 09
+    // § 3). The refusal is held rather than returned, because it is owed a durable ledger row under
+    // this operation id and `new` does not exist yet.
+    let (attribution, refusal) = match app.delegated_context.verify(
+        presented.as_deref(),
+        &identity.subject,
+        &app.deployment,
+        app.authority.now(),
+    ) {
+        Ok(verified) => (verified, None),
+        Err(refusal) => (None, Some(refusal)),
+    };
     match app
         .store_io(|| {
             app.store
@@ -106,6 +127,11 @@ pub(super) async fn decode_mutation<T: DeserializeOwned>(
     {
         Ok(None) => {}
         Ok(Some(reservation)) => {
+            if let Some(response) =
+                grant_conflict(app, &scope, &operation, request_id, attribution.as_ref()).await
+            {
+                return Err(response);
+            }
             return Err(
                 reservation_response(Ok(reservation), request_id, &operation)
                     .unwrap_or_else(|| outcome_unknown(request_id, &operation)),
@@ -122,14 +148,27 @@ pub(super) async fn decode_mutation<T: DeserializeOwned>(
         capability_snapshot: None,
         actor: identity.actor.clone(),
         principal: identity.principal.clone(),
+        grant_ref: attribution.as_ref().map(|value| value.grant_ref.clone()),
+        platform_principal: attribution
+            .as_ref()
+            .map(|value| value.platform_principal.clone()),
         resource: None,
     };
     if !query_is_empty(raw_query) {
         let response = schema_invalid(request_id, Some(&operation), "query");
         return Err(record_bound_refusal(app, request_id, &new, response).await);
     }
-    if object.len() != 2 {
+    // Still closed: `op`, `input`, and the one optional sibling. Anything else is the same
+    // strict-request refusal `0.6.0` gave, at the same address.
+    if object
+        .keys()
+        .any(|member| !matches!(member.as_str(), "op" | "input" | "delegated_context"))
+    {
         let response = schema_invalid(request_id, Some(&operation), "input");
+        return Err(record_bound_refusal(app, request_id, &new, response).await);
+    }
+    if let Some(refusal) = refusal {
+        let response = delegated_context_refusal(request_id, Some(&operation), refusal);
         return Err(record_bound_refusal(app, request_id, &new, response).await);
     }
     let Ok(input) = serde_json::from_value(raw_input.clone()) else {
@@ -140,7 +179,55 @@ pub(super) async fn decode_mutation<T: DeserializeOwned>(
         op: operation,
         input,
         request_hash,
+        attribution,
     })
+}
+
+/// The one new envelope member (ADR 0011), read as a raw string before anything interprets it.
+///
+/// A structure shaped like something else is refused here rather than coerced: the member is a
+/// compact JWS or it is not present, and there is no third reading.
+fn presented_context(
+    object: &serde_json::Map<String, Value>,
+    request_id: &str,
+    operation: &str,
+) -> Result<Option<String>, Response> {
+    match object.get("delegated_context") {
+        None => Ok(None),
+        Some(Value::String(token)) => Ok(Some(token.clone())),
+        Some(_) => Err(schema_invalid(
+            request_id,
+            Some(operation),
+            "delegated_context",
+        )),
+    }
+}
+
+/// The one conflict a verified context can raise, on an operation id that already exists.
+///
+/// `delegated_context` is outside the canonical request hash, so replaying an `op` with a *fresh*
+/// context is the same operation and returns the original outcome. Replaying it under a *different*
+/// grant is not: first write wins on the recorded one (design 09 § 4). The extra ledger read costs
+/// nothing on the common path — it runs only when a reservation already exists *and* this request
+/// carried a verified grant.
+async fn grant_conflict(
+    app: &App,
+    scope: &Scope,
+    operation: &str,
+    request_id: &str,
+    attribution: Option<&VerifiedContext>,
+) -> Option<Response> {
+    let attribution = attribution?;
+    let existing = match app.store_io(|| app.store.operation(scope, operation)).await {
+        Ok(existing) => existing?,
+        Err(error) => return Some(store_failure(request_id, Some(operation), &error)),
+    };
+    existing
+        .grant_ref
+        .is_some_and(|recorded| recorded != attribution.grant_ref)
+        .then(|| {
+            delegated_context_refusal(request_id, Some(operation), ContextRefusal::GRANT_CONFLICT)
+        })
 }
 
 async fn record_bound_refusal(
@@ -449,6 +536,7 @@ pub(super) fn validate_pipe_session_input(
         op: mutation.op.clone(),
         input: mutation.input.exec.clone(),
         request_hash: mutation.request_hash.clone(),
+        attribution: mutation.attribution.clone(),
     };
     validate_exec_input(app, &exec_mutation, request_id)?;
     if !pipe_confinement_available(&app.driver.machine().facts) {
@@ -566,6 +654,14 @@ pub(super) fn new_operation<T>(
         capability_snapshot: capability_snapshot.or_else(|| Some(app.driver.machine().snapshot)),
         actor: identity.actor.clone(),
         principal: identity.principal.clone(),
+        grant_ref: mutation
+            .attribution
+            .as_ref()
+            .map(|value| value.grant_ref.clone()),
+        platform_principal: mutation
+            .attribution
+            .as_ref()
+            .map(|value| value.platform_principal.clone()),
         resource,
     }
 }
@@ -660,6 +756,14 @@ pub(super) async fn refuse_before_dispatch_response<T>(
         capability_snapshot: None,
         actor: identity.actor.clone(),
         principal: identity.principal.clone(),
+        grant_ref: mutation
+            .attribution
+            .as_ref()
+            .map(|value| value.grant_ref.clone()),
+        platform_principal: mutation
+            .attribution
+            .as_ref()
+            .map(|value| value.platform_principal.clone()),
         resource: None,
     };
     let _ = (method, address);

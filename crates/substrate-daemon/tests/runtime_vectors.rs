@@ -26,9 +26,12 @@ use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64URL;
+use ed25519_dalek::{Signer as _, SigningKey};
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use serde_json::{Value, json};
+use sha2::Digest as _;
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::UnixStream;
@@ -231,6 +234,8 @@ impl Daemon {
         cgroup_root: Option<&Path>,
         apertures: &[String],
         secret_slots: &[String],
+        delegated_context_keys: &[String],
+        require_delegated_context: bool,
     ) -> Self {
         let socket = root.join("substrate.sock");
         let workspaces = root.join("workspaces");
@@ -262,6 +267,15 @@ impl Daemon {
         for slot in secret_slots {
             command.push("--secret-slot".to_owned());
             command.push(slot.clone());
+        }
+        // `kid=issuer=base64url-public-key`, and there is no shape of this flag that takes anything
+        // else: substrate mints no delegated context and holds no signing key (ADR 0011).
+        for key in delegated_context_keys {
+            command.push("--delegated-context-key".to_owned());
+            command.push(key.clone());
+        }
+        if require_delegated_context {
+            command.push("--require-delegated-context".to_owned());
         }
         let mut child = Command::new(&command[0])
             .args(&command[1..])
@@ -1863,6 +1877,25 @@ async fn check_http_journey(
         "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
     );
     passed += 1;
+
+    // Delegated context (ADR 0011), on the same daemon every other case ran against: verification
+    // is pure computation, so it needs nothing the portable lane does not already have.
+    assert_verified_context_is_recorded(
+        daemon,
+        "01JPHASE2CLEANGRANT0001",
+        "req_clean_grant",
+        &json!({ "runner": "cleanroom" }),
+    )
+    .await;
+    passed += 1;
+
+    assert_caller_written_identity_is_ignored(
+        daemon,
+        "01JPHASE2CLEANGRANT0002",
+        "req_clean_forged",
+    )
+    .await;
+    passed += 1;
     passed
 }
 
@@ -2346,12 +2379,394 @@ async fn check_confined_secret_slots(daemon: &Daemon, workspace: &str, snapshot:
 }
 
 // ---------------------------------------------------------------------------------------------
+// Delegated context and grant attribution (ADR 0011)
+// ---------------------------------------------------------------------------------------------
+//
+// Verification is pure computation over the presented bytes and one configured trusted key, so
+// every case here runs in the **portable** lane: no cgroup, no delegation, no privilege. What they
+// prove is what a reader of one ledger row can answer — which grant authorised this, on behalf of
+// which platform principal — from the shipped binary's own record, over the wire, with nothing of
+// the implementation linked.
+
+/// The issuer origin the clean-room key vouches for. RFC 6761 reserved: it names nothing on any
+/// network, and nothing here ever calls it — substrate resolves no issuer during a request.
+const DELEGATED_ISSUER: &str = "https://issuer.invalid";
+const DELEGATED_KID: &str = "cleanroom-key-1";
+const DELEGATED_GRANT: &str = "grant:observability-read";
+const DELEGATED_PLATFORM_PRINCIPAL: &str = "platform:principal-cleanroom";
+
+/// A test-only signing key, derived from a literal English sentence rather than committed material.
+///
+/// Substrate never signs a delegated context — it holds a *verifying* key and nothing else — so the
+/// signer only exists to stand in for whichever service the deployment configures. Deriving the
+/// seed from this sentence means the repository carries no key blob to leak or rotate, and the
+/// runtime cases can still mint documents bound to *this* machine's subject and *this* instant,
+/// which a committed fixture can never be.
+fn delegated_signing_key() -> SigningKey {
+    let seed: [u8; 32] =
+        sha2::Sha256::digest(b"substrate clean-room delegated-context signing seed").into();
+    SigningKey::from_bytes(&seed)
+}
+
+/// The `--delegated-context-key kid=issuer=base64url` declaration for that key.
+fn delegated_key_flag() -> String {
+    format!(
+        "{DELEGATED_KID}={DELEGATED_ISSUER}={}",
+        BASE64URL.encode(delegated_signing_key().verifying_key().as_bytes())
+    )
+}
+
+/// The subject the daemon derives from kernel peer credentials, which is what a document binds to.
+///
+/// Read from the running process rather than written down: the binding a case presents has to be
+/// the binding the daemon will actually compute, or the case proves the wrong thing.
+fn clean_room_subject() -> String {
+    format!("local:{}", nix::unistd::getuid().as_raw())
+}
+
+/// The closed claim set of design 09 § 3, as JSON, ready to be perturbed by one member.
+fn delegated_claims() -> Value {
+    let now = chrono::Utc::now().timestamp();
+    json!({
+        "act": { "sub": "svc:cleanroom-actor" },
+        "aud": "urn:b10x:substrate",
+        "bound_deployment": "dep_cleanroom",
+        "bound_subject": clean_room_subject(),
+        "exp": now + 120,
+        "grant_ref": DELEGATED_GRANT,
+        "grant_revision": "rev_00000000000000000007",
+        "iat": now - 10,
+        "iss": DELEGATED_ISSUER,
+        "jti": "jti_cleanroom_0000000001",
+        "nbf": now - 10,
+        "sub": DELEGATED_PLATFORM_PRINCIPAL,
+        "tenant": "tenant_cleanroom",
+    })
+}
+
+/// One compact JWS: `base64url(header).base64url(claims).base64url(signature)`.
+fn delegated_context(claims: &Value) -> String {
+    let header = json!({
+        "alg": "EdDSA",
+        "kid": DELEGATED_KID,
+        "typ": "substrate-delegated-context+jwt",
+    });
+    let signing_input = format!(
+        "{}.{}",
+        BASE64URL.encode(serde_json::to_vec(&header).expect("header JSON")),
+        BASE64URL.encode(serde_json::to_vec(claims).expect("claims JSON"))
+    );
+    let signature = delegated_signing_key().sign(signing_input.as_bytes());
+    format!("{signing_input}.{}", BASE64URL.encode(signature.to_bytes()))
+}
+
+/// A mutation envelope carrying the optional third member beside `op` and `input`.
+fn attributed_mutation(operation: &str, input: &Value, context: &str) -> Vec<u8> {
+    serde_json::to_vec(&json!({
+        "delegated_context": context,
+        "input": input,
+        "op": operation,
+    }))
+    .expect("attributed mutation JSON")
+}
+
+/// Starts one clean-room daemon that trusts [`delegated_key_flag`], for a case of its own.
+async fn delegated_daemon(root: &Path, required: bool) -> Daemon {
+    std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))
+        .expect("owner-private clean-room directory");
+    Daemon::start(root, None, &[], &[], &[delegated_key_flag()], required).await
+}
+
+/// The ledger row `GET /v1/ops/{op}` reports, which is the row an `operation.*` event carries.
+async fn ledger_row(daemon: &Daemon, operation: &str, request_id: &str) -> Value {
+    let (status, row) = daemon
+        .call("GET", &format!("/v1/ops/{operation}"), request_id, None)
+        .await;
+    assert_eq!(status, 200, "{row}");
+    row["result"].clone()
+}
+
+/// The acceptance of `story:ledger-rows-carry-the-declared-grant`, on the wire.
+async fn assert_verified_context_is_recorded(
+    daemon: &Daemon,
+    operation: &str,
+    request_id: &str,
+    labels: &Value,
+) {
+    let (status, created) = daemon
+        .call(
+            "POST",
+            "/v1/workspaces",
+            request_id,
+            Some(&attributed_mutation(
+                operation,
+                &json!({ "source": "empty", "labels": labels }),
+                &delegated_context(&delegated_claims()),
+            )),
+        )
+        .await;
+    assert_eq!(status, 201, "{created}");
+
+    let row = ledger_row(daemon, operation, &format!("{request_id}_op")).await;
+    assert_eq!(
+        row["grant_ref"], DELEGATED_GRANT,
+        "the ledger row does not carry the declared grant: {row}"
+    );
+    assert_eq!(
+        row["platform_principal"], DELEGATED_PLATFORM_PRINCIPAL,
+        "the ledger row does not carry the platform principal: {row}"
+    );
+    // The existing column keeps its meaning: the process id is not the platform principal, and
+    // collapsing them is the confusion design 06 § 2 forbids.
+    assert_ne!(
+        row["principal"], row["platform_principal"],
+        "principal was reused for the platform principal: {row}"
+    );
+    assert!(
+        row["principal"]
+            .as_str()
+            .is_some_and(|value| value.starts_with("pid:")),
+        "principal stopped being the calling process id: {row}"
+    );
+
+    // The same two members reach the `operation.*` events, because an operation transition's
+    // observation *is* this row (`crates/substrate-store/src/events.rs`).
+    let (status, events) = daemon
+        .call(
+            "GET",
+            "/v1/events?limit=100",
+            &format!("{request_id}_ev"),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{events}");
+    let attributed: Vec<&Value> = events["result"]["items"]
+        .as_array()
+        .expect("event page items")
+        .iter()
+        .filter(|event| {
+            event["cause"]["operation"] == operation
+                && text(&event["transition"]).starts_with("operation.")
+        })
+        .collect();
+    assert!(
+        !attributed.is_empty(),
+        "no operation.* event for {operation}: {events}"
+    );
+    for event in attributed {
+        assert_eq!(
+            event["observation"]["grant_ref"], DELEGATED_GRANT,
+            "an operation event carries no grant: {event}"
+        );
+        assert_eq!(
+            event["observation"]["platform_principal"], DELEGATED_PLATFORM_PRINCIPAL,
+            "an operation event carries no platform principal: {event}"
+        );
+    }
+}
+
+/// Design 06 § 2: caller-written identity strings are not trusted. Two ways of writing one.
+async fn assert_caller_written_identity_is_ignored(
+    daemon: &Daemon,
+    operation: &str,
+    request_id: &str,
+) {
+    // 1. Identity-shaped strings the caller *is* allowed to write — workspace labels are free-form
+    //    and are echoed back verbatim — reach the resource and never the attribution.
+    let forged = json!({
+        "grant_ref": "grant:forged-by-the-caller",
+        "platform_principal": "platform:forged-by-the-caller",
+    });
+    assert_verified_context_is_recorded(daemon, operation, request_id, &forged).await;
+    let row = ledger_row(daemon, operation, &format!("{request_id}_row")).await;
+    assert_ne!(
+        row["platform_principal"], "platform:forged-by-the-caller",
+        "a caller-written label became the platform principal: {row}"
+    );
+    assert_ne!(
+        row["grant_ref"], "grant:forged-by-the-caller",
+        "a caller-written label became the grant: {row}"
+    );
+
+    // 2. Writing one into the envelope itself is refused, not ignored quietly: the request union
+    //    stays closed around `op`, `input` and the one signed member.
+    let mut envelope = json!({
+        "delegated_context": delegated_context(&delegated_claims()),
+        "input": { "source": "empty", "labels": {} },
+        "op": "01JPHASE2DELEGWRITTEN1",
+    });
+    envelope["platform_principal"] = json!("platform:forged-by-the-caller");
+    expect_error(
+        &daemon
+            .call(
+                "POST",
+                "/v1/workspaces",
+                &format!("{request_id}_env"),
+                Some(&serde_json::to_vec(&envelope).expect("envelope JSON")),
+            )
+            .await,
+        422,
+        "request.schema-invalid",
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn ledger_row_records_grant_ref_and_platform_principal() {
+    let temporary = TempDir::with_prefix("substrate-delegated-record-").expect("case directory");
+    let daemon = delegated_daemon(temporary.path(), false).await;
+    assert_verified_context_is_recorded(
+        &daemon,
+        "01JPHASE2DELEGRECORD001",
+        "req_delegated_record",
+        &json!({ "runner": "cleanroom" }),
+    )
+    .await;
+
+    // Omission is untouched: the same daemon, no context, and a row that says so rather than
+    // guessing one (invariant 3 — absent, never optimistic).
+    let (status, plain) = daemon
+        .call(
+            "POST",
+            "/v1/workspaces",
+            "req_delegated_none",
+            Some(&mutation(
+                "01JPHASE2DELEGRECORD002",
+                &json!({ "source": "empty", "labels": {} }),
+            )),
+        )
+        .await;
+    assert_eq!(status, 201, "{plain}");
+    let row = ledger_row(&daemon, "01JPHASE2DELEGRECORD002", "req_delegated_none_op").await;
+    assert!(
+        row.get("grant_ref").is_none() && row.get("platform_principal").is_none(),
+        "an unattributed row invented an attribution: {row}"
+    );
+    daemon.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn caller_written_identity_is_ignored_when_context_is_verified() {
+    let temporary = TempDir::with_prefix("substrate-delegated-ignore-").expect("case directory");
+    let daemon = delegated_daemon(temporary.path(), false).await;
+    assert_caller_written_identity_is_ignored(
+        &daemon,
+        "01JPHASE2DELEGIGNORE001",
+        "req_delegated_ignore",
+    )
+    .await;
+    daemon.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn missing_delegated_context_is_refused_by_name_when_required() {
+    let temporary = TempDir::with_prefix("substrate-delegated-required-").expect("case directory");
+    let daemon = delegated_daemon(temporary.path(), true).await;
+    let operation = "01JPHASE2DELEGABSENT001";
+    expect_error(
+        &daemon
+            .call(
+                "POST",
+                "/v1/workspaces",
+                "req_delegated_absent",
+                Some(&mutation(
+                    operation,
+                    &json!({ "source": "empty", "labels": {} }),
+                )),
+            )
+            .await,
+        422,
+        "delegated-context.absent",
+    );
+
+    // A named refusal, durable under the operation id — not a missing row (atlas O1).
+    let row = ledger_row(&daemon, operation, "req_delegated_absent_op").await;
+    assert_eq!(row["state"], "refused", "{row}");
+    assert_eq!(row["outcome"]["error"]["code"], "delegated-context.absent");
+    assert_eq!(row["outcome"]["error"]["address"], "delegated_context");
+    assert!(
+        row.get("grant_ref").is_none(),
+        "a refused operation recorded a grant: {row}"
+    );
+
+    // The same deployment still serves a request that presents one.
+    assert_verified_context_is_recorded(
+        &daemon,
+        "01JPHASE2DELEGABSENT002",
+        "req_delegated_present",
+        &json!({}),
+    )
+    .await;
+    daemon.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn delegated_context_bound_to_another_subject_is_refused() {
+    let temporary = TempDir::with_prefix("substrate-delegated-bound-").expect("case directory");
+    let daemon = delegated_daemon(temporary.path(), false).await;
+
+    // The binding runs one way. A correctly signed document naming another subject refuses; it
+    // never re-subjects the request, because substrate's subject comes from kernel peer credentials
+    // and never from HTTP data.
+    let mut foreign = delegated_claims();
+    foreign["bound_subject"] = json!("local:4242");
+    let operation = "01JPHASE2DELEGBOUND0001";
+    expect_error(
+        &daemon
+            .call(
+                "POST",
+                "/v1/workspaces",
+                "req_delegated_bound",
+                Some(&attributed_mutation(
+                    operation,
+                    &json!({ "source": "empty", "labels": {} }),
+                    &delegated_context(&foreign),
+                )),
+            )
+            .await,
+        422,
+        "delegated-context.subject-mismatch",
+    );
+    let row = ledger_row(&daemon, operation, "req_delegated_bound_op").await;
+    assert_eq!(row["state"], "refused", "{row}");
+    assert_eq!(
+        row["actor"],
+        format!("unix-peer:{}", nix::unistd::getuid().as_raw()),
+        "the request was re-subjected to the document's subject: {row}"
+    );
+    assert!(
+        row.get("grant_ref").is_none(),
+        "a subject-bound refusal still recorded a grant: {row}"
+    );
+
+    // The same shape, bound to another *deployment*, is the same named refusal.
+    let mut elsewhere = delegated_claims();
+    elsewhere["bound_deployment"] = json!("dep_elsewhere");
+    expect_error(
+        &daemon
+            .call(
+                "POST",
+                "/v1/workspaces",
+                "req_delegated_deployment",
+                Some(&attributed_mutation(
+                    "01JPHASE2DELEGBOUND0002",
+                    &json!({ "source": "empty", "labels": {} }),
+                    &delegated_context(&elsewhere),
+                )),
+            )
+            .await,
+        422,
+        "delegated-context.subject-mismatch",
+    );
+    daemon.close().await;
+}
+
+// ---------------------------------------------------------------------------------------------
 // The lane
 // ---------------------------------------------------------------------------------------------
 
 /// The predecessor printed its case count; the port asserts it, so a case cannot vanish quietly.
-const PORTABLE_CASES: usize = 31;
-const DELEGATED_CASES: usize = 48;
+const PORTABLE_CASES: usize = 33;
+const DELEGATED_CASES: usize = 50;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {
@@ -2375,7 +2790,15 @@ async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {
     std::fs::set_permissions(&slot_file, std::fs::Permissions::from_mode(0o600))
         .expect("restrict the declared slot file");
     let slots = vec![format!("{SECRET_SLOT_NAME}={}", slot_file.display())];
-    let daemon = Daemon::start(root, delegated.as_deref(), &declared, &slots).await;
+    let daemon = Daemon::start(
+        root,
+        delegated.as_deref(),
+        &declared,
+        &slots,
+        &[delegated_key_flag()],
+        false,
+    )
+    .await;
     check_dual_daemon_refusal(&daemon).await;
     let passed =
         check_http_journey(&daemon, delegated.as_deref(), inside.port(), outside.port()).await;

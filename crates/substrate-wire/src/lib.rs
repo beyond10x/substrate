@@ -80,6 +80,21 @@ pub const MIN_LEASE_TTL_MS: u64 = 1_000;
 pub const MAX_LEASE_TTL_MS: u64 = 86_400_000;
 pub const LEASE_CLOCK_TOLERANCE_MS: u64 = 30_000;
 
+/// The one audience a delegated-context document may name (ADR 0011).
+///
+/// A wire-visible identifier carrying a former brand name, frozen with the rest of them
+/// (`AGENTS.md` § *Safety envelope*). Adopted from identity's published vocabulary
+/// (`identity/README.md:144`), not minted here.
+pub const DELEGATED_CONTEXT_AUDIENCE: &str = "urn:b10x:substrate";
+/// The JOSE `typ` a delegated-context document declares (ADR 0011). Carries no brand token.
+pub const DELEGATED_CONTEXT_TYPE: &str = "substrate-delegated-context+jwt";
+/// The byte bound a delegated-context document is parsed within, before any decode.
+pub const MAX_DELEGATED_CONTEXT_BYTES: usize = 4_096;
+/// The longest total lifetime (`exp - iat`) a delegated-context document may declare.
+pub const MAX_DELEGATED_CONTEXT_LIFETIME_SECONDS: i64 = 300;
+/// The clock skew allowed on either side of the `nbf`/`exp` window.
+pub const DELEGATED_CONTEXT_CLOCK_SKEW_SECONDS: i64 = 30;
+
 pub type Labels = BTreeMap<String, String>;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -87,6 +102,14 @@ pub type Labels = BTreeMap<String, String>;
 pub struct Mutation<T> {
     pub op: String,
     pub input: T,
+    /// The optional signed delegated-context document (ADR 0011).
+    ///
+    /// A sibling of `op` and `input`, never a member of `input`, so it stays outside the canonical
+    /// request hash (design 09 § 4): replaying the same `op` with a *fresh* context is the same
+    /// operation and returns the original outcome. Absent, the serialized bytes are exactly what a
+    /// `0.6.0` client sent, which is what keeps every frozen bundle's vectors true.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delegated_context: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1535,6 +1558,19 @@ pub struct OperationRecord {
     pub principal: Option<String>,
     pub resource: Option<String>,
     pub outcome: Option<OperationOutcome>,
+    /// The declared grant this operation ran under, verbatim from a verified delegated context.
+    ///
+    /// Absent when no context was presented, which is every operation a `0.6.0` client sends: the
+    /// member is skipped rather than serialized as `null`, so an unattributed row is byte-for-byte
+    /// the row `0.6.0` produced (ADR 0011; invariant 6).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grant_ref: Option<String>,
+    /// The initiating platform principal, verbatim from a verified delegated context.
+    ///
+    /// Deliberately **not** `principal`, which keeps its `pid:` meaning: collapsing the local
+    /// process and the platform principal into one field is the confusion design 06 § 2 forbids.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub platform_principal: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
