@@ -97,7 +97,13 @@ reproduces the frozen `0.4.0` byte for byte.
 `crates/substrate-daemon/tests/runtime_vectors.rs` is the clean-room runner — an independent
 Unix-socket HTTP lane that spawns the shipped `substrate-daemon` binary and asserts only on the
 wire, linking no implementation. It has no gate step of its own because the gate's first step,
-`cargo test --workspace --locked`, runs it. Set `SUBSTRATE_VECTORS_CGROUP_ROOT=<delegated-root>`,
+`cargo test --workspace --locked`, runs it. **`bash scripts/delegated-lane.sh` runs that lane**, and needs no privilege: it asks systemd for a
+delegated scope (`systemd-run --user -p Delegate=yes --scope`), moves itself into a child group so
+the delegation root stays process-free, and sets the variable. A user session's own scope is
+root-owned, so trying to `mkdir` in it fails and the lane reports itself **absent, not passed**
+(invariant 3) — which reads exactly like a green run if you only look at `cargo test`.
+
+Set `SUBSTRATE_VECTORS_CGROUP_ROOT=<delegated-root>` by hand instead,
 **while the test process itself is inside that delegation**, to add the real no-egress,
 shaped-environment, pids/memory, timeout, truncation and whole-tree cancellation cases:
 

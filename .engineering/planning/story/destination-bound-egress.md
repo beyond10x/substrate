@@ -2,7 +2,7 @@
 format: aep.planning-md/1
 id: story:destination-bound-egress
 kind: story
-status: active
+status: implemented
 title: Destination-bound egress apertures are declared, verified and refused by name
 summary: 'Design 04 section 6: ordinary execution has no egress; an aperture is operator authority matched to a destination. With sealed secret slots this is what unlocks a confined vendor harness.'
 owner: substrate
@@ -13,7 +13,7 @@ tags:
 relations:
 - decomposes: epic:byte-plane-completion
 - depends_on: story:sealed-secret-slots
-revision: 7
+revision: 9
 ---
 # Story: Destination-bound egress apertures are declared, verified and refused by name
 
@@ -126,9 +126,28 @@ different kernel — including CI's — for something that is not a regression.
 - `exec.aperture-byte-limit` (design 10 § 5 row 5) **deferred**: bytes are counted and observed, the
   ceiling is not enforced. That is the one row of design 10 § 5 this change does not deliver.
 
-**Not executed on this host: the delegated lane.**
-`/sys/fs/cgroup/user.slice/user-1000.slice/session-3.scope` is root-owned and `mkdir` gives
-`Permission denied`, so `check_confined_apertures` and `DELEGATED_CASES = 42` are **absent, never
-reported as passed** (invariant 3). Portable lane 29/29. Step 4 of the acceptance — the fake
-app-server inside the aperture with a second endpoint outside it — is written and switched on by
-`SUBSTRATE_VECTORS_CGROUP_ROOT`, and has not run anywhere yet.
+## The delegated lane does run here — 2026-08-30
+
+The implementer concluded it could not: `/sys/fs/cgroup/user.slice/user-1000.slice/session-3.scope`
+is root-owned and `mkdir` gives `Permission denied`, so `check_confined_apertures` and
+`DELEGATED_CASES = 42` reported themselves **absent** (invariant 3). That conclusion was about one
+cgroup path, not about the host. Asking systemd for a delegated scope needs no privilege:
+
+    $ bash scripts/delegated-lane.sh
+    delegated-lane: root /sys/fs/cgroup/…/app.slice/run-….scope, controllers cpu memory pids
+    runtime clean-room: 42 HTTP cases, startup refusal, and dual-daemon refusal passed (delegated lane)
+    test result: ok. 1 passed; 0 failed
+
+The script wraps `systemd-run --user -p Delegate=yes --scope`, moves itself into a child group so
+the delegation root stays process-free, and sets `SUBSTRATE_VECTORS_CGROUP_ROOT`. It is checked in
+precisely so nobody reaches that conclusion again: **an absent lane and a green one read the same
+way if you only look at `cargo test`.**
+
+**Acceptance step 4 is therefore executed, not written-but-unrun.** `check_confined_apertures`
+(`crates/substrate-daemon/tests/runtime_vectors.rs:1656`) drives the model-free app-server on a
+loopback endpoint inside the aperture and a second endpoint outside it, and it is one of the 42.
+Portable lane 29/29 separately.
+
+**Deferred and not covered by this story's acceptance:** `exec.aperture-byte-limit`
+(design 10 § 5 row 5). Bytes are counted and observed; the ceiling is not enforced. That is the one
+row of design 10 § 5 this change does not deliver, and it wants its own story.
