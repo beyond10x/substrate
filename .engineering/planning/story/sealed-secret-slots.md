@@ -2,7 +2,7 @@
 format: aep.planning-md/1
 id: story:sealed-secret-slots
 kind: story
-status: active
+status: implemented
 title: Sealed secret slots reach a child only as a memfd descriptor
 summary: Design 06 decision 3 fixes the mechanism; a live vendor harness stays refused without it.
 owner: substrate
@@ -12,7 +12,7 @@ tags:
 - wire
 relations:
 - decomposes: epic:byte-plane-completion
-revision: 6
+revision: 8
 ---
 # Story: Sealed secret slots reach a child only as a memfd descriptor
 
@@ -117,3 +117,41 @@ for `xtask`. No new external dependency.
 **Not done.** No end-to-end daemon run with a live slot — there is no delegated cgroup on this host,
 so the four named tests are portable-lane, driving the real acquire/place/close code without a
 sandboxed child. `read_only_roots` is still absent from every bundle including `0.5.0`.
+
+## Progress — 2026-08-30, the delegated lane closes acceptance
+
+`PORTABLE_CASES` 29 → 31 and `DELEGATED_CASES` 42 → 48
+(`crates/substrate-daemon/tests/runtime_vectors.rs:2353-2354`). Both lanes re-run here, not taken
+on report:
+
+- `bash scripts/delegated-lane.sh` → `runtime clean-room: 48 HTTP cases, startup refusal, and
+  dual-daemon refusal passed (delegated lane)`, exit 0, 16.47s.
+- `cargo test -p substrate-daemon --test runtime_vectors` → `31 HTTP cases … (portable lane)`,
+  exit 0, 2.59s.
+
+Proven against the shipped binary over its socket, so nothing links the implementation: the
+confined child reads its slot from the declared descriptor and returns a SHA-256 of the bytes; it
+reports `F_GET_SEALS` as the declared set and a write refused with `EPERM`; its descriptor table is
+exactly `{0,1,2}` plus its slot; the value appears in no captured argv, shaped environment, stdout,
+stderr, event page, ledger row, applied record, refusal body or daemon diagnostic; and
+`/proc/<daemon>/fd` holds no slot `memfd` while the child is still running and has not yet read.
+The portable lane asserts `exec.secret-slots-unserved` and `exec.secret-slot-descriptor-invalid`.
+
+Failing-first, each perturbation reverted:
+
+| perturbation | failure |
+|---|---|
+| daemon started without `--secret-slot` | `left: 501 right: 200`, `exec.secret-slots-unserved` |
+| `SEAL_SET` drops `F_SEAL_GROW` (`crates/substrate-host/src/secrets.rs:33`) | `left: Number(11) right: 15`, read back by the child through the wire |
+| child echoes its slot value | `captured stdout carries the declared value` |
+| `drop(slots)` → `mem::forget` (`crates/substrate-host/src/process.rs:433`) | `left: ["/memfd:substrate-slot-vendor_api_key (deleted)", …×2] right: []` |
+
+The slot value in the test is a synthetic literal, `not-a-credential-…`
+(`crates/substrate-daemon/tests/runtime_vectors.rs:2014`) — no real material in a public
+repository. `bash scripts/check-secrets.sh` → `no leaks found`, 68 commits scanned.
+
+**Gap found while proving this, filed separately, not fixed here:**
+`story:secret-slot-probe-observes-what-it-claims`. The gating probe verifies less than design 11
+§ 5 says it does — it never reads `F_GET_SEALS` on the far side and never enumerates descriptors
+(`crates/substrate-host/src/probe.rs:296-298`, `:313`). It does not weaken what this story ships;
+it means the fact can be published on a host where these cases never ran.

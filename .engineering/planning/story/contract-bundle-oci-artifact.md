@@ -12,7 +12,7 @@ tags:
 relations:
 - decomposes: epic:release-hardening
 - depends_on: story:signed-daemon-image
-revision: 6
+revision: 7
 ---
 # Story: The 0.4.0 contract bundle is a signed, digest-pinned OCI artifact
 
@@ -30,14 +30,14 @@ every bundle path except itself, and the outer OCI manifest digest pins `bundle.
 
 ## Acceptance
 
-`scripts/package-contract-bundle.py <version>` produces a deterministic OCI layout from
+`cargo xtask package-bundle <version>` produces a deterministic OCI layout from
 `contracts/substrate-wire/<version>/` without writing into `contracts/`, two runs yield
 byte-identical manifests, and the release workflow publishes and signs it at
 `ghcr.io/beyond10x/b10x-substrate-wire:<bundle-version>` with the digest in `CHANGELOG.md`.
 
 Evidence that satisfies it:
 
-- `scripts/test_package_contract_bundle.py`: identical manifests on two runs; a one-byte change in
+- `xtask/src/package.rs` tests: identical manifests on two runs; a one-byte change in
   any bundle file changes the manifest digest — written failing-first against a stub that embeds
   a timestamp;
 - `bundle.json` matches design 07's shape and a checker asserts each digest and byte length;
@@ -49,7 +49,7 @@ Evidence that satisfies it:
 
 ## Progress — 2026-08-29 (packager half)
 
-- `scripts/package-contract-bundle.py <version> --out <dir>`: OCI Image Layout (`oci-layout`,
+- `cargo xtask package-bundle <version> --out <dir>`: OCI Image Layout (`oci-layout`,
   `index.json`, `blobs/sha256/…`); config **is** `bundle.json` verbatim, media type
   `application/vnd.b10x.substrate-wire.bundle.v1+json`, so the manifest digest pins
   `bundle.json` (design 07 § *Bundle*); one layer per bundle file, layer digest = the `sha256`
@@ -57,13 +57,13 @@ Evidence that satisfies it:
   `dev.b10x.contract.status=development`, `ref.name` on the index entry. Refuses `--out` inside
   `contracts/`, non-empty `--out` without `--force`, symlinks, a file set disagreeing with
   `bundle.json`.
-- `scripts/test_package_contract_bundle.py`: 14 tests; determinism test written failing-first
+- 14 tests; determinism test written failing-first
   against a timestamp-embedding stub (`FAILED (failures=1)`), then green. Two runs on `0.4.0` →
   `sha256:f94d15fc116587d991aab6de5628f6ee5baf872af4e7c79d2a35e2b17a8485c4`, `diff -r` empty.
   `oras manifest fetch --oci-layout` resolves the same digest; `oras pull` round-trip matches
   `contracts/substrate-wire/0.4.0` byte for byte.
 - `check-contract-bundle-0.4.0.py` → exit 0; `git status contracts/` → clean (invariant 6).
-- Wired into the gate at `scripts/gate.sh:24`.
+- Gated by `cargo test --workspace` (`scripts/gate.sh:15`), not by a gate line of its own.
 - The `posix-tar` archive `packaging.json` declares is now the last layer (media type
   `application/vnd.b10x.substrate-wire.bundle.tar`, title `0.4.0.tar`): ustar, directory entries
   0755 ahead of files 0644, uid/gid 0, empty names, bytewise order, every mtime =
@@ -76,3 +76,21 @@ Evidence that satisfies it:
   tip's author time — pin `--source-date-epoch` there.
 - **Open:** the publish/sign half — `release.yml`, `ghcr.io/beyond10x/b10x-substrate-wire`,
   cosign, digest in `CHANGELOG.md` — waits on `story:signed-daemon-image`.
+
+## Correction — 2026-08-30
+
+The two Python names this story was written against no longer exist. `ef22de0` ("the bundle
+packager is cargo xtask package-bundle, and its Python is gone") ported the packager and deleted
+`scripts/package-contract-bundle.py` and `scripts/test_package_contract_bundle.py`. Acceptance and
+the progress notes above now name the Rust verb; the behaviour they assert is unchanged, and the
+`0.4.0` manifest digests recorded above were observed against the Python and have not been
+re-observed against the verb.
+
+Coverage is not lost in the move: `xtask/src/package.rs` carries 21 `#[test]`s (was 21 Python
+tests), and `cargo test --workspace` at `scripts/gate.sh:15` runs them. There is no
+`package-bundle` line in `scripts/gate.sh` and none is needed.
+
+**Still open, unchanged:** the publish/sign half — `release.yml`,
+`ghcr.io/beyond10x/b10x-substrate-wire`, cosign, digest in `CHANGELOG.md`. It waits on
+`story:signed-daemon-image`, which is a draft. This story cannot reach `implemented` until that
+one is designed and built.
