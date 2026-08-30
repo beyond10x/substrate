@@ -26,7 +26,7 @@ run python3 scripts/check-contract-bundle-0.4.0.py
 # xtask verbs").
 run cargo xtask check-bundle 0.5.0
 run cargo xtask check-bundle 0.6.0
-run python3 scripts/test_contract_json_gate.py
+run cargo xtask check-json
 run cargo xtask check-toolchain
 
 

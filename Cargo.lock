@@ -2111,8 +2111,10 @@ version = "0.2.2"
 dependencies = [
  "anyhow",
  "clap",
+ "fancy-regex",
  "hex",
  "jsonschema",
+ "serde",
  "serde_json",
  "sha2",
  "substrate-wire",

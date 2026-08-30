@@ -43,7 +43,7 @@ Each is a claim that can be checked. Breaking one is a design change, not a refa
 6. **Every released contract bundle directory is immutable.** `contracts/substrate-wire/0.1.0`
    through `0.6.0` exist; `0.6.0` is the current development bundle, adding destination-bound egress
    apertures (ADR 0013), and **every earlier directory is frozen** (`STATUS.md:36`,
-   `scripts/contract_json_gate.py:283`, `contracts/substrate-wire/0.2.0/README.md:13`).
+   `xtask/src/json.rs:152`, `contracts/substrate-wire/0.2.0/README.md:13`).
    The daemon still advertises `substrate-wire/0.4.0` in `x-b10x-contract`
    (`crates/substrate-daemon/src/app.rs:3`): a bundle exists to be pinned by a consumer before the
    server claims it, and moving the header is its own change with its own clients to notify. A wire change **adds a successor bundle**; it
@@ -121,7 +121,7 @@ In order: `cargo test --workspace --locked`, `cargo fmt --all --check`,
 `cargo clippy --workspace --all-targets --locked -- -D warnings`, then `cargo xtask check-links`,
 `cargo xtask check-adrs`, `check-contract-bundle.py`, `check-contract-bundle-0.2.0.py`,
 `-0.3.0.py`, `-0.4.0.py`, `cargo xtask check-bundle 0.5.0`, `check-bundle 0.6.0`,
-`test_contract_json_gate.py` and `cargo xtask check-toolchain`.
+`cargo xtask check-json` and `cargo xtask check-toolchain`.
 Green here is the bar for `main`.
 The former brand is fenced org-wide by `scripts/check-org-brand.sh` in the **atlas** repo, not here.
 
@@ -138,6 +138,7 @@ bundles' reproducibility proof (invariant 6), not as tooling.
 | `package-bundle <version> --out <dir>` | produces a released bundle as a deterministic OCI image layout | no — under `cargo test` |
 | `render-bundle <version> --out <dir>` | produces a bundle tree from `substrate-wire` and `xtask/bundle-source/<version>/`; refuses to write anywhere under `contracts/` | no — under `cargo test` |
 | `check-bundle <version>` | a released bundle whose bytes are not the fixed point of `xtask/bundle-source/<version>/` | yes, `0.5.0` and `0.6.0` |
+| `check-json [<version>...]` | JSON beneath a released bundle that no bundled schema classifies, that its schema rejects, or that is not in deterministic source form | yes, all six |
 
 **`cargo xtask package-bundle <version> --out <dir>`** packages a released bundle as a
 deterministic OCI image layout. It is not a gate step of its own: its cases run under
@@ -148,7 +149,8 @@ for `0.5.0` onward. `xtask/bundle-source/<version>/` holds what a human authored
 emitted path, plus `routes.json`, `coverage.json`, `hash-cases.json`, `vector-order.json` and
 `executable-vectors.json`; the renderer computes 30 of `0.4.0`'s 200 files whole and splices
 computed values into 14 more. It lives outside `contracts/` because every directory there is a
-released bundle and `scripts/contract_json_gate.py:301` fails closed on JSON beneath one. Rendering
+released bundle and `cargo xtask check-json` fails closed on JSON beneath one
+(`xtask/src/json.rs:165`). Rendering
 into `contracts/` is a named refusal, not a warning. A test asserts that rendering `0.4.0` still
 reproduces the frozen tree byte for byte, so the renderer cannot drift away from what shipped.
 
@@ -166,8 +168,10 @@ insertion order, which a sorted-key bundle preserves nowhere.
 reason.** `crates/substrate-daemon/tests/runtime_vectors.rs` spawns the *shipped* binary
 (`env!("CARGO_BIN_EXE_substrate-daemon")`) and drives it over its Unix socket with a
 hand-written HTTP/1.1 and WebSocket client, so it links no implementation and asserts only on
-the wire; `cargo test --workspace --locked` runs it. Its portable lane asserts the named
-refusal `exec.sandbox-unavailable` (501). Its delegated lane runs only when
+the wire; `cargo test --workspace --locked` runs it. Its portable lane asserts three named
+refusals — `exec.sandbox-unavailable` (501), `exec.secret-slots-unserved` (501) and
+`exec.secret-slot-descriptor-invalid` (422) — across 31 cases, and its delegated lane 48
+(`crates/substrate-daemon/tests/runtime_vectors.rs:2353-2354`). Its delegated lane runs only when
 `SUBSTRATE_VECTORS_CGROUP_ROOT` names a delegated cgroup v2 subtree the test process is inside;
 unset, those cases are **absent, never reported as passed** (invariant 3). **`bash scripts/delegated-lane.sh`
 runs that lane and needs no privilege** — it asks systemd for a delegated scope, moves itself into a

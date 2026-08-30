@@ -8,6 +8,7 @@
 
 mod adrs;
 mod bundle;
+mod json;
 mod links;
 mod package;
 mod render;
@@ -44,6 +45,9 @@ enum Command {
     /// Validate ADR identity, frontmatter, index agreement, and supersession links.
     #[command(name = "check-adrs")]
     Adrs,
+    /// Reject contract JSON that no bundled schema classifies, or that its schema rejects.
+    #[command(name = "check-json")]
+    CheckJson(json::Args),
     /// Package a released contract bundle as a deterministic OCI image layout.
     #[command(name = "package-bundle")]
     PackageBundle(package::Args),
@@ -77,6 +81,7 @@ fn dispatch() -> Result<ExitCode> {
         }
         Command::Links => links::check(&repo::root()?)?,
         Command::Adrs => adrs::check(&repo::root()?)?,
+        Command::CheckJson(args) => return json::run(&args),
         Command::PackageBundle(args) => return package::run(&args),
         Command::CheckBundle(args) => return bundle::run(&args),
         Command::RenderBundle(args) => return render::run(&args),

@@ -17,7 +17,9 @@ import tempfile
 from pathlib import Path, PurePosixPath
 from urllib.parse import unquote_to_bytes
 
-from contract_json_gate import check_json_authority
+# JSON authority classification is `cargo xtask check-json`, a gate step of its own: it was
+# shared live machinery rather than part of this bundle's reproducibility proof, so it moved
+# with the rest of the tooling (atlas AGENTS.md, section "Language").
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -1596,7 +1598,6 @@ def main() -> int:
     failures: list[str] = []
     documents = Documents(failures)
     listed, executable_vectors, design_vectors = check_manifest(documents, failures)
-    json_documents = check_json_authority(BUNDLE, "0.2.0", documents, validate, failures)
     check_renderer_reproducibility(failures)
     check_schema_references(documents, listed, failures)
     operations, _ = check_registry(documents, failures)
@@ -1610,7 +1611,7 @@ def main() -> int:
         print("\n".join(failures), file=sys.stderr)
         return 1
     print(
-        f"substrate-wire 0.2.0: {len(listed)} files, {json_documents} classified JSON documents, "
+        f"substrate-wire 0.2.0: {len(listed)} files, "
         f"{len(operations)} closed operations, "
         f"{len(executable_vectors)} executable vectors, {len(design_vectors)} design vectors, "
         f"{len(REQUIRED_COVERAGE)} requirements, and "
