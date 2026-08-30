@@ -11,7 +11,7 @@ tags:
 - wire
 relations:
 - decomposes: epic:byte-plane-completion
-revision: 3
+revision: 4
 ---
 # Story: Network session transport over TLS with single-use proof-bound authority
 
@@ -96,3 +96,40 @@ Not an open exposure: `serve_tcp` bails unless both `--tcp-development-only` and
 reachable only in an explicitly acknowledged development profile on a private overlay. But the story
 asserts a property the code does not have, so either the acceptance must change or the router must
 split — and nothing in the tree specifies a split. Decide it in the ADR this story still owes.
+
+## Design draft — 2026-08-30
+
+`docs/design/14-network-session-authority.md`, **proposed**. Claims no ADR number.
+
+- **Proof binding: a client Ed25519 key, signing the RFC 5705 exporter.** The exporter alone proves
+  nothing — both ends of any TLS session derive a matching value, so a thief redeems on their own
+  connection; it stops a re-encrypting proxy and nothing else, and calling that "proof-bound" is
+  invariant 3's silent degradation. The key costs no new crate.
+- **TLS is `rustls` + `tokio-rustls`.** `native-tls` does not portably expose
+  `export_keying_material`, so choosing it would decide the binding by omission.
+- **Single redemption is consumed inside `claim_pipe_session_attachment`'s existing `Immediate`
+  transaction** (`crates/substrate-store/src/sessions.rs:526-546`), in new columns beside
+  `resource_json` and never in it — a second transaction leaves a window where the authority is
+  spent and the attachment is not, and `resource_json` is returned by `GET /v1/pipe-sessions/{id}`.
+
+**The acceptance this story carried was false, and it stands — the code changes.** The
+development-only TCP transport already serves the attach route: `serve_tcp` builds its service with
+the same `router(app)` as the Unix path (`crates/substrate-daemon/src/runtime.rs:785` against
+`:514`), and that router registers `/v1/pipe-sessions/{session_id}/attach`
+(`crates/substrate-daemon/src/app/routes.rs:75-78`). The design splits the router by property: no
+listener that cannot carry an authority confidentially serves the mint or the attach.
+
+**Why the split rather than restating the acceptance, verified independently by the orchestrator.**
+`--tcp-private-overlay` is a bare boolean an operator asserts; there is **no `is_loopback` call
+anywhere** in `crates/substrate-daemon/src/runtime.rs` or `src/main.rs`, so a non-loopback plaintext
+bind is accepted, and the bearer guarding it has no expiry or rotation (`read_bearer_digest`). On a
+wrongly-declared "private" address, one observer owns every confined process's stdin and stdout,
+indefinitely. A fifth startup `bail!` refusing non-loopback plaintext lands with the split.
+
+The static-bearer TCP path is **kept and narrowed**, not superseded: removing `--tcp-listen` breaks
+a documented posture and buys nothing here.
+
+Bundle `0.9.0` is **provisional**: design 13 names it too.
+
+Not established: the exporter label string is a new wire-visible identifier, and whether it may
+carry the former brand is atlas ADR 0001's call — deferred to the bundle cut.
