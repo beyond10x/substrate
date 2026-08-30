@@ -296,13 +296,19 @@ fn check_route_paths(
 ) {
     let previous_ids = previous.ids();
     let predecessor_root = inputs.contracts_root.join(predecessor);
+    // The version a bundle states about itself is what its documents repeat, and therefore what may
+    // be erased from them — so it is read out of the bundle rather than off the directory name. For
+    // every released bundle the two agree, and `check-bundle` on that bundle is what makes them
+    // agree; taking the declared one keeps this from depending on a coincidence it does not check.
+    let published_version = declared_version(&predecessor_root, released, false, predecessor);
+    let offered_version = declared_version(&predecessor_root, released, true, &inputs.version);
     let published = Side::Released {
         root: &predecessor_root,
-        version: predecessor,
+        version: &published_version,
     };
     let offered = Side::Rendered {
         tree: released,
-        version: &inputs.version,
+        version: &offered_version,
     };
     // A path is pinned as firmly as an id, and moving one is invisible to everything above: the id
     // difference is empty, so the counts are the predecessor's own and nothing is dropped. A
@@ -651,7 +657,30 @@ const DECLARED_MEMBERS: [&str; 3] = ["id", "path", "alias_of"];
 /// the second, and a route whose response schema changed does not answer at the old path the way it
 /// did. `docs/design/16-sessions-are-not-pipe-sessions.md` changes no schema document, so all seven
 /// of the routes it moves stay declarable.
-const SCHEMA_MEMBERS: [&str; 3] = ["address_schema", "input_schema", "result_schema"];
+const SCHEMA_MEMBERS: [(&str, Facing); 3] = [
+    ("address_schema", Facing::Request),
+    ("input_schema", Facing::Request),
+    ("result_schema", Facing::Response),
+];
+
+/// The [`Facing`] of a registry member that names a schema document, or `None` if it names none.
+fn facing_of(member: &str) -> Option<Facing> {
+    SCHEMA_MEMBERS
+        .iter()
+        .find(|(name, _)| *name == member)
+        .map(|(_, facing)| *facing)
+}
+
+/// The parameters a path template takes, in order, exactly as the renderer reads them.
+///
+/// A mirror of `xtask/src/render.rs:653-662`, which is the function that decides what a generated
+/// address document requires: a whole segment of the form `{name}`, and nothing else — so a literal
+/// brace inside a segment is not a parameter here any more than it is there.
+fn path_parameters(path: &str) -> Vec<&str> {
+    path.split('/')
+        .filter_map(|segment| segment.strip_prefix('{')?.strip_suffix('}'))
+        .collect()
+}
 
 /// A path template with its parameter *names* removed: `/v1/x/{a}` and `/v1/x/{b}` are one shape.
 ///
@@ -668,10 +697,32 @@ const SCHEMA_MEMBERS: [&str; 3] = ["address_schema", "input_schema", "result_sch
 /// to reach a path `/v1/pipe-sessions/{session_id}` already occupies. And an operation has moved
 /// only when its shape has, so renaming `{session_id}` to `{id}` is not a move at all: no concrete
 /// URL changed, and there is nothing for a consumer to have pinned differently.
+///
+/// **Not every `{` opens a parameter.** matchit escapes a literal brace by doubling it — "the `{`
+/// character is escaped with `{{` and the `}` character is escaped with `}}`"
+/// (`matchit-0.8.4/src/lib.rs:57`) — and `UnescapedRoute::new` (`src/escape.rs`) collapses each pair
+/// to one character in a single left-to-right pass, recording that position so the parameter scan
+/// never treats it as a delimiter. `/v1/machine/x{{a}}y` and `/v1/machine/x{{b}}y` are therefore two
+/// *static* routes matching the two distinct concrete URLs `/v1/machine/x{a}y` and
+/// `/v1/machine/x{b}y`, and erasing both to one shape would erase a move between them. This mirrors
+/// that pass: a doubled brace is one literal character and opens and closes nothing, inside a
+/// parameter name or outside one.
 fn path_shape(path: &str) -> String {
     let mut shape = String::with_capacity(path.len());
     let mut parameter: Option<String> = None;
-    for character in path.chars() {
+    let mut characters = path.chars().peekable();
+    while let Some(character) = characters.next() {
+        // A doubled brace is one literal character, taken before anything else looks at it — which
+        // is the order `UnescapedRoute::new` uses, and the reason an escaped brace can never
+        // delimit a parameter.
+        if matches!(character, '{' | '}') && characters.peek() == Some(&character) {
+            characters.next();
+            match &mut parameter {
+                Some(name) => name.push(character),
+                None => shape.push(character),
+            }
+            continue;
+        }
         match (character, &mut parameter) {
             ('{', None) => parameter = Some(String::new()),
             ('}', Some(name)) => {
@@ -684,9 +735,11 @@ fn path_shape(path: &str) -> String {
             (_, None) => shape.push(character),
         }
     }
-    if parameter.is_some() {
-        // An unterminated `{` is not a template; say so rather than guessing at a shape.
+    if let Some(name) = parameter {
+        // An unterminated `{` is not a template; keep it and what followed it rather than guessing
+        // at a shape, so an unclosed brace is never mistaken for a parameter or dropped.
         shape.push('{');
+        shape.push_str(&name);
     }
     shape
 }
@@ -748,6 +801,7 @@ impl Routes {
             .ok_or_else(|| anyhow!("no operations array"))?;
         let mut routes = Self::default();
         let mut dispatch: BTreeMap<(&str, String), (&str, &str)> = BTreeMap::new();
+        let mut addressed: BTreeMap<&str, (&str, Vec<&str>)> = BTreeMap::new();
         for entry in entries {
             let (Some(id), Some(path)) = (
                 entry.get("id").and_then(Value::as_str),
@@ -782,6 +836,35 @@ impl Routes {
                     "{method} {} is served by two operations, {} at {} and {} at {}; one method \
                      and path shape reach one operation",
                     route.shape,
+                    both[0].0,
+                    both[0].1,
+                    both[1].0,
+                    both[1].1
+                ));
+            }
+            // The address document is generated per `address_schema` *target*, not per route:
+            // `render.rs:345-381` loops over the routes and `insert`s one document per target,
+            // with `required` taken from that route's own path parameters — so two routes naming
+            // one target produce one document, authored by whichever `routes.json` holds last, and
+            // the other one publishes an address its own path cannot fill.
+            //
+            // Refusing every shared target is not the rule, because a declared move *requires* one:
+            // the shim is a copy of the entry it stands in for, target and all. What has to hold is
+            // that the two would generate the same document, and the generator reads nothing but
+            // the parameter sequence — so the sequences must agree. Design 16's move keeps
+            // `{session_id}` on both paths and is unaffected; a move that renames the parameter as
+            // it goes is refused here rather than shipping an unaddressable operation.
+            let parameters = path_parameters(path);
+            if let Some(target) = entry.get("address_schema").and_then(Value::as_str)
+                && let Some((other, theirs)) = addressed.insert(target, (id, parameters.clone()))
+                && theirs != parameters
+            {
+                let mut both = [(other, theirs), (id, parameters)];
+                both.sort_unstable();
+                return Err(anyhow!(
+                    "{target} is named by {} taking {:?} and by {} taking {:?}; one address \
+                     document is generated per target, from one of the two, so the other publishes \
+                     an address its own path cannot fill",
                     both[0].0,
                     both[0].1,
                     both[1].0,
@@ -876,7 +959,7 @@ struct Closure {
 /// The walk is bounded by what it has already read rather than by depth, so a reference cycle —
 /// legal in a schema tree, and `common.json` is reached from nearly everything — terminates instead
 /// of recursing.
-fn closure_of(side: &Side, start: &str) -> Closure {
+fn closure_of(side: &Side, start: &str, facing: Facing) -> Closure {
     let mut documents: BTreeMap<String, Value> = BTreeMap::new();
     let mut unresolved = BTreeSet::new();
     let mut pending = vec![start.to_owned()];
@@ -888,9 +971,13 @@ fn closure_of(side: &Side, start: &str) -> Closure {
             unresolved.insert(path);
             continue;
         };
-        for reference in references(&document) {
+        let (found, unfollowable) = references(&document);
+        for keyword in unfollowable {
+            unresolved.insert(format!("{path}: {keyword}"));
+        }
+        for reference in found {
             // Everything before the fragment: `../common.json#/$defs/session-id` names a sibling,
-            // `#/$defs/session-id` names this document and is already in hand.
+            // `#/$defs/session-id` or `#attachInput` names this document and is already in hand.
             let target = reference.split('#').next().unwrap_or_default();
             if target.is_empty() {
                 continue;
@@ -902,7 +989,7 @@ fn closure_of(side: &Side, start: &str) -> Closure {
                 }
             }
         }
-        documents.insert(path, normalised(&document, side.version()));
+        documents.insert(path, normalised_facing(&document, side.version(), facing));
     }
     Closure {
         documents,
@@ -910,17 +997,61 @@ fn closure_of(side: &Side, start: &str) -> Closure {
     }
 }
 
-/// Every `$ref` value anywhere in a document.
-fn references(document: &Value) -> Vec<String> {
+/// The keywords that reach another document. Their values are followed.
+const REFERENCE_KEYWORDS: [&str; 3] = ["$ref", "$dynamicRef", "$recursiveRef"];
+
+/// The `$`-prefixed keywords that reach nothing, and are known to reach nothing.
+///
+/// `$id` and `$anchor` name *this* document, `$schema` and `$vocabulary` name the meta-schema,
+/// `$defs` holds subschemas already inside it, and `$comment` is prose. All eight released bundles
+/// use exactly four `$` members between them — `$defs`, `$id`, `$ref`, `$schema` — so the rest of
+/// this list is what 2020-12 permits rather than what has been seen.
+const INERT_KEYWORDS: [&str; 6] = [
+    "$anchor",
+    "$comment",
+    "$defs",
+    "$dynamicAnchor",
+    "$id",
+    "$schema",
+];
+
+/// Everything a document reaches, and everything it might reach that this cannot follow.
+///
+/// `$ref` is not the only reference in Draft 2020-12: `$dynamicRef` is core vocabulary, the pinned
+/// meta-schema admits it, and the validator resolves it — so a document whose whole shape is a
+/// `$dynamicRef` into a sibling reaches that sibling, and a walk that matched `$ref` by name saw
+/// nothing. Matching more names by hand only moves the day that repeats, so the rule is closed
+/// rather than open: a `$`-prefixed member is followed if it is a known reference, ignored if it is
+/// known to be inert, and **reported as unfollowable otherwise**. A keyword this does not know
+/// makes the comparison fail rather than quietly succeed.
+fn references(document: &Value) -> (Vec<String>, BTreeSet<String>) {
     let mut found = Vec::new();
+    let mut unfollowable = BTreeSet::new();
     let mut pending = vec![document];
     while let Some(value) = pending.pop() {
         match value {
             Value::Object(members) => {
                 for (name, member) in members {
-                    match (name.as_str(), member.as_str()) {
-                        ("$ref", Some(reference)) => found.push(reference.to_owned()),
-                        _ => pending.push(member),
+                    if !name.starts_with('$') {
+                        pending.push(member);
+                        continue;
+                    }
+                    if INERT_KEYWORDS.contains(&name.as_str()) {
+                        // `$defs` holds subschemas, and those are walked; the others hold no
+                        // schema, but walking them is harmless and keeps this one branch.
+                        pending.push(member);
+                    } else if REFERENCE_KEYWORDS.contains(&name.as_str()) {
+                        match member.as_str() {
+                            Some(reference) => found.push(reference.to_owned()),
+                            None => {
+                                unfollowable.insert(format!("{name} is not a string"));
+                            }
+                        }
+                    } else {
+                        unfollowable.insert(format!(
+                            "{name} is neither a reference this follows nor a keyword known to \
+                             reach nothing"
+                        ));
                     }
                 }
             }
@@ -928,49 +1059,118 @@ fn references(document: &Value) -> Vec<String> {
             _ => {}
         }
     }
-    found
+    (found, unfollowable)
 }
 
-/// A document with everything that names the bundle it lives in taken out.
-///
-/// Two versions of one document differ wherever the document states its own version, and they state
-/// it in more than one shape. Measured across all eight released bundles, every string carrying a
-/// bundle's own version is one of five: the bare version, `substrate-wire/<version>`,
-/// `substrate-wire@<version>`, `urn:b10x:substrate-wire:<version>:…` — which is what `$id` is, so it
-/// needs no special case of its own — and a renderer file name. The version is therefore replaced
-/// wherever it occurs as a whole number, which covers all five and any sixth a successor invents.
-///
-/// Without this, one of the seven routes `docs/design/16-sessions-are-not-pipe-sessions.md` moves
-/// could not be declared at all: `schemas/results/pipe-session-capabilities.json` states
-/// `substrate-wire/<version>` at `/properties/contract/const`, so a shim that is a byte-copy of the
-/// operation it stands in for still "differed" from it. The escape — giving the shim a private
-/// frozen copy of the document — is the shape that design rejects in as many words, because
-/// splitting the schema reintroduces the drift the alias exists to prevent, and it would make one
-/// daemon answer two contract versions at two paths.
-fn normalised(document: &Value, version: &str) -> Value {
-    fn walk(value: &Value, version: &str) -> Value {
-        match value {
-            Value::Object(members) => Value::Object(
-                members
-                    .iter()
-                    .map(|(name, member)| (name.clone(), walk(member, version)))
-                    .collect(),
-            ),
-            Value::Array(items) => {
-                Value::Array(items.iter().map(|item| walk(item, version)).collect())
-            }
-            Value::String(text) => Value::String(without_version(text, version)),
-            other => other.clone(),
+/// The version a bundle states about itself in its own `compatibility.json`, or `fallback`.
+fn declared_version(root: &Path, tree: &Tree, rendered: bool, fallback: &str) -> String {
+    let side = if rendered {
+        Side::Rendered {
+            tree,
+            version: fallback,
         }
+    } else {
+        Side::Released {
+            root,
+            version: fallback,
+        }
+    };
+    side.read("compatibility.json")
+        .as_ref()
+        .and_then(|document| document.get("version"))
+        .and_then(Value::as_str)
+        .unwrap_or(fallback)
+        .to_owned()
+}
+
+/// Which way a document faces, which decides whether the version in it may be erased.
+///
+/// A version a document **states** and a version a document **demands** are the same string and
+/// opposite facts. `schemas/results/pipe-session-capabilities.json` states `substrate-wire/<v>`: the
+/// daemon writes it, so a shim writing the successor's really does answer as the predecessor did,
+/// and erasing it is what makes design 16's move of that route declarable at all. Put the same
+/// string in an **input** and it is a value the *client* must send — a consumer pinned to `0.7.0`
+/// sends `0.7.0`, and a shim demanding `0.8.0` refuses every request the declaration promised would
+/// keep working. Erased, those two are indistinguishable; kept apart by which member named the
+/// document, they are not.
+///
+/// Measured rather than assumed, and it costs nothing: across `0.7.0` and `0.8.0`, of the 49
+/// documents reachable from an `address_schema` or an `input_schema`, **none** carries a version
+/// string anywhere but in its own `$id`; of the 32 reachable from a `result_schema`, exactly one
+/// does, and it is the capabilities result that drove the erasure in the first place.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Facing {
+    /// `address_schema` and `input_schema`: what a client must send. Nothing is erased but the
+    /// document's own name, so a version it demands is compared as the value it is.
+    Request,
+    /// `result_schema`: what the daemon writes. A version the document states about itself is
+    /// erased, because stating the successor's is answering as before.
+    Response,
+}
+
+/// A document with the parts that name the bundle it lives in taken out, as its [`Facing`] allows.
+fn normalised_facing(document: &Value, version: &str, facing: Facing) -> Value {
+    match facing {
+        Facing::Response => normalised(document, version),
+        Facing::Request => without_identity(document),
     }
-    walk(document, version)
+}
+
+/// A document the daemon writes, with everything naming this bundle taken out.
+///
+/// `$id` is dropped — it is the document's own name, and its
+/// `urn:b10x:substrate-wire:<version>:…` form is the only place the urn shape occurs in any of the
+/// eight released bundles — and every whole occurrence of the version is replaced besides.
+///
+/// This is what makes design 16's move of `session.capabilities` declarable:
+/// `schemas/results/pipe-session-capabilities.json` states `substrate-wire/<version>` at
+/// `/properties/contract/const`, so without it a shim that is a byte-copy of the operation it
+/// stands in for still "differed" from it. The escape — giving the shim a private frozen copy of
+/// the document — is the shape that design rejects in as many words, because splitting the schema
+/// reintroduces the drift the alias exists to prevent, and it would make one daemon answer two
+/// contract versions at two paths.
+fn normalised(document: &Value, version: &str) -> Value {
+    match document {
+        Value::Object(members) => Value::Object(
+            members
+                .iter()
+                .filter(|(name, _)| name.as_str() != "$id")
+                .map(|(name, member)| (name.clone(), normalised(member, version)))
+                .collect(),
+        ),
+        Value::Array(items) => {
+            Value::Array(items.iter().map(|item| normalised(item, version)).collect())
+        }
+        Value::String(text) => Value::String(without_version(text, version)),
+        other => other.clone(),
+    }
+}
+
+/// A document a client must satisfy, with only the document's own name taken out.
+///
+/// No version is erased here, and that is the whole of [`Facing`]: a version in an input or an
+/// address is a value the *client* sends, so a shim demanding the successor's refuses every request
+/// a consumer pinned to the predecessor can build. Comparing those two strings as they stand is
+/// what catches it — including `substrate-wire/<version>`, which the response side does erase.
+fn without_identity(document: &Value) -> Value {
+    match document {
+        Value::Object(members) => Value::Object(
+            members
+                .iter()
+                .filter(|(name, _)| name.as_str() != "$id")
+                .map(|(name, member)| (name.clone(), without_identity(member)))
+                .collect(),
+        ),
+        Value::Array(items) => Value::Array(items.iter().map(without_identity).collect()),
+        other => other.clone(),
+    }
 }
 
 /// `text` with every whole occurrence of `version` replaced by a placeholder.
 ///
 /// "Whole" means not bordered by a digit on either side, so `0.8.0` inside `10.8.05` is left alone
 /// while `urn:…:0.8.0:result:…`, `substrate-wire@0.8.0` and `render-contract-bundle-0.8.0.py` are
-/// all normalised.
+/// all normalised. Applied only to a document the daemon writes — see [`Facing`].
 fn without_version(text: &str, version: &str) -> String {
     if version.is_empty() {
         return text.to_owned();
@@ -1015,14 +1215,14 @@ fn declaration_differences(
         .collect();
     let mut differing = Vec::new();
     for member in members {
-        let same = if SCHEMA_MEMBERS.contains(&member) {
+        let same = if let Some(facing) = facing_of(member) {
             match (
                 was.member(member).and_then(Value::as_str),
                 shim.member(member).and_then(Value::as_str),
             ) {
                 (Some(was_reference), Some(shim_reference)) => {
-                    let published = closure_of(published, was_reference);
-                    let offered = closure_of(offered, shim_reference);
+                    let published = closure_of(published, was_reference, facing);
+                    let offered = closure_of(offered, shim_reference, facing);
                     published.unresolved.is_empty()
                         && offered.unresolved.is_empty()
                         && published.documents == offered.documents
@@ -3065,6 +3265,24 @@ mod tests {
         // `/v1/x/{a}` alone does not catch.
         assert_ne!(path_shape("/v1/x/{a"), path_shape("/v1/x/{a}"));
         assert_ne!(path_shape("/v1/x/{a"), path_shape("/v1/x/"));
+
+        // And not every `{` opens a parameter. matchit escapes a literal brace by doubling it, so
+        // these are static routes matching distinct concrete URLs, and erasing them to one shape
+        // erases a move between them.
+        assert_ne!(path_shape("/v1/x/y{{a}}z"), path_shape("/v1/x/y{{b}}z"));
+        assert_ne!(path_shape("/v1/x/{{a}}"), path_shape("/v1/x/{{b}}"));
+        // matchit's own example: the escaped form is a static route, the bare form a parameter.
+        assert_ne!(path_shape("/{{hello}}"), path_shape("/{hello}"));
+        // An escaped brace stays literal, so a static segment is never a parameter.
+        assert_ne!(path_shape("/v1/x/{{a}}"), path_shape("/v1/x/{a}"));
+        // Escaped braces beside a real parameter leave the parameter a parameter.
+        assert_eq!(path_shape("/v1/x/{{a}}/{b}"), path_shape("/v1/x/{{a}}/{c}"));
+        assert_ne!(path_shape("/v1/x/{{a}}/{b}"), path_shape("/v1/x/{{z}}/{b}"));
+        // A doubled brace *inside* a parameter name is part of the name and closes nothing —
+        // `UnescapedRoute::new` marks it before the parameter scan runs — so this is one parameter
+        // and one shape, not a parameter followed by a literal.
+        assert_eq!(path_shape("/v1/x/{a}}b}/y"), path_shape("/v1/x/{q}/y"));
+        assert_ne!(path_shape("/v1/x/{a}}b}/y"), path_shape("/v1/x/{a}/b}/y"));
     }
 
     /// And the rule holds where it has to hold: no released bundle serves one method and shape
@@ -3150,6 +3368,7 @@ mod tests {
                     version: VERSION,
                 },
                 "schemas/addresses/a.json",
+                super::Facing::Request,
             )
         };
         let (wide, narrow) = (closure(&wide), closure(&narrow));
@@ -3186,6 +3405,7 @@ mod tests {
                 version: VERSION,
             },
             "schemas/a.json",
+            super::Facing::Request,
         );
         assert!(closure.unresolved.is_empty());
         assert_eq!(closure.documents.len(), 2, "both documents, once each");
@@ -3211,6 +3431,7 @@ mod tests {
                 version: VERSION,
             },
             "schemas/a.json",
+            super::Facing::Request,
         );
         assert_eq!(
             closure.unresolved,
@@ -3227,7 +3448,12 @@ mod tests {
     /// Class: a member that states the bundle's own version differs at every boundary by
     /// construction, and does it in more than one shape.
     ///
-    /// The red case is the one shape a route can reach — `substrate-wire/<version>`, in
+    /// This is the **response-side** rule — [`super::Facing::Response`], the documents a daemon
+    /// writes — and it is the only side any version is erased from; the request side is pinned by
+    /// `a_shim_that_demands_the_successors_version_declares_nothing` and
+    /// `a_shim_demanding_the_self_naming_version_in_an_input_declares_nothing`.
+    ///
+    /// One shape a route can reach — `substrate-wire/<version>`, in
     /// `schemas/results/pipe-session-capabilities.json`. The other three live in `bundle.json`,
     /// `compatibility.json`, `origins.json` and `packaging.json`, which no route's schema reaches,
     /// so they are pinned here rather than through a rendered successor.
@@ -3386,6 +3612,891 @@ mod tests {
                 report.failure_text()
             );
         }
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Adversarial cases, fourth pass. Added against 10c6c3e; they assert the story's acceptance
+    // against successors the cases above do not build.
+    // ------------------------------------------------------------------------------------------
+
+    /// The path a moved operation *lands* on is not the path its published address schema
+    /// describes, and a declared move is what makes that expressible.
+    ///
+    /// `Rendered::address_schemas` keys the generated documents by the `address_schema` string
+    /// (`xtask/src/render.rs:345-381`) and writes them with `insert`, so two routes naming one
+    /// target produce one document, generated from whichever of the two `routes.json` holds
+    /// **last**. A declared move gives two routes exactly that: the shim is a copy of the entry it
+    /// stands in for, target and all, and `declare_alias` appends it — so the entry left behind
+    /// authors the address schema of the operation that moved.
+    ///
+    /// Here `session.attach` lands on `/v1/sessions/{exec_id}/attach` while the shim keeps
+    /// `/v1/pipe-sessions/{session_id}/attach`. The address schema both name requires `session_id`
+    /// and forbids everything else, so no request to the path `session.attach` now answers at can
+    /// produce an address that validates. The operation is unaddressable and the bundle verifies.
+    #[test]
+    fn a_moved_operation_publishes_an_address_schema_its_own_path_can_fill() {
+        const LANDS_ON: &str = "/v1/sessions/{exec_id}/attach";
+        let (_scratch, inputs) = author_a_successor("borrowed-address", |authored| {
+            admit_alias_of(authored);
+            edit_json(&authored.join("routes.json"), |routes| {
+                let routes = routes.as_array_mut().expect("routes.json is an array");
+                let mut shim = routes
+                    .iter_mut()
+                    .find(|route| route.get("id").and_then(Value::as_str) == Some(MOVED_ID))
+                    .map(|route| {
+                        assert_eq!(route["path"], json!(MOVED_FROM), "{MOVED_ID} moved already");
+                        route["path"] = json!(LANDS_ON);
+                        route.clone()
+                    })
+                    .expect("the moved route");
+                shim["id"] = json!(ALIAS_ID);
+                shim["path"] = json!(MOVED_FROM);
+                shim["alias_of"] = json!(MOVED_ID);
+                // Appended, exactly as `declare_alias` writes a declaration.
+                routes.push(shim);
+            });
+            edit_json(&authored.join("documents/schemas/bundle.json"), |bundle| {
+                bundle["properties"]["compatibility"]["properties"]["adds_routes"] =
+                    json!({ "const": 1 });
+            });
+        });
+
+        let published: Value = serde_json::from_slice(
+            &std::fs::read(
+                inputs
+                    .contracts_root
+                    .join(VERSION)
+                    .join("schemas/addresses/pipe-session-attach.json"),
+            )
+            .expect("the rendered address schema"),
+        )
+        .expect("the rendered address schema parses");
+        assert_eq!(
+            published["required"],
+            json!(["session_id"]),
+            "the shim, authored last, wrote the one document both entries name"
+        );
+        assert_eq!(
+            published["additionalProperties"],
+            json!(false),
+            "and it forbids the parameter the moved path actually carries"
+        );
+
+        let report = check(&inputs).expect("the successor reads");
+        assert!(
+            !report.failures().is_empty(),
+            "{MOVED_ID} answers at {LANDS_ON} and publishes an address requiring session_id, so \
+             no request can address it: {}",
+            report.failure_text()
+        );
+    }
+
+    /// And the verdict on one and the same pair of served routes turns on array order alone.
+    ///
+    /// The case above is accepted because the shim is authored *after* the operation it stands in
+    /// for. Authored before it, the same two entries — same ids, same paths, same members, the same
+    /// two URLs answering — are refused, because now the moved operation writes the one document
+    /// both name and the shim's copy of it stops matching what the predecessor published. A verdict
+    /// on a registry has to be a function of the routes it serves; `Routes::read` already says so
+    /// for a duplicated id, and the same property is owed here.
+    #[test]
+    fn a_declared_move_gets_the_same_verdict_in_either_authored_order() {
+        let shim_last = the_verdict_on_a_borrowed_address("borrowed-last", true);
+        let shim_first = the_verdict_on_a_borrowed_address("borrowed-first", false);
+        assert_eq!(
+            shim_last, shim_first,
+            "the same two served routes, two array orders, two verdicts"
+        );
+    }
+
+    /// Renders the declared move of `MOVED_ID` onto a path carrying a differently *named*
+    /// parameter, with the shim that keeps `MOVED_FROM` answering authored either last or first,
+    /// and hands back what the gate said.
+    fn the_verdict_on_a_borrowed_address(prefix: &str, shim_last: bool) -> Vec<String> {
+        const LANDS_ON: &str = "/v1/sessions/{exec_id}/attach";
+        let (_scratch, inputs) = author_a_successor(prefix, |authored| {
+            admit_alias_of(authored);
+            edit_json(&authored.join("routes.json"), |routes| {
+                let routes = routes.as_array_mut().expect("routes.json is an array");
+                let at = routes
+                    .iter()
+                    .position(|route| route.get("id").and_then(Value::as_str) == Some(MOVED_ID))
+                    .expect("the moved route");
+                let mut shim = routes[at].clone();
+                assert_eq!(shim["path"], json!(MOVED_FROM), "{MOVED_ID} moved already");
+                routes[at]["path"] = json!(LANDS_ON);
+                shim["id"] = json!(ALIAS_ID);
+                shim["alias_of"] = json!(MOVED_ID);
+                if shim_last {
+                    routes.push(shim);
+                } else {
+                    routes.insert(at, shim);
+                }
+            });
+            edit_json(&authored.join("documents/schemas/bundle.json"), |bundle| {
+                bundle["properties"]["compatibility"]["properties"]["adds_routes"] =
+                    json!({ "const": 1 });
+            });
+        });
+        check(&inputs)
+            .expect("the successor reads")
+            .failures()
+            .to_vec()
+    }
+
+    /// The one mutant `10c6c3e` reports as surviving-because-equivalent is not equivalent.
+    ///
+    /// Its argument: `shims_for` may filter on `alias.path == was.path` instead of
+    /// `alias.shape == was.shape`, because "a shim on the vacated shape but not the vacated string
+    /// must carry a different parameter name, and the renderer derives the address schema's
+    /// property from that name, so the closure always differs — driven both ways, the verdict is
+    /// the same refusal with a different clause".
+    ///
+    /// The renderer does not derive the document from the asking route's parameter name. It derives
+    /// one document per `address_schema` *string*, from whichever route names it last
+    /// (`xtask/src/render.rs:345-381`), and a shim names the same string as the operation it copies.
+    /// So here the shim stands at `/v1/pipe-sessions/{exec_id}/attach` — the vacated shape, never
+    /// the vacated string — and the moved operation, authored after it, writes the shared document
+    /// with `session_id`. Every closure matches the predecessor's, nothing differs, and the shape
+    /// filter is the only thing that admitted this shim at all: under the mutant no shim is found
+    /// and the move is refused. Two verdicts, so the mutant is live and unpinned.
+    ///
+    /// It is also not a verdict the shape rule can defend. `additionalProperties: false` on an
+    /// address requiring `session_id` cannot be satisfied from a template whose only parameter is
+    /// `exec_id`, so the entry left standing on the vacated URL space is itself unaddressable.
+    #[test]
+    fn a_shim_at_the_vacated_shape_answers_at_an_address_it_can_fill() {
+        const SHIM_AT: &str = "/v1/pipe-sessions/{exec_id}/attach";
+        let (_scratch, inputs) = author_a_successor("shape-not-string", |authored| {
+            admit_alias_of(authored);
+            edit_json(&authored.join("routes.json"), |routes| {
+                let routes = routes.as_array_mut().expect("routes.json is an array");
+                let at = routes
+                    .iter()
+                    .position(|route| route.get("id").and_then(Value::as_str) == Some(MOVED_ID))
+                    .expect("the moved route");
+                let mut shim = routes[at].clone();
+                assert_eq!(shim["path"], json!(MOVED_FROM), "{MOVED_ID} moved already");
+                routes[at]["path"] = json!(MOVED_TO);
+                shim["id"] = json!(ALIAS_ID);
+                shim["path"] = json!(SHIM_AT);
+                shim["alias_of"] = json!(MOVED_ID);
+                // Authored before the operation it stands in for, so that operation writes the one
+                // address document the two of them name.
+                routes.insert(at, shim);
+            });
+            edit_json(&authored.join("documents/schemas/bundle.json"), |bundle| {
+                bundle["properties"]["compatibility"]["properties"]["adds_routes"] =
+                    json!({ "const": 1 });
+            });
+        });
+
+        let published: Value = serde_json::from_slice(
+            &std::fs::read(
+                inputs
+                    .contracts_root
+                    .join(VERSION)
+                    .join("schemas/addresses/pipe-session-attach.json"),
+            )
+            .expect("the rendered address schema"),
+        )
+        .expect("the rendered address schema parses");
+        assert_eq!(
+            published["required"],
+            json!(["session_id"]),
+            "the moved operation, authored last, wrote the document the shim also names"
+        );
+
+        let report = check(&inputs).expect("the successor reads");
+        assert!(
+            !report.failures().is_empty(),
+            "{ALIAS_ID} stands at {SHIM_AT} and publishes an address requiring session_id, so no \
+             request reaches it: {}",
+            report.failure_text()
+        );
+    }
+
+    /// Class C's membership: `references` counts `$ref` and nothing else, and `$ref` is not the
+    /// only way a Draft 2020-12 document reaches another one.
+    ///
+    /// `$dynamicRef` is a reference. It is in the 2020-12 core vocabulary, the pinned meta-schema
+    /// admits it, `jsonschema` resolves it, and a successor whose input schema is nothing but a
+    /// `$dynamicRef` into a sibling renders, classifies and verifies here today — this case is that
+    /// bundle. `references` (`bundle.rs:914-929`) matches the member name `$ref` exactly, so
+    /// `closure_of` stops at the document holding the `$dynamicRef` and never reads what it names.
+    ///
+    /// So the shim's `input_schema` document is byte-identical to the predecessor's modulo the
+    /// version — asserted below — while the shape it delegates to went from "no member required" to
+    /// "`client_key` required". Every attach request `0.7.0` published is now invalid at the path
+    /// the declaration promised keeps answering, which is the same defect
+    /// `an_alias_whose_input_schema_names_a_narrowed_document_declares_nothing` was written for,
+    /// reached through a reference form the closure does not follow.
+    #[test]
+    fn a_shim_whose_input_narrows_behind_a_dynamic_ref_declares_nothing() {
+        let shape = |properties: Value, required: Value| {
+            json!({
+                "$dynamicAnchor": "attachInput",
+                "$schema": super::DRAFT_2020_12,
+                "additionalProperties": false,
+                "properties": properties,
+                "required": required,
+                "title": "pipe-session-attach request shape",
+                "type": "object",
+            })
+        };
+        let wide = shape(json!({}), json!([]));
+        let narrow = shape(
+            json!({ "client_key": { "type": "string" } }),
+            json!(["client_key"]),
+        );
+        assert_ne!(wide, narrow, "the narrowing must be a real one");
+        // The same rewrite on both sides: the document keeps its `$id` and its title and delegates
+        // its whole shape to the sibling.
+        let delegate = |document: &mut Value| {
+            let object = document.as_object_mut().expect("a schema object");
+            for keyword in ["additionalProperties", "properties", "required", "type"] {
+                object.remove(keyword);
+            }
+            object.insert(
+                "$dynamicRef".to_owned(),
+                json!("../attach-shape.json#attachInput"),
+            );
+        };
+
+        let narrowed = narrow.clone();
+        let (_scratch, inputs) = author_a_successor("dynamic-ref-narrowed", |authored| {
+            edit_json(&authored.join("routes.json"), |routes| {
+                for route in routes.as_array_mut().expect("routes.json is an array") {
+                    if route.get("id").and_then(Value::as_str) == Some(MOVED_ID) {
+                        assert_eq!(route["path"], json!(MOVED_FROM), "{MOVED_ID} moved already");
+                        route["path"] = json!(MOVED_TO);
+                    }
+                }
+            });
+            declare_alias(authored, MOVED_FROM);
+            std::fs::write(
+                authored.join("documents/schemas/attach-shape.json"),
+                serde_json::to_vec_pretty(&narrowed).expect("serialize"),
+            )
+            .expect("write");
+            edit_json(
+                &authored.join("documents/schemas/inputs/pipe-session-attach.json"),
+                delegate,
+            );
+        });
+
+        // The predecessor published the wide shape, behind the same reference.
+        let published = inputs.contracts_root.join(PREDECESSOR);
+        std::fs::write(
+            published.join("schemas/attach-shape.json"),
+            serde_json::to_vec_pretty(&wide).expect("serialize"),
+        )
+        .expect("write");
+        edit_json(
+            &published.join("schemas/inputs/pipe-session-attach.json"),
+            delegate,
+        );
+
+        let read = |path: &std::path::Path| -> Value {
+            serde_json::from_slice(&std::fs::read(path).expect("read")).expect("parse")
+        };
+        assert_eq!(
+            super::normalised(
+                &read(&published.join("schemas/inputs/pipe-session-attach.json")),
+                PREDECESSOR
+            ),
+            super::normalised(
+                &read(
+                    &inputs
+                        .contracts_root
+                        .join(VERSION)
+                        .join("schemas/inputs/pipe-session-attach.json")
+                ),
+                VERSION
+            ),
+            "the two input documents must differ only behind the reference"
+        );
+
+        let report = check(&inputs).expect("the successor reads");
+        let text = report.failure_text();
+        assert!(
+            text.contains(MOVED_ID),
+            "the shim now requires a member the empty attach input {PREDECESSOR} published does \
+             not carry, so nothing a pinned consumer sends reaches {MOVED_FROM}: {text}"
+        );
+    }
+
+    /// Class B's membership: a version a document *states* and a version a document *demands* are
+    /// not the same string, and `without_version` cannot tell them apart.
+    ///
+    /// The enumeration behind [`normalised`] is a survey of what eight bundles say about
+    /// themselves, and the rule it produced replaces the version "wherever it occurs as a whole
+    /// number". `schemas/results/pipe-session-capabilities.json` is the case that drove it, and it
+    /// is a **result**: a value the daemon writes, so a shim writing `0.8.0` where the predecessor
+    /// wrote `0.7.0` really does answer as before. An **input** is the other direction. A version
+    /// in an input is a value the *client* has to send, and a consumer pinned to the predecessor
+    /// sends the predecessor's.
+    ///
+    /// Here `0.7.0`'s attach input requires `contract: "0.7.0"` and the shim's requires
+    /// `contract: "0.8.0"`. Normalised, the two documents are equal — asserted below — so the
+    /// declaration is accepted, and every attach request a pinned consumer can build is refused at
+    /// the path the declaration promised keeps answering. No released bundle demands a version in
+    /// an input; nothing stops a ninth, and the rule is stated for every string rather than for the
+    /// five it was measured on.
+    #[test]
+    fn a_shim_that_demands_the_successors_version_declares_nothing() {
+        let demand = |version: &str| {
+            let version = version.to_owned();
+            move |document: &mut Value| {
+                document["properties"]["contract"] = json!({ "const": version });
+                document["required"] = json!(["contract"]);
+            }
+        };
+        let (_scratch, inputs) = author_a_successor("demanded-version", |authored| {
+            edit_json(&authored.join("routes.json"), |routes| {
+                for route in routes.as_array_mut().expect("routes.json is an array") {
+                    if route.get("id").and_then(Value::as_str) == Some(MOVED_ID) {
+                        assert_eq!(route["path"], json!(MOVED_FROM), "{MOVED_ID} moved already");
+                        route["path"] = json!(MOVED_TO);
+                    }
+                }
+            });
+            declare_alias(authored, MOVED_FROM);
+            edit_json(
+                &authored.join("documents/schemas/inputs/pipe-session-attach.json"),
+                demand(VERSION),
+            );
+        });
+
+        let published = inputs.contracts_root.join(PREDECESSOR);
+        edit_json(
+            &published.join("schemas/inputs/pipe-session-attach.json"),
+            demand(PREDECESSOR),
+        );
+
+        let read = |path: &std::path::Path| -> Value {
+            serde_json::from_slice(&std::fs::read(path).expect("read")).expect("parse")
+        };
+        let (was, now) = (
+            read(&published.join("schemas/inputs/pipe-session-attach.json")),
+            read(
+                &inputs
+                    .contracts_root
+                    .join(VERSION)
+                    .join("schemas/inputs/pipe-session-attach.json"),
+            ),
+        );
+        assert_eq!(
+            was.pointer("/properties/contract/const"),
+            Some(&json!(PREDECESSOR)),
+            "the predecessor demands its own version"
+        );
+        assert_eq!(
+            now.pointer("/properties/contract/const"),
+            Some(&json!(VERSION)),
+            "and the shim demands the successor's"
+        );
+        assert_eq!(
+            super::normalised(&was, PREDECESSOR),
+            super::normalised(&now, VERSION),
+            "the two documents must be equal once normalised, or this case proves nothing"
+        );
+
+        let report = check(&inputs).expect("the successor reads");
+        let text = report.failure_text();
+        assert!(
+            text.contains(MOVED_ID),
+            "a consumer pinned to {PREDECESSOR} sends contract {PREDECESSOR} and the shim refuses \
+             it, so nothing reaches {MOVED_FROM}: {text}"
+        );
+    }
+
+    /// Class A's mechanism: `path_shape` erases every `{…}` it sees, and not every `{…}` in a
+    /// route template is a parameter.
+    ///
+    /// matchit 0.8.4 — the router the rule was measured against — escapes a literal brace by
+    /// doubling it: "the `{` character is escaped with `{{` and the `}` character is escaped with
+    /// `}}`" (`matchit-0.8.4/src/lib.rs:57`, and `src/escape.rs` implements it). So
+    /// `/v1/machine/x{{a}}y` and `/v1/machine/x{{b}}y` are two *static* routes, matching the two
+    /// concrete URLs `/v1/machine/x{a}y` and `/v1/machine/x{b}y`; matchit registers both, and a
+    /// request tells them apart the way it tells `/v1/machine` from `/v1/execs` apart. `path_shape`
+    /// reduces both to `/v1/machine/x{}}y` and the move test reads that as "the shape did not
+    /// change", so it `continue`s.
+    ///
+    /// The registry constrains `path` with `"pattern": "^/v1/"` and nothing else
+    /// (`schemas/operation-registry.json`), and neither template carries a parameter —
+    /// `path_parameters` matches a whole segment (`xtask/src/render.rs:653-662`) — so the address
+    /// schema is the empty object either way and the successor renders and verifies. An operation
+    /// id is served at a different concrete URL and `check-bundle` says nothing, which is the
+    /// acceptance statement.
+    #[test]
+    fn a_move_between_two_escaped_literal_paths_is_refused() {
+        const STATIC_ID: &str = "machine.get";
+        const WAS_AT: &str = "/v1/machine/x{{a}}y";
+        const NOW_AT: &str = "/v1/machine/x{{b}}y";
+        assert_ne!(WAS_AT, NOW_AT, "two templates, two concrete URLs");
+
+        let at = |routes: &mut Value, path: &str| {
+            for route in routes.as_array_mut().expect("an array of routes") {
+                if route.get("id").and_then(Value::as_str) == Some(STATIC_ID) {
+                    route["path"] = json!(path);
+                }
+            }
+        };
+        let (_scratch, inputs) = author_a_successor("escaped-literal", |authored| {
+            edit_json(&authored.join("routes.json"), |routes| at(routes, NOW_AT));
+        });
+        edit_json(
+            &inputs
+                .contracts_root
+                .join(PREDECESSOR)
+                .join("operations.json"),
+            |registry| at(&mut registry["operations"], WAS_AT),
+        );
+
+        let report = check(&inputs).expect("the successor reads");
+        let text = report.failure_text();
+        assert!(
+            text.contains(STATIC_ID),
+            "{STATIC_ID} answered at {WAS_AT} and answers at {NOW_AT}; the URL a consumer pinned \
+             is gone: {text}"
+        );
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // The rest of the four classes pass 4 found instances of, and the regression each fix risks.
+    // ------------------------------------------------------------------------------------------
+
+    /// Design 16's move, whole: all seven ids relocated from `/v1/pipe-sessions*` to
+    /// `/v1/sessions*`, each with a new `pipe-session.*` entry standing on the path it left.
+    ///
+    /// This is the regression the finding-2 fix could most easily have caused, because a
+    /// declaration *always* makes two routes name one `address_schema` target and the new rule
+    /// refuses some of those. It must refuse only the ones whose parameter sequences disagree, and
+    /// design 16 keeps `{session_id}` on both sides of every one of its seven.
+    ///
+    /// The predecessor is a copy of `0.8.0` rather than `0.7.0`, because that is the boundary
+    /// design 16 actually proposes: a version that moves paths and changes no schema document.
+    /// Against `0.7.0` four of the seven would be refused on `result_schema` — `resource.json`
+    /// changed for the aperture ceiling — which is the cost `SCHEMA_MEMBERS` documents and not a
+    /// property of the move.
+    const DESIGN_16_ROUTES: [(&str, &str, &str); 7] = [
+        ("session.capabilities", "/v1/pipe-sessions", "/v1/sessions"),
+        ("session.start", "/v1/pipe-sessions", "/v1/sessions"),
+        (
+            "session.get",
+            "/v1/pipe-sessions/{session_id}",
+            "/v1/sessions/{session_id}",
+        ),
+        (
+            "session.attach",
+            "/v1/pipe-sessions/{session_id}/attach",
+            "/v1/sessions/{session_id}/attach",
+        ),
+        (
+            "session.signal",
+            "/v1/pipe-sessions/{session_id}/signal",
+            "/v1/sessions/{session_id}/signal",
+        ),
+        (
+            "session.retire",
+            "/v1/pipe-sessions/{session_id}",
+            "/v1/sessions/{session_id}",
+        ),
+        (
+            "session.lease.renew",
+            "/v1/pipe-sessions/{session_id}/lease/renew",
+            "/v1/sessions/{session_id}/lease/renew",
+        ),
+    ];
+
+    #[test]
+    fn design_16_moves_all_seven_session_routes_and_the_bundle_verifies() {
+        const BASELINE: &str = "0.8.0-baseline";
+        let scratch = tempfile::Builder::new()
+            .prefix("design-16")
+            .tempdir()
+            .expect("scratch");
+        let source = scratch.path().join("bundle-source");
+        let contracts = scratch.path().join("substrate-wire");
+        copy_tree(
+            &root().join("xtask/bundle-source").join(VERSION),
+            &source.join(VERSION),
+        );
+        // The predecessor is this same bundle under another name: same schemas, same everything,
+        // so the only thing the successor changes is where its routes are served.
+        copy_tree(
+            &root().join("contracts/substrate-wire").join(VERSION),
+            &contracts.join(BASELINE),
+        );
+
+        let authored = source.join(VERSION);
+        admit_alias_of(&authored);
+        edit_json(&authored.join("routes.json"), |routes| {
+            let routes = routes.as_array_mut().expect("routes.json is an array");
+            let mut shims = Vec::new();
+            for (id, from, to) in DESIGN_16_ROUTES {
+                let route = routes
+                    .iter_mut()
+                    .find(|route| route.get("id").and_then(Value::as_str) == Some(id))
+                    .expect("a design 16 route");
+                assert_eq!(route["path"], json!(from), "{id} moved already");
+                route["path"] = json!(to);
+                let mut shim = route.clone();
+                shim["id"] = json!(id.replace("session.", "pipe-session."));
+                shim["path"] = json!(from);
+                shim["alias_of"] = json!(id);
+                shims.push(shim);
+            }
+            routes.extend(shims);
+        });
+        edit_json(&authored.join("documents/bundle.json"), |bundle| {
+            bundle["compatibility"]["predecessor"] = json!(BASELINE);
+        });
+        edit_json(&authored.join("documents/schemas/bundle.json"), |schema| {
+            let compatibility = &mut schema["properties"]["compatibility"]["properties"];
+            compatibility["predecessor"] = json!({ "const": BASELINE });
+            compatibility["adds_routes"] = json!({ "const": DESIGN_16_ROUTES.len() });
+        });
+
+        let inputs = crate::render::Inputs {
+            source_root: source,
+            contracts_root: contracts.clone(),
+            ..inputs()
+        };
+        let rendered = crate::render::render(&inputs).expect("design 16's successor renders");
+        for (path, bytes) in &rendered {
+            let target = contracts.join(VERSION).join(path);
+            std::fs::create_dir_all(target.parent().expect("a parent")).expect("create");
+            std::fs::write(&target, bytes).expect("write");
+        }
+
+        // The fixture is the move, not something that only looks like it.
+        let registry: Value = serde_json::from_slice(
+            &std::fs::read(contracts.join(VERSION).join("operations.json")).expect("read"),
+        )
+        .expect("parse");
+        let served: std::collections::BTreeMap<String, String> = registry["operations"]
+            .as_array()
+            .expect("an operations array")
+            .iter()
+            .filter_map(|entry| {
+                Some((
+                    entry.get("id")?.as_str()?.to_owned(),
+                    entry.get("path")?.as_str()?.to_owned(),
+                ))
+            })
+            .collect();
+        assert_eq!(served.len(), 33, "twenty-six routes and seven shims");
+        for (id, from, to) in DESIGN_16_ROUTES {
+            assert_eq!(served.get(id).map(String::as_str), Some(to));
+            let shim = id.replace("session.", "pipe-session.");
+            assert_eq!(served.get(&shim).map(String::as_str), Some(from));
+        }
+
+        let report = check(&inputs).expect("the successor reads");
+        assert!(
+            report.failures().is_empty(),
+            "design 16 moves seven paths and keeps all seven answering: {}",
+            report.failure_text()
+        );
+    }
+
+    /// Class C's rule, rather than one member of it: a `$`-prefixed keyword is followed if it is a
+    /// reference this knows, ignored if it is known to reach nothing, and reported otherwise.
+    ///
+    /// The red case is `$dynamicRef`. Adding that name alone would leave the next keyword exactly
+    /// where `$dynamicRef` was, so what is pinned here is the closed rule: an unknown `$` member
+    /// makes the comparison fail rather than pass, and the inert ones do not, or every document in
+    /// the bundle would fail.
+    #[test]
+    fn a_reference_keyword_is_followed_known_inert_or_reported() {
+        let followed = |document: Value| super::references(&document);
+        // Every reference form 2020-12 and its predecessor admit, named here rather than read out
+        // of the constant: a case that iterates the list under test cannot see the list shrink, and
+        // dropping `$dynamicRef` back into the unknown bucket would still "fail closed" while
+        // making every bundle that uses one undeclarable.
+        assert_eq!(
+            super::REFERENCE_KEYWORDS,
+            ["$ref", "$dynamicRef", "$recursiveRef"]
+        );
+        for keyword in ["$ref", "$dynamicRef", "$recursiveRef"] {
+            let (found, unfollowable) = followed(json!({ keyword: "../common.json#/$defs/id" }));
+            assert_eq!(
+                found,
+                vec!["../common.json#/$defs/id".to_owned()],
+                "{keyword}"
+            );
+            assert!(unfollowable.is_empty(), "{keyword}: {unfollowable:?}");
+        }
+        // Every `$` keyword that names this document or its meta-schema reaches nothing, and
+        // saying so is what keeps the closed rule from failing every real document.
+        for keyword in super::INERT_KEYWORDS {
+            let (found, unfollowable) = followed(json!({ keyword: "anything at all" }));
+            assert!(found.is_empty() && unfollowable.is_empty(), "{keyword}");
+        }
+        // A subschema under `$defs` is still walked, so a reference inside one is found.
+        let (found, unfollowable) =
+            followed(json!({ "$defs": { "x": { "$ref": "../common.json" } } }));
+        assert_eq!(found, vec!["../common.json".to_owned()]);
+        assert!(unfollowable.is_empty());
+        // Anything else is reported rather than treated as inert.
+        let (found, unfollowable) = followed(json!({ "$futureRef": "../common.json" }));
+        assert!(found.is_empty());
+        assert_eq!(unfollowable.len(), 1, "{unfollowable:?}");
+        assert!(unfollowable.iter().all(|why| why.contains("$futureRef")));
+        // Including a reference that is not a string, which names no document either.
+        let (_, unfollowable) = followed(json!({ "$ref": ["../common.json"] }));
+        assert_eq!(unfollowable.len(), 1, "{unfollowable:?}");
+    }
+
+    /// Class B's other direction, and the residual pass 4 expected to be left standing.
+    ///
+    /// `substrate-wire/<version>` is the self-identifying form, so erasing it is what makes design
+    /// 16's capabilities move declarable. Demanded of a *client*, in an input, the same string is a
+    /// value a pinned consumer cannot send. Reading the member that names the document rather than
+    /// the shape of the string tells those apart, so this is refused too rather than left as a
+    /// documented hole.
+    #[test]
+    fn a_shim_demanding_the_self_naming_version_in_an_input_declares_nothing() {
+        let demand = |version: &str| {
+            let contract = format!("substrate-wire/{version}");
+            move |document: &mut Value| {
+                document["properties"]["contract"] = json!({ "const": contract });
+                document["required"] = json!(["contract"]);
+            }
+        };
+        let (_scratch, inputs) = author_a_successor("demanded-self-naming", |authored| {
+            edit_json(&authored.join("routes.json"), |routes| {
+                for route in routes.as_array_mut().expect("routes.json is an array") {
+                    if route.get("id").and_then(Value::as_str) == Some(MOVED_ID) {
+                        route["path"] = json!(MOVED_TO);
+                    }
+                }
+            });
+            declare_alias(authored, MOVED_FROM);
+            edit_json(
+                &authored.join("documents/schemas/inputs/pipe-session-attach.json"),
+                demand(VERSION),
+            );
+        });
+        edit_json(
+            &inputs
+                .contracts_root
+                .join(PREDECESSOR)
+                .join("schemas/inputs/pipe-session-attach.json"),
+            demand(PREDECESSOR),
+        );
+        // The same string in a result would be erased — that is the capabilities case above — so
+        // the two documents are equal under the response-side rule and differ under the request-side
+        // one. Which of the two applies is the whole finding.
+        let read = |at: &std::path::Path| -> Value {
+            serde_json::from_slice(&std::fs::read(at).expect("read")).expect("parse")
+        };
+        let (was, now) = (
+            read(
+                &inputs
+                    .contracts_root
+                    .join(PREDECESSOR)
+                    .join("schemas/inputs/pipe-session-attach.json"),
+            ),
+            read(
+                &inputs
+                    .contracts_root
+                    .join(VERSION)
+                    .join("schemas/inputs/pipe-session-attach.json"),
+            ),
+        );
+        assert_eq!(
+            super::normalised(&was, PREDECESSOR),
+            super::normalised(&now, VERSION),
+            "read as a document the daemon writes, the two are the same"
+        );
+        assert_ne!(
+            super::normalised_facing(&was, PREDECESSOR, super::Facing::Request),
+            super::normalised_facing(&now, VERSION, super::Facing::Request),
+            "read as a document a client must satisfy, they are not"
+        );
+
+        let report = check(&inputs).expect("the successor reads");
+        let text = report.failure_text();
+        assert!(
+            text.contains(MOVED_ID),
+            "a consumer pinned to {PREDECESSOR} sends substrate-wire/{PREDECESSOR} and the shim \
+             demands substrate-wire/{VERSION}: {text}"
+        );
+    }
+
+    /// Class D's other member: the generated document depends on the parameter *sequence*, so two
+    /// routes naming one target may not disagree about the order either, not just the names.
+    ///
+    /// No shim here — the rule is about the registry, not about declarations, and two ordinary
+    /// routes that happen to name one target are the same trap.
+    #[test]
+    fn two_routes_naming_one_address_target_may_not_order_it_differently() {
+        const TARGET: &str = "schemas/addresses/workspace-file-read.json";
+        let shared = |reorder: bool| {
+            let (_scratch, inputs) = author_a_successor(
+                if reorder {
+                    "target-reordered"
+                } else {
+                    "target-shared"
+                },
+                |authored| {
+                    edit_json(&authored.join("routes.json"), |routes| {
+                        for route in routes.as_array_mut().expect("routes.json is an array") {
+                            if route.get("id").and_then(Value::as_str)
+                                == Some("workspace.file.write")
+                            {
+                                route["address_schema"] = json!(TARGET);
+                                if reorder {
+                                    route["path"] =
+                                        json!("/v1/workspaces/{path}/files/{workspace_id}");
+                                }
+                            }
+                        }
+                    });
+                },
+            );
+            check(&inputs)
+                .expect("the successor reads")
+                .failures()
+                .to_vec()
+        };
+        // Same target, same parameter sequence: one document serves both, and it is right for both.
+        assert!(
+            shared(false).is_empty(),
+            "sharing a target is what a declaration does; it is not the defect"
+        );
+        // Same target, same parameter *set*, different order: one `required` array, wrong for one
+        // of them.
+        let reordered = shared(true);
+        assert!(
+            reordered.iter().any(|failure| failure.contains(TARGET)),
+            "one document is generated per target, so the order has to agree too: {reordered:?}"
+        );
+    }
+
+    /// Class C's positive half: a reference form this follows must also be one a declaration may
+    /// *use*.
+    ///
+    /// Failing closed on an unknown `$` keyword is only half a rule. Left at that, `$dynamicRef`
+    /// would be reported unfollowable and every successor whose schemas use one — legitimately,
+    /// with the same document behind it on both sides — could never declare a move at all. Found by
+    /// mutation: dropping `$dynamicRef` from `REFERENCE_KEYWORDS` left the whole suite green,
+    /// because the negative case then refused for the fail-closed reason instead of the real one.
+    #[test]
+    fn a_declaration_whose_schemas_agree_behind_a_dynamic_ref_is_accepted() {
+        let shape = json!({
+            "$dynamicAnchor": "attachInput",
+            "$schema": super::DRAFT_2020_12,
+            "additionalProperties": false,
+            "properties": {},
+            "required": [],
+            "title": "pipe-session-attach request shape",
+            "type": "object",
+        });
+        let delegate = |document: &mut Value| {
+            let object = document.as_object_mut().expect("a schema object");
+            for keyword in ["additionalProperties", "properties", "required", "type"] {
+                object.remove(keyword);
+            }
+            object.insert(
+                "$dynamicRef".to_owned(),
+                json!("../attach-shape.json#attachInput"),
+            );
+        };
+
+        let authored_shape = shape.clone();
+        let (_scratch, inputs) = author_a_successor("dynamic-ref-agreed", |authored| {
+            edit_json(&authored.join("routes.json"), |routes| {
+                for route in routes.as_array_mut().expect("routes.json is an array") {
+                    if route.get("id").and_then(Value::as_str) == Some(MOVED_ID) {
+                        route["path"] = json!(MOVED_TO);
+                    }
+                }
+            });
+            declare_alias(authored, MOVED_FROM);
+            std::fs::write(
+                authored.join("documents/schemas/attach-shape.json"),
+                serde_json::to_vec_pretty(&authored_shape).expect("serialize"),
+            )
+            .expect("write");
+            edit_json(
+                &authored.join("documents/schemas/inputs/pipe-session-attach.json"),
+                delegate,
+            );
+        });
+
+        // The predecessor published the same shape behind the same reference.
+        let published = inputs.contracts_root.join(PREDECESSOR);
+        std::fs::write(
+            published.join("schemas/attach-shape.json"),
+            serde_json::to_vec_pretty(&shape).expect("serialize"),
+        )
+        .expect("write");
+        edit_json(
+            &published.join("schemas/inputs/pipe-session-attach.json"),
+            delegate,
+        );
+
+        let report = check(&inputs).expect("the successor reads");
+        assert!(
+            report.failures().is_empty(),
+            "both sides delegate to the same shape behind the same $dynamicRef, so the shim \
+             answers as the predecessor did: {}",
+            report.failure_text()
+        );
+    }
+
+    /// The shape rule is about the route table, not about moves: a successor may not *add* a route
+    /// a request cannot tell apart from one it already serves either.
+    ///
+    /// Found by mutation. `a_declared_move_onto_a_parameter_renamed_occupied_path_is_refused` stopped
+    /// pinning the collision key once the address-target rule landed, because that fixture also
+    /// makes two routes name one address target and the address rule reaches the same verdict
+    /// first. Keying the collision map on the path *string* is therefore invisible there — and it is
+    /// a live defect, because two routes may collide in shape while naming separate targets.
+    ///
+    /// Here nothing moves: `session.peek` is a brand-new id at `GET /v1/pipe-sessions/{workspace_id}`
+    /// with an address target of its own, and `session.get` still serves
+    /// `GET /v1/pipe-sessions/{session_id}`. Every id is preserved, one is added, no address target
+    /// is shared — and `axum::Router::route` panics building the table this bundle describes.
+    #[test]
+    fn a_successor_may_not_add_a_route_at_a_shape_it_already_serves() {
+        const ADDED: &str = "session.peek";
+        const ADDED_AT: &str = "/v1/pipe-sessions/{workspace_id}";
+        let (_scratch, inputs) = author_a_successor("added-collision", |authored| {
+            edit_json(&authored.join("routes.json"), |routes| {
+                let routes = routes.as_array_mut().expect("routes.json is an array");
+                let mut added = routes
+                    .iter()
+                    .find(|route| route.get("id").and_then(Value::as_str) == Some("session.get"))
+                    .cloned()
+                    .expect("a route to model the addition on");
+                assert_eq!(
+                    added["method"],
+                    json!("GET"),
+                    "the collision must be on one method"
+                );
+                added["id"] = json!(ADDED);
+                added["path"] = json!(ADDED_AT);
+                // Its own address document, so nothing here depends on the shared-target rule.
+                added["address_schema"] = json!("schemas/addresses/pipe-session-peek.json");
+                routes.push(added);
+            });
+            edit_json(&authored.join("documents/schemas/bundle.json"), |bundle| {
+                bundle["properties"]["compatibility"]["properties"]["adds_routes"] =
+                    json!({ "const": 1 });
+            });
+        });
+        let report = check(&inputs).expect("the successor reads");
+        let text = report.failure_text();
+        assert!(
+            text.contains(ADDED) && text.contains("session.get"),
+            "{ADDED} at {ADDED_AT} and session.get at /v1/pipe-sessions/{{session_id}} are one \
+             route to a router: {text}"
+        );
     }
 
     fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
