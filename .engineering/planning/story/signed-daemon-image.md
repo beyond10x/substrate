@@ -2,7 +2,7 @@
 format: aep.planning-md/1
 id: story:signed-daemon-image
 kind: story
-status: active
+status: implemented
 title: A tagged main publishes a signed, digest-pinned daemon image
 summary: The Dockerfile exists; no workflow builds, pushes or signs it.
 owner: substrate
@@ -12,7 +12,7 @@ tags:
 relations:
 - decomposes: epic:release-hardening
 - depends_on: story:ci-runs-the-full-gate
-revision: 5
+revision: 7
 ---
 # Story: A tagged main publishes a signed, digest-pinned daemon image
 
@@ -96,3 +96,39 @@ for the delegated-context vector paths alone. Proven narrow rather than asserted
 allowed in `contracts/substrate-wire/0.7.0/vectors/http/delegated-context-records-grant.json` and
 still caught in `crates/substrate-daemon/src/`. `bash scripts/check-secrets.sh` → `no leaks found`,
 76 commits.
+
+## Both open evidence items closed — 2026-08-30
+
+**`cosign verify` with the workflow identity succeeds.** Run
+<https://github.com/beyond10x/substrate/actions/runs/33304493276>, step 8 *Verify the signature with
+the workflow identity*: `success`. Steps 5-10 — build, push, install cosign, sign, verify, publish
+the release — all `success`, in that order. `ghcr.io/beyond10x/b10x-substrate-daemon:0.2.3` at
+`sha256:ab10158266b579d705ce8422c7d2a6e783cde950d30e100f61ca6befc4d0beda`, built from `34b219a`.
+
+**A pre-release tag publishes nothing.** Tag `0.2.3-rc.0`, annotated, pushed to the remote at
+`062bc89` — a commit whose `gate.yml` run concluded `success`, so any refusal is about the version
+form and not incidentally about a missing gate conclusion. Confirmed on the remote:
+`git ls-remote --tags origin` → `refs/tags/0.2.3-rc.0` and `refs/tags/0.2.3-rc.0^{}` at `062bc89`.
+
+The result is stronger than this story asked for. It asked for "the pre-release-tag run URL showing
+no publish"; **there is no URL, because no run was created at all**. The coarse ref filter
+`[0-9]+.[0-9]+.[0-9]+` rejected the ref before any workflow existed to refuse anything:
+
+- `gh run list --workflow release.yml` → only `33304493276`, the `0.2.3` run;
+- no run of any workflow for `headBranch=0.2.3-rc.0`;
+- newest run of any kind predates the push;
+- `gh release view 0.2.3-rc.0` → `release not found`.
+
+**What this does not prove.** The workflow's header claims a pre-release tag "fails both" the coarse
+glob and the anchored regex in the preflight job. Only the glob is verified: nothing reached the
+regex, so the preflight's version check remains asserted rather than observed. Exercising it needs a
+ref that passes the glob and fails the regex.
+
+## Known, and not a defect
+
+The release run reports `failure`. The only failing step is the last one, *Record the digest in
+CHANGELOG.md on main*: `main` is a protected branch requiring the `Full gate` status check, and a
+direct push can never satisfy it because no gate run exists for a commit that was never pushed. The
+ordering guarantee held — build, push, sign and verify all succeeded before anything was announced.
+The digest was recorded by pull request (`68d226f`), which is the route branch protection leaves
+open, and the workflow now says so by name instead of retrying three times and blaming a race.
