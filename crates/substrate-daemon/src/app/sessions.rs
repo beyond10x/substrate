@@ -1066,8 +1066,8 @@ async fn run_pipe_attachment(
                         // cannot become a free ioctl loop (design 13). Answered as a
                         // `protocol-error` in a published code and not as a bare WebSocket close:
                         // the close named a bound no document published, in a word no document
-                        // named. The 1008 close stays for WebSocket *control* frames, which are
-                        // not part of the published `oneOf` and have no frame to answer in.
+                        // named. Round 5 took the same answer to the ping arm above, so this
+                        // budget now has exactly one answer and the 1008 close is gone from both.
                         if control_rate.exceeded(
                             policy.max_controls_per_window,
                             policy.control_window,

@@ -2075,3 +2075,62 @@ async fn a_resize_whose_axes_have_a_zero_fractional_part_is_inside_the_published
          terminal. Substrate answered: {described}"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// Sixth adversarial pass. Cases added below this line; nothing above it was changed.
+// ---------------------------------------------------------------------------------------------
+
+/// The rule round 5 adopted for the window axes, on the field beside them.
+///
+/// `a_resize_whose_axes_have_a_zero_fractional_part_is_inside_the_published_vocabulary` above
+/// established the rule and round 5 implemented it: the published axis is
+/// `{"type": "integer", "minimum": 1, "maximum": 1000}`, JSON Schema 2020-12 defines `integer` as
+/// any number with a zero fractional part, so `132.0` is an admitted member of the closed client
+/// vocabulary and refusing it as "outside the closed pty vocabulary" is a false statement about an
+/// admitted frame. `PtyWindow` grew a hand-written `Deserialize` to say so
+/// (`crates/substrate-wire/src/lib.rs:1588-1636`).
+///
+/// `sequence` sits in the same branch of the same document, declared
+/// `{"type": "integer", "minimum": 1, "maximum": 18446744073709551615}` — the same keyword, the same
+/// reading. It is still a plain `u64` on `PipeClientFrame`, so `serde_json` refuses `1.0` and the
+/// whole frame fails `from_slice::<PipeClientFrame>` at
+/// `crates/substrate-daemon/src/app/sessions.rs:936-951`, before any window is looked at. The
+/// client is told `session.frame-invalid` about a frame the published schema admits, which is the
+/// exact statement the round-5 fix was made to stop making.
+///
+/// Wider than the window rule, not narrower: `sequence` is on **every** client frame of **both**
+/// vocabularies — `stdin`, `close-input`, `signal`, `resize` — so this reaches the released
+/// `pipes` workflow and not only the new `pty` one.
+///
+/// Portable lane.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_sequence_with_a_zero_fractional_part_is_inside_the_published_vocabulary() {
+    let harness = Harness::with_terminals().await;
+    let (session_id, exec_id) = harness.start_pty().await;
+    let mut socket = harness
+        .attach(&format!("/v1/pipe-sessions/{session_id}/attach"))
+        .await;
+    let frame = "{\"kind\":\"resize\",\"sequence\":1.0,\"window\":{\"columns\":132,\"rows\":43}}";
+    socket.send_text(frame.as_bytes()).await;
+    let described = match tokio::time::timeout(Duration::from_secs(5), socket.next_frame()).await {
+        Err(_deadline) => "no frame at all, and the attachment stayed open".to_owned(),
+        Ok(None) => "the connection closed with no frame at all".to_owned(),
+        Ok(Some(frame)) if frame.opcode == 0x1 => {
+            String::from_utf8_lossy(&frame.payload).into_owned()
+        }
+        Ok(Some(frame)) => format!("opcode {:#x}", frame.opcode),
+    };
+    assert_eq!(
+        harness.resizes(&exec_id),
+        vec![substrate_wire::PtyWindow {
+            columns: 132,
+            rows: 43
+        }],
+        "0.9.0/schemas/pty-channel-frame.json declares every client frame's sequence as a JSON \
+         Schema integer in 1..=18446744073709551615, and 1.0 is an integer with a zero fractional \
+         part to every conforming validator — the same reading round 5 adopted for the window axes \
+         one property over. {frame} is an admitted member of the published client vocabulary with \
+         a first sequence and an in-bounds window, so the only published outcome is that the \
+         window reaches the terminal. Substrate answered: {described}"
+    );
+}

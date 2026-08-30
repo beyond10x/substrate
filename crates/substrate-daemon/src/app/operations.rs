@@ -1110,8 +1110,18 @@ pub(super) async fn finish_driver_error(
     resource_id: Option<&str>,
     error: &DriverError,
 ) -> Response {
+    // **Per code, from one place.** This used to be `detail.retriable = false;` — every driver
+    // refusal, unconditionally — which contradicted `contracts/substrate-wire/0.9.0/refusals.json`
+    // and `vectors/http/pty-session-exhausted.json`, both of which publish `retriable: true` for
+    // `session.pty-exhausted` on design 13's reason: "the host's pty count is a global resource
+    // other tenants can fill and free". Deriving it from `DriverErrorClass` instead is the other
+    // wrong answer: `exhausted` is retriable at the port and `workspace.write-limit` is `exhausted`
+    // and never retriable, which is why frozen `0.1.0`-`0.4.0` vectors pin `false` for five
+    // released codes. `session_refusal_is_retriable` is the per-code table; everything not in it
+    // keeps the `false` those vectors pin. The same `detail` goes to the body and to the durable
+    // ledger below, so this is one value in one place.
     let (status, mut detail) = driver_detail(Some(operation), error);
-    detail.retriable = false;
+    detail.retriable = substrate_wire::session_refusal_is_retriable(&detail.code);
     if let Err(store_error) = app
         .store_io(|| {
             app.store.complete_error(
@@ -1172,8 +1182,18 @@ pub(super) async fn finish_dispatch_absence(
     resource_id: &str,
     error: &DriverError,
 ) -> Response {
+    // **Per code, from one place.** This used to be `detail.retriable = false;` — every driver
+    // refusal, unconditionally — which contradicted `contracts/substrate-wire/0.9.0/refusals.json`
+    // and `vectors/http/pty-session-exhausted.json`, both of which publish `retriable: true` for
+    // `session.pty-exhausted` on design 13's reason: "the host's pty count is a global resource
+    // other tenants can fill and free". Deriving it from `DriverErrorClass` instead is the other
+    // wrong answer: `exhausted` is retriable at the port and `workspace.write-limit` is `exhausted`
+    // and never retriable, which is why frozen `0.1.0`-`0.4.0` vectors pin `false` for five
+    // released codes. `session_refusal_is_retriable` is the per-code table; everything not in it
+    // keeps the `false` those vectors pin. The same `detail` goes to the body and to the durable
+    // ledger below, so this is one value in one place.
     let (status, mut detail) = driver_detail(Some(operation), error);
-    detail.retriable = false;
+    detail.retriable = substrate_wire::session_refusal_is_retriable(&detail.code);
     if let Err(store_error) = app
         .store_io(|| {
             app.store.complete_dispatch_absence(
@@ -1203,8 +1223,18 @@ pub(super) async fn finish_pipe_session_dispatch_absence(
     exec_id: &str,
     error: &DriverError,
 ) -> Response {
+    // **Per code, from one place.** This used to be `detail.retriable = false;` — every driver
+    // refusal, unconditionally — which contradicted `contracts/substrate-wire/0.9.0/refusals.json`
+    // and `vectors/http/pty-session-exhausted.json`, both of which publish `retriable: true` for
+    // `session.pty-exhausted` on design 13's reason: "the host's pty count is a global resource
+    // other tenants can fill and free". Deriving it from `DriverErrorClass` instead is the other
+    // wrong answer: `exhausted` is retriable at the port and `workspace.write-limit` is `exhausted`
+    // and never retriable, which is why frozen `0.1.0`-`0.4.0` vectors pin `false` for five
+    // released codes. `session_refusal_is_retriable` is the per-code table; everything not in it
+    // keeps the `false` those vectors pin. The same `detail` goes to the body and to the durable
+    // ledger below, so this is one value in one place.
     let (status, mut detail) = driver_detail(Some(operation), error);
-    detail.retriable = false;
+    detail.retriable = substrate_wire::session_refusal_is_retriable(&detail.code);
     if let Err(store_error) = app
         .store_io(|| {
             app.store.complete_pipe_session_dispatch_absence(

@@ -779,8 +779,18 @@ fn check_pty_refusal_class(released: &Tree, failures: &mut Vec<String>) {
         if row.get("class").and_then(Value::as_str).is_none() {
             failures.push(format!("refusals.json: {code} states no error class"));
         }
-        let arrives = row.get("arrives").and_then(Value::as_str);
-        if arrives.is_none() {
+        // Every way it reaches a client, not one of them: `session.pty-unserved` arrives as an
+        // HTTP refusal from the start path *and* in a `protocol-error` frame from a driver that
+        // leaves `Driver::resize_pty_session`'s default, and a single-valued column could hold only
+        // one of those truths.
+        let arrives: Vec<&str> = row
+            .get("arrives")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .collect();
+        if arrives.is_empty() {
             failures.push(format!(
                 "refusals.json: {code} does not say where it arrives"
             ));
@@ -792,8 +802,20 @@ fn check_pty_refusal_class(released: &Tree, failures: &mut Vec<String>) {
         {
             failures.push(format!("refusals.json: {code} states no message"));
         }
+        // The column a client acts on, bound to the one table the daemon answers from. It drifted
+        // once already: four rows published `retriable: true` for refusals the daemon sent as
+        // `false`, which is a backoff a client would have taken against a stop.
+        let published = row.get("retriable").and_then(Value::as_bool);
+        let sent = substrate_wire::session_refusal_is_retriable(code);
+        if published != Some(sent) {
+            failures.push(format!(
+                "refusals.json: {code} publishes retriable {published:?}, and the daemon sends \
+                 {sent}"
+            ));
+        }
         // An HTTP refusal without a status is not usable by a client that has to branch on one.
-        if arrives == Some("http-response") && row.get("status").and_then(Value::as_u64).is_none() {
+        if arrives.contains(&"http-response") && row.get("status").and_then(Value::as_u64).is_none()
+        {
             failures.push(format!(
                 "refusals.json: {code} arrives as an HTTP response and states no status"
             ));

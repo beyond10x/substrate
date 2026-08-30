@@ -329,14 +329,29 @@ pub const SESSION_PROTOCOL_ERROR_CODES: [&str; 18] = [
     SESSION_WRITE_FAILED,
 ];
 
-/// Every refusal code a `pty` session can raise, in one place, sorted.
+/// Whether waiting alone can make the same request succeed — the `retriable` a client acts on.
 ///
-/// This exists so the *class* is checkable rather than a list somebody remembers to extend. Each
-/// emission site in `substrate-host` and `substrate-daemon` binds its constant from here instead of
-/// writing a literal, so a code cannot exist without being on this list; and
-/// `xtask`'s bundle checker requires the released bundle to name every entry, so a code cannot
-/// exist without being readable by a client of the contract. A code nobody can look up is a code
-/// nobody can handle.
+/// **Per code, because it is not a property of the class.** `DriverErrorClass::Exhausted` marks
+/// every one of its refusals retriable at the port, and that is wrong for most of them:
+/// `workspace.write-limit` is `exhausted` and a request over the limit is over the limit however
+/// long the client waits. So the daemon flattened *every* driver refusal to `false`, which is what
+/// the released bundles pin — `exec.capacity`, `workspace.capacity`,
+/// `operation.ledger-capacity`, `snapshot.materialization-limit` and `request.body-limit` all
+/// assert `retriable: false` in executable `0.1.0`–`0.4.0` vectors — and that blanket was wrong in
+/// the other direction for the one code with a decision behind it.
+///
+/// Design 13: *"Allocation failure is `exhausted` and retriable because the host's pty count is a
+/// global resource other tenants can fill and free."* That is the whole basis of the one `true`
+/// below. Every other code keeps the `false` the released bundles pin, because no design decides
+/// otherwise and inventing one here is what this table exists to stop.
+///
+/// `refusals.json`'s `retriable` column is checked against this function, so the published register
+/// and the response cannot disagree again.
+#[must_use]
+pub fn session_refusal_is_retriable(code: &str) -> bool {
+    code == SESSION_PTY_EXHAUSTED
+}
+
 /// **Every** refusal code a session can raise, from either crate, in one place.
 ///
 /// The two arrays below are views of this one — the pty-specific codes and the codes an attachment
@@ -346,6 +361,11 @@ pub const SESSION_PROTOCOL_ERROR_CODES: [&str; 18] = [
 /// neither direction of the check saw them and none had a row in the register that says it lists
 /// them all. `no_session_refusal_code_is_written_as_a_literal` keeps the class closed by refusing a
 /// literal anywhere in either crate's `src/`.
+///
+/// Ordered by Rust identifier, which is what `rustfmt` and a reader of this file see; that is not
+/// the same as wire-word order — `SESSION_INPUT_CLOSED` precedes `SESSION_INPUT_CLOSE_UNSERVED`
+/// here and `session.input-close-unserved` precedes `session.input-closed` on the wire. Nothing
+/// depends on either order: every consumer collects into a `BTreeSet`.
 pub const SESSION_REFUSAL_CODES: [&str; 31] = [
     SESSION_ALREADY_ATTACHED,
     SESSION_ATTACHMENT_CAPACITY,
@@ -380,6 +400,11 @@ pub const SESSION_REFUSAL_CODES: [&str; 31] = [
     SESSION_WRITE_FAILED,
 ];
 
+/// The refusal codes this story introduced, a view of [`SESSION_REFUSAL_CODES`].
+///
+/// Kept as its own list because `xtask`'s `check_pty_additions` asks a question about `0.9.0`
+/// specifically — that the bundle this unit cut names each of them — which is a narrower claim than
+/// the register's, and a claim about a version rather than about the crate.
 pub const SESSION_PTY_REFUSAL_CODES: [&str; 10] = [
     SESSION_INPUT_CLOSE_UNSERVED,
     SESSION_NOT_PTY,
@@ -1587,42 +1612,105 @@ struct PtyWindowFields {
     rows: WindowAxis,
 }
 
+/// One JSON Schema `integer`, and where it sits relative to what a `u64` can hold.
+///
+/// `Below` and `Above` are not errors: the published schemas declare these fields `integer` with a
+/// `minimum` and a `maximum`, so a value outside the range is an admitted member of the vocabulary
+/// that the field's own bound refuses. Which refusal it earns is the field's business — see the
+/// three readers below — and this only reports where the number fell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JsonInteger {
+    Exact(u64),
+    Below,
+    Above,
+}
+
+/// Reads any JSON number with a zero fractional part, which is what JSON Schema 2020-12 means by
+/// `"type": "integer"`.
+///
+/// **The one rule, in one place.** A Rust integer field deciding what a published `integer` admits
+/// is the defect this wave has surfaced three times: `u16` cut the terminal window at 65535, `u64`
+/// moved that cut to −1, and `sequence` and `grace_ms` — one property over, on every client frame
+/// of *both* channel vocabularies — still refused `1.0`. Every reader that takes a client's integer
+/// goes through here, so the only thing that decides the answer is the field's declared range.
+///
+/// One residual and it is named rather than hidden: a literal `serde_json` itself cannot parse —
+/// `1e1000`, or several hundred digits — fails in the number parser before this is reached.
+fn read_json_integer<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+    what: &'static str,
+) -> Result<JsonInteger, D::Error> {
+    let number = serde_json::Number::deserialize(deserializer)?;
+    if let Some(value) = number.as_u64() {
+        return Ok(JsonInteger::Exact(value));
+    }
+    if number.as_i64().is_some_and(|value| value < 0) {
+        return Ok(JsonInteger::Below);
+    }
+    let Some(value) = number.as_f64() else {
+        return Err(serde::de::Error::custom(format!("{what} is a JSON number")));
+    };
+    if value.is_nan() || value.fract() != 0.0 {
+        return Err(serde::de::Error::custom(format!(
+            "{what} is an integer: a number with a zero fractional part"
+        )));
+    }
+    if value < 0.0 {
+        return Ok(JsonInteger::Below);
+    }
+    if value >= 18_446_744_073_709_551_615.0 {
+        return Ok(JsonInteger::Above);
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    Ok(JsonInteger::Exact(value as u64))
+}
+
 #[derive(Debug, Clone, Copy)]
 struct WindowAxis(u64);
 
 impl<'de> Deserialize<'de> for WindowAxis {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        let number = serde_json::Number::deserialize(deserializer)?;
-        if let Some(value) = number.as_u64() {
-            return Ok(Self(value));
-        }
-        // Negative and out of range are the same thing to the published rule, and `0` is an
-        // out-of-range value this type can hold. Nothing reads an out-of-range axis but
-        // `within_bounds`, which says no to both.
-        if number.as_i64().is_some_and(|value| value < 0) {
-            return Ok(Self(0));
-        }
-        let Some(value) = number.as_f64() else {
-            return Err(serde::de::Error::custom(
-                "a terminal window axis is a JSON number",
-            ));
-        };
-        if value.is_nan() || value.fract() != 0.0 {
-            return Err(serde::de::Error::custom(
-                "a terminal window axis is an integer: a number with a zero fractional part",
-            ));
-        }
-        if value < 0.0 {
-            return Ok(Self(0));
-        }
-        // Above the range, saturating is exact enough: `within_bounds` refuses everything here.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        Ok(Self(if value >= 18_446_744_073_709_551_615.0 {
-            u64::MAX
-        } else {
-            value as u64
-        }))
+        // The declared range is 1..=1000, so `0` and `u64::MAX` are both outside it and
+        // `within_bounds` refuses either. Out of range in either direction is out of range.
+        Ok(Self(
+            match read_json_integer(deserializer, "a terminal window axis")? {
+                JsonInteger::Exact(value) => value,
+                JsonInteger::Below => 0,
+                JsonInteger::Above => u64::MAX,
+            },
+        ))
     }
+}
+
+/// A client frame's `sequence`, declared `integer` in `1..=18446744073709551615`.
+///
+/// Saturating below to `0` puts it outside the declared minimum, and the attachment answers
+/// `session.sequence-invalid` — the published refusal for a sequence that is not the next one.
+/// Saturating above to `u64::MAX` leaves it inside the declared range, which is right: that value
+/// *is* the declared maximum, and it earns `session.sequence-invalid` for not being the next one.
+fn read_frame_sequence<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+    Ok(
+        match read_json_integer(deserializer, "a client frame sequence")? {
+            JsonInteger::Exact(value) => value,
+            JsonInteger::Below => 0,
+            JsonInteger::Above => u64::MAX,
+        },
+    )
+}
+
+/// A signal frame's `grace_ms`, declared `integer` in `0..=60000`.
+///
+/// Both saturations go **up**, unlike the window's. `0` is inside this field's declared range, so
+/// mapping a negative there would turn a value outside the vocabulary's minimum into a valid
+/// zero-grace signal; `u64::MAX` is above the declared maximum and earns `session.signal-invalid`,
+/// which is the published answer for a grace outside the bound.
+fn read_grace_ms<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+    Ok(
+        match read_json_integer(deserializer, "a signal grace in milliseconds")? {
+            JsonInteger::Exact(value) => value,
+            JsonInteger::Below | JsonInteger::Above => u64::MAX,
+        },
+    )
 }
 
 impl<'de> Deserialize<'de> for PtyWindow {
@@ -1655,9 +1743,12 @@ impl PtyWindow {
     /// — so a client is invited to try it, and a `u16` field made 65536 fail `serde` decoding
     /// before `within_bounds` ran. That put the boundary between "your window is out of range" and
     /// "your frame is not a frame" at 65535, a number no released document names, inside a range
-    /// the published schema describes with one rule and one refusal code. Now every integer a
-    /// client can write decodes — negative, fractional-zero or enormous — and the only rule is the
-    /// published one.
+    /// the published schema describes with one rule and one refusal code. Now every integer
+    /// `serde_json` will parse decodes — negative, fractional-zero or enormous — and the range is
+    /// the only rule applied to it. The residual is `serde_json`'s own number parser, which refuses
+    /// `1e1000` and a several-hundred-digit literal before any of this is reached; that boundary is
+    /// the parser's, is the same for every numeric field on the wire, and is not one this type can
+    /// move.
     #[must_use]
     pub const fn cells(&self) -> Option<(u16, u16)> {
         if !self.within_bounds() {
@@ -1753,25 +1844,43 @@ pub struct PipeSessionCapabilities {
     pub control_window_ms: u64,
 }
 
+/// Every integer a client may put on a session channel, read the way the published schemas declare
+/// one — see [`read_json_integer`].
+///
+/// The enumeration is exhaustive over both channel-frame vocabularies. Client frames carry three
+/// distinct integer fields: `sequence` (on all four kinds, both vocabularies), `grace_ms` (on
+/// `signal`) and the terminal window's `columns`/`rows` (on `resize`). Every one of them goes
+/// through the shared reader.
+///
+/// The remaining integers in those documents are on **server** frames — `output.sequence`,
+/// `truncated.sequence`, `exit.sequence`, `protocol-error.sequence` and `exit.code` — and are left
+/// as plain Rust integers on purpose: substrate constructs them and never reads a client's bytes
+/// into one, so no Rust type there can mis-refuse anything a client sent. What the schema
+/// constrains for those is what substrate emits, and it emits in-range values by construction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum PipeClientFrame {
     Stdin {
+        #[serde(deserialize_with = "read_frame_sequence")]
         sequence: u64,
         content: Base64Content,
     },
     CloseInput {
+        #[serde(deserialize_with = "read_frame_sequence")]
         sequence: u64,
     },
     Signal {
+        #[serde(deserialize_with = "read_frame_sequence")]
         sequence: u64,
         signal: Signal,
+        #[serde(deserialize_with = "read_grace_ms")]
         grace_ms: u64,
     },
     /// A new terminal window for a `pty` session (design 13). There is no `close-input` companion:
     /// a pty has no half-close, so a client ends input by sending the terminal's own EOF character
     /// as ordinary input bytes.
     Resize {
+        #[serde(deserialize_with = "read_frame_sequence")]
         sequence: u64,
         window: PtyWindow,
     },
@@ -3304,6 +3413,91 @@ mod tests {
                 SessionProtocolErrorCode::classify(outside),
                 SessionProtocolErrorCode::DriverRefused
             );
+        }
+    }
+
+    /// Every integer a client may put on a channel frame reads the way the schema declares it.
+    ///
+    /// The enumeration is exhaustive over both channel-frame vocabularies' **client** branches:
+    /// `sequence` on all four kinds, `grace_ms` on `signal`, and the window axes on `resize`. The
+    /// remaining integers in those documents are on server frames, which substrate constructs and
+    /// never reads a client's bytes into.
+    ///
+    /// Out of range is not the same as outside the vocabulary, and the two saturations differ on
+    /// purpose: a window's declared minimum is 1 so `0` is out of range, and `grace_ms`'s is 0 so a
+    /// negative has to saturate *up* to stay out of range rather than become a valid zero grace.
+    #[test]
+    fn every_client_frame_integer_reads_the_way_the_schema_declares_it() {
+        use super::PtyWindow;
+
+        let decode = |text: &str| serde_json::from_str::<PipeClientFrame>(text);
+        // A zero fractional part is an integer to every conforming validator, on every field.
+        assert!(matches!(
+            decode(r#"{"kind":"resize","sequence":1.0,"window":{"columns":132.0,"rows":43.0}}"#)
+                .expect("an admitted frame"),
+            PipeClientFrame::Resize {
+                sequence: 1,
+                window: PtyWindow {
+                    columns: 132,
+                    rows: 43
+                }
+            }
+        ));
+        assert!(matches!(
+            decode(r#"{"kind":"stdin","sequence":2.0,"content":{"encoding":"base64","data":""}}"#)
+                .expect("an admitted frame"),
+            PipeClientFrame::Stdin { sequence: 2, .. }
+        ));
+        assert!(matches!(
+            decode(r#"{"kind":"close-input","sequence":3.0}"#).expect("an admitted frame"),
+            PipeClientFrame::CloseInput { sequence: 3 }
+        ));
+        assert!(matches!(
+            decode(r#"{"kind":"signal","sequence":4.0,"signal":"TERM","grace_ms":1000.0}"#)
+                .expect("an admitted frame"),
+            PipeClientFrame::Signal {
+                sequence: 4,
+                grace_ms: 1000,
+                ..
+            }
+        ));
+
+        // Out of range decodes and lands outside its own declared bound, so the field's published
+        // refusal answers rather than "your frame is not a frame".
+        for (text, sequence) in [
+            (r#"{"kind":"close-input","sequence":-1}"#, 0),
+            (r#"{"kind":"close-input","sequence":-1.0}"#, 0),
+            (r#"{"kind":"close-input","sequence":1e30}"#, u64::MAX),
+        ] {
+            let PipeClientFrame::CloseInput { sequence: found } =
+                decode(text).expect("an out-of-range sequence still decodes")
+            else {
+                panic!("{text}");
+            };
+            assert_eq!(found, sequence, "{text}");
+        }
+        for text in [
+            r#"{"kind":"signal","sequence":1,"signal":"TERM","grace_ms":-1}"#,
+            r#"{"kind":"signal","sequence":1,"signal":"TERM","grace_ms":1e30}"#,
+        ] {
+            let PipeClientFrame::Signal { grace_ms, .. } =
+                decode(text).expect("an out-of-range grace still decodes")
+            else {
+                panic!("{text}");
+            };
+            assert!(
+                grace_ms > 60_000,
+                "{text} must land above the declared maximum, not on a valid zero grace"
+            );
+        }
+
+        // A fractional part is genuinely outside the vocabulary, and is refused as such.
+        for text in [
+            r#"{"kind":"close-input","sequence":1.5}"#,
+            r#"{"kind":"signal","sequence":1,"signal":"TERM","grace_ms":0.5}"#,
+            r#"{"kind":"resize","sequence":1,"window":{"columns":80.5,"rows":24}}"#,
+        ] {
+            assert!(decode(text).is_err(), "{text}");
         }
     }
 
