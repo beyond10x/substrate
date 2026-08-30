@@ -174,8 +174,17 @@ id gains a `coverage.json` row sourced here, in the existing `requirements[].evi
 `0.4.0` is frozen with the other released bundles (invariant 6). The change ships as successor
 `contracts/substrate-wire/0.5.0`, `kind: additive-v1`, `predecessor: "0.4.0"`, `adds_routes: 0`,
 `preserves_routes: 26` — the count `0.4.0` already carries (19 preserved + 7 added). No byte of an
-earlier bundle changes, and `scripts/check-contract-bundle-0.5.0.py` joins the four checkers in
-`scripts/gate.sh`; a bundle whose checker is not in the gate is unverified from the next commit.
+earlier bundle changes, and the successor's checker joins the four in `scripts/gate.sh`; a bundle
+whose checker is not in the gate is unverified from the next commit.
+
+**Implementation note, 2026-08-30.** That checker is `cargo xtask check-bundle 0.5.0`, not
+`scripts/check-contract-bundle-0.5.0.py` as this section first said. Between this design and its
+implementation, `story:tooling-moves-to-cargo-xtask` landed the Rust renderer and moved the gate's
+own checks to `cargo xtask` verbs; the four Python pairs stay only as the reproducibility proof of
+the bundles they froze (`AGENTS.md` § *The gate*). Writing a fifth Python script would have added a
+runnable Python file to a repository whose language rule forbids one. The Rust verb checks strictly
+more than its predecessors could: it re-renders the bundle and compares byte for byte, so a
+hand-edit anywhere in `contracts/substrate-wire/0.5.0` fails the gate.
 
 Request policy is closed, so failure is honest both ways: a `0.5.0` client sending `secret_slots` to
 a `0.4.0` daemon is refused as schema-invalid, and a `0.4.0` client is unaffected.

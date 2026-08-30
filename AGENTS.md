@@ -41,9 +41,12 @@ Each is a claim that can be checked. Breaking one is a design change, not a refa
 5. **Operations are durable before driver dispatch**
    (`adr/0005-operations-are-durable-before-driver-dispatch.md`).
 6. **Every released contract bundle directory is immutable.** `contracts/substrate-wire/0.1.0`
-   through `0.4.0` exist; `0.4.0` is the current development bundle and **every earlier directory is
-   frozen** (`STATUS.md:36`, `scripts/contract_json_gate.py:283`,
-   `contracts/substrate-wire/0.2.0/README.md:13`). A wire change **adds a successor bundle**; it
+   through `0.5.0` exist; `0.5.0` is the current development bundle, adding sealed secret slots
+   (ADR 0012), and **every earlier directory is frozen** (`STATUS.md:36`,
+   `scripts/contract_json_gate.py:283`, `contracts/substrate-wire/0.2.0/README.md:13`).
+   The daemon still advertises `substrate-wire/0.4.0` in `x-b10x-contract`
+   (`crates/substrate-daemon/src/app.rs:3`): a bundle exists to be pinned by a consumer before the
+   server claims it, and moving the header is its own change with its own clients to notify. A wire change **adds a successor bundle**; it
    never rewrites bytes in a released one. The compatibility block of a successor states its
    predecessor and its exact `adds_routes`/`preserves_routes` counts, and the checker pins them.
    **One recorded exception, 2026-08-24:** the brand rename rewrote every frozen bundle in place,
@@ -117,7 +120,8 @@ bash scripts/gate.sh
 In order: `cargo test --workspace --locked`, `cargo fmt --all --check`,
 `cargo clippy --workspace --all-targets --locked -- -D warnings`, then `cargo xtask check-links`,
 `cargo xtask check-adrs`, `check-contract-bundle.py`, `check-contract-bundle-0.2.0.py`,
-`-0.3.0.py`, `-0.4.0.py`, `test_contract_json_gate.py` and `cargo xtask check-toolchain`.
+`-0.3.0.py`, `-0.4.0.py`, `cargo xtask check-bundle 0.5.0`, `test_contract_json_gate.py` and
+`cargo xtask check-toolchain`.
 Green here is the bar for `main`.
 The former brand is fenced org-wide by `scripts/check-org-brand.sh` in the **atlas** repo, not here.
 
@@ -133,6 +137,7 @@ bundles' reproducibility proof (invariant 6), not as tooling.
 | `check-adrs` | an ADR whose identity, frontmatter, index row or supersession link does not agree | yes |
 | `package-bundle <version> --out <dir>` | produces a released bundle as a deterministic OCI image layout | no — under `cargo test` |
 | `render-bundle <version> --out <dir>` | produces a bundle tree from `substrate-wire` and `xtask/bundle-source/<version>/`; refuses to write anywhere under `contracts/` | no — under `cargo test` |
+| `check-bundle <version>` | a released bundle whose bytes are not the fixed point of `xtask/bundle-source/<version>/` | yes, from `0.5.0` on |
 
 **`cargo xtask package-bundle <version> --out <dir>`** packages a released bundle as a
 deterministic OCI image layout. It is not a gate step of its own: its cases run under
@@ -167,10 +172,16 @@ refusal `exec.sandbox-unavailable` (501). Its delegated lane runs only when
 unset, those cases are **absent, never reported as passed** (invariant 3).
 
 **The gate verifies every released bundle, not just `0.1.0`.** `scripts/gate.sh:20-23` runs the
-`0.1.0` checker and the `0.2.0`, `0.3.0` and `0.4.0` checkers, so a green gate *is* evidence that
-all four still hold. Cutting a successor bundle therefore means **adding its checker to
-`scripts/gate.sh`** alongside those four — a bundle whose checker is not in the gate is unverified
-from the next commit onward.
+four frozen Python checkers, and `:27` runs `cargo xtask check-bundle 0.5.0`, so a green gate *is*
+evidence that all five still hold. Cutting a successor bundle therefore means **adding its check to
+`scripts/gate.sh`** — a bundle whose check is not in the gate is unverified from the next commit
+onward.
+
+**From `0.5.0` on, that check is `cargo xtask check-bundle <version>`, not a fifth Python checker.**
+It re-renders the bundle from `xtask/bundle-source/<version>/` and compares bytes, so it verifies
+strictly more than a hand-written checker: a released tree that is no longer the fixed point of its
+own source fails, whatever else about it still looks well-formed. The four Python checkers stay for
+`0.1.0`–`0.4.0`, which have no authored source tree and never will.
 
 **A green local gate does not guarantee a green CI.** The steps mirror each other, and
 `.github/workflows/gate.yml` runs the same `bash scripts/gate.sh` on push and pull request. The

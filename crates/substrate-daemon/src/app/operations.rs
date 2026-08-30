@@ -299,6 +299,7 @@ pub(super) fn validate_exec_input(
             false,
         ));
     }
+    check_secret_slots(&facts, mutation, request_id)?;
     if facts.exec_namespaces.is_none()
         || facts.exec_cgroup_limits.is_none()
         || facts.exec_cgroup_kill != Some(true)
@@ -314,6 +315,63 @@ pub(super) fn validate_exec_input(
             Some("exec.namespaces"),
             false,
         ));
+    }
+    Ok(())
+}
+
+/// Daemon-side admission for the slots a start names (ADR 0012).
+///
+/// Shape, then capability, then declaration — the same order the driver uses, so a caller hears the
+/// same answer whichever layer sees the request first. The published fact is the sorted list of
+/// declared **names**, so this needs no access to any path and gets none.
+fn check_secret_slots(
+    facts: &substrate_wire::CapabilityFacts,
+    mutation: &BoundMutation<ExecStartInput>,
+    request_id: &str,
+) -> Result<(), Response> {
+    let requested = &mutation.input.secret_slots;
+    if requested.is_empty() {
+        return Ok(());
+    }
+    if substrate_wire::validate_secret_slots(requested).is_err() {
+        return Err(failure(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            request_id,
+            Some(&mutation.op),
+            ErrorClass::Refused,
+            "exec.secret-slot-descriptor-invalid",
+            "A named secret slot is outside the closed descriptor bounds.",
+            Some("secret_slots"),
+            false,
+        ));
+    }
+    let Some(published) = facts.secrets_slots.as_ref() else {
+        return Err(failure(
+            StatusCode::NOT_IMPLEMENTED,
+            request_id,
+            Some(&mutation.op),
+            ErrorClass::Unserved,
+            "exec.secret-slots-unserved",
+            "Sealed secret slots are not served by this host.",
+            Some("secret_slots"),
+            false,
+        ));
+    };
+    for slot in requested {
+        if !published.contains(&slot.slot) {
+            return Err(failure(
+                StatusCode::UNPROCESSABLE_ENTITY,
+                request_id,
+                Some(&mutation.op),
+                ErrorClass::Refused,
+                "exec.secret-slot-unknown",
+                // The slot name, never its material: an error may say which slot and nothing about
+                // what is in it (`docs/design/04-security-and-isolation.md`).
+                &format!("Secret slot {} is not declared on this host.", slot.slot),
+                Some("secret_slots"),
+                false,
+            ));
+        }
     }
     Ok(())
 }

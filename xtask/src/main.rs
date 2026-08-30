@@ -7,6 +7,7 @@
 //! frozen bundles `0.1.0`–`0.4.0` (AGENTS.md invariant 6), not tooling.
 
 mod adrs;
+mod bundle;
 mod links;
 mod package;
 mod render;
@@ -46,6 +47,9 @@ enum Command {
     /// Package a released contract bundle as a deterministic OCI image layout.
     #[command(name = "package-bundle")]
     PackageBundle(package::Args),
+    /// Verify a released contract bundle directory against its authored source.
+    #[command(name = "check-bundle")]
+    CheckBundle(bundle::Args),
     /// Render a contract bundle from substrate-wire and its authored source tree.
     #[command(name = "render-bundle")]
     RenderBundle(render::Args),
@@ -74,6 +78,7 @@ fn dispatch() -> Result<ExitCode> {
         Command::Links => links::check(&repo::root()?)?,
         Command::Adrs => adrs::check(&repo::root()?)?,
         Command::PackageBundle(args) => return package::run(&args),
+        Command::CheckBundle(args) => return bundle::run(&args),
         Command::RenderBundle(args) => return render::run(&args),
     };
     Ok(report.emit())

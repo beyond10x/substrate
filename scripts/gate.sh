@@ -21,6 +21,10 @@ run python3 scripts/check-contract-bundle.py
 run python3 scripts/check-contract-bundle-0.2.0.py
 run python3 scripts/check-contract-bundle-0.3.0.py
 run python3 scripts/check-contract-bundle-0.4.0.py
+# 0.5.0 and every successor are checked by the Rust verb: the four Python pairs stay only as the
+# reproducibility proof of the bundles they froze (AGENTS.md, "The gate's own checks are cargo
+# xtask verbs").
+run cargo xtask check-bundle 0.5.0
 run python3 scripts/test_contract_json_gate.py
 run cargo xtask check-toolchain
 

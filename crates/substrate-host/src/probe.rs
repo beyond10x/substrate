@@ -1,4 +1,6 @@
+use std::os::fd::AsRawFd as _;
 use std::os::unix::fs::MetadataExt as _;
+use std::os::unix::process::CommandExt as _;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
@@ -49,6 +51,19 @@ pub fn probe(config: &HostConfig, openat2: bool) -> CapabilitySnapshot {
     let unprivileged = effective_uid() != 0;
     let close_range = probe_close_range();
     let exec = namespaces && cgroup && unprivileged && close_range && backend.is_some();
+    // Every clause is a proof and the fact is absent unless all of them hold. Nothing is probed at
+    // all when no slot is declared, so a daemon that wants none pays nothing.
+    //
+    // Orphan reconciliation is the fourth obligation ADR 0012 names. It is not a clause here
+    // because it cannot be: `ProcessRuntime::new` runs it after this probe
+    // (`crates/substrate-host/src/lib.rs`), and a reconciliation it cannot complete fails the
+    // driver's construction outright — the daemon does not start rather than starting with the
+    // fact absent. Absent is the weaker of the two, so nothing here is optimistic.
+    let secrets_slots = crate::secrets::secret_slots_fact(
+        &config.secret_slots,
+        exec && !config.secret_slots.is_empty() && crate::secrets::sealing_is_provable(),
+        exec && !config.secret_slots.is_empty() && probe_descriptor_passthrough(config),
+    );
     let facts = CapabilityFacts {
         events_pull: Some(true),
         events_stream: Some(true),
@@ -92,6 +107,7 @@ pub fn probe(config: &HostConfig, openat2: bool) -> CapabilitySnapshot {
             max_file_bytes: MAX_EXECUTION_CAPSULE_FILE_BYTES,
             max_total_bytes: MAX_EXECUTION_CAPSULE_BYTES,
         }),
+        secrets_slots,
         snapshot_provenance_events: Some(config.snapshot_provenance_events),
     };
     let driver_version = env!("CARGO_PKG_VERSION");
@@ -216,6 +232,77 @@ fn probe_bubblewrap(config: &HostConfig) -> bool {
     command.status().is_ok_and(|status| status.success())
 }
 
+/// Proves that a sealed `memfd` crosses bubblewrap at the number it was placed at, and is still
+/// sealed on the far side.
+///
+/// Bubblewrap passing an inherited descriptor through at the same number is *behaviour*, not a
+/// documented contract, so it is probed on every capability snapshot rather than assumed
+/// (ADR 0012). The child reads the sentinel back from the declared descriptor and then fails to
+/// write to it, which is the seal observed from inside the sandbox rather than claimed from
+/// outside.
+fn probe_descriptor_passthrough(config: &HostConfig) -> bool {
+    if !config.bubblewrap.is_file() {
+        return false;
+    }
+    // Non-secret by construction: a fixed probe string, never a declared slot value.
+    let sentinel = "substrate-secret-slot-passthrough";
+    let Some((staged, target)) = crate::secrets::probe_slot(sentinel) else {
+        return false;
+    };
+    let source = staged.as_raw_fd();
+    let mut command = Command::new(&config.bubblewrap);
+    command
+        .env_clear()
+        .args([
+            "--unshare-user",
+            "--unshare-ipc",
+            "--unshare-pid",
+            "--unshare-net",
+            "--unshare-uts",
+            "--new-session",
+            "--die-with-parent",
+            "--clearenv",
+            "--ro-bind",
+            "/usr",
+            "/usr",
+            "--ro-bind-try",
+            "/bin",
+            "/bin",
+            "--ro-bind-try",
+            "/lib",
+            "/lib",
+            "--ro-bind-try",
+            "/lib64",
+            "/lib64",
+            "--proc",
+            "/proc",
+            "--dev",
+            "/dev",
+            "--tmpfs",
+            "/tmp",
+            "--",
+            "/bin/sh",
+            "-c",
+            &format!(
+                "cat <&{target}; if echo x >&{target} 2>/dev/null; then printf writable; else printf sealed; fi"
+            ),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let placements = [(source, target)];
+    let retained = [0_u32, 1, 2, u32::try_from(target).unwrap_or(u32::MAX)];
+    // SAFETY: the closure runs after fork and calls only async-signal-safe libc entry points on
+    // plain descriptor numbers the parent holds open across the fork.
+    unsafe {
+        command.pre_exec(move || crate::secrets::place_and_close(&placements, &retained));
+    }
+    let Ok(output) = command.output() else {
+        return false;
+    };
+    output.status.success() && output.stdout == format!("{sentinel}sealed").into_bytes()
+}
+
 fn probe_cgroup(config: &HostConfig) -> bool {
     let Some(root) = config.cgroup_root.as_ref() else {
         return false;
@@ -338,5 +425,83 @@ mod tests {
         std::fs::write(&bubblewrap, b"replacement backend").unwrap();
         let second = backend_binding(&config).unwrap();
         assert_ne!(first, second);
+    }
+
+    /// A sealed descriptor crosses bubblewrap at the number it was placed at, still sealed.
+    ///
+    /// Absent, never reported as passed: where the configured backend is not on the machine the
+    /// case makes no claim at all, because a probe that cannot run has proven nothing.
+    #[test]
+    fn a_sealed_descriptor_crosses_the_configured_backend() {
+        let config = HostConfig::minimum("/does/not/exist");
+        if !config.bubblewrap.is_file() {
+            return;
+        }
+        assert!(
+            probe_descriptor_passthrough(&config),
+            "the configured backend did not deliver a sealed descriptor at its declared number"
+        );
+    }
+
+    /// The capability is published only from proof, and rotating a value moves no fact.
+    #[test]
+    fn the_slot_fact_is_names_only_and_needs_every_proof() {
+        let directory = tempfile::tempdir().unwrap();
+        let declarations = vec![
+            crate::SecretSlot {
+                name: "registry_token".to_owned(),
+                path: directory.path().join("registry_token"),
+            },
+            crate::SecretSlot {
+                name: "vendor_api_key".to_owned(),
+                path: directory.path().join("vendor_api_key"),
+            },
+        ];
+        let fact = crate::secrets::secret_slots_fact(&declarations, true, true)
+            .expect("both proofs publish the fact");
+        assert_eq!(fact, vec!["registry_token", "vendor_api_key"]);
+        let rendered = serde_json::to_string(&fact).unwrap();
+        for declaration in &declarations {
+            assert!(
+                !rendered.contains(&declaration.path.display().to_string()),
+                "the fact carries a declared path"
+            );
+        }
+        assert_eq!(
+            crate::secrets::secret_slots_fact(&declarations, false, true),
+            None
+        );
+        assert_eq!(
+            crate::secrets::secret_slots_fact(&declarations, true, false),
+            None
+        );
+    }
+
+    /// A snapshot digest moves when a slot is declared, and not when its material changes.
+    #[test]
+    fn declaring_a_slot_moves_the_snapshot_and_rotating_one_does_not() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("vendor_api_key");
+        std::fs::write(&path, b"first-material").unwrap();
+        let bare = HostConfig::minimum("/does/not/exist");
+        let mut declared = bare.clone();
+        declared.secret_slots = vec![crate::SecretSlot {
+            name: "vendor_api_key".to_owned(),
+            path: path.clone(),
+        }];
+        // The facts, not the snapshot: `probed_at` is part of the snapshot material, so two probes
+        // never share a digest and comparing them would prove nothing either way.
+        let before = probe(&declared, false).facts;
+        std::fs::write(&path, b"a-completely-other-material").unwrap();
+        assert_eq!(
+            before,
+            probe(&declared, false).facts,
+            "rotating the material behind a declared slot moved an observable fact"
+        );
+        assert_ne!(
+            probe(&bare, false).facts.secrets_slots,
+            Some(vec!["vendor_api_key".to_owned()]),
+            "a daemon with no declared slot published the fact"
+        );
     }
 }

@@ -67,6 +67,7 @@ The table is the gate's own order (`scripts/gate.sh`).
 | contract bundle 0.2.0 | `python3 scripts/check-contract-bundle-0.2.0.py` |
 | contract bundle 0.3.0 | `python3 scripts/check-contract-bundle-0.3.0.py` |
 | contract bundle 0.4.0 | `python3 scripts/check-contract-bundle-0.4.0.py` |
+| contract bundle 0.5.0 | `cargo xtask check-bundle 0.5.0` — re-renders from its authored source and compares bytes |
 | JSON gate self-test | `python3 scripts/test_contract_json_gate.py` |
 | toolchain | `cargo xtask check-toolchain` |
 
@@ -82,6 +83,10 @@ gate's first step, already covers them:
 |---|---|
 | `cargo xtask package-bundle <version> --out <dir>` | packages a released bundle as a deterministic OCI image layout, so a consumer can pin one manifest digest |
 | `cargo xtask render-bundle <version> --out <dir>` | renders a bundle tree from `substrate-wire` and the authored source at `xtask/bundle-source/<version>/`; this is how a successor bundle is cut, and it refuses to write anywhere under `contracts/` |
+
+`cargo xtask check-bundle <version>` **is** a gate step, from `0.5.0` on. It replaces the
+per-version Python checker: re-rendering and comparing bytes catches a released tree that has
+stopped being the fixed point of its own source, which a hand-written checker cannot see.
 
 The four `scripts/render-contract-bundle*.py` and their `check-contract-bundle*.py` partners are
 **not tooling** — they are the reproducibility proof of the frozen `0.1.0`–`0.4.0` bundles, which
@@ -127,6 +132,32 @@ target/debug/substrate-daemon \
   --event-retention 10000 \
   --allow-uid 1000
 ```
+
+### Secret slots
+
+`--secret-slot <name>=<path>` (repeatable) declares a secret the daemon holds for a run. The value
+reaches a child only as a **sealed memfd at a declared descriptor** — never in argv, never in the
+environment, never in an event, the ledger or an error body. The child gets the mapping and nothing
+else, through `SUBSTRATE_SECRET_SLOTS=<name>=<fd>,…`; the daemon closes its own copy immediately
+after spawn, and the seal set is `F_SEAL_WRITE|F_SEAL_SHRINK|F_SEAL_GROW|F_SEAL_SEAL`, which a child
+can confirm with `fcntl(fd, F_GET_SEALS)`.
+
+```console
+target/debug/substrate-daemon \
+  --socket ./run/substrate.sock \
+  --state ./run/state.db \
+  --workspaces ./run/workspaces \
+  --deployment personal \
+  --allow-uid 1000 \
+  --secret-slot model-key=/etc/substrate/model-key
+```
+
+The **path** never leaves the daemon process — it is not a capability fact, not an event field and
+not an error message. An error may name a slot; it never names a value. Rotating the file behind a
+declared name needs no restart and invalidates no admitted operation. The ledger request hash covers
+slot **names** only, so two requests differing only in a slot's value hash identically. Where sealing
+is unavailable the capability fact `secrets.slots` is **absent and the operation is refused by
+name** — it never degrades to passing the value some other way (invariant 3). ADR 0012.
 
 ### Serving exec
 

@@ -4,6 +4,7 @@
 mod fs;
 mod probe;
 mod process;
+mod secrets;
 
 use std::collections::HashSet;
 use std::os::unix::fs::PermissionsExt as _;
@@ -25,6 +26,18 @@ use tokio::sync::Semaphore;
 
 pub use process::{ExecObservation, PipeFrame, PipeStream};
 
+/// One operator-declared secret slot: a name, and the bounded owner-private file behind it
+/// (ADR 0012).
+///
+/// Daemon configuration and never request data. The path never leaves this struct — not into a
+/// capability fact, not into an event, not into an error — so rotating the file behind a declared
+/// name changes nothing any client can observe.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecretSlot {
+    pub name: String,
+    pub path: PathBuf,
+}
+
 #[derive(Debug, Clone)]
 pub struct HostConfig {
     pub workspace_root: PathBuf,
@@ -42,6 +55,9 @@ pub struct HostConfig {
     pub max_current_workspaces: u64,
     pub max_current_execs: u64,
     pub snapshot_provenance_events: u64,
+    /// Every slot this operator declared. Empty means the capability is absent, not that slots
+    /// degrade to something weaker.
+    pub secret_slots: Vec<SecretSlot>,
 }
 
 impl HostConfig {
@@ -76,6 +92,7 @@ impl HostConfig {
             max_current_workspaces: substrate_wire::MAX_CURRENT_WORKSPACES,
             max_current_execs: substrate_wire::MAX_CURRENT_EXECS,
             snapshot_provenance_events: substrate_wire::MAX_SNAPSHOT_PROVENANCE_EVENTS,
+            secret_slots: Vec::new(),
         }
     }
 }

@@ -172,6 +172,11 @@ pub fn wire_constants() -> BTreeMap<String, Value> {
             "MAX_SNAPSHOT_PROVENANCE_EVENTS",
             json!(wire::MAX_SNAPSHOT_PROVENANCE_EVENTS),
         ),
+        ("MAX_SECRET_SLOTS", json!(wire::MAX_SECRET_SLOTS)),
+        ("MAX_SECRET_SLOT_BYTES", json!(wire::MAX_SECRET_SLOT_BYTES)),
+        ("MAX_SECRET_SLOT_FD", json!(wire::MAX_SECRET_SLOT_FD)),
+        ("MIN_SECRET_SLOT_FD", json!(wire::MIN_SECRET_SLOT_FD)),
+        ("SECRET_SLOTS_ENV", json!(wire::SECRET_SLOTS_ENV)),
         ("MIN_LEASE_TTL_MS", json!(wire::MIN_LEASE_TTL_MS)),
         (
             "OPERATION_LEDGER_GLOBAL_MAX_BYTES",

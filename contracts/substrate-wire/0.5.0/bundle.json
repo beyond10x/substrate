@@ -1,0 +1,1357 @@
+{
+  "$schema": "schemas/bundle.json",
+  "api_version": "v1",
+  "bundle_format": "b10x.contract-bundle.v1",
+  "compatibility": {
+    "adds_routes": 0,
+    "kind": "additive-v1",
+    "predecessor": "0.4.0",
+    "preserves_routes": 26
+  },
+  "conformance": {
+    "design_vectors": [
+      "vectors/driver/absolute-path.json",
+      "vectors/driver/credential-inheritance.json",
+      "vectors/driver/dangling-link.json",
+      "vectors/driver/execution-capsule-cleanup.json",
+      "vectors/driver/execution-capsule-digest-drift.json",
+      "vectors/driver/execution-capsule-path-escape.json",
+      "vectors/driver/execution-capsule-read-only.json",
+      "vectors/driver/execution-capsule-restart-cleanup.json",
+      "vectors/driver/execution-capsule-workspace-separation.json",
+      "vectors/driver/generation-reset.json",
+      "vectors/driver/git-helper.json",
+      "vectors/driver/git-hook.json",
+      "vectors/driver/git-lfs.json",
+      "vectors/driver/git-proxy.json",
+      "vectors/driver/git-rebinding.json",
+      "vectors/driver/git-redirect.json",
+      "vectors/driver/git-submodule.json",
+      "vectors/driver/lease-authorizing-operation.json",
+      "vectors/driver/lease-boot-change.json",
+      "vectors/driver/lease-cleanup-failure.json",
+      "vectors/driver/lease-expiry.json",
+      "vectors/driver/lease-wall-skew.json",
+      "vectors/driver/lost-answer.json",
+      "vectors/driver/machinery-failure.json",
+      "vectors/driver/magic-link.json",
+      "vectors/driver/mount-escape.json",
+      "vectors/driver/no-egress.json",
+      "vectors/driver/output-truncation.json",
+      "vectors/driver/pipe-session-attachment-loss.json",
+      "vectors/driver/pipe-session-capabilities.json",
+      "vectors/driver/pipe-session-lease-renew.json",
+      "vectors/driver/pipe-session-protocol-failure.json",
+      "vectors/driver/pipe-session-restart.json",
+      "vectors/driver/pipe-session-retire.json",
+      "vectors/driver/pipe-session-single-attachment.json",
+      "vectors/driver/pipe-session-terminal-evidence.json",
+      "vectors/driver/process-tree-cancel.json",
+      "vectors/driver/resource-limits.json",
+      "vectors/driver/secret-slot-daemon-copy-closed.json",
+      "vectors/driver/secret-slot-memfd-is-sealed.json",
+      "vectors/driver/secret-slot-reaches-declared-descriptor.json",
+      "vectors/driver/secret-slot-unknown-name-refused.json",
+      "vectors/driver/secret-slot-unserved-without-capability.json",
+      "vectors/driver/secret-slot-value-never-observable.json",
+      "vectors/driver/snapshot-incomplete.json",
+      "vectors/driver/stale-capability.json",
+      "vectors/driver/symlink-escape.json",
+      "vectors/driver/timeout.json",
+      "vectors/http/cross-subject-not-found.json",
+      "vectors/http/cross-subject-resource.json",
+      "vectors/http/directory-list.json",
+      "vectors/http/egress-unserved.json",
+      "vectors/http/event-list.json",
+      "vectors/http/event-stream-generation.json",
+      "vectors/http/exec-get.json",
+      "vectors/http/exec-lease-renew.json",
+      "vectors/http/exec-nonzero-is-observation.json",
+      "vectors/http/exec-output.json",
+      "vectors/http/exec-retire.json",
+      "vectors/http/exec-signal.json",
+      "vectors/http/file-delete-depth.json",
+      "vectors/http/file-delete.json",
+      "vectors/http/file-read.json",
+      "vectors/http/file-write.json",
+      "vectors/http/machine-probe.json",
+      "vectors/http/operation-get.json",
+      "vectors/http/path-escape.json",
+      "vectors/http/read-limit.json",
+      "vectors/http/reconciliation-snapshot-limit.json",
+      "vectors/http/sandbox-unavailable.json",
+      "vectors/http/strict-request.json",
+      "vectors/http/unauthenticated-startup.json",
+      "vectors/http/workspace-create.json",
+      "vectors/http/workspace-destroy.json",
+      "vectors/http/workspace-get.json",
+      "vectors/http/workspace-lease-renew.json",
+      "vectors/http/workspace-replay.json"
+    ],
+    "executable_vectors": [
+      "vectors/driver/crash-after-dispatch.json",
+      "vectors/driver/crash-before-dispatch.json",
+      "vectors/driver/event-push-pull-identity.json",
+      "vectors/driver/event-retention-gap.json",
+      "vectors/driver/event-stream-backpressure.json",
+      "vectors/driver/restart-no-redispatch.json",
+      "vectors/driver/snapshot-concurrent-mutation.json",
+      "vectors/http/event-cross-scope-cursor.json",
+      "vectors/http/exec-capacity.json",
+      "vectors/http/exec-start.json",
+      "vectors/http/input-body-limit.json",
+      "vectors/http/ledger-capacity.json",
+      "vectors/http/machinery-failure.json",
+      "vectors/http/pipe-session-missing-lease.json",
+      "vectors/http/pipe-session-start.json",
+      "vectors/http/reconciliation-snapshot-create.json",
+      "vectors/http/reconciliation-snapshot-empty.json",
+      "vectors/http/reconciliation-snapshot-get.json",
+      "vectors/http/replay-conflict.json",
+      "vectors/http/workspace-capacity.json",
+      "vectors/http/write-limit.json"
+    ]
+  },
+  "files": [
+    {
+      "byte_length": 568,
+      "media_type": "application/json",
+      "path": "compatibility.json",
+      "sha256": "161c1a25b3f1491b4c2fffebb856bcf5db6aedcf4e4df0b0e7b053dedf723ca1"
+    },
+    {
+      "byte_length": 28822,
+      "media_type": "application/json",
+      "path": "coverage.json",
+      "sha256": "85334ff88e228e807913f7ef1220e301c7fd5b3fed0fac179938e7b0118159cc"
+    },
+    {
+      "byte_length": 18786,
+      "media_type": "application/json",
+      "path": "fixtures/canonical-hash.json",
+      "sha256": "50922e38fb884bba53dcfc7f967c1fa7ec86a45dc10b9a3846c44190714dded9"
+    },
+    {
+      "byte_length": 6819,
+      "media_type": "application/json",
+      "path": "fixtures/operation-states.json",
+      "sha256": "34babf89c97d426e1cb65ddf0b6afe6fc5369098912b9027c657c684edf18677"
+    },
+    {
+      "byte_length": 6870,
+      "media_type": "application/json",
+      "path": "fixtures/resource-invariants.json",
+      "sha256": "a83080c81cc31e3607b4d8e2e5d8a05439402a7b9a64d6d18f64c69675d458b9"
+    },
+    {
+      "byte_length": 1643,
+      "media_type": "application/json",
+      "path": "fixtures/runner-results.json",
+      "sha256": "66a5f88cb526677e8d947aad234b9acb6d2fe491e7937c71d2991004516b9f6a"
+    },
+    {
+      "byte_length": 1986,
+      "media_type": "application/json",
+      "path": "hashing.json",
+      "sha256": "065caa9bb2d778a57d313e38212ff491afc9ee1ff7ac2d403b2954247da2b22a"
+    },
+    {
+      "byte_length": 20421,
+      "media_type": "application/json",
+      "path": "operations.json",
+      "sha256": "5d9a14dc33bffdf4c8083a4e3dce9581bb38d994d566964667dcd61a4f8bf2c7"
+    },
+    {
+      "byte_length": 2504,
+      "media_type": "application/json",
+      "path": "origins.json",
+      "sha256": "4d31021adee119f7199f4662a299cb20481c0d30a6abaa0dab5b5c4a0ada354c"
+    },
+    {
+      "byte_length": 603,
+      "media_type": "application/json",
+      "path": "packaging.json",
+      "sha256": "9176da21dd375b0826bf9f69b6e1c6b58195effa8fe58d92a5f48c2b425f3cc6"
+    },
+    {
+      "byte_length": 1261,
+      "media_type": "application/json",
+      "path": "runner.json",
+      "sha256": "661f6a3c1b2c156797ad031dafe9a56f6df28260890c2057b07c5e2df3789e0e"
+    },
+    {
+      "byte_length": 266,
+      "media_type": "application/json",
+      "path": "schemas/addresses/event-list.json",
+      "sha256": "5c6c971b831a5d38675f685d18825433cca1299d99cbfba6e4fa9d06f207b788"
+    },
+    {
+      "byte_length": 270,
+      "media_type": "application/json",
+      "path": "schemas/addresses/event-stream.json",
+      "sha256": "ea4ac303f24fbb28bf4fe6ac6f314267161e303480e367cf28b0e095945429f7"
+    },
+    {
+      "byte_length": 351,
+      "media_type": "application/json",
+      "path": "schemas/addresses/exec-get.json",
+      "sha256": "b13158e47dfbcaa06d269fec3f5202488135c9730e3df0e1cf30a468fd45ab42"
+    },
+    {
+      "byte_length": 367,
+      "media_type": "application/json",
+      "path": "schemas/addresses/exec-lease-renew.json",
+      "sha256": "5d3b0da409cc2b5e1a09cf240617421e7d32191450ad0a5c6f553098d89fb194"
+    },
+    {
+      "byte_length": 365,
+      "media_type": "application/json",
+      "path": "schemas/addresses/exec-output-get.json",
+      "sha256": "a8f419f68526cced5291ee3a42580d08e2b1693ac8e3e81447de331606364107"
+    },
+    {
+      "byte_length": 357,
+      "media_type": "application/json",
+      "path": "schemas/addresses/exec-retire.json",
+      "sha256": "00a41190fa5b1ddcb5e889e93f6629056653709a6e76adbffb4a796cd1b9fa99"
+    },
+    {
+      "byte_length": 357,
+      "media_type": "application/json",
+      "path": "schemas/addresses/exec-signal.json",
+      "sha256": "f0f51b227ad3625a86c5316244677602a1f1bc1772df91cbdb3757759129adb7"
+    },
+    {
+      "byte_length": 266,
+      "media_type": "application/json",
+      "path": "schemas/addresses/exec-start.json",
+      "sha256": "b2b84259a5de1c78bb721f4b4f305da42e28bbeacf4fb1af0b8ed65b2a8e866e"
+    },
+    {
+      "byte_length": 268,
+      "media_type": "application/json",
+      "path": "schemas/addresses/machine-get.json",
+      "sha256": "9add933ed03b0826d6f1ad247315f791ab5a7b37b4b31bff5a6b1ede44759ce8"
+    },
+    {
+      "byte_length": 376,
+      "media_type": "application/json",
+      "path": "schemas/addresses/operation-get.json",
+      "sha256": "83296e7bcc4f962c4e3697e1e6ffe5b0af59751a7167f47ff001fd300375f4b3"
+    },
+    {
+      "byte_length": 382,
+      "media_type": "application/json",
+      "path": "schemas/addresses/pipe-session-attach.json",
+      "sha256": "3bb2da75424d9f51599a81cdf4ca371e2e7f306ca161a8d807ce630b084f5c1b"
+    },
+    {
+      "byte_length": 296,
+      "media_type": "application/json",
+      "path": "schemas/addresses/pipe-session-capabilities.json",
+      "sha256": "1fa15dcf3a54630f09f68ca5d02c07f8500adb9cf2d5378ea89abdbb028bc0c5"
+    },
+    {
+      "byte_length": 376,
+      "media_type": "application/json",
+      "path": "schemas/addresses/pipe-session-get.json",
+      "sha256": "c3c1ea4e0da125b5c7273027965ee1d54355c03d1a968a2989403e15d7ecf4ae"
+    },
+    {
+      "byte_length": 392,
+      "media_type": "application/json",
+      "path": "schemas/addresses/pipe-session-lease-renew.json",
+      "sha256": "6b7eb22263f71337054f53e284f722547716cc10b4a9803ea8437fce20036789"
+    },
+    {
+      "byte_length": 382,
+      "media_type": "application/json",
+      "path": "schemas/addresses/pipe-session-retire.json",
+      "sha256": "d68a3a4184a378b8917121411fba5f26fffd74eb684fd2d9333e3123ca707930"
+    },
+    {
+      "byte_length": 382,
+      "media_type": "application/json",
+      "path": "schemas/addresses/pipe-session-signal.json",
+      "sha256": "8b90aed3066679344aefa47c0a7fae014c8dbae66b9e5f24ab6c15f5378d3971"
+    },
+    {
+      "byte_length": 282,
+      "media_type": "application/json",
+      "path": "schemas/addresses/pipe-session-start.json",
+      "sha256": "3c26a526fb64ec581419f52f7c9db7d1b0b2b1eea9b0fe1b52463b3957a90bf3"
+    },
+    {
+      "byte_length": 306,
+      "media_type": "application/json",
+      "path": "schemas/addresses/reconciliation-snapshot-create.json",
+      "sha256": "6a5b38bf096659c8334a3d60ade726aa5027b036551327ed4c39333a96f01d40"
+    },
+    {
+      "byte_length": 401,
+      "media_type": "application/json",
+      "path": "schemas/addresses/reconciliation-snapshot-get.json",
+      "sha256": "496620a3996e8ca8da002bb53d26f4d1f93ff7e902d60b96c54bb7053887650e"
+    },
+    {
+      "byte_length": 278,
+      "media_type": "application/json",
+      "path": "schemas/addresses/workspace-create.json",
+      "sha256": "5d351c3b055b6d84951412b7e4e832da856ce4719119a4dfc6324b5f7f4c1694"
+    },
+    {
+      "byte_length": 384,
+      "media_type": "application/json",
+      "path": "schemas/addresses/workspace-destroy.json",
+      "sha256": "ff8956da953e6f05aef4c5131b8e48c2a3e02ad7588997a3c37057bec56391cd"
+    },
+    {
+      "byte_length": 477,
+      "media_type": "application/json",
+      "path": "schemas/addresses/workspace-file-delete.json",
+      "sha256": "0ed67164881cef0d0e4e1a576a80400055ebe12130a4c3bc6e9ef1fc349f4aba"
+    },
+    {
+      "byte_length": 473,
+      "media_type": "application/json",
+      "path": "schemas/addresses/workspace-file-read.json",
+      "sha256": "ed28de56c02e8760bc46546ae4cc678a7c23158fd67da910c30bdf512ecba032"
+    },
+    {
+      "byte_length": 475,
+      "media_type": "application/json",
+      "path": "schemas/addresses/workspace-file-write.json",
+      "sha256": "9abdba0f90095667a1c290d3fa3e56e389e4514ed45d2ff542d8f970f88b1b5a"
+    },
+    {
+      "byte_length": 376,
+      "media_type": "application/json",
+      "path": "schemas/addresses/workspace-get.json",
+      "sha256": "af741270b8398058803586dbb45b235eb789c7daed07f924f050d99f1c92bbdc"
+    },
+    {
+      "byte_length": 392,
+      "media_type": "application/json",
+      "path": "schemas/addresses/workspace-lease-renew.json",
+      "sha256": "f21e4689865c047458a7b3823f83b0084689674aba6bca2026e210e998e1ed64"
+    },
+    {
+      "byte_length": 3388,
+      "media_type": "application/json",
+      "path": "schemas/bundle.json",
+      "sha256": "cc62a683118d5cf78d239db19c883b3d484ec2898cfdef5c83b67fca74f46569"
+    },
+    {
+      "byte_length": 5627,
+      "media_type": "application/json",
+      "path": "schemas/capability.json",
+      "sha256": "b61032ad146789bcc09743bdf4df2d19705c9b9900fcc3b817d54409246973cd"
+    },
+    {
+      "byte_length": 3159,
+      "media_type": "application/json",
+      "path": "schemas/common.json",
+      "sha256": "3e7da66ee5ea0f1e3b5fa0bda0c6c21e3389b5e107dc8c194d01b87c338ed495"
+    },
+    {
+      "byte_length": 1048,
+      "media_type": "application/json",
+      "path": "schemas/compatibility.json",
+      "sha256": "e524edd3b1c36e14f7e0911e5627ca4ad6845511886db27a04cccaa2c70b1fab"
+    },
+    {
+      "byte_length": 1557,
+      "media_type": "application/json",
+      "path": "schemas/coverage.json",
+      "sha256": "36b75a2d4cf965583042014b61259cf394bac7de1124828df0f00258f55bd0d1"
+    },
+    {
+      "byte_length": 1377,
+      "media_type": "application/json",
+      "path": "schemas/error.json",
+      "sha256": "0d93b33fd006846a33e3695697e98c2e1a49d414c9929da24df76326d218b800"
+    },
+    {
+      "byte_length": 2363,
+      "media_type": "application/json",
+      "path": "schemas/event-stream-frame.json",
+      "sha256": "c38e70a023bae1e091d9b7043743ae92add5a4097d852acb2dfca83306168e32"
+    },
+    {
+      "byte_length": 19119,
+      "media_type": "application/json",
+      "path": "schemas/event.json",
+      "sha256": "ffae548dc3691dca8572cb40f1b8085fe09665d7fe330841040478f5645e7925"
+    },
+    {
+      "byte_length": 6205,
+      "media_type": "application/json",
+      "path": "schemas/hash-fixtures.json",
+      "sha256": "17e27c27ee9f3016c67e01d1a7d1b5be959b1912fd025e6e6b66ab500d21a737"
+    },
+    {
+      "byte_length": 4794,
+      "media_type": "application/json",
+      "path": "schemas/hashing.json",
+      "sha256": "086f444110212db5bf3106677b776fe270736445dc6b8ada81d1e0e115fdf869"
+    },
+    {
+      "byte_length": 441,
+      "media_type": "application/json",
+      "path": "schemas/inputs/event-list.json",
+      "sha256": "45d3ca434153f40912a062126e7db49546df0eb6037d22f238eb008a421f3fc9"
+    },
+    {
+      "byte_length": 445,
+      "media_type": "application/json",
+      "path": "schemas/inputs/event-stream.json",
+      "sha256": "21881173dc217f843e6bd6201bebae72f7ebc2dc74b392ffba62fdcf03738b4d"
+    },
+    {
+      "byte_length": 251,
+      "media_type": "application/json",
+      "path": "schemas/inputs/exec-get.json",
+      "sha256": "78f97ca3a7de9b09a3ae97d997e86d494a44e1c02e6f899774ddb9c7376b8269"
+    },
+    {
+      "byte_length": 601,
+      "media_type": "application/json",
+      "path": "schemas/inputs/exec-output-get.json",
+      "sha256": "6a8deaf9acabee4a7d6ddf8d8a43aed9a650cf19bca0b87990dfa7194ab05452"
+    },
+    {
+      "byte_length": 257,
+      "media_type": "application/json",
+      "path": "schemas/inputs/exec-retire.json",
+      "sha256": "478c38ebc430b5dd6e2a6bba4b87e6060da54b89b4de5e719b38421edacc6da4"
+    },
+    {
+      "byte_length": 477,
+      "media_type": "application/json",
+      "path": "schemas/inputs/exec-signal.json",
+      "sha256": "a6c2c653232eb55961e186d3e85b11719ad8387327aa0c8680cede26d8b76c76"
+    },
+    {
+      "byte_length": 5938,
+      "media_type": "application/json",
+      "path": "schemas/inputs/exec-start.json",
+      "sha256": "10047386aaff369ada4ec72a85336722d03c3bad84e64c058bff132d5140f77d"
+    },
+    {
+      "byte_length": 372,
+      "media_type": "application/json",
+      "path": "schemas/inputs/lease-renew.json",
+      "sha256": "5f85e9436df6df6872e7e7ad4e79757088e1cf5db689a798922f9783e871e499"
+    },
+    {
+      "byte_length": 257,
+      "media_type": "application/json",
+      "path": "schemas/inputs/machine-get.json",
+      "sha256": "766888db21e9d12537401c3be489df3bb26d10dcf829be95961e1176ff985b28"
+    },
+    {
+      "byte_length": 261,
+      "media_type": "application/json",
+      "path": "schemas/inputs/operation-get.json",
+      "sha256": "7849fa200e5c761b6044f02d9442124a58a3274bf4bd85ca7054114c120cecb5"
+    },
+    {
+      "byte_length": 273,
+      "media_type": "application/json",
+      "path": "schemas/inputs/pipe-session-attach.json",
+      "sha256": "5e5a55b80cef57582ad18aec2252b053609a87cf0d953c44c4729f558eb92de0"
+    },
+    {
+      "byte_length": 267,
+      "media_type": "application/json",
+      "path": "schemas/inputs/pipe-session-get.json",
+      "sha256": "5b57753531cb704f3f41e5c712d55977e2dcbdeaca9e13d2683bcaff5c36232b"
+    },
+    {
+      "byte_length": 273,
+      "media_type": "application/json",
+      "path": "schemas/inputs/pipe-session-retire.json",
+      "sha256": "a902c43498c5f972d76f44658cfc35bcfad77dc9cc1de6f8de6f079adddf1407"
+    },
+    {
+      "byte_length": 7455,
+      "media_type": "application/json",
+      "path": "schemas/inputs/pipe-session-start.json",
+      "sha256": "3d7c0bcdf4eb9e4802a37b685bb0ea112b2c3cad5efbe11ca0a221f88d0b4a41"
+    },
+    {
+      "byte_length": 295,
+      "media_type": "application/json",
+      "path": "schemas/inputs/reconciliation-snapshot-create.json",
+      "sha256": "045666665c38b02c254e6114bad54685936aea98bbf52474dd615dc7101c0089"
+    },
+    {
+      "byte_length": 475,
+      "media_type": "application/json",
+      "path": "schemas/inputs/reconciliation-snapshot-get.json",
+      "sha256": "8a2791783704dcc2da64673e39b8981eb8624799da6b7b50f39332cada615987"
+    },
+    {
+      "byte_length": 1473,
+      "media_type": "application/json",
+      "path": "schemas/inputs/workspace-create.json",
+      "sha256": "64ec6e1de58f36c0bbd44a4c952908184d529dcc1ceb9d0d903ccd707184d33b"
+    },
+    {
+      "byte_length": 269,
+      "media_type": "application/json",
+      "path": "schemas/inputs/workspace-destroy.json",
+      "sha256": "60f7b5fe7264e8641300d8f2ddb18a4a926bce7f2206a9131f3aa41ffd1038b2"
+    },
+    {
+      "byte_length": 277,
+      "media_type": "application/json",
+      "path": "schemas/inputs/workspace-file-delete.json",
+      "sha256": "9bbe117ce62b4d91b6ad725ecf42ec3b852c9017b790153154e29175174c6932"
+    },
+    {
+      "byte_length": 1152,
+      "media_type": "application/json",
+      "path": "schemas/inputs/workspace-file-read.json",
+      "sha256": "16be32018abc897f5b3f96a22b245790ac2df79ee0297feea44811094a4bda27"
+    },
+    {
+      "byte_length": 626,
+      "media_type": "application/json",
+      "path": "schemas/inputs/workspace-file-write.json",
+      "sha256": "769e81aaaa4d0f4c7139e7afdb4aa3f77bb08e7dfcda04ebdda48fffd66faa40"
+    },
+    {
+      "byte_length": 261,
+      "media_type": "application/json",
+      "path": "schemas/inputs/workspace-get.json",
+      "sha256": "2d6692d2c6a6d57ec06da8125dfb2733146fa2133d9467e1e11fb91affa7fa44"
+    },
+    {
+      "byte_length": 5211,
+      "media_type": "application/json",
+      "path": "schemas/operation-registry.json",
+      "sha256": "26c3495c67c4038c1504b05c23e14c50f58e89cd721df11e1d60e9fb8d9feaaa"
+    },
+    {
+      "byte_length": 18687,
+      "media_type": "application/json",
+      "path": "schemas/operation.json",
+      "sha256": "4d26ecf1c560b3d9468affb5682c4e2855e08505c0c797c03bd3315845c1b10a"
+    },
+    {
+      "byte_length": 4398,
+      "media_type": "application/json",
+      "path": "schemas/origins.json",
+      "sha256": "f0f05582a1234e96d967c3a08834a65d75c598f8d8dbbba627fc095be32bb5c2"
+    },
+    {
+      "byte_length": 1705,
+      "media_type": "application/json",
+      "path": "schemas/packaging.json",
+      "sha256": "53ed160093c35cd6fd4195b2b5559a208bc781c77c5c9060a7b1a6202f78266a"
+    },
+    {
+      "byte_length": 6212,
+      "media_type": "application/json",
+      "path": "schemas/pipe-channel-frame.json",
+      "sha256": "e04c7bf0af94288d8c6c3f91ce9f051d5edfc9b38549a7ca95b0a7b6319884eb"
+    },
+    {
+      "byte_length": 4423,
+      "media_type": "application/json",
+      "path": "schemas/request.json",
+      "sha256": "ae5c01522e2dd8d874384f00fb96e40d157cb4da2dc4c33210ef892eb7736f24"
+    },
+    {
+      "byte_length": 72876,
+      "media_type": "application/json",
+      "path": "schemas/resource.json",
+      "sha256": "9311d25fd7eb5f8c181edcb5c14527ff93a8d1538f1a1e57354c8a07fdb358e3"
+    },
+    {
+      "byte_length": 14441,
+      "media_type": "application/json",
+      "path": "schemas/response.json",
+      "sha256": "1a3e4d8d397d339f6973ce02e3760c11b4d090edd4fed5e953efc0a6f4a1ff18"
+    },
+    {
+      "byte_length": 1034,
+      "media_type": "application/json",
+      "path": "schemas/results/event-list.json",
+      "sha256": "22bacb24cbd1359569a4fba3a35a5df8297cdd01df8afbb01cdc4badbca4f435"
+    },
+    {
+      "byte_length": 785,
+      "media_type": "application/json",
+      "path": "schemas/results/event-stream.json",
+      "sha256": "fb1e3acb6eaeed6d0c614978159de0a90a8274666b126dfb0f91b5feff67cc43"
+    },
+    {
+      "byte_length": 204,
+      "media_type": "application/json",
+      "path": "schemas/results/exec-get.json",
+      "sha256": "04468bdc30e714200c5e7e5b1faf76dcc7a936e5108fed391a17cbda8c0bacc1"
+    },
+    {
+      "byte_length": 220,
+      "media_type": "application/json",
+      "path": "schemas/results/exec-lease-renew.json",
+      "sha256": "2a4f84c10118e16ab1434cd99d896b088fa744b4e163bfd6c6adb3b243e97add"
+    },
+    {
+      "byte_length": 1381,
+      "media_type": "application/json",
+      "path": "schemas/results/exec-output-get.json",
+      "sha256": "9b0654e13acdb61a8008f9d18e2313b0d785748ab51d962cd8f63b40e37717c5"
+    },
+    {
+      "byte_length": 545,
+      "media_type": "application/json",
+      "path": "schemas/results/exec-retire.json",
+      "sha256": "76ff78fcc9dd70dc18fbf782070635010db7d210062d5da881efc975196f440a"
+    },
+    {
+      "byte_length": 210,
+      "media_type": "application/json",
+      "path": "schemas/results/exec-signal.json",
+      "sha256": "aae2aace89f7a0a85a940da8cfb7848622e26735d478e3de90c6b3f6cbe2edfd"
+    },
+    {
+      "byte_length": 208,
+      "media_type": "application/json",
+      "path": "schemas/results/exec-start.json",
+      "sha256": "3e39fb24467b5c63114e94d8b2e79a0c0cd69376d24877072759e96579192c3a"
+    },
+    {
+      "byte_length": 200,
+      "media_type": "application/json",
+      "path": "schemas/results/machine-get.json",
+      "sha256": "b800b965de6b8564ca30aa2198187dc11fef4a1d98df5ba9d81b52416aa341ad"
+    },
+    {
+      "byte_length": 203,
+      "media_type": "application/json",
+      "path": "schemas/results/operation-get.json",
+      "sha256": "5b09c0e81b73c733cfd9fd11eb83118abf1b068f4ba20e50280cdf79611a7364"
+    },
+    {
+      "byte_length": 537,
+      "media_type": "application/json",
+      "path": "schemas/results/pipe-session-attach.json",
+      "sha256": "c4e8c7d027b17cf9b6d88c09101dc921f7910348bdd706f84f1272cee79176b8"
+    },
+    {
+      "byte_length": 1023,
+      "media_type": "application/json",
+      "path": "schemas/results/pipe-session-capabilities.json",
+      "sha256": "c95330d879242225756261826d5289050eb1b6817448c9336eedb5f97c1aef1a"
+    },
+    {
+      "byte_length": 228,
+      "media_type": "application/json",
+      "path": "schemas/results/pipe-session-get.json",
+      "sha256": "5d5423d60325b2b3801a6b9728c182eba264f41c903dfc367607e0a303ef4ebc"
+    },
+    {
+      "byte_length": 244,
+      "media_type": "application/json",
+      "path": "schemas/results/pipe-session-lease-renew.json",
+      "sha256": "e5bdec24f8952896542e3e006d062ef66554b5cc60c362f7e1a37b8cd11b78ea"
+    },
+    {
+      "byte_length": 567,
+      "media_type": "application/json",
+      "path": "schemas/results/pipe-session-retire.json",
+      "sha256": "ae862b33fce5d90355c8d7b4ea0278de84b19db07363063d6a012729879d6626"
+    },
+    {
+      "byte_length": 234,
+      "media_type": "application/json",
+      "path": "schemas/results/pipe-session-signal.json",
+      "sha256": "12532286f91808a1d75e22f8bef230b027f92c81ec685774af9661f6a95e3858"
+    },
+    {
+      "byte_length": 232,
+      "media_type": "application/json",
+      "path": "schemas/results/pipe-session-start.json",
+      "sha256": "72a7b46cc9f963791e10f0936d6860744f77926cea596ff99ddfd984c07fe638"
+    },
+    {
+      "byte_length": 2346,
+      "media_type": "application/json",
+      "path": "schemas/results/reconciliation-snapshot-create.json",
+      "sha256": "40550c2fa5a706eca2cf8174a958499aad5d317509c09f93e2fc621b5e8b91af"
+    },
+    {
+      "byte_length": 3176,
+      "media_type": "application/json",
+      "path": "schemas/results/reconciliation-snapshot-get.json",
+      "sha256": "8ba0268d4daafde16922593b15b6457fc10c122d457870083897661362a10a73"
+    },
+    {
+      "byte_length": 357,
+      "media_type": "application/json",
+      "path": "schemas/results/workspace-create.json",
+      "sha256": "628927cade5598f03c9194d172530e13a3c150269b64740a3f7c62c809be6d40"
+    },
+    {
+      "byte_length": 567,
+      "media_type": "application/json",
+      "path": "schemas/results/workspace-destroy.json",
+      "sha256": "e8349480ded075448a2b2fb49416765b1254511ccffa54b6a4d0e761fdd125f3"
+    },
+    {
+      "byte_length": 669,
+      "media_type": "application/json",
+      "path": "schemas/results/workspace-file-delete.json",
+      "sha256": "8cae6440f77746ae43f31bfe8f442847d829cc0a5a921b15c03f4224d386b856"
+    },
+    {
+      "byte_length": 3169,
+      "media_type": "application/json",
+      "path": "schemas/results/workspace-file-read.json",
+      "sha256": "b683857e15db51826b3ec5628b6582f4a0c52b9c688ca5d69010b69b933a8299"
+    },
+    {
+      "byte_length": 889,
+      "media_type": "application/json",
+      "path": "schemas/results/workspace-file-write.json",
+      "sha256": "41409e77b9839aef71c88bfe557bdfd550265aa0b76083ec4f1cc268e0fcff9d"
+    },
+    {
+      "byte_length": 219,
+      "media_type": "application/json",
+      "path": "schemas/results/workspace-get.json",
+      "sha256": "9f1772826ae98e4c89422eb2180a9bc13aa7dd71ddaee543ad8b61c413d48d01"
+    },
+    {
+      "byte_length": 235,
+      "media_type": "application/json",
+      "path": "schemas/results/workspace-lease-renew.json",
+      "sha256": "a79b37e8f1457def80462f3d8f6b23dacf98a8ee630da018167fd9e86ce51216"
+    },
+    {
+      "byte_length": 2965,
+      "media_type": "application/json",
+      "path": "schemas/runner-result.json",
+      "sha256": "2f673270659c266d7dd91dc0afdd01607b52c1aacf8473b45902358e81d0e15f"
+    },
+    {
+      "byte_length": 3628,
+      "media_type": "application/json",
+      "path": "schemas/runner.json",
+      "sha256": "18a21baef6068c5bceb2b42d113a4abf78bcb609cfc1394a19298eb10a101b01"
+    },
+    {
+      "byte_length": 1067,
+      "media_type": "application/json",
+      "path": "schemas/schema-fixtures.json",
+      "sha256": "af4e0ed96ce27660911a16dd6ef8121fb43e10330ca079d9aefd8e5bfd7d7e43"
+    },
+    {
+      "byte_length": 162936,
+      "media_type": "application/json",
+      "path": "schemas/vector.json",
+      "sha256": "ac8e600579f7a52b7bd31c4fd4f57bf9fa6bc6e3b366610e8c0ae80fa16c7de0"
+    },
+    {
+      "byte_length": 1297,
+      "media_type": "application/json",
+      "path": "vectors/driver/absolute-path.json",
+      "sha256": "1fda6af8d16671d8635f593f018904a6caf12e9cf11ed77ed4fcfca8508400c0"
+    },
+    {
+      "byte_length": 1243,
+      "media_type": "application/json",
+      "path": "vectors/driver/crash-after-dispatch.json",
+      "sha256": "bba9361e399ca8c04bdbdb24f3801150355ed79d7a4f1a83292436f0696d2d2d"
+    },
+    {
+      "byte_length": 1241,
+      "media_type": "application/json",
+      "path": "vectors/driver/crash-before-dispatch.json",
+      "sha256": "254841946d4bd642ac1585b6ccffff00f12fac7f3379bf3981d4f09c591a9950"
+    },
+    {
+      "byte_length": 1854,
+      "media_type": "application/json",
+      "path": "vectors/driver/credential-inheritance.json",
+      "sha256": "abc6586331fdf34b4b0cb4740ce1d23b3ed22c49163ef635ce361e611fc47b74"
+    },
+    {
+      "byte_length": 1315,
+      "media_type": "application/json",
+      "path": "vectors/driver/dangling-link.json",
+      "sha256": "4947c2117d8c468c9792722c6340e6e7b96fe1bf4f1df57c5c8c2f4fe294765d"
+    },
+    {
+      "byte_length": 1920,
+      "media_type": "application/json",
+      "path": "vectors/driver/event-push-pull-identity.json",
+      "sha256": "e30508e363ab6b90a137abb301befdbfd4741a97445288b3147aea0bd42e2157"
+    },
+    {
+      "byte_length": 1033,
+      "media_type": "application/json",
+      "path": "vectors/driver/event-retention-gap.json",
+      "sha256": "b0438a974725ad13203efb7540765a0ae6fbf72dcc10e47e6de8d973b97ba252"
+    },
+    {
+      "byte_length": 1140,
+      "media_type": "application/json",
+      "path": "vectors/driver/event-stream-backpressure.json",
+      "sha256": "1aee0394a8819cfcdd6c0c3cc2ecaf231f4d191bae03c145469c1d4737853d2c"
+    },
+    {
+      "byte_length": 1025,
+      "media_type": "application/json",
+      "path": "vectors/driver/execution-capsule-cleanup.json",
+      "sha256": "d00d88ce944592bc41d22d2441b6ad5384f458b54d1e22c293a40e5cacdc57a4"
+    },
+    {
+      "byte_length": 1040,
+      "media_type": "application/json",
+      "path": "vectors/driver/execution-capsule-digest-drift.json",
+      "sha256": "bae85da495d5a15b838499d1871fcf166f8b8afa26e13fbf7b249b4aa57135b2"
+    },
+    {
+      "byte_length": 1039,
+      "media_type": "application/json",
+      "path": "vectors/driver/execution-capsule-path-escape.json",
+      "sha256": "1266c00f4b95bb16808dd522080c6842f36efc4985f9c6ca0f100841adc2c77f"
+    },
+    {
+      "byte_length": 1014,
+      "media_type": "application/json",
+      "path": "vectors/driver/execution-capsule-read-only.json",
+      "sha256": "573e0620f2d06f88f757fd67101bd54b04b0cc939c4a0a6b89825e639be4beae"
+    },
+    {
+      "byte_length": 1322,
+      "media_type": "application/json",
+      "path": "vectors/driver/execution-capsule-restart-cleanup.json",
+      "sha256": "8454484480e77d10fb858e77741dc293ae9d422da00ab236a41d63a2ee31600e"
+    },
+    {
+      "byte_length": 1061,
+      "media_type": "application/json",
+      "path": "vectors/driver/execution-capsule-workspace-separation.json",
+      "sha256": "5fe0a696bb068635eb800a22cef8c92fd1b021be639291c96baddf5ad9e3ec06"
+    },
+    {
+      "byte_length": 1039,
+      "media_type": "application/json",
+      "path": "vectors/driver/generation-reset.json",
+      "sha256": "c3ffe56a187f951d57c31ec0a88246a8329910d37ae832d89e300adbf4187f0c"
+    },
+    {
+      "byte_length": 1272,
+      "media_type": "application/json",
+      "path": "vectors/driver/git-helper.json",
+      "sha256": "0c0e2c9527da550795155530103f153d16ffcc08d1aaf6903c6f3e3447fb5790"
+    },
+    {
+      "byte_length": 1251,
+      "media_type": "application/json",
+      "path": "vectors/driver/git-hook.json",
+      "sha256": "b2d86e0442647acd3f676b0b916bed96586d18db367c06aee30bcd94024c59a3"
+    },
+    {
+      "byte_length": 1275,
+      "media_type": "application/json",
+      "path": "vectors/driver/git-lfs.json",
+      "sha256": "6ccb1e283c2e1ceccbabaf05688d610878243f7ac8682c6f36912c186ea23615"
+    },
+    {
+      "byte_length": 1267,
+      "media_type": "application/json",
+      "path": "vectors/driver/git-proxy.json",
+      "sha256": "2f907de2316de987857084ea538fbb971145c5584fa7a6bc8d472b62701dc28b"
+    },
+    {
+      "byte_length": 1274,
+      "media_type": "application/json",
+      "path": "vectors/driver/git-rebinding.json",
+      "sha256": "ff8f493e3443ecfefa15bc1cb9ba698f1a4e3daa16b501ee492b1554400f2cd1"
+    },
+    {
+      "byte_length": 1295,
+      "media_type": "application/json",
+      "path": "vectors/driver/git-redirect.json",
+      "sha256": "02a3dff6016c33e1e8fa3b7859c1547d513c43155fbb5e9be399a2e957c3009e"
+    },
+    {
+      "byte_length": 1299,
+      "media_type": "application/json",
+      "path": "vectors/driver/git-submodule.json",
+      "sha256": "6da41fc8c88296ca3dfc8de4e334b752ab385b122414d7ba633faf5c874eb509"
+    },
+    {
+      "byte_length": 1488,
+      "media_type": "application/json",
+      "path": "vectors/driver/lease-authorizing-operation.json",
+      "sha256": "c101d24821c893ab7a6284bc32dfe9fe906dba356637d49e05d4437e561fc2e8"
+    },
+    {
+      "byte_length": 1014,
+      "media_type": "application/json",
+      "path": "vectors/driver/lease-boot-change.json",
+      "sha256": "970282094213d4ca7463b05418de4c9dbc69a93b5b138aa0f8e57d7f245af45a"
+    },
+    {
+      "byte_length": 1041,
+      "media_type": "application/json",
+      "path": "vectors/driver/lease-cleanup-failure.json",
+      "sha256": "3f597366443c3a24c0d74ee4a9d5d4b753bee7a1668a0e8779d0165581242f09"
+    },
+    {
+      "byte_length": 1055,
+      "media_type": "application/json",
+      "path": "vectors/driver/lease-expiry.json",
+      "sha256": "04057965c47cd09d73c38d0b41023dfcf19d20372beec442fd38b72decfeddb1"
+    },
+    {
+      "byte_length": 1025,
+      "media_type": "application/json",
+      "path": "vectors/driver/lease-wall-skew.json",
+      "sha256": "edc48e057145a3102695302456ccb98dced51e09d006d560ed28266f1b1cc7ad"
+    },
+    {
+      "byte_length": 1209,
+      "media_type": "application/json",
+      "path": "vectors/driver/lost-answer.json",
+      "sha256": "a21e490f1e7e8434c79bd0664c99232c623d427b8a67c5d718d764f9d57bd67d"
+    },
+    {
+      "byte_length": 1142,
+      "media_type": "application/json",
+      "path": "vectors/driver/machinery-failure.json",
+      "sha256": "1b61203b2b7691d157966d134f15a847bf5ee1ca72bc3fe397d108639974f863"
+    },
+    {
+      "byte_length": 1304,
+      "media_type": "application/json",
+      "path": "vectors/driver/magic-link.json",
+      "sha256": "00ad5ec626311cacb28d220a160cd8da3ba865ab40c3d6fd36c6fd924374978a"
+    },
+    {
+      "byte_length": 1296,
+      "media_type": "application/json",
+      "path": "vectors/driver/mount-escape.json",
+      "sha256": "70a841e67ac3ac874bee6ceb2653f9c044768e2ba91865473bba4223beaf0ed6"
+    },
+    {
+      "byte_length": 1273,
+      "media_type": "application/json",
+      "path": "vectors/driver/no-egress.json",
+      "sha256": "35898ba2b23c0edee93129e214527bc88b72a81f087e108014ad87215b75fcc4"
+    },
+    {
+      "byte_length": 1327,
+      "media_type": "application/json",
+      "path": "vectors/driver/output-truncation.json",
+      "sha256": "0c2dcf70a9e473daee7af6bd09f4f083b3af2cd9681068086254c02b43cfc66d"
+    },
+    {
+      "byte_length": 1158,
+      "media_type": "application/json",
+      "path": "vectors/driver/pipe-session-attachment-loss.json",
+      "sha256": "5b575ada47e26cd211016ebc4589fe1575821bc0201e4302235cd7ad28a9e319"
+    },
+    {
+      "byte_length": 1067,
+      "media_type": "application/json",
+      "path": "vectors/driver/pipe-session-capabilities.json",
+      "sha256": "bddb32ea045cb571238f63769baf0ef22c7f97e27df93665df092e1e406d6db8"
+    },
+    {
+      "byte_length": 1071,
+      "media_type": "application/json",
+      "path": "vectors/driver/pipe-session-lease-renew.json",
+      "sha256": "92d7497240f2099c00deccf1609aed4dc2ccea55d3d604f1a0cf38672c2aa245"
+    },
+    {
+      "byte_length": 1115,
+      "media_type": "application/json",
+      "path": "vectors/driver/pipe-session-protocol-failure.json",
+      "sha256": "8ce8aad49420673b47187c7561eee65901fab52339318d59b223a5f21f534792"
+    },
+    {
+      "byte_length": 1061,
+      "media_type": "application/json",
+      "path": "vectors/driver/pipe-session-restart.json",
+      "sha256": "f91a65e3b9b12ae82a93ce3ba3a9436650bebcd5d6a840f1d0683746cec277f2"
+    },
+    {
+      "byte_length": 1055,
+      "media_type": "application/json",
+      "path": "vectors/driver/pipe-session-retire.json",
+      "sha256": "03d0d38547ae1541a94b0d023c42ef61d6c8f1ae7072544d71bd560f201bcce4"
+    },
+    {
+      "byte_length": 1118,
+      "media_type": "application/json",
+      "path": "vectors/driver/pipe-session-single-attachment.json",
+      "sha256": "b093bc827ad29033b1f4809ed3ce5e456d8c3af4328628b2a54b5a5cbc659076"
+    },
+    {
+      "byte_length": 1109,
+      "media_type": "application/json",
+      "path": "vectors/driver/pipe-session-terminal-evidence.json",
+      "sha256": "44bdd9ad9af18afabf35cc2c07a1e24ebba7b011ce672aa6241b61bbc8073831"
+    },
+    {
+      "byte_length": 1324,
+      "media_type": "application/json",
+      "path": "vectors/driver/process-tree-cancel.json",
+      "sha256": "0142ec7327e844bb9a9dd7927088cc09735a386881f57e479cf777d4b35ac8d3"
+    },
+    {
+      "byte_length": 1310,
+      "media_type": "application/json",
+      "path": "vectors/driver/resource-limits.json",
+      "sha256": "3861606e969cb7c7ba30cc7383f20ed4760b49ff336beb10d4dde9abf2c73365"
+    },
+    {
+      "byte_length": 1035,
+      "media_type": "application/json",
+      "path": "vectors/driver/restart-no-redispatch.json",
+      "sha256": "620fbc3a025c21e72759184c3203df754b6a692b937c4198a913070657a9fabd"
+    },
+    {
+      "byte_length": 3341,
+      "media_type": "application/json",
+      "path": "vectors/driver/secret-slot-daemon-copy-closed.json",
+      "sha256": "d7c77baf32ea8aeb4df1c00325fc6af582efcbc10289367f9b97484a8766c775"
+    },
+    {
+      "byte_length": 3288,
+      "media_type": "application/json",
+      "path": "vectors/driver/secret-slot-memfd-is-sealed.json",
+      "sha256": "51e16549d84b9e70cbe81516676e74886bbf93d66e0433dc79481ab74210de90"
+    },
+    {
+      "byte_length": 3465,
+      "media_type": "application/json",
+      "path": "vectors/driver/secret-slot-reaches-declared-descriptor.json",
+      "sha256": "cd0630e62d921f60d3935aa37328cfe58900c99b48ed4787032829aa53c42bc8"
+    },
+    {
+      "byte_length": 3233,
+      "media_type": "application/json",
+      "path": "vectors/driver/secret-slot-unknown-name-refused.json",
+      "sha256": "43b6b6722cacd484d9ead8515c15ffef533a2a707dafa54a7f782d29641c3065"
+    },
+    {
+      "byte_length": 3145,
+      "media_type": "application/json",
+      "path": "vectors/driver/secret-slot-unserved-without-capability.json",
+      "sha256": "726aa3e44ed47e4613ed84f5998bc91c5e4999a3cd1594811d88ed9363f5ed44"
+    },
+    {
+      "byte_length": 4177,
+      "media_type": "application/json",
+      "path": "vectors/driver/secret-slot-value-never-observable.json",
+      "sha256": "39fd78ad711238f6fae999d3951e312b34240394d5522eb6a9d240d4dc0d761d"
+    },
+    {
+      "byte_length": 1050,
+      "media_type": "application/json",
+      "path": "vectors/driver/snapshot-concurrent-mutation.json",
+      "sha256": "0132b78bb69477c5138dbe019ae4186bce726609e401333518007e44cf85be9f"
+    },
+    {
+      "byte_length": 1048,
+      "media_type": "application/json",
+      "path": "vectors/driver/snapshot-incomplete.json",
+      "sha256": "37a5e41bc84a8b7983550b1f51bec1ff1903b9e7d723e00416f29f491e2ac458"
+    },
+    {
+      "byte_length": 1238,
+      "media_type": "application/json",
+      "path": "vectors/driver/stale-capability.json",
+      "sha256": "a4d424b685c3b9b4d83817e0609b320d67153c9ed096877f7a54ba3391698495"
+    },
+    {
+      "byte_length": 1296,
+      "media_type": "application/json",
+      "path": "vectors/driver/symlink-escape.json",
+      "sha256": "adf84b23c9c17fe7ce98ba8892d6bf00c5b186810a0b2183685583d1b4b7e57e"
+    },
+    {
+      "byte_length": 1181,
+      "media_type": "application/json",
+      "path": "vectors/driver/timeout.json",
+      "sha256": "dd3b76ff50e8344637406ea0077001fc0fc14e9b00df84faa710e3a5974ef0c9"
+    },
+    {
+      "byte_length": 1630,
+      "media_type": "application/json",
+      "path": "vectors/http/cross-subject-not-found.json",
+      "sha256": "90c8e470b326d2c955b45de6b0d55b2bd351014297a62f0c57d27d9f0cdbe928"
+    },
+    {
+      "byte_length": 1759,
+      "media_type": "application/json",
+      "path": "vectors/http/cross-subject-resource.json",
+      "sha256": "29bd571904253b226ea81aa75112cb267ac0d3a044a245e508fc5117a13a2895"
+    },
+    {
+      "byte_length": 1853,
+      "media_type": "application/json",
+      "path": "vectors/http/directory-list.json",
+      "sha256": "96dd3c2b12709199de648663728492108fb5c7e22295b5a47acc1fcd8a025c49"
+    },
+    {
+      "byte_length": 4289,
+      "media_type": "application/json",
+      "path": "vectors/http/egress-unserved.json",
+      "sha256": "5957bade2f6137c3b4b1578b1a0d7bd027b7d90dced81bc52021898325a96264"
+    },
+    {
+      "byte_length": 1782,
+      "media_type": "application/json",
+      "path": "vectors/http/event-cross-scope-cursor.json",
+      "sha256": "b65a79adfd7f3d2ebd4a4e5a3ad99d0d72c15937652eb58aeda16a2e1ee5b8f3"
+    },
+    {
+      "byte_length": 2919,
+      "media_type": "application/json",
+      "path": "vectors/http/event-list.json",
+      "sha256": "5c53217d7c9b55331ab020a832e16ae6ae03174c3f981fc943294931d021d912"
+    },
+    {
+      "byte_length": 1755,
+      "media_type": "application/json",
+      "path": "vectors/http/event-stream-generation.json",
+      "sha256": "c72eda1a846a6511c19f23d020bc87657bdddddca9c9d22e33bd6f007ed4d6da"
+    },
+    {
+      "byte_length": 4710,
+      "media_type": "application/json",
+      "path": "vectors/http/exec-capacity.json",
+      "sha256": "53523d4911e24780e16aa17d3c9eb5c0e337aafcab660c4fb7f614f9223827b0"
+    },
+    {
+      "byte_length": 2895,
+      "media_type": "application/json",
+      "path": "vectors/http/exec-get.json",
+      "sha256": "7502ed31a111b4375dbdbfefc5522babfcd44c3e7fdca37b413f52e63e284871"
+    },
+    {
+      "byte_length": 2669,
+      "media_type": "application/json",
+      "path": "vectors/http/exec-lease-renew.json",
+      "sha256": "cdbba8b2c745e820dd28b4eee3c97b29c0808230d1c042c4bc3ef234dc3c9e6c"
+    },
+    {
+      "byte_length": 4864,
+      "media_type": "application/json",
+      "path": "vectors/http/exec-nonzero-is-observation.json",
+      "sha256": "d1d734c91650dc37f406e144a0dff1b566ba15041f35de8843e0439108dd0091"
+    },
+    {
+      "byte_length": 1835,
+      "media_type": "application/json",
+      "path": "vectors/http/exec-output.json",
+      "sha256": "b37f885d6f12f3a999382a7c9028b630aba2be0e863828917ef49b707ae25fdb"
+    },
+    {
+      "byte_length": 2955,
+      "media_type": "application/json",
+      "path": "vectors/http/exec-retire.json",
+      "sha256": "722ee6dd2dd7eeb0e258d70d536ce6d7c89b495979ecb356a054f78416af731d"
+    },
+    {
+      "byte_length": 3144,
+      "media_type": "application/json",
+      "path": "vectors/http/exec-signal.json",
+      "sha256": "9339330575eaf877dad3002491ad4b4c020b56213f3d1f88ecd1a6d3158b2a90"
+    },
+    {
+      "byte_length": 4923,
+      "media_type": "application/json",
+      "path": "vectors/http/exec-start.json",
+      "sha256": "07d7a6964e1ae371966f380701108b36ebd892888713d8b9bffcff767e420803"
+    },
+    {
+      "byte_length": 1849,
+      "media_type": "application/json",
+      "path": "vectors/http/file-delete-depth.json",
+      "sha256": "78bb4ba0c721c44247d662059ac7e5461042be78b922497d9966b3540c466fce"
+    },
+    {
+      "byte_length": 1912,
+      "media_type": "application/json",
+      "path": "vectors/http/file-delete.json",
+      "sha256": "19437f3e7b24910bc78831c106101e4837ac96928232017e65b93e9c6a144604"
+    },
+    {
+      "byte_length": 1911,
+      "media_type": "application/json",
+      "path": "vectors/http/file-read.json",
+      "sha256": "709da295bc9332d6e28ba6556a608e4443e6027d72a8e4ad240e0bee2c9cc40a"
+    },
+    {
+      "byte_length": 2288,
+      "media_type": "application/json",
+      "path": "vectors/http/file-write.json",
+      "sha256": "f9532646443233b940cedeae3a66ef6da7a4e0e91baacacdc66c66712a72f579"
+    },
+    {
+      "byte_length": 1836,
+      "media_type": "application/json",
+      "path": "vectors/http/input-body-limit.json",
+      "sha256": "ab7abe398bf7e4e5a2a0431a21bd8dea74debaba556886f1db55cb0a5f352fd5"
+    },
+    {
+      "byte_length": 2159,
+      "media_type": "application/json",
+      "path": "vectors/http/ledger-capacity.json",
+      "sha256": "b86154e0edae77280c63c8cdda2ffa1e42ffad511e4cc3ffc48a64037fd61dfd"
+    },
+    {
+      "byte_length": 3164,
+      "media_type": "application/json",
+      "path": "vectors/http/machine-probe.json",
+      "sha256": "a7292b0c6cbff368ee06fb25e24def2b3a94676ed105d2220078dff4fcf31898"
+    },
+    {
+      "byte_length": 2113,
+      "media_type": "application/json",
+      "path": "vectors/http/machinery-failure.json",
+      "sha256": "47fa1e2310f2d7a1b86908003660c24d38dbffa8275283f85413c87f42093da6"
+    },
+    {
+      "byte_length": 3134,
+      "media_type": "application/json",
+      "path": "vectors/http/operation-get.json",
+      "sha256": "1e3f5aff9c729e9f4d96de3f62cd23e3d86d0af1a6491305d009bc4c673c1173"
+    },
+    {
+      "byte_length": 1691,
+      "media_type": "application/json",
+      "path": "vectors/http/path-escape.json",
+      "sha256": "95b85747d270404215c3ef98de7d91fa84faea3c7fb3d977bb5653cdc28d5271"
+    },
+    {
+      "byte_length": 4547,
+      "media_type": "application/json",
+      "path": "vectors/http/pipe-session-missing-lease.json",
+      "sha256": "cdc119266d7d84fb9c97ee046fb9eca0a7d561714c579142c26b1e1677088701"
+    },
+    {
+      "byte_length": 5628,
+      "media_type": "application/json",
+      "path": "vectors/http/pipe-session-start.json",
+      "sha256": "f2527dd73d9fbe1a4391f39f6cc547399b8d280e69a2e3f4df2855a722093402"
+    },
+    {
+      "byte_length": 3454,
+      "media_type": "application/json",
+      "path": "vectors/http/read-limit.json",
+      "sha256": "7813d67befffd1f29fde3df175e23e593832d9df2954f028ca810e78fa5d4be1"
+    },
+    {
+      "byte_length": 2187,
+      "media_type": "application/json",
+      "path": "vectors/http/reconciliation-snapshot-create.json",
+      "sha256": "a45dc493596a8deeca76d50b475091c5cbfa2d87c46eab0cfec5696f6576fbf2"
+    },
+    {
+      "byte_length": 2668,
+      "media_type": "application/json",
+      "path": "vectors/http/reconciliation-snapshot-empty.json",
+      "sha256": "0b1936f930ae840fd3b1af145e091d32349d8abf3d3ec42a5536a77a935089a3"
+    },
+    {
+      "byte_length": 3111,
+      "media_type": "application/json",
+      "path": "vectors/http/reconciliation-snapshot-get.json",
+      "sha256": "95e1d78126ac7977ccc621227191b516aaeabe2f688cf3ef71db970ae47a5fef"
+    },
+    {
+      "byte_length": 2140,
+      "media_type": "application/json",
+      "path": "vectors/http/reconciliation-snapshot-limit.json",
+      "sha256": "c964f07d63b3a9082985a180938760edb64eb5df61aae78ace4929c0eae481bd"
+    },
+    {
+      "byte_length": 2080,
+      "media_type": "application/json",
+      "path": "vectors/http/replay-conflict.json",
+      "sha256": "5018619c296f0864fd9d1661bd44828b021dbda15250b6205741822691b232da"
+    },
+    {
+      "byte_length": 3897,
+      "media_type": "application/json",
+      "path": "vectors/http/sandbox-unavailable.json",
+      "sha256": "da6f6972eafb6392adc22c76bba3e6ca34edd27067e6bdefc0379f3d00764358"
+    },
+    {
+      "byte_length": 1670,
+      "media_type": "application/json",
+      "path": "vectors/http/strict-request.json",
+      "sha256": "899e289beec26ec8a76d9e94d2bcee0828e4b80eda76ebd872c4a39d8def5b06"
+    },
+    {
+      "byte_length": 1262,
+      "media_type": "application/json",
+      "path": "vectors/http/unauthenticated-startup.json",
+      "sha256": "b805508d59bb18212ceb4a4fe810920a5e0a635408b386e05c301c1e5a7dab92"
+    },
+    {
+      "byte_length": 2132,
+      "media_type": "application/json",
+      "path": "vectors/http/workspace-capacity.json",
+      "sha256": "d998835cab8999cb085f9c3a9a88aa54c3a6a98d05e58ab67f9ce20f26e51888"
+    },
+    {
+      "byte_length": 3743,
+      "media_type": "application/json",
+      "path": "vectors/http/workspace-create.json",
+      "sha256": "89a16fb41f0a89b8f8a35e1e29239d0c100d7a08261257371c070ab652cfe1e4"
+    },
+    {
+      "byte_length": 1685,
+      "media_type": "application/json",
+      "path": "vectors/http/workspace-destroy.json",
+      "sha256": "ca0bdb24f0350624fd1080a6d76955ccec2d8cf817c4278d2b02a587bc0c8995"
+    },
+    {
+      "byte_length": 1633,
+      "media_type": "application/json",
+      "path": "vectors/http/workspace-get.json",
+      "sha256": "a542eb9bdd8b1501081d1f36d71eabf3b0b6a04e3c246403422fdffcc1635eac"
+    },
+    {
+      "byte_length": 2119,
+      "media_type": "application/json",
+      "path": "vectors/http/workspace-lease-renew.json",
+      "sha256": "49b8f64c4de8abe80a7cb41619a25f0b267dae827acae710a92417a169286e55"
+    },
+    {
+      "byte_length": 4897,
+      "media_type": "application/json",
+      "path": "vectors/http/workspace-replay.json",
+      "sha256": "f17dab0c0716d5ccdbe950d8225cd988304a421041605436372d8352c412aaae"
+    },
+    {
+      "byte_length": 3664,
+      "media_type": "application/json",
+      "path": "vectors/http/write-limit.json",
+      "sha256": "8964254d5adf9cf2aa9d19ff0f4f1609a6f1ba28bd2f868b8c553ef0a02c54b2"
+    }
+  ],
+  "generator": {
+    "digest": "d1efc088275688e6323a7d447fd1f3cbff9ff9d21333bcff50d9ef061fe4feaa",
+    "name": "xtask/src/render.rs",
+    "version": "1"
+  },
+  "name": "substrate-wire",
+  "origin": "b10x",
+  "source_base_commit": null,
+  "status": "development",
+  "version": "0.5.0"
+}

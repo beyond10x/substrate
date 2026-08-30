@@ -280,7 +280,24 @@ pub struct DaemonConfig {
     pub cgroup_root: Option<PathBuf>,
     pub bubblewrap: PathBuf,
     pub event_retention: u64,
+    /// Operator-declared secret slots (ADR 0012), each a name and a bounded owner-private file.
+    ///
+    /// Never request data. An empty list means the `secrets.slots` capability is absent and a start
+    /// naming a slot is `unserved` — there is no weaker delivery to fall back to.
+    pub secret_slots: Vec<SecretSlot>,
     pub tcp: Option<TcpDaemonConfig>,
+}
+
+/// One operator-declared secret slot: a name, and the file behind it (ADR 0012).
+///
+/// The daemon's own configuration vocabulary, not the driver's. Invariant 4 is why it is declared
+/// here rather than re-exported from `substrate_host`: a second driver written against the port
+/// would otherwise find the daemon already shaped around the first one's types. `serve` converts it
+/// at the composition root, and nowhere else.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecretSlot {
+    pub name: String,
+    pub path: PathBuf,
 }
 
 /// Authenticated TCP listener for hosted/private-overlay composition.
@@ -314,6 +331,7 @@ impl DaemonConfig {
             cgroup_root: None,
             bubblewrap: PathBuf::from("/usr/bin/bwrap"),
             event_retention: 10_000,
+            secret_slots: Vec::new(),
             tcp: None,
         }
     }
@@ -346,6 +364,7 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
     if config.event_retention == 0 {
         bail!("event retention must be nonzero");
     }
+    check_secret_slots(&config.secret_slots)?;
     let store = Arc::new(
         Store::open_with_event_retention(&config.state, config.event_retention)
             .context("open durable state")?,
@@ -357,6 +376,14 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
     host_config.cgroup_root = config.cgroup_root;
     host_config.bubblewrap = config.bubblewrap;
     host_config.event_retention = config.event_retention;
+    host_config.secret_slots = config
+        .secret_slots
+        .into_iter()
+        .map(|slot| substrate_host::SecretSlot {
+            name: slot.name,
+            path: slot.path,
+        })
+        .collect();
     let driver = HostDriver::open(host_config).context("open host driver")?;
     let app = App::new(store, driver, config.deployment);
     app.sweep_expired().await;
@@ -438,6 +465,43 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Every rule a declared slot must satisfy before the daemon will serve at all.
+///
+/// Startup is the right place for all of it. A slot that only turns out to be undeclarable on the
+/// first start that names it is a refusal the operator hears from a client instead of from the
+/// process they configured.
+///
+/// # Errors
+///
+/// Returns the first rule broken, naming the slot and never reading its bytes.
+#[allow(clippy::verbose_bit_mask)] // Permission masks read better than bit-position arithmetic.
+fn check_secret_slots(slots: &[SecretSlot]) -> anyhow::Result<()> {
+    let mut declared: BTreeSet<&str> = BTreeSet::new();
+    for slot in slots {
+        if !substrate_wire::valid_secret_slot_name(&slot.name) {
+            bail!("secret slot names must match [a-z][a-z0-9_]{{0,63}}");
+        }
+        if !declared.insert(slot.name.as_str()) {
+            bail!("secret slot {} is declared more than once", slot.name);
+        }
+        let metadata = std::fs::symlink_metadata(&slot.path)
+            .with_context(|| format!("inspect the file declared for secret slot {}", slot.name))?;
+        let mode = metadata.permissions().mode();
+        if !metadata.is_file()
+            || metadata.len() == 0
+            || metadata.len() > substrate_wire::MAX_SECRET_SLOT_BYTES
+            || metadata.uid() != nix::unistd::geteuid().as_raw()
+            || mode & 0o077 != 0
+        {
+            bail!(
+                "secret slot {} must name one bounded regular file with private workload ownership",
+                slot.name
+            );
+        }
+    }
+    Ok(())
+}
+
 fn configuration_generation(config: &DaemonConfig) -> u64 {
     let mut material = Vec::new();
     for value in [
@@ -456,6 +520,18 @@ fn configuration_generation(config: &DaemonConfig) -> u64 {
         material.extend_from_slice(&0_u64.to_be_bytes());
     }
     material.extend_from_slice(&config.event_retention.to_be_bytes());
+    // Slot **names** only. Which slots exist is configuration a client may notice change; what is
+    // behind one is not, so a rotation must move nothing here (ADR 0012).
+    let mut names: Vec<&str> = config
+        .secret_slots
+        .iter()
+        .map(|slot| slot.name.as_str())
+        .collect();
+    names.sort_unstable();
+    for name in names {
+        material.extend_from_slice(&(name.len() as u64).to_be_bytes());
+        material.extend_from_slice(name.as_bytes());
+    }
     let digest = Sha256::digest(material);
     u64::from_be_bytes(
         digest[..8]

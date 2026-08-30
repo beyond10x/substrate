@@ -33,11 +33,14 @@ trust this page.
 
 - The Rust workspace has five crates — `substrate-wire`, `substrate-store`, `substrate-host`,
   `substrate-daemon` and the offline `substrate-contract-check` ([`Cargo.toml`](Cargo.toml),
-  `[workspace] members`). 0.4.0 is the current development bundle and every earlier bundle
-  directory is frozen; [`scripts/gate.sh`](scripts/gate.sh) runs all four bundle checkers on every
-  invocation, so a green gate is evidence that all four still hold. The one recorded exception is
-  the 2026-08-24 brand rename, which re-rendered every bundle in place (AGENTS.md invariant 6). No
-  development bundle becomes a stable release without packaging and signing.
+  `[workspace] members`). 0.5.0 is the current development bundle and every earlier bundle
+  directory is frozen; [`scripts/gate.sh`](scripts/gate.sh) runs the four Python bundle checkers
+  plus `cargo xtask check-bundle 0.5.0` on every invocation, so a green gate is evidence that all
+  five still hold. 0.5.0 is the first bundle whose checker is a `cargo xtask` verb rather than a
+  Python script; the four frozen pairs stay Python as the reproducibility proof of the bundles they
+  froze. The one recorded exception to immutability is the 2026-08-24 brand rename, which
+  re-rendered every bundle in place (AGENTS.md invariant 6). No development bundle becomes a stable
+  release without packaging and signing.
 - No Flux package, type or checkout is required: `flux` appears in no
   [`Cargo.lock`](Cargo.lock) package and nowhere under [`crates/`](crates), as
   [ADR 0001](adr/0001-substrate-is-standalone-and-flux-free.md) requires.
