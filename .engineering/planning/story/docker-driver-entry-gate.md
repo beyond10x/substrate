@@ -15,7 +15,7 @@ relations:
 - depends_on: story:pty-sessions
 - depends_on: story:sealed-secret-slots
 - depends_on: story:network-session-authority
-revision: 3
+revision: 4
 ---
 # Story: The Docker driver entry gate is proven before any Docker code
 
@@ -46,3 +46,23 @@ Evidence that satisfies it:
 - `docs/design/04-security-and-isolation.md` gains the section: daemon socket, `--privileged`,
   host network/PID namespaces, arbitrary bind mounts — visible deployment facts, never defaults;
 - plan 03 status and `ROADMAP.md` phase 5 change in the same commit.
+
+## Design draft — 2026-08-30
+
+`docs/design/15-docker-driver-entry-gate.md`, **proposed**. Claims no ADR number.
+
+| decision | chosen | alternative's cost |
+|---|---|---|
+| socket acquisition | an explicit flag only; no autodetect, no `DOCKER_HOST` | discovery turns a `chmod` elsewhere on the host into a silent capability here |
+| root-equivalence | published as the fact `exec.host-equivalent-authority` | a driver-name check makes the driver part of the contract (invariant 4) |
+| refused options | the driver builds a closed spec and the probe must pass **with the option applied** | a denylist grows by accident and is never the enforcement |
+| sealed slots | **absent** on containers | there is no `pre_exec` — the runtime forks the child, so passing the value through the runtime API is the leak ADR 0012 closes |
+| apertures | **absent** until a spike observes the `setns` handback | asserting it repeats what design 10 refused |
+| new refusal codes | one, `exec.container-option-in-request` | more would duplicate `exec.sandbox-unavailable`, which reads facts and never a driver kind |
+
+Bundle `0.9.0`, provisional — designs 13, 14 and 16 name it too.
+
+Two findings from the draft: the story's acceptance maps plan 03 criterion 3 onto a conformance
+harness, but that is criterion 1; and `crates/substrate-daemon/tests/driver_port.rs:7` cites
+`substrate-host/src/lib.rs:171` for `pub trait Driver`, which is `:201` at `d65db79` — a
+text-scanning test, so nothing is broken, but the citation is stale.
