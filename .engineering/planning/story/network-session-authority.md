@@ -2,7 +2,7 @@
 format: aep.planning-md/1
 id: story:network-session-authority
 kind: story
-status: draft
+status: proposed
 title: Network session transport over TLS with single-use proof-bound authority
 summary: 'Design 05 decisions 3-4: at most 60 s, redeems once, channel-bound; reconnect is a fresh authority; only the Unix socket serves sessions today.'
 owner: substrate
@@ -11,7 +11,7 @@ tags:
 - wire
 relations:
 - decomposes: epic:byte-plane-completion
-revision: 5
+revision: 6
 ---
 # Story: Network session transport over TLS with single-use proof-bound authority
 
