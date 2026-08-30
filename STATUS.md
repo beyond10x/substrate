@@ -8,11 +8,13 @@ Phase 3 **lifecycle and recovery** is complete under the
 [archived closure disposition](docs/reviews/archived/2026-08-14-phase-3-closure-review-disposition.md),
 which records findings 1–39 closed. Phase 4 **direct byte plane** is in progress
 ([ROADMAP.md](ROADMAP.md), [Plan 04](docs/plan/04-direct-byte-plane.md)): the model-free raw-pipe
-session slice and the bounded read-only execution capsule are green, and PTY and network session
-authority remain absent. Route closure happened in 0.3.0, which added the seven pipe-session
-operations to 0.2.0's nineteen; 0.4.0 keeps those 26 and adds six execution-capsule driver vectors
-without adding a route. This is development conformance, not stable contract publication: daemon
-image `0.2.3` is published, signed and digest-pinned, but no contract bundle is published as stable.
+session slice, the bounded read-only execution capsule and the pty session mode are green, and
+network session authority remains absent. Route closure happened in 0.3.0, which added the seven
+pipe-session operations to 0.2.0's nineteen; 0.4.0 keeps those 26 and adds six execution-capsule
+driver vectors without adding a route, and 0.10.0 adds a terminal to the same 31 operations by
+growing a field rather than a route family ([ADR 0019](adr/0019-pty-is-a-second-session-mode.md)).
+This is development conformance, not stable contract publication: daemon image `0.2.3` is
+published, signed and digest-pinned, but no contract bundle is published as stable.
 
 | Area | State | Next proof |
 |---|---|---|
@@ -24,7 +26,7 @@ image `0.2.3` is published, signed and digest-pinned, but no contract bundle is 
 | Drivers | Linux host driver implemented; absent delegation keeps exec facts absent and answers `exec.sandbox-unavailable` (501, error class `unserved`) rather than degrading, proven by the portable lane of [`crates/substrate-daemon/tests/runtime_vectors.rs`](crates/substrate-daemon/tests/runtime_vectors.rs); the delegated lane runs only when that test is given `SUBSTRATE_VECTORS_CGROUP_ROOT`, which the gate and CI do not do | retain the delegated lane as a pre-release step and add no optimistic facts |
 | Security | `openat2` beneath/no-link/no-mount I/O, atomic replacement, cleared/shaped environment, namespace no-egress, pids/memory+swap plus cumulatively observed CPU cgroup bounds, backend-identity-bound capability snapshots, output draining, timeout, whole-tree kill, exact capsule-byte verification, read-only `/runtime`, separate writable `/workspace`, owner-private durable state, and bounded normal/restart capsule cleanup are enforced; static-bearer TCP is explicitly development-only | implement the accepted short-lived scoped hosted trust-envelope profile and retain the inline capsule proof while defining a signed complete runtime closure separately |
 | Stack integration | trust, session, event, federation, and contract-release seams accepted in umbrella ADRs 0015–0019 | keep later features behind their named phases |
-| Implementation | the phase-4 raw-pipe slice has distinct durable session identity, session-native lifecycle operations, one scoped Unix-WebSocket attachment, atomic terminal/restart projection and verified execution capsules, proven by [`crates/substrate-daemon/tests`](crates/substrate-daemon/tests) — `pipe_session.rs`, `websocket.rs`, `contract_vectors.rs`. The delegated model-free harness lane with correlated hook evidence is a recorded prior observation ([Plan 04](docs/plan/04-direct-byte-plane.md)), not something this repository re-runs in its own gate | retain the raw-pipe and capsule evidence while adding only separately gated PTY, authority and release work |
+| Implementation | the phase-4 raw-pipe slice has distinct durable session identity, session-native lifecycle operations, one scoped Unix-WebSocket attachment, atomic terminal/restart projection and verified execution capsules, proven by [`crates/substrate-daemon/tests`](crates/substrate-daemon/tests) — `pipe_session.rs`, `websocket.rs`, `contract_vectors.rs`. A pty is a second **mode** on that same slice, with the controlling terminal acquired inside the sandbox after bubblewrap's `setsid`; the delegated lane of [`runtime_vectors.rs`](crates/substrate-daemon/tests/runtime_vectors.rs) drives an interactive shell through one — echo, a resize the child reads back with `TIOCGWINSZ`, and whole-tree cleanup on attachment loss — and the portable lane proves `session.pty-unserved`. The delegated model-free harness lane with correlated hook evidence is a recorded prior observation ([Plan 04](docs/plan/04-direct-byte-plane.md)), not something this repository re-runs in its own gate | retain the raw-pipe, capsule and terminal evidence while adding only separately gated authority and release work |
 
 ## Repository facts
 
@@ -114,10 +116,13 @@ trust this page.
 - The toolchain is pinned, not floating: [`rust-toolchain.toml`](rust-toolchain.toml) declares the
   channel, and `cargo xtask check-toolchain` fails the gate unless it, the `rust-version` in
   [`Cargo.toml`](Cargo.toml) and the [`Dockerfile`](Dockerfile) builder tag agree.
-- Git, PTY, reconnect, workloads, images, volumes, endpoints, Docker and Kubernetes are absent
+- Git, reconnect, workloads, images, volumes, endpoints, Docker and Kubernetes are absent
   rather than stubbed: `contracts/substrate-wire/0.4.0/operations.json` closes 26 operations and
-  none of them is one of those. The development pipe session is the sole phase-4 byte-plane slice,
-  under [ADR 0007](adr/0007-protocol-processes-use-raw-pipe-sessions.md).
+  none of them is one of those — and `contracts/substrate-wire/0.9.0/operations.json` still closes
+  the same 26, because a terminal arrived as a `mode` field rather than as a route family. The
+  development session is the sole phase-4 byte-plane slice, in two modes: raw pipes under
+  [ADR 0007](adr/0007-protocol-processes-use-raw-pipe-sessions.md) and a terminal under
+  [design 13](docs/design/13-pty-sessions.md).
 
 ## How this page is refreshed
 

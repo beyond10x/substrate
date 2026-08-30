@@ -41,7 +41,8 @@ Each is a claim that can be checked. Breaking one is a design change, not a refa
 5. **Operations are durable before driver dispatch**
    (`adr/0005-operations-are-durable-before-driver-dispatch.md`).
 6. **Every released contract bundle directory is immutable.** `contracts/substrate-wire/0.1.0`
-   through `0.9.0` exist; `0.9.0` is the current development bundle, declaring all served API
+   through `0.10.0` exist; `0.10.0` is the current development bundle, adding the `pty` session
+   mode, the `resize` frame and the `sessions.pty` fact (ADR 0019); `0.9.0` declared all served API
    majors and the v1 catch-all file paths in one registry (ADR 0018); `0.8.0` added the declared
    aperture byte ceiling and the named bound on an exec observation (ADR 0014); `0.7.0` added delegated
    context and grant attribution (ADR 0011); `0.6.0` added destination-bound egress
@@ -192,7 +193,8 @@ reason.** `crates/substrate-daemon/tests/runtime_vectors.rs` spawns the *shipped
 hand-written HTTP/1.1 and WebSocket client, so it links no implementation and asserts only on
 the wire; `cargo test --workspace --locked` runs it. Its portable lane asserts three named
 refusals — `exec.sandbox-unavailable` (501), `exec.secret-slots-unserved` (501) and
-`exec.secret-slot-descriptor-invalid` (422) — across 34 cases, and its delegated lane 54
+`exec.secret-slot-descriptor-invalid` (422) — plus `session.pty-unserved` (501) — across 35 cases,
+and its delegated lane 62, which include an interactive shell driven through a `pty` session
 (`crates/substrate-daemon/tests/runtime_vectors.rs`, `PORTABLE_CASES` and `DELEGATED_CASES`). Its delegated lane runs only when
 `SUBSTRATE_VECTORS_CGROUP_ROOT` names a delegated cgroup v2 subtree the test process is inside;
 unset, those cases are **absent, never reported as passed** (invariant 3). **`bash scripts/delegated-lane.sh`
