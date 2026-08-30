@@ -21,6 +21,13 @@ pub struct NewOperation {
     pub capability_snapshot: Option<String>,
     pub actor: String,
     pub principal: Option<String>,
+    /// The declared grant a verified delegated context named, or `None` (ADR 0011).
+    pub grant_ref: Option<String>,
+    /// The initiating platform principal a verified delegated context named, or `None`.
+    ///
+    /// Never `principal`: that column keeps the calling process id, and the two are separate
+    /// because collapsing them is what design 06 § 2 forbids.
+    pub platform_principal: Option<String>,
     pub resource: Option<String>,
 }
 
@@ -34,7 +41,9 @@ pub struct StoredAnswer {
 pub enum Reservation {
     Accepted,
     Replay(StoredAnswer),
-    Pending(OperationRecord),
+    /// Boxed because the ledger row is the one large member of an otherwise small enum, and this
+    /// value is returned by value on every mutation path (ADR 0011 added two members to the row).
+    Pending(Box<OperationRecord>),
     Conflict,
     Capacity(OperationCapacity),
 }
@@ -138,7 +147,7 @@ impl Store {
         } else if let Some(answer) = existing.answer {
             Reservation::Replay(answer)
         } else {
-            Reservation::Pending(existing.record)
+            Reservation::Pending(Box::new(existing.record))
         }))
     }
 
@@ -157,7 +166,7 @@ impl Store {
             } else if let Some(answer) = existing.answer {
                 Reservation::Replay(answer)
             } else {
-                Reservation::Pending(existing.record)
+                Reservation::Pending(Box::new(existing.record))
             };
             transaction.commit()?;
             return Ok(result);
@@ -168,9 +177,11 @@ impl Store {
         transaction.execute(
             "INSERT INTO operations (
                 deployment, subject, operation, operation_kind, request_hash, state, accepted_at,
-                terminal_at, capability_snapshot, actor, principal, resource, outcome_json,
-                response_status
-             ) VALUES (?1, ?2, ?3, ?4, ?5, 'refused', NULL, ?6, NULL, ?7, ?8, NULL, ?9, ?10)",
+                terminal_at, capability_snapshot, actor, principal, grant_ref, platform_principal,
+                resource, outcome_json, response_status
+             ) VALUES (
+                ?1, ?2, ?3, ?4, ?5, 'refused', NULL, ?6, NULL, ?7, ?8, ?9, ?10, NULL, ?11, ?12
+             )",
             params![
                 new.scope.deployment,
                 new.scope.subject,
@@ -180,6 +191,8 @@ impl Store {
                 terminal_at,
                 new.actor,
                 new.principal,
+                new.grant_ref,
+                new.platform_principal,
                 serde_json::to_string(&outcome)?,
                 i64::from(status),
             ],
@@ -498,6 +511,8 @@ pub(crate) fn operation_row_bytes(
           + COALESCE(length(CAST(terminal_at AS BLOB)), 0)
           + COALESCE(length(CAST(capability_snapshot AS BLOB)), 0)
           + length(CAST(actor AS BLOB)) + COALESCE(length(CAST(principal AS BLOB)), 0)
+          + COALESCE(length(CAST(grant_ref AS BLOB)), 0)
+          + COALESCE(length(CAST(platform_principal AS BLOB)), 0)
           + COALESCE(length(CAST(resource AS BLOB)), 0)
           + COALESCE(length(CAST(outcome_json AS BLOB)), 0)
           + CASE WHEN response_status IS NULL THEN 0 ELSE 8 END
@@ -674,7 +689,7 @@ pub(crate) fn existing_reservation(
     } else if let Some(answer) = existing.answer {
         Reservation::Replay(answer)
     } else {
-        Reservation::Pending(existing.record)
+        Reservation::Pending(Box::new(existing.record))
     }))
 }
 
@@ -687,8 +702,8 @@ pub(crate) fn insert_accepted_operation(
     connection.execute(
         "INSERT INTO operations (
             deployment, subject, operation, operation_kind, request_hash, state, accepted_at,
-            capability_snapshot, actor, principal, resource
-         ) VALUES (?1, ?2, ?3, ?4, ?5, 'accepted', ?6, ?7, ?8, ?9, ?10)",
+            capability_snapshot, actor, principal, grant_ref, platform_principal, resource
+         ) VALUES (?1, ?2, ?3, ?4, ?5, 'accepted', ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
         params![
             new.scope.deployment,
             new.scope.subject,
@@ -699,6 +714,8 @@ pub(crate) fn insert_accepted_operation(
             new.capability_snapshot,
             new.actor,
             new.principal,
+            new.grant_ref,
+            new.platform_principal,
             new.resource,
         ],
     )?;
@@ -736,9 +753,11 @@ pub(crate) fn insert_refused_operation(
     connection.execute(
         "INSERT INTO operations (
             deployment, subject, operation, operation_kind, request_hash, state, accepted_at,
-            terminal_at, capability_snapshot, actor, principal, resource, outcome_json,
-            response_status
-         ) VALUES (?1, ?2, ?3, ?4, ?5, 'refused', NULL, ?6, NULL, ?7, ?8, ?9, ?10, ?11)",
+            terminal_at, capability_snapshot, actor, principal, grant_ref, platform_principal,
+            resource, outcome_json, response_status
+         ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, 'refused', NULL, ?6, NULL, ?7, ?8, ?9, ?10, ?11, ?12, ?13
+         )",
         params![
             new.scope.deployment,
             new.scope.subject,
@@ -748,6 +767,8 @@ pub(crate) fn insert_refused_operation(
             terminal_at,
             new.actor,
             new.principal,
+            new.grant_ref,
+            new.platform_principal,
             new.resource,
             serde_json::to_string(&outcome)?,
             i64::from(status),
@@ -927,7 +948,8 @@ pub(crate) fn load_operation(
     let stored = connection
         .query_row(
             "SELECT operation_kind, request_hash, state, accepted_at, terminal_at,
-                    capability_snapshot, actor, principal, resource, outcome_json, response_status
+                    capability_snapshot, actor, principal, resource, outcome_json,
+                    response_status, grant_ref, platform_principal
              FROM operations WHERE deployment = ?1 AND subject = ?2 AND operation = ?3",
             params![scope.deployment, scope.subject, operation],
             |row| {
@@ -943,6 +965,8 @@ pub(crate) fn load_operation(
                     row.get::<_, Option<String>>(8)?,
                     row.get::<_, Option<String>>(9)?,
                     row.get::<_, Option<i64>>(10)?,
+                    row.get::<_, Option<String>>(11)?,
+                    row.get::<_, Option<String>>(12)?,
                 ))
             },
         )
@@ -959,6 +983,8 @@ pub(crate) fn load_operation(
         resource,
         outcome_json,
         response_status,
+        grant_ref,
+        platform_principal,
     )) = stored
     else {
         return Ok(None);
@@ -994,6 +1020,8 @@ pub(crate) fn load_operation(
             principal,
             resource,
             outcome,
+            grant_ref,
+            platform_principal,
         },
         answer,
     }))

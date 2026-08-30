@@ -53,6 +53,8 @@ impl Store {
                 capability_snapshot TEXT,
                 actor TEXT NOT NULL,
                 principal TEXT,
+                grant_ref TEXT,
+                platform_principal TEXT,
                 resource TEXT,
                 outcome_json TEXT,
                 response_status INTEGER,
@@ -260,6 +262,7 @@ impl Store {
         migrate_exec_physical_absence(&connection)?;
         migrate_workspace_cleanup_progress(&connection)?;
         migrate_operation_ledger_accounting(&mut connection, config)?;
+        migrate_operation_grant_attribution(&connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
             event_retention: config.event_retention,
@@ -420,6 +423,30 @@ fn migrate_lease_authority(connection: &Connection) -> Result<(), StoreError> {
         COMMIT;
         ",
     )?;
+    Ok(())
+}
+
+/// The two nullable attribution columns ADR 0011 adds to the operation ledger.
+///
+/// `CREATE TABLE IF NOT EXISTS` above never alters a table that already exists, so a store written
+/// before this change reaches here without them. Nullable and unbackfilled on purpose: a row
+/// recorded before delegated context existed ran under no declared grant, and inventing one for it
+/// would be exactly the unattributed-run-dressed-as-attributed outcome invariant 3 refuses.
+fn migrate_operation_grant_attribution(connection: &Connection) -> Result<(), StoreError> {
+    let mut statement = connection.prepare("PRAGMA table_info(operations)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    if !columns.iter().any(|column| column == "grant_ref") {
+        connection.execute("ALTER TABLE operations ADD COLUMN grant_ref TEXT", [])?;
+    }
+    if !columns.iter().any(|column| column == "platform_principal") {
+        connection.execute(
+            "ALTER TABLE operations ADD COLUMN platform_principal TEXT",
+            [],
+        )?;
+    }
     Ok(())
 }
 

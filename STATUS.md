@@ -33,9 +33,9 @@ trust this page.
 
 - The Rust workspace has five crates — `substrate-wire`, `substrate-store`, `substrate-host`,
   `substrate-daemon` and the offline `substrate-contract-check` ([`Cargo.toml`](Cargo.toml),
-  `[workspace] members`). 0.6.0 is the current development bundle and every earlier bundle
+  `[workspace] members`). 0.7.0 is the current development bundle and every earlier bundle
   directory is frozen; [`scripts/gate.sh`](scripts/gate.sh) runs the four Python bundle checkers
-  plus `cargo xtask check-bundle` for 0.5.0 and 0.6.0 on every invocation, so a green gate is
+  plus `cargo xtask check-bundle` for 0.5.0, 0.6.0 and 0.7.0 on every invocation, so a green gate is
   evidence that all six still hold. 0.5.0 is the first bundle whose checker is a `cargo xtask` verb
   rather than a Python script; the four frozen pairs stay Python as the reproducibility proof of the bundles they
   froze. The one recorded exception to immutability is the 2026-08-24 brand rename, which
@@ -77,7 +77,7 @@ trust this page.
   limits, capped fair maintenance across reopen, lease clocks, symlink escape refusal, and strict
   minimum host limits. `cargo test --workspace --locked` is the command that counts them; this page
   does not restate the number.
-- All six bundle trees classify every JSON document and meta-validate their declared Draft 2020-12
+- All seven bundle trees classify every JSON document and meta-validate their declared Draft 2020-12
   schemas with the pinned standards validator. Semantic relations and fixed authorities are checked
   offline, and `cargo xtask check-json` ([`xtask/src/json.rs`](xtask/src/json.rs)) carries the
   negative tests proving unclassified JSON, invalid payloads, invalid schemas and invalid

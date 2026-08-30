@@ -6,6 +6,8 @@ use axum::response::{IntoResponse as _, Response};
 use serde::Serialize;
 use substrate_wire::{ErrorClass, ErrorDetail, Failure, Success, WireValidationError};
 
+use crate::delegation::ContextRefusal;
+
 use super::App;
 
 pub(super) fn request_id(app: &App, headers: &HeaderMap) -> String {
@@ -119,6 +121,33 @@ pub(super) fn conflict(
         code,
         message,
         Some(address),
+        false,
+    )
+}
+
+/// One named delegated-context refusal, answered before dispatch (ADR 0011, design 09 section 5).
+///
+/// The `address` is the claim that failed and never its value, and the presented document's bytes
+/// reach no error body, no event and no log (design 06 section 3): only the constant strings on
+/// [`ContextRefusal`] are serialized here.
+pub(super) fn delegated_context_refusal(
+    request_id: &str,
+    operation: Option<&str>,
+    refusal: ContextRefusal,
+) -> Response {
+    let status = if matches!(refusal.class, ErrorClass::Conflict) {
+        StatusCode::CONFLICT
+    } else {
+        StatusCode::UNPROCESSABLE_ENTITY
+    };
+    failure(
+        status,
+        request_id,
+        operation,
+        refusal.class,
+        refusal.code,
+        refusal.message,
+        Some(refusal.address),
         false,
     )
 }

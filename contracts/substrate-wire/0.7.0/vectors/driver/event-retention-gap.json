@@ -1,0 +1,52 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "command": {
+      "cursor": "ev2.scope_vector_subject.41.1",
+      "operation": "event.list"
+    },
+    "kind": "driver",
+    "port": "lifecycle"
+  },
+  "context": {
+    "authority": "driver-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000"
+  },
+  "covers": [
+    "events.retention-gap"
+  ],
+  "expected": {
+    "kind": "driver-outcome",
+    "outcome": {
+      "code": "event.retention-gap",
+      "status": "conflict"
+    }
+  },
+  "id": "event-retention-gap-is-explicit",
+  "layer": "driver",
+  "phase": 3,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/silent_fast_forward",
+      "expected": false,
+      "operator": "equals"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "event",
+      "name": "retention-window",
+      "state": {
+        "first": 8,
+        "last": 12
+      }
+    }
+  ]
+}

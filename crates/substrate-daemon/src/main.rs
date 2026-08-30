@@ -3,8 +3,12 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
+use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64URL;
 use clap::Parser;
-use substrate_daemon::{DaemonConfig, EgressAperture, SecretSlot, TcpDaemonConfig, serve};
+use substrate_daemon::{
+    DaemonConfig, DelegatedContextKey, EgressAperture, SecretSlot, TcpDaemonConfig, serve,
+};
 use tracing_subscriber::EnvFilter;
 
 /// Parses one `--secret-slot name=path`.
@@ -57,6 +61,38 @@ fn parse_egress_aperture(value: &str) -> Result<EgressAperture, String> {
         name: name.to_owned(),
         host: host.to_owned(),
         port,
+    })
+}
+
+/// Parses one `--delegated-context-key kid=issuer=base64url-ed25519-public-key`.
+///
+/// Public material only. Substrate mints no delegated context, so there is no shape of this flag
+/// that takes a seed or a signing key, and which service signs is exactly this declaration
+/// (ADR 0011). The key is base64url without padding, so the value carries no `=` of its own and the
+/// two splits are unambiguous.
+fn parse_delegated_context_key(value: &str) -> Result<DelegatedContextKey, String> {
+    let (kid, rest) = value.split_once('=').ok_or_else(|| {
+        "a delegated-context key is declared as kid=issuer=base64url-public-key".to_owned()
+    })?;
+    let (issuer, encoded) = rest.split_once('=').ok_or_else(|| {
+        "a delegated-context key is declared as kid=issuer=base64url-public-key".to_owned()
+    })?;
+    if kid.is_empty() || kid.len() > 128 {
+        return Err("a delegated-context key id must be 1..=128 bytes".to_owned());
+    }
+    if issuer.is_empty() || issuer.len() > 512 {
+        return Err(format!("delegated-context key {kid} declares no issuer"));
+    }
+    let raw = BASE64URL
+        .decode(encoded)
+        .map_err(|_| format!("delegated-context key {kid} is not unpadded base64url"))?;
+    let public_key: [u8; 32] = raw
+        .try_into()
+        .map_err(|_| format!("delegated-context key {kid} is not a 32-byte Ed25519 key"))?;
+    Ok(DelegatedContextKey {
+        kid: kid.to_owned(),
+        issuer: issuer.to_owned(),
+        public_key,
     })
 }
 
@@ -126,6 +162,30 @@ struct Arguments {
     #[arg(long, env = "SUBSTRATE_CA_BUNDLE", value_name = "PATH")]
     ca_bundle: Option<PathBuf>,
 
+    /// Trust a delegated-context signer as `kid=issuer=base64url-public-key` (repeatable). ADR 0011.
+    ///
+    /// This is the whole of "who signs". Substrate verifies the binding a document declares and
+    /// records the grant it names; it never evaluates that grant and never calls the issuer.
+    #[arg(
+        long = "delegated-context-key",
+        env = "SUBSTRATE_DELEGATED_CONTEXT_KEY",
+        value_name = "KID=ISSUER=BASE64URL",
+        value_delimiter = ',',
+        value_parser = parse_delegated_context_key
+    )]
+    delegated_context_keys: Vec<DelegatedContextKey>,
+
+    /// Refuse an effectful operation that presents no delegated context.
+    ///
+    /// Requires a trusted key: requiring what cannot be verified refuses every mutation, which
+    /// startup rejects rather than serving.
+    #[arg(
+        long = "require-delegated-context",
+        env = "SUBSTRATE_REQUIRE_DELEGATED_CONTEXT",
+        requires = "delegated_context_keys"
+    )]
+    require_delegated_context: bool,
+
     #[arg(
         long,
         env = "SUBSTRATE_TCP_LISTEN",
@@ -181,6 +241,8 @@ impl From<Arguments> for DaemonConfig {
             secret_slots: arguments.secret_slots,
             egress_apertures: arguments.egress_apertures,
             ca_bundle: arguments.ca_bundle,
+            delegated_context_keys: arguments.delegated_context_keys,
+            require_delegated_context: arguments.require_delegated_context,
             tcp,
         }
     }

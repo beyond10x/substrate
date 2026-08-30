@@ -9,6 +9,31 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- **An operation's ledger row carries the declared grant it ran under.** A start may present a
+  signed delegated-context document; substrate verifies it and records `grant_ref` and
+  `platform_principal` on the operation's ledger row and its `operation.*` events, so a reader can
+  answer *which declared grant authorised this, on behalf of which platform principal* from
+  substrate's own durable record. Accepted as
+  [ADR 0011](adr/0011-delegated-context-and-grant-attribution.md).
+- **Caller-written identity is never attribution.** Identity-shaped strings a caller may legitimately
+  write — workspace labels are free-form and echoed verbatim — reach the resource and never the two
+  attribution columns. Writing one into the request envelope is refused `request.schema-invalid`,
+  not ignored quietly: the request union stays closed around `op`, `input` and the one signed
+  member. Substrate verifies signature, issuer, exact audience, time window and binding to the
+  authenticated subject, and it never evaluates the grant — connectors decides, substrate records.
+- **The field is optional everywhere and costs a `0.6.0` client nothing.** `delegated_context` is a
+  sibling of `op` and `input`, never a member of `input`, so it stays outside the canonical request
+  hash: replaying the same `op` with a *fresh* context is the same operation and returns the
+  original outcome. Absent, the serialized bytes are exactly what a `0.6.0` client sent.
+- **Which service signs is configuration, not code.** A deployment declares
+  `--delegated-context-key <kid>=<issuer>=<base64url>`; substrate holds a verifying key and never a
+  signing key. Identity and connectors are both named relying parties (ADR 0011).
+- **Contract bundle `contracts/substrate-wire/0.7.0`**, an additive successor to `0.6.0` carrying
+  the optional `delegated_context` request member, the `grant_ref` and `platform_principal`
+  ledger/event fields and the eight named refusals — `delegated-context.absent`, `.malformed`,
+  `.unknown-key`, `.signature-invalid`, `.audience-mismatch`, `.subject-mismatch`, `.expired` and
+  `.grant-conflict`. 224 files; every earlier bundle directory unchanged.
+
 - **Destination-bound egress apertures.** A confined run can now reach exactly one
   operator-declared destination and nothing else. `--egress-aperture <name>=<host>:<port>/tcp`
   (repeatable) declares one; a start selects it **by name** — `sandbox.network: "aperture"` plus
