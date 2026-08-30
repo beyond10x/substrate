@@ -19,3 +19,4 @@ with YAML frontmatter containing `date` and `status`. Draft design questions rem
 | [0011](0011-delegated-context-and-grant-attribution.md) | Delegated context carries grant attribution | accepted |
 | [0012](0012-secret-slots-are-sealed-memfds.md) | Secret slots are sealed memfds | accepted |
 | [0013](0013-egress-apertures-are-declared-by-the-operator.md) | Egress apertures are declared by the operator and referenced by name | accepted |
+| [0014](0014-apertures-carry-a-declared-byte-ceiling.md) | An egress aperture carries a declared byte ceiling | accepted |

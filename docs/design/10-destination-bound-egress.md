@@ -281,13 +281,13 @@ A *name* alongside `network: "none"` is the new refusal, `exec.aperture-mode-mis
 is a request trying to widen itself. Two codes § 5 left unnamed are
 `exec.egress-apertures-unserved` (the fact is absent) and `exec.aperture-name-invalid`.
 
-**Deferred by ADR 0013, decided by [design 12](12-aperture-byte-ceiling.md):
+**Deferred by ADR 0013, decided by [ADR 0014](../../adr/0014-apertures-carry-a-declared-byte-ceiling.md):
 `exec.aperture-byte-limit` (§ 5, row 5).** There is no declared byte ceiling in the configuration
 surface, so there is nothing to exceed — true at ADR 0013's commit, and the reason row 5 shipped as
 a name with nothing able to raise it. The forwarder already counts the bytes and publishes them in
-the applied observation, which is the half a ceiling reads. The other half is design 12,
-**proposed and not accepted**: it fixes the declaration as an optional `/max=<size>` term on
+the applied observation, which is the half a ceiling reads. The other half is [design 12](12-aperture-byte-ceiling.md),
+**accepted as ADR 0014**: it fixes the declaration as an optional `/max=<size>` term on
 `--egress-aperture`, one ceiling over both directions summed, per run rather than per aperture
 lifetime, enforced in the relay — with the parent's existing supervision loop naming the refusal —
-and never expressible in a request. Its vectors and its successor bundle land with it; until the
-operator accepts it, this row is still a name with nothing behind it.
+and never expressible in a request. Its vectors and its successor bundle `0.8.0` land with it;
+until they do, this row is still a name with nothing behind it.

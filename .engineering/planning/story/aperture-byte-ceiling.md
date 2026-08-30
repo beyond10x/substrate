@@ -8,7 +8,7 @@ summary: Design 10 § 5 row 5 names exec.aperture-byte-limit; the counter exists
 relations:
 - decomposes: epic:byte-plane-completion
 - depends_on: story:destination-bound-egress
-revision: 3
+revision: 4
 ---
 # Story: A declared aperture carries a byte ceiling that refuses mid-run
 
@@ -105,3 +105,18 @@ what makes this a contract change rather than a host-local one.
 
 Operator acceptance of design 12. Invariant 8: an ADR before code. Nothing here is implementable
 until that decision is made.
+
+## Accepted — 2026-08-30
+
+The operator accepted design 12 as
+[`adr/0014-apertures-carry-a-declared-byte-ceiling.md`](../../../adr/0014-apertures-carry-a-declared-byte-ceiling.md).
+Evidence item 1 is satisfied; invariant 8 no longer blocks implementation.
+
+One number moved while the design waited: it was drafted against successor bundle `0.7.0`, and that
+number went to ADR 0011's grant attribution. The successor is **`0.8.0`**, predecessor `0.7.0`,
+`adds_routes: 0`, `preserves_routes: 26` (`contracts/substrate-wire/0.7.0/bundle.json:5-10`), with
+`cargo xtask check-bundle 0.8.0` added to `scripts/gate.sh`.
+
+Remaining evidence: items 2-5 — the successor bundle, the two delegated-lane vectors (the ceiling
+refuses; an aperture without one is unchanged) and the request-side refusal
+`exec.aperture-ceiling-in-request`.

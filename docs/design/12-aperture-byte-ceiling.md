@@ -1,12 +1,10 @@
 # Design 12: an egress aperture carries a declared byte ceiling
 
-**Status:** proposed · **Date:** 2026-08-30
+**Status:** accepted as [ADR 0014](../../adr/0014-apertures-carry-a-declared-byte-ceiling.md) · **Date:** 2026-08-30
 
 This document precedes the ADR that `story:aperture-byte-ceiling` names as its first evidence.
 It fixes the ceiling's declaration surface, what it counts, where it is enforced and what the
-confined child observes when it is crossed. It proposes no ADR number: `adr/` admits `accepted`
-and `superseded` and nothing else (`xtask/src/adrs.rs:12`), so the number is assigned at
-acceptance, by the operator, not here.
+confined child observes when it is crossed. Accepted by the operator on 2026-08-30 as ADR 0014.
 
 ## Context
 
@@ -107,10 +105,12 @@ second place where reach is decided: it is not this decision and it is not serve
 (`crates/substrate-wire/src/lib.rs:1838-1841`) so `/v1/machine` answers "how much could this daemon
 ever pass", and `AppliedAperture` (`crates/substrate-wire/src/lib.rs:760-769`) states the ceiling the
 run actually ran under beside the bytes that crossed — reported, not inferred, the idiom ADR 0010
-set. Successor bundle `0.7.0`: predecessor `0.6.0`, `adds_routes: 0`, `preserves_routes: 26`
-(`contracts/substrate-wire/0.6.0/bundle.json:5-10`), with its own `cargo xtask check-bundle 0.7.0`
+set. Successor bundle `0.8.0`: predecessor `0.7.0`, `adds_routes: 0`, `preserves_routes: 26`
+(`contracts/substrate-wire/0.7.0/bundle.json:5-10`), with its own `cargo xtask check-bundle 0.8.0`
 added to `scripts/gate.sh`, because a bundle whose check is not in the gate is unverified from the
-next commit onward. Earlier directories keep their bytes (invariant 6).
+next commit onward. Earlier directories keep their bytes (invariant 6). (This document said `0.7.0`
+when it was drafted; that number went to ADR 0011's grant attribution while this one waited for
+acceptance.)
 
 ## Consequences
 
