@@ -12,7 +12,7 @@ tags:
 - wire
 relations:
 - decomposes: epic:byte-plane-completion
-revision: 4
+revision: 5
 ---
 # Story: PTY sessions are a distinct session kind with resize
 
@@ -108,3 +108,38 @@ demands a new design document. `epic:byte-plane-completion:29` says these procee
 with an ADR each and **no new design document**", because design 05 § 2 already fixes the frames.
 `AGENTS.md:62-64` reads "a design document **or** an ADR **before code**" — so the epic's reading is
 the admissible one and this story is over-specifying its own gate. Resolve before dispatching work.
+
+## Design draft — 2026-08-30
+
+`docs/design/13-pty-sessions.md`, **proposed**. Claims no ADR number: `adr/` admits `accepted` and
+`superseded` only (`xtask/src/adrs.rs:12`), so the number is assigned at acceptance.
+
+Both contradictions this story carried are now decided:
+
+- **`SessionMode` grows a `Pty` variant**, not `SessionKind`. `SessionKind` is the *resource* axis
+  and mirrors `ExecKind`; growing it would fork the single `ses_…`/`ex_…` resource ADR 0008 built.
+- **The route family is reused**, `/v1/pipe-sessions/*` with a `mode` field defaulting to `pipes`,
+  so `adds_routes: 0`. A new family means seven duplicate mode-neutral operation ids and a `GET`
+  that would have to claim `absent: true` for a live session; renaming the path is a coordinated
+  migration with an ADR in atlas and removes seven routes, which is not `additive-v1`.
+
+Also fixed: `sessions.pty` becomes a probe-verified `CapabilityFacts` member; pty unavailable is
+`unserved`/`session.pty-unserved` (501) and allocation failure `exhausted`/`session.pty-exhausted`
+(429, retriable) — **never a fall back to pipes**; resize is 1–1000 cols/rows in cells, rated on the
+existing control window, with an initial window required and no 80×24 default; an output bound ends
+the session through ADR 0014's refusal field, because design 05 gave the pty no `truncated` frame
+and a terminal has no offset to resume from.
+
+**Finding the draft turned up, verified in the tree.** The shared confinement path passes
+`--new-session` (`crates/substrate-host/src/process.rs:1113`), which `bwrap(1)` documents as calling
+`setsid()` and disconnecting the sandbox from the controlling terminal. Inheriting the pty slave as
+fd 0/1/2 therefore gives no job control and no hangup — which is what this story's acceptance needs.
+The design takes the controlling terminal *inside* the sandbox after bwrap's setsid, and forbids
+dropping the flag.
+
+Bundle `0.9.0` is **provisional**: design 14 names it too, and it belongs to whichever is accepted
+first.
+
+Not established, and left to the implementing work: which interposition acquires the controlling
+terminal. Kernel `SIGWINCH`/`TIOCSCTTY`/hangup semantics are labelled as kernel behaviour rather
+than verified in this tree.
