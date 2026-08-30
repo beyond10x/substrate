@@ -11,7 +11,7 @@ tags:
 - rust
 relations:
 - decomposes: epic:release-hardening
-revision: 7
+revision: 8
 ---
 # Story: Anything that runs is Rust — the gate's Python moves to `cargo xtask`
 
@@ -127,3 +127,62 @@ a Unix socket. Nothing outside the gate invoked the script.
   passed; `cargo test --workspace`: 17 suites, 205 passed, 0 failed.
 - **The gate now runs no Python except the frozen bundles' own renderers and checkers.** Remaining
   for this story: step 5 (`render-bundle 0.5.0` from `substrate-wire` types) and step 6.
+
+## Progress — 2026-08-30, steps 5 and 6
+
+**Step 5 done, and step 5's own premise was wrong.** `cargo xtask render-bundle 0.4.0` reproduces
+the frozen bundle byte for byte — `diff -r contracts/substrate-wire/0.4.0 <out>` empty, 200 files,
+and packaging the rendered tree yields the manifest digest already checked in,
+`sha256:3758e80bc39f1eb03b15c69410608c9ef1d2ba8095c7e707c6988dbb5894ab00`. A test holds that fixed
+point (`the_rendered_tree_packages_to_the_released_manifest_digest`), so the renderer cannot drift
+from what shipped.
+
+The story said "derives schemas from `substrate-wire` types". It cannot, and the implementation
+records that rather than pretending:
+
+- `schemars` is not a workspace dependency (`Cargo.toml:22-59`) and adding derives would mean
+  editing `crates/`, so nothing can reflect the types.
+- Even with reflection the types are **ahead** of 0.4.0: `ExecStartInput::read_only_roots`
+  (`crates/substrate-wire/src/lib.rs:761`) has no 0.4.0 schema at all —
+  `grep -rl read_only_roots contracts/substrate-wire/0.4.0/` → 0 hits — and
+  `FileEditInput`, `FilePatchInput`, `WorkspaceTree*` and `PathMoveInput` have no 0.4.0 input schema.
+- The constraints the schemas state are not on the types. `argv: Vec<String>`
+  (`crates/substrate-wire/src/lib.rs:757`) against a schema of `minLength 1 / maxLength 4096 /
+  maxItems 256`, whose literals live in `crates/substrate-daemon/src/app/operations.rs:245-248` and
+  `crates/substrate-host/src/process.rs:824-826`.
+
+What the wire crate does own is taken from it: canonical hashing for all 11 fixture cases,
+cross-checked against `canonical_request_hash_v2`, and 22 bounds constants bound through a `$wire`
+splice. Of 200 emitted files (708,672 bytes), 30 are computed whole, 14 are authored with computed
+splices, and 156 are authored verbatim.
+
+One derivation is **lost**, and is documented as lost at `xtask/src/render.rs:19-25`: the three
+unions in `schemas/vector.json` encode Python dict insertion order (`exec.output-limit-bytes` before
+`exec.max-current`), which a sorted-key bundle records nowhere.
+
+Authored source is `xtask/bundle-source/<version>/` — one file per emitted path under `documents/`,
+plus `routes.json`, `coverage.json`, `hash-cases.json`, `vector-order.json` and
+`executable-vectors.json`. Not `contracts/source/`: every directory under `contracts/` is a released
+bundle (invariant 6) and `scripts/contract_json_gate.py:301` classifies JSON beneath one and fails
+closed (invariant 7). Rendering into `contracts/` is a named refusal, exit 1.
+
+Failing-first: `render`/`hash_case` stubbed to `unimplemented!()` gave `55 passed; 9 failed`.
+Then `cargo test -p xtask --locked` → `64 passed; 0 failed` (49 before). `bash scripts/gate.sh`
+passed, 11 steps. `git status --short contracts/` empty.
+
+**Step 6 done.** `AGENTS.md` § *The gate* and `README.md` § *Build, test, run* both carry the verb
+table — `check-toolchain`, `check-links`, `check-adrs`, `package-bundle`, `render-bundle` — and both
+say why the four frozen `render-contract-bundle*.py` / `check-contract-bundle*.py` pairs stay: they
+are the released bundles' reproducibility proof, and 0.4.0's `generator.name` points at one of them,
+so deleting it would break the bundle it generated.
+
+**Decision taken by default:** `render-bundle` gets no `gate.sh` step of its own. A test already
+asserts the 0.4.0 digest, and `cargo test --workspace --locked` is the gate's first step — the same
+reasoning that keeps `package-bundle` and the runtime-vector runner out of it.
+
+**Open, and the only thing left for this story:** the acceptance names
+`cargo xtask render-bundle 0.5.0` as the successor's only renderer. The verb exists and refuses
+correctly; 0.5.0 itself is cut by `story:sealed-secret-slots`, whose bundle is in progress. When it
+lands, this story is satisfied. For 0.5.0 the renderer needs `generator.name` to point at something
+hashable — it hashes a file or a tree — which is a further reason 0.4.0's Python renderer must
+survive.

@@ -74,6 +74,21 @@ Rust 1.97, edition 2024 — the toolchain is pinned by `rust-toolchain.toml`, an
 `cargo xtask check-toolchain` fails when it, `Cargo.toml`'s `rust-version` and the `Dockerfile`
 builder tag disagree. `.github/workflows/gate.yml` runs the same gate on push and pull request.
 
+Every check the gate runs is a `cargo xtask` verb — anything that runs in a b10x foundation
+repository is Rust. Two verbs are not gate steps because `cargo test --workspace --locked`, the
+gate's first step, already covers them:
+
+| verb | what it does |
+|---|---|
+| `cargo xtask package-bundle <version> --out <dir>` | packages a released bundle as a deterministic OCI image layout, so a consumer can pin one manifest digest |
+| `cargo xtask render-bundle <version> --out <dir>` | renders a bundle tree from `substrate-wire` and the authored source at `xtask/bundle-source/<version>/`; this is how a successor bundle is cut, and it refuses to write anywhere under `contracts/` |
+
+The four `scripts/render-contract-bundle*.py` and their `check-contract-bundle*.py` partners are
+**not tooling** — they are the reproducibility proof of the frozen `0.1.0`–`0.4.0` bundles, which
+are immutable, and `0.4.0`'s own `generator.name` points at one of them. They stay in Python and
+are not ported. `render-bundle` is the renderer for `0.5.0` onward, and a test asserts it still
+reproduces the frozen `0.4.0` byte for byte.
+
 `crates/substrate-daemon/tests/runtime_vectors.rs` is the clean-room runner — an independent
 Unix-socket HTTP lane that spawns the shipped `substrate-daemon` binary and asserts only on the
 wire, linking no implementation. It has no gate step of its own because the gate's first step,
