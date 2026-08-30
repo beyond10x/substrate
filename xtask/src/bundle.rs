@@ -20,8 +20,11 @@
 //!    different path. An additive successor that quietly removed a route would otherwise still pass
 //!    its own schema, and one that quietly *moved* a route would pass with `adds_routes: 0` and
 //!    nothing at all to report — the inventories are compared on id **and** path for that reason. A
-//!    deliberate move is declared by keeping the predecessor's path answering, through an entry
-//!    whose `alias_of` names the operation that moved.
+//!    deliberate move is declared by keeping the predecessor's path answering, through a **new**
+//!    entry whose `alias_of` names the operation that moved and which serves that path the way the
+//!    predecessor served it. Nothing weaker is a declaration: an entry the predecessor already had
+//!    would let two operations trade paths and each vouch for the other, and an entry under another
+//!    method or scope resolves the URL only to refuse what a pinned consumer sends.
 //! 4. **Classification** (invariant 7). Every JSON under `schemas/` declares the pinned Draft
 //!    2020-12 meta-schema and validates against it; every other JSON declares exactly one `$schema`
 //!    pointing under `schemas/`, and validates against it. Unclassified JSON fails closed.
@@ -280,13 +283,17 @@ fn check_compatibility(inputs: &Inputs, released: &Tree, failures: &mut Vec<Stri
         let Some(now) = current.served.get(id) else {
             continue;
         };
-        if current.answers(id, was) {
+        if current.still_answers(was, &previous_ids) {
             continue;
         }
         failures.push(format!(
-            "operations.json: route {id} served by {predecessor} at {was} is served at {now}; a \
-             successor that moves a path keeps the old one answering through an entry whose \
-             alias_of is {id}, or it has moved a path a consumer pinned"
+            "operations.json: route {id} served by {predecessor} at {} is served at {}; a \
+             successor that moves a path keeps {} answering through a new entry whose alias_of is \
+             {id}, serving it with the same {} — or it has moved a path a consumer pinned",
+            was.path,
+            now.path,
+            was.path,
+            ANSWERED_BY.join(", ")
         ));
     }
 }
@@ -545,6 +552,45 @@ fn json_at(released: &Tree, path: &str, failures: &mut Vec<String>) -> Option<Va
     }
 }
 
+/// What a request to one route is answered by.
+///
+/// These are the registry fields that decide whether a request a consumer already sends is answered
+/// at all, and answered the same way: the wrong `method` is a 405, the wrong `required_scope` is a
+/// 403 against a token that used to work, and `idempotency`, `input_binding`, `input_schema` and
+/// `result_schema` are the request envelope the consumer builds and the response it parses. An
+/// entry that differs in any of them is serving something else at that URL.
+///
+/// It stops there deliberately. `risk`, `effects` and `exposure` describe an operation to a reader
+/// rather than to a client; `capability_predicates` decide a refusal the driver owns, not the shape
+/// of the exchange; and `address_schema` follows from the path, which is compared exactly. The
+/// stronger rule — that a declared alias is byte-identical to the operation it stands in for in
+/// every field but `id`, `path` and `alias_of` — is a claim about one successor's own additions
+/// (`docs/design/16-sessions-are-not-pipe-sessions.md`), and belongs in that version's arm of
+/// [`check_additions`], not in the cross-version compatibility check.
+const ANSWERED_BY: [&str; 6] = [
+    "method",
+    "required_scope",
+    "idempotency",
+    "input_binding",
+    "input_schema",
+    "result_schema",
+];
+
+/// One entry of a bundle's operation registry, kept whole so a declaration can be compared field by
+/// field against the operation it stands in for.
+#[derive(Debug, Clone)]
+struct Route {
+    id: String,
+    path: String,
+    entry: Value,
+}
+
+impl Route {
+    fn field(&self, name: &str) -> Option<&str> {
+        self.entry.get(name).and_then(Value::as_str)
+    }
+}
+
 /// One bundle's route inventory: which operation id is served, at which path, and which entries
 /// stand in for another operation.
 ///
@@ -553,10 +599,16 @@ fn json_at(released: &Tree, path: &str, failures: &mut Vec<String>) -> Option<Va
 /// keeps every id while moving a path is a rename an id-only inventory cannot see.
 #[derive(Debug, Default)]
 struct Routes {
-    /// Operation id to the path it is served at.
-    served: BTreeMap<String, String>,
-    /// For each operation id, the paths that entries declaring `alias_of: <id>` are served at.
-    aliased: BTreeMap<String, BTreeSet<String>>,
+    /// Operation id to the entry serving it. One entry per id: a registry that names an id twice is
+    /// refused by [`Routes::read`], because keying by id would otherwise keep whichever the array
+    /// happened to hold last and never look at the other path at all.
+    served: BTreeMap<String, Route>,
+    /// The entries declaring `alias_of: <id>`, by the id they stand in for.
+    ///
+    /// Consulted on the **successor** only. A predecessor's own aliases need no separate treatment:
+    /// each is an operation id in its own right, so the successor has to keep serving it, at its
+    /// path, exactly like every other id — which is what `served` above already states.
+    aliased: BTreeMap<String, Vec<Route>>,
 }
 
 impl Routes {
@@ -573,14 +625,31 @@ impl Routes {
             ) else {
                 continue;
             };
+            let route = Route {
+                id: id.to_owned(),
+                path: path.to_owned(),
+                entry: entry.clone(),
+            };
             if let Some(target) = entry.get("alias_of").and_then(Value::as_str) {
                 routes
                     .aliased
                     .entry(target.to_owned())
                     .or_default()
-                    .insert(path.to_owned());
+                    .push(route.clone());
             }
-            routes.served.insert(id.to_owned(), path.to_owned());
+            if let Some(first) = routes.served.insert(id.to_owned(), route) {
+                // Named in sorted order, not in array order: the verdict on a registry has to be a
+                // function of the routes it serves, and a message that echoed the order would make
+                // the same two entries produce two different reports.
+                let mut both = [first.path.as_str(), path];
+                both.sort_unstable();
+                return Err(anyhow!(
+                    "operation {id} is served twice, at {} and at {}; an inventory keyed by id \
+                     would keep one of them and never look at the other",
+                    both[0],
+                    both[1]
+                ));
+            }
         }
         Ok(routes)
     }
@@ -589,14 +658,39 @@ impl Routes {
         self.served.keys().map(String::as_str).collect()
     }
 
-    /// Whether a request to `path` still reaches `id` — either because `id` is served there, or
-    /// because an entry declaring itself an alias of `id` is.
-    fn answers(&self, id: &str, path: &str) -> bool {
-        self.served.get(id).is_some_and(|served| served == path)
-            || self
-                .aliased
-                .get(id)
-                .is_some_and(|paths| paths.contains(path))
+    /// Whether a request the predecessor answered at `was.path` is still answered there, the same
+    /// way, by this successor.
+    ///
+    /// Either the operation has not moved, or the path it left is served by a **declaration**, and
+    /// a declaration is three things read out of the registry, never one:
+    ///
+    /// 1. **The declaring entry is new.** An id the predecessor already served may not stand in for
+    ///    somebody else's move — two existing operations naming each other as `alias_of` would
+    ///    trade paths and each "declare" the other, with every id preserved and nothing added.
+    /// 2. **It is served at exactly the path the operation left**, so the URL a consumer pinned
+    ///    still resolves.
+    /// 3. **It answers there as the predecessor did**, in every field of [`ANSWERED_BY`]. An entry
+    ///    parked on the old path under another method or another scope resolves the URL and refuses
+    ///    the request, which is the withdrawal this check exists to catch, not a declaration of it.
+    fn still_answers(&self, was: &Route, previous_ids: &BTreeSet<&str>) -> bool {
+        if self
+            .served
+            .get(&was.id)
+            .is_some_and(|now| now.path == was.path)
+        {
+            return true;
+        }
+        self.aliased
+            .get(&was.id)
+            .into_iter()
+            .flatten()
+            .any(|alias| {
+                !previous_ids.contains(alias.id.as_str())
+                    && alias.path == was.path
+                    && ANSWERED_BY
+                        .iter()
+                        .all(|field| alias.field(field) == was.field(field))
+            })
     }
 }
 
@@ -1617,6 +1711,320 @@ mod tests {
             serde_json::to_vec_pretty(&document).expect("serialize"),
         )
         .expect("write");
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Adversarial cases. Added by the adversarial-verify step against 6702455; they assert the
+    // story's own acceptance statement — "a successor bundle that serves an existing operation id
+    // at a different path fails `cargo xtask check-bundle`" — against successors the three cases
+    // above do not build.
+    // ------------------------------------------------------------------------------------------
+
+    /// Two operations that trade paths. Both already exist in the predecessor, both are `GET`,
+    /// both take `{session_id}`, so the swap is expressible without touching anything else.
+    const TRADE_A: &str = "session.attach";
+    const TRADE_A_PATH: &str = "/v1/pipe-sessions/{session_id}/attach";
+    const TRADE_B: &str = "session.get";
+    const TRADE_B_PATH: &str = "/v1/pipe-sessions/{session_id}";
+
+    /// Renders a successor from `VERSION`'s authored source after `author` has had its say, into a
+    /// scratch contracts root holding the predecessor, and hands back the inputs that name it.
+    ///
+    /// The same shape as `check_with_the_route_moved`, minus its fixed `MOVED_ID` edit, so a case
+    /// can author any successor it likes — and returning the inputs rather than a report, so a
+    /// case can drive `run` (the verb the acceptance names) and not only `check`.
+    fn author_a_successor(
+        prefix: &str,
+        author: impl FnOnce(&std::path::Path),
+    ) -> (tempfile::TempDir, crate::render::Inputs) {
+        let scratch = tempfile::Builder::new()
+            .prefix(prefix)
+            .tempdir()
+            .expect("scratch");
+        let source = scratch.path().join("bundle-source");
+        let contracts = scratch.path().join("substrate-wire");
+        copy_tree(
+            &root().join("xtask/bundle-source").join(VERSION),
+            &source.join(VERSION),
+        );
+        copy_tree(
+            &root().join("contracts/substrate-wire").join(PREDECESSOR),
+            &contracts.join(PREDECESSOR),
+        );
+        author(&source.join(VERSION));
+
+        let inputs = crate::render::Inputs {
+            source_root: source,
+            contracts_root: contracts.clone(),
+            ..inputs()
+        };
+        let rendered = crate::render::render(&inputs).expect("the authored successor renders");
+        for (path, bytes) in &rendered {
+            let target = contracts.join(VERSION).join(path);
+            std::fs::create_dir_all(target.parent().expect("a parent")).expect("create");
+            std::fs::write(&target, bytes).expect("write");
+        }
+        (scratch, inputs)
+    }
+
+    /// The successor's own registry schema admits `alias_of`, exactly as `declare_alias` does it.
+    /// Without this the entry fails classification and the case would prove nothing about paths.
+    fn admit_alias_of(authored: &std::path::Path) {
+        edit_json(
+            &authored.join("documents/schemas/operation-registry.json"),
+            |registry| {
+                registry["properties"]["operations"]["items"]["properties"]["alias_of"] = json!({
+                    "pattern": "^[a-z][a-z0-9-]*(\\.[a-z][a-z0-9-]*)+$",
+                    "type": "string",
+                });
+            },
+        );
+    }
+
+    /// Authors the path trade: each of the two operations moves onto the other's path and names
+    /// the other as its `alias_of`.
+    fn trade_the_two_paths(authored: &std::path::Path) {
+        admit_alias_of(authored);
+        edit_json(&authored.join("routes.json"), |routes| {
+            for route in routes.as_array_mut().expect("routes.json is an array") {
+                match route.get("id").and_then(Value::as_str) {
+                    Some(TRADE_A) => {
+                        assert_eq!(
+                            route["path"],
+                            json!(TRADE_A_PATH),
+                            "{TRADE_A} moved already"
+                        );
+                        route["path"] = json!(TRADE_B_PATH);
+                        route["alias_of"] = json!(TRADE_B);
+                    }
+                    Some(TRADE_B) => {
+                        assert_eq!(
+                            route["path"],
+                            json!(TRADE_B_PATH),
+                            "{TRADE_B} moved already"
+                        );
+                        route["path"] = json!(TRADE_A_PATH);
+                        route["alias_of"] = json!(TRADE_A);
+                    }
+                    _ => {}
+                }
+            }
+        });
+    }
+
+    /// Two existing operations trade paths. Every id is preserved, `adds_routes` is still 0, no
+    /// entry is added — and each move is "declared" by the *other* operation sitting on the path
+    /// it vacated, because `Routes::answers` asks only whether some entry naming `alias_of: <id>`
+    /// is served at that path and never whether that entry stands in for `<id>` in any way.
+    ///
+    /// Both old URLs still resolve, and both resolve to the wrong operation:
+    /// `GET /v1/pipe-sessions/{session_id}` now reaches `session.attach`, a duplex byte channel,
+    /// where it used to reach `session.get`. That is two existing operation ids served at a
+    /// different path, which the acceptance statement says must fail.
+    #[test]
+    fn two_operations_that_trade_paths_are_refused() {
+        let (_scratch, inputs) = author_a_successor("traded-paths", trade_the_two_paths);
+        let report = check(&inputs).expect("the traded successor reads");
+        let text = report.failure_text();
+        assert!(
+            text.contains(TRADE_A) && text.contains(TRADE_B),
+            "both operations moved and both must be named: {text}"
+        );
+    }
+
+    /// The same successor through the verb the acceptance names, not through `check`.
+    #[test]
+    fn the_command_refuses_two_operations_that_trade_paths() {
+        let (_scratch, inputs) = author_a_successor("traded-paths-cli", trade_the_two_paths);
+        let code = run(&Args {
+            version: VERSION.to_owned(),
+            contracts_root: Some(inputs.contracts_root.clone()),
+            source: Some(inputs.source_root.clone()),
+        })
+        .expect("the command runs");
+        assert_ne!(
+            format!("{code:?}"),
+            format!("{:?}", std::process::ExitCode::SUCCESS),
+            "check-bundle accepted a bundle in which two operations traded paths"
+        );
+    }
+
+    /// `Routes::answers` is documented as "whether a request to `path` still reaches `id`", and it
+    /// reads the path string alone. An alias parked on the predecessor's path under a *different*
+    /// method leaves every pinned request to that URL answered by a 405 — the old path answers
+    /// nothing a consumer sends — and the declaration is accepted anyway.
+    #[test]
+    fn an_alias_answering_the_old_path_under_another_method_declares_nothing() {
+        let report = check_with_the_route_moved("alias-wrong-method", |authored| {
+            declare_alias(authored, MOVED_FROM);
+            edit_json(&authored.join("routes.json"), |routes| {
+                for route in routes.as_array_mut().expect("routes.json is an array") {
+                    if route.get("id").and_then(Value::as_str) == Some(ALIAS_ID) {
+                        assert_eq!(route["method"], json!("GET"), "{MOVED_ID} was a GET");
+                        route["method"] = json!("DELETE");
+                    }
+                }
+            });
+        });
+        let text = report.failure_text();
+        assert!(
+            text.contains(MOVED_ID),
+            "no GET reaches {MOVED_FROM} any more, so the move is undeclared: {text}"
+        );
+    }
+
+    /// And the same for the scope. An alias on the old path demanding a scope the moved operation
+    /// never demanded refuses every pinned consumer's existing token with a 403; the old URL is as
+    /// dead to them as if it had been deleted, and the gate reports the successor verified.
+    #[test]
+    fn an_alias_answering_the_old_path_under_another_scope_declares_nothing() {
+        let report = check_with_the_route_moved("alias-wrong-scope", |authored| {
+            declare_alias(authored, MOVED_FROM);
+            edit_json(&authored.join("routes.json"), |routes| {
+                for route in routes.as_array_mut().expect("routes.json is an array") {
+                    if route.get("id").and_then(Value::as_str) == Some(ALIAS_ID) {
+                        assert_eq!(route["required_scope"], json!("session"), "scope moved");
+                        route["required_scope"] = json!("workspaces");
+                    }
+                }
+            });
+        });
+        let text = report.failure_text();
+        assert!(
+            text.contains(MOVED_ID),
+            "no session-scoped consumer reaches {MOVED_FROM} any more: {text}"
+        );
+    }
+
+    /// Boundary: a route that is genuinely dropped is still refused after the inventory stopped
+    /// being a bare id set. Differencing `previous_ids`/`current_ids` must keep saying so.
+    #[test]
+    fn a_dropped_route_is_still_refused() {
+        let (_scratch, inputs) = author_a_successor("dropped-route", |authored| {
+            edit_json(&authored.join("routes.json"), |routes| {
+                let routes = routes.as_array_mut().expect("routes.json is an array");
+                routes.retain(|route| {
+                    route.get("id").and_then(Value::as_str) != Some("session.lease.renew")
+                });
+            });
+            // The successor's own bundle schema states the count its inventory now produces.
+            edit_json(&authored.join("documents/schemas/bundle.json"), |bundle| {
+                bundle["properties"]["compatibility"]["properties"]["preserves_routes"] =
+                    json!({ "const": 25 });
+            });
+        });
+        let report = check(&inputs).expect("the truncated successor reads");
+        let text = report.failure_text();
+        assert!(
+            text.contains("session.lease.renew") && text.contains("never drops one"),
+            "a dropped route must still be named: {text}"
+        );
+    }
+
+    /// Boundary: a route that is dropped *and* another that moves onto its path must both be
+    /// reported. Neither loop may swallow the other's finding.
+    #[test]
+    fn a_dropped_route_does_not_mask_a_move_onto_its_path() {
+        let (_scratch, inputs) = author_a_successor("dropped-and-moved", |authored| {
+            edit_json(&authored.join("routes.json"), |routes| {
+                let routes = routes.as_array_mut().expect("routes.json is an array");
+                routes.retain(|route| {
+                    route.get("id").and_then(Value::as_str) != Some("session.lease.renew")
+                });
+                for route in routes.iter_mut() {
+                    if route.get("id").and_then(Value::as_str) == Some(MOVED_ID) {
+                        route["path"] = json!("/v1/pipe-sessions/{session_id}/lease/renew");
+                    }
+                }
+            });
+            edit_json(&authored.join("documents/schemas/bundle.json"), |bundle| {
+                bundle["properties"]["compatibility"]["properties"]["preserves_routes"] =
+                    json!({ "const": 25 });
+            });
+        });
+        let report = check(&inputs).expect("the successor reads");
+        let text = report.failure_text();
+        assert!(
+            text.contains("session.lease.renew"),
+            "the dropped route must be named: {text}"
+        );
+        assert!(
+            text.contains(MOVED_ID) && text.contains(MOVED_FROM),
+            "the moved route must be named too: {text}"
+        );
+    }
+
+    /// Boundary: a predecessor whose `operations.json` cannot be read must fail closed. An error
+    /// path that reports and still lets the verb exit 0 is the defect the story was written
+    /// against.
+    #[test]
+    fn a_predecessor_whose_registry_does_not_parse_is_refused() {
+        let (_scratch, inputs) = author_a_successor("broken-predecessor", |_| {});
+        std::fs::write(
+            inputs
+                .contracts_root
+                .join(PREDECESSOR)
+                .join("operations.json"),
+            b"{ not json",
+        )
+        .expect("write");
+        // `render` reads the predecessor's inventory too, so the verb fails there first and
+        // never reaches `check_compatibility`'s own arm. Either way it does not exit 0, which is
+        // the property that matters; `main` turns the error into `ExitCode::FAILURE`.
+        let outcome = run(&Args {
+            version: VERSION.to_owned(),
+            contracts_root: Some(inputs.contracts_root.clone()),
+            source: Some(inputs.source_root.clone()),
+        });
+        match outcome {
+            Err(error) => assert!(
+                format!("{error:#}").contains("operations.json"),
+                "the unreadable file must be named: {error:#}"
+            ),
+            Ok(code) => assert_ne!(
+                format!("{code:?}"),
+                format!("{:?}", std::process::ExitCode::SUCCESS),
+                "an unreadable predecessor inventory must not exit 0"
+            ),
+        }
+    }
+
+    /// `Routes::read` keys `served` by id and inserts unconditionally, so two entries sharing one
+    /// id collapse to whichever the registry array happens to hold *last*. Nothing in the gate
+    /// rejects a duplicate id, and the counts are set-valued, so the verdict on one and the same
+    /// pair of served routes turns on array order alone: original-then-twin is refused as a move,
+    /// twin-then-original is verified and the second path is never looked at.
+    #[test]
+    fn one_id_at_two_paths_gets_the_same_verdict_in_either_order() {
+        let twin_last = the_verdict_on_a_duplicated_id("dup-twin-last", true);
+        let twin_first = the_verdict_on_a_duplicated_id("dup-twin-first", false);
+        assert_eq!(
+            twin_last, twin_first,
+            "the same two served routes, two array orders, two verdicts"
+        );
+    }
+
+    /// Renders a successor holding `MOVED_ID` twice — once at its released path, once at
+    /// `MOVED_TO` — with the twin either after or before the original, and returns what the gate
+    /// said about it.
+    fn the_verdict_on_a_duplicated_id(prefix: &str, twin_last: bool) -> Vec<String> {
+        let (_scratch, inputs) = author_a_successor(prefix, |authored| {
+            edit_json(&authored.join("routes.json"), |routes| {
+                let routes = routes.as_array_mut().expect("routes.json is an array");
+                let at = routes
+                    .iter()
+                    .position(|route| route.get("id").and_then(Value::as_str) == Some(MOVED_ID))
+                    .expect("the route to duplicate");
+                let mut twin = routes[at].clone();
+                assert_eq!(twin["path"], json!(MOVED_FROM), "{MOVED_ID} moved already");
+                twin["path"] = json!(MOVED_TO);
+                routes.insert(if twin_last { at + 1 } else { at }, twin);
+            });
+        });
+        check(&inputs)
+            .expect("the duplicated successor reads")
+            .failures()
+            .to_vec()
     }
 
     fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
