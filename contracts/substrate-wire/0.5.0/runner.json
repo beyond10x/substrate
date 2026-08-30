@@ -1,0 +1,52 @@
+{
+  "$schema": "schemas/runner.json",
+  "comparison": {
+    "expected": "exact-json-value-equality",
+    "postconditions": "rfc6901-pointer-plus-declared-scalar-operator"
+  },
+  "exit_codes": {
+    "0": "pass",
+    "1": "conformance-failure",
+    "2": "invalid-input",
+    "3": "harness-failure"
+  },
+  "format": "b10x.substrate-clean-room-runner.v1",
+  "invocation": {
+    "argv": [
+      "<runner>",
+      "--bundle",
+      "<bundle-dir>",
+      "--vector",
+      "<bundle-relative-vector-path>",
+      "--output",
+      "<runner-result.json>"
+    ],
+    "network": "disabled-unless-vector-setup-provides-sentinels",
+    "working_directory": "new-empty-directory"
+  },
+  "isolation": {
+    "producer_input": "action-only",
+    "repository_access": "bundle-only",
+    "setup_delivery": "runner-only"
+  },
+  "protocol": {
+    "result_schema": "schemas/runner-result.json",
+    "vector_schema": "schemas/vector.json"
+  },
+  "roles": {
+    "producer_receives": [
+      "action"
+    ],
+    "runner_owns": [
+      "setup",
+      "probes",
+      "comparison",
+      "reporting"
+    ]
+  },
+  "selection": {
+    "fixture_identity": "out-of-band-only-never-request-data",
+    "manifest_pointer": "/conformance/executable_vectors",
+    "source": "bundle-manifest"
+  }
+}

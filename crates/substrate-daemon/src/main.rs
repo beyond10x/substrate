@@ -4,8 +4,28 @@ use std::net::SocketAddr;
 use std::path::PathBuf;
 
 use clap::Parser;
-use substrate_daemon::{DaemonConfig, TcpDaemonConfig, serve};
+use substrate_daemon::{DaemonConfig, SecretSlot, TcpDaemonConfig, serve};
 use tracing_subscriber::EnvFilter;
+
+/// Parses one `--secret-slot name=path`.
+///
+/// Splits at the **first** `=`, so a path may contain one. The name shape is the wire's own rule,
+/// not a second copy of it.
+fn parse_secret_slot(value: &str) -> Result<SecretSlot, String> {
+    let (name, path) = value
+        .split_once('=')
+        .ok_or_else(|| "a secret slot is declared as name=path".to_owned())?;
+    if !substrate_wire::valid_secret_slot_name(name) {
+        return Err("a secret slot name must match [a-z][a-z0-9_]{0,63}".to_owned());
+    }
+    if path.is_empty() {
+        return Err(format!("secret slot {name} declares no file"));
+    }
+    Ok(SecretSlot {
+        name: name.to_owned(),
+        path: PathBuf::from(path),
+    })
+}
 
 #[derive(Debug, Parser)]
 #[command(
@@ -37,6 +57,20 @@ struct Arguments {
 
     #[arg(long, default_value_t = 10_000)]
     event_retention: u64,
+
+    /// Declare a secret slot as `name=path` (repeatable). ADR 0012.
+    ///
+    /// The path never leaves this process: it is not a capability fact, not an event field and not
+    /// an error message. Rotating the file behind a declared name needs no restart and invalidates
+    /// no admitted operation.
+    #[arg(
+        long = "secret-slot",
+        env = "SUBSTRATE_SECRET_SLOT",
+        value_name = "NAME=PATH",
+        value_delimiter = ',',
+        value_parser = parse_secret_slot
+    )]
+    secret_slots: Vec<SecretSlot>,
 
     #[arg(
         long,
@@ -90,6 +124,7 @@ impl From<Arguments> for DaemonConfig {
             cgroup_root: arguments.cgroup_root,
             bubblewrap: arguments.bubblewrap,
             event_retention: arguments.event_retention,
+            secret_slots: arguments.secret_slots,
             tcp,
         }
     }

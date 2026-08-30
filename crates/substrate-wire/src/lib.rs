@@ -28,6 +28,23 @@ pub const MAX_EXECUTION_CAPSULE_BYTES: u64 = 524_288;
 /// Small on purpose. A closure that needs many roots is a closure that should be assembled rather
 /// than enumerated, and a long list is a request nobody reviewed.
 pub const MAX_READ_ONLY_ROOTS: u32 = 4;
+/// How many secret slots one start may name (ADR 0012).
+///
+/// A slot is a credential, and a process that needs many credentials is a process that has been
+/// handed somebody else's authority. Small enough that the `close_range` gap list stays bounded.
+pub const MAX_SECRET_SLOTS: u32 = 8;
+/// Lowest descriptor a secret slot may be delivered at: above stdio, never on it.
+pub const MIN_SECRET_SLOT_FD: u32 = 3;
+/// Highest descriptor a secret slot may be delivered at
+/// (`docs/design/11-sealed-secret-slots.md` § 10 decision 3).
+pub const MAX_SECRET_SLOT_FD: u32 = 63;
+/// Largest declared slot file the driver will seal into a `memfd`.
+pub const MAX_SECRET_SLOT_BYTES: u64 = 65_536;
+/// The one shaped-environment name that carries the slot mapping — names and descriptors only.
+///
+/// A caller cannot collide with it: every caller-set name containing `secret` is already refused
+/// (`crates/substrate-daemon/src/app/operations.rs`, `crates/substrate-host/src/process.rs`).
+pub const SECRET_SLOTS_ENV: &str = "SUBSTRATE_SECRET_SLOTS";
 pub const EXECUTION_CAPSULE_MOUNT: &str = "/runtime";
 /// Hash-domain separator for the capsule manifest. A wire-visible protocol byte string:
 /// `contracts/substrate-wire/0.4.0/hashing.json` const-pins the same value, and
@@ -633,6 +650,12 @@ pub struct AppliedConfinement {
     /// visible.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub read_only_roots: Vec<ReadOnlyRoot>,
+    /// Every secret slot that was placed, by name and descriptor (ADR 0012).
+    ///
+    /// An auditor sees that this run held `vendor_api_key` and where it arrived, and never what was
+    /// in it. Applied, not requested: this is the record of what the driver actually placed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secret_slots: Vec<SecretSlotRequest>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -764,6 +787,13 @@ pub struct ExecStartInput {
     /// package registry — for a process that still has no network to fetch one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub read_only_roots: Vec<ReadOnlyRoot>,
+    /// Operator-declared credentials this start wants, and the descriptors they must arrive at
+    /// (ADR 0012).
+    ///
+    /// A name and a number each; never a value, a path or a length. Absent on every existing
+    /// consumer, and absent is what keeps the ledger hash of an unchanged start unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub secret_slots: Vec<SecretSlotRequest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capsule: Option<ExecutionCapsuleInput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1272,6 +1302,14 @@ pub struct CapabilityFacts {
         skip_serializing_if = "Option::is_none"
     )]
     pub exec_inline_capsule: Option<ExecutionCapsuleFacts>,
+    /// The sorted names of the slots this driver can deliver sealed (ADR 0012).
+    ///
+    /// Names only — never a path, a length or a digest of a value — so adding or removing a slot
+    /// moves the snapshot digest while **rotating a value moves nothing observable**. Published
+    /// only from a probe that proved sealing and descriptor pass-through; absent otherwise, because
+    /// a missing guarantee is a named refusal and never a weaker delivery (invariant 3).
+    #[serde(rename = "secrets.slots", skip_serializing_if = "Option::is_none")]
+    pub secrets_slots: Option<Vec<String>>,
     #[serde(
         rename = "snapshot.provenance-events",
         skip_serializing_if = "Option::is_none"
@@ -1307,6 +1345,7 @@ impl Default for CapabilityFacts {
             exec_max_current: None,
             exec_signals: None,
             exec_inline_capsule: None,
+            secrets_slots: None,
             snapshot_provenance_events: None,
         }
     }
@@ -1411,6 +1450,16 @@ pub enum WireValidationError {
     ReservedReadOnlyRootMount,
     #[error("two declared read-only roots name the same mount point")]
     DuplicateReadOnlyRootMount,
+    #[error("named secret slots are outside the closed bounds")]
+    InvalidSecretSlotBounds,
+    #[error("a named secret slot is not a legal slot name")]
+    InvalidSecretSlotName,
+    #[error("a secret slot descriptor is outside the closed range")]
+    InvalidSecretSlotDescriptor,
+    #[error("two named secret slots ask for the same descriptor")]
+    DuplicateSecretSlotDescriptor,
+    #[error("one secret slot is named twice in the same start")]
+    DuplicateSecretSlotName,
     #[error("execution capsule manifest does not match its digest")]
     CapsuleManifestMismatch,
 }
@@ -1561,6 +1610,90 @@ pub fn validate_read_only_roots(roots: &[ReadOnlyRoot]) -> Result<(), WireValida
         }
     }
     Ok(())
+}
+
+/// One operator-declared secret slot, named and placed by a start (ADR 0012).
+///
+/// A name and a number, and deliberately nothing else. There is no value here, no path and no
+/// length, because the ledger frames the whole request (`canonical_request_hash_v2`): the only way
+/// the material stays out of the hash is for it never to be in the request. Rotating what is behind
+/// `slot` therefore changes no byte a client can read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SecretSlotRequest {
+    /// The operator-declared slot name.
+    pub slot: String,
+    /// The descriptor the sealed `memfd` must arrive at inside the child.
+    pub fd: u32,
+}
+
+/// A slot name: `[a-z][a-z0-9_]{0,63}`.
+///
+/// Non-secret by construction — it is the `memfd` name the child reads back through
+/// `/proc/self/fd`, and it is what an error is allowed to say
+/// (`docs/design/04-security-and-isolation.md:79`).
+pub fn valid_secret_slot_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= 64
+        && name.bytes().enumerate().all(|(index, byte)| {
+            if index == 0 {
+                byte.is_ascii_lowercase()
+            } else {
+                byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_'
+            }
+        })
+}
+
+/// Checks a start's named slots against every rule ADR 0012 names.
+///
+/// Whether the *name* is declared by this operator is the driver's question — this is the shape.
+///
+/// # Errors
+///
+/// Returns the rule that was broken. Nothing is adjusted: a slot that cannot be placed exactly
+/// where it was asked for refuses the dispatch.
+pub fn validate_secret_slots(slots: &[SecretSlotRequest]) -> Result<(), WireValidationError> {
+    if slots.len() > MAX_SECRET_SLOTS as usize {
+        return Err(WireValidationError::InvalidSecretSlotBounds);
+    }
+    let mut names: BTreeSet<&str> = BTreeSet::new();
+    let mut descriptors: BTreeSet<u32> = BTreeSet::new();
+    for slot in slots {
+        if !valid_secret_slot_name(&slot.slot) {
+            return Err(WireValidationError::InvalidSecretSlotName);
+        }
+        if !(MIN_SECRET_SLOT_FD..=MAX_SECRET_SLOT_FD).contains(&slot.fd) {
+            return Err(WireValidationError::InvalidSecretSlotDescriptor);
+        }
+        if !names.insert(slot.slot.as_str()) {
+            return Err(WireValidationError::DuplicateSecretSlotName);
+        }
+        if !descriptors.insert(slot.fd) {
+            return Err(WireValidationError::DuplicateSecretSlotDescriptor);
+        }
+    }
+    Ok(())
+}
+
+/// The `SUBSTRATE_SECRET_SLOTS` value for a start: `name=fd`, comma-separated, sorted by name.
+///
+/// `None` when no slot is named, so the variable is absent rather than empty — an empty mapping and
+/// no mapping are different claims and a child should not have to tell them apart.
+pub fn secret_slot_environment(slots: &[SecretSlotRequest]) -> Option<String> {
+    if slots.is_empty() {
+        return None;
+    }
+    let sorted: BTreeMap<&str, u32> = slots
+        .iter()
+        .map(|slot| (slot.slot.as_str(), slot.fd))
+        .collect();
+    Some(
+        sorted
+            .into_iter()
+            .map(|(name, fd)| format!("{name}={fd}"))
+            .collect::<Vec<_>>()
+            .join(","),
+    )
 }
 
 /// An absolute path with no `.`, no `..`, no empty component and no trailing slash.
@@ -2252,6 +2385,100 @@ mod tests {
         assert_eq!(
             validate_read_only_roots(&too_many).expect_err("refused"),
             WireValidationError::InvalidReadOnlyRootBounds
+        );
+    }
+}
+
+#[cfg(test)]
+mod secret_slot_tests {
+    use super::{
+        MAX_SECRET_SLOTS, SECRET_SLOTS_ENV, SecretSlotRequest, WireValidationError,
+        secret_slot_environment, valid_secret_slot_name, validate_secret_slots,
+    };
+
+    fn slot(name: &str, fd: u32) -> SecretSlotRequest {
+        SecretSlotRequest {
+            slot: name.to_owned(),
+            fd,
+        }
+    }
+
+    #[test]
+    fn a_slot_name_is_lowercase_bounded_and_never_empty() {
+        for admitted in ["a", "vendor_api_key", "registry_token", "k9"] {
+            assert!(valid_secret_slot_name(admitted), "{admitted}");
+        }
+        for refused in ["", "Vendor", "9lives", "vendor-api-key", "vendor.key", " x"] {
+            assert!(!valid_secret_slot_name(refused), "{refused:?}");
+        }
+        assert!(valid_secret_slot_name(&"a".repeat(64)));
+        assert!(!valid_secret_slot_name(&"a".repeat(65)));
+    }
+
+    #[test]
+    fn descriptors_are_bounded_above_stdio_and_below_the_staging_floor() {
+        assert!(validate_secret_slots(&[slot("vendor_api_key", 3)]).is_ok());
+        assert!(validate_secret_slots(&[slot("vendor_api_key", 63)]).is_ok());
+        assert!(
+            validate_secret_slots(&[]).is_ok(),
+            "and none is the default"
+        );
+        for illegal in [0, 1, 2, 64, 4096] {
+            assert_eq!(
+                validate_secret_slots(&[slot("vendor_api_key", illegal)]).expect_err("refused"),
+                WireValidationError::InvalidSecretSlotDescriptor,
+                "fd {illegal}"
+            );
+        }
+    }
+
+    #[test]
+    fn one_descriptor_and_one_name_are_each_claimed_once() {
+        // Whichever won, the other would be a credential the caller believed had arrived.
+        assert_eq!(
+            validate_secret_slots(&[slot("vendor_api_key", 7), slot("registry_token", 7)])
+                .expect_err("refused"),
+            WireValidationError::DuplicateSecretSlotDescriptor
+        );
+        assert_eq!(
+            validate_secret_slots(&[slot("vendor_api_key", 7), slot("vendor_api_key", 9)])
+                .expect_err("refused"),
+            WireValidationError::DuplicateSecretSlotName
+        );
+    }
+
+    #[test]
+    fn the_bound_is_the_one_the_design_publishes() {
+        let too_many: Vec<SecretSlotRequest> = (0..=MAX_SECRET_SLOTS)
+            .map(|index| slot(&format!("slot_{index}"), 3 + index))
+            .collect();
+        assert_eq!(
+            validate_secret_slots(&too_many).expect_err("refused"),
+            WireValidationError::InvalidSecretSlotBounds
+        );
+    }
+
+    #[test]
+    fn the_mapping_is_sorted_by_name_and_absent_when_nothing_is_named() {
+        assert_eq!(secret_slot_environment(&[]), None);
+        assert_eq!(
+            secret_slot_environment(&[slot("vendor_api_key", 7), slot("registry_token", 9)])
+                .as_deref(),
+            Some("registry_token=9,vendor_api_key=7"),
+        );
+        assert_eq!(SECRET_SLOTS_ENV, "SUBSTRATE_SECRET_SLOTS");
+    }
+
+    #[test]
+    fn a_slot_carries_a_name_and_a_number_and_nothing_else() {
+        let rendered = serde_json::to_string(&slot("vendor_api_key", 7)).expect("serialize");
+        assert_eq!(rendered, r#"{"slot":"vendor_api_key","fd":7}"#);
+        // `deny_unknown_fields`: a value, a path or a length cannot be smuggled in beside them.
+        assert!(
+            serde_json::from_str::<SecretSlotRequest>(
+                r#"{"slot":"vendor_api_key","fd":7,"value":"x"}"#
+            )
+            .is_err()
         );
     }
 }

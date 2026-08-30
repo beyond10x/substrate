@@ -337,40 +337,36 @@ impl ProcessRuntime {
             }
         };
         let sync_fd = sync_read.as_raw_fd();
+        // Last thing before spawn, first thing released after it. Every admission check and the
+        // backend recheck are behind us, so a start that will not run never reads a credential
+        // (`docs/design/11-sealed-secret-slots.md` § 4).
+        let slots = match crate::secrets::SecretSlotSet::acquire(
+            &self.config.secret_slots,
+            &input.secret_slots,
+        ) {
+            Ok(slots) => slots,
+            Err(error) => return contain_cgroup(&cgroup, error),
+        };
         let mut command = self.command(
             workspace,
             input,
             sync_fd,
             pipe_settings.is_some(),
             capsule.as_ref(),
+            &slots,
         );
         let write_fd = sync_write.as_raw_fd();
+        let placements = slots.placements();
+        let retained = slots.retained(Some(sync_fd));
         // SAFETY: pre_exec runs after fork; it invokes only async-signal-safe libc calls and does
-        // not allocate. The captured descriptor is a plain integer owned by the parent until spawn.
+        // not allocate. The captured descriptors are plain integers owned by the parent until spawn,
+        // and the two vectors are built before the fork and only read after it.
         unsafe {
             command.as_std_mut().pre_exec(move || {
                 if libc::close(write_fd) != 0 {
                     return Err(std::io::Error::last_os_error());
                 }
-                if sync_fd > 3
-                    && libc::syscall(
-                        libc::SYS_close_range,
-                        3_u32,
-                        u32::try_from(sync_fd - 1).expect("descriptor is positive"),
-                        0_u32,
-                    ) != 0
-                {
-                    return Err(std::io::Error::last_os_error());
-                }
-                if libc::syscall(
-                    libc::SYS_close_range,
-                    u32::try_from(sync_fd + 1).expect("descriptor is positive"),
-                    u32::MAX,
-                    0_u32,
-                ) != 0
-                {
-                    return Err(std::io::Error::last_os_error());
-                }
+                crate::secrets::place_and_close(&placements, &retained)?;
                 if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
                     return Err(std::io::Error::last_os_error());
                 }
@@ -390,6 +386,10 @@ impl ProcessRuntime {
             }
         };
         drop(sync_read);
+        // The child now holds the only copy. A memfd has no name in any filesystem, so this is the
+        // whole release: when the last descriptor goes, the kernel frees the memory.
+        let applied_slots = slots.applied();
+        drop(slots);
         let Some(leader_pid) = child.id() else {
             let error =
                 DriverError::failed("exec.spawn-failed", "spawn returned no process identity");
@@ -419,6 +419,9 @@ impl ProcessRuntime {
             // mount exactly as declared, so by here the two are the same list — and a reader gets
             // it from the record rather than from the fact that a build happened to succeed.
             read_only_roots: input.read_only_roots.clone(),
+            // Placed, not requested: this list is taken from the acquired set, so it names what
+            // actually crossed into the child.
+            secret_slots: applied_slots,
         };
         let resource = Exec {
             id: id.to_owned(),
@@ -777,6 +780,49 @@ impl ProcessRuntime {
         Ok(())
     }
 
+    /// Every rule ADR 0012 names about *which* slots a start may ask for, before anything is read.
+    ///
+    /// Order matters. Shape first, because it is the caller's mistake and does not depend on this
+    /// host; then the capability, because a slot asked for where none can be delivered is
+    /// `unserved` and never a weaker delivery; then whether the operator declared this name.
+    pub(crate) fn admit_secret_slots(
+        config: &HostConfig,
+        published: Option<&Vec<String>>,
+        requested: &[substrate_wire::SecretSlotRequest],
+    ) -> Result<(), DriverError> {
+        if requested.is_empty() {
+            return Ok(());
+        }
+        substrate_wire::validate_secret_slots(requested).map_err(|error| {
+            DriverError::refused(
+                "exec.secret-slot-descriptor-invalid",
+                format!("A named secret slot is not admissible: {error}"),
+                "secret_slots",
+            )
+        })?;
+        if published.is_none() {
+            return Err(DriverError::unserved(
+                "exec.secret-slots-unserved",
+                "Sealed secret slots are not served by this host.",
+                "secret_slots",
+            ));
+        }
+        for slot in requested {
+            if !config
+                .secret_slots
+                .iter()
+                .any(|declaration| declaration.name == slot.slot)
+            {
+                return Err(DriverError::refused(
+                    "exec.secret-slot-unknown",
+                    format!("Secret slot {} is not declared on this host.", slot.slot),
+                    "secret_slots",
+                ));
+            }
+        }
+        Ok(())
+    }
+
     fn admit(&self, id: &str, workspace: &Path, input: &ExecStartInput) -> Result<(), DriverError> {
         if !id.starts_with("ex_")
             || !id
@@ -790,6 +836,11 @@ impl ProcessRuntime {
             ));
         }
         Self::admit_read_only_roots(&input.read_only_roots)?;
+        Self::admit_secret_slots(
+            &self.config,
+            self.capability.facts.secrets_slots.as_ref(),
+            &input.secret_slots,
+        )?;
         if input.sandbox.capability_snapshot != self.capability.snapshot {
             return Err(DriverError::refused(
                 "exec.capability-stale",
@@ -885,6 +936,7 @@ impl ProcessRuntime {
         sync_fd: RawFd,
         interactive: bool,
         capsule: Option<&PreparedCapsule>,
+        slots: &crate::secrets::SecretSlotSet,
     ) -> Command {
         let mut command = Command::new(&self.config.bubblewrap);
         command
@@ -951,6 +1003,11 @@ impl ProcessRuntime {
         }
         for (name, value) in &input.env.set {
             command.args(["--setenv", name, value]);
+        }
+        // The mapping and nothing else: names and descriptors, sorted, ASCII. Absent when this
+        // start named no slot, so a child can tell "no slots" from "an empty list".
+        if let Some(mapping) = slots.environment() {
+            command.args(["--setenv", substrate_wire::SECRET_SLOTS_ENV, &mapping]);
         }
         // Bubblewrap injects PWD after `--clearenv`; remove that implementation detail before
         // exec, then restore it only when the closed request explicitly supplied PWD.
@@ -1965,6 +2022,7 @@ mod tests {
         let runtime = ProcessRuntime::new(config, capability).expect("runtime");
         let input = ExecStartInput {
             read_only_roots: Vec::new(),
+            secret_slots: Vec::new(),
             workspace: "ws_test".to_owned(),
             argv: vec!["/usr/bin/true".to_owned()],
             env: ExecEnvironment {
@@ -2036,6 +2094,7 @@ mod tests {
         let runtime = ProcessRuntime::new(config, capability).unwrap();
         let input = ExecStartInput {
             read_only_roots: Vec::new(),
+            secret_slots: Vec::new(),
             workspace: "ws_test".to_owned(),
             argv: vec!["/usr/bin/true".to_owned()],
             env: ExecEnvironment {

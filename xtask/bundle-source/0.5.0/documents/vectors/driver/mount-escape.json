@@ -1,0 +1,58 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "command": {
+      "operation": "workspace.read-file",
+      "path": "mounted/secret",
+      "workspace": "ws_vector"
+    },
+    "kind": "driver",
+    "port": "workspace"
+  },
+  "context": {
+    "authority": "driver-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000"
+  },
+  "covers": [
+    "security.path.mount"
+  ],
+  "expected": {
+    "kind": "driver-outcome",
+    "outcome": {
+      "code": "workspace.path-escape",
+      "status": "refused"
+    }
+  },
+  "id": "mount-escape-is-refused",
+  "layer": "driver",
+  "phase": 2,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/outside_sha256",
+      "expected": "1111111111111111111111111111111111111111111111111111111111111111",
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/outside_access_count",
+      "expected": 0,
+      "operator": "equals"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "path-shape",
+      "name": "mount",
+      "state": {
+        "outside_sha256": "1111111111111111111111111111111111111111111111111111111111111111",
+        "path": "mounted/secret"
+      }
+    }
+  ]
+}

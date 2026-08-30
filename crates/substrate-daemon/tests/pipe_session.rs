@@ -188,6 +188,7 @@ impl Driver for PipeFixtureDriver {
                 requested: input.exec.sandbox.clone(),
                 applied: Some(AppliedConfinement {
                     read_only_roots: Vec::new(),
+                    secret_slots: Vec::new(),
                     capability_snapshot: SNAPSHOT.to_owned(),
                     cgroup: format!("fixture-{id}"),
                     filesystem: AppliedFilesystem::WorkspaceReadWriteSystemReadOnly,

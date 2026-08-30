@@ -11,7 +11,7 @@ tags:
 - rust
 relations:
 - decomposes: epic:release-hardening
-revision: 8
+revision: 9
 ---
 # Story: Anything that runs is Rust — the gate's Python moves to `cargo xtask`
 
@@ -180,9 +180,28 @@ so deleting it would break the bundle it generated.
 asserts the 0.4.0 digest, and `cargo test --workspace --locked` is the gate's first step — the same
 reasoning that keeps `package-bundle` and the runtime-vector runner out of it.
 
-**Open, and the only thing left for this story:** the acceptance names
-`cargo xtask render-bundle 0.5.0` as the successor's only renderer. The verb exists and refuses
-correctly; 0.5.0 itself is cut by `story:sealed-secret-slots`, whose bundle is in progress. When it
-lands, this story is satisfied. For 0.5.0 the renderer needs `generator.name` to point at something
-hashable — it hashes a file or a tree — which is a further reason 0.4.0's Python renderer must
-survive.
+**0.5.0 is cut, so that clause is closed.** `story:sealed-secret-slots` rendered
+`contracts/substrate-wire/0.5.0/` (206 files) with `cargo xtask render-bundle`, and no Python
+renderer was involved or written. It also replaced the ADR's proposed
+`scripts/check-contract-bundle-0.5.0.py` with a new verb, `cargo xtask check-bundle <version>`,
+which re-renders from the authored source and compares bytes — strictly stronger than a
+hand-written checker.
+
+## What is actually left — 2026-08-30
+
+**576 lines, and they are not the frozen renderers.** The acceptance says the gate invokes no Python
+except the four frozen renderers' checkers. It still invokes one more:
+
+    scripts/gate.sh:28  run python3 scripts/test_contract_json_gate.py
+
+`scripts/contract_json_gate.py` (377 lines) and its self-test (199) are shared live machinery, not a
+per-version frozen artefact — `:301` classifies JSON under a bundle directory and fails closed, and
+`:195` already shells out to `crates/substrate-contract-check`, which is Rust. Porting it is the
+last step of this story, and it is the one place a new bundle's JSON is admitted or rejected, so it
+wants the same differential proof every other move got: the predecessor's negative cases run against
+the Rust replacement before the Python is deleted.
+
+`scripts/check-bot-files.py` (39 lines) is not in `scripts/gate.sh` and is out of this story's
+acceptance; name it separately if it should move.
+
+Of the 21,298 Python lines left, 20,683 are the four frozen renderer/checker pairs, which stay.
