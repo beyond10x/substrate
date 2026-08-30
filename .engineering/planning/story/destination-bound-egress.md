@@ -13,7 +13,7 @@ tags:
 relations:
 - decomposes: epic:byte-plane-completion
 - depends_on: story:sealed-secret-slots
-revision: 9
+revision: 10
 ---
 # Story: Destination-bound egress apertures are declared, verified and refused by name
 
@@ -151,3 +151,7 @@ Portable lane 29/29 separately.
 **Deferred and not covered by this story's acceptance:** `exec.aperture-byte-limit`
 (design 10 § 5 row 5). Bytes are counted and observed; the ceiling is not enforced. That is the one
 row of design 10 § 5 this change does not deliver, and it wants its own story.
+
+**Delivered — 2026-08-30.** That story is `story:aperture-byte-ceiling`: accepted as ADR 0014,
+implemented, merged at `a7c040a` with contract bundle `0.8.0`. `exec.aperture-byte-limit` is now a
+refusal a run can actually receive.

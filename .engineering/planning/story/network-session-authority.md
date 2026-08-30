@@ -11,7 +11,7 @@ tags:
 - wire
 relations:
 - decomposes: epic:byte-plane-completion
-revision: 4
+revision: 5
 ---
 # Story: Network session transport over TLS with single-use proof-bound authority
 
@@ -59,7 +59,7 @@ Derived 2026-08-30 by `story-scoper`. Every line is **cited** or **inferred**.
 
 - **Primary surface:** `crates/substrate-daemon` — cited; both the listener and the attach route
   live there.
-- **Files, cited:** `crates/substrate-daemon/src/runtime.rs:736` (`serve_tcp`), `:856`
+- **Files, cited:** `crates/substrate-daemon/src/runtime.rs:764` (`serve_tcp`), `:856`
   (`require_tcp_bearer`), `src/app/routes.rs:33` (`router`), `src/app/sessions.rs:735`
   (`pipe_session_attach`).
 - **Symbols, cited:** `serve_tcp`, `TcpAuthState`, `require_tcp_bearer`, `router`,
@@ -133,3 +133,7 @@ Bundle `0.9.0` is **provisional**: design 13 names it too.
 
 Not established: the exporter label string is a new wire-visible identifier, and whether it may
 carry the former brand is atlas ADR 0001's call — deferred to the bundle cut.
+
+## Citation refresh — 2026-08-30
+
+`serve_tcp` was cited at `runtime.rs:736`; it is `:764` at `5749353`.

@@ -10,7 +10,7 @@ tags:
 - phase-5
 relations:
 - depends_on: epic:byte-plane-completion
-revision: 2
+revision: 3
 ---
 # Epic: Container driver entry
 
@@ -51,3 +51,15 @@ assertion, or a source scan. Prefer the one that fails on the first offending `u
 ## Done When
 
 The story is implemented, and plan 03's status and `ROADMAP.md` phase 5 change together.
+
+## Correction — 2026-08-30
+
+The body above says this epic holds one story and is done when that story is implemented. The
+2026-08-29 split gave it **two**: `story:driver-port-carries-no-host-types`, which is already
+implemented, and `story:docker-driver-entry-gate`, which is a draft now carrying a proposed design
+(`docs/design/15-docker-driver-entry-gate.md`).
+
+"Done when the story is implemented" therefore reads as satisfied when it is not. This epic is done
+when **both** are, and the Docker gate is the one that remains — a gate stated before any Docker
+code exists, whose design says sealed secret slots and egress apertures are **absent** on a
+container driver rather than weakened.

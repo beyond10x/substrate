@@ -9,7 +9,7 @@ owner: substrate
 tags:
 - ci
 - release
-revision: 2
+revision: 3
 ---
 # Epic: Release hardening
 
@@ -70,3 +70,13 @@ Bit-for-bit reproducible binaries: digests are recorded, reproduction is a later
 From a fresh clone: `AGENTS.md` matches the scripts; a PR with a formatting error goes red; clippy
 runs on the pinned toolchain; `STATUS.md` names the standalone repository and the current tag; a
 tag `0.x.y` yields a signed image and a signed bundle artifact whose digests are in `CHANGELOG.md`.
+
+## Correction — 2026-08-30
+
+Scope above says "Six stories". **Eight** decompose this epic: the six named plus
+`story:tooling-moves-to-cargo-xtask` (implemented — the gate's Python moved to `cargo xtask`) and
+`story:contract-gate-sees-route-paths` (draft — the successor check reads operation ids and never
+the paths they are served at, so a route can move silently).
+
+Six of the eight are implemented. `story:contract-bundle-oci-artifact` is active and unblocked;
+`story:contract-gate-sees-route-paths` is a draft filed today.
