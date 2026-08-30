@@ -2,7 +2,7 @@
 format: aep.planning-md/1
 id: story:ledger-rows-carry-the-declared-grant
 kind: story
-status: active
+status: implemented
 title: An operation's ledger row carries the declared grant it ran under
 summary: 'Atlas O1 exit evidence: every effectful call attributable to a declared grant, verified across the connectors/identity seam from substrate''s own record; design 06 section 2 fixes the shape.'
 owner: substrate
@@ -10,7 +10,7 @@ tags:
 - ledger
 - o1
 - trust
-revision: 5
+revision: 7
 ---
 # Story: An operation's ledger row carries the declared grant it ran under
 
@@ -78,3 +78,60 @@ tokens and holds no signing key, `kid` or JWKS (`identity/src/lib.rs:1936-1939`,
 `grant_ref` (`connectors/crates/integration-catalog/src/lib.rs:99-106`). The draft keeps the
 story's default (identity-signed) with that cost stated; the cheaper path is a connectors-signed
 context. Decides: the ADR, with both owners.
+
+## Progress — 2026-08-30, steps 2-4 done, story complete
+
+Merged as `16b2b3b` (PR #20). Every command below was re-run by the orchestrator in the agent's
+worktree, not taken from a report.
+
+**Step 2 — the successor bundle.** `contracts/substrate-wire/0.7.0/`, 224 files, additive successor
+to `0.6.0`, carrying the optional `delegated_context` request member, the `grant_ref` and
+`platform_principal` ledger/event fields and the named refusals.
+
+- `cargo xtask check-bundle 0.7.0` → `contract bundle 0.7.0 verified: 224 files, fixed point of
+  xtask/bundle-source/0.7.0`; `0.5.0` (206) and `0.6.0` (213) still fixed points.
+- `git status --short contracts/` showed only the new directory (invariant 6).
+- `cargo xtask check-json` → `1316 documents in 7 bundles`. This matters: `check-json` landed the
+  same night (`5f332b8`) and classifies every document under every bundle, where the retired Python
+  only ever ran on `0.1.0`–`0.4.0`. `0.7.0` is classified, not skipped.
+
+**Step 3 — the four named tests**, on the wire against the shipped binary over its socket.
+`PORTABLE_CASES` 31 → 33, `DELEGATED_CASES` 48 → 50
+(`crates/substrate-daemon/tests/runtime_vectors.rs:2768-2769`).
+`bash scripts/delegated-lane.sh` → `runtime clean-room: 50 HTTP cases, startup refusal, and
+dual-daemon refusal passed (delegated lane)`, plus the four named tests, 5 passed, exit 0.
+
+**Failing-first is partly missing, and this records that rather than papering over it.** The
+implementing agent hit a session limit before reporting, so its own failing-first output is lost.
+One perturbation was reproduced to prove the tests are not vacuous: replacing the subject-binding
+check at `crates/substrate-daemon/src/delegation.rs:174` with `if false` makes
+`delegated_context_bound_to_another_subject_is_refused` fail `left: 201, right: 422` — a context
+bound to another subject is accepted where it must be refused. Reverted; the file is byte-identical
+to its backup. **The other three tests were not proven to fail first.** If that matters later, the
+perturbations are cheap to repeat.
+
+**Step 4 — key material.** The test signer derives its seed from a sentence
+(`crates/substrate-daemon/tests/runtime_vectors.rs:2405-2409`) rather than carrying a key blob, so
+the public repository has nothing to leak or rotate, and the cases mint documents bound to *this*
+machine's subject and *this* instant — which a committed fixture never can.
+`bash scripts/check-secrets.sh` → `no leaks found`.
+
+**What it does not do**, each a deliberate boundary: it never evaluates the grant (connectors
+decides); it never signs — `--delegated-context-key <kid>=<issuer>=<base64url>` declares a
+*verifying* key, so which service signs is configuration and changes no substrate code; and the
+grant-set revision, tenant, actor chain and `jti` are verified as part of the closed claim set and
+then dropped, keeping the query surface to the two named columns.
+
+Eight named refusals: `delegated-context.absent`, `.malformed`, `.unknown-key`,
+`.signature-invalid`, `.audience-mismatch`, `.subject-mismatch`, `.expired`, `.grant-conflict`
+(`crates/substrate-daemon/src/delegation.rs:209-256`).
+
+`delegated_context` is a sibling of `op` and `input`, never a member of `input`
+(`crates/substrate-wire/src/lib.rs:100-113`), so it sits outside the canonical request hash:
+replaying the same `op` with a fresh context is the same operation and returns the original
+outcome, and a request without one serializes exactly as a `0.6.0` client's did — which is what
+keeps every frozen bundle's vectors true.
+
+**Still open on the seam, not on substrate:** step 4's conformance vector *pair* needs the
+connectors-side copy. Substrate's side is byte-reproducible; the atlas O1 row cannot cite both
+sides until connectors holds its copy.
