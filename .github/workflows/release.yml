@@ -27,14 +27,24 @@
 # (push to GHCR) and `id-token: write` (the OIDC token keyless cosign signs with) and nothing else.
 # Neither write scope exists anywhere but that one job.
 #
-# Identity. The `GITHUB_TOKEN` pushes the image; every **git push and API write** — the GitHub
-# release and the `CHANGELOG.md` commit — goes through the b10x-bot GitHub App instead, per
-# AGENTS.md § "Bot identity" ("automated commits and pushes use the GitHub App … never a human
-# identity"). The author line is assembled the same way `scripts/as-bot.sh:14-20` assembles it.
-# This needs two repository secrets that do not exist yet — `B10X_BOT_APP_ID` and
-# `B10X_BOT_PRIVATE_KEY` — and the app's installation needs `contents: write` on this repository.
-# Without them the job fails at "Mint a b10x-bot installation token", after the image is pushed and
-# signed and before anything is announced.
+# Identity. Everything here — the image push, the GitHub release and the `CHANGELOG.md` commit —
+# uses the run's own `GITHUB_TOKEN`, so the release holds no credential that reaches beyond this
+# repository. It carries no secret to set, rotate or leak: GitHub mints it per run and expires it
+# when the run ends.
+#
+# This is a deliberate departure from AGENTS.md § "Bot identity", which requires the b10x-bot App
+# for automated commits and pushes. That App is installed org-wide with `administration:write` and
+# `workflows:write` on every repository in `beyond10x`, and this repository is **public**: its key
+# as an Actions secret here would put an org-wide credential in the repository with the widest
+# audience for proposing workflow changes. The rule exists to keep *human* identities out of
+# automated commits, and `GITHUB_TOKEN` does that with a fraction of the reach. The cost is the
+# author line: releases are committed by `github-actions[bot]`, not `b10x-bot[bot]`. AGENTS.md
+# § "Bot identity" records the exception.
+#
+# A `GITHUB_TOKEN` push does not trigger further workflow runs (GitHub's own loop protection), so
+# the changelog commit below cannot start a second gate run. If branch protection on `main` rejects
+# the push, the step refuses by name after three attempts and says the image is already published —
+# it never leaves the digest silently unrecorded.
 #
 # Platform. `linux/amd64` only: the hosted runner is amd64 and a cross-built or emulated Rust
 # release build is not something this job can honestly claim to have exercised. An arm64 image is
@@ -235,9 +245,10 @@ jobs:
     # more input to trust in the artifact an operator is asked to verify).
     timeout-minutes: 120
     permissions:
-      # Restated because a job-level block replaces the workflow-level one outright rather than
-      # merging with it — without this line the job would have no `contents` scope at all.
-      contents: read
+      # `write`, not `read`: this job creates the GitHub release and pushes the changelog commit
+      # with `GITHUB_TOKEN`. Restated in full because a job-level block replaces the workflow-level
+      # one outright rather than merging with it.
+      contents: write
       packages: write
       id-token: write
     env:
@@ -338,13 +349,6 @@ jobs:
 
       # Everything below announces. Nothing above it did.
 
-      - name: Mint a b10x-bot installation token
-        id: app-token
-        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        with:
-          app-id: ${{ secrets.B10X_BOT_APP_ID }}
-          private-key: ${{ secrets.B10X_BOT_PRIVATE_KEY }}
-
       # The release notes state what the artifact is and, as explicitly, what it is not. The wire
       # contract bundles under `contracts/substrate-wire/` are **development** bundles: publishing
       # a signed daemon image does not make any of them a stable contract, and a stable-contract
@@ -414,7 +418,7 @@ jobs:
       # here.
       - name: Publish the GitHub release
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           gh release create "${VERSION}" \
@@ -425,23 +429,23 @@ jobs:
 
       # The digest also belongs in `CHANGELOG.md` under this version's heading, on `main`
       # (AGENTS.md, section "Releases": the changelog is cut under a version heading at release).
-      # The commit is authored by the App, with the author line assembled exactly as
-      # `scripts/as-bot.sh:14-20` assembles it, and pushed through the same credential helper shape
-      # so the token never reaches argv or a remote URL.
+      # The commit is authored by `github-actions[bot]` and pushed through a credential helper, so
+      # the token never reaches argv or a remote URL. The user id is pinned rather than looked up:
+      # `gh api /users/github-actions%5Bbot%5D` is 41898282, and a release should not fail because
+      # an API call for a constant did not answer.
       #
       # Idempotent: re-running replaces this version's digest line rather than stacking a second
       # one. Retried against a fresh `origin/main` because `main` can move while a release builds.
       - name: Record the digest in CHANGELOG.md on main
         env:
-          B10X_BOT_TOKEN: ${{ steps.app-token.outputs.token }}
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+          RELEASE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
           set -euo pipefail
 
-          bot_user="${APP_SLUG}[bot]"
-          bot_id=$(gh api "/users/${APP_SLUG}%5Bbot%5D" --jq '.id')
+          bot_user="github-actions[bot]"
+          bot_id=41898282
           digest_line="Image: \`${IMAGE}:${VERSION}\` at \`${DIGEST}\`, keyless-signed; verify with \`cosign verify\`."
 
           attempt=1
@@ -477,7 +481,7 @@ jobs:
 
             if git \
               -c 'credential.https://github.com.helper=' \
-              -c 'credential.https://github.com.helper=!f() { echo username=x-access-token; echo "password=${B10X_BOT_TOKEN}"; }; f' \
+              -c 'credential.https://github.com.helper=!f() { echo username=x-access-token; echo "password=${RELEASE_TOKEN}"; }; f' \
               push origin HEAD:main; then
               echo "recorded ${DIGEST} in CHANGELOG.md on main"
               exit 0

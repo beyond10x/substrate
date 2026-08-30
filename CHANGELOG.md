@@ -19,7 +19,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   tag such as `0.2.2-rc.0` publishes nothing. `permissions` are `contents: read` at workflow level,
   with `packages: write` and `id-token: write` on the release job alone; every action is SHA-pinned;
   the release and the changelog commit are made by the b10x-bot App. No image is published yet — the
-  workflow has never run, and its `B10X_BOT_APP_ID` and `B10X_BOT_PRIVATE_KEY` secrets are unset.
+  workflow has never run. It needs no repository secret: the image push, the GitHub release and the
+  changelog commit all use the run's own `GITHUB_TOKEN`, which cannot leave this repository.
   A signed daemon image does not make any wire contract bundle stable; the bundles under
   `contracts/substrate-wire/` remain development bundles.
 
