@@ -589,20 +589,14 @@ pub(super) fn validate_pipe_session_input(
     // The mode gate is outermost, because the mode decides which contract the rest of the request
     // is read under. A terminal this deployment never proved it can give is refused by name — not
     // as the confinement refusal a pipe session would also get, and never served as pipes instead
-    // (design 13, invariant 3). The window rule comes first because it is pure request shape.
+    // (design 13, invariant 3).
+    //
+    // **The fact outranks the window shape**, and the order is asserted rather than incidental
+    // (`vectors/http/pty-session-unserved-outranks-a-missing-window.json`). Both refusals can apply
+    // to one request; only one of them is worth acting on. `session.window-invalid` invites the
+    // client to add a window and try again, which on a deployment with no terminals is a retry that
+    // can never succeed. `session.pty-unserved` says *stop*, which is the true answer.
     let input = &mutation.input;
-    if substrate_wire::validate_session_window(input.mode, input.window.as_ref()).is_err() {
-        return Err(failure(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            request_id,
-            Some(&mutation.op),
-            ErrorClass::Refused,
-            "session.window-invalid",
-            "A pty session declares an initial window within the closed cell bounds, and a raw-pipe session declares none.",
-            Some("window"),
-            false,
-        ));
-    }
     if input.mode == substrate_wire::SessionMode::Pty
         && app.driver.machine().facts.sessions_pty != Some(true)
     {
@@ -614,6 +608,18 @@ pub(super) fn validate_pipe_session_input(
             "session.pty-unserved",
             "This deployment did not prove it can give a confined process a controlling terminal.",
             Some("mode"),
+            false,
+        ));
+    }
+    if substrate_wire::validate_session_window(input.mode, input.window.as_ref()).is_err() {
+        return Err(failure(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            request_id,
+            Some(&mutation.op),
+            ErrorClass::Refused,
+            "session.window-invalid",
+            "A pty session declares an initial window within the closed cell bounds, and a raw-pipe session declares none.",
+            Some("window"),
             false,
         ));
     }

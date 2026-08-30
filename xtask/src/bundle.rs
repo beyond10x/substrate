@@ -508,6 +508,10 @@ fn check_classification(version: &str, released: &Tree, failures: &mut Vec<Strin
 /// A successor that rendered, verified and preserved everything while adding nothing is the failure
 /// this catches; the entries are the acceptance list of the story that cut the bundle.
 fn check_additions(version: &str, released: &Tree, failures: &mut Vec<String>) {
+    if version == "0.10.0" {
+        check_pty_additions(released, failures);
+        return;
+    }
     if version == "0.9.0" {
         check_multi_major_additions(released, failures);
         return;
@@ -1534,6 +1538,413 @@ fn resolve(from: &str, declaration: &str) -> Option<String> {
 /// The request field, the capability fact, the applied observation and the refusals — each read out
 /// of the bundle rather than out of prose, so a successor that renders and preserves everything but
 /// adds none of this fails here.
+/// What `0.10.0` exists for: a pty is a second session *mode* (ADR 0019).
+///
+/// The two absences are checked as hard as the additions, because they are the decision. A pty
+/// frame vocabulary that grew a `close-input` would be claiming a half-close a terminal does not
+/// have, and one that grew a `truncated` would be claiming the session survives its output bound.
+fn check_pty_additions(released: &Tree, failures: &mut Vec<String>) {
+    let require = |path: &str, pointer: &str, what: &str, failures: &mut Vec<String>| {
+        let Some(document) = json_at(released, path, failures) else {
+            return;
+        };
+        if document.pointer(pointer).is_none() {
+            failures.push(format!("{path}: {what} is absent at {pointer}"));
+        }
+    };
+    require(
+        "schemas/inputs/pipe-session-start.json",
+        "/properties/mode",
+        "the session mode field (design 13)",
+        failures,
+    );
+    require(
+        "schemas/inputs/pipe-session-start.json",
+        "/properties/window",
+        "the initial terminal window (design 13)",
+        failures,
+    );
+    require(
+        "schemas/capability.json",
+        "/properties/facts/properties/sessions.pty",
+        "the sessions.pty capability fact (design 13)",
+        failures,
+    );
+    require(
+        "schemas/results/pipe-session-capabilities.json",
+        "/properties/modes",
+        "the served session modes (design 13)",
+        failures,
+    );
+    require(
+        "schemas/pty-channel-frame.json",
+        "/oneOf",
+        "the pty frame vocabulary (design 13)",
+        failures,
+    );
+
+    // An omitted mode can only ever mean pipes, which is what makes design 05 § 2's "a PTY is never
+    // substituted for pipes" mechanical rather than a promise: no existing client can be handed a
+    // terminal by a daemon that grew one.
+    if let Some(document) = json_at(released, "schemas/inputs/pipe-session-start.json", failures)
+        && document
+            .pointer("/properties/mode/default")
+            .and_then(Value::as_str)
+            != Some("pipes")
+    {
+        failures.push(
+            "schemas/inputs/pipe-session-start.json: an omitted mode must default to pipes"
+                .to_owned(),
+        );
+    }
+
+    check_pty_modes(released, failures);
+    check_pty_frames(released, failures);
+    check_pty_window_bounds(released, failures);
+    check_pty_coverage(released, failures);
+}
+
+/// The mode itself is present in every place a client reads one, by **value** and not by key.
+///
+/// Checking that a `modes` property exists is not checking that a terminal is in it: dropping `pty`
+/// from that enum leaves the property, the schema, the manifest and the fixed point all intact, and
+/// leaves a bundle that adds a pty mode without offering one. Same for the start input's `mode`
+/// enum, the durable resource's, and the fact's own `const`.
+fn check_pty_modes(released: &Tree, failures: &mut Vec<String>) {
+    let members = |document: &Value, pointer: &str| -> BTreeSet<String> {
+        document
+            .pointer(pointer)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_str)
+            .map(str::to_owned)
+            .collect()
+    };
+    for (path, pointer, what) in [
+        (
+            "schemas/results/pipe-session-capabilities.json",
+            "/properties/modes/items/enum",
+            "the modes a client may be offered",
+        ),
+        (
+            "schemas/inputs/pipe-session-start.json",
+            "/properties/mode/enum",
+            "the modes a client may ask for",
+        ),
+    ] {
+        let Some(document) = json_at(released, path, failures) else {
+            continue;
+        };
+        let found = members(&document, pointer);
+        for mode in ["pipes", "pty"] {
+            if !found.contains(mode) {
+                failures.push(format!(
+                    "{path}: {pointer} does not offer {mode}, and it is {what} (design 13)"
+                ));
+            }
+        }
+    }
+    // The durable resource carries the mode a session was started in, so every branch of it has to
+    // admit a terminal or a live `ses_…` becomes unreadable against its own schema.
+    if let Some(document) = json_at(released, "schemas/resource.json", failures) {
+        let branches = document
+            .pointer("/$defs/pipe-session/oneOf")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        if branches.is_empty() {
+            failures.push(
+                "schemas/resource.json: the durable session has no branches to carry a mode"
+                    .to_owned(),
+            );
+        }
+        for (index, branch) in branches.iter().enumerate() {
+            if !members(branch, "/properties/mode/enum").contains("pty") {
+                failures.push(format!(
+                    "schemas/resource.json: durable session branch {index} does not admit \
+                     mode pty (design 13)"
+                ));
+            }
+        }
+    }
+    // Absent means absent; the fact is never published as `false`.
+    if let Some(document) = json_at(released, "schemas/capability.json", failures) {
+        let declared = document.pointer("/properties/facts/properties/sessions.pty/const");
+        if declared != Some(&json!(true)) {
+            failures.push(format!(
+                "schemas/capability.json: sessions.pty is declared {declared:?}, and a fact this \
+                 driver did not prove is absent rather than false (invariant 3)"
+            ));
+        }
+    }
+}
+
+/// The pty frame vocabulary, by what it has and by what it must not have (design 13).
+fn check_pty_frames(released: &Tree, failures: &mut Vec<String>) {
+    let Some(document) = json_at(released, "schemas/pty-channel-frame.json", failures) else {
+        return;
+    };
+    let kinds: BTreeSet<String> = document
+        .get("oneOf")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|branch| {
+            branch
+                .pointer("/properties/kind/const")
+                .and_then(Value::as_str)
+        })
+        .map(str::to_owned)
+        .collect();
+    for present in [
+        "stdin",
+        "resize",
+        "signal",
+        "output",
+        "exit",
+        "protocol-error",
+    ] {
+        if !kinds.contains(present) {
+            failures.push(format!(
+                "schemas/pty-channel-frame.json: the {present} frame is absent"
+            ));
+        }
+    }
+    // A pty has no half-close and no truncation statement: a client ends input by sending the
+    // terminal's own end-of-file character, and reaching the output bound ends the session through
+    // the exec observation's refusal field instead (design 13).
+    for absent in ["close-input", "truncated"] {
+        if kinds.contains(absent) {
+            failures.push(format!(
+                "schemas/pty-channel-frame.json: a terminal has no {absent} frame"
+            ));
+        }
+    }
+    // Stdout and stderr *are* the same descriptor on a terminal, so the merged stream can only ever
+    // be attributed one way.
+    let attributed = document
+        .get("oneOf")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|branch| {
+            branch
+                .pointer("/properties/kind/const")
+                .and_then(Value::as_str)
+                == Some("output")
+        })
+        .and_then(|branch| branch.pointer("/properties/stream/const"))
+        .and_then(Value::as_str);
+    if attributed != Some("stdout") {
+        failures.push(format!(
+            "schemas/pty-channel-frame.json: the output frame attributes {attributed:?}, and a              terminal has one file"
+        ));
+    }
+}
+
+/// The cell bounds, bound to the wire constants here and never through a `{"$wire": …}` marker.
+///
+/// Binding them in the authored source would mean editing `xtask/src/render.rs`, whose sha256 every
+/// rendered `bundle.json` carries — one edit there and `0.5.0` stops being a fixed point of its own
+/// source. This makes the same claim from a file no bundle hashes, exactly as
+/// `check_aperture_additions` does for `MAX_EGRESS_APERTURES`.
+fn check_pty_window_bounds(released: &Tree, failures: &mut Vec<String>) {
+    let columns = u64::from(substrate_wire::MAX_PTY_WINDOW_COLUMNS);
+    let rows = u64::from(substrate_wire::MAX_PTY_WINDOW_ROWS);
+    let declared = |path: &str, pointer: &str, expected: u64, failures: &mut Vec<String>| {
+        let Some(document) = json_at(released, path, failures) else {
+            return;
+        };
+        let found = document.pointer(pointer).and_then(Value::as_u64);
+        if found != Some(expected) {
+            failures.push(format!(
+                "{path}: {pointer} is {found:?}, and the wire constant is {expected}"
+            ));
+        }
+    };
+    for (path, pointer, expected) in [
+        (
+            "schemas/inputs/pipe-session-start.json",
+            "/properties/window/properties/columns/maximum",
+            columns,
+        ),
+        (
+            "schemas/inputs/pipe-session-start.json",
+            "/properties/window/properties/rows/maximum",
+            rows,
+        ),
+        (
+            "schemas/results/pipe-session-capabilities.json",
+            "/properties/max_window_columns/const",
+            columns,
+        ),
+        (
+            "schemas/results/pipe-session-capabilities.json",
+            "/properties/max_window_rows/const",
+            rows,
+        ),
+    ] {
+        declared(path, pointer, expected, failures);
+    }
+    // Zero is refused rather than mapped to a default: a zero dimension is how a terminal says
+    // *I do not know*, which is not what a client that sent a window meant (design 13).
+    for pointer in [
+        "/properties/window/properties/columns/minimum",
+        "/properties/window/properties/rows/minimum",
+    ] {
+        declared(
+            "schemas/inputs/pipe-session-start.json",
+            pointer,
+            1,
+            failures,
+        );
+    }
+}
+
+/// The coverage half of `0.9.0`: every pty requirement carries evidence, and each refusal is read
+/// out of the vector that asserts it rather than out of prose.
+fn check_pty_coverage(released: &Tree, failures: &mut Vec<String>) {
+    let required_requirements = [
+        "session.pty-controlling-terminal",
+        "session.pty-exhausted",
+        "session.pty-hangup",
+        "session.pty-never-substituted",
+        "session.pty-output-bound",
+        "session.pty-refusal-order",
+        "session.pty-resize-observed",
+        "session.pty-unserved",
+        "session.pty-window",
+    ];
+    let Some(coverage) = json_at(released, "coverage.json", failures) else {
+        return;
+    };
+    let rows = coverage
+        .get("requirements")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for requirement in required_requirements {
+        let covered = rows.iter().any(|row| {
+            row.get("id").and_then(Value::as_str) == Some(requirement)
+                && row
+                    .get("evidence")
+                    .and_then(Value::as_array)
+                    .is_some_and(|evidence| !evidence.is_empty())
+        });
+        if !covered {
+            failures.push(format!(
+                "coverage.json: requirement {requirement} is absent or carries no evidence"
+            ));
+        }
+    }
+    check_pty_refusals(released, failures);
+}
+
+/// Every refusal design 13 names, read out of the vector that asserts it rather than out of prose.
+///
+/// Including the one a client can only ever learn from here: `session.pty-exhausted` is raised by
+/// the driver when the host's pty count is full, never by anything a request could get wrong, so a
+/// bundle that does not name it leaves the code unreachable to every reader of the contract.
+fn check_pty_refusals(released: &Tree, failures: &mut Vec<String>) {
+    for (path, status, code) in [
+        (
+            "vectors/http/pty-session-unserved.json",
+            501,
+            "session.pty-unserved",
+        ),
+        (
+            "vectors/http/pty-session-window-required.json",
+            422,
+            "session.window-invalid",
+        ),
+        (
+            "vectors/http/pty-session-exhausted.json",
+            429,
+            "session.pty-exhausted",
+        ),
+        (
+            "vectors/http/pty-session-unserved-outranks-a-missing-window.json",
+            501,
+            "session.pty-unserved",
+        ),
+    ] {
+        let Some(vector) = json_at(released, path, failures) else {
+            continue;
+        };
+        if vector
+            .pointer("/expected/response/body/error/code")
+            .and_then(Value::as_str)
+            != Some(code)
+        {
+            failures.push(format!("{path}: does not assert the refusal code {code}"));
+        }
+        if vector
+            .pointer("/expected/response/status")
+            .and_then(Value::as_u64)
+            != Some(status)
+        {
+            failures.push(format!("{path}: does not assert the status {status}"));
+        }
+    }
+    // An exhausted host's pty count is a resource other tenants fill and free, so this refusal is
+    // the one of the three that is worth trying again. Stated, so it cannot drift into the shape of
+    // its `unserved` neighbour.
+    if let Some(vector) = json_at(
+        released,
+        "vectors/http/pty-session-exhausted.json",
+        failures,
+    ) && vector.pointer("/expected/response/body/error/retriable") != Some(&json!(true))
+    {
+        failures.push(
+            "vectors/http/pty-session-exhausted.json: an exhausted pty count is retriable"
+                .to_owned(),
+        );
+    }
+    // Which refusal answers when a request earns both. Read off the vector, so narrowing it later
+    // is something somebody does on purpose.
+    if let Some(vector) = json_at(
+        released,
+        "vectors/http/pty-session-unserved-outranks-a-missing-window.json",
+        failures,
+    ) && vector
+        .pointer("/action/request/body/input/window")
+        .is_some()
+    {
+        failures.push(
+            "vectors/http/pty-session-unserved-outranks-a-missing-window.json: the case only \
+             makes its claim when the request carries no window"
+                .to_owned(),
+        );
+    }
+    // The delegated half: a terminal that cannot be proved on a hosted runner still has to be
+    // stated, so the vectors that name it are present and say what they assert.
+    for (path, pointer, expected) in [
+        (
+            "vectors/driver/pty-session-window-is-observed.json",
+            "/expected/outcome/window_after_resize/columns",
+            json!(132),
+        ),
+        (
+            "vectors/driver/pty-session-hangup.json",
+            "/expected/outcome/exit/signal",
+            json!("HUP"),
+        ),
+        (
+            "vectors/driver/pty-session-output-bound-ends-the-session.json",
+            "/expected/outcome/code",
+            json!("session.output-limit"),
+        ),
+    ] {
+        let Some(vector) = json_at(released, path, failures) else {
+            continue;
+        };
+        if vector.pointer(pointer) != Some(&expected) {
+            failures.push(format!("{path}: {pointer} does not state {expected}"));
+        }
+    }
+}
+
 fn check_aperture_additions(released: &Tree, failures: &mut Vec<String>) {
     let require = |path: &str, pointer: &str, what: &str, failures: &mut Vec<String>| {
         let Some(document) = json_at(released, path, failures) else {

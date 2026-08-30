@@ -1108,3 +1108,39 @@ async fn a_resize_outside_the_declared_bounds_is_a_protocol_error() {
         "the admitted resize reached the driver and the refused one did not"
     );
 }
+
+/// Both refusals apply to one request, and the order is a decision rather than an accident.
+///
+/// A windowless `mode: "pty"` start on a deployment with no `sessions.pty` is refused
+/// `session.pty-unserved`, not `session.window-invalid`: telling this client to add a window would
+/// send it back for a retry that can never succeed. Asserted here and in
+/// `vectors/http/pty-session-unserved-outranks-a-missing-window.json`, so narrowing it later is
+/// something somebody does on purpose.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_absent_pty_fact_outranks_a_missing_window() {
+    let harness = Harness::open().await;
+    let workspace = harness.create_workspace("01JPTYWORKSPACECREATE004").await;
+    let (status, refusal) = harness
+        .call(
+            Method::POST,
+            "/v1/pipe-sessions",
+            mutation("01JPTYSESSIONORDER000001", pty_start(&workspace, None)),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{refusal}");
+    assert_eq!(refusal["error"]["code"], "session.pty-unserved");
+    assert_eq!(refusal["error"]["address"], "mode");
+
+    // And the window rule still answers where it is the only thing wrong.
+    let terminals = Harness::with_terminals().await;
+    let workspace = terminals.create_workspace("01JPTYWORKSPACECREATE005").await;
+    let (status, refusal) = terminals
+        .call(
+            Method::POST,
+            "/v1/pipe-sessions",
+            mutation("01JPTYSESSIONORDER000002", pty_start(&workspace, None)),
+        )
+        .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refusal}");
+    assert_eq!(refusal["error"]["code"], "session.window-invalid");
+}

@@ -834,11 +834,28 @@ impl ProcessRuntime {
     /// `TIOCGWINSZ` the way any process does. Nothing is injected into the environment: `COLUMNS`
     /// and `LINES` would go stale at exactly this call (design 13).
     ///
+    /// Both guards are here rather than only in the daemon, because this is the driver port and a
+    /// port is a contract. The cell bound is a bound on the *terminal*, and the terminal lives
+    /// here: `TIOCSWINSZ` takes an `unsigned short`, so a caller that skipped the frame decoder
+    /// could hand the child a 65535x65535 window, which is not a display but an amplification knob
+    /// — programs allocate per-cell buffers when the size changes, and that allocation is spent
+    /// from the run's own memory bound (`substrate_wire::MAX_PTY_WINDOW_COLUMNS`). And the master
+    /// descriptor outlives the child, so the ioctl succeeds long after anything can observe it;
+    /// reporting that as applied would tell a client a child saw a window no process will ever
+    /// read.
+    ///
     /// # Errors
     ///
-    /// Returns a typed refusal when the exec is not a live pty session, and a failure when the
-    /// kernel refuses the resize.
+    /// Returns a typed refusal when the window is outside the closed cell bounds, when the exec is
+    /// not a live pty session, and a failure when the kernel refuses the resize.
     pub fn resize_pty(&self, id: &str, window: PtyWindow) -> Result<(), DriverError> {
+        if substrate_wire::validate_session_window(SessionMode::Pty, Some(&window)).is_err() {
+            return Err(DriverError::refused(
+                "session.resize-invalid",
+                "A resize names 1 to 1000 cells on each axis of a pty session.",
+                "window",
+            ));
+        }
         let execution = self.execution(id)?;
         let terminal = execution
             .pipe
@@ -847,6 +864,13 @@ impl ProcessRuntime {
             .ok_or_else(|| {
                 DriverError::refused("session.not-pty", "Exec is not a pty session.", "session")
             })?;
+        if is_terminal(execution.observation.lock().resource.state) {
+            return Err(DriverError::refused(
+                "session.not-pty",
+                "Exec is not a live pty session; its child has already finished.",
+                "session",
+            ));
+        }
         terminal.resize(window).map_err(|error| {
             DriverError::failed("session.resize-failed", format!("pty resize: {error}"))
         })
@@ -1622,6 +1646,15 @@ async fn run_child(
     // increment a counter after the observation is built.
     let cgroup_reconciled = reconcile_cgroup(&cgroup).await;
     let aperture_exhausted = ceiling_reached(aperture_exhausted, aperture.as_ref());
+    // Asked once more after the wait, for exactly the reason `ceiling_reached` is: the drain raises
+    // this flag from its own task, and a child that crosses the bound on its **last** write and
+    // then exits loses the `select!` to `child.wait()`, leaving the supervision tick no chance to
+    // read it. The flag outlives that race — it is a shared page this process owns — so without
+    // this re-read the run is reported byte for byte like one that finished on its own: `exited`,
+    // code 0, no refusal, with the transcript silently stopped at exactly the declared bound. That
+    // is the silent degradation invariant 3 forbids, and it is what
+    // `vectors/driver/pty-session-output-bound-ends-the-session.json` says must not happen.
+    let output_exhausted = output_exhausted || output_bound.load(Ordering::Acquire);
     let applied_aperture = aperture
         .as_ref()
         .map(crate::egress::InstalledAperture::applied);
