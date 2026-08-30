@@ -726,6 +726,34 @@ fn check_v1_file_catch_alls(operations: &[Value], failures: &mut Vec<String>) {
     }
 }
 
+/// Every refusal code a pty session can raise is named somewhere a reader of the contract can find.
+///
+/// The rule is the *class*, not a list kept here by hand — which is exactly what let four codes
+/// slip through the round that added the fifth. `substrate_wire::SESSION_PTY_REFUSAL_CODES` is the
+/// one place the set is written down, every emission site in `substrate-host` and
+/// `substrate-daemon` binds its constant from there rather than writing a literal, and this asks
+/// the released bundle to name each one. A code a client can receive and cannot look up is a code
+/// nobody can handle; a code the source raises and the bundle never mentions does not exist as far
+/// as the contract is concerned.
+fn check_pty_refusal_class(released: &Tree, failures: &mut Vec<String>) {
+    for code in substrate_wire::SESSION_PTY_REFUSAL_CODES {
+        let named = released.iter().any(|(path, bytes)| {
+            Path::new(path)
+                .extension()
+                .is_some_and(|extension| extension == "json")
+                && bytes
+                    .windows(code.len())
+                    .any(|window| window == code.as_bytes())
+        });
+        if !named {
+            failures.push(format!(
+                "no document names the refusal code {code}, which substrate raises and no reader \
+                 of this bundle could look up"
+            ));
+        }
+    }
+}
+
 /// One bundle file's path relative to the bundle root, to its exact bytes.
 type Tree = BTreeMap<String, Vec<u8>>;
 
@@ -1750,6 +1778,17 @@ fn check_pty_frames(released: &Tree, failures: &mut Vec<String>) {
 /// source. This makes the same claim from a file no bundle hashes, exactly as
 /// `check_aperture_additions` does for `MAX_EGRESS_APERTURES`.
 fn check_pty_window_bounds(released: &Tree, failures: &mut Vec<String>) {
+    if let Some(document) = json_at(released, "schemas/pty-channel-frame.json", failures)
+        && document
+            .pointer(&format!("/oneOf/{RESIZE_BRANCH}/properties/kind/const"))
+            .and_then(Value::as_str)
+            != Some("resize")
+    {
+        failures.push(format!(
+            "schemas/pty-channel-frame.json: oneOf branch {RESIZE_BRANCH} is not the resize frame"
+        ));
+        return;
+    }
     let columns = u64::from(substrate_wire::MAX_PTY_WINDOW_COLUMNS);
     let rows = u64::from(substrate_wire::MAX_PTY_WINDOW_ROWS);
     let declared = |path: &str, pointer: &str, expected: u64, failures: &mut Vec<String>| {
@@ -1784,22 +1823,58 @@ fn check_pty_window_bounds(released: &Tree, failures: &mut Vec<String>) {
             "/properties/max_window_rows/const",
             rows,
         ),
+        // The document a WebSocket client reads to build a `resize` — the only place the *live*
+        // bound is stated on the wire, and the one this table used to omit. A client that trusted
+        // the frame schema alone would have believed 65535 was deliverable.
+        (
+            "schemas/pty-channel-frame.json",
+            &resize_window("columns", "maximum"),
+            columns,
+        ),
+        (
+            "schemas/pty-channel-frame.json",
+            &resize_window("rows", "maximum"),
+            rows,
+        ),
     ] {
         declared(path, pointer, expected, failures);
     }
     // Zero is refused rather than mapped to a default: a zero dimension is how a terminal says
     // *I do not know*, which is not what a client that sent a window meant (design 13).
-    for pointer in [
-        "/properties/window/properties/columns/minimum",
-        "/properties/window/properties/rows/minimum",
-    ] {
-        declared(
+    for (path, pointer) in [
+        (
             "schemas/inputs/pipe-session-start.json",
-            pointer,
-            1,
-            failures,
-        );
+            "/properties/window/properties/columns/minimum".to_owned(),
+        ),
+        (
+            "schemas/inputs/pipe-session-start.json",
+            "/properties/window/properties/rows/minimum".to_owned(),
+        ),
+        (
+            "schemas/pty-channel-frame.json",
+            resize_window("columns", "minimum"),
+        ),
+        (
+            "schemas/pty-channel-frame.json",
+            resize_window("rows", "minimum"),
+        ),
+    ] {
+        declared(path, &pointer, 1, failures);
     }
+}
+
+/// Where the `resize` frame sits in the authored `oneOf` — `stdin`, `resize`, `signal`, `output`,
+/// `exit`, `protocol-error`. `check_pty_frames` proves every one of those branches exists, so this
+/// index cannot point at a branch that vanished; `check_pty_window_bounds` reads the branch's own
+/// `kind` before trusting it, so it cannot point at one that moved either.
+const RESIZE_BRANCH: usize = 1;
+
+/// A pointer into the `resize` branch of the pty frame vocabulary.
+///
+/// The branch is selected by position, so this asks the schema where `resize` is rather than
+/// hard-coding an index that a reordered `oneOf` would silently invalidate.
+fn resize_window(axis: &str, bound: &str) -> String {
+    format!("/oneOf/{RESIZE_BRANCH}/properties/window/properties/{axis}/{bound}")
 }
 
 /// The coverage half of `0.9.0`: every pty requirement carries evidence, and each refusal is read
@@ -1887,6 +1962,8 @@ fn check_pty_refusals(released: &Tree, failures: &mut Vec<String>) {
             failures.push(format!("{path}: does not assert the status {status}"));
         }
     }
+    check_pty_refusal_class(released, failures);
+
     // An exhausted host's pty count is a resource other tenants fill and free, so this refusal is
     // the one of the three that is worth trying again. Stated, so it cannot drift into the shape of
     // its `unserved` neighbour.
@@ -1925,10 +2002,19 @@ fn check_pty_refusals(released: &Tree, failures: &mut Vec<String>) {
             "/expected/outcome/window_after_resize/columns",
             json!(132),
         ),
+        // Never an `exit.signal`: `substrate_wire::Signal` and this bundle's own
+        // `schemas/resource.json#/$defs/exit` admit `INT`/`TERM`/`KILL` only, so a vector naming a
+        // hangup signal would be stating an outcome no conforming daemon could ever produce.
+        // What is stated instead is what a case actually observes.
         (
             "vectors/driver/pty-session-hangup.json",
-            "/expected/outcome/exit/signal",
-            json!("HUP"),
+            "/expected/outcome/hangup_ends_the_child",
+            json!(true),
+        ),
+        (
+            "vectors/driver/pty-session-hangup.json",
+            "/expected/outcome/controlling_terminal",
+            json!(true),
         ),
         (
             "vectors/driver/pty-session-output-bound-ends-the-session.json",

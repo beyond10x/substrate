@@ -76,6 +76,24 @@ impl PipeFixtureDriver {
             signal,
         });
     }
+
+    /// Exactly what a host records when a `pty` session reaches its declared output bound.
+    ///
+    /// `drain_capped` raises `truncated` on the same branch that raises the bound flag, `run_child`
+    /// copies it onto `observation.stdout_truncated`, and `record_terminal_output_bound` names the
+    /// bound on the refusal field — `crates/substrate-host/src/process.rs:1554-1557`, `:1579` and
+    /// `:1675-1683`. Written by the adversary pass; no case that shipped calls it.
+    fn output_bound_reached(&self, id: &str) {
+        self.terminal(id, ExecState::Cancelled, Some(substrate_wire::Signal::Kill));
+        let mut pipes = self.pipes.lock().expect("pipe fixture lock");
+        let pipe = pipes.get_mut(id).expect("known pipe fixture");
+        pipe.observation.stdout_truncated = true;
+        pipe.observation.resource.refusal = Some(substrate_wire::ExecRefusal {
+            class: substrate_wire::ErrorClass::Exhausted,
+            code: "session.output-limit".to_owned(),
+            message: "The declared output bound ended the terminal session.".to_owned(),
+        });
+    }
 }
 
 #[async_trait]
@@ -1143,4 +1161,30 @@ async fn the_absent_pty_fact_outranks_a_missing_window() {
         .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{refusal}");
     assert_eq!(refusal["error"]["code"], "session.window-invalid");
+}
+
+/// A terminal has no `truncated` frame, and reaching the output bound ends the session instead.
+///
+/// `contracts/substrate-wire/0.9.0/schemas/pty-channel-frame.json` carries
+/// `x-b10x-no-truncated: "reaching-the-output-bound-ends-the-session-through-the-exec-refusal"` and
+/// no `truncated` branch in its `oneOf`; `xtask/src/bundle.rs:754-760` refuses a bundle whose pty
+/// vocabulary grows one; `vectors/driver/pty-session-output-bound-ends-the-session.json` states
+/// `/probes/truncated_frames_delivered` is 0. The attachment's terminal path
+/// (`crates/substrate-daemon/src/app/sessions.rs:1188-1220`) does not read the session's mode, so a
+/// pty session whose merged transcript was truncated is sent the raw-pipe `truncated` frame — a
+/// frame outside the vocabulary the bundle publishes for this attachment.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pty_attachment_is_never_sent_a_truncated_frame() {
+    let harness = Harness::with_terminals().await;
+    let (session_id, exec_id) = harness.start_pty().await;
+    let mut socket = harness
+        .attach(&format!("/v1/pipe-sessions/{session_id}/attach"))
+        .await;
+    harness.driver.output_bound_reached(&exec_id);
+    let frame = socket.next_json().await;
+    assert_eq!(
+        frame["kind"], "exit",
+        "the pty frame vocabulary has no truncated frame: {frame}"
+    );
+    assert_eq!(frame["state"], "cancelled", "{frame}");
 }

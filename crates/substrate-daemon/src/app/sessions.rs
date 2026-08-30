@@ -991,6 +991,15 @@ async fn run_pipe_attachment(
                             return false;
                         }
                     }
+                    // Every arm below that answers with a `protocol-error` frame then returns,
+                    // ending the attachment. That is not a local choice: ADR 0008 states
+                    // "Upgrade failure, disconnect, **protocol failure**, send timeout, or lifetime
+                    // expiry triggers whole-tree cancellation and terminal persistence"
+                    // (`adr/0008-pipe-sessions-have-distinct-durable-identity.md:36-37`), and
+                    // design 05 § 2 says attachment loss "follows typed cancellation or
+                    // reconciliation behavior rather than unbounded buffering". A protocol error is
+                    // terminal, so a client does not receive an `exit` frame after one; the durable
+                    // observation is where it reads the outcome.
                     PipeClientFrame::Resize { window, .. } => {
                         // Rated on the control window that already exists, so a resize storm
                         // cannot become a free ioctl loop (design 13).
@@ -1010,7 +1019,7 @@ async fn run_pipe_attachment(
                             let _sent = send_pipe_protocol_error(
                                 &mut socket,
                                 &mut server_sequence,
-                                "session.resize-invalid",
+                                substrate_wire::SESSION_RESIZE_INVALID,
                                 "A resize names 1 to 1000 cells on each axis of a pty session.",
                                 policy,
                             ).await;
@@ -1085,6 +1094,7 @@ async fn run_pipe_attachment(
                         return send_pipe_terminal(
                             &mut socket,
                             &mut server_sequence,
+                            mode,
                             &observation,
                             policy,
                         ).await.is_ok();
@@ -1121,6 +1131,7 @@ async fn run_pipe_attachment(
                         return send_pipe_terminal(
                             &mut socket,
                             &mut server_sequence,
+                            mode,
                             &observation,
                             policy,
                         ).await.is_ok();
@@ -1185,9 +1196,19 @@ async fn send_pipe_protocol_error(
     send_pipe_server_frame(socket, &frame, policy).await
 }
 
+/// The terminal frames one attachment is owed, in the vocabulary its own mode publishes.
+///
+/// A `pty` attachment gets no `truncated` frame: the published vocabulary has no branch for one
+/// (`contracts/substrate-wire/0.9.0/schemas/pty-channel-frame.json`, `x-b10x-no-truncated`),
+/// reaching the output bound *ends* a terminal session and names itself on the exec observation's
+/// refusal field instead, and a terminal stream has no per-stream offset for a client to rejoin at
+/// — which is why design 13 removed the statement rather than relocating it. The observation still
+/// carries `stdout_truncated`, because the bound really was crossed; what changes is that this
+/// attachment is not told in a word it cannot parse.
 async fn send_pipe_terminal(
     socket: &mut WebSocket,
     sequence: &mut u64,
+    mode: SessionMode,
     observation: &ExecObservation,
     policy: PipeSessionPolicy,
 ) -> Result<(), ()> {
@@ -1199,7 +1220,8 @@ async fn send_pipe_terminal(
     {
         send_pipe_protocol_error(socket, sequence, &refusal.code, &refusal.message, policy).await?;
     }
-    if observation.stdout_truncated {
+    let truncation_is_deliverable = mode == SessionMode::Pipes;
+    if truncation_is_deliverable && observation.stdout_truncated {
         send_pipe_server_frame(
             socket,
             &PipeServerFrame::Truncated {
@@ -1211,7 +1233,7 @@ async fn send_pipe_terminal(
         .await?;
         *sequence = sequence.saturating_add(1);
     }
-    if observation.stderr_truncated {
+    if truncation_is_deliverable && observation.stderr_truncated {
         send_pipe_server_frame(
             socket,
             &PipeServerFrame::Truncated {

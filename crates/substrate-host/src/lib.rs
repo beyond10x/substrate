@@ -386,7 +386,7 @@ pub trait Driver: Send + Sync {
         _window: substrate_wire::PtyWindow,
     ) -> Result<(), DriverError> {
         Err(DriverError::unserved(
-            "session.pty-unserved",
+            substrate_wire::SESSION_PTY_UNSERVED,
             "The selected driver does not serve pty sessions.",
             "session",
         ))

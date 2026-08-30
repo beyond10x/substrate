@@ -274,7 +274,10 @@ async fn a_resize_after_the_child_exited_is_refused_rather_than_reported_applied
             observed.resource.state
         )
     });
-    assert_eq!(error.code, "session.not-pty");
+    // `session.not-pty` next door means the caller named the wrong kind of thing. This exec *is* a
+    // pty session; what is wrong is that nothing is left to observe the window, so it has its own
+    // code (`substrate_wire::SESSION_PTY_ENDED`).
+    assert_eq!(error.code, substrate_wire::SESSION_PTY_ENDED);
 }
 
 /// Design 13's central claim, at the layer that ships it: **the confined child of a `pty` session

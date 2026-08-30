@@ -89,6 +89,48 @@ pub const MAX_PTY_WINDOW_COLUMNS: u16 = 1_000;
 /// The tallest terminal a pty session may declare or resize to, in cells (design 13).
 pub const MAX_PTY_WINDOW_ROWS: u16 = 1_000;
 
+/// A `pty` start named a window when the mode forbids one, or omitted the one the mode requires.
+pub const SESSION_WINDOW_INVALID: &str = "session.window-invalid";
+/// This deployment never proved it can give a confined process a controlling terminal.
+pub const SESSION_PTY_UNSERVED: &str = "session.pty-unserved";
+/// The host's pty count is full. Retriable: it is a resource other tenants fill and free.
+pub const SESSION_PTY_EXHAUSTED: &str = "session.pty-exhausted";
+/// A pty was allocated and the driver could not make it usable.
+pub const SESSION_PTY_FAILED: &str = "session.pty-failed";
+/// A resize named a window outside 1..=1000 cells on an axis.
+pub const SESSION_RESIZE_INVALID: &str = "session.resize-invalid";
+/// The exec this operation names is not a pty session at all.
+pub const SESSION_NOT_PTY: &str = "session.not-pty";
+/// The exec is a pty session whose child has already finished, so nothing can observe a change.
+pub const SESSION_PTY_ENDED: &str = "session.pty-ended";
+/// The kernel refused the resize.
+pub const SESSION_RESIZE_FAILED: &str = "session.resize-failed";
+/// A pty has no half-close; a client ends input with the terminal's own end-of-file character.
+pub const SESSION_INPUT_CLOSE_UNSERVED: &str = "session.input-close-unserved";
+/// The declared output bound ended the session (ADR 0014's refusal field, design 13).
+pub const SESSION_OUTPUT_LIMIT: &str = "session.output-limit";
+
+/// Every refusal code a `pty` session can raise, in one place, sorted.
+///
+/// This exists so the *class* is checkable rather than a list somebody remembers to extend. Each
+/// emission site in `substrate-host` and `substrate-daemon` binds its constant from here instead of
+/// writing a literal, so a code cannot exist without being on this list; and
+/// `xtask`'s bundle checker requires the released bundle to name every entry, so a code cannot
+/// exist without being readable by a client of the contract. A code nobody can look up is a code
+/// nobody can handle.
+pub const SESSION_PTY_REFUSAL_CODES: [&str; 10] = [
+    SESSION_INPUT_CLOSE_UNSERVED,
+    SESSION_NOT_PTY,
+    SESSION_OUTPUT_LIMIT,
+    SESSION_PTY_ENDED,
+    SESSION_PTY_EXHAUSTED,
+    SESSION_PTY_FAILED,
+    SESSION_PTY_UNSERVED,
+    SESSION_RESIZE_FAILED,
+    SESSION_RESIZE_INVALID,
+    SESSION_WINDOW_INVALID,
+];
+
 /// The one audience a delegated-context document may name (ADR 0011).
 ///
 /// A wire-visible identifier carrying a former brand name, frozen with the rest of them

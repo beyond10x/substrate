@@ -362,21 +362,24 @@ impl ProcessRuntime {
                 "wait",
             ));
         }
-        // The window rule before the bounds, and the fact before either: a request for a terminal
-        // this driver never proved it can give is refused by name, and in no case is a pipe session
-        // started instead (design 13, invariant 3).
-        if substrate_wire::validate_session_window(input.mode, input.window.as_ref()).is_err() {
-            return DispatchOutcome::NotDispatched(DriverError::refused(
-                "session.window-invalid",
-                "A pty session declares an initial window within the closed cell bounds, and a raw-pipe session declares none.",
-                "window",
-            ));
-        }
+        // The fact first, then the window shape, then the bounds — the same order the daemon
+        // applies (`crates/substrate-daemon/src/app/operations.rs`) and the same one `0.9.0` states
+        // in `vectors/http/pty-session-unserved-outranks-a-missing-window.json`. A request can earn
+        // both refusals; only one is worth acting on. `session.window-invalid` invites a client on a
+        // terminal-less deployment to add a window and retry into a refusal it can never get past.
+        // In no case is a pipe session started instead (design 13, invariant 3).
         if input.mode == SessionMode::Pty && self.capability.facts.sessions_pty != Some(true) {
             return DispatchOutcome::NotDispatched(DriverError::unserved(
-                "session.pty-unserved",
+                substrate_wire::SESSION_PTY_UNSERVED,
                 "This driver did not prove it can give a confined process a controlling terminal.",
                 "mode",
+            ));
+        }
+        if substrate_wire::validate_session_window(input.mode, input.window.as_ref()).is_err() {
+            return DispatchOutcome::NotDispatched(DriverError::refused(
+                substrate_wire::SESSION_WINDOW_INVALID,
+                "A pty session declares an initial window within the closed cell bounds, and a raw-pipe session declares none.",
+                "window",
             ));
         }
         if input.input_limit_bytes == 0
@@ -504,7 +507,7 @@ impl ProcessRuntime {
                     return contain_cgroup(
                         &cgroup,
                         DriverError::exhausted(
-                            "session.pty-exhausted",
+                            substrate_wire::SESSION_PTY_EXHAUSTED,
                             format!("pty allocation: {error}"),
                             "session",
                         ),
@@ -587,7 +590,7 @@ impl ProcessRuntime {
                             child,
                             cgroup,
                             DriverError::failed(
-                                "session.pty-failed",
+                                substrate_wire::SESSION_PTY_FAILED,
                                 format!("pty master: {error}"),
                             ),
                         )
@@ -819,7 +822,7 @@ impl ProcessRuntime {
             // own end-of-file character as ordinary input bytes, which is line-discipline
             // behaviour and not a frame.
             return Err(DriverError::refused(
-                "session.input-close-unserved",
+                substrate_wire::SESSION_INPUT_CLOSE_UNSERVED,
                 "A pty session has no half-close; send the terminal's own end-of-file character as input.",
                 "session",
             ));
@@ -846,12 +849,14 @@ impl ProcessRuntime {
     ///
     /// # Errors
     ///
-    /// Returns a typed refusal when the window is outside the closed cell bounds, when the exec is
-    /// not a live pty session, and a failure when the kernel refuses the resize.
+    /// Returns [`substrate_wire::SESSION_RESIZE_INVALID`] for a window outside the closed cell
+    /// bounds, [`substrate_wire::SESSION_NOT_PTY`] when the exec is not a pty session at all,
+    /// [`substrate_wire::SESSION_PTY_ENDED`] when it is one whose child has finished, and
+    /// [`substrate_wire::SESSION_RESIZE_FAILED`] when the kernel refuses the resize.
     pub fn resize_pty(&self, id: &str, window: PtyWindow) -> Result<(), DriverError> {
         if substrate_wire::validate_session_window(SessionMode::Pty, Some(&window)).is_err() {
             return Err(DriverError::refused(
-                "session.resize-invalid",
+                substrate_wire::SESSION_RESIZE_INVALID,
                 "A resize names 1 to 1000 cells on each axis of a pty session.",
                 "window",
             ));
@@ -862,17 +867,28 @@ impl ProcessRuntime {
             .as_ref()
             .and_then(|pipe| pipe.terminal.as_ref())
             .ok_or_else(|| {
-                DriverError::refused("session.not-pty", "Exec is not a pty session.", "session")
+                DriverError::refused(
+                    substrate_wire::SESSION_NOT_PTY,
+                    "Exec is not a pty session.",
+                    "session",
+                )
             })?;
+        // Its own code, because it is its own condition: this exec *is* a pty session, and what is
+        // wrong is that nothing is left to observe the new window. `session.not-pty` next door means
+        // the caller named the wrong kind of thing, which is a different mistake with a different
+        // fix.
         if is_terminal(execution.observation.lock().resource.state) {
             return Err(DriverError::refused(
-                "session.not-pty",
-                "Exec is not a live pty session; its child has already finished.",
+                substrate_wire::SESSION_PTY_ENDED,
+                "The pty session has ended; its child already finished, so no process can observe a new window.",
                 "session",
             ));
         }
         terminal.resize(window).map_err(|error| {
-            DriverError::failed("session.resize-failed", format!("pty resize: {error}"))
+            DriverError::failed(
+                substrate_wire::SESSION_RESIZE_FAILED,
+                format!("pty resize: {error}"),
+            )
         })
     }
 
@@ -1587,6 +1603,7 @@ async fn run_child(
                 frame_limit,
                 terminal_execution,
                 reached,
+                false,
             )
             .await
         });
@@ -1605,6 +1622,7 @@ async fn run_child(
                     frame_limit,
                     stdout_execution,
                     None,
+                    true,
                 )
                 .await
             }),
@@ -1617,6 +1635,7 @@ async fn run_child(
                     frame_limit,
                     stderr_execution,
                     None,
+                    true,
                 )
                 .await
             }),
@@ -1778,7 +1797,7 @@ fn record_terminal_output_bound(observation: &mut ExecObservation, exhausted: bo
     if exhausted && observation.resource.refusal.is_none() {
         observation.resource.refusal = Some(substrate_wire::ExecRefusal {
             class: substrate_wire::ErrorClass::Exhausted,
-            code: "session.output-limit".to_owned(),
+            code: substrate_wire::SESSION_OUTPUT_LIMIT.to_owned(),
             message: "The declared output bound ended the terminal session.".to_owned(),
         });
     }
@@ -2013,7 +2032,7 @@ fn child_terminal_descriptors(
     let clone = || {
         pair.slave.try_clone().map_err(|error| {
             DriverError::failed(
-                "session.pty-failed",
+                substrate_wire::SESSION_PTY_FAILED,
                 format!("pty slave descriptor: {error}"),
             )
         })
@@ -2029,6 +2048,14 @@ fn contain_cgroup(cgroup: &Cgroup, error: DriverError) -> DispatchOutcome<ExecOb
     }
 }
 
+/// Drains one reader under the admitted output bound, live and durably.
+///
+/// `mark_truncation` is the raw-pipe truncation statement, and a terminal does not get one. Design
+/// 13 removed truncation from the pty vocabulary on purpose — reaching the bound *ends* a terminal
+/// session and names itself on the exec observation's refusal field — so writing
+/// `[substrate: output truncated]` into a merged terminal transcript would both speak a statement
+/// the published frame vocabulary has no branch for and destroy the last
+/// `TRUNCATION_MARKER.len()` bytes the child actually wrote inside the bound.
 async fn drain_capped<R>(
     reader: Option<R>,
     limit: usize,
@@ -2037,6 +2064,7 @@ async fn drain_capped<R>(
     frame_limit: usize,
     execution: Option<Arc<Execution>>,
     bound_reached: Option<Arc<AtomicBool>>,
+    mark_truncation: bool,
 ) -> (Vec<u8>, bool)
 where
     R: AsyncRead + Unpin,
@@ -2094,7 +2122,9 @@ where
         }
     }
     if truncated {
-        if limit >= TRUNCATION_MARKER.len() {
+        if !mark_truncation {
+            stored.truncate(limit);
+        } else if limit >= TRUNCATION_MARKER.len() {
             stored.truncate(limit - TRUNCATION_MARKER.len());
             stored.extend_from_slice(TRUNCATION_MARKER);
         } else {
@@ -2834,9 +2864,11 @@ mod tests {
 
     /// A terminal is never quietly downgraded to pipes, in either direction.
     ///
-    /// Two refusals, and the second is the one that matters: a driver whose `sessions.pty` fact was
-    /// never published refuses `session.pty-unserved` *before* it looks at anything else, and a
-    /// driver that has the fact but has lost the confinement floor refuses
+    /// Two refusals, and the ordering is the point of the first: the request with no published
+    /// `sessions.pty` fact also carries **no window**, so it earns `session.window-invalid` too and
+    /// the case only passes if the fact really is checked before the window shape — the order
+    /// `0.9.0` states in `vectors/http/pty-session-unserved-outranks-a-missing-window.json`. The
+    /// second request has the fact and a window and has lost the confinement floor, so it earns
     /// `exec.sandbox-unavailable`. Neither answer is a pipe session (design 13, invariant 3).
     #[tokio::test]
     async fn pty_session_refused_without_confinement() {
@@ -2865,9 +2897,16 @@ mod tests {
             sessions_pty: pty,
             ..CapabilityFacts::default()
         };
-        for (published, expected) in [
-            (None, "session.pty-unserved"),
-            (Some(true), "exec.sandbox-unavailable"),
+        for (published, window, expected) in [
+            (None, None, substrate_wire::SESSION_PTY_UNSERVED),
+            (
+                Some(true),
+                Some(substrate_wire::PtyWindow {
+                    columns: 80,
+                    rows: 24,
+                }),
+                "exec.sandbox-unavailable",
+            ),
         ] {
             let capability = CapabilitySnapshot {
                 snapshot: snapshot.clone(),
@@ -2891,17 +2930,14 @@ mod tests {
                         frame_limit_bytes: 4_096,
                         queued_frames: 4,
                         mode: substrate_wire::SessionMode::Pty,
-                        window: Some(substrate_wire::PtyWindow {
-                            columns: 80,
-                            rows: 24,
-                        }),
+                        window,
                     },
                 )
                 .await
             else {
                 panic!("a terminal must never be served as a pipe session instead");
             };
-            assert_eq!(error.code, expected);
+            assert_eq!(error.code, expected, "published fact: {published:?}");
         }
     }
 
@@ -3092,6 +3128,7 @@ mod tests {
             PipeStream::Stdout,
             64,
             None,
+            true,
         ));
         writer.write_all(b"abcdef").await.unwrap();
         drop(writer);
@@ -3129,6 +3166,7 @@ mod tests {
             1,
             Some(std::sync::Arc::clone(&execution)),
             None,
+            true,
         ));
         writer
             .write_all(b"queue saturation must not block timeout")
