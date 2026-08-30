@@ -27,9 +27,14 @@ if set -q _flag_help
     echo "  --root <dir>      where worktrees live      (default .claude/worktrees)"
     echo "  --builds <dir>    where build dirs live     (default \$HOME/.cache)"
     echo
-    echo "Build directories are matched as <builds>/<repo>-worktree-<name>, the naming a wave"
-    echo "uses. A build directory named anything else is invisible here too — name it correctly"
-    echo "when you create it, or nothing will ever find it."
+    echo "Build directories are matched by several conventions, because waves in this org use"
+    echo "several. For a unit named <name>, under both <builds> and <root>:"
+    echo "  <repo>-worktree-<name>    target-<name>    <name>-target    target/<name>"
+    echo
+    echo "A build directory named none of those is invisible here — which is not a hypothetical:"
+    echo "on 2026-08-30 this script removed five clean harness worktrees, reported \"none"
+    echo "orphaned\", and left 8.8G of target-<name> directories standing beside them. Add the"
+    echo "convention below rather than trusting a report that found nothing."
     exit 0
 end
 
@@ -121,27 +126,81 @@ echo
 #    git knows nothing about.
 # ---------------------------------------------------------------------------------------------
 
-set -l orphan_total 0
+# Four naming conventions, because the waves in this org use four and a build directory nobody
+# can name is a build directory nobody ever deletes. Searched under the build root AND the
+# worktree root, since a wave that puts its worktrees in `~/.cache/<wave>/` usually puts their
+# targets there too.
+set -l candidates
+
+# `<repo>-worktree-<name>` carries the repository in the name, so it is safe to search anywhere,
+# including a shared cache directory.
+for dir in $build_root $worktree_root
+    test -d $dir; or continue
+    for build in $dir/$repo_name-worktree-*
+        test -d $build; or continue
+        set -a candidates $build (string replace "$dir/$repo_name-worktree-" '' $build)
+    end
+end
+
+# `target-<name>`, `<name>-target` and `target/<name>` carry no repository at all, so they are only
+# searched in directories scoped to ONE wave: the worktree root, and a build root the caller named
+# explicitly. Never a shared default.
+#
+# This is not caution for its own sake. A dry run from `substrate` with these patterns loose in
+# `$HOME/.cache` proposed removing `autodev-review-recovery-cli-target`, `b10x-connectors-target`,
+# `sipx-clstr-v1-review-target` and eleven more — other projects' build directories, roughly 20 GB,
+# none of them this repository's to delete. The regression scenario below keeps that from coming
+# back.
+set -l scoped $worktree_root
+set -q _flag_builds; and set -a scoped $build_root
+for dir in $scoped
+    test -d $dir; or continue
+    for build in $dir/target-*
+        test -d $build; or continue
+        set -a candidates $build (string replace "$dir/target-" '' $build)
+    end
+    for build in $dir/*-target
+        test -d $build; or continue
+        set -a candidates $build (string replace -r '.*/(.*)-target$' '$1' $build)
+    end
+    for build in $dir/target/*
+        test -d $build; or continue
+        set -a candidates $build (basename $build)
+    end
+end
+
 set -l orphans 0
-for build in $build_root/$repo_name-worktree-*
-    test -d $build; or continue
-    set -l name (string replace "$build_root/$repo_name-worktree-" '' $build)
+set -l seen
+set -l reclaimed
+for i in (seq 1 2 (count $candidates))
+    set -l build $candidates[$i]
+    set -l name $candidates[(math $i + 1)]
+    contains $build $seen; and continue
+    set -a seen $build
     set -l size (du -sh $build 2>/dev/null | cut -f1)
 
-    if contains "$worktree_root/$name" $others; and not contains $name $gone
+    # Still owned: a worktree by that name is registered and this run did not take it down.
+    set -l owned no
+    for tree in $others
+        if test (basename $tree) = $name; and not contains $name $gone
+            set owned yes
+        end
+    end
+    if test $owned = yes
         echo "builds:    $name — kept, its worktree is still registered ($size)"
         continue
     end
 
     set orphans (math $orphans + 1)
+    set -a reclaimed $size
     if test $apply = yes
         rm -rf $build
-        echo "builds:    $name — removed, no worktree owns it ($size)"
+        echo "builds:    $name — removed, no worktree owns it ($size) [$build]"
     else
-        echo "builds:    $name — would remove, no worktree owns it ($size)"
+        echo "builds:    $name — would remove, no worktree owns it ($size) [$build]"
     end
 end
-test $orphans -eq 0; and echo "builds:    none orphaned under $build_root/$repo_name-worktree-*"
+test $orphans -eq 0; and echo "builds:    none orphaned under $build_root or $worktree_root"
 
 echo
 
