@@ -1832,7 +1832,7 @@ dependencies = [
 
 [[package]]
 name = "substrate-contract-check"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "jsonschema",
  "serde_json",
@@ -1840,7 +1840,7 @@ dependencies = [
 
 [[package]]
 name = "substrate-daemon"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1877,7 +1877,7 @@ dependencies = [
 
 [[package]]
 name = "substrate-host"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "async-trait",
  "base64",
@@ -1899,7 +1899,7 @@ dependencies = [
 
 [[package]]
 name = "substrate-store"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "chrono",
  "parking_lot",
@@ -1913,7 +1913,7 @@ dependencies = [
 
 [[package]]
 name = "substrate-wire"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "base64",
  "chrono",
@@ -2462,7 +2462,7 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 
 [[package]]
 name = "xtask"
-version = "0.2.3"
+version = "0.2.4"
 dependencies = [
  "anyhow",
  "clap",

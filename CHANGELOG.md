@@ -7,6 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.2.4] — 2026-08-31
+
 ### Changed
 
 - **Substrate is Apache-2.0.** Atlas ADR 0010 grants Apache-2.0 across all beyond10x-owned
