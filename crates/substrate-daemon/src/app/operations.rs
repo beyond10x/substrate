@@ -586,14 +586,50 @@ pub(super) fn validate_pipe_session_input(
         request_hash: mutation.request_hash.clone(),
         attribution: mutation.attribution.clone(),
     };
-    validate_exec_input(app, &exec_mutation, request_id)?;
+    // The mode gate is outermost, because the mode decides which contract the rest of the request
+    // is read under. A terminal this deployment never proved it can give is refused by name — not
+    // as the confinement refusal a pipe session would also get, and never served as pipes instead
+    // (design 13, invariant 3).
+    //
+    // **The fact outranks the window shape**, and the order is asserted rather than incidental
+    // (`vectors/http/pty-session-unserved-outranks-a-missing-window.json`). Both refusals can apply
+    // to one request; only one of them is worth acting on. `session.window-invalid` invites the
+    // client to add a window and try again, which on a deployment with no terminals is a retry that
+    // can never succeed. `session.pty-unserved` says *stop*, which is the true answer.
+    let input = &mutation.input;
+    if input.mode == substrate_wire::SessionMode::Pty
+        && app.driver.machine().facts.sessions_pty != Some(true)
+    {
+        return Err(failure(
+            StatusCode::NOT_IMPLEMENTED,
+            request_id,
+            Some(&mutation.op),
+            ErrorClass::Unserved,
+            substrate_wire::SESSION_PTY_UNSERVED,
+            "This deployment did not prove it can give a confined process a controlling terminal.",
+            Some("mode"),
+            false,
+        ));
+    }
+    if substrate_wire::validate_session_window(input.mode, input.window.as_ref()).is_err() {
+        return Err(failure(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            request_id,
+            Some(&mutation.op),
+            ErrorClass::Refused,
+            substrate_wire::SESSION_WINDOW_INVALID,
+            "A pty session declares an initial window within the closed cell bounds, and a raw-pipe session declares none.",
+            Some("window"),
+            false,
+        ));
+    }
     if !pipe_confinement_available(&app.driver.machine().facts) {
         return Err(failure(
             StatusCode::NOT_IMPLEMENTED,
             request_id,
             Some(&mutation.op),
             ErrorClass::Unserved,
-            "session.confinement-unavailable",
+            substrate_wire::SESSION_CONFINEMENT_UNAVAILABLE,
             "Raw-pipe sessions require complete namespaces and cgroup limits, whole-tree kill, explicit leases, no egress, and bounded output.",
             Some("session"),
             false,
@@ -611,6 +647,13 @@ pub(super) fn validate_pipe_session_input(
     {
         return Err(schema_invalid(request_id, Some(&mutation.op), "input"));
     }
+    // **Last, so the two ports rank it the same.** The exec shape is checked here *and* by
+    // `ProcessRuntime::admit`, which the driver reaches only after its own `wait` and session-bound
+    // checks — so with this call where it used to be (before them) the two implementations of one
+    // contract ranked the same pair of refusals in opposite orders. It was invisible only because
+    // this port answers `request.schema-invalid` for both, differing in `address`, which is
+    // precisely why a pin that read the code could not see it.
+    validate_exec_input(app, &exec_mutation, request_id)?;
     Ok(())
 }
 
@@ -1067,8 +1110,18 @@ pub(super) async fn finish_driver_error(
     resource_id: Option<&str>,
     error: &DriverError,
 ) -> Response {
+    // **Per code, from one place.** This used to be `detail.retriable = false;` — every driver
+    // refusal, unconditionally — which contradicted `contracts/substrate-wire/0.10.0/refusals.json`
+    // and `vectors/http/pty-session-exhausted.json`, both of which publish `retriable: true` for
+    // `session.pty-exhausted` on design 13's reason: "the host's pty count is a global resource
+    // other tenants can fill and free". Deriving it from `DriverErrorClass` instead is the other
+    // wrong answer: `exhausted` is retriable at the port and `workspace.write-limit` is `exhausted`
+    // and never retriable, which is why frozen `0.1.0`-`0.4.0` vectors pin `false` for five
+    // released codes. `session_refusal_is_retriable` is the per-code table; everything not in it
+    // keeps the `false` those vectors pin. The same `detail` goes to the body and to the durable
+    // ledger below, so this is one value in one place.
     let (status, mut detail) = driver_detail(Some(operation), error);
-    detail.retriable = false;
+    detail.retriable = substrate_wire::session_refusal_is_retriable(&detail.code);
     if let Err(store_error) = app
         .store_io(|| {
             app.store.complete_error(
@@ -1129,8 +1182,18 @@ pub(super) async fn finish_dispatch_absence(
     resource_id: &str,
     error: &DriverError,
 ) -> Response {
+    // **Per code, from one place.** This used to be `detail.retriable = false;` — every driver
+    // refusal, unconditionally — which contradicted `contracts/substrate-wire/0.10.0/refusals.json`
+    // and `vectors/http/pty-session-exhausted.json`, both of which publish `retriable: true` for
+    // `session.pty-exhausted` on design 13's reason: "the host's pty count is a global resource
+    // other tenants can fill and free". Deriving it from `DriverErrorClass` instead is the other
+    // wrong answer: `exhausted` is retriable at the port and `workspace.write-limit` is `exhausted`
+    // and never retriable, which is why frozen `0.1.0`-`0.4.0` vectors pin `false` for five
+    // released codes. `session_refusal_is_retriable` is the per-code table; everything not in it
+    // keeps the `false` those vectors pin. The same `detail` goes to the body and to the durable
+    // ledger below, so this is one value in one place.
     let (status, mut detail) = driver_detail(Some(operation), error);
-    detail.retriable = false;
+    detail.retriable = substrate_wire::session_refusal_is_retriable(&detail.code);
     if let Err(store_error) = app
         .store_io(|| {
             app.store.complete_dispatch_absence(
@@ -1160,8 +1223,18 @@ pub(super) async fn finish_pipe_session_dispatch_absence(
     exec_id: &str,
     error: &DriverError,
 ) -> Response {
+    // **Per code, from one place.** This used to be `detail.retriable = false;` — every driver
+    // refusal, unconditionally — which contradicted `contracts/substrate-wire/0.10.0/refusals.json`
+    // and `vectors/http/pty-session-exhausted.json`, both of which publish `retriable: true` for
+    // `session.pty-exhausted` on design 13's reason: "the host's pty count is a global resource
+    // other tenants can fill and free". Deriving it from `DriverErrorClass` instead is the other
+    // wrong answer: `exhausted` is retriable at the port and `workspace.write-limit` is `exhausted`
+    // and never retriable, which is why frozen `0.1.0`-`0.4.0` vectors pin `false` for five
+    // released codes. `session_refusal_is_retriable` is the per-code table; everything not in it
+    // keeps the `false` those vectors pin. The same `detail` goes to the body and to the durable
+    // ledger below, so this is one value in one place.
     let (status, mut detail) = driver_detail(Some(operation), error);
-    detail.retriable = false;
+    detail.retriable = substrate_wire::session_refusal_is_retriable(&detail.code);
     if let Err(store_error) = app
         .store_io(|| {
             app.store.complete_pipe_session_dispatch_absence(

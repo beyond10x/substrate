@@ -59,10 +59,40 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   directory keeps its bytes, and `cargo xtask check-bundle 0.8.0` is in
   [`scripts/gate.sh`](scripts/gate.sh).
 
+- **A pty is a second session mode, not a second session resource.** `POST /v1/pipe-sessions` takes
+  `mode: "pty"` beside the `pipes` it already served, with a required initial `window` of 1–1000
+  cells on each axis. The route family, the operation ids, the `ses_…` identity, the lease, the
+  single attachment and the whole-tree cleanup are the ones a raw-pipe session already had; a
+  `resize` frame joins the closed client vocabulary, bounded by the same cell rule and rated on the
+  control window that already existed. There is no `close-input` on a terminal — a client ends
+  input by sending the terminal's own end-of-file character as ordinary input bytes — and no
+  `truncated`: reaching the declared output bound ends the session and names
+  `session.output-limit` through the refusal field [ADR 0014](adr/0014-apertures-carry-a-declared-byte-ceiling.md)
+  added. Decided in [ADR 0019](adr/0019-pty-is-a-second-session-mode.md).
+- **`sessions.pty` is published only after a verified allocation.** A startup probe allocates a
+  pair, makes it controlling inside a throwaway sandbox *after* bubblewrap's own `setsid`, and
+  round-trips a window through the child's `TIOCGWINSZ` before and after a resize. Absent, every
+  `mode: "pty"` request is refused `session.pty-unserved` (501, `unserved`) and **never** served as
+  pipes; an allocation failure at start is `session.pty-exhausted` (429, `exhausted`, retriable).
+  `--new-session` is not dropped to make a terminal work: that would weaken the confinement floor of
+  every non-pty exec to serve one feature.
+- **Session refusals are closed and actionable.** The bundle register names all 32 refusal codes,
+  their arrival surface, class, status and retry fact; protocol-error frames use a closed typed
+  vocabulary. The attachment-capacity path now reads the same per-code retry table as the register,
+  so its HTTP response cannot contradict the published `retriable: false` decision.
+- **Contract bundle [`contracts/substrate-wire/0.10.0`](contracts/substrate-wire/0.10.0)**, 251 files, an
+  additive successor to `0.9.0`: `adds_routes: 0`, `preserves_routes: 31`. It adds the `mode` and
+  `window` start fields, the `sessions.pty` fact, the served-modes capability document and
+  `schemas/pty-channel-frame.json`. Every earlier bundle directory keeps its bytes, and
+  `cargo xtask check-bundle 0.10.0` is in [`scripts/gate.sh`](scripts/gate.sh).
+
 ### Unchanged
 
 - An aperture declared without the term behaves byte for byte as it did: no ceiling in the relay,
   no `max_bytes` on the fact or the observation, and no `refusal` on the run.
+- A session start that names no `mode` is a raw-pipe session, byte for byte as before: the field
+  defaults to `pipes`, so no existing client can be handed a terminal, and a `0.4.0` daemon refuses
+  `mode: "pty"` as schema-invalid rather than quietly serving pipes.
 
 ## [0.2.3] — 2026-08-30
 

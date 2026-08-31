@@ -1,0 +1,1076 @@
+{
+  "$defs": {
+    "base-properties": {
+      "accepted_at": {
+        "oneOf": [
+          {
+            "$ref": "common.json#/$defs/timestamp"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "actor": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "capability_snapshot": {
+        "oneOf": [
+          {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "grant_ref": {
+        "description": "The declared grant this operation ran under, verbatim from a verified delegated context. Null when none was presented.",
+        "maxLength": 512,
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "operation": {
+        "$ref": "common.json#/$defs/operation-id"
+      },
+      "operation_kind": {
+        "enum": [
+          "workspace.create",
+          "workspace.file.write",
+          "workspace.file.delete",
+          "workspace.destroy",
+          "exec.start",
+          "exec.signal",
+          "exec.retire",
+          "session.start",
+          "session.signal",
+          "session.retire",
+          "session.lease.renew",
+          "workspace.lease.renew",
+          "exec.lease.renew",
+          "workspace.file.replace-v2",
+          "workspace.file.edit-v2",
+          "workspace.file.patch-v2"
+        ]
+      },
+      "outcome": {},
+      "platform_principal": {
+        "description": "The initiating platform principal, verbatim from a verified delegated context. Separate from principal, which keeps its process-id meaning.",
+        "maxLength": 512,
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "principal": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "request_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "type": "string"
+      },
+      "resource": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "state": {
+        "enum": [
+          "refused",
+          "accepted",
+          "unknown",
+          "terminal"
+        ]
+      },
+      "terminal_at": {
+        "oneOf": [
+          {
+            "$ref": "common.json#/$defs/timestamp"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "error-outcome": {
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "$ref": "error.json#/$defs/detail"
+        },
+        "kind": {
+          "const": "error"
+        }
+      },
+      "required": [
+        "kind",
+        "error"
+      ],
+      "type": "object"
+    },
+    "success-outcome": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "success"
+        },
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "results/workspace-create.json"
+            },
+            {
+              "$ref": "results/workspace-file-write.json"
+            },
+            {
+              "$ref": "results/workspace-file-delete.json"
+            },
+            {
+              "$ref": "results/workspace-destroy.json"
+            },
+            {
+              "$ref": "results/exec-start.json"
+            },
+            {
+              "$ref": "results/exec-signal.json"
+            },
+            {
+              "$ref": "results/exec-retire.json"
+            },
+            {
+              "$ref": "results/pipe-session-start.json"
+            },
+            {
+              "$ref": "results/pipe-session-signal.json"
+            },
+            {
+              "$ref": "results/pipe-session-retire.json"
+            },
+            {
+              "$ref": "results/pipe-session-lease-renew.json"
+            },
+            {
+              "$ref": "results/workspace-lease-renew.json"
+            },
+            {
+              "$ref": "results/exec-lease-renew.json"
+            },
+            {
+              "$ref": "results/workspace-file-mutation-v2.json"
+            },
+            {
+              "$ref": "results/workspace-file-mutation-v2.json"
+            },
+            {
+              "$ref": "results/workspace-file-mutation-v2.json"
+            }
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "result"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "urn:b10x:substrate-wire:0.10.0:operation",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "operation_kind": {
+            "const": "workspace.create"
+          },
+          "outcome": {
+            "properties": {
+              "kind": {
+                "const": "success"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          }
+        },
+        "required": [
+          "operation_kind",
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "properties": {
+              "result": {
+                "$ref": "results/workspace-create.json"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation_kind": {
+            "const": "workspace.file.write"
+          },
+          "outcome": {
+            "properties": {
+              "kind": {
+                "const": "success"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          }
+        },
+        "required": [
+          "operation_kind",
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "properties": {
+              "result": {
+                "$ref": "results/workspace-file-write.json"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation_kind": {
+            "const": "workspace.file.delete"
+          },
+          "outcome": {
+            "properties": {
+              "kind": {
+                "const": "success"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          }
+        },
+        "required": [
+          "operation_kind",
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "properties": {
+              "result": {
+                "$ref": "results/workspace-file-delete.json"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation_kind": {
+            "const": "workspace.destroy"
+          },
+          "outcome": {
+            "properties": {
+              "kind": {
+                "const": "success"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          }
+        },
+        "required": [
+          "operation_kind",
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "properties": {
+              "result": {
+                "$ref": "results/workspace-destroy.json"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation_kind": {
+            "const": "exec.start"
+          },
+          "outcome": {
+            "properties": {
+              "kind": {
+                "const": "success"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          }
+        },
+        "required": [
+          "operation_kind",
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "properties": {
+              "result": {
+                "$ref": "results/exec-start.json"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation_kind": {
+            "const": "exec.signal"
+          },
+          "outcome": {
+            "properties": {
+              "kind": {
+                "const": "success"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          }
+        },
+        "required": [
+          "operation_kind",
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "properties": {
+              "result": {
+                "$ref": "results/exec-signal.json"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation_kind": {
+            "const": "exec.retire"
+          },
+          "outcome": {
+            "properties": {
+              "kind": {
+                "const": "success"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          }
+        },
+        "required": [
+          "operation_kind",
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "properties": {
+              "result": {
+                "$ref": "results/exec-retire.json"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation_kind": {
+            "const": "session.start"
+          },
+          "outcome": {
+            "properties": {
+              "kind": {
+                "const": "success"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          }
+        },
+        "required": [
+          "operation_kind",
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "properties": {
+              "result": {
+                "$ref": "results/pipe-session-start.json"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation_kind": {
+            "const": "session.signal"
+          },
+          "outcome": {
+            "properties": {
+              "kind": {
+                "const": "success"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          }
+        },
+        "required": [
+          "operation_kind",
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "properties": {
+              "result": {
+                "$ref": "results/pipe-session-signal.json"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation_kind": {
+            "const": "session.retire"
+          },
+          "outcome": {
+            "properties": {
+              "kind": {
+                "const": "success"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          }
+        },
+        "required": [
+          "operation_kind",
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "properties": {
+              "result": {
+                "$ref": "results/pipe-session-retire.json"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation_kind": {
+            "const": "session.lease.renew"
+          },
+          "outcome": {
+            "properties": {
+              "kind": {
+                "const": "success"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          }
+        },
+        "required": [
+          "operation_kind",
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "properties": {
+              "result": {
+                "$ref": "results/pipe-session-lease-renew.json"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation_kind": {
+            "const": "workspace.lease.renew"
+          },
+          "outcome": {
+            "properties": {
+              "kind": {
+                "const": "success"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          }
+        },
+        "required": [
+          "operation_kind",
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "properties": {
+              "result": {
+                "$ref": "results/workspace-lease-renew.json"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation_kind": {
+            "const": "exec.lease.renew"
+          },
+          "outcome": {
+            "properties": {
+              "kind": {
+                "const": "success"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          }
+        },
+        "required": [
+          "operation_kind",
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "properties": {
+              "result": {
+                "$ref": "results/exec-lease-renew.json"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation_kind": {
+            "const": "workspace.file.replace-v2"
+          },
+          "outcome": {
+            "properties": {
+              "kind": {
+                "const": "success"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          }
+        },
+        "required": [
+          "operation_kind",
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "properties": {
+              "result": {
+                "$ref": "results/workspace-file-mutation-v2.json"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation_kind": {
+            "const": "workspace.file.edit-v2"
+          },
+          "outcome": {
+            "properties": {
+              "kind": {
+                "const": "success"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          }
+        },
+        "required": [
+          "operation_kind",
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "properties": {
+              "result": {
+                "$ref": "results/workspace-file-mutation-v2.json"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "operation_kind": {
+            "const": "workspace.file.patch-v2"
+          },
+          "outcome": {
+            "properties": {
+              "kind": {
+                "const": "success"
+              }
+            },
+            "required": [
+              "kind"
+            ]
+          }
+        },
+        "required": [
+          "operation_kind",
+          "outcome"
+        ]
+      },
+      "then": {
+        "properties": {
+          "outcome": {
+            "properties": {
+              "result": {
+                "$ref": "results/workspace-file-mutation-v2.json"
+              }
+            },
+            "required": [
+              "result"
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "accepted_at": {
+          "type": "null"
+        },
+        "actor": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "capability_snapshot": {
+          "type": "null"
+        },
+        "grant_ref": {
+          "description": "The declared grant this operation ran under, verbatim from a verified delegated context. Null when none was presented.",
+          "maxLength": 512,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "operation_kind": {
+          "enum": [
+            "workspace.create",
+            "workspace.file.write",
+            "workspace.file.delete",
+            "workspace.destroy",
+            "exec.start",
+            "exec.signal",
+            "exec.retire",
+            "session.start",
+            "session.signal",
+            "session.retire",
+            "session.lease.renew",
+            "workspace.lease.renew",
+            "exec.lease.renew",
+            "workspace.file.replace-v2",
+            "workspace.file.edit-v2",
+            "workspace.file.patch-v2"
+          ]
+        },
+        "outcome": {
+          "$ref": "#/$defs/error-outcome"
+        },
+        "platform_principal": {
+          "description": "The initiating platform principal, verbatim from a verified delegated context. Separate from principal, which keeps its process-id meaning.",
+          "maxLength": 512,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "principal": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "request_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "resource": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "const": "refused"
+        },
+        "terminal_at": {
+          "$ref": "common.json#/$defs/timestamp"
+        }
+      },
+      "required": [
+        "operation",
+        "operation_kind",
+        "request_hash",
+        "state",
+        "accepted_at",
+        "terminal_at",
+        "capability_snapshot",
+        "actor",
+        "principal",
+        "resource",
+        "outcome"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "accepted_at": {
+          "$ref": "common.json#/$defs/timestamp"
+        },
+        "actor": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "capability_snapshot": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "grant_ref": {
+          "description": "The declared grant this operation ran under, verbatim from a verified delegated context. Null when none was presented.",
+          "maxLength": 512,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "operation_kind": {
+          "enum": [
+            "workspace.create",
+            "workspace.file.write",
+            "workspace.file.delete",
+            "workspace.destroy",
+            "exec.start",
+            "exec.signal",
+            "exec.retire",
+            "session.start",
+            "session.signal",
+            "session.retire",
+            "session.lease.renew",
+            "workspace.lease.renew",
+            "exec.lease.renew",
+            "workspace.file.replace-v2",
+            "workspace.file.edit-v2",
+            "workspace.file.patch-v2"
+          ]
+        },
+        "outcome": {
+          "type": "null"
+        },
+        "platform_principal": {
+          "description": "The initiating platform principal, verbatim from a verified delegated context. Separate from principal, which keeps its process-id meaning.",
+          "maxLength": 512,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "principal": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "request_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "resource": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "enum": [
+            "accepted",
+            "unknown"
+          ]
+        },
+        "terminal_at": {
+          "type": "null"
+        }
+      },
+      "required": [
+        "operation",
+        "operation_kind",
+        "request_hash",
+        "state",
+        "accepted_at",
+        "terminal_at",
+        "capability_snapshot",
+        "actor",
+        "principal",
+        "resource",
+        "outcome"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "accepted_at": {
+          "$ref": "common.json#/$defs/timestamp"
+        },
+        "actor": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "capability_snapshot": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "grant_ref": {
+          "description": "The declared grant this operation ran under, verbatim from a verified delegated context. Null when none was presented.",
+          "maxLength": 512,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "operation_kind": {
+          "enum": [
+            "workspace.create",
+            "workspace.file.write",
+            "workspace.file.delete",
+            "workspace.destroy",
+            "exec.start",
+            "exec.signal",
+            "exec.retire",
+            "session.start",
+            "session.signal",
+            "session.retire",
+            "session.lease.renew",
+            "workspace.lease.renew",
+            "exec.lease.renew",
+            "workspace.file.replace-v2",
+            "workspace.file.edit-v2",
+            "workspace.file.patch-v2"
+          ]
+        },
+        "outcome": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/success-outcome"
+            },
+            {
+              "$ref": "#/$defs/error-outcome"
+            }
+          ]
+        },
+        "platform_principal": {
+          "description": "The initiating platform principal, verbatim from a verified delegated context. Separate from principal, which keeps its process-id meaning.",
+          "maxLength": 512,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "principal": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "request_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "resource": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "const": "terminal"
+        },
+        "terminal_at": {
+          "$ref": "common.json#/$defs/timestamp"
+        }
+      },
+      "required": [
+        "operation",
+        "operation_kind",
+        "request_hash",
+        "state",
+        "accepted_at",
+        "terminal_at",
+        "capability_snapshot",
+        "actor",
+        "principal",
+        "resource",
+        "outcome"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "Subject-scoped operation record with structural lifecycle invariants"
+}

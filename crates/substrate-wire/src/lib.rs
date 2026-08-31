@@ -79,6 +79,351 @@ pub const OPERATION_LEDGER_GLOBAL_MAX_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 pub const MIN_LEASE_TTL_MS: u64 = 1_000;
 pub const MAX_LEASE_TTL_MS: u64 = 86_400_000;
 pub const LEASE_CLOCK_TOLERANCE_MS: u64 = 30_000;
+/// The widest terminal a pty session may declare or resize to, in cells (design 13).
+///
+/// The kernel field is an `unsigned short`, so 65535 is deliverable; a 65535x65535 window is not a
+/// display but an amplification knob, because programs allocate per-cell buffers when the size
+/// changes and that allocation is spent from the run's own memory bound. 1000 is above any real
+/// terminal — a 4K display at a small font is roughly 400 columns by 100 rows.
+pub const MAX_PTY_WINDOW_COLUMNS: u16 = 1_000;
+/// The tallest terminal a pty session may declare or resize to, in cells (design 13).
+pub const MAX_PTY_WINDOW_ROWS: u16 = 1_000;
+
+/// A `pty` start named a window when the mode forbids one, or omitted the one the mode requires.
+pub const SESSION_WINDOW_INVALID: &str = "session.window-invalid";
+/// This deployment never proved it can give a confined process a controlling terminal.
+pub const SESSION_PTY_UNSERVED: &str = "session.pty-unserved";
+/// The host's pty count is full. Retriable: it is a resource other tenants fill and free.
+pub const SESSION_PTY_EXHAUSTED: &str = "session.pty-exhausted";
+/// A pty was allocated and the driver could not make it usable.
+pub const SESSION_PTY_FAILED: &str = "session.pty-failed";
+/// A resize named a window outside 1..=1000 cells on an axis.
+pub const SESSION_RESIZE_INVALID: &str = "session.resize-invalid";
+/// The exec this operation names is not a pty session at all.
+pub const SESSION_NOT_PTY: &str = "session.not-pty";
+/// The exec is a pty session whose child has already finished, so nothing can observe a change.
+pub const SESSION_PTY_ENDED: &str = "session.pty-ended";
+/// The kernel refused the resize.
+pub const SESSION_RESIZE_FAILED: &str = "session.resize-failed";
+/// A pty has no half-close; a client ends input with the terminal's own end-of-file character.
+pub const SESSION_INPUT_CLOSE_UNSERVED: &str = "session.input-close-unserved";
+/// The declared output bound ended the session (ADR 0014's refusal field, design 13).
+pub const SESSION_OUTPUT_LIMIT: &str = "session.output-limit";
+/// The live output queue was not drained within its declared bound.
+pub const SESSION_OUTPUT_BACKPRESSURE: &str = "session.output-backpressure";
+
+/// The bundle whose result schema the session capability document conforms to.
+///
+/// **Not the same claim as the `x-b10x-contract` header.** The header is what the *server*
+/// advertises, and `AGENTS.md` invariant 6 scopes moving it as its own change with its own clients
+/// to notify. This is a field inside one result document, and every released bundle declares it
+/// `{"const": "substrate-wire/<that bundle's own version>"}` — `0.3.0` through `0.10.0`, without
+/// exception — so its value is definitionally *the bundle whose schema this document conforms to*.
+/// A document carrying `modes` and the window and control-rate ceilings is shaped by `0.10.0` and by
+/// no earlier bundle, so naming anything else is a false statement about its own shape: `0.4.0`'s
+/// schema is `additionalProperties: false` over nine properties and forbids all five.
+pub const PIPE_SESSION_CAPABILITY_CONTRACT: &str = "substrate-wire/0.10.0";
+
+/// The session is not attachable in its current state.
+pub const SESSION_NOT_ATTACHABLE: &str = "session.not-attachable";
+/// The session already has its single permitted attachment.
+pub const SESSION_ALREADY_ATTACHED: &str = "session.already-attached";
+/// The bounded attachment capacity is exhausted.
+pub const SESSION_ATTACHMENT_CAPACITY: &str = "session.attachment-capacity";
+/// The confinement floor sessions require is not available on this host.
+pub const SESSION_CONFINEMENT_UNAVAILABLE: &str = "session.confinement-unavailable";
+/// The declared session bounds exceed the host profile.
+pub const SESSION_LIMIT_UNSERVED: &str = "session.limit-unserved";
+/// A raw-pipe process did not expose stdin.
+pub const SESSION_STDIN_MISSING: &str = "session.stdin-missing";
+/// The selected driver does not serve sessions at all.
+pub const SESSION_UNSERVED: &str = "session.unserved";
+/// A session cannot use synchronous exec wait.
+pub const SESSION_WAIT_INVALID: &str = "session.wait-invalid";
+
+/// How many control frames one attachment may send inside [`SESSION_CONTROL_WINDOW_MS`].
+///
+/// Published on the session capability document like every other bound a client has to obey. It was
+/// the one bound a terminal client is most likely to cross and the only one it could not read.
+pub const MAX_SESSION_CONTROLS_PER_WINDOW: u32 = 120;
+/// The window [`MAX_SESSION_CONTROLS_PER_WINDOW`] is counted over, in milliseconds.
+pub const SESSION_CONTROL_WINDOW_MS: u64 = 60_000;
+/// The attachment sent more control frames than the published rate admits.
+pub const SESSION_CONTROL_RATE_EXCEEDED: &str = "session.control-rate-exceeded";
+/// A session attachment refused a client frame, and the loop could not name the reason more
+/// precisely than "the driver refused it". The driver's own code is carried in the message.
+pub const SESSION_DRIVER_REFUSED: &str = "session.driver-refused";
+/// A client frame is outside the closed vocabulary of the mode this attachment serves.
+pub const SESSION_FRAME_INVALID: &str = "session.frame-invalid";
+/// Client sequences must be contiguous and start at one.
+pub const SESSION_SEQUENCE_INVALID: &str = "session.sequence-invalid";
+/// Input content is not valid standard base64.
+pub const SESSION_BASE64_INVALID: &str = "session.base64-invalid";
+/// A signal frame is outside the closed signal or grace bounds.
+pub const SESSION_SIGNAL_INVALID: &str = "session.signal-invalid";
+/// Input is already closed and cannot be written or closed again.
+pub const SESSION_INPUT_CLOSED: &str = "session.input-closed";
+/// The exec this operation names is not a raw-pipe session.
+pub const SESSION_NOT_PIPE: &str = "session.not-pipe";
+/// One input frame is outside the admitted frame bound.
+pub const SESSION_FRAME_LIMIT: &str = "session.frame-limit";
+/// Cumulative input is outside the admitted byte bound.
+pub const SESSION_INPUT_LIMIT: &str = "session.input-limit";
+/// Substrate could not deliver input and does not pretend it arrived.
+pub const SESSION_WRITE_FAILED: &str = "session.write-failed";
+/// An output read deadline elapsed with no frame.
+pub const SESSION_READ_TIMEOUT: &str = "session.read-timeout";
+/// A read deadline of zero is not a deadline.
+pub const SESSION_TIMEOUT_INVALID: &str = "session.timeout-invalid";
+
+/// Every code a session attachment's `protocol-error` frame may carry.
+///
+/// This is closed **by construction**, not by convention: [`send a protocol
+/// error`](SessionProtocolErrorCode) takes this type and nothing else, so a code outside the set
+/// cannot be put on the wire, and [`SessionProtocolErrorCode::classify`] is the only door a driver
+/// error comes through. Before it existed the loop forwarded `DriverError::code` verbatim, which
+/// could put `exec.cgroup-missing`, `exec.observe-timeout`, `exec.sandbox-unavailable` or
+/// `resource.not-found` into a frame whose published `code` is `^session\.[a-z0-9-]+$` — a frame
+/// the bundle says cannot exist. Every member below matches that pattern.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionProtocolErrorCode {
+    Base64Invalid,
+    ControlRateExceeded,
+    DriverRefused,
+    // `ReadTimeout` and `OutputLimit` are deliberately **not** members. The attachment loop matches
+    // `SESSION_READ_TIMEOUT` and continues before anything is classified, so no driver can put it
+    // in a frame; and `SESSION_OUTPUT_LIMIT` is only ever an `ExecRefusal` on the durable exec,
+    // which a client fetches rather than receives. Publishing either would be the mirror of the
+    // dead published code this type was introduced to prevent.
+    FrameInvalid,
+    FrameLimit,
+    InputCloseUnserved,
+    InputClosed,
+    InputLimit,
+    NotPipe,
+    NotPty,
+    OutputBackpressure,
+    PtyEnded,
+    PtyUnserved,
+    ResizeFailed,
+    ResizeInvalid,
+    SequenceInvalid,
+    SignalInvalid,
+    TimeoutInvalid,
+    WriteFailed,
+}
+
+impl SessionProtocolErrorCode {
+    /// Every member, so a caller can enumerate the class rather than remember it.
+    pub const ALL: [Self; 19] = [
+        Self::Base64Invalid,
+        Self::ControlRateExceeded,
+        Self::DriverRefused,
+        Self::FrameInvalid,
+        Self::FrameLimit,
+        Self::InputCloseUnserved,
+        Self::InputClosed,
+        Self::InputLimit,
+        Self::NotPipe,
+        Self::NotPty,
+        Self::OutputBackpressure,
+        Self::PtyEnded,
+        Self::PtyUnserved,
+        Self::ResizeFailed,
+        Self::ResizeInvalid,
+        Self::SequenceInvalid,
+        Self::SignalInvalid,
+        Self::TimeoutInvalid,
+        Self::WriteFailed,
+    ];
+
+    /// The wire word.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Base64Invalid => SESSION_BASE64_INVALID,
+            Self::ControlRateExceeded => SESSION_CONTROL_RATE_EXCEEDED,
+            Self::DriverRefused => SESSION_DRIVER_REFUSED,
+            Self::FrameInvalid => SESSION_FRAME_INVALID,
+            Self::FrameLimit => SESSION_FRAME_LIMIT,
+            Self::InputCloseUnserved => SESSION_INPUT_CLOSE_UNSERVED,
+            Self::InputClosed => SESSION_INPUT_CLOSED,
+            Self::InputLimit => SESSION_INPUT_LIMIT,
+            Self::NotPipe => SESSION_NOT_PIPE,
+            Self::NotPty => SESSION_NOT_PTY,
+            Self::OutputBackpressure => SESSION_OUTPUT_BACKPRESSURE,
+            Self::PtyEnded => SESSION_PTY_ENDED,
+            Self::PtyUnserved => SESSION_PTY_UNSERVED,
+            Self::ResizeFailed => SESSION_RESIZE_FAILED,
+            Self::ResizeInvalid => SESSION_RESIZE_INVALID,
+            Self::SequenceInvalid => SESSION_SEQUENCE_INVALID,
+            Self::SignalInvalid => SESSION_SIGNAL_INVALID,
+            Self::TimeoutInvalid => SESSION_TIMEOUT_INVALID,
+            Self::WriteFailed => SESSION_WRITE_FAILED,
+        }
+    }
+
+    /// The member a driver error belongs to, or [`Self::DriverRefused`] when it belongs to none.
+    ///
+    /// A driver may return any code at all — `exec.*` and `resource.*` among them — and an
+    /// attachment may not put those on the wire. Codes that *are* members keep their name, because
+    /// `session.input-limit` tells a client something `session.driver-refused` does not; everything
+    /// else is classified, and the driver's own code goes in the frame's human-readable message.
+    #[must_use]
+    pub fn classify(code: &str) -> Self {
+        let mut index = 0;
+        while index < Self::ALL.len() {
+            let member = Self::ALL[index];
+            if member.as_str() == code {
+                return member;
+            }
+            index += 1;
+        }
+        Self::DriverRefused
+    }
+}
+
+impl Serialize for SessionProtocolErrorCode {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for SessionProtocolErrorCode {
+    /// Exact match only.
+    ///
+    /// Deliberately **not** [`Self::classify`]: that maps an unknown word onto `DriverRefused`,
+    /// which is right for a driver error the loop is naming and wrong for bytes off the wire — it
+    /// would let a peer put any word at all into a frame and have it read back as a member.
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let word = String::deserialize(deserializer)?;
+        Self::ALL
+            .into_iter()
+            .find(|member| member.as_str() == word)
+            .ok_or_else(|| {
+                serde::de::Error::custom(format!(
+                    "{word} is outside the closed session protocol-error vocabulary"
+                ))
+            })
+    }
+}
+
+/// Every code a session attachment's `protocol-error` frame may carry, as wire words.
+///
+/// Derived from [`SessionProtocolErrorCode::ALL`] and checked against it by
+/// `every_protocol_error_variant_has_a_wire_word`, so a variant added without a word — or a word
+/// added without a variant — fails the suite rather than shipping.
+pub const SESSION_PROTOCOL_ERROR_CODES: [&str; 19] = [
+    SESSION_BASE64_INVALID,
+    SESSION_CONTROL_RATE_EXCEEDED,
+    SESSION_DRIVER_REFUSED,
+    SESSION_FRAME_INVALID,
+    SESSION_FRAME_LIMIT,
+    SESSION_INPUT_CLOSE_UNSERVED,
+    SESSION_INPUT_CLOSED,
+    SESSION_INPUT_LIMIT,
+    SESSION_NOT_PIPE,
+    SESSION_NOT_PTY,
+    SESSION_OUTPUT_BACKPRESSURE,
+    SESSION_PTY_ENDED,
+    SESSION_PTY_UNSERVED,
+    SESSION_RESIZE_FAILED,
+    SESSION_RESIZE_INVALID,
+    SESSION_SEQUENCE_INVALID,
+    SESSION_SIGNAL_INVALID,
+    SESSION_TIMEOUT_INVALID,
+    SESSION_WRITE_FAILED,
+];
+
+/// Whether waiting alone can make the same request succeed — the `retriable` a client acts on.
+///
+/// **Per code, because it is not a property of the class.** `DriverErrorClass::Exhausted` marks
+/// every one of its refusals retriable at the port, and that is wrong for most of them:
+/// `workspace.write-limit` is `exhausted` and a request over the limit is over the limit however
+/// long the client waits. So the daemon flattened *every* driver refusal to `false`, which is what
+/// the released bundles pin — `exec.capacity`, `workspace.capacity`,
+/// `operation.ledger-capacity`, `snapshot.materialization-limit` and `request.body-limit` all
+/// assert `retriable: false` in executable `0.1.0`–`0.4.0` vectors — and that blanket was wrong in
+/// the other direction for the one code with a decision behind it.
+///
+/// Design 13: *"Allocation failure is `exhausted` and retriable because the host's pty count is a
+/// global resource other tenants can fill and free."* That is the whole basis of the one `true`
+/// below. Every other code keeps the `false` the released bundles pin, because no design decides
+/// otherwise and inventing one here is what this table exists to stop.
+///
+/// `refusals.json`'s `retriable` column is checked against this function, so the published register
+/// and the response cannot disagree again.
+#[must_use]
+pub fn session_refusal_is_retriable(code: &str) -> bool {
+    code == SESSION_PTY_EXHAUSTED
+}
+
+/// **Every** refusal code a session can raise, from either crate, in one place.
+///
+/// The two arrays below are views of this one — the pty-specific codes and the codes an attachment
+/// can put in a frame — and this is the domain the bundle checker ranges over. It exists because a
+/// narrower domain let three literals hide: `session.not-attachable`, `session.already-attached`
+/// and `session.attachment-capacity` were written out in the daemon rather than bound here, so
+/// neither direction of the check saw them and none had a row in the register that says it lists
+/// them all. `no_session_refusal_code_is_written_as_a_literal` keeps the class closed by refusing a
+/// literal anywhere in either crate's `src/`.
+///
+/// Ordered by Rust identifier, which is what `rustfmt` and a reader of this file see; that is not
+/// the same as wire-word order — `SESSION_INPUT_CLOSED` precedes `SESSION_INPUT_CLOSE_UNSERVED`
+/// here and `session.input-close-unserved` precedes `session.input-closed` on the wire. Nothing
+/// depends on either order: every consumer collects into a `BTreeSet`.
+pub const SESSION_REFUSAL_CODES: [&str; 32] = [
+    SESSION_ALREADY_ATTACHED,
+    SESSION_ATTACHMENT_CAPACITY,
+    SESSION_BASE64_INVALID,
+    SESSION_CONFINEMENT_UNAVAILABLE,
+    SESSION_CONTROL_RATE_EXCEEDED,
+    SESSION_DRIVER_REFUSED,
+    SESSION_FRAME_INVALID,
+    SESSION_FRAME_LIMIT,
+    SESSION_INPUT_CLOSED,
+    SESSION_INPUT_CLOSE_UNSERVED,
+    SESSION_INPUT_LIMIT,
+    SESSION_LIMIT_UNSERVED,
+    SESSION_NOT_ATTACHABLE,
+    SESSION_NOT_PIPE,
+    SESSION_NOT_PTY,
+    SESSION_OUTPUT_BACKPRESSURE,
+    SESSION_OUTPUT_LIMIT,
+    SESSION_PTY_ENDED,
+    SESSION_PTY_EXHAUSTED,
+    SESSION_PTY_FAILED,
+    SESSION_PTY_UNSERVED,
+    SESSION_READ_TIMEOUT,
+    SESSION_RESIZE_FAILED,
+    SESSION_RESIZE_INVALID,
+    SESSION_SEQUENCE_INVALID,
+    SESSION_SIGNAL_INVALID,
+    SESSION_STDIN_MISSING,
+    SESSION_TIMEOUT_INVALID,
+    SESSION_UNSERVED,
+    SESSION_WAIT_INVALID,
+    SESSION_WINDOW_INVALID,
+    SESSION_WRITE_FAILED,
+];
+
+/// The refusal codes this story introduced, a view of [`SESSION_REFUSAL_CODES`].
+///
+/// Kept as its own list because `xtask`'s `check_pty_additions` asks a question about `0.10.0`
+/// specifically — that the bundle this unit cut names each of them — which is a narrower claim than
+/// the register's, and a claim about a version rather than about the crate.
+pub const SESSION_PTY_REFUSAL_CODES: [&str; 10] = [
+    SESSION_INPUT_CLOSE_UNSERVED,
+    SESSION_NOT_PTY,
+    SESSION_OUTPUT_LIMIT,
+    SESSION_PTY_ENDED,
+    SESSION_PTY_EXHAUSTED,
+    SESSION_PTY_FAILED,
+    SESSION_PTY_UNSERVED,
+    SESSION_RESIZE_FAILED,
+    SESSION_RESIZE_INVALID,
+    SESSION_WINDOW_INVALID,
+];
 
 /// The one audience a delegated-context document may name (ADR 0011).
 ///
@@ -1214,6 +1559,13 @@ pub struct PipeSessionStartInput {
     pub input_limit_bytes: u64,
     pub frame_limit_bytes: u64,
     pub queued_frames: u32,
+    /// The channel this session carries. Omitted means [`SessionMode::Pipes`], and that default is
+    /// what enforces design 05 section 2 mechanically: no existing client can be handed a terminal.
+    #[serde(default)]
+    pub mode: SessionMode,
+    /// The initial terminal window, required for `pty` and refused for `pipes` (design 13).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub window: Option<PtyWindow>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1222,10 +1574,196 @@ pub enum SessionKind {
     Session,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+/// The channel a session carries, never the kind of resource it is (design 13).
+///
+/// `SessionKind` is the *resource* axis and holds one variant; growing it would make a terminal a
+/// different kind of resource from a pipe session, which is the split ADR 0008 refused. This is the
+/// channel axis, already carried as `mode` on the durable resource, and it is what grows.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SessionMode {
+    /// Three descriptors, separately attributed, and a machine protocol may run on them (ADR 0007).
+    #[default]
     Pipes,
+    /// One terminal: merged output, a line discipline, a window and a hangup (design 13).
+    Pty,
+}
+
+/// A terminal window in cells. Pixel dimensions are not on the wire and are set to zero.
+///
+/// **Deserialization admits exactly what the published schema admits, and nothing decides the
+/// answer but [`Self::within_bounds`].** The axes are declared
+/// `{"type": "integer", "minimum": 1, "maximum": 1000}`, and JSON Schema 2020-12 defines `integer`
+/// as *any number with a zero fractional part* — so `-1`, `1001`, `1e30` and `80.0` are all
+/// well-typed members of the vocabulary, and the published answer to each is decided by the range
+/// alone. A Rust integer field decided it instead, three times running: `u16` cut the vocabulary at
+/// 65535, `u64` moved the cut to −1, and neither ever admitted `80.0` — which any client whose
+/// window came out of a division writes, because `json.dumps({"columns": width / 2})` is `80.0`.
+/// Refusing that as "outside the closed vocabulary" was a false statement about an admitted frame.
+///
+/// So the axis reads every JSON number with a zero fractional part. A value in bounds is carried
+/// exactly; one out of bounds is saturated to a value that is also out of bounds, because past the
+/// range the contract only cares *that* it is out. A number with a fractional part is refused,
+/// which is true: it is outside the vocabulary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct PtyWindow {
+    pub columns: u64,
+    pub rows: u64,
+}
+
+/// The two axes, read the way the published schema declares them.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PtyWindowFields {
+    columns: WindowAxis,
+    rows: WindowAxis,
+}
+
+/// One JSON Schema `integer`, and where it sits relative to what a `u64` can hold.
+///
+/// `Below` and `Above` are not errors: the published schemas declare these fields `integer` with a
+/// `minimum` and a `maximum`, so a value outside the range is an admitted member of the vocabulary
+/// that the field's own bound refuses. Which refusal it earns is the field's business — see the
+/// three readers below — and this only reports where the number fell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JsonInteger {
+    Exact(u64),
+    Below,
+    Above,
+}
+
+/// Reads any JSON number with a zero fractional part, which is what JSON Schema 2020-12 means by
+/// `"type": "integer"`.
+///
+/// **The one rule, in one place.** A Rust integer field deciding what a published `integer` admits
+/// is the defect this wave has surfaced three times: `u16` cut the terminal window at 65535, `u64`
+/// moved that cut to −1, and `sequence` and `grace_ms` — one property over, on every client frame
+/// of *both* channel vocabularies — still refused `1.0`. Every reader that takes a client's integer
+/// goes through here, so the only thing that decides the answer is the field's declared range.
+///
+/// One residual and it is named rather than hidden: a literal `serde_json` itself cannot parse —
+/// `1e1000`, or several hundred digits — fails in the number parser before this is reached.
+fn read_json_integer<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+    what: &'static str,
+) -> Result<JsonInteger, D::Error> {
+    let number = serde_json::Number::deserialize(deserializer)?;
+    if let Some(value) = number.as_u64() {
+        return Ok(JsonInteger::Exact(value));
+    }
+    if number.as_i64().is_some_and(|value| value < 0) {
+        return Ok(JsonInteger::Below);
+    }
+    let Some(value) = number.as_f64() else {
+        return Err(serde::de::Error::custom(format!("{what} is a JSON number")));
+    };
+    if value.is_nan() || value.fract() != 0.0 {
+        return Err(serde::de::Error::custom(format!(
+            "{what} is an integer: a number with a zero fractional part"
+        )));
+    }
+    if value < 0.0 {
+        return Ok(JsonInteger::Below);
+    }
+    if value >= 18_446_744_073_709_551_615.0 {
+        return Ok(JsonInteger::Above);
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    Ok(JsonInteger::Exact(value as u64))
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WindowAxis(u64);
+
+impl<'de> Deserialize<'de> for WindowAxis {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // The declared range is 1..=1000, so `0` and `u64::MAX` are both outside it and
+        // `within_bounds` refuses either. Out of range in either direction is out of range.
+        Ok(Self(
+            match read_json_integer(deserializer, "a terminal window axis")? {
+                JsonInteger::Exact(value) => value,
+                JsonInteger::Below => 0,
+                JsonInteger::Above => u64::MAX,
+            },
+        ))
+    }
+}
+
+/// A client frame's `sequence`, declared `integer` in `1..=18446744073709551615`.
+///
+/// Saturating below to `0` puts it outside the declared minimum, and the attachment answers
+/// `session.sequence-invalid` — the published refusal for a sequence that is not the next one.
+/// Saturating above to `u64::MAX` leaves it inside the declared range, which is right: that value
+/// *is* the declared maximum, and it earns `session.sequence-invalid` for not being the next one.
+fn read_frame_sequence<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+    Ok(
+        match read_json_integer(deserializer, "a client frame sequence")? {
+            JsonInteger::Exact(value) => value,
+            JsonInteger::Below => 0,
+            JsonInteger::Above => u64::MAX,
+        },
+    )
+}
+
+/// A signal frame's `grace_ms`, declared `integer` in `0..=60000`.
+///
+/// Both saturations go **up**, unlike the window's. `0` is inside this field's declared range, so
+/// mapping a negative there would turn a value outside the vocabulary's minimum into a valid
+/// zero-grace signal; `u64::MAX` is above the declared maximum and earns `session.signal-invalid`,
+/// which is the published answer for a grace outside the bound.
+fn read_grace_ms<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+    Ok(
+        match read_json_integer(deserializer, "a signal grace in milliseconds")? {
+            JsonInteger::Exact(value) => value,
+            JsonInteger::Below | JsonInteger::Above => u64::MAX,
+        },
+    )
+}
+
+impl<'de> Deserialize<'de> for PtyWindow {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let fields = PtyWindowFields::deserialize(deserializer)?;
+        Ok(Self {
+            columns: fields.columns.0,
+            rows: fields.rows.0,
+        })
+    }
+}
+
+impl PtyWindow {
+    /// Whether both axes are within 1..=1000 cells.
+    ///
+    /// Zero is outside the bounds rather than a request for a default: a zero dimension is how a
+    /// terminal says *I do not know*, which is not what a client that sent a window meant.
+    #[must_use]
+    pub const fn within_bounds(&self) -> bool {
+        self.columns >= 1
+            && self.columns <= MAX_PTY_WINDOW_COLUMNS as u64
+            && self.rows >= 1
+            && self.rows <= MAX_PTY_WINDOW_ROWS as u64
+    }
+
+    /// The window as the `TIOCSWINSZ` field pair, once it is known to be in bounds.
+    ///
+    /// The axes are `u64` on the wire and `unsigned short` at the kernel **on purpose**. Design 13
+    /// discusses 65535 by name — "the kernel field is an `unsigned short`, so 65535 is deliverable"
+    /// — so a client is invited to try it, and a `u16` field made 65536 fail `serde` decoding
+    /// before `within_bounds` ran. That put the boundary between "your window is out of range" and
+    /// "your frame is not a frame" at 65535, a number no released document names, inside a range
+    /// the published schema describes with one rule and one refusal code. Now every integer
+    /// `serde_json` will parse decodes — negative, fractional-zero or enormous — and the range is
+    /// the only rule applied to it. The residual is `serde_json`'s own number parser, which refuses
+    /// `1e1000` and a several-hundred-digit literal before any of this is reached; that boundary is
+    /// the parser's, is the same for every numeric field on the wire, and is not one this type can
+    /// move.
+    #[must_use]
+    pub const fn cells(&self) -> Option<(u16, u16)> {
+        if !self.within_bounds() {
+            return None;
+        }
+        #[allow(clippy::cast_possible_truncation)] // `within_bounds` bounds both axes by 1000.
+        Some((self.columns as u16, self.rows as u16))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1298,22 +1836,60 @@ pub struct PipeSessionCapabilities {
     pub max_input_bytes: u64,
     pub max_frame_bytes: u64,
     pub max_queued_frames: u32,
+    /// The modes this daemon serves, derived from the capability facts and never a second source
+    /// of truth. `pty` appears only when `sessions.pty` was probe-verified (design 13).
+    pub modes: Vec<SessionMode>,
+    pub max_window_columns: u16,
+    pub max_window_rows: u16,
+    /// The control-frame rate an attachment is held to, and the window it is counted over.
+    ///
+    /// Every other bound a client must obey is on this document; these two were enforced and
+    /// unpublished, which made the one bound a terminal client is most likely to cross the only one
+    /// it could not read. `Ping` shares the budget, so a client choosing a keepalive interval needs
+    /// both numbers to choose it safely.
+    pub max_controls_per_window: u32,
+    pub control_window_ms: u64,
 }
 
+/// Every integer a client may put on a session channel, read the way the published schemas declare
+/// one — see [`read_json_integer`].
+///
+/// The enumeration is exhaustive over both channel-frame vocabularies. Client frames carry three
+/// distinct integer fields: `sequence` (on all four kinds, both vocabularies), `grace_ms` (on
+/// `signal`) and the terminal window's `columns`/`rows` (on `resize`). Every one of them goes
+/// through the shared reader.
+///
+/// The remaining integers in those documents are on **server** frames — `output.sequence`,
+/// `truncated.sequence`, `exit.sequence`, `protocol-error.sequence` and `exit.code` — and are left
+/// as plain Rust integers on purpose: substrate constructs them and never reads a client's bytes
+/// into one, so no Rust type there can mis-refuse anything a client sent. What the schema
+/// constrains for those is what substrate emits, and it emits in-range values by construction.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case", deny_unknown_fields)]
 pub enum PipeClientFrame {
     Stdin {
+        #[serde(deserialize_with = "read_frame_sequence")]
         sequence: u64,
         content: Base64Content,
     },
     CloseInput {
+        #[serde(deserialize_with = "read_frame_sequence")]
         sequence: u64,
     },
     Signal {
+        #[serde(deserialize_with = "read_frame_sequence")]
         sequence: u64,
         signal: Signal,
+        #[serde(deserialize_with = "read_grace_ms")]
         grace_ms: u64,
+    },
+    /// A new terminal window for a `pty` session (design 13). There is no `close-input` companion:
+    /// a pty has no half-close, so a client ends input by sending the terminal's own EOF character
+    /// as ordinary input bytes.
+    Resize {
+        #[serde(deserialize_with = "read_frame_sequence")]
+        sequence: u64,
+        window: PtyWindow,
     },
 }
 
@@ -1334,9 +1910,13 @@ pub enum PipeServerFrame {
         state: ExecState,
         exit: Option<ExecExit>,
     },
+    /// The code is [`SessionProtocolErrorCode`] and not a `String`, so "a session attachment can
+    /// only send a code the contract publishes" is a property of this type rather than of the one
+    /// function that used to be the only door. A `String` here was the same convention the enum was
+    /// introduced to replace.
     ProtocolError {
         sequence: u64,
-        code: String,
+        code: SessionProtocolErrorCode,
         message: String,
     },
 }
@@ -1488,6 +2068,14 @@ pub struct CapabilityFacts {
     /// a missing guarantee is a named refusal and never a weaker delivery (invariant 3).
     #[serde(rename = "secrets.slots", skip_serializing_if = "Option::is_none")]
     pub secrets_slots: Option<Vec<String>>,
+    /// Whether this driver proved it can give a confined process a controlling terminal.
+    ///
+    /// Published **only** after a startup probe allocated a pty pair, made it controlling inside a
+    /// throwaway sandbox and round-tripped a window size through the child — never from a constant
+    /// and never from configuration (invariant 4, design 13). Absent leaves every `mode: "pty"`
+    /// request `unserved` by name; it never falls back to pipes (invariant 3).
+    #[serde(rename = "sessions.pty", skip_serializing_if = "Option::is_none")]
+    pub sessions_pty: Option<bool>,
     #[serde(
         rename = "snapshot.provenance-events",
         skip_serializing_if = "Option::is_none"
@@ -1525,6 +2113,7 @@ impl Default for CapabilityFacts {
             exec_inline_capsule: None,
             exec_egress_apertures: None,
             secrets_slots: None,
+            sessions_pty: None,
             snapshot_provenance_events: None,
         }
     }
@@ -1664,6 +2253,8 @@ pub enum WireValidationError {
     ApertureModeMismatch,
     #[error("execution capsule manifest does not match its digest")]
     CapsuleManifestMismatch,
+    #[error("a session window is absent, unwanted, or outside the closed cell bounds")]
+    InvalidSessionWindow,
 }
 
 fn valid_sha256(value: &str) -> bool {
@@ -2011,6 +2602,36 @@ pub fn validate_aperture_request(
     }
 }
 
+/// Validates the initial window a session start declares against the mode it declared.
+///
+/// A `pty` start states its window and a `pipes` start states none: substrate has nothing to
+/// observe about a client's terminal, the client does, and inventing 80x24 would be manufacturing a
+/// fact (design 13). The same bounds decide a `resize` frame, so a window admitted at start and a
+/// window admitted mid-session are the same rule read from one place.
+///
+/// # Errors
+///
+/// Returns [`WireValidationError::InvalidSessionWindow`] when a `pty` start carries no window, a
+/// `pipes` start carries one, or either axis is outside 1..=1000 cells.
+pub fn validate_session_window(
+    mode: SessionMode,
+    window: Option<&PtyWindow>,
+) -> Result<(), WireValidationError> {
+    match (mode, window) {
+        (SessionMode::Pipes, None) => Ok(()),
+        (SessionMode::Pipes, Some(_)) | (SessionMode::Pty, None) => {
+            Err(WireValidationError::InvalidSessionWindow)
+        }
+        (SessionMode::Pty, Some(window)) => {
+            if window.within_bounds() {
+                Ok(())
+            } else {
+                Err(WireValidationError::InvalidSessionWindow)
+            }
+        }
+    }
+}
+
 /// An absolute path with no `.`, no `..`, no empty component and no trailing slash.
 ///
 /// Canonical in the textual sense only. Whether the host path exists and is a directory is the
@@ -2325,9 +2946,14 @@ mod tests {
         canonical_request_hash_v2, validate_execution_capsule, validate_relative_path,
     };
     use super::{
-        EXECUTION_CAPSULE_HASH_DOMAIN, EXECUTION_CAPSULE_MOUNT, MAX_READ_ONLY_ROOTS, ReadOnlyRoot,
-        WireValidationError, validate_read_only_roots,
+        CapabilityFacts, PipeSessionStartInput, PtyWindow, SessionMode, validate_session_window,
     };
+    use super::{
+        EXECUTION_CAPSULE_HASH_DOMAIN, EXECUTION_CAPSULE_MOUNT, MAX_PTY_WINDOW_COLUMNS,
+        MAX_PTY_WINDOW_ROWS, MAX_READ_ONLY_ROOTS, ReadOnlyRoot, WireValidationError,
+        validate_read_only_roots,
+    };
+    use super::{SESSION_PROTOCOL_ERROR_CODES, SessionProtocolErrorCode};
     use serde::Deserialize as _;
     use serde_json::Value;
     use sha2::{Digest as _, Sha256};
@@ -2578,6 +3204,308 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    /// Design 13: `SessionMode` grows, `SessionKind` does not, and an omitted `mode` can only ever
+    /// mean `pipes` — the mechanical half of design 05 § 2's "a PTY is never substituted for
+    /// pipes". A `0.4.0` client that never heard of a terminal cannot be handed one.
+    #[test]
+    fn an_omitted_session_mode_is_pipes_and_a_pty_start_carries_its_own_window() {
+        let start: PipeSessionStartInput = serde_json::from_value(serde_json::json!({
+            "exec": exec_start_value(),
+            "input_limit_bytes": 65_536,
+            "frame_limit_bytes": 4_096,
+            "queued_frames": 4
+        }))
+        .expect("a start without a mode decodes");
+        assert_eq!(start.mode, SessionMode::Pipes);
+        assert_eq!(start.window, None);
+
+        let pty: PipeSessionStartInput = serde_json::from_value(serde_json::json!({
+            "exec": exec_start_value(),
+            "input_limit_bytes": 65_536,
+            "frame_limit_bytes": 4_096,
+            "queued_frames": 4,
+            "mode": "pty",
+            "window": {"columns": 132, "rows": 40}
+        }))
+        .expect("a pty start decodes");
+        assert_eq!(pty.mode, SessionMode::Pty);
+        assert_eq!(
+            pty.window,
+            Some(PtyWindow {
+                columns: 132,
+                rows: 40
+            })
+        );
+        assert_eq!(
+            serde_json::to_value(SessionMode::Pty).expect("mode serialises"),
+            serde_json::json!("pty")
+        );
+    }
+
+    /// Design 13: the client half of the pty vocabulary is `input`, `resize` and `signal`. The
+    /// resize frame carries a window and nothing else, and a resize without one stays outside the
+    /// closed vocabulary.
+    #[test]
+    fn the_resize_frame_carries_a_window_and_joins_the_closed_client_vocabulary() {
+        let frame: PipeClientFrame = serde_json::from_value(serde_json::json!({
+            "kind": "resize",
+            "sequence": 3,
+            "window": {"columns": 100, "rows": 30}
+        }))
+        .expect("a resize frame decodes");
+        assert!(matches!(
+            frame,
+            PipeClientFrame::Resize {
+                sequence: 3,
+                window: PtyWindow {
+                    columns: 100,
+                    rows: 30
+                }
+            }
+        ));
+        assert!(
+            serde_json::from_value::<PipeClientFrame>(serde_json::json!({
+                "kind": "resize",
+                "sequence": 3,
+                "window": {"columns": 100, "rows": 30, "pixels": 4}
+            }))
+            .is_err(),
+            "pixel dimensions are not on the wire"
+        );
+    }
+
+    /// Design 13: 1–1000 cells on each axis, and **zero is refused rather than mapped to 80×24** —
+    /// a zero dimension is how a terminal says *I do not know*, which is not what a client that
+    /// sent a resize meant. A `pty` start without a window is refused for the same reason.
+    #[test]
+    fn a_window_is_one_to_one_thousand_cells_and_is_never_defaulted() {
+        assert_eq!(MAX_PTY_WINDOW_COLUMNS, 1_000);
+        assert_eq!(MAX_PTY_WINDOW_ROWS, 1_000);
+        for (columns, rows) in [(1, 1), (80, 24), (1_000, 1_000)] {
+            assert!(
+                PtyWindow { columns, rows }.within_bounds(),
+                "{columns}x{rows}"
+            );
+        }
+        for (columns, rows) in [(0, 24), (80, 0), (0, 0), (1_001, 24), (80, 1_001)] {
+            assert!(
+                !PtyWindow { columns, rows }.within_bounds(),
+                "{columns}x{rows}"
+            );
+        }
+        let window = PtyWindow {
+            columns: 80,
+            rows: 24,
+        };
+        assert_eq!(
+            validate_session_window(SessionMode::Pty, None),
+            Err(WireValidationError::InvalidSessionWindow),
+            "a pty start with no window is refused, never defaulted to 80x24"
+        );
+        assert_eq!(
+            validate_session_window(SessionMode::Pipes, Some(&window)),
+            Err(WireValidationError::InvalidSessionWindow),
+            "a pipes start carrying a window is refused"
+        );
+        assert_eq!(
+            validate_session_window(
+                SessionMode::Pty,
+                Some(&PtyWindow {
+                    columns: 0,
+                    rows: 24
+                })
+            ),
+            Err(WireValidationError::InvalidSessionWindow)
+        );
+        assert_eq!(
+            validate_session_window(SessionMode::Pty, Some(&window)),
+            Ok(())
+        );
+        assert_eq!(validate_session_window(SessionMode::Pipes, None), Ok(()));
+    }
+
+    /// Invariant 4 and design 13: `sessions.pty` is a driver fact, absent by default, and carries
+    /// its own wire name. Absent means every terminal request is refused by name; it never means
+    /// "probably yes".
+    #[test]
+    fn the_sessions_pty_fact_is_absent_by_default_and_carries_its_wire_name() {
+        let facts = CapabilityFacts::default();
+        assert_eq!(facts.sessions_pty, None);
+        let rendered = serde_json::to_value(&facts).expect("facts serialise");
+        assert!(
+            rendered.get("sessions.pty").is_none(),
+            "an absent fact is absent from the document, not false"
+        );
+        let published = CapabilityFacts {
+            sessions_pty: Some(true),
+            ..CapabilityFacts::default()
+        };
+        assert_eq!(
+            serde_json::to_value(&published).expect("facts serialise")["sessions.pty"],
+            serde_json::json!(true)
+        );
+    }
+
+    fn exec_start_value() -> Value {
+        serde_json::json!({
+            "workspace": "ws_test",
+            "argv": ["/bin/sh"],
+            "env": {"allow": [], "set": {}},
+            "sandbox": {
+                "capability_snapshot": format!("sha256:{}", "7".repeat(64)),
+                "network": "none",
+                "profile": "workspace",
+                "require": true
+            },
+            "limits": {
+                "timeout_ms": 5_000,
+                "output_bytes": 65_536,
+                "processes": 16,
+                "memory_bytes": 67_108_864,
+                "cpu_millis": 1_000
+            },
+            "wait": false,
+            "read_only_roots": [],
+            "secret_slots": [],
+            "lease_ttl_ms": 60_000
+        })
+    }
+
+    /// The class is closed by construction, and this proves the two halves of it agree.
+    ///
+    /// `SessionProtocolErrorCode::ALL` is what a caller enumerates and
+    /// `SESSION_PROTOCOL_ERROR_CODES` is what the contract publishes. A variant added without a
+    /// wire word, or a word added without a variant, fails here rather than shipping a code a
+    /// client cannot look up — which is the defect this type exists to make unrepresentable.
+    #[test]
+    fn every_protocol_error_variant_has_a_wire_word_and_the_reverse() {
+        let mut from_variants: Vec<&str> = SessionProtocolErrorCode::ALL
+            .iter()
+            .map(|member| member.as_str())
+            .collect();
+        from_variants.sort_unstable();
+        let mut published: Vec<&str> = SESSION_PROTOCOL_ERROR_CODES.to_vec();
+        published.sort_unstable();
+        assert_eq!(from_variants, published);
+        // Dedup *before* counting. Comparing `from_variants.len()` with `ALL.len()` was a
+        // tautology — the first is built by mapping the second — so two variants sharing one wire
+        // word passed it, and `check_pty_refusal_class` collects into a `BTreeSet`, which loses the
+        // duplicate too. `classify` would then return whichever came first and the other variant
+        // would be unreachable.
+        let mut distinct = from_variants.clone();
+        distinct.dedup();
+        assert_eq!(
+            distinct.len(),
+            SessionProtocolErrorCode::ALL.len(),
+            "two variants share one wire word: {from_variants:?}"
+        );
+        for member in SessionProtocolErrorCode::ALL {
+            assert_eq!(SessionProtocolErrorCode::classify(member.as_str()), member);
+            assert!(
+                member.as_str().starts_with("session."),
+                "{} is outside the published protocol-error code pattern",
+                member.as_str()
+            );
+        }
+        // Anything a driver can return that is not a member classifies rather than escaping.
+        for outside in [
+            "exec.cgroup-missing",
+            "exec.observe-timeout",
+            "exec.sandbox-unavailable",
+            "resource.not-found",
+        ] {
+            assert_eq!(
+                SessionProtocolErrorCode::classify(outside),
+                SessionProtocolErrorCode::DriverRefused
+            );
+        }
+    }
+
+    /// Every integer a client may put on a channel frame reads the way the schema declares it.
+    ///
+    /// The enumeration is exhaustive over both channel-frame vocabularies' **client** branches:
+    /// `sequence` on all four kinds, `grace_ms` on `signal`, and the window axes on `resize`. The
+    /// remaining integers in those documents are on server frames, which substrate constructs and
+    /// never reads a client's bytes into.
+    ///
+    /// Out of range is not the same as outside the vocabulary, and the two saturations differ on
+    /// purpose: a window's declared minimum is 1 so `0` is out of range, and `grace_ms`'s is 0 so a
+    /// negative has to saturate *up* to stay out of range rather than become a valid zero grace.
+    #[test]
+    fn every_client_frame_integer_reads_the_way_the_schema_declares_it() {
+        use super::PtyWindow;
+
+        let decode = |text: &str| serde_json::from_str::<PipeClientFrame>(text);
+        // A zero fractional part is an integer to every conforming validator, on every field.
+        assert!(matches!(
+            decode(r#"{"kind":"resize","sequence":1.0,"window":{"columns":132.0,"rows":43.0}}"#)
+                .expect("an admitted frame"),
+            PipeClientFrame::Resize {
+                sequence: 1,
+                window: PtyWindow {
+                    columns: 132,
+                    rows: 43
+                }
+            }
+        ));
+        assert!(matches!(
+            decode(r#"{"kind":"stdin","sequence":2.0,"content":{"encoding":"base64","data":""}}"#)
+                .expect("an admitted frame"),
+            PipeClientFrame::Stdin { sequence: 2, .. }
+        ));
+        assert!(matches!(
+            decode(r#"{"kind":"close-input","sequence":3.0}"#).expect("an admitted frame"),
+            PipeClientFrame::CloseInput { sequence: 3 }
+        ));
+        assert!(matches!(
+            decode(r#"{"kind":"signal","sequence":4.0,"signal":"TERM","grace_ms":1000.0}"#)
+                .expect("an admitted frame"),
+            PipeClientFrame::Signal {
+                sequence: 4,
+                grace_ms: 1000,
+                ..
+            }
+        ));
+
+        // Out of range decodes and lands outside its own declared bound, so the field's published
+        // refusal answers rather than "your frame is not a frame".
+        for (text, sequence) in [
+            (r#"{"kind":"close-input","sequence":-1}"#, 0),
+            (r#"{"kind":"close-input","sequence":-1.0}"#, 0),
+            (r#"{"kind":"close-input","sequence":1e30}"#, u64::MAX),
+        ] {
+            let PipeClientFrame::CloseInput { sequence: found } =
+                decode(text).expect("an out-of-range sequence still decodes")
+            else {
+                panic!("{text}");
+            };
+            assert_eq!(found, sequence, "{text}");
+        }
+        for text in [
+            r#"{"kind":"signal","sequence":1,"signal":"TERM","grace_ms":-1}"#,
+            r#"{"kind":"signal","sequence":1,"signal":"TERM","grace_ms":1e30}"#,
+        ] {
+            let PipeClientFrame::Signal { grace_ms, .. } =
+                decode(text).expect("an out-of-range grace still decodes")
+            else {
+                panic!("{text}");
+            };
+            assert!(
+                grace_ms > 60_000,
+                "{text} must land above the declared maximum, not on a valid zero grace"
+            );
+        }
+
+        // A fractional part is genuinely outside the vocabulary, and is refused as such.
+        for text in [
+            r#"{"kind":"close-input","sequence":1.5}"#,
+            r#"{"kind":"signal","sequence":1,"signal":"TERM","grace_ms":0.5}"#,
+            r#"{"kind":"resize","sequence":1,"window":{"columns":80.5,"rows":24}}"#,
+        ] {
+            assert!(decode(text).is_err(), "{text}");
+        }
     }
 
     /// The capsule hash domain is a wire-visible protocol byte string that another party

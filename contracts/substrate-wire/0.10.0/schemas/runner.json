@@ -1,0 +1,169 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.10.0:runner",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "const": "schemas/runner.json"
+    },
+    "comparison": {
+      "additionalProperties": false,
+      "properties": {
+        "expected": {
+          "const": "exact-json-value-equality"
+        },
+        "postconditions": {
+          "const": "rfc6901-pointer-plus-declared-scalar-operator"
+        }
+      },
+      "required": [
+        "expected",
+        "postconditions"
+      ],
+      "type": "object"
+    },
+    "exit_codes": {
+      "additionalProperties": false,
+      "properties": {
+        "0": {
+          "const": "pass"
+        },
+        "1": {
+          "const": "conformance-failure"
+        },
+        "2": {
+          "const": "invalid-input"
+        },
+        "3": {
+          "const": "harness-failure"
+        }
+      },
+      "required": [
+        "0",
+        "1",
+        "2",
+        "3"
+      ],
+      "type": "object"
+    },
+    "format": {
+      "const": "b10x.substrate-clean-room-runner.v1"
+    },
+    "invocation": {
+      "additionalProperties": false,
+      "properties": {
+        "argv": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 7,
+          "type": "array"
+        },
+        "network": {
+          "const": "disabled-unless-vector-setup-provides-sentinels"
+        },
+        "working_directory": {
+          "const": "new-empty-directory"
+        }
+      },
+      "required": [
+        "argv",
+        "working_directory",
+        "network"
+      ],
+      "type": "object"
+    },
+    "isolation": {
+      "additionalProperties": false,
+      "properties": {
+        "producer_input": {
+          "const": "action-only"
+        },
+        "repository_access": {
+          "const": "bundle-only"
+        },
+        "setup_delivery": {
+          "const": "runner-only"
+        }
+      },
+      "required": [
+        "repository_access",
+        "setup_delivery",
+        "producer_input"
+      ],
+      "type": "object"
+    },
+    "protocol": {
+      "additionalProperties": false,
+      "properties": {
+        "result_schema": {
+          "const": "schemas/runner-result.json"
+        },
+        "vector_schema": {
+          "const": "schemas/vector.json"
+        }
+      },
+      "required": [
+        "vector_schema",
+        "result_schema"
+      ],
+      "type": "object"
+    },
+    "roles": {
+      "additionalProperties": false,
+      "properties": {
+        "producer_receives": {
+          "const": [
+            "action"
+          ]
+        },
+        "runner_owns": {
+          "const": [
+            "setup",
+            "probes",
+            "comparison",
+            "reporting"
+          ]
+        }
+      },
+      "required": [
+        "producer_receives",
+        "runner_owns"
+      ],
+      "type": "object"
+    },
+    "selection": {
+      "additionalProperties": false,
+      "properties": {
+        "fixture_identity": {
+          "const": "out-of-band-only-never-request-data"
+        },
+        "manifest_pointer": {
+          "const": "/conformance/executable_vectors"
+        },
+        "source": {
+          "const": "bundle-manifest"
+        }
+      },
+      "required": [
+        "source",
+        "manifest_pointer",
+        "fixture_identity"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "$schema",
+    "format",
+    "roles",
+    "invocation",
+    "isolation",
+    "selection",
+    "protocol",
+    "comparison",
+    "exit_codes"
+  ],
+  "title": "Clean-room conformance runner interface",
+  "type": "object"
+}

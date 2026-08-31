@@ -83,9 +83,15 @@ directories only after orphan cgroups are reconciled and refuses unexpected or s
 
 ## Later phase-4 slices
 
-PTY/resize behavior, network WebSocket/TLS transport, proof-bound brokered authority, reconnect,
-sealed named secret slots, and destination-bound egress remain separate additions. A live vendor
-harness is refused until the required secret and egress capabilities exist.
+Network WebSocket/TLS transport, proof-bound brokered authority and reconnect remain separate
+additions. A live vendor harness is refused until the required secret and egress capabilities exist.
+
+Landed since this plan was written, each as its own gated slice: sealed named secret slots
+([ADR 0012](../../adr/0012-secret-slots-are-sealed-memfds.md)), destination-bound egress
+([ADR 0013](../../adr/0013-egress-apertures-are-declared-by-the-operator.md)) and its byte ceiling
+([ADR 0014](../../adr/0014-apertures-carry-a-declared-byte-ceiling.md)), and PTY/resize behaviour
+([ADR 0019](../../adr/0019-pty-is-a-second-session-mode.md)) — a terminal is a second session **mode** on this same
+route family, so it added no route and no second lifecycle.
 
 ## Exit evidence
 

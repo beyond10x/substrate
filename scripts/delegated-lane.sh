@@ -9,6 +9,7 @@
 #     bash scripts/delegated-lane.sh
 #
 # Without it the lane is absent, not green: `cargo test` alone proves the portable refusal only.
+# It runs both delegated lanes: the host crate's own cases and the clean-room runner's.
 set -euo pipefail
 
 if [[ "${SUBSTRATE_DELEGATED_INNER:-}" != "1" ]]; then
@@ -31,5 +32,22 @@ echo $$ > "${root}/runner/cgroup.procs"
 echo "+cpu +memory +pids" > "${root}/cgroup.subtree_control"
 
 echo "delegated-lane: root ${root}, controllers ${controllers}"
-exec env SUBSTRATE_VECTORS_CGROUP_ROOT="${root}" \
-  cargo test -p substrate-daemon --test runtime_vectors -- --nocapture "$@"
+export SUBSTRATE_VECTORS_CGROUP_ROOT="${root}"
+
+# The host crate has delegated cases of its own — a pty session's echo, controlling terminal,
+# SIGWINCH, output bound and whole-tree cleanup (design 13). They read the same variable and are
+# *absent* without it, so a lane that ran only the daemon's runner would leave them looking green
+# while never running.
+#
+# **No name filter.** Selecting them by the substring `pty` skipped two cases whose names do not
+# carry it, and a filter that matches nothing still exits 0 — so a rename would have made this lane
+# green having run nothing, which is the exact failure it exists to prevent. The
+# absent-without-SUBSTRATE_VECTORS_CGROUP_ROOT guard inside each case does the selecting, exactly as
+# the daemon half already does.
+#
+# One thread, because these cases share one delegation root: `ProcessRuntime::new` reconciles every
+# `substrate-ex_*` cgroup under its configured root at construction, which is right for the one
+# daemon that owns a root and fatal for six drivers that share one.
+cargo test -p substrate-host --locked -- --nocapture --test-threads=1
+
+exec cargo test -p substrate-daemon --test runtime_vectors -- --nocapture "$@"

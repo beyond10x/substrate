@@ -1884,6 +1884,7 @@ dependencies = [
  "chrono",
  "hex",
  "libc",
+ "nix",
  "parking_lot",
  "serde",
  "serde_json",

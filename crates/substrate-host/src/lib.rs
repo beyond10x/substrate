@@ -5,6 +5,7 @@ mod egress;
 mod fs;
 mod probe;
 mod process;
+mod pty;
 mod seccomp;
 mod secrets;
 
@@ -341,7 +342,7 @@ pub trait Driver: Send + Sync {
         _input: &substrate_wire::PipeSessionStartInput,
     ) -> DispatchOutcome<ExecObservation> {
         DispatchOutcome::NotDispatched(DriverError::unserved(
-            "session.unserved",
+            substrate_wire::SESSION_UNSERVED,
             "The selected driver does not serve raw-pipe sessions.",
             "session",
         ))
@@ -350,7 +351,7 @@ pub trait Driver: Send + Sync {
     /// Writes one bounded frame to an admitted raw-pipe process.
     async fn write_pipe_session(&self, _id: &str, _bytes: &[u8]) -> Result<(), DriverError> {
         Err(DriverError::unserved(
-            "session.unserved",
+            substrate_wire::SESSION_UNSERVED,
             "The selected driver does not serve raw-pipe sessions.",
             "session",
         ))
@@ -363,7 +364,7 @@ pub trait Driver: Send + Sync {
         _timeout: std::time::Duration,
     ) -> Result<Option<PipeFrame>, DriverError> {
         Err(DriverError::unserved(
-            "session.unserved",
+            substrate_wire::SESSION_UNSERVED,
             "The selected driver does not serve raw-pipe sessions.",
             "session",
         ))
@@ -372,8 +373,21 @@ pub trait Driver: Send + Sync {
     /// Half-closes the admitted raw-pipe process input.
     async fn close_pipe_session_input(&self, _id: &str) -> Result<(), DriverError> {
         Err(DriverError::unserved(
-            "session.unserved",
+            substrate_wire::SESSION_UNSERVED,
             "The selected driver does not serve raw-pipe sessions.",
+            "session",
+        ))
+    }
+
+    /// Applies a new window to an admitted `pty` session.
+    async fn resize_pty_session(
+        &self,
+        _id: &str,
+        _window: substrate_wire::PtyWindow,
+    ) -> Result<(), DriverError> {
+        Err(DriverError::unserved(
+            substrate_wire::SESSION_PTY_UNSERVED,
+            "The selected driver does not serve pty sessions.",
             "session",
         ))
     }
@@ -570,6 +584,20 @@ impl HostDriver {
     /// Refuses missing resources and execs which were not started as pipe sessions.
     pub async fn close_pipe_session_input(&self, id: &str) -> Result<(), DriverError> {
         self.processes.close_pipe_input(id).await
+    }
+
+    /// Applies a new window to a live terminal.
+    ///
+    /// # Errors
+    ///
+    /// Refuses missing resources and execs which were not started as pty sessions, and reports a
+    /// kernel refusal without pretending the child saw the new size.
+    pub fn resize_pty_session(
+        &self,
+        id: &str,
+        window: substrate_wire::PtyWindow,
+    ) -> Result<(), DriverError> {
+        self.processes.resize_pty(id, window)
     }
 
     async fn filesystem_io<T, F>(&self, operation: F) -> Result<T, DriverError>
@@ -869,6 +897,14 @@ impl Driver for HostDriver {
 
     async fn close_pipe_session_input(&self, id: &str) -> Result<(), DriverError> {
         HostDriver::close_pipe_session_input(self, id).await
+    }
+
+    async fn resize_pty_session(
+        &self,
+        id: &str,
+        window: substrate_wire::PtyWindow,
+    ) -> Result<(), DriverError> {
+        HostDriver::resize_pty_session(self, id, window)
     }
 
     async fn observe_exec(&self, id: &str) -> Result<ExecObservation, DriverError> {

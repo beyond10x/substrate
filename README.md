@@ -51,7 +51,8 @@ published contract.**
 | phase 4, [raw pipe sessions](adr/0007-protocol-processes-use-raw-pipe-sessions.md) | source-typed bounded raw-pipe primitive, distinct durable session identity, leased start, single-attachment Unix-WebSocket route ([plan 04](docs/plan/04-direct-byte-plane.md)) |
 | daemon image release | [`.github/workflows/release.yml`](.github/workflows/release.yml) publishes, keyless-signs and digest-pins `ghcr.io/beyond10x/b10x-substrate-daemon:<version>` on an annotated bare-version tag whose commit has a green gate run; a pre-release tag publishes nothing. `0.2.3` is published at `sha256:ab101582…`, keyless-signed. It needs no repository secret: the image push, the release and the changelog commit all use the run's own `GITHUB_TOKEN`. The changelog digest line lands by pull request — `main` is protected and declines a direct push |
 | stable publication | **not done.** The contract bundles' OCI packaging, signing and digest pinning are separate release work; no bundle is a stable published contract |
-| PTY, network session authority, Git sources | **absent** |
+| phase 4, [pty sessions](adr/0019-pty-is-a-second-session-mode.md) | a terminal is a second session **mode** on the same route family, not a second resource: `mode: "pty"` with a required 1–1000-cell window, a `resize` frame, and the `sessions.pty` fact published only after a startup probe allocated a pair, made it controlling inside a throwaway sandbox and round-tripped a window through the child. Absent, the mode is refused `session.pty-unserved` (501) and **never** served as pipes |
+| network session authority, Git sources | **absent** |
 | hosted trust envelope | accepted in design, **not implemented**; the TCP static bearer is explicitly development-only |
 
 Per-area state with the exact next proof each is waiting for is [`STATUS.md`](STATUS.md); ordered
@@ -83,6 +84,7 @@ The table is the gate's own order (`scripts/gate.sh`).
 | contract bundle 0.7.0 | `cargo xtask check-bundle 0.7.0` |
 | contract bundle 0.8.0 | `cargo xtask check-bundle 0.8.0` |
 | contract bundle 0.9.0 | `cargo xtask check-bundle 0.9.0` — checks the multi-major registry and served catch-all paths |
+| contract bundle 0.10.0 | `cargo xtask check-bundle 0.10.0` — checks the PTY mode, closed frame vocabulary and refusal register |
 | contract JSON | `cargo xtask check-json` — every JSON under `contracts/` is classified by exactly one bundled schema, or it fails closed |
 | toolchain | `cargo xtask check-toolchain` |
 
@@ -107,7 +109,7 @@ The four `scripts/render-contract-bundle*.py` and their `check-contract-bundle*.
 **not tooling** — they are the reproducibility proof of the frozen `0.1.0`–`0.4.0` bundles, which
 are immutable, and `0.4.0`'s own `generator.name` points at one of them. They stay in Python and
 are not ported. `render-bundle` dispatches to the frozen renderer for `0.5.0`–`0.8.0` and the
-versioned multi-major renderer for `0.9.0`; a test asserts the original renderer still reproduces
+versioned multi-major renderer for `0.9.0` and later; a test asserts the original renderer still reproduces
 the frozen `0.4.0` byte for byte.
 
 `crates/substrate-daemon/tests/runtime_vectors.rs` is the clean-room runner — an independent

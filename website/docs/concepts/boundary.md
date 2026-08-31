@@ -33,7 +33,7 @@ plane does not import product behavior.
 |---|---|
 | workspaces | identity, confined filesystem root, guarded files, lifecycle |
 | execs | argv-only start, sandbox requirements, limits, signals, output, terminal state |
-| sessions | leased raw-pipe lifecycle and one bounded attachment |
+| sessions | leased raw-pipe and probe-gated PTY modes with one bounded attachment |
 | operations | caller-minted retry identity and durable outcome |
 | events | typed transitions with bounded replay |
 | capabilities | facts probed from the active backend and configuration |

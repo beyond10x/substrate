@@ -1,0 +1,303 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.10.0:pipe-channel-frame",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "content": {
+          "additionalProperties": false,
+          "properties": {
+            "data": {
+              "maxLength": 87384,
+              "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$",
+              "type": "string"
+            },
+            "encoding": {
+              "const": "base64"
+            }
+          },
+          "required": [
+            "encoding",
+            "data"
+          ],
+          "type": "object"
+        },
+        "kind": {
+          "const": "stdin"
+        },
+        "sequence": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "sequence",
+        "content"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "close-input"
+        },
+        "sequence": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "sequence"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "grace_ms": {
+          "maximum": 60000,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "kind": {
+          "const": "signal"
+        },
+        "sequence": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "signal": {
+          "enum": [
+            "INT",
+            "TERM",
+            "KILL"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "sequence",
+        "signal",
+        "grace_ms"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "content": {
+          "additionalProperties": false,
+          "properties": {
+            "data": {
+              "maxLength": 87384,
+              "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$",
+              "type": "string"
+            },
+            "encoding": {
+              "const": "base64"
+            }
+          },
+          "required": [
+            "encoding",
+            "data"
+          ],
+          "type": "object"
+        },
+        "kind": {
+          "const": "output"
+        },
+        "sequence": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "stream": {
+          "enum": [
+            "stdout",
+            "stderr"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "sequence",
+        "stream",
+        "content"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "truncated"
+        },
+        "sequence": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "stream": {
+          "enum": [
+            "stdout",
+            "stderr"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "sequence",
+        "stream"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "exit": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "oneOf": [
+                {
+                  "properties": {
+                    "code": {
+                      "maximum": 255,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "signal": {
+                      "type": "null"
+                    }
+                  }
+                },
+                {
+                  "properties": {
+                    "code": {
+                      "type": "null"
+                    },
+                    "signal": {
+                      "enum": [
+                        "INT",
+                        "TERM",
+                        "KILL"
+                      ]
+                    }
+                  }
+                }
+              ],
+              "properties": {
+                "code": {
+                  "maximum": 255,
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "signal": {
+                  "enum": [
+                    "INT",
+                    "TERM",
+                    "KILL",
+                    null
+                  ]
+                }
+              },
+              "required": [
+                "code",
+                "signal"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "kind": {
+          "const": "exit"
+        },
+        "sequence": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "state": {
+          "enum": [
+            "exited",
+            "cancelled",
+            "expired",
+            "unknown"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "sequence",
+        "state",
+        "exit"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "code": {
+          "pattern": "^session\\.[a-z0-9-]+$",
+          "type": "string"
+        },
+        "kind": {
+          "const": "protocol-error"
+        },
+        "message": {
+          "maxLength": 1024,
+          "minLength": 1,
+          "type": "string"
+        },
+        "sequence": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "kind",
+        "sequence",
+        "code",
+        "message"
+      ],
+      "type": "object",
+      "x-b10x-codes": [
+        "session.base64-invalid",
+        "session.control-rate-exceeded",
+        "session.driver-refused",
+        "session.frame-invalid",
+        "session.frame-limit",
+        "session.input-close-unserved",
+        "session.input-closed",
+        "session.input-limit",
+    "session.not-pipe",
+    "session.not-pty",
+    "session.output-backpressure",
+    "session.pty-ended",
+        "session.pty-unserved",
+        "session.resize-failed",
+        "session.resize-invalid",
+        "session.sequence-invalid",
+        "session.signal-invalid",
+        "session.timeout-invalid",
+        "session.write-failed"
+      ],
+      "x-b10x-codes-are": "the-closed-set-the-attachment-loop-can-emit-in-either-mode"
+    }
+  ],
+  "title": "Closed bounded raw-pipe WebSocket frame vocabulary"
+}

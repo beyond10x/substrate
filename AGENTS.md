@@ -41,7 +41,8 @@ Each is a claim that can be checked. Breaking one is a design change, not a refa
 5. **Operations are durable before driver dispatch**
    (`adr/0005-operations-are-durable-before-driver-dispatch.md`).
 6. **Every released contract bundle directory is immutable.** `contracts/substrate-wire/0.1.0`
-   through `0.9.0` exist; `0.9.0` is the current development bundle, declaring all served API
+   through `0.10.0` exist; `0.10.0` is the current development bundle, adding the `pty` session
+   mode, the `resize` frame and the `sessions.pty` fact (ADR 0019); `0.9.0` declared all served API
    majors and the v1 catch-all file paths in one registry (ADR 0018); `0.8.0` added the declared
    aperture byte ceiling and the named bound on an exec observation (ADR 0014); `0.7.0` added delegated
    context and grant attribution (ADR 0011); `0.6.0` added destination-bound egress
@@ -138,7 +139,7 @@ In order: `cargo test --workspace --release --locked`, `cargo fmt --all --check`
 `cargo xtask check-licenses`,
 `check-contract-bundle.py`, `check-contract-bundle-0.2.0.py`,
 `-0.3.0.py`, `-0.4.0.py`, `cargo xtask check-bundle 0.5.0`, `check-bundle 0.6.0`, `check-bundle 0.7.0`,
-`check-bundle 0.8.0`, `check-bundle 0.9.0`,
+`check-bundle 0.8.0`, `check-bundle 0.9.0`, `check-bundle 0.10.0`,
 `cargo xtask check-json` and `cargo xtask check-toolchain`.
 Green here is the bar for `main`.
 The former brand is fenced org-wide by `scripts/check-org-brand.sh` in the **atlas** repo, not here.
@@ -158,15 +159,15 @@ bundles' reproducibility proof (invariant 6), not as tooling.
 | `check-licenses` | non-Apache workspace metadata, an unreviewed dependency licence or third-party notice drift | yes |
 | `package-bundle <version> --out <dir>` | produces a released bundle as a deterministic OCI image layout | no — under `cargo test` |
 | `render-bundle <version> --out <dir>` | produces a bundle tree from `substrate-wire` and `xtask/bundle-source/<version>/`; refuses to write anywhere under `contracts/` | no — under `cargo test` |
-| `check-bundle <version>` | a released bundle whose bytes are not the fixed point of `xtask/bundle-source/<version>/` | yes, `0.5.0` through `0.9.0` |
-| `check-json [<version>...]` | JSON beneath a released bundle that no bundled schema classifies, that its schema rejects, or that is not in deterministic source form | yes, all nine |
+| `check-bundle <version>` | a released bundle whose bytes are not the fixed point of `xtask/bundle-source/<version>/` | yes, `0.5.0` through `0.10.0` |
+| `check-json [<version>...]` | JSON beneath a released bundle that no bundled schema classifies, that its schema rejects, or that is not in deterministic source form | yes, all ten |
 
 **`cargo xtask package-bundle <version> --out <dir>`** packages a released bundle as a
 deterministic OCI image layout. It is not a gate step of its own: its cases run under
 `cargo test --workspace --locked`, the gate's first step.
 
 **`cargo xtask render-bundle <version>` is how a successor bundle is cut.** The original renderer
-is frozen for `0.5.0`–`0.8.0`; `0.9.0` selects the versioned multi-major renderer.
+is frozen for `0.5.0`–`0.8.0`; `0.9.0` and later select the versioned multi-major renderer.
 `xtask/bundle-source/<version>/` holds what a human authored — one file per
 emitted path, plus `routes.json`, `coverage.json`, `hash-cases.json`, `vector-order.json` and
 `executable-vectors.json`; the renderer computes 30 of `0.4.0`'s 200 files whole and splices
@@ -192,7 +193,8 @@ reason.** `crates/substrate-daemon/tests/runtime_vectors.rs` spawns the *shipped
 hand-written HTTP/1.1 and WebSocket client, so it links no implementation and asserts only on
 the wire; `cargo test --workspace --locked` runs it. Its portable lane asserts three named
 refusals — `exec.sandbox-unavailable` (501), `exec.secret-slots-unserved` (501) and
-`exec.secret-slot-descriptor-invalid` (422) — across 34 cases, and its delegated lane 54
+`exec.secret-slot-descriptor-invalid` (422) — plus `session.pty-unserved` (501) — across 35 cases,
+and its delegated lane 62, which include an interactive shell driven through a `pty` session
 (`crates/substrate-daemon/tests/runtime_vectors.rs`, `PORTABLE_CASES` and `DELEGATED_CASES`). Its delegated lane runs only when
 `SUBSTRATE_VECTORS_CGROUP_ROOT` names a delegated cgroup v2 subtree the test process is inside;
 unset, those cases are **absent, never reported as passed** (invariant 3). **`bash scripts/delegated-lane.sh`
@@ -203,8 +205,8 @@ and an absent lane looks identical to a green one if you only read `cargo test`.
 
 **The gate verifies every released bundle, not just `0.1.0`.** `scripts/gate.sh:20-23` runs the
 four frozen Python checkers, and the lines after them run `cargo xtask check-bundle` for `0.5.0`
-through `0.9.0`, so
-a green gate *is* evidence that all nine still hold. Cutting a successor bundle therefore means
+through `0.10.0`, so
+a green gate *is* evidence that all ten still hold. Cutting a successor bundle therefore means
 **adding its check to `scripts/gate.sh`** — a bundle whose check is not in the gate is unverified
 from the next commit onward.
 

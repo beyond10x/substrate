@@ -32,6 +32,7 @@ run cargo xtask check-bundle 0.6.0
 run cargo xtask check-bundle 0.7.0
 run cargo xtask check-bundle 0.8.0
 run cargo xtask check-bundle 0.9.0
+run cargo xtask check-bundle 0.10.0
 run cargo xtask check-json
 run cargo xtask check-toolchain
 
