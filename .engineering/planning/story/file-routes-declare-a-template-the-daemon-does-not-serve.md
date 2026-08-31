@@ -2,12 +2,12 @@
 format: aep.planning-md/1
 id: story:file-routes-declare-a-template-the-daemon-does-not-serve
 kind: story
-status: active
+status: implemented
 title: The file routes are served at a template the contract cannot declare
 summary: The daemon registers a wildcard file path and every bundle declares a single-segment one; the renderer cannot express the wildcard, and render.rs is frozen by generator.digest.
 relations:
 - decomposes: epic:release-hardening
-revision: 3
+revision: 4
 ---
 # Story: The file routes are served at a template the contract cannot declare
 

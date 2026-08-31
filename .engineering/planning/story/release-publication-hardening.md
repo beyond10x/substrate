@@ -2,12 +2,12 @@
 format: aep.planning-md/1
 id: story:release-publication-hardening
 kind: story
-status: active
+status: implemented
 title: Daemon releases are public, immutable, exact-binary tested and non-overwriting
 summary: Harden GHCR visibility, image layout, tag races, summaries and changelog flow.
 relations:
 - decomposes: epic:release-hardening
-revision: 3
+revision: 4
 ---
 # Story: Release publication hardening
 

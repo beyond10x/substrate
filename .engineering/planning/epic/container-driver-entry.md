@@ -2,7 +2,7 @@
 format: aep.planning-md/1
 id: epic:container-driver-entry
 kind: epic
-status: draft
+status: proposed
 title: Container driver entry
 summary: 'Plan 03''s entry criteria proven before any Docker code: no host type crosses the driver port, one driver-parameterised conformance journey, named root-equivalent Docker authorities.'
 owner: substrate
@@ -10,7 +10,7 @@ tags:
 - phase-5
 relations:
 - depends_on: epic:byte-plane-completion
-revision: 3
+revision: 5
 ---
 # Epic: Container driver entry
 
@@ -63,3 +63,7 @@ implemented, and `story:docker-driver-entry-gate`, which is a draft now carrying
 when **both** are, and the Docker gate is the one that remains — a gate stated before any Docker
 code exists, whose design says sealed secret slots and egress apertures are **absent** on a
 container driver rather than weakened.
+
+## Reconciled delivery — 2026-09-01
+
+The structural driver-port story is implemented. The proposed Docker entry gate remains first, followed by a workspace/exec slice and then an immutable image-backed workload slice. Both implementation slices depend on shared black-box conformance and retain absent facts for secret slots and apertures until a separate mechanism proves them.

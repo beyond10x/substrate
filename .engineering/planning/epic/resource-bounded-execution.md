@@ -2,7 +2,7 @@
 format: aep.planning-md/1
 id: epic:resource-bounded-execution
 kind: epic
-status: active
+status: implemented
 title: Resource-bounded general execution
 summary: Hard persistent and ephemeral storage ceilings, exact execution accounting, and public runnable examples for arbitrary confined commands.
 owner: substrate
@@ -10,7 +10,7 @@ tags:
 - confinement
 - o1
 - observability
-revision: 3
+revision: 4
 ---
 ## Outcome
 

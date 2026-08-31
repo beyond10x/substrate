@@ -2,14 +2,14 @@
 format: aep.planning-md/1
 id: epic:release-hardening
 kind: epic
-status: draft
+status: active
 title: Release hardening
 summary: A CI gate, a pinned toolchain, a re-observed STATUS.md, and a signed digest-pinned daemon image and contract-bundle artifact; no route, schema or frozen bundle byte changes.
 owner: substrate
 tags:
 - ci
 - release
-revision: 3
+revision: 6
 ---
 # Epic: Release hardening
 
@@ -80,3 +80,7 @@ the paths they are served at, so a route can move silently).
 
 Six of the eight are implemented. `story:contract-bundle-oci-artifact` is active and unblocked;
 `story:contract-gate-sees-route-paths` is a draft filed today.
+
+## Reconciled state — 2026-09-01
+
+The CI, toolchain, repository recovery, Apache-2.0/publication, route/compatibility gates, daemon image and release-publication stories are implemented on main. The epic remains active for the signed contract-bundle OCI artifact and the separately coordinated move of the daemon's advertised contract frontier. A signed daemon image does not make a development bundle stable.

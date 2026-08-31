@@ -2,12 +2,12 @@
 format: aep.planning-md/1
 id: story:contract-gate-sees-route-paths
 kind: story
-status: active
+status: implemented
 title: The contract gate refuses a renamed route path
 summary: 'route_ids collects operation ids, never paths, so moving a route passes check-bundle as adds_routes: 0.'
 relations:
 - decomposes: epic:release-hardening
-revision: 4
+revision: 5
 ---
 # Story: The contract gate refuses a renamed route path
 
