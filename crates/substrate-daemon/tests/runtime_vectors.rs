@@ -3166,7 +3166,7 @@ async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {
     };
     assert_eq!(passed, expected, "{lane} lane case inventory");
     println!(
-        "runtime clean-room: {passed} HTTP cases, startup refusal, \
+        "runtime clean-room: the complete HTTP inventory, startup refusal, \
          and dual-daemon refusal passed ({lane} lane)"
     );
 }
