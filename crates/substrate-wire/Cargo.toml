@@ -1,12 +1,20 @@
 [package]
-name = "substrate-wire"
+name = "b10x-substrate-wire"
 description = "Closed Rust representation of substrate-wire phase 3"
+homepage = "https://beyond10x.github.io/substrate/"
+documentation = "https://docs.rs/b10x-substrate-wire"
 edition.workspace = true
 license.workspace = true
+readme = "README.md"
 repository.workspace = true
 rust-version.workspace = true
 version.workspace = true
-publish = false
+publish = true
+keywords = ["sandbox", "execution", "workspace"]
+categories = ["api-bindings"]
+
+[lib]
+name = "substrate_wire"
 
 [dependencies]
 base64.workspace = true

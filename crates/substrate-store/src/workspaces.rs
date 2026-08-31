@@ -37,7 +37,7 @@ pub enum WorkspaceAdmission {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum WorkspaceObservationWrite {
     Missing,
-    Authoritative(Workspace),
+    Authoritative(Box<Workspace>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -381,7 +381,7 @@ impl Store {
             )?;
         }
         transaction.commit()?;
-        Ok(WorkspaceObservationWrite::Authoritative(durable))
+        Ok(WorkspaceObservationWrite::Authoritative(Box::new(durable)))
     }
 
     pub fn admit_workspace(

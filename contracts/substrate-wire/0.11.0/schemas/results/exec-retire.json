@@ -1,0 +1,27 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.11.0:result:exec-retire",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "absent": {
+      "const": true
+    },
+    "id": {
+      "$ref": "../common.json#/$defs/exec-id"
+    },
+    "kind": {
+      "const": "exec"
+    },
+    "observed_at": {
+      "$ref": "../common.json#/$defs/timestamp"
+    }
+  },
+  "required": [
+    "kind",
+    "id",
+    "absent",
+    "observed_at"
+  ],
+  "title": "exec-retire operation result",
+  "type": "object"
+}

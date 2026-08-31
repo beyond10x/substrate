@@ -1,0 +1,37 @@
+[package]
+name = "b10x-substrate-sdk"
+description = "Typed Rust client and managed-daemon launcher for b10x Substrate"
+homepage = "https://beyond10x.github.io/substrate/"
+documentation = "https://docs.rs/b10x-substrate-sdk"
+edition.workspace = true
+license.workspace = true
+readme = "README.md"
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+publish = true
+keywords = ["sandbox", "sdk", "execution", "workspace"]
+categories = ["api-bindings", "asynchronous"]
+
+[features]
+default = []
+linked-daemon = ["dep:substrate-daemon"]
+
+[dependencies]
+base64.workspace = true
+chrono.workspace = true
+futures-util.workspace = true
+nix = { workspace = true, features = ["process", "signal", "user"] }
+serde.workspace = true
+serde_json.workspace = true
+serde_urlencoded.workspace = true
+substrate-daemon = { package = "b10x-substrate-daemon", path = "../substrate-daemon", version = "=0.3.0", optional = true }
+substrate-wire = { package = "b10x-substrate-wire", path = "../substrate-wire", version = "=0.3.0" }
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+ulid.workspace = true
+
+[lints]
+workspace = true

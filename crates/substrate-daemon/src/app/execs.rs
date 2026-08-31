@@ -135,6 +135,13 @@ pub(super) async fn exec_start(
             requested: mutation.input.sandbox.clone(),
             applied: None,
             exit: None,
+            usage: mutation
+                .input
+                .measurements
+                .contains(&substrate_wire::ExecMeasurement::ResourceUsage)
+                .then(|| substrate_wire::ExecUsage::Pending {
+                    observed_at: app.authority.now(),
+                }),
             lease: lease.as_ref().map(NewLease::observation),
             // An accepted exec has hit no bound: nothing has run yet.
             refusal: None,

@@ -81,12 +81,14 @@ const EXECUTABLE_VECTORS_0_3: &[&str] = &[
 #[derive(Clone)]
 struct VectorAuthority {
     snapshot_id: String,
+    clock_available: Arc<AtomicBool>,
 }
 
 impl Default for VectorAuthority {
     fn default() -> Self {
         Self {
             snapshot_id: "snap_vector".to_owned(),
+            clock_available: Arc::new(AtomicBool::new(true)),
         }
     }
 }
@@ -117,6 +119,9 @@ impl Authority for VectorAuthority {
     }
 
     fn lease_clock(&self) -> Result<LeaseClock, String> {
+        if !self.clock_available.load(Ordering::SeqCst) {
+            return Err("injected unavailable lease clock".to_owned());
+        }
         Ok(LeaseClock {
             wall: self.now(),
             boot_id: "00000000-0000-0000-0000-000000000001".to_owned(),
@@ -176,6 +181,7 @@ impl VectorDriver {
                     code: None,
                     signal: Some(substrate_wire::Signal::Term),
                 }),
+                usage: None,
                 lease: None,
                 refusal: None,
             },
@@ -242,6 +248,7 @@ impl Driver for VectorDriver {
                 labels: input.labels.clone(),
                 observed_at: FIXED_TIME.parse().expect("fixed time"),
                 state: WorkspaceState::Ready,
+                storage: None,
                 lease: None,
             };
             *self
@@ -267,6 +274,7 @@ impl Driver for VectorDriver {
                     labels: input.labels.clone(),
                     observed_at: FIXED_TIME.parse().expect("fixed time"),
                     state: WorkspaceState::Ready,
+                    storage: None,
                     lease: None,
                 };
                 *self
@@ -491,6 +499,7 @@ struct Harness {
     app: Arc<App>,
     store: Arc<Store>,
     driver: Arc<VectorDriver>,
+    clock_available: Arc<AtomicBool>,
 }
 
 impl Harness {
@@ -558,12 +567,14 @@ impl Harness {
             after_observed_hook: StdMutex::new(None),
         });
         let erased: Arc<dyn Driver> = driver.clone();
+        let clock_available = Arc::new(AtomicBool::new(true));
         let app = App::with_authority(
             Arc::clone(&store),
             erased,
             "dep_vector",
             Arc::new(VectorAuthority {
                 snapshot_id: snapshot_id.to_owned(),
+                clock_available: Arc::clone(&clock_available),
             }),
         );
         Self {
@@ -571,6 +582,7 @@ impl Harness {
             app,
             store,
             driver,
+            clock_available,
         }
     }
 
@@ -814,6 +826,42 @@ async fn successor_pipe_session_positive_and_adversarial_vectors_execute_exactly
     seed_workspace(&harness.store);
     assert_exact_http(&harness.execute(&refusal).await, &refusal);
     assert_eq!(harness.driver.start_count.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pipe_session_clock_refusal_is_durable_when_the_clock_recovers() {
+    let start = bundle_vector("0.4.0", "http", "pipe-session-start");
+    let harness = Harness::open(false);
+    seed_workspace(&harness.store);
+    assert_exact_http(&harness.execute(&start).await, &start);
+
+    let renew = json!({
+        "context": {"subject": "local:1000"},
+        "action": {
+            "kind": "http",
+            "request": {
+                "method": "POST",
+                "path": "/v1/pipe-sessions/ses_vector/lease/renew",
+                "query": {},
+                "headers": {"x-request-id": "req_pipe_clock_unavailable"},
+                "body": {
+                    "op": "01JPIPECLOCKUNAVAILABLE01",
+                    "input": {"ttl_ms": 90000}
+                }
+            }
+        }
+    });
+    harness.clock_available.store(false, Ordering::SeqCst);
+    let refused = harness.execute(&renew).await;
+    assert_eq!(refused["status"], 501);
+    assert_eq!(refused["body"]["error"]["code"], "lease.clock-unavailable");
+
+    harness.clock_available.store(true, Ordering::SeqCst);
+    assert_eq!(
+        harness.execute(&renew).await,
+        refused,
+        "the same operation replays its first durable refusal after clock recovery"
+    );
 }
 
 #[test]
@@ -1332,6 +1380,7 @@ fn seed_workspace_named(store: &Store, id: &str, operation_id: &str, actor: &str
         labels: BTreeMap::default(),
         observed_at: FIXED_TIME.parse().expect("fixed time"),
         state: WorkspaceState::Unknown,
+        storage: None,
         lease: None,
     };
     assert_eq!(
@@ -1375,6 +1424,7 @@ fn seed_workspace_state(store: &Store, state: WorkspaceState) {
         labels: BTreeMap::default(),
         observed_at: FIXED_TIME.parse().expect("fixed time"),
         state: WorkspaceState::Unknown,
+        storage: None,
         lease: None,
     };
     assert!(matches!(

@@ -20,6 +20,7 @@ run cargo xtask check-adrs
 run cargo xtask check-secrets
 run cargo xtask check-advisories
 run cargo xtask check-licenses
+run cargo xtask check-packages
 run python3 scripts/check-contract-bundle.py
 run python3 scripts/check-contract-bundle-0.2.0.py
 run python3 scripts/check-contract-bundle-0.3.0.py
@@ -33,6 +34,7 @@ run cargo xtask check-bundle 0.7.0
 run cargo xtask check-bundle 0.8.0
 run cargo xtask check-bundle 0.9.0
 run cargo xtask check-bundle 0.10.0
+run cargo xtask check-bundle 0.11.0
 run cargo xtask check-json
 run cargo xtask check-toolchain
 

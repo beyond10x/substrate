@@ -332,7 +332,7 @@ jobs:
           chmod 0755 target/image-under-test/substrate-daemon
           SUBSTRATE_VECTORS_DAEMON="${PWD}/target/image-under-test/substrate-daemon" \
             cargo test --release --locked \
-              -p substrate-daemon --test runtime_vectors -- --nocapture
+              -p b10x-substrate-daemon --test runtime_vectors -- --nocapture
 
           git fetch --force --no-tags origin "+refs/tags/${VERSION}:refs/tags/${VERSION}"
           current_sha=$(git rev-parse "refs/tags/${VERSION}^{commit}")

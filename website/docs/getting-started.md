@@ -81,6 +81,6 @@ A Linux host that serves exec needs all of the following:
 The daemon probes the backend before advertising execution. Missing enforcement produces a refusal,
 not weaker isolation.
 
-Continue with [confinement and refusal](./concepts/confinement.md) before admitting process work, or
-read [deployment postures](./guides/deployment.md) before making the daemon reachable beyond its
-owner.
+Continue with [run a bounded command](./guides/run-a-command.md) for a complete terminal journey.
+Read [confinement and refusal](./concepts/confinement.md) before admitting process work, or
+[deployment postures](./guides/deployment.md) before making the daemon reachable beyond its owner.

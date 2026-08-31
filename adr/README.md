@@ -25,3 +25,6 @@ with YAML frontmatter containing `date` and `status`. Draft design questions rem
 | [0017](0017-delegated-context-is-verified-before-replay.md) | Delegated context is verified before replay | accepted |
 | [0018](0018-one-registry-declares-every-served-api-major.md) | One registry declares every served API major | accepted |
 | [0019](0019-pty-is-a-second-session-mode.md) | A PTY is a second session mode | accepted |
+| [0020](0020-writable-storage-uses-delegated-project-quotas.md) | Writable storage uses delegated project quotas | accepted |
+| [0021](0021-execution-metrics-are-explicit-exact-observations.md) | Execution metrics are explicit exact observations | accepted |
+| [0022](0022-the-rust-sdk-remains-a-wire-client.md) | The Rust SDK remains a wire client | accepted |

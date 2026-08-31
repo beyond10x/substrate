@@ -4,7 +4,7 @@ use std::sync::{Arc, Mutex as StdMutex, Weak};
 use chrono::TimeZone as _;
 use rusqlite::params;
 use substrate_wire::{
-    ConfinementRequest, ErrorClass, ErrorDetail, EventCause, Exec, ExecKind, ExecState,
+    ConfinementRequest, ErrorClass, ErrorDetail, EventCause, Exec, ExecKind, ExecState, ExecUsage,
     LeaseObservation, LeaseState, NetworkMode, OperationOutcome, OperationState, PipeSession,
     PipeSessionLimits, SandboxProfile, SessionAttachmentState, SessionKind, SessionMode,
     SessionState, SnapshotItemKind, Workspace, WorkspaceKind, WorkspaceState,
@@ -134,6 +134,7 @@ fn workspace(id: &str) -> Workspace {
         labels: BTreeMap::new(),
         observed_at: "2026-08-13T12:00:01Z".parse().expect("time"),
         state: WorkspaceState::Ready,
+        storage: None,
         lease: None,
     }
 }
@@ -155,6 +156,7 @@ fn exec(id: &str, workspace: &str, state: ExecState) -> StoredExec {
             },
             applied: None,
             exit: None,
+            usage: None,
             lease: None,
             refusal: None,
         },
@@ -1008,7 +1010,10 @@ fn provisional_workspace_and_exec_membership_commit_with_acceptance() {
         "ex_provisional",
         &"2".repeat(64),
     );
-    let provisional_exec = exec("ex_provisional", "ws_provisional", ExecState::Accepted);
+    let mut provisional_exec = exec("ex_provisional", "ws_provisional", ExecState::Accepted);
+    provisional_exec.resource.usage = Some(ExecUsage::Pending {
+        observed_at: "2026-08-13T12:00:01Z".parse().expect("time"),
+    });
     assert_eq!(
         store
             .reserve_exec_start(&exec_operation, &provisional_exec, None, None)
@@ -1036,15 +1041,16 @@ fn provisional_workspace_and_exec_membership_commit_with_acceptance() {
             64,
         )
         .expect("restart reconcile");
-    assert_eq!(
-        store
-            .exec(&scope, "ex_provisional")
-            .expect("exec lookup")
-            .expect("unknown exec")
-            .resource
-            .state,
-        ExecState::Unknown
-    );
+    let unknown = store
+        .exec(&scope, "ex_provisional")
+        .expect("exec lookup")
+        .expect("unknown exec")
+        .resource;
+    assert_eq!(unknown.state, ExecState::Unknown);
+    assert!(matches!(
+        unknown.usage,
+        Some(ExecUsage::Unavailable { ref code, .. }) if code == "exec.metrics-unavailable"
+    ));
     assert!(
         store
             .workspace_has_nonterminal_execs(&scope, "ws_provisional")

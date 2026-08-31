@@ -1,0 +1,34 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.11.0:input:workspace-file-edit-v2",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "expected_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "match_policy": {
+      "enum": [
+        "exact",
+        "line_whitespace_normalized"
+      ]
+    },
+    "new_text": {
+      "maxLength": 1048576,
+      "type": "string"
+    },
+    "old_text": {
+      "maxLength": 1048576,
+      "minLength": 1,
+      "type": "string"
+    }
+  },
+  "required": [
+    "expected_sha256",
+    "old_text",
+    "new_text",
+    "match_policy"
+  ],
+  "title": "workspace-file-edit-v2 operation input",
+  "type": "object"
+}

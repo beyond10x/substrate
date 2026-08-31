@@ -537,6 +537,8 @@ mod tests {
                 cpu_millis: 1_000,
             },
             wait: false,
+            scratch: None,
+            measurements: std::collections::BTreeSet::new(),
             read_only_roots: Vec::new(),
             secret_slots: slots,
             capsule: None,

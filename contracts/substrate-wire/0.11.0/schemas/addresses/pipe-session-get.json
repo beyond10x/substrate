@@ -1,0 +1,15 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.11.0:address:pipe-session-get",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "session_id": {
+      "$ref": "../common.json#/$defs/session-id"
+    }
+  },
+  "required": [
+    "session_id"
+  ],
+  "title": "pipe-session-get normalized route address",
+  "type": "object"
+}

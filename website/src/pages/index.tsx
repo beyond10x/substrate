@@ -17,21 +17,48 @@ const pathways = [
   },
   {
     number: '02',
-    label: 'Find the boundary',
-    detail: 'intent stops, facts begin',
-    to: '/docs/concepts/boundary',
+    label: 'See what it can power',
+    detail: 'workers, plugins, tools',
+    to: '/docs/use-cases',
   },
   {
     number: '03',
-    label: 'Read the guarantees',
-    detail: 'confinement or refusal',
-    to: '/docs/concepts/confinement',
+    label: 'Run a command',
+    detail: 'curl, limits, output, metrics',
+    to: '/docs/guides/run-a-command',
   },
   {
     number: '04',
     label: 'Inspect the wire',
     detail: 'resources and recovery',
     to: '/docs/reference/contract',
+  },
+];
+
+const buildCards = [
+  {
+    label: 'BUILD + TEST',
+    title: 'Isolated native workers',
+    text: 'Compile, lint, inspect, or test in one guarded workspace with bounded process, memory, CPU, time, disk, and output.',
+    fact: 'argv → terminal evidence',
+  },
+  {
+    label: 'TRANSFORM',
+    title: 'Untrusted file processors',
+    text: 'Put input in /workspace, mount verified runtime bytes read-only, and give disposable intermediate data a hard /scratch quota.',
+    fact: 'input → bounded artifact',
+  },
+  {
+    label: 'EXTEND',
+    title: 'Plugin execution',
+    text: 'Run extensions with a cleared environment and no egress, or one operator-declared destination instead of an open network.',
+    fact: 'named reach → no ambient reach',
+  },
+  {
+    label: 'AUTOMATE',
+    title: 'Agent tool backends',
+    text: 'Keep the agent loop and approvals outside while Substrate owns durable effects, confinement, cancellation, and observations.',
+    fact: 'tool call → governed operation',
   },
 ];
 
@@ -264,6 +291,35 @@ export default function Home(): ReactNode {
           </div>
         </section>
 
+        <section className={styles.builds}>
+          <div className="container">
+            <div className={styles.sectionHead}>
+              <div>
+                <p className={styles.sectionLabel}>NOT JUST FOR AGENTS</p>
+                <Heading as="h2">One execution primitive. Several useful systems.</Heading>
+              </div>
+              <Link to="/docs/use-cases">Explore practical use cases →</Link>
+            </div>
+            <div className={styles.buildGrid}>
+              {buildCards.map((card) => (
+                <article key={card.label}>
+                  <span>{card.label}</span>
+                  <Heading as="h3">{card.title}</Heading>
+                  <p>{card.text}</p>
+                  <code>{card.fact}</code>
+                </article>
+              ))}
+            </div>
+            <div className={styles.handsOnCallout}>
+              <div>
+                <span>HANDS ON / TERMINAL</span>
+                <strong>Run <code>sha256sum</code> with a 64 MiB memory ceiling and read its peak usage.</strong>
+              </div>
+              <Link to="/docs/guides/run-a-command">Open the walkthrough <span aria-hidden="true">↗</span></Link>
+            </div>
+          </div>
+        </section>
+
         <section className={styles.operation}>
           <div className="container">
             <div className={styles.sectionHead}>
@@ -348,9 +404,10 @@ export default function Home(): ReactNode {
               <Heading as="h2">Linux host slice. Development contract. Explicit gaps.</Heading>
             </div>
             <p>
-              Guarded workspaces, capability-gated exec, durable operations, events, leases and a
-              leased raw-pipe and probe-gated PTY development slice are served today. Docker,
-              Kubernetes, workloads, images, Git sources and stable signed packaging are absent.
+              Guarded workspaces, capability-gated exec, hard opt-in writable-storage quotas,
+              exact resource observations, durable operations, events, leases, raw pipes and a
+              probe-gated PTY are served today. Docker, Kubernetes, workloads, images, Git sources
+              and stable signed contract packaging are absent.
             </p>
             <Link to="/docs/status">Read status and limitations <span aria-hidden="true">↗</span></Link>
           </div>

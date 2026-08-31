@@ -69,6 +69,8 @@ fn start(
                 cpu_millis: 5_000,
             },
             wait,
+            scratch: None,
+            measurements: std::collections::BTreeSet::new(),
             read_only_roots: Vec::new(),
             secret_slots: Vec::new(),
             capsule: None,

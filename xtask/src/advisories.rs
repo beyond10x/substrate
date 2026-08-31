@@ -44,49 +44,11 @@ pub fn check(root: &Path) -> Result<Report> {
     {
         failures.push("Cargo.lock: h2 is present in the HTTP/1-only daemon workspace".to_owned());
     }
-    for manifest in workspace_manifests(root)? {
-        let text = std::fs::read_to_string(&manifest)
-            .with_context(|| format!("reading {}", manifest.display()))?;
-        let document: toml::Value =
-            toml::from_str(&text).with_context(|| format!("parsing {}", manifest.display()))?;
-        if document
-            .get("package")
-            .and_then(|package| package.get("publish"))
-            .and_then(toml::Value::as_bool)
-            != Some(false)
-        {
-            failures.push(format!(
-                "{}: [package] publish must be false",
-                manifest.strip_prefix(root).unwrap_or(&manifest).display()
-            ));
-        }
-    }
     if failures.is_empty() {
         Ok(Report::passed(
-            "Cargo.lock has no known RustSec vulnerabilities or h2, and every crate is private",
+            "Cargo.lock has no known RustSec vulnerabilities and contains no h2",
         ))
     } else {
         Ok(Report::failed(failures))
     }
-}
-
-fn workspace_manifests(root: &Path) -> Result<Vec<std::path::PathBuf>> {
-    let text =
-        std::fs::read_to_string(root.join("Cargo.toml")).context("reading workspace Cargo.toml")?;
-    let root_manifest: toml::Value =
-        toml::from_str(&text).context("parsing workspace Cargo.toml")?;
-    let members = root_manifest
-        .get("workspace")
-        .and_then(|workspace| workspace.get("members"))
-        .and_then(toml::Value::as_array)
-        .context("workspace.members is absent")?;
-    members
-        .iter()
-        .map(|member| {
-            member
-                .as_str()
-                .map(|member| root.join(member).join("Cargo.toml"))
-                .context("workspace member is not a string")
-        })
-        .collect()
 }

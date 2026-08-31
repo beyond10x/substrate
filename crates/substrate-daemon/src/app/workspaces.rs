@@ -55,7 +55,7 @@ pub(super) async fn workspace_create(
         Ok(value) => value,
         Err(response) => return response,
     };
-    if let Err(response) = validate_workspace_input(&mutation, &request_id) {
+    if let Err(response) = validate_workspace_input(&app, &mutation, &request_id) {
         return refuse_before_dispatch_response(
             &app,
             &identity,
@@ -140,6 +140,7 @@ pub(super) async fn workspace_create(
         labels: mutation.input.labels.clone(),
         observed_at: app.authority.now(),
         state: WorkspaceState::Unknown,
+        storage: None,
         lease: lease.as_ref().map(NewLease::observation),
     };
     if let Some(response) = reservation_response(
@@ -245,9 +246,10 @@ pub(super) async fn workspace_get(
                 })
                 .await
             {
-                Ok(WorkspaceObservationWrite::Authoritative(authoritative)) => {
-                    success(StatusCode::OK, Success::observed(request_id, authoritative))
-                }
+                Ok(WorkspaceObservationWrite::Authoritative(authoritative)) => success(
+                    StatusCode::OK,
+                    Success::observed(request_id, *authoritative),
+                ),
                 Ok(WorkspaceObservationWrite::Missing) => not_found(&request_id),
                 Err(error) => store_failure(&request_id, None, &error),
             }

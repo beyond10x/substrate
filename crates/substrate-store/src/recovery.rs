@@ -1,5 +1,5 @@
 use crate::events::{append_event, commit_effect};
-use crate::execs::load_exec;
+use crate::execs::{load_exec, mark_exec_unknown};
 use crate::operations::{
     operation_resource_kind, parse_operation_state, refresh_nonterminal_operation_accounting,
 };
@@ -282,8 +282,7 @@ impl Store {
             };
             let mut resource: Exec = serde_json::from_str(json)?;
             debug_assert!(matches!(state.as_str(), "accepted" | "running"));
-            resource.state = substrate_wire::ExecState::Unknown;
-            resource.observed_at = observed_at.parse()?;
+            mark_exec_unknown(&mut resource, observed_at.parse()?);
             transaction.execute(
                 "UPDATE execs SET resource_json = ?4, output_complete = 1
                  WHERE deployment = ?1 AND subject = ?2 AND id = ?3",

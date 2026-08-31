@@ -7,6 +7,31 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- **A public builder-oriented Rust SDK.** `b10x-substrate-sdk` verifies the daemon-advertised
+  `substrate-wire/0.4.0` identity, exposes typed workspace, file, exec, raw-pipe, event, refusal and
+  operation APIs, requires explicit execution bounds, and reconciles ambiguous mutations through
+  the durable ledger under one operation id.
+- **Managed daemon ownership without collapsing the process boundary.** The SDK can supervise an
+  external binary or opt into a linked current-executable re-exec; both are separate authenticated
+  child processes with readiness verification, parent-liveness shutdown, bounded diagnostics,
+  graceful termination, force-kill fallback and reaping.
+- **A closed Rust registry boundary.** Five `b10x-substrate-*` runtime packages carry exact 0.3.0
+  internal edges, package READMEs and Apache-2.0 SPDX metadata. `cargo xtask check-packages` refuses any
+  additional publishable workspace member and assembles every approved archive without adding a
+  crates.io credential to GitHub.
+- **Hard writable-storage ceilings and exact resource observations.** Workspaces and per-exec
+  `/scratch` can request byte-and-inode project quotas when the operator delegates an exclusive
+  range and the filesystem proves enforcement. Execs explicitly opt into exact live and terminal
+  cgroup observations; no mean-memory estimate is manufactured.
+- **Contract bundle [`contracts/substrate-wire/0.11.0`](contracts/substrate-wire/0.11.0)**, 260 files,
+  an additive successor to `0.10.0`: `adds_routes: 2`, `preserves_routes: 31`. It adds
+  `GET /v1/metrics`, a latest-wins WebSocket stream, quota requests, capability facts and usage
+  schemas while leaving every earlier bundle byte untouched.
+- **Practical public guides.** The Pages site now shows non-agent use cases and a terminal journey
+  that runs an ordinary binary with process, memory, CPU, duration, disk, output and metrics bounds.
+
 ### Changed
 
 - Updated the locked Rust dependency set to `base64` 0.23.1, `hyper` 1.11.1, `nix` 0.31.3,

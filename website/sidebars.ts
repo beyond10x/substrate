@@ -4,6 +4,7 @@ const sidebars: SidebarsConfig = {
   docsSidebar: [
     {type: 'doc', id: 'index', label: 'What is Substrate?'},
     {type: 'doc', id: 'getting-started', label: 'Getting started'},
+    {type: 'doc', id: 'use-cases', label: 'What you can build'},
     {
       type: 'category',
       label: 'Understand',
@@ -19,6 +20,9 @@ const sidebars: SidebarsConfig = {
       label: 'Operate',
       collapsed: false,
       items: [
+        {type: 'doc', id: 'guides/rust-sdk', label: 'Rust SDK'},
+        {type: 'doc', id: 'guides/run-a-command', label: 'Run a bounded command'},
+        {type: 'doc', id: 'guides/storage-and-metrics', label: 'Storage and metrics'},
         {type: 'doc', id: 'guides/deployment', label: 'Deployment postures'},
       ],
     },

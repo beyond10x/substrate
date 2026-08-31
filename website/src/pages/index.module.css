@@ -164,6 +164,7 @@
 .pathways a:focus-visible,
 .sectionHead > a:focus-visible,
 .inlineActions a:focus-visible,
+.handsOnCallout a:focus-visible,
 .now a:focus-visible {
   outline: 2px solid #ffc46b;
   outline-offset: 4px;
@@ -546,6 +547,7 @@
 }
 
 .thesis,
+.builds,
 .operation,
 .outcomes,
 .layers {
@@ -557,6 +559,7 @@
 }
 
 .thesis h2,
+.builds h2,
 .sectionHead h2,
 .layers h2 {
   max-width: 19ch;
@@ -635,6 +638,101 @@
   border-top: 1px solid var(--s-line);
   border-bottom: 1px solid var(--s-line);
   background: var(--s-surface);
+}
+
+.builds {
+  border-top: 1px solid var(--s-line);
+  background:
+    linear-gradient(145deg, color-mix(in srgb, var(--s-amber) 5%, transparent), transparent 45%),
+    var(--s-card);
+}
+
+.buildGrid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  margin-top: clamp(3rem, 6vw, 5rem);
+  border: 1px solid var(--s-line);
+  border-radius: 0.45rem;
+  overflow: hidden;
+  background: var(--s-line);
+}
+
+.buildGrid article {
+  display: flex;
+  min-height: 22rem;
+  flex-direction: column;
+  padding: 1.8rem;
+  background: var(--s-paper);
+}
+
+.buildGrid article > span {
+  color: var(--s-blue);
+  font: 800 0.6rem/1 var(--ifm-font-family-monospace);
+  letter-spacing: 0.11em;
+}
+
+.buildGrid h3 {
+  margin: 2.2rem 0 1rem;
+  font-size: clamp(1.25rem, 2vw, 1.75rem);
+  letter-spacing: -0.035em;
+}
+
+.buildGrid p {
+  margin: 0;
+  color: var(--s-text-soft);
+  font-size: 0.86rem;
+  line-height: 1.75;
+}
+
+.buildGrid code {
+  margin-top: auto;
+  padding-top: 2rem;
+  border: 0;
+  color: var(--s-muted);
+  background: transparent;
+  font-size: 0.62rem;
+}
+
+.handsOnCallout {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 2rem;
+  margin-top: 1rem;
+  padding: 1.35rem 1.6rem;
+  border: 1px solid color-mix(in srgb, var(--s-blue) 45%, var(--s-line));
+  border-radius: 0.38rem;
+  background: color-mix(in srgb, var(--s-blue) 7%, var(--s-paper));
+}
+
+.handsOnCallout > div {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+}
+
+.handsOnCallout > div > span {
+  color: var(--s-blue);
+  font: 800 0.58rem/1 var(--ifm-font-family-monospace);
+  letter-spacing: 0.1em;
+}
+
+.handsOnCallout strong {
+  color: var(--ifm-heading-color);
+  font-size: 0.92rem;
+}
+
+.handsOnCallout strong code {
+  border: 0;
+  color: var(--s-amber);
+  background: transparent;
+}
+
+.handsOnCallout > a {
+  flex: 0 0 auto;
+  font-size: 0.76rem;
+  font-weight: 800;
 }
 
 .sectionHead {
@@ -956,6 +1054,14 @@
     grid-template-columns: repeat(2, 1fr);
   }
 
+  .buildGrid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .buildGrid article {
+    min-height: 18rem;
+  }
+
   .pathwaysGrid a:nth-child(2) {
     border-right: 0;
   }
@@ -1033,6 +1139,7 @@
   }
 
   .pathwaysGrid,
+  .buildGrid,
   .thesisGrid,
   .outcomeGrid,
   .boundaryRail,
@@ -1046,6 +1153,7 @@
   }
 
   .thesis h2,
+  .builds h2,
   .sectionHead h2,
   .layers h2 {
     font-size: clamp(2.25rem, 12vw, 3.8rem);
@@ -1054,6 +1162,15 @@
   .sectionHead {
     align-items: flex-start;
     flex-direction: column;
+  }
+
+  .handsOnCallout {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .buildGrid article {
+    min-height: 16rem;
   }
 
   .operationRail {

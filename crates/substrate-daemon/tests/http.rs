@@ -11,7 +11,8 @@ use substrate_daemon::{App, CONTRACT_BUNDLE, CONTRACT_BUNDLE_SHA256, Identity, r
 use substrate_host::{HostConfig, HostDriver};
 use substrate_store::{ExecWrite, NewOperation, Reservation, Scope, Store, StoredExec};
 use substrate_wire::{
-    ConfinementRequest, Exec, ExecExit, ExecKind, ExecState, NetworkMode, SandboxProfile,
+    ConfinementRequest, Exec, ExecExit, ExecKind, ExecState, ExecUsage, NetworkMode, ResourceUsage,
+    SandboxProfile,
 };
 use tempfile::TempDir;
 use tower::ServiceExt as _;
@@ -224,6 +225,21 @@ async fn twelve_route_vertical_slice_is_scoped_durable_and_observed() {
             code: Some(0),
             signal: None,
         }),
+        usage: Some(ExecUsage::Observed(ResourceUsage {
+            complete: true,
+            observed_at: Utc::now(),
+            wall_time_us: 12_345,
+            cpu_time_us: 4_321,
+            memory_current_bytes: None,
+            memory_peak_bytes: 8_388_608,
+            processes_current: None,
+            processes_peak: 3,
+            process_limit_hits: 0,
+            memory_oom_kills: 0,
+            io_read_bytes: 4_096,
+            io_write_bytes: 8_192,
+            scratch: None,
+        })),
         lease: None,
         refusal: None,
     };
@@ -300,6 +316,54 @@ async fn twelve_route_vertical_slice_is_scoped_durable_and_observed() {
         .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(observed_exec["result"]["state"], "exited");
+
+    let (status, metrics) = harness
+        .call(
+            "local:1000",
+            Method::GET,
+            "/v1/metrics?resource_kind=exec&resource_id=ex_seed",
+            "req_exec_metrics_test",
+            Body::empty(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(metrics["result"]["resource_kind"], "exec");
+    assert_eq!(metrics["result"]["usage"]["status"], "observed");
+    assert_eq!(metrics["result"]["usage"]["complete"], true);
+    assert_eq!(metrics["result"]["usage"]["wall_time_us"], 12_345);
+    assert_eq!(metrics["result"]["usage"]["memory_peak_bytes"], 8_388_608);
+    assert!(
+        metrics["result"]["usage"]
+            .get("memory_current_bytes")
+            .is_none()
+    );
+
+    let (status, hidden_metrics) = harness
+        .call(
+            "local:2000",
+            Method::GET,
+            "/v1/metrics?resource_kind=exec&resource_id=ex_seed",
+            "req_hidden_metrics_test",
+            Body::empty(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(hidden_metrics["error"]["code"], "resource.not-found");
+
+    let (status, workspace_metrics) = harness
+        .call(
+            "local:1000",
+            Method::GET,
+            &format!("/v1/metrics?resource_kind=workspace&resource_id={workspace}"),
+            "req_workspace_metrics_test",
+            Body::empty(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        workspace_metrics["error"]["code"],
+        "workspace.metrics-not-requested"
+    );
 
     let (status, output) = harness
         .call(

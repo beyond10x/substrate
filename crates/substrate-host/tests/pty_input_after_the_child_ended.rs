@@ -88,6 +88,8 @@ fn pty_start(snapshot: &str, argv: &[&str]) -> PipeSessionStartInput {
                 cpu_millis: 5_000,
             },
             wait: false,
+            scratch: None,
+            measurements: std::collections::BTreeSet::new(),
             read_only_roots: Vec::new(),
             secret_slots: Vec::new(),
             capsule: None,

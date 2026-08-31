@@ -1,0 +1,6 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.11.0:result:exec-lease-renew",
+  "$ref": "../resource.json#/$defs/exec",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "exec-lease-renew operation result"
+}

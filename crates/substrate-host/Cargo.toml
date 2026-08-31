@@ -1,12 +1,20 @@
 [package]
-name = "substrate-host"
+name = "b10x-substrate-host"
 description = "Linux host driver for the standalone substrate"
+homepage = "https://beyond10x.github.io/substrate/"
+documentation = "https://docs.rs/b10x-substrate-host"
 edition.workspace = true
 license.workspace = true
+readme = "README.md"
 repository.workspace = true
 rust-version.workspace = true
 version.workspace = true
-publish = false
+publish = true
+keywords = ["sandbox", "linux", "execution"]
+categories = ["os::linux-apis"]
+
+[lib]
+name = "substrate_host"
 
 [dependencies]
 async-trait.workspace = true
@@ -19,7 +27,7 @@ parking_lot.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-substrate-wire = { path = "../substrate-wire" }
+substrate-wire = { package = "b10x-substrate-wire", path = "../substrate-wire", version = "=0.3.0" }
 tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

@@ -1,0 +1,134 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.11.0:result:reconciliation-snapshot-get",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "complete": {
+      "type": "boolean"
+    },
+    "generation": {
+      "maximum": 18446744073709551615,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "items": {
+      "items": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "pattern": "^workspace:ws_[A-Za-z0-9]+$",
+                "type": "string"
+              },
+              "kind": {
+                "const": "workspace"
+              },
+              "ordinal": {
+                "maximum": 4096,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "value": {
+                "$ref": "../resource.json#/$defs/workspace"
+              }
+            },
+            "required": [
+              "ordinal",
+              "kind",
+              "id",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "pattern": "^exec:ex_[A-Za-z0-9]+$",
+                "type": "string"
+              },
+              "kind": {
+                "const": "exec"
+              },
+              "ordinal": {
+                "maximum": 4096,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "value": {
+                "$ref": "../resource.json#/$defs/exec"
+              }
+            },
+            "required": [
+              "ordinal",
+              "kind",
+              "id",
+              "value"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "id": {
+                "pattern": "^event:[1-9][0-9]*:[1-9][0-9]*$",
+                "type": "string"
+              },
+              "kind": {
+                "const": "provenance-event"
+              },
+              "ordinal": {
+                "maximum": 4096,
+                "minimum": 1,
+                "type": "integer"
+              },
+              "value": {
+                "$ref": "../event.json"
+              }
+            },
+            "required": [
+              "ordinal",
+              "kind",
+              "id",
+              "value"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "maxItems": {
+        "$wire": "MAX_SNAPSHOT_PAGE_ITEMS"
+      },
+      "type": "array"
+    },
+    "next_cursor": {
+      "oneOf": [
+        {
+          "$ref": "../common.json#/$defs/snapshot-cursor"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "snapshot": {
+      "$ref": "../common.json#/$defs/snapshot-id"
+    },
+    "through_seq": {
+      "maximum": 18446744073709551615,
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "snapshot",
+    "generation",
+    "through_seq",
+    "items",
+    "next_cursor",
+    "complete"
+  ],
+  "title": "reconciliation-snapshot-get operation result",
+  "type": "object"
+}

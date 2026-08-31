@@ -10,9 +10,10 @@ use sha2::{Digest as _, Sha256};
 use substrate_wire::{
     CapabilityFacts, CapabilitySnapshot, CgroupLimitFacts, EXECUTION_CAPSULE_MOUNT,
     ExecutionCapsuleFacts, HostDriverKind, MAX_EXECUTION_CAPSULE_BYTES,
-    MAX_EXECUTION_CAPSULE_FILE_BYTES, MAX_EXECUTION_CAPSULE_FILES, NamespaceFacts,
-    OPERATION_LEDGER_GLOBAL_MAX_BYTES, OPERATION_LEDGER_GLOBAL_MAX_ROWS,
-    OPERATION_LEDGER_SUBJECT_MAX_BYTES, OPERATION_LEDGER_SUBJECT_MAX_ROWS, Signal,
+    MAX_EXECUTION_CAPSULE_FILE_BYTES, MAX_EXECUTION_CAPSULE_FILES, MetricsStreamFacts,
+    NamespaceFacts, OPERATION_LEDGER_GLOBAL_MAX_BYTES, OPERATION_LEDGER_GLOBAL_MAX_ROWS,
+    OPERATION_LEDGER_SUBJECT_MAX_BYTES, OPERATION_LEDGER_SUBJECT_MAX_ROWS, ResourceUsageFacts,
+    ScratchQuotaFacts, Signal,
 };
 
 use crate::HostConfig;
@@ -41,12 +42,14 @@ struct SnapshotMaterial<'a> {
     backend: &'a Option<BackendBinding>,
 }
 
+#[allow(clippy::too_many_lines)] // One snapshot construction keeps every probed fact auditable.
 pub fn probe(config: &HostConfig, openat2: bool) -> CapabilitySnapshot {
     let probed_at = Utc::now();
     let backend = backend_binding(config);
     let workspace = openat2;
     let namespaces = probe_bubblewrap(config);
     let cgroup = probe_cgroup(config);
+    let resource_usage = cgroup && probe_resource_usage(config);
     let lease_clock = probe_lease_clock();
     let unprivileged = effective_uid() != 0;
     let close_range = probe_close_range();
@@ -80,6 +83,9 @@ pub fn probe(config: &HostConfig, openat2: bool) -> CapabilitySnapshot {
     // stands on. Absent leaves every `mode: "pty"` request refused by name (invariant 3, 4).
     let sessions_pty =
         (exec && crate::pty::mechanism_is_provable(&config.bubblewrap)).then_some(true);
+    let quota =
+        crate::quota::ProjectQuotas::probe(&config.workspace_root, config.project_quota_ids);
+    let quota_facts = quota.then_some(crate::quota::ProjectQuotas::facts());
     let facts = CapabilityFacts {
         events_pull: Some(true),
         events_stream: Some(true),
@@ -97,6 +103,7 @@ pub fn probe(config: &HostConfig, openat2: bool) -> CapabilitySnapshot {
         workspace_max_file_bytes: workspace.then_some(config.max_file_bytes),
         workspace_read_limit_bytes: workspace.then_some(config.read_limit_bytes),
         workspace_list_limit_items: workspace.then_some(config.list_limit_items),
+        workspace_storage_quota: quota_facts,
         exec_argv_only: exec.then_some(true),
         exec_namespaces: exec.then_some(NamespaceFacts {
             user: true,
@@ -123,6 +130,28 @@ pub fn probe(config: &HostConfig, openat2: bool) -> CapabilitySnapshot {
             max_file_bytes: MAX_EXECUTION_CAPSULE_FILE_BYTES,
             max_total_bytes: MAX_EXECUTION_CAPSULE_BYTES,
         }),
+        exec_scratch_quota: quota.then_some(ScratchQuotaFacts {
+            mount: substrate_wire::EXEC_SCRATCH_MOUNT.to_owned(),
+            allocation_unit_bytes: crate::quota::ALLOCATION_UNIT_BYTES,
+            max_bytes: substrate_wire::MAX_STORAGE_QUOTA_BYTES,
+            max_inodes: substrate_wire::MAX_STORAGE_QUOTA_INODES,
+        }),
+        exec_resource_usage: (exec && resource_usage).then_some(ResourceUsageFacts {
+            wall_time: true,
+            cpu_time: true,
+            memory_current: true,
+            memory_peak: true,
+            processes_current: true,
+            processes_peak: true,
+            process_limit_hits: true,
+            memory_oom_kills: true,
+            block_io: true,
+        }),
+        metrics_stream: (exec && resource_usage).then_some(MetricsStreamFacts {
+            sample_interval_ms: substrate_wire::RESOURCE_USAGE_SAMPLE_INTERVAL_MS,
+            latest_wins: true,
+            replay: false,
+        }),
         exec_egress_apertures: egress_apertures,
         secrets_slots,
         sessions_pty,
@@ -147,6 +176,23 @@ pub fn probe(config: &HostConfig, openat2: bool) -> CapabilitySnapshot {
         valid_until: None,
         facts,
     }
+}
+
+fn probe_resource_usage(config: &HostConfig) -> bool {
+    config.cgroup_root.as_ref().is_some_and(|root| {
+        [
+            "cpu.stat",
+            "memory.current",
+            "memory.peak",
+            "memory.events",
+            "pids.current",
+            "pids.peak",
+            "pids.events",
+            "io.stat",
+        ]
+        .iter()
+        .all(|name| root.join(name).is_file())
+    })
 }
 
 pub(crate) fn backend_binding(config: &HostConfig) -> Option<BackendBinding> {

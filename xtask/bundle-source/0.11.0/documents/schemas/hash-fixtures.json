@@ -1,0 +1,248 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.11.0:hash-fixtures",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "const": "../schemas/hash-fixtures.json"
+    },
+    "algorithm": {
+      "const": "sha256"
+    },
+    "cases": {
+      "items": {
+        "additionalProperties": false,
+        "allOf": [
+          {
+            "else": {
+              "properties": {
+                "canonical_query": {
+                  "type": "null"
+                }
+              }
+            },
+            "if": {
+              "properties": {
+                "query_mode": {
+                  "const": "pairs"
+                }
+              },
+              "required": [
+                "query_mode"
+              ]
+            },
+            "then": {
+              "properties": {
+                "canonical_query": {
+                  "type": "array"
+                }
+              }
+            }
+          }
+        ],
+        "properties": {
+          "canonical_input_hex": {
+            "maxLength": 4194304,
+            "pattern": "^(?:[0-9a-f]{2})*$",
+            "type": "string"
+          },
+          "canonical_query": {
+            "oneOf": [
+              {
+                "items": {
+                  "items": {
+                    "maxLength": 4096,
+                    "type": "string"
+                  },
+                  "maxItems": 2,
+                  "minItems": 2,
+                  "type": "array"
+                },
+                "maxItems": 256,
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "canonical_query_hex": {
+            "maxLength": 32768,
+            "pattern": "^(?:[0-9a-f]{2})*$",
+            "type": "string"
+          },
+          "excluded": {
+            "additionalProperties": false,
+            "properties": {
+              "authorization": {
+                "type": "string"
+              },
+              "bearer": {
+                "type": "string"
+              },
+              "deployment": {
+                "type": "string"
+              },
+              "headers": {
+                "type": "object"
+              },
+              "operation": {
+                "$ref": "common.json#/$defs/operation-id"
+              },
+              "principal": {
+                "type": "string"
+              },
+              "request_id": {
+                "$ref": "common.json#/$defs/request-id"
+              },
+              "subject": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "operation",
+              "request_id",
+              "authorization",
+              "bearer",
+              "headers",
+              "subject",
+              "deployment",
+              "principal"
+            ],
+            "type": "object"
+          },
+          "hash_version": {
+            "const": 2
+          },
+          "id": {
+            "pattern": "^[a-z][a-z0-9-]+$",
+            "type": "string"
+          },
+          "input_mode": {
+            "enum": [
+              "rfc8785-jcs",
+              "rejected-number-json"
+            ]
+          },
+          "ledger_key": {
+            "additionalProperties": false,
+            "properties": {
+              "deployment": {
+                "type": "string"
+              },
+              "operation": {
+                "$ref": "common.json#/$defs/operation-id"
+              },
+              "subject": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "deployment",
+              "subject",
+              "operation"
+            ],
+            "type": "object"
+          },
+          "method": {
+            "enum": [
+              "POST",
+              "PUT",
+              "DELETE"
+            ]
+          },
+          "normalized_address": {
+            "pattern": "^/v1/",
+            "type": "string"
+          },
+          "query_mode": {
+            "enum": [
+              "pairs",
+              "malformed-raw"
+            ]
+          },
+          "raw_input": {
+            "type": "object"
+          },
+          "raw_query": {
+            "additionalProperties": false,
+            "properties": {
+              "data": {
+                "maxLength": 16384,
+                "pattern": "^(?:[0-9a-f]{2})*$",
+                "type": "string"
+              },
+              "encoding": {
+                "const": "hex"
+              }
+            },
+            "required": [
+              "encoding",
+              "data"
+            ],
+            "type": "object"
+          },
+          "relation": {
+            "additionalProperties": false,
+            "properties": {
+              "case": {
+                "type": "string"
+              },
+              "kind": {
+                "enum": [
+                  "same-request-hash-different-ledger-key",
+                  "same-request-hash-same-ledger-key",
+                  "different-request-hash-same-ledger-key"
+                ]
+              }
+            },
+            "required": [
+              "kind",
+              "case"
+            ],
+            "type": "object"
+          },
+          "sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          },
+          "tuple_hex": {
+            "pattern": "^(?:[0-9a-f]{2})+$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "hash_version",
+          "method",
+          "normalized_address",
+          "raw_input",
+          "input_mode",
+          "canonical_input_hex",
+          "raw_query",
+          "query_mode",
+          "canonical_query",
+          "canonical_query_hex",
+          "tuple_hex",
+          "sha256",
+          "excluded",
+          "ledger_key"
+        ],
+        "type": "object"
+      },
+      "minItems": 11,
+      "type": "array"
+    },
+    "format": {
+      "const": "b10x.substrate-canonical-hash-fixtures.v2"
+    }
+  },
+  "required": [
+    "$schema",
+    "format",
+    "algorithm",
+    "cases"
+  ],
+  "title": "Canonical request-hash fixtures",
+  "type": "object"
+}

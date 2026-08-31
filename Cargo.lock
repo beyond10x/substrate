@@ -171,6 +171,114 @@ dependencies = [
 ]
 
 [[package]]
+name = "b10x-substrate-daemon"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "axum",
+ "b10x-substrate-host",
+ "b10x-substrate-store",
+ "b10x-substrate-wire",
+ "base64 0.23.1",
+ "chrono",
+ "clap",
+ "ed25519-dalek",
+ "futures-util",
+ "hex",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "nix",
+ "parking_lot",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "sha2 0.11.0",
+ "subtle",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "ulid",
+ "zeroize",
+]
+
+[[package]]
+name = "b10x-substrate-host"
+version = "0.3.0"
+dependencies = [
+ "async-trait",
+ "b10x-substrate-wire",
+ "base64 0.23.1",
+ "chrono",
+ "hex",
+ "libc",
+ "nix",
+ "parking_lot",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "ulid",
+ "zeroize",
+]
+
+[[package]]
+name = "b10x-substrate-sdk"
+version = "0.3.0"
+dependencies = [
+ "b10x-substrate-daemon",
+ "b10x-substrate-wire",
+ "base64 0.23.1",
+ "chrono",
+ "futures-util",
+ "nix",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tokio-tungstenite",
+ "ulid",
+]
+
+[[package]]
+name = "b10x-substrate-store"
+version = "0.3.0"
+dependencies = [
+ "b10x-substrate-wire",
+ "chrono",
+ "parking_lot",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror",
+]
+
+[[package]]
+name = "b10x-substrate-wire"
+version = "0.3.0"
+dependencies = [
+ "base64 0.23.1",
+ "chrono",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror",
+ "ulid",
+]
+
+[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1919,98 +2027,10 @@ dependencies = [
 
 [[package]]
 name = "substrate-contract-check"
-version = "0.2.4"
+version = "0.3.0"
 dependencies = [
  "jsonschema",
  "serde_json",
-]
-
-[[package]]
-name = "substrate-daemon"
-version = "0.2.4"
-dependencies = [
- "anyhow",
- "async-trait",
- "axum",
- "base64 0.23.1",
- "chrono",
- "clap",
- "ed25519-dalek",
- "futures-util",
- "hex",
- "http",
- "http-body-util",
- "hyper",
- "hyper-util",
- "nix",
- "parking_lot",
- "rusqlite",
- "serde",
- "serde_json",
- "serde_urlencoded",
- "sha2 0.11.0",
- "substrate-host",
- "substrate-store",
- "substrate-wire",
- "subtle",
- "tempfile",
- "thiserror",
- "tokio",
- "tower",
- "tracing",
- "tracing-subscriber",
- "ulid",
- "zeroize",
-]
-
-[[package]]
-name = "substrate-host"
-version = "0.2.4"
-dependencies = [
- "async-trait",
- "base64 0.23.1",
- "chrono",
- "hex",
- "libc",
- "nix",
- "parking_lot",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "substrate-wire",
- "tempfile",
- "thiserror",
- "tokio",
- "ulid",
- "zeroize",
-]
-
-[[package]]
-name = "substrate-store"
-version = "0.2.4"
-dependencies = [
- "chrono",
- "parking_lot",
- "rusqlite",
- "serde",
- "serde_json",
- "substrate-wire",
- "tempfile",
- "thiserror",
-]
-
-[[package]]
-name = "substrate-wire"
-version = "0.2.4"
-dependencies = [
- "base64 0.23.1",
- "chrono",
- "hex",
- "serde",
- "serde_json",
- "sha2 0.11.0",
- "thiserror",
- "ulid",
 ]
 
 [[package]]
@@ -2550,9 +2570,10 @@ checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
 
 [[package]]
 name = "xtask"
-version = "0.2.4"
+version = "0.3.0"
 dependencies = [
  "anyhow",
+ "b10x-substrate-wire",
  "clap",
  "fancy-regex",
  "hex",
@@ -2563,7 +2584,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
- "substrate-wire",
  "tempfile",
  "toml",
 ]

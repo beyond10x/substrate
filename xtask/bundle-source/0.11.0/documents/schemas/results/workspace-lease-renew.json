@@ -1,0 +1,6 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.11.0:result:workspace-lease-renew",
+  "$ref": "../resource.json#/$defs/workspace",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "workspace-lease-renew operation result"
+}

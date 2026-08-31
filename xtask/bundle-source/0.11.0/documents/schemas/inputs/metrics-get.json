@@ -1,0 +1,24 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.11.0:input:metrics-get",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "resource_id": {
+      "maxLength": 128,
+      "minLength": 1,
+      "type": "string"
+    },
+    "resource_kind": {
+      "enum": [
+        "exec",
+        "workspace"
+      ]
+    }
+  },
+  "required": [
+    "resource_kind",
+    "resource_id"
+  ],
+  "title": "metrics-get operation input",
+  "type": "object"
+}

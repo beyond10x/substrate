@@ -6,6 +6,7 @@ mod fs;
 mod probe;
 mod process;
 mod pty;
+mod quota;
 mod seccomp;
 mod secrets;
 
@@ -71,6 +72,9 @@ pub struct HostConfig {
     /// that verifies certificates will refuse the connection rather than trust something it cannot
     /// check. Absent and unverifiable, never present and unverified (invariant 3).
     pub ca_bundle: Option<PathBuf>,
+    /// An operator-reserved inclusive Linux project-id range. Absent means hard storage quotas are
+    /// not served; the driver never guesses that ids outside its state are free.
+    pub project_quota_ids: Option<(u32, u32)>,
 }
 
 impl HostConfig {
@@ -108,11 +112,16 @@ impl HostConfig {
             secret_slots: Vec::new(),
             egress_apertures: Vec::new(),
             ca_bundle: None,
+            project_quota_ids: None,
         }
     }
 
     fn aperture_root(&self) -> PathBuf {
         self.workspace_root.join(".substrate-apertures")
+    }
+
+    fn scratch_root(&self) -> PathBuf {
+        self.workspace_root.join(".substrate-scratch")
     }
 }
 
@@ -418,6 +427,7 @@ pub struct HostDriver {
     processes: process::ProcessRuntime,
     blocking_slots: Arc<Semaphore>,
     workspace_destroy_namespace: (libc::dev_t, libc::ino_t),
+    quotas: Option<Arc<quota::ProjectQuotas>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -497,6 +507,18 @@ impl HostDriver {
                 )
             },
         )?;
+        if config.project_quota_ids.is_some() {
+            std::fs::create_dir_all(config.scratch_root()).map_err(|error| {
+                DriverError::failed("scratch.root-failed", format!("scratch root: {error}"))
+            })?;
+            std::fs::set_permissions(
+                config.scratch_root(),
+                std::fs::Permissions::from_mode(0o700),
+            )
+            .map_err(|error| {
+                DriverError::failed("scratch.root-failed", format!("scratch root mode: {error}"))
+            })?;
+        }
         let filesystem = Arc::new(fs::GuardedFilesystem::open(
             &config.workspace_root,
             config.max_file_bytes,
@@ -504,7 +526,16 @@ impl HostDriver {
             config.list_limit_items,
         )?);
         let capability = probe::probe(&config, filesystem.openat2_available());
-        let processes = process::ProcessRuntime::new(config.clone(), capability.clone())?;
+        let quotas = if capability.facts.workspace_storage_quota.is_some() {
+            quota::ProjectQuotas::open(&config.workspace_root, config.project_quota_ids)?
+        } else {
+            None
+        };
+        let processes = process::ProcessRuntime::new_with_quotas(
+            config.clone(),
+            capability.clone(),
+            quotas.clone(),
+        )?;
         let workspace_destroy_namespace = filesystem.root_identity()?;
         Ok(Arc::new(Self {
             config,
@@ -513,6 +544,7 @@ impl HostDriver {
             processes,
             blocking_slots: Arc::new(Semaphore::new(16)),
             workspace_destroy_namespace,
+            quotas,
         }))
     }
 
@@ -652,15 +684,40 @@ impl Driver for HostDriver {
         let root_name = root_name.to_owned();
         let recovery_root_name = root_name.clone();
         let labels = input.labels.clone();
+        let storage_limit = input.storage;
+        let quotas = self.quotas.clone();
+        let quota_path = self.config.workspace_root.join(&root_name);
         let result = self
             .filesystem_io(move |filesystem| {
                 filesystem.create_workspace(&root_name)?;
+                let storage = match storage_limit {
+                    Some(limit) => {
+                        let Some(quotas) = quotas.as_ref() else {
+                            let _ = std::fs::remove_dir(&quota_path);
+                            return Err(DriverError::unserved(
+                                "workspace.storage-quota-unserved",
+                                "The active host has not proved hard workspace storage quotas.",
+                                "storage",
+                            ));
+                        };
+                        match quotas.apply(&quota_path, limit) {
+                            Ok(usage) => Some(usage),
+                            Err(error) => {
+                                let _ = std::fs::remove_dir(&quota_path);
+                                let _ = quotas.release(&quota_path);
+                                return Err(error);
+                            }
+                        }
+                    }
+                    None => None,
+                };
                 Ok(Workspace {
                     id,
                     kind: substrate_wire::WorkspaceKind::Workspace,
                     labels,
                     observed_at: Utc::now(),
                     state: substrate_wire::WorkspaceState::Ready,
+                    storage,
                     lease: None,
                 })
             })
@@ -690,12 +747,24 @@ impl Driver for HostDriver {
     ) -> Result<Workspace, DriverError> {
         let id = id.to_owned();
         let root_name = root_name.to_owned();
+        let quota_path = self.config.workspace_root.join(&root_name);
+        let quotas = self.quotas.clone();
         let mut result = previous.clone();
         self.filesystem_io(move |filesystem| {
             filesystem.observe_workspace(&root_name)?;
             id.clone_into(&mut result.id);
             result.state = substrate_wire::WorkspaceState::Ready;
             result.observed_at = Utc::now();
+            if let Some(previous) = result.storage.as_ref() {
+                let quotas = quotas.as_ref().ok_or_else(|| {
+                    DriverError::unserved(
+                        "workspace.storage-quota-unserved",
+                        "The workspace quota can no longer be observed.",
+                        "storage",
+                    )
+                })?;
+                result.storage = Some(quotas.usage(&quota_path, previous.limit)?);
+            }
             Ok(result)
         })
         .await
@@ -840,6 +909,8 @@ impl Driver for HostDriver {
     ) -> Result<WorkspaceDestroyProgress, DriverError> {
         let workspace_id = workspace_id.to_owned();
         let root_name = root_name.to_owned();
+        let quota_path = self.config.workspace_root.join(&root_name);
+        let quotas = self.quotas.clone();
         let workspace_destroy_namespace = self.workspace_destroy_namespace;
         self.filesystem_io(move |filesystem| {
             let _ownership =
@@ -849,6 +920,9 @@ impl Driver for HostDriver {
                     Ok(WorkspaceDestroyProgress::Pending { removed_items })
                 }
                 fs::WorkspaceDestroyBatch::Absent => {
+                    if let Some(quotas) = quotas.as_ref() {
+                        quotas.release(&quota_path)?;
+                    }
                     Ok(WorkspaceDestroyProgress::Absent(WorkspaceAbsence {
                         kind: substrate_wire::WorkspaceKind::Workspace,
                         id: workspace_id,

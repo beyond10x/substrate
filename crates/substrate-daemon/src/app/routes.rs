@@ -15,6 +15,7 @@ use super::events::{
 use super::execs::{
     exec_get, exec_lease_renew, exec_output_get, exec_retire, exec_signal, exec_start,
 };
+use super::metrics::{metrics_get, metrics_stream};
 use super::responses::{
     not_found, not_found_at, query_is_empty, request_id, schema_invalid, store_failure, success,
 };
@@ -37,6 +38,8 @@ const V2_ENVELOPE_LIMIT: usize = super::BODY_LIMIT * 8;
 pub fn router(app: Arc<App>) -> Router {
     Router::new()
         .route("/v1/machine", get(machine_get))
+        .route("/v1/metrics", get(metrics_get))
+        .route("/v1/metrics/stream", get(metrics_stream))
         .route("/v1/workspaces", post(workspace_create))
         .route(
             "/v1/workspaces/{workspace_id}",
