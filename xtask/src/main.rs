@@ -14,6 +14,7 @@ mod json;
 mod licenses;
 mod links;
 mod package;
+mod packages;
 mod render;
 mod render_v2;
 mod repo;
@@ -43,6 +44,9 @@ enum Command {
     /// Verify workspace licensing and the locked graph's deterministic third-party notices.
     #[command(name = "check-licenses")]
     Licenses,
+    /// Verify the closed public-crate allowlist and each registry package's contents.
+    #[command(name = "check-packages")]
+    Packages,
     /// Scan every reachable commit with the checksum-pinned Gitleaks release.
     #[command(name = "check-secrets")]
     Secrets,
@@ -91,6 +95,7 @@ fn dispatch() -> Result<ExitCode> {
     let report = match cli.command {
         Command::Advisories => advisories::check(&repo::root()?)?,
         Command::Licenses => licenses::check(&repo::root()?)?,
+        Command::Packages => packages::check(&repo::root()?)?,
         Command::Secrets => secrets::check(&repo::root()?)?,
         Command::BotFiles(args) => bot_files::check(&args),
         Command::Toolchain { root } => {

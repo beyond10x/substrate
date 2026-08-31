@@ -13,9 +13,22 @@ use crate::{
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 use substrate_wire::{
-    ErrorClass, ErrorDetail, Exec, ExecAbsence, ExecKind, ExecState, LeaseState, OperationOutcome,
-    Workspace, WorkspaceState,
+    ErrorClass, ErrorDetail, Exec, ExecAbsence, ExecKind, ExecState, ExecUsage, LeaseState,
+    OperationOutcome, Workspace, WorkspaceState,
 };
+
+pub(crate) fn mark_exec_unknown(resource: &mut Exec, observed_at: DateTime<Utc>) {
+    resource.state = ExecState::Unknown;
+    resource.observed_at = observed_at;
+    if matches!(resource.usage, Some(ExecUsage::Pending { .. })) {
+        resource.usage = Some(ExecUsage::Unavailable {
+            observed_at,
+            code: "exec.metrics-unavailable".to_owned(),
+            message: "The daemon restarted before a complete resource observation was recovered."
+                .to_owned(),
+        });
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExecRetireReservation {
@@ -579,8 +592,7 @@ impl Store {
             transaction.commit()?;
             return Ok(());
         }
-        stored.resource.state = ExecState::Unknown;
-        stored.resource.observed_at = observed_at;
+        mark_exec_unknown(&mut stored.resource, observed_at);
         stored.output_complete = true;
         transaction.execute(
             "UPDATE execs SET resource_json = ?4, output_complete = 1, physically_absent = 1

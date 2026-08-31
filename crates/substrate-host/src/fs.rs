@@ -1353,6 +1353,20 @@ fn path_escape() -> DriverError {
 
 #[allow(clippy::needless_pass_by_value)] // Call sites hand ownership out of map_err closures.
 fn io_failed(code: &'static str, error: std::io::Error) -> DriverError {
+    if error.raw_os_error() == Some(libc::EDQUOT) {
+        return DriverError::exhausted(
+            "workspace.storage-quota-exhausted",
+            "The declared workspace byte or inode ceiling refused the write.",
+            "storage",
+        );
+    }
+    if error.raw_os_error() == Some(libc::ENOSPC) {
+        return DriverError::exhausted(
+            "workspace.storage-exhausted",
+            "The backing workspace filesystem has no free capacity.",
+            "storage",
+        );
+    }
     DriverError::failed(code, format!("Guarded workspace operation failed: {error}"))
 }
 

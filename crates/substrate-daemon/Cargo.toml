@@ -1,12 +1,17 @@
 [package]
-name = "substrate-daemon"
+name = "b10x-substrate-daemon"
 description = "Standalone substrate HTTP daemon"
+homepage = "https://beyond10x.github.io/substrate/"
+documentation = "https://docs.rs/b10x-substrate-daemon"
 edition.workspace = true
 license.workspace = true
+readme = "README.md"
 repository.workspace = true
 rust-version.workspace = true
 version.workspace = true
-publish = false
+publish = true
+keywords = ["sandbox", "daemon", "execution", "workspace"]
+categories = ["command-line-utilities"]
 
 [lib]
 name = "substrate_daemon"
@@ -28,16 +33,16 @@ http.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
-nix.workspace = true
+nix = { workspace = true, features = ["signal"] }
 parking_lot.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_urlencoded.workspace = true
 sha2.workspace = true
 subtle.workspace = true
-substrate-host = { path = "../substrate-host" }
-substrate-store = { path = "../substrate-store" }
-substrate-wire = { path = "../substrate-wire" }
+substrate-host = { package = "b10x-substrate-host", path = "../substrate-host", version = "=0.3.0" }
+substrate-store = { package = "b10x-substrate-store", path = "../substrate-store", version = "=0.3.0" }
+substrate-wire = { package = "b10x-substrate-wire", path = "../substrate-wire", version = "=0.3.0" }
 thiserror.workspace = true
 tokio.workspace = true
 tower.workspace = true

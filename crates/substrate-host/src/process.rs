@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::{ExitStatus, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use base64::Engine as _;
 use chrono::Utc;
@@ -18,7 +18,7 @@ use substrate_wire::{
     Base64Encoding, BaselineEnvironment, CapabilitySnapshot, EXECUTION_CAPSULE_MOUNT, Exec,
     ExecExit, ExecKind, ExecOutputQuery, ExecSignalInput, ExecStartInput, ExecState,
     ExecutionCapsuleInput, OutputSlice, OutputStream, PipeSessionStartInput, PtyWindow,
-    SandboxProfile, SessionMode, Signal,
+    ResourceUsage, SandboxProfile, SessionMode, Signal,
 };
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::process::{Child, ChildStdin, Command};
@@ -61,6 +61,8 @@ struct Execution {
     delivered_signal: Mutex<Option<Signal>>,
     pipe_backpressure: AtomicBool,
     pipe: Option<PipeState>,
+    started_at: Instant,
+    scratch: Option<ScratchObservation>,
 }
 
 struct PipeState {
@@ -101,8 +103,55 @@ struct PreparedCapsule {
     applied: AppliedExecutionCapsule,
 }
 
+#[derive(Clone)]
+struct ScratchObservation {
+    path: PathBuf,
+    limit: substrate_wire::StorageLimit,
+    quotas: Arc<crate::quota::ProjectQuotas>,
+}
+
+impl ScratchObservation {
+    fn usage(&self) -> Result<substrate_wire::StorageUsage, DriverError> {
+        self.quotas.usage(&self.path, self.limit)
+    }
+}
+
+struct PreparedScratch {
+    observation: ScratchObservation,
+    active: bool,
+}
+
+impl PreparedScratch {
+    fn close(mut self) -> bool {
+        let removed = std::fs::remove_dir_all(&self.observation.path).is_ok()
+            && !self.observation.path.exists();
+        let released = removed
+            && self
+                .observation
+                .quotas
+                .release(&self.observation.path)
+                .is_ok();
+        self.active = !released;
+        released
+    }
+}
+
+impl Drop for PreparedScratch {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = std::fs::remove_dir_all(&self.observation.path);
+            let _ = self.observation.quotas.release(&self.observation.path);
+        }
+    }
+}
+
 impl Execution {
-    fn new(observation: ExecObservation, pipe: Option<PipeState>) -> Self {
+    fn new(
+        observation: ExecObservation,
+        pipe: Option<PipeState>,
+        started_at: Instant,
+        scratch: Option<ScratchObservation>,
+    ) -> Self {
         Self {
             observation: Mutex::new(observation),
             notify: Notify::new(),
@@ -110,6 +159,8 @@ impl Execution {
             delivered_signal: Mutex::new(None),
             pipe_backpressure: AtomicBool::new(false),
             pipe,
+            started_at,
+            scratch,
         }
     }
 }
@@ -121,10 +172,20 @@ pub struct ProcessRuntime {
     executions: Arc<Mutex<HashMap<String, Arc<Execution>>>>,
     reservations: Arc<Mutex<HashSet<String>>>,
     active: Arc<AtomicUsize>,
+    quotas: Option<Arc<crate::quota::ProjectQuotas>>,
 }
 
 impl ProcessRuntime {
+    #[cfg(test)]
     pub fn new(config: HostConfig, capability: CapabilitySnapshot) -> Result<Self, DriverError> {
+        Self::new_with_quotas(config, capability, None)
+    }
+
+    pub(crate) fn new_with_quotas(
+        config: HostConfig,
+        capability: CapabilitySnapshot,
+        quotas: Option<Arc<crate::quota::ProjectQuotas>>,
+    ) -> Result<Self, DriverError> {
         let backend_binding = crate::probe::backend_binding(&config);
         let runtime = Self {
             config,
@@ -133,10 +194,12 @@ impl ProcessRuntime {
             executions: Arc::new(Mutex::new(HashMap::new())),
             reservations: Arc::new(Mutex::new(HashSet::new())),
             active: Arc::new(AtomicUsize::new(0)),
+            quotas,
         };
         let process_trees_reconciled = runtime.reconcile_orphans()?;
         runtime.reconcile_capsules(process_trees_reconciled)?;
         runtime.reconcile_apertures(process_trees_reconciled)?;
+        runtime.reconcile_scratch(process_trees_reconciled)?;
         Ok(runtime)
     }
 
@@ -339,6 +402,58 @@ impl ProcessRuntime {
         Ok(())
     }
 
+    fn reconcile_scratch(&self, process_trees_reconciled: bool) -> Result<(), DriverError> {
+        let Some(quotas) = self.quotas.as_ref() else {
+            return Ok(());
+        };
+        let root = self.config.scratch_root();
+        for (index, entry) in std::fs::read_dir(&root)
+            .map_err(|error| {
+                DriverError::failed("scratch.reconcile-failed", format!("scratch root: {error}"))
+            })?
+            .enumerate()
+        {
+            if !process_trees_reconciled || index >= self.config.max_tracked_execs {
+                return Err(DriverError::failed(
+                    "scratch.reconcile-limit",
+                    "Scratch cleanup is unproven or exceeds the tracked-exec bound.",
+                ));
+            }
+            let entry = entry.map_err(|error| {
+                DriverError::failed(
+                    "scratch.reconcile-failed",
+                    format!("scratch entry: {error}"),
+                )
+            })?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                return Err(DriverError::failed(
+                    "scratch.reconcile-invalid",
+                    "A scratch entry has a non-UTF-8 name.",
+                ));
+            };
+            if !name.starts_with("scratch-ex_")
+                || !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+                || !entry.file_type().is_ok_and(|kind| kind.is_dir())
+            {
+                return Err(DriverError::failed(
+                    "scratch.reconcile-invalid",
+                    "The scratch root contains an unexpected entry.",
+                ));
+            }
+            std::fs::remove_dir_all(entry.path()).map_err(|error| {
+                DriverError::failed(
+                    "scratch.reconcile-failed",
+                    format!("scratch cleanup: {error}"),
+                )
+            })?;
+            quotas.release(&entry.path())?;
+        }
+        Ok(())
+    }
+
     pub async fn start(
         &self,
         id: &str,
@@ -465,6 +580,10 @@ impl ProcessRuntime {
             Ok(value) => value,
             Err(outcome) => return outcome,
         };
+        let scratch = match self.prepare_scratch(id, input.scratch) {
+            Ok(scratch) => scratch,
+            Err(error) => return contain_cgroup(&cgroup, error),
+        };
         // Selected again rather than carried out of `admit`, because it is a pure function of the
         // request and the configuration and re-asking is cheaper than threading a borrow through
         // every early return above.
@@ -552,6 +671,7 @@ impl ProcessRuntime {
             &slots,
             resolution.as_ref(),
             info_fd,
+            scratch.as_ref(),
         ) {
             Ok(value) => value,
             Err(error) => return contain_cgroup(&cgroup, error),
@@ -657,6 +777,7 @@ impl ProcessRuntime {
             }
             _ => None,
         };
+        let started_at = Instant::now();
         if let Err(error) = release_barrier(&sync_write) {
             return contain_spawned(child, cgroup, error).await;
         }
@@ -697,6 +818,12 @@ impl ProcessRuntime {
             requested: input.sandbox.clone(),
             applied: Some(applied),
             exit: None,
+            usage: input
+                .measurements
+                .contains(&substrate_wire::ExecMeasurement::ResourceUsage)
+                .then(|| substrate_wire::ExecUsage::Pending {
+                    observed_at: Utc::now(),
+                }),
             lease: None,
             refusal: None,
         };
@@ -738,7 +865,12 @@ impl ProcessRuntime {
             (None, None)
         };
         let output_bound = Arc::new(AtomicBool::new(false));
-        let execution = Arc::new(Execution::new(observation.clone(), pipe));
+        let execution = Arc::new(Execution::new(
+            observation.clone(),
+            pipe,
+            started_at,
+            scratch.as_ref().map(|scratch| scratch.observation.clone()),
+        ));
         tracking.install(Arc::clone(&execution));
         let timeout = Duration::from_millis(input.limits.timeout_ms);
         let cpu_budget_micros = input.limits.cpu_millis.saturating_mul(1_000);
@@ -760,6 +892,8 @@ impl ProcessRuntime {
             permit,
             terminal,
             output_bound,
+            started_at,
+            scratch,
         ));
         if input.wait {
             if let Err(error) =
@@ -986,7 +1120,21 @@ impl ProcessRuntime {
             .get(id)
             .cloned()
             .ok_or_else(DriverError::not_found)?;
-        let observation = execution.observation.lock().clone();
+        let mut observation = execution.observation.lock().clone();
+        if !is_terminal(observation.resource.state)
+            && observation.resource.usage.is_some()
+            && let (Some(root), Some(name)) = (
+                self.config.cgroup_root.as_deref(),
+                observation.cgroup.as_deref(),
+            )
+        {
+            let cgroup = Cgroup::existing(root, name)?;
+            let mut usage = cgroup.resource_usage(false, execution.started_at)?;
+            if let Some(scratch) = execution.scratch.as_ref() {
+                usage.scratch = Some(scratch.usage()?);
+            }
+            observation.resource.usage = Some(substrate_wire::ExecUsage::Observed(usage));
+        }
         Ok(observation)
     }
 
@@ -1277,6 +1425,7 @@ impl ProcessRuntime {
         })
     }
 
+    #[allow(clippy::too_many_lines)] // Refusal precedence is clearer in one admission sequence.
     fn admit(&self, id: &str, workspace: &Path, input: &ExecStartInput) -> Result<(), DriverError> {
         if !id.starts_with("ex_")
             || !id
@@ -1322,6 +1471,33 @@ impl ProcessRuntime {
             || self.capability.facts.exec_cgroup_kill.is_none()
         {
             return Err(sandbox_unavailable());
+        }
+        if !input.measurements.is_empty() && self.capability.facts.exec_resource_usage.is_none() {
+            return Err(DriverError::unserved(
+                "exec.metrics-unserved",
+                "The active host has not proved the requested execution resource counters.",
+                "measurements",
+            ));
+        }
+        if let Some(scratch) = input.scratch {
+            let Some(fact) = self.capability.facts.exec_scratch_quota.as_ref() else {
+                return Err(DriverError::unserved(
+                    "exec.scratch-quota-unserved",
+                    "The active host has not proved hard per-exec scratch quotas.",
+                    "scratch",
+                ));
+            };
+            if !scratch.within_contract_bounds()
+                || scratch.max_bytes % fact.allocation_unit_bytes != 0
+                || scratch.max_bytes > fact.max_bytes
+                || scratch.max_inodes > fact.max_inodes
+            {
+                return Err(DriverError::exhausted(
+                    "exec.scratch-quota-limit",
+                    "The requested scratch quota exceeds or misaligns with the proved host limit.",
+                    "scratch",
+                ));
+            }
         }
         if input.argv.is_empty()
             || input.argv.len() > 256
@@ -1395,6 +1571,7 @@ impl ProcessRuntime {
         slots: &crate::secrets::SecretSlotSet,
         resolution: Option<&crate::egress::GeneratedResolution>,
         info_fd: Option<RawFd>,
+        scratch: Option<&PreparedScratch>,
     ) -> Result<(Command, File), DriverError> {
         let seccomp = crate::seccomp::profile()?;
         let seccomp_fd = seccomp.as_raw_fd();
@@ -1475,6 +1652,12 @@ impl ProcessRuntime {
             for (source, mount) in resolution.binds() {
                 command.arg("--ro-bind").arg(source).arg(mount);
             }
+        }
+        if let Some(scratch) = scratch {
+            command
+                .arg("--bind")
+                .arg(&scratch.observation.path)
+                .arg(substrate_wire::EXEC_SCRATCH_MOUNT);
         }
         command
             .arg("--bind")
@@ -1609,6 +1792,51 @@ impl ProcessRuntime {
             },
         }))
     }
+
+    fn prepare_scratch(
+        &self,
+        id: &str,
+        limit: Option<substrate_wire::StorageLimit>,
+    ) -> Result<Option<PreparedScratch>, DriverError> {
+        let Some(limit) = limit else {
+            return Ok(None);
+        };
+        let quotas = self.quotas.clone().ok_or_else(|| {
+            DriverError::unserved(
+                "exec.scratch-quota-unserved",
+                "The active host has not proved hard per-exec scratch quotas.",
+                "scratch",
+            )
+        })?;
+        let path = self.config.scratch_root().join(format!("scratch-{id}"));
+        std::fs::create_dir(&path).map_err(|error| {
+            DriverError::failed(
+                "exec.scratch-create-failed",
+                format!("scratch create: {error}"),
+            )
+        })?;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).map_err(
+            |error| {
+                let _ = std::fs::remove_dir(&path);
+                DriverError::failed(
+                    "exec.scratch-create-failed",
+                    format!("scratch mode: {error}"),
+                )
+            },
+        )?;
+        if let Err(error) = quotas.apply(&path, limit) {
+            let _ = std::fs::remove_dir(&path);
+            return Err(error);
+        }
+        Ok(Some(PreparedScratch {
+            observation: ScratchObservation {
+                path,
+                limit,
+                quotas,
+            },
+            active: true,
+        }))
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1628,6 +1856,8 @@ async fn run_child(
     _permit: ActivePermit,
     terminal: Option<Arc<crate::pty::PtyMaster>>,
     output_bound: Arc<AtomicBool>,
+    started_at: Instant,
+    scratch: Option<PreparedScratch>,
 ) {
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
@@ -1703,10 +1933,20 @@ async fn run_child(
     .await;
     let (stdout, stdout_truncated) = stdout_task.await.unwrap_or_else(|_| (Vec::new(), true));
     let (stderr, stderr_truncated) = stderr_task.await.unwrap_or_else(|_| (Vec::new(), true));
-    // Quiesce the whole run tree before the terminal counter sample. The shared mapping remains
+    let measured = execution.observation.lock().resource.usage.is_some();
+    let terminal_usage = measured.then(|| {
+        let mut usage = cgroup.resource_usage(true, started_at)?;
+        if let Some(scratch) = scratch.as_ref() {
+            usage.scratch = Some(scratch.observation.usage()?);
+        }
+        Ok::<_, DriverError>(usage)
+    });
+    let metrics_failed = terminal_usage.as_ref().is_some_and(Result::is_err);
+    // Quiesce the whole run tree after the terminal counter sample. The shared mapping remains
     // owned by `aperture`, so killing and reaping the relay cannot invalidate it and no relay can
     // increment a counter after the observation is built.
     let cgroup_reconciled = reconcile_cgroup(&cgroup).await;
+    let scratch_reconciled = scratch.is_none_or(PreparedScratch::close);
     let aperture_exhausted = ceiling_reached(aperture_exhausted, aperture.as_ref());
     // Asked once more after the wait, for exactly the reason `ceiling_reached` is: the drain raises
     // this flag from its own task, and a child that crosses the bound on its **last** write and
@@ -1735,14 +1975,40 @@ async fn run_child(
     observation.stderr_truncated = stderr_truncated;
     observation.output_complete = true;
     observation.resource.observed_at = Utc::now();
+    if let Some(usage) = terminal_usage {
+        observation.resource.usage = Some(match usage {
+            Ok(usage) => substrate_wire::ExecUsage::Observed(usage),
+            Err(_) => substrate_wire::ExecUsage::Unavailable {
+                observed_at: Utc::now(),
+                code: "exec.metrics-unavailable".to_owned(),
+                message: "Requested execution resource counters became unavailable.".to_owned(),
+            },
+        });
+    }
     record_aperture(&mut observation, applied_aperture, aperture_exhausted);
     record_pipe_backpressure(&mut observation, &execution);
     record_terminal_output_bound(&mut observation, output_exhausted);
+    let memory_exhausted = matches!(
+        observation.resource.usage,
+        Some(substrate_wire::ExecUsage::Observed(ResourceUsage {
+            memory_oom_kills: 1..,
+            ..
+        }))
+    );
+    record_resource_bound(
+        &mut observation,
+        timed_out,
+        cpu_exhausted,
+        memory_exhausted,
+        metrics_failed || cpu_measurement_failed,
+    );
     match status {
         _ if !cgroup_reconciled
             || !capsule_reconciled
             || !resolution_reconciled
-            || cpu_measurement_failed =>
+            || !scratch_reconciled
+            || cpu_measurement_failed
+            || metrics_failed =>
         {
             observation.resource.state = ExecState::Unknown;
             observation.resource.exit = None;
@@ -1773,6 +2039,51 @@ async fn run_child(
     }
     drop(observation);
     execution.notify.notify_waiters();
+}
+
+#[allow(clippy::fn_params_excessive_bools)] // These are independent kernel termination facts.
+fn record_resource_bound(
+    observation: &mut ExecObservation,
+    timed_out: bool,
+    cpu_exhausted: bool,
+    memory_exhausted: bool,
+    metrics_failed: bool,
+) {
+    if observation.resource.refusal.is_some() {
+        return;
+    }
+    let (class, code, message) = if metrics_failed {
+        (
+            substrate_wire::ErrorClass::Failed,
+            "exec.metrics-unavailable",
+            "Requested execution resource counters became unavailable.",
+        )
+    } else if memory_exhausted {
+        (
+            substrate_wire::ErrorClass::Exhausted,
+            "exec.memory-limit",
+            "The declared memory ceiling ended the execution.",
+        )
+    } else if cpu_exhausted {
+        (
+            substrate_wire::ErrorClass::Exhausted,
+            "exec.cpu-limit",
+            "The declared cumulative CPU-time budget ended the execution.",
+        )
+    } else if timed_out {
+        (
+            substrate_wire::ErrorClass::Exhausted,
+            "exec.timeout",
+            "The declared wall-time deadline ended the execution.",
+        )
+    } else {
+        return;
+    };
+    observation.resource.refusal = Some(substrate_wire::ExecRefusal {
+        class,
+        code: code.to_owned(),
+        message: message.to_owned(),
+    });
 }
 
 fn record_pipe_backpressure(observation: &mut ExecObservation, execution: &Execution) {
@@ -2406,6 +2717,35 @@ impl Cgroup {
             })
     }
 
+    fn resource_usage(
+        &self,
+        complete: bool,
+        started_at: Instant,
+    ) -> Result<ResourceUsage, DriverError> {
+        let memory_current = read_decimal_counter(&self.path.join("memory.current"))?;
+        let memory_peak = read_decimal_counter(&self.path.join("memory.peak"))?;
+        let processes_current = read_decimal_counter(&self.path.join("pids.current"))?;
+        let processes_peak = read_decimal_counter(&self.path.join("pids.peak"))?;
+        let process_limit_hits = read_named_counter(&self.path.join("pids.events"), "max")?;
+        let memory_oom_kills = read_named_counter(&self.path.join("memory.events"), "oom_kill")?;
+        let (io_read_bytes, io_write_bytes) = read_io_counters(&self.path.join("io.stat"))?;
+        Ok(ResourceUsage {
+            complete,
+            observed_at: Utc::now(),
+            wall_time_us: u64::try_from(started_at.elapsed().as_micros()).unwrap_or(u64::MAX),
+            cpu_time_us: self.cpu_usage_micros()?,
+            memory_current_bytes: (!complete).then_some(memory_current),
+            memory_peak_bytes: memory_peak,
+            processes_current: (!complete).then_some(processes_current),
+            processes_peak,
+            process_limit_hits,
+            memory_oom_kills,
+            io_read_bytes,
+            io_write_bytes,
+            scratch: None,
+        })
+    }
+
     fn signal_all(&self, signal: Signal, excluded_pid: Option<u32>) -> Result<(), DriverError> {
         let processes =
             std::fs::read_to_string(self.path.join("cgroup.procs")).map_err(|error| {
@@ -2454,6 +2794,78 @@ impl Cgroup {
             )
         })
     }
+}
+
+fn read_decimal_counter(path: &Path) -> Result<u64, DriverError> {
+    std::fs::read_to_string(path)
+        .map_err(|error| {
+            DriverError::failed(
+                "exec.metrics-read-failed",
+                format!("cgroup metric {}: {error}", path.display()),
+            )
+        })?
+        .trim()
+        .parse::<u64>()
+        .map_err(|_| {
+            DriverError::failed(
+                "exec.metrics-read-failed",
+                format!("cgroup metric {} is not an integer", path.display()),
+            )
+        })
+}
+
+fn read_named_counter(path: &Path, key: &str) -> Result<u64, DriverError> {
+    let contents = std::fs::read_to_string(path).map_err(|error| {
+        DriverError::failed(
+            "exec.metrics-read-failed",
+            format!("cgroup metric {}: {error}", path.display()),
+        )
+    })?;
+    contents
+        .lines()
+        .find_map(|line| {
+            let mut fields = line.split_whitespace();
+            (fields.next() == Some(key))
+                .then(|| fields.next()?.parse::<u64>().ok())
+                .flatten()
+        })
+        .ok_or_else(|| {
+            DriverError::failed(
+                "exec.metrics-read-failed",
+                format!("cgroup metric {} omitted {key}", path.display()),
+            )
+        })
+}
+
+fn read_io_counters(path: &Path) -> Result<(u64, u64), DriverError> {
+    let contents = std::fs::read_to_string(path).map_err(|error| {
+        DriverError::failed(
+            "exec.metrics-read-failed",
+            format!("cgroup metric {}: {error}", path.display()),
+        )
+    })?;
+    let mut read = 0_u64;
+    let mut written = 0_u64;
+    for line in contents.lines() {
+        for field in line.split_whitespace().skip(1) {
+            if let Some(value) = field.strip_prefix("rbytes=") {
+                read = read.saturating_add(value.parse::<u64>().map_err(|_| {
+                    DriverError::failed(
+                        "exec.metrics-read-failed",
+                        "cgroup io.stat has invalid rbytes",
+                    )
+                })?);
+            } else if let Some(value) = field.strip_prefix("wbytes=") {
+                written = written.saturating_add(value.parse::<u64>().map_err(|_| {
+                    DriverError::failed(
+                        "exec.metrics-read-failed",
+                        "cgroup io.stat has invalid wbytes",
+                    )
+                })?);
+            }
+        }
+    }
+    Ok((read, written))
 }
 
 fn write_control(path: &Path, name: &str, value: &str) -> Result<(), DriverError> {
@@ -2569,6 +2981,7 @@ mod tests {
                 },
                 applied: None,
                 exit: None,
+                usage: None,
                 lease: None,
                 refusal: None,
             },
@@ -2812,6 +3225,8 @@ mod tests {
                 cpu_millis: 1_000,
             },
             wait: false,
+            scratch: None,
+            measurements: std::collections::BTreeSet::new(),
             capsule: None,
             lease_ttl_ms: None,
         };
@@ -2885,6 +3300,8 @@ mod tests {
                 cpu_millis: 1_000,
             },
             wait: false,
+            scratch: None,
+            measurements: std::collections::BTreeSet::new(),
             capsule: None,
             lease_ttl_ms: None,
         };
@@ -3156,6 +3573,8 @@ mod tests {
                 cpu_millis: 1_000,
             },
             wait: false,
+            scratch: None,
+            measurements: std::collections::BTreeSet::new(),
             capsule: None,
             lease_ttl_ms: Some(60_000),
         }
@@ -3204,6 +3623,8 @@ mod tests {
                 frame_limit: 1,
                 terminal: None,
             }),
+            std::time::Instant::now(),
+            None,
         ));
         let drain = tokio::spawn(drain_capped(
             Some(reader),
@@ -3269,7 +3690,12 @@ mod tests {
         let runtime = ProcessRuntime::new(HostConfig::minimum("/does/not/exist"), capability)
             .expect("runtime");
         let mut running = running_observation("ex_ack_race");
-        let execution = std::sync::Arc::new(Execution::new(running.clone(), None));
+        let execution = std::sync::Arc::new(Execution::new(
+            running.clone(),
+            None,
+            std::time::Instant::now(),
+            None,
+        ));
         runtime.executions.lock().insert(
             running.resource.id.clone(),
             std::sync::Arc::clone(&execution),
@@ -3303,7 +3729,12 @@ mod tests {
         let mut running = running_observation("ex_notify_race");
         running.resource.exit = None;
         running.output_complete = false;
-        let execution = std::sync::Arc::new(Execution::new(running, None));
+        let execution = std::sync::Arc::new(Execution::new(
+            running,
+            None,
+            std::time::Instant::now(),
+            None,
+        ));
         let hook_execution = std::sync::Arc::clone(&execution);
         wait_terminal_with_hook(
             &execution,

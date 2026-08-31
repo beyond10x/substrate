@@ -23,6 +23,12 @@ pub const MAX_SNAPSHOT_PROVENANCE_EVENTS: u64 = 1_024;
 pub const MAX_EXECUTION_CAPSULE_FILES: u32 = 32;
 pub const MAX_EXECUTION_CAPSULE_FILE_BYTES: u64 = 262_144;
 pub const MAX_EXECUTION_CAPSULE_BYTES: u64 = 524_288;
+pub const MIN_STORAGE_QUOTA_BYTES: u64 = 1_048_576;
+pub const MAX_STORAGE_QUOTA_BYTES: u64 = 1_099_511_627_776;
+pub const MIN_STORAGE_QUOTA_INODES: u64 = 16;
+pub const MAX_STORAGE_QUOTA_INODES: u64 = 1_048_576;
+pub const RESOURCE_USAGE_SAMPLE_INTERVAL_MS: u64 = 1_000;
+pub const EXEC_SCRATCH_MOUNT: &str = "/scratch";
 /// How many host directories one start may declare read-only (ADR 0010).
 ///
 /// Small on purpose. A closure that needs many roots is a closure that should be assembled rather
@@ -538,7 +544,34 @@ pub struct WorkspaceCreateInput {
     pub source: WorkspaceSource,
     pub labels: Labels,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<StorageLimit>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lease_ttl_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StorageLimit {
+    pub max_bytes: u64,
+    pub max_inodes: u64,
+}
+
+impl StorageLimit {
+    pub const fn within_contract_bounds(self) -> bool {
+        self.max_bytes >= MIN_STORAGE_QUOTA_BYTES
+            && self.max_bytes <= MAX_STORAGE_QUOTA_BYTES
+            && self.max_inodes >= MIN_STORAGE_QUOTA_INODES
+            && self.max_inodes <= MAX_STORAGE_QUOTA_INODES
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StorageUsage {
+    pub limit: StorageLimit,
+    pub used_bytes: u64,
+    pub used_inodes: u64,
+    pub observed_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -613,6 +646,8 @@ pub struct Workspace {
     pub labels: Labels,
     pub observed_at: DateTime<Utc>,
     pub state: WorkspaceState,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<StorageUsage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lease: Option<LeaseObservation>,
 }
@@ -1267,6 +1302,10 @@ pub struct ExecStartInput {
     pub sandbox: ConfinementRequest,
     pub limits: ExecLimits,
     pub wait: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scratch: Option<StorageLimit>,
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub measurements: BTreeSet<ExecMeasurement>,
     /// Host directories admitted read-only inside this process (ADR 0010).
     ///
     /// Empty on every existing consumer, and empty is what keeps the isolation verified from
@@ -1286,6 +1325,12 @@ pub struct ExecStartInput {
     pub capsule: Option<ExecutionCapsuleInput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lease_ttl_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ExecMeasurement {
+    ResourceUsage,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1343,6 +1388,8 @@ pub struct Exec {
     pub applied: Option<AppliedConfinement>,
     pub exit: Option<ExecExit>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<ExecUsage>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lease: Option<LeaseObservation>,
     /// The named bound that ended this run, when one did (ADR 0014).
     ///
@@ -1353,6 +1400,87 @@ pub struct Exec {
     /// already parses is byte-identical.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refusal: Option<ExecRefusal>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "kebab-case")]
+pub enum ExecUsage {
+    Pending {
+        observed_at: DateTime<Utc>,
+    },
+    Observed(ResourceUsage),
+    Unavailable {
+        observed_at: DateTime<Utc>,
+        code: String,
+        message: String,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceUsage {
+    pub complete: bool,
+    pub observed_at: DateTime<Utc>,
+    pub wall_time_us: u64,
+    pub cpu_time_us: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_current_bytes: Option<u64>,
+    pub memory_peak_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub processes_current: Option<u64>,
+    pub processes_peak: u64,
+    pub process_limit_hits: u64,
+    pub memory_oom_kills: u64,
+    pub io_read_bytes: u64,
+    pub io_write_bytes: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scratch: Option<StorageUsage>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExecMetrics {
+    pub exec: String,
+    pub usage: ExecUsage,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MetricsResourceKind {
+    Exec,
+    Workspace,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MetricsQuery {
+    pub resource_kind: MetricsResourceKind,
+    pub resource_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MetricsStreamQuery {
+    pub exec_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "resource_kind", rename_all = "lowercase")]
+pub enum MetricsObservation {
+    Exec {
+        exec: String,
+        usage: ExecUsage,
+    },
+    Workspace {
+        workspace: String,
+        storage: StorageUsage,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+pub enum MetricsStreamFrame {
+    Usage { exec: String, usage: ExecUsage },
 }
 
 /// The class, code and message of the bound a run was stopped by (ADR 0014).
@@ -2024,6 +2152,11 @@ pub struct CapabilityFacts {
         skip_serializing_if = "Option::is_none"
     )]
     pub workspace_list_limit_items: Option<u32>,
+    #[serde(
+        rename = "workspace.storage-quota",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub workspace_storage_quota: Option<StorageQuotaFacts>,
     #[serde(rename = "exec.argv-only", skip_serializing_if = "Option::is_none")]
     pub exec_argv_only: Option<bool>,
     #[serde(rename = "exec.namespaces", skip_serializing_if = "Option::is_none")]
@@ -2048,6 +2181,15 @@ pub struct CapabilityFacts {
         skip_serializing_if = "Option::is_none"
     )]
     pub exec_inline_capsule: Option<ExecutionCapsuleFacts>,
+    #[serde(rename = "exec.scratch-quota", skip_serializing_if = "Option::is_none")]
+    pub exec_scratch_quota: Option<ScratchQuotaFacts>,
+    #[serde(
+        rename = "exec.resource-usage",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub exec_resource_usage: Option<ResourceUsageFacts>,
+    #[serde(rename = "metrics.stream", skip_serializing_if = "Option::is_none")]
+    pub metrics_stream: Option<MetricsStreamFacts>,
     /// The apertures this deployment declared, by name and pinned destination (ADR 0013).
     ///
     /// Answers "what could this daemon ever reach" — deployment vocabulary, not secret material
@@ -2102,6 +2244,7 @@ impl Default for CapabilityFacts {
             workspace_max_file_bytes: None,
             workspace_read_limit_bytes: None,
             workspace_list_limit_items: None,
+            workspace_storage_quota: None,
             exec_argv_only: None,
             exec_namespaces: None,
             exec_no_egress: None,
@@ -2111,12 +2254,55 @@ impl Default for CapabilityFacts {
             exec_max_current: None,
             exec_signals: None,
             exec_inline_capsule: None,
+            exec_scratch_quota: None,
+            exec_resource_usage: None,
+            metrics_stream: None,
             exec_egress_apertures: None,
             secrets_slots: None,
             sessions_pty: None,
             snapshot_provenance_events: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StorageQuotaFacts {
+    pub allocation_unit_bytes: u64,
+    pub max_bytes: u64,
+    pub max_inodes: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScratchQuotaFacts {
+    pub mount: String,
+    pub allocation_unit_bytes: u64,
+    pub max_bytes: u64,
+    pub max_inodes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(clippy::struct_excessive_bools)] // Each independently probed counter is a wire-visible fact.
+pub struct ResourceUsageFacts {
+    pub wall_time: bool,
+    pub cpu_time: bool,
+    pub memory_current: bool,
+    pub memory_peak: bool,
+    pub processes_current: bool,
+    pub processes_peak: bool,
+    pub process_limit_hits: bool,
+    pub memory_oom_kills: bool,
+    pub block_io: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MetricsStreamFacts {
+    pub sample_interval_ms: u64,
+    pub latest_wins: bool,
+    pub replay: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -3941,6 +4127,7 @@ mod egress_aperture_tests {
             },
             applied: None,
             exit: None,
+            usage: None,
             lease: None,
             refusal: None,
         };

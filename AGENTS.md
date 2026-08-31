@@ -41,8 +41,10 @@ Each is a claim that can be checked. Breaking one is a design change, not a refa
 5. **Operations are durable before driver dispatch**
    (`adr/0005-operations-are-durable-before-driver-dispatch.md`).
 6. **Every released contract bundle directory is immutable.** `contracts/substrate-wire/0.1.0`
-   through `0.10.0` exist; `0.10.0` is the current development bundle, adding the `pty` session
-   mode, the `resize` frame and the `sessions.pty` fact (ADR 0019); `0.9.0` declared all served API
+   through `0.11.0` exist; `0.11.0` is the current development bundle, adding hard persistent and
+   per-exec writable-storage quotas plus explicit exact resource observations and two metrics routes
+   (ADRs 0020–0021); `0.10.0` added the `pty` session mode, the `resize` frame and the
+   `sessions.pty` fact (ADR 0019); `0.9.0` declared all served API
    majors and the v1 catch-all file paths in one registry (ADR 0018); `0.8.0` added the declared
    aperture byte ceiling and the named bound on an exec observation (ADR 0014); `0.7.0` added delegated
    context and grant attribution (ADR 0011); `0.6.0` added destination-bound egress
@@ -136,10 +138,10 @@ bash scripts/gate.sh
 In order: `cargo test --workspace --release --locked`, `cargo fmt --all --check`,
 `cargo clippy --workspace --all-targets --locked -- -D warnings`, then `cargo xtask check-links`,
 `cargo xtask check-adrs`, `cargo xtask check-secrets`, `cargo xtask check-advisories`,
-`cargo xtask check-licenses`,
+`cargo xtask check-licenses`, `cargo xtask check-packages`,
 `check-contract-bundle.py`, `check-contract-bundle-0.2.0.py`,
 `-0.3.0.py`, `-0.4.0.py`, `cargo xtask check-bundle 0.5.0`, `check-bundle 0.6.0`, `check-bundle 0.7.0`,
-`check-bundle 0.8.0`, `check-bundle 0.9.0`, `check-bundle 0.10.0`,
+`check-bundle 0.8.0`, `check-bundle 0.9.0`, `check-bundle 0.10.0`, `check-bundle 0.11.0`,
 `cargo xtask check-json` and `cargo xtask check-toolchain`.
 Green here is the bar for `main`.
 The former brand is fenced org-wide by `scripts/check-org-brand.sh` in the **atlas** repo, not here.
@@ -155,12 +157,13 @@ bundles' reproducibility proof (invariant 6), not as tooling.
 | `check-links` | a machine-local Markdown link, or a repository-relative target that is not there | yes |
 | `check-adrs` | an ADR whose identity, frontmatter, index row or supersession link does not agree | yes |
 | `check-secrets` | a reachable Git object carrying a credential, or an incomplete history scan | yes |
-| `check-advisories` | a RustSec vulnerability, forbidden HTTP/2 dependency or publishable workspace crate | yes |
+| `check-advisories` | a RustSec vulnerability or forbidden HTTP/2 dependency | yes |
 | `check-licenses` | non-Apache workspace metadata, an unreviewed dependency licence or third-party notice drift | yes |
+| `check-packages` | a registry package outside the five-name allowlist, a loose internal version edge, or a package without inherited SPDX metadata and its README | yes |
 | `package-bundle <version> --out <dir>` | produces a released bundle as a deterministic OCI image layout | no — under `cargo test` |
 | `render-bundle <version> --out <dir>` | produces a bundle tree from `substrate-wire` and `xtask/bundle-source/<version>/`; refuses to write anywhere under `contracts/` | no — under `cargo test` |
-| `check-bundle <version>` | a released bundle whose bytes are not the fixed point of `xtask/bundle-source/<version>/` | yes, `0.5.0` through `0.10.0` |
-| `check-json [<version>...]` | JSON beneath a released bundle that no bundled schema classifies, that its schema rejects, or that is not in deterministic source form | yes, all ten |
+| `check-bundle <version>` | a released bundle whose bytes are not the fixed point of `xtask/bundle-source/<version>/` | yes, `0.5.0` through `0.11.0` |
+| `check-json [<version>...]` | JSON beneath a released bundle that no bundled schema classifies, that its schema rejects, or that is not in deterministic source form | yes, all eleven |
 
 **`cargo xtask package-bundle <version> --out <dir>`** packages a released bundle as a
 deterministic OCI image layout. It is not a gate step of its own: its cases run under
@@ -205,8 +208,8 @@ and an absent lane looks identical to a green one if you only read `cargo test`.
 
 **The gate verifies every released bundle, not just `0.1.0`.** `scripts/gate.sh:20-23` runs the
 four frozen Python checkers, and the lines after them run `cargo xtask check-bundle` for `0.5.0`
-through `0.10.0`, so
-a green gate *is* evidence that all ten still hold. Cutting a successor bundle therefore means
+through `0.11.0`, so
+a green gate *is* evidence that all eleven still hold. Cutting a successor bundle therefore means
 **adding its check to `scripts/gate.sh`** — a bundle whose check is not in the gate is unverified
 from the next commit onward.
 
@@ -240,6 +243,14 @@ applies here.
 Maintain `CHANGELOG.md` in Keep a Changelog form and cut it under a version heading at release. The
 tag is the bare version — `0.2.0`, the version and nothing else (atlas § *Naming*) — annotated, at a
 fully gated `main` commit. The full gate comes first; component steps alone are not enough.
+
+The five approved crates are published manually from that fully gated annotated tag, in dependency
+order: `b10x-substrate-wire`, `b10x-substrate-store`, `b10x-substrate-host`,
+`b10x-substrate-daemon`, then `b10x-substrate-sdk`. Use an operator-held scoped crates.io token and
+`cargo publish --locked -p <package>` for each; wait for each dependency to become visible before
+publishing its consumer. Never add that token to GitHub or automate this through the image release
+workflow. `cargo xtask check-packages` proves the closed allowlist and package contents before the
+tag; crates.io is the authority for whether an already-published version can be uploaded.
 
 **Pushing that tag runs [`.github/workflows/release.yml`](.github/workflows/release.yml)**, which
 builds the `Dockerfile`, publishes `ghcr.io/beyond10x/b10x-substrate-daemon:<version>`, signs it

@@ -1,0 +1,121 @@
+{
+  "$defs": {
+    "line": {
+      "maximum": 4294967295,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "text": {
+      "maxLength": 1048576,
+      "type": "string"
+    }
+  },
+  "$id": "urn:b10x:substrate-wire:0.11.0:input:workspace-file-patch-v2",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "edits": {
+      "items": {
+        "oneOf": [
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "insert_before"
+              },
+              "line": {
+                "$ref": "#/$defs/line"
+              },
+              "text": {
+                "$ref": "#/$defs/text"
+              }
+            },
+            "required": [
+              "kind",
+              "line",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "kind": {
+                "const": "insert_after"
+              },
+              "line": {
+                "$ref": "#/$defs/line"
+              },
+              "text": {
+                "$ref": "#/$defs/text"
+              }
+            },
+            "required": [
+              "kind",
+              "line",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "end_line": {
+                "$ref": "#/$defs/line"
+              },
+              "kind": {
+                "const": "replace_range"
+              },
+              "start_line": {
+                "$ref": "#/$defs/line"
+              },
+              "text": {
+                "$ref": "#/$defs/text"
+              }
+            },
+            "required": [
+              "kind",
+              "start_line",
+              "end_line",
+              "text"
+            ],
+            "type": "object"
+          },
+          {
+            "additionalProperties": false,
+            "properties": {
+              "end_line": {
+                "$ref": "#/$defs/line"
+              },
+              "kind": {
+                "const": "delete_range"
+              },
+              "start_line": {
+                "$ref": "#/$defs/line"
+              }
+            },
+            "required": [
+              "kind",
+              "start_line",
+              "end_line"
+            ],
+            "type": "object"
+          }
+        ]
+      },
+      "maxItems": 128,
+      "minItems": 1,
+      "type": "array"
+    },
+    "expected_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "expected_sha256",
+    "edits"
+  ],
+  "title": "workspace-file-patch-v2 operation input",
+  "type": "object"
+}

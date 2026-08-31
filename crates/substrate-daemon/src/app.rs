@@ -18,6 +18,7 @@ const MAINTENANCE_DRIVER_TIMEOUT: std::time::Duration = std::time::Duration::fro
 
 mod events;
 mod execs;
+mod metrics;
 mod operations;
 mod responses;
 mod routes;

@@ -313,6 +313,7 @@ async fn record_bound_refusal(
 }
 
 pub(super) fn validate_workspace_input(
+    app: &App,
     mutation: &BoundMutation<WorkspaceCreateInput>,
     request_id: &str,
 ) -> Result<(), Response> {
@@ -334,6 +335,42 @@ pub(super) fn validate_workspace_input(
         .is_some_and(|ttl| !(MIN_LEASE_TTL_MS..=MAX_LEASE_TTL_MS).contains(&ttl))
     {
         return Err(schema_invalid(request_id, Some(&mutation.op), "input"));
+    }
+    if let Some(storage) = mutation.input.storage {
+        if !storage.within_contract_bounds() {
+            return Err(schema_invalid(
+                request_id,
+                Some(&mutation.op),
+                "input.storage",
+            ));
+        }
+        let Some(fact) = app.driver.machine().facts.workspace_storage_quota else {
+            return Err(failure(
+                StatusCode::NOT_IMPLEMENTED,
+                request_id,
+                Some(&mutation.op),
+                ErrorClass::Unserved,
+                "workspace.storage-quota-unserved",
+                "The active host has not proved hard workspace storage quotas.",
+                Some("storage"),
+                false,
+            ));
+        };
+        if storage.max_bytes % fact.allocation_unit_bytes != 0
+            || storage.max_bytes > fact.max_bytes
+            || storage.max_inodes > fact.max_inodes
+        {
+            return Err(failure(
+                StatusCode::INSUFFICIENT_STORAGE,
+                request_id,
+                Some(&mutation.op),
+                ErrorClass::Exhausted,
+                "workspace.storage-quota-limit",
+                "The requested storage quota exceeds or misaligns with the proved host limit.",
+                Some("storage"),
+                false,
+            ));
+        }
     }
     if let WorkspaceSource::Git(source) = &mutation.input.source {
         let git = &source.git;
@@ -359,6 +396,7 @@ impl WorkspaceInput for WorkspaceCreateInput {
     }
 }
 
+#[allow(clippy::too_many_lines)] // Validation order is the public refusal precedence.
 pub(super) fn validate_exec_input(
     app: &App,
     mutation: &BoundMutation<ExecStartInput>,
@@ -393,6 +431,9 @@ pub(super) fn validate_exec_input(
         && input
             .lease_ttl_ms
             .is_none_or(|ttl| (MIN_LEASE_TTL_MS..=MAX_LEASE_TTL_MS).contains(&ttl))
+        && input
+            .scratch
+            .is_none_or(substrate_wire::StorageLimit::within_contract_bounds)
         && input.sandbox.required
         && input.sandbox.capability_snapshot.starts_with("sha256:")
         && input.sandbox.capability_snapshot.len() == 71
@@ -417,6 +458,47 @@ pub(super) fn validate_exec_input(
     }
     check_egress_aperture(&facts, &input.sandbox, mutation, request_id)?;
     check_secret_slots(&facts, mutation, request_id)?;
+    if !input.measurements.is_empty() && facts.exec_resource_usage.is_none() {
+        return Err(failure(
+            StatusCode::NOT_IMPLEMENTED,
+            request_id,
+            Some(&mutation.op),
+            ErrorClass::Unserved,
+            "exec.metrics-unserved",
+            "The active host has not proved the requested execution resource counters.",
+            Some("measurements"),
+            false,
+        ));
+    }
+    if let Some(scratch) = input.scratch {
+        let Some(fact) = facts.exec_scratch_quota.as_ref() else {
+            return Err(failure(
+                StatusCode::NOT_IMPLEMENTED,
+                request_id,
+                Some(&mutation.op),
+                ErrorClass::Unserved,
+                "exec.scratch-quota-unserved",
+                "The active host has not proved hard per-exec scratch quotas.",
+                Some("scratch"),
+                false,
+            ));
+        };
+        if scratch.max_bytes % fact.allocation_unit_bytes != 0
+            || scratch.max_bytes > fact.max_bytes
+            || scratch.max_inodes > fact.max_inodes
+        {
+            return Err(failure(
+                StatusCode::INSUFFICIENT_STORAGE,
+                request_id,
+                Some(&mutation.op),
+                ErrorClass::Exhausted,
+                "exec.scratch-quota-limit",
+                "The requested scratch quota exceeds or misaligns with the proved host limit.",
+                Some("scratch"),
+                false,
+            ));
+        }
+    }
     if facts.exec_namespaces.is_none()
         || facts.exec_cgroup_limits.is_none()
         || facts.exec_cgroup_kill != Some(true)

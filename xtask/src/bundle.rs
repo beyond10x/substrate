@@ -508,6 +508,10 @@ fn check_classification(version: &str, released: &Tree, failures: &mut Vec<Strin
 /// A successor that rendered, verified and preserved everything while adding nothing is the failure
 /// this catches; the entries are the acceptance list of the story that cut the bundle.
 fn check_additions(version: &str, released: &Tree, failures: &mut Vec<String>) {
+    if version == "0.11.0" {
+        check_resource_accounting_additions(released, failures);
+        return;
+    }
     if version == "0.10.0" {
         check_pty_additions(released, failures);
         return;
@@ -528,9 +532,13 @@ fn check_additions(version: &str, released: &Tree, failures: &mut Vec<String>) {
         check_aperture_additions(released, failures);
         return;
     }
-    if version != "0.5.0" {
-        return;
+    if version == "0.5.0" {
+        check_secret_slot_additions(released, failures);
     }
+}
+
+/// What `0.5.0` exists for: declared secret slots with explicit refusal behavior.
+fn check_secret_slot_additions(released: &Tree, failures: &mut Vec<String>) {
     let require = |path: &str, pointer: &str, what: &str, failures: &mut Vec<String>| {
         let Some(document) = json_at(released, path, failures) else {
             return;
@@ -610,6 +618,100 @@ fn check_additions(version: &str, released: &Tree, failures: &mut Vec<String>) {
         {
             failures.push(format!("{path}: does not assert the refusal class {code}"));
         }
+    }
+}
+
+/// What `0.11.0` exists for: hard writable-storage quotas and exact, opt-in execution metrics.
+fn check_resource_accounting_additions(released: &Tree, failures: &mut Vec<String>) {
+    let require = |path: &str, pointer: &str, what: &str, failures: &mut Vec<String>| {
+        let Some(document) = json_at(released, path, failures) else {
+            return;
+        };
+        if document.pointer(pointer).is_none() {
+            failures.push(format!("{path}: {what} is absent at {pointer}"));
+        }
+    };
+    for (path, pointer, what) in [
+        (
+            "schemas/inputs/workspace-create.json",
+            "/properties/storage",
+            "the persistent workspace storage quota request",
+        ),
+        (
+            "schemas/inputs/exec-start.json",
+            "/properties/scratch",
+            "the per-exec scratch quota request",
+        ),
+        (
+            "schemas/inputs/exec-start.json",
+            "/properties/measurements",
+            "the explicit execution measurements opt-in",
+        ),
+        (
+            "schemas/capability.json",
+            "/properties/facts/properties/workspace.storage-quota",
+            "the proved workspace quota fact",
+        ),
+        (
+            "schemas/capability.json",
+            "/properties/facts/properties/exec.scratch-quota",
+            "the proved scratch quota fact",
+        ),
+        (
+            "schemas/capability.json",
+            "/properties/facts/properties/exec.resource-usage",
+            "the proved exact-counter fact",
+        ),
+        (
+            "schemas/capability.json",
+            "/properties/facts/properties/metrics.stream",
+            "the latest-wins stream fact",
+        ),
+        (
+            "schemas/resource.json",
+            "/$defs/exec-usage",
+            "the execution usage observation",
+        ),
+        (
+            "schemas/resource.json",
+            "/$defs/storage-usage",
+            "the storage usage observation",
+        ),
+        (
+            "schemas/metrics-stream-frame.json",
+            "/properties/usage",
+            "the metrics stream usage frame",
+        ),
+    ] {
+        require(path, pointer, what, failures);
+    }
+
+    let Some(registry) = json_at(released, "operations.json", failures) else {
+        return;
+    };
+    for operation in ["metrics.get", "metrics.stream"] {
+        if registry
+            .get("operations")
+            .and_then(Value::as_array)
+            .is_none_or(|operations| {
+                !operations
+                    .iter()
+                    .any(|row| row.get("id").and_then(Value::as_str) == Some(operation))
+            })
+        {
+            failures.push(format!(
+                "operations.json: added route {operation} is absent"
+            ));
+        }
+    }
+
+    if released.values().any(|bytes| {
+        std::str::from_utf8(bytes)
+            .is_ok_and(|text| text.to_ascii_lowercase().contains("mean_memory"))
+    }) {
+        failures.push(
+            "0.11.0: mean memory is not an exact kernel observation and must be absent".to_owned(),
+        );
     }
 }
 
@@ -4279,7 +4381,7 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{}: {error}", bundle.display()));
             checked += 1;
         }
-        assert_eq!(checked, 10, "every released bundle must be checked");
+        assert_eq!(checked, 11, "every released bundle must be checked");
     }
 
     /// Class, the other half: if a parameter's name is not a discriminator, then renaming one is

@@ -1,0 +1,15 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.11.0:address:workspace-lease-renew",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "workspace_id": {
+      "$ref": "../common.json#/$defs/workspace-id"
+    }
+  },
+  "required": [
+    "workspace_id"
+  ],
+  "title": "workspace-lease-renew normalized route address",
+  "type": "object"
+}

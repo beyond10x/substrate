@@ -63,6 +63,22 @@ fn parse_byte_ceiling(value: &str) -> Result<u64, String> {
     Ok(bytes)
 }
 
+fn parse_project_quota_ids(value: &str) -> Result<(u32, u32), String> {
+    let (start, end) = value
+        .split_once('-')
+        .ok_or_else(|| "a project quota range is START-END".to_owned())?;
+    let start = start
+        .parse::<u32>()
+        .map_err(|_| "a project quota range has an invalid start".to_owned())?;
+    let end = end
+        .parse::<u32>()
+        .map_err(|_| "a project quota range has an invalid end".to_owned())?;
+    if start == 0 || start > end || u64::from(end - start) + 1 < 128 {
+        return Err("a project quota range must contain at least 128 nonzero ids".to_owned());
+    }
+    Ok((start, end))
+}
+
 /// Parses one `--egress-aperture name=host:port/tcp[/max=<size>]`.
 ///
 /// The protocol suffix is required and is `tcp`, so a later slice that serves another one does not
@@ -153,6 +169,10 @@ fn parse_delegated_context_key(value: &str) -> Result<DelegatedContextKey, Strin
 }
 
 #[derive(Debug, Parser)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent clap switches are intentionally represented as boolean flags"
+)]
 #[command(
     name = "substrate-daemon",
     version,
@@ -177,11 +197,24 @@ struct Arguments {
     #[arg(long, env = "SUBSTRATE_CGROUP_ROOT")]
     cgroup_root: Option<PathBuf>,
 
+    /// Inclusive project-id range reserved exclusively for Substrate storage quotas.
+    #[arg(
+        long,
+        env = "SUBSTRATE_PROJECT_QUOTA_IDS",
+        value_name = "START-END",
+        value_parser = parse_project_quota_ids
+    )]
+    project_quota_ids: Option<(u32, u32)>,
+
     #[arg(long, default_value = "/usr/bin/bwrap")]
     bubblewrap: PathBuf,
 
     #[arg(long, default_value_t = 10_000)]
     event_retention: u64,
+
+    /// Stop this managed child when its parent's stdin pipe closes.
+    #[arg(long, hide = true)]
+    exit_on_stdin_close: bool,
 
     /// Declare a secret slot as `name=path` (repeatable). ADR 0012.
     ///
@@ -295,6 +328,7 @@ impl From<Arguments> for DaemonConfig {
             deployment: arguments.deployment,
             allow_uids: arguments.allow_uids,
             cgroup_root: arguments.cgroup_root,
+            project_quota_ids: arguments.project_quota_ids,
             bubblewrap: arguments.bubblewrap,
             event_retention: arguments.event_retention,
             secret_slots: arguments.secret_slots,
@@ -314,12 +348,47 @@ async fn main() -> anyhow::Result<()> {
             EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
         )
         .init();
-    serve(Arguments::parse().into()).await
+    let arguments = Arguments::parse();
+    let exit_on_stdin_close = arguments.exit_on_stdin_close;
+    let daemon = serve(arguments.into());
+    tokio::pin!(daemon);
+    if !exit_on_stdin_close {
+        return daemon.await;
+    }
+    let mut stdin = tokio::io::stdin();
+    let mut byte = [0_u8; 1];
+    tokio::select! {
+        result = &mut daemon => result,
+        read = tokio::io::AsyncReadExt::read(&mut stdin, &mut byte) => {
+            read?;
+            let pid = i32::try_from(std::process::id())
+                .map_err(|_| anyhow::anyhow!("process id is outside i32"))?;
+            nix::sys::signal::kill(
+                nix::unistd::Pid::from_raw(pid),
+                nix::sys::signal::Signal::SIGTERM,
+            )?;
+            daemon.await
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::parse_egress_aperture;
+    use super::{parse_egress_aperture, parse_project_quota_ids};
+
+    #[test]
+    fn project_quota_ids_are_nonzero_inclusive_and_bounded_below() {
+        assert_eq!(
+            parse_project_quota_ids("200000-200127"),
+            Ok((200_000, 200_127))
+        );
+        for invalid in ["", "1", "0-127", "200127-200000", "1-127", "one-two"] {
+            assert!(
+                parse_project_quota_ids(invalid).is_err(),
+                "{invalid:?} must not reserve a quota range"
+            );
+        }
+    }
 
     /// The declaration that exists today parses exactly as it does today, and declares no ceiling.
     #[test]

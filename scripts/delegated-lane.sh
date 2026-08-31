@@ -48,6 +48,6 @@ export SUBSTRATE_VECTORS_CGROUP_ROOT="${root}"
 # One thread, because these cases share one delegation root: `ProcessRuntime::new` reconciles every
 # `substrate-ex_*` cgroup under its configured root at construction, which is right for the one
 # daemon that owns a root and fatal for six drivers that share one.
-cargo test -p substrate-host --locked -- --nocapture --test-threads=1
+cargo test -p b10x-substrate-host --locked -- --nocapture --test-threads=1
 
-exec cargo test -p substrate-daemon --test runtime_vectors -- --nocapture "$@"
+exec cargo test -p b10x-substrate-daemon --test runtime_vectors -- --nocapture "$@"

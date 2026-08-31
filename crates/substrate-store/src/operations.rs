@@ -1,4 +1,5 @@
 use crate::events::{append_event, commit_effect};
+use crate::execs::mark_exec_unknown;
 use crate::execs::upsert_exec;
 use crate::leases::upsert_lease;
 use crate::workspaces::upsert_workspace;
@@ -7,8 +8,8 @@ use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 use serde::Serialize;
 use serde_json::json;
 use substrate_wire::{
-    ErrorClass, ErrorDetail, Event, Exec, ExecState, OperationOutcome, OperationRecord,
-    OperationState, Workspace,
+    ErrorClass, ErrorDetail, Event, Exec, OperationOutcome, OperationRecord, OperationState,
+    Workspace,
 };
 
 #[derive(Debug, Clone)]
@@ -348,8 +349,7 @@ impl Store {
                 |row| row.get(0),
             )?;
             let mut resource: Exec = serde_json::from_str(&json)?;
-            resource.state = ExecState::Unknown;
-            resource.observed_at = observed_at.parse()?;
+            mark_exec_unknown(&mut resource, observed_at.parse()?);
             transaction.execute(
                 "UPDATE execs SET resource_json = ?4
                  WHERE deployment = ?1 AND subject = ?2 AND id = ?3",

@@ -334,6 +334,14 @@ pub(super) async fn pipe_session_start(
             requested: mutation.input.exec.sandbox.clone(),
             applied: None,
             exit: None,
+            usage: mutation
+                .input
+                .exec
+                .measurements
+                .contains(&substrate_wire::ExecMeasurement::ResourceUsage)
+                .then(|| substrate_wire::ExecUsage::Pending {
+                    observed_at: app.authority.now(),
+                }),
             lease: Some(lease.observation()),
             refusal: None,
         },
@@ -718,7 +726,19 @@ pub(super) async fn pipe_session_lease_renew(
         &operation,
     ) {
         Ok(value) => value,
-        Err(response) => return response,
+        Err(response) => {
+            return refuse_before_dispatch_response(
+                &app,
+                &identity,
+                &request_id,
+                "session.lease.renew",
+                "POST",
+                &address,
+                &mutation,
+                response,
+            )
+            .await;
+        }
     };
     if let Some(response) = begin(
         &app,

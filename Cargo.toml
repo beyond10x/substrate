@@ -5,6 +5,7 @@ members = [
     "crates/substrate-host",
     "crates/substrate-daemon",
     "crates/substrate-contract-check",
+    "crates/b10x-substrate-sdk",
     "xtask",
 ]
 resolver = "2"
@@ -14,7 +15,7 @@ edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/beyond10x/substrate"
 rust-version = "1.97"
-version = "0.2.4"
+version = "0.3.0"
 
 [workspace.dependencies]
 anyhow = "1.0"
@@ -34,7 +35,7 @@ jsonschema = { version = "=0.49.9", default-features = false }
 hyper = { version = "1.7", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["service", "tokio"] }
 libc = "0.2"
-nix = { version = "0.31", features = ["fs", "term", "user"] }
+nix = { version = "0.31", features = ["fs", "ioctl", "term", "user"] }
 parking_lot = "0.12"
 pulldown-cmark = "0.13"
 rusqlite = { version = "0.40", features = ["bundled"] }
@@ -47,7 +48,8 @@ zeroize = "1"
 subtle = "2.6"
 tempfile = "3.20"
 thiserror = "2.0"
-tokio = { version = "1.47", features = ["fs", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "test-util", "time"] }
+tokio = { version = "1.47", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt-multi-thread", "signal", "sync", "test-util", "time"] }
+tokio-tungstenite = { version = "0.29", default-features = false, features = ["handshake"] }
 toml = "1.0"
 tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"

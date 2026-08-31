@@ -6,7 +6,7 @@ RUN --mount=type=cache,id=b10x-cargo-registry,target=/usr/local/cargo/registry,s
     --mount=type=cache,id=b10x-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=b10x-substrate-target,target=/src/target,sharing=locked \
     find Cargo.toml Cargo.lock crates -path '*/target' -prune -o -type f -exec touch {} + && \
-    cargo build --locked --release -p substrate-daemon --bin substrate-daemon && \
+    cargo build --locked --release -p b10x-substrate-daemon --bin substrate-daemon && \
     install -D /src/target/release/substrate-daemon /out/substrate-daemon && \
     install -d -m 0700 /out/state
 

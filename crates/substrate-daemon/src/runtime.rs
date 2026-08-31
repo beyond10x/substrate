@@ -304,6 +304,7 @@ pub struct DaemonConfig {
     pub deployment: String,
     pub allow_uids: Vec<u32>,
     pub cgroup_root: Option<PathBuf>,
+    pub project_quota_ids: Option<(u32, u32)>,
     pub bubblewrap: PathBuf,
     pub event_retention: u64,
     /// Operator-declared secret slots (ADR 0012), each a name and a bounded owner-private file.
@@ -409,6 +410,7 @@ impl DaemonConfig {
             deployment: deployment.into(),
             allow_uids,
             cgroup_root: None,
+            project_quota_ids: None,
             bubblewrap: PathBuf::from("/usr/bin/bwrap"),
             event_retention: 10_000,
             secret_slots: Vec::new(),
@@ -468,6 +470,7 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
     let mut host_config = HostConfig::minimum(&config.workspaces);
     host_config.config_generation = configuration_generation(&config);
     host_config.cgroup_root = config.cgroup_root;
+    host_config.project_quota_ids = config.project_quota_ids;
     host_config.bubblewrap = config.bubblewrap;
     host_config.event_retention = config.event_retention;
     host_config.secret_slots = config

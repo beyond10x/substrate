@@ -1,5 +1,5 @@
 use crate::events::{append_event, commit_effect};
-use crate::execs::{is_terminal_exec_state, load_exec, upsert_exec};
+use crate::execs::{is_terminal_exec_state, load_exec, mark_exec_unknown, upsert_exec};
 use crate::leases::{freeze_workspace_lease_if_due, upsert_lease};
 use crate::operations::{
     complete_operation_error_transaction, existing_reservation, finalize_operation_accounting,
@@ -477,8 +477,7 @@ impl Store {
         refresh_nonterminal_operation_accounting(&transaction, self.config, scope, operation)?;
         let mut exec = load_exec(&transaction, scope, exec_id)?
             .ok_or_else(|| StoreError::NotAccepted(operation.to_owned()))?;
-        exec.resource.state = ExecState::Unknown;
-        exec.resource.observed_at = observed_at;
+        mark_exec_unknown(&mut exec.resource, observed_at);
         exec.output_complete = true;
         upsert_exec(&transaction, scope, &exec)?;
         let mut session = load_session(&transaction, scope, session_id)?

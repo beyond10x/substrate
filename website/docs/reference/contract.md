@@ -53,8 +53,18 @@ required bounded terminal window, a closed resize-capable frame vocabulary, and 
 that is present only after the host proves terminal allocation and resize behavior. Without that
 fact, PTY start is refused and is never served as raw pipes.
 
-Bundle `0.10.0` exists for development consumers to pin and verify before the server claims it; its
-existence is not a stability or compatibility promise.
+Bundle `0.11.0` succeeds `0.10.0`, preserves its 31 routes, and adds `GET /v1/metrics` plus
+`GET /v1/metrics/stream`. It also declares hard `/workspace` and `/scratch` quota requests and the
+exact, explicitly requested resource-usage observation. Bundle `0.11.0` exists for development
+consumers to pin and verify before the server claims it; its existence is not a stability or
+compatibility promise.
+
+### Metrics
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/v1/metrics` | refresh one exec or workspace usage observation |
+| `GET` | `/v1/metrics/stream` | receive latest-wins live exec samples over WebSocket |
 
 ## Execs
 

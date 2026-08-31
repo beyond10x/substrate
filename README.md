@@ -25,18 +25,19 @@ development wire contract stable.
 
 | direction | what |
 |---|---|
-| confines | [harness](https://github.com/beyond10x/harness) — embedded in-process, or over the daemon socket |
+| confines | [harness](https://github.com/beyond10x/harness) — over the daemon socket, directly or through the Rust SDK |
 | may govern | [connectors](https://github.com/beyond10x/connectors) — as a first-party provider, and later to isolate an attested connector artifact |
 | may execute for | [autodev](https://github.com/beyond10x/autodev) — over its `Executor` port |
 | may adapt | [flux](https://github.com/codewandler/flux) — a remote execution adapter over the substrate API. The dependency never points back into Flux |
 | mapped in | [atlas](https://github.com/beyond10x/atlas) |
 
 There is **no sibling-component implementation dependency**. Cross-component consumers use the
-released native `substrate-daemon` artifact and the owner-released wire contract; they do not
-import the implementation crates.
+released native `substrate-daemon` artifact or `b10x-substrate-sdk`. The SDK's opt-in linked mode
+may package the daemon solely to re-execute it as a separate child; resource operations still cross
+the authenticated Unix socket.
 
-The product and binary name are `substrate`. Published packages will use the `b10x-substrate-*`
-prefix.
+The product and binary name are `substrate`. The approved registry packages use the
+`b10x-substrate-*` prefix.
 
 ## Status
 
@@ -49,6 +50,7 @@ published contract.**
 | 0.2.0 bundle, runtime, portable lane, delegated Linux lane | green |
 | 0.4.0 successor development bundle | adds independently verified read-only execution capsules; the delegated model-free lane proves capsule/config/hook binding and correlated native hook evidence before model dispatch |
 | phase 4, [raw pipe sessions](adr/0007-protocol-processes-use-raw-pipe-sessions.md) | source-typed bounded raw-pipe primitive, distinct durable session identity, leased start, single-attachment Unix-WebSocket route ([plan 04](docs/plan/04-direct-byte-plane.md)) |
+| Rust SDK | `b10x-substrate-sdk` provides typed builders, resource handles, durable-operation recovery, event streams and separately supervised external or linked daemon children; it exposes only the daemon-advertised `substrate-wire/0.4.0` surface |
 | daemon image release | [`.github/workflows/release.yml`](.github/workflows/release.yml) publishes, keyless-signs and digest-pins `ghcr.io/beyond10x/b10x-substrate-daemon:<version>` on an annotated bare-version tag whose commit has a green gate run; a pre-release tag publishes nothing. `0.2.4` is published at `sha256:18b4bf9…`, keyless-signed. It needs no repository secret: the image push and signing use the run's own `GITHUB_TOKEN` and OIDC identity. The changelog digest line lands by pull request — `main` is protected and declines a direct push |
 | stable publication | **not done.** The contract bundles' OCI packaging, signing and digest pinning are separate release work; no bundle is a stable published contract |
 | phase 4, [pty sessions](adr/0019-pty-is-a-second-session-mode.md) | a terminal is a second session **mode** on the same route family, not a second resource: `mode: "pty"` with a required 1–1000-cell window, a `resize` frame, and the `sessions.pty` fact published only after a startup probe allocated a pair, made it controlling inside a throwaway sandbox and round-tripped a window through the child. Absent, the mode is refused `session.pty-unserved` (501) and **never** served as pipes |
@@ -73,8 +75,9 @@ The table is the gate's own order (`scripts/gate.sh`).
 | links | `cargo xtask check-links` — rejects machine-local and broken repository-relative links |
 | ADRs | `cargo xtask check-adrs` |
 | secrets | `cargo xtask check-secrets` — scans every reachable commit, including root trees |
-| dependencies | `cargo xtask check-advisories` — rejects RustSec findings, HTTP/2 and publishable crates |
+| dependencies | `cargo xtask check-advisories` — rejects RustSec findings and HTTP/2 |
 | licences | `cargo xtask check-licenses` — verifies Apache-2.0 workspace metadata and deterministic third-party notices |
+| packages | `cargo xtask check-packages` — enforces the five-package registry allowlist, exact internal versions, and complete package archives |
 | contract bundle 0.1.0 | `python3 scripts/check-contract-bundle.py` |
 | contract bundle 0.2.0 | `python3 scripts/check-contract-bundle-0.2.0.py` |
 | contract bundle 0.3.0 | `python3 scripts/check-contract-bundle-0.3.0.py` |
@@ -85,6 +88,7 @@ The table is the gate's own order (`scripts/gate.sh`).
 | contract bundle 0.8.0 | `cargo xtask check-bundle 0.8.0` |
 | contract bundle 0.9.0 | `cargo xtask check-bundle 0.9.0` — checks the multi-major registry and served catch-all paths |
 | contract bundle 0.10.0 | `cargo xtask check-bundle 0.10.0` — checks the PTY mode, closed frame vocabulary and refusal register |
+| contract bundle 0.11.0 | `cargo xtask check-bundle 0.11.0` — checks hard writable-storage quotas, exact opt-in resource observations and both metrics routes |
 | contract JSON | `cargo xtask check-json` — every JSON under `contracts/` is classified by exactly one bundled schema, or it fails closed |
 | toolchain | `cargo xtask check-toolchain` |
 
@@ -159,6 +163,9 @@ target/debug/substrate-daemon \
   --event-retention 10000 \
   --allow-uid 1000
 ```
+
+Rust applications can instead follow the [public Rust SDK guide](https://beyond10x.github.io/substrate/docs/guides/rust-sdk)
+to connect to that socket or supervise the daemon as a separate child.
 
 ### Secret slots
 
