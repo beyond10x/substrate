@@ -21,7 +21,7 @@
 //! and handed out over `SCM_RIGHTS`, and the process that dials the pinned destination never enters
 //! the sandbox at all.
 //!
-//! ## Two traps, both silent
+//! ## Three traps, all silent
 //!
 //! 1. **The owning user namespace, not the child's.** Bubblewrap nests a *second* user namespace,
 //!    so `/proc/<child>/ns/user` is not the namespace that owns `/proc/<child>/ns/net`, and joining
@@ -31,6 +31,11 @@
 //! 2. **`child-pid` from `--info-fd`, never the spawned pid.** `Child::id()` is the *bubblewrap*
 //!    pid and `/proc/<that>/ns/net` is the **host** namespace. Binding there would put the aperture
 //!    on host loopback, reachable by everything on the machine — and every test would still pass.
+//! 3. **Wait for loopback before binding.** Bubblewrap reports `child-pid` before its concurrent
+//!    child has necessarily raised `lo`. Racing that setup makes a correct bind fail with
+//!    `EADDRNOTAVAIL`, or makes the first connect see `ENETUNREACH`. The helper retries only that
+//!    readiness errno, with a fixed bound; it does not race bubblewrap by configuring the
+//!    interface itself, and every other bind error remains an immediate refusal.
 //!
 //! ## Forking from a threaded daemon
 //!
@@ -63,6 +68,8 @@ use crate::DriverError;
 
 /// `_IO(NSIO, 0x1)` from `linux/nsfs.h`: the user namespace that owns a namespace descriptor.
 const NS_GET_USERNS: libc::c_ulong = 0xb701;
+/// One-millisecond waits before unavailable loopback remains a stage-6 failure.
+const LOOPBACK_READY_ATTEMPTS: usize = 1_000;
 /// Bytes moved per relay iteration, on the forked child's existing stack — never a new
 /// allocation, because a relay runs after `fork` and before nothing.
 const RELAY_BUFFER: usize = 16_384;
@@ -394,29 +401,8 @@ fn listen_inside(
     let owner = unsafe { OwnedFd::from_raw_fd(owner) };
     let cgroup = open_cgroup(cgroup_procs)?;
 
-    let mut handback = [0_i32; 2];
-    // SAFETY: a socketpair into a two-element array of the required size.
-    if unsafe {
-        libc::socketpair(
-            libc::AF_UNIX,
-            libc::SOCK_STREAM,
-            0,
-            handback.as_mut_ptr().cast(),
-        )
-    } != 0
-    {
-        return Err(install_failed(
-            "aperture handback socket",
-            &io::Error::last_os_error(),
-        ));
-    }
-    // SAFETY: both descriptors were just created by `socketpair` and are owned here.
-    let (parent_end, child_end) = unsafe {
-        (
-            OwnedFd::from_raw_fd(handback[0]),
-            OwnedFd::from_raw_fd(handback[1]),
-        )
-    };
+    let (parent_end, child_end) =
+        handback_pair().map_err(|error| install_failed("aperture handback socket", &error))?;
 
     let cgroup_fd = cgroup.as_ref().map_or(-1, AsRawFd::as_raw_fd);
     let netns_fd = netns.as_raw_fd();
@@ -444,9 +430,17 @@ fn listen_inside(
     drop(child_end);
     let handback = receive_descriptor(parent_fd);
     let mut status = 0;
-    // SAFETY: reaping a child this process just forked.
-    unsafe {
-        libc::waitpid(pid, &raw mut status, 0);
+    loop {
+        // SAFETY: reaping a child this process just forked.
+        let waited = unsafe { libc::waitpid(pid, &raw mut status, 0) };
+        if waited == pid {
+            break;
+        }
+        let error = io::Error::last_os_error();
+        if waited < 0 && error.raw_os_error() == Some(libc::EINTR) {
+            continue;
+        }
+        return Err(install_failed("aperture helper reaping", &error));
     }
     let helper_exit = if libc::WIFEXITED(status) {
         libc::WEXITSTATUS(status)
@@ -516,12 +510,7 @@ unsafe fn helper_body(
             u32::try_from(std::mem::size_of::<libc::c_int>()).unwrap_or(4),
         );
         let address = loopback_sockaddr(port);
-        if libc::bind(
-            listener,
-            std::ptr::from_ref(&address).cast(),
-            u32::try_from(std::mem::size_of::<libc::sockaddr_in>()).unwrap_or(16),
-        ) != 0
-        {
+        if !bind_when_loopback_is_ready(listener, &address) {
             return helper_failure(handback_fd, 6);
         }
         if libc::listen(listener, 16) != 0 {
@@ -534,16 +523,75 @@ unsafe fn helper_body(
     }
 }
 
+/// Binds once bubblewrap's concurrent child has raised loopback, without configuring it here.
+///
+/// A loopback address can become bindable just before the interface is `IFF_UP`; binding at that
+/// instant succeeds but the first connection still gets `ENETUNREACH`. Reading the flags first
+/// closes that half of the race. `EADDRNOTAVAIL` remains retryable inside the same fixed budget for
+/// the address-publication edge; every other bind errno returns immediately. `poll` with no
+/// descriptors is an allocation-free, async-signal-safe one-millisecond wait that yields to the
+/// bubblewrap child instead of competing with it for the interface configuration.
+///
+/// # Safety
+///
+/// `socket` must be a live, unbound socket in the freshly joined sandbox network namespace.
+/// Post-fork child only; the function calls libc over stack memory and allocates nothing.
+unsafe fn bind_when_loopback_is_ready(socket: RawFd, address: &libc::sockaddr_in) -> bool {
+    unsafe {
+        let mut request: libc::ifreq = std::mem::zeroed();
+        request.ifr_name[0] = b'l'.cast_signed();
+        request.ifr_name[1] = b'o'.cast_signed();
+        let up = libc::c_short::try_from(libc::IFF_UP).unwrap_or(1);
+        for attempt in 0..LOOPBACK_READY_ATTEMPTS {
+            if libc::ioctl(socket, libc::SIOCGIFFLAGS, &raw mut request) != 0 {
+                if *libc::__errno_location() == libc::EINTR {
+                    continue;
+                }
+                return false;
+            }
+            if request.ifr_ifru.ifru_flags & up != 0
+                && libc::bind(
+                    socket,
+                    std::ptr::from_ref(address).cast(),
+                    u32::try_from(std::mem::size_of::<libc::sockaddr_in>()).unwrap_or(16),
+                ) == 0
+            {
+                return true;
+            }
+            if request.ifr_ifru.ifru_flags & up != 0
+                && *libc::__errno_location() != libc::EADDRNOTAVAIL
+            {
+                return false;
+            }
+            if attempt + 1 < LOOPBACK_READY_ATTEMPTS {
+                libc::poll(std::ptr::null_mut(), 0, 1);
+            }
+        }
+        *libc::__errno_location() = libc::EADDRNOTAVAIL;
+        false
+    }
+}
+
 /// Reports the failing stage and the thread-local errno without allocation in the post-fork child.
 unsafe fn helper_failure(handback_fd: RawFd, stage: i32) -> i32 {
     unsafe {
         let errno = *libc::__errno_location();
         let record = [stage, errno];
-        let _ = libc::write(
-            handback_fd,
-            record.as_ptr().cast(),
-            std::mem::size_of_val(&record),
-        );
+        loop {
+            let sent = libc::send(
+                handback_fd,
+                record.as_ptr().cast(),
+                std::mem::size_of_val(&record),
+                libc::MSG_NOSIGNAL,
+            );
+            if sent == isize::try_from(std::mem::size_of_val(&record)).unwrap_or(8) {
+                break;
+            }
+            if sent < 0 && *libc::__errno_location() == libc::EINTR {
+                continue;
+            }
+            break;
+        }
         stage
     }
 }
@@ -1180,7 +1228,7 @@ unsafe fn send_descriptor(socket: RawFd, descriptor: RawFd) -> bool {
         (*header).cmsg_len = libc::CMSG_LEN(4) as usize;
         std::ptr::write_unaligned(libc::CMSG_DATA(header).cast::<RawFd>(), descriptor);
         message.msg_controllen = libc::CMSG_SPACE(4) as usize;
-        libc::sendmsg(socket, &raw const message, 0) == 1
+        libc::sendmsg(socket, &raw const message, libc::MSG_NOSIGNAL) == 1
     }
 }
 
@@ -1191,43 +1239,73 @@ enum HelperHandback {
     Missing,
 }
 
+fn handback_pair() -> io::Result<(OwnedFd, OwnedFd)> {
+    let mut sockets = [0_i32; 2];
+    // SAFETY: `sockets` is writable storage for exactly two descriptors.
+    if unsafe {
+        libc::socketpair(
+            libc::AF_UNIX,
+            libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC,
+            0,
+            sockets.as_mut_ptr(),
+        )
+    } != 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: both descriptors were just created by `socketpair` and are owned here.
+    Ok(unsafe {
+        (
+            OwnedFd::from_raw_fd(sockets[0]),
+            OwnedFd::from_raw_fd(sockets[1]),
+        )
+    })
+}
+
 fn receive_descriptor(socket: RawFd) -> HelperHandback {
     // SAFETY: a `recvmsg` into stack buffers of the sizes its own macros computed, followed by a
     // bounds-checked read of exactly the descriptor the kernel placed in the control message.
     unsafe {
-        let mut payload = [0_u8; 8];
-        let mut iov = libc::iovec {
-            iov_base: payload.as_mut_ptr().cast(),
-            iov_len: payload.len(),
-        };
-        let mut control = [0_u8; 64];
-        let mut message: libc::msghdr = std::mem::zeroed();
-        message.msg_iov = &raw mut iov;
-        message.msg_iovlen = 1;
-        message.msg_control = control.as_mut_ptr().cast();
-        message.msg_controllen = control.len();
-        let received = libc::recvmsg(socket, &raw mut message, 0);
-        if received == 8 {
-            let stage = i32::from_ne_bytes(payload[..4].try_into().unwrap_or_default());
-            let errno = i32::from_ne_bytes(payload[4..].try_into().unwrap_or_default());
-            return HelperHandback::Failure { stage, errno };
-        }
-        if received != 1 {
-            return HelperHandback::Missing;
-        }
-        let header = libc::CMSG_FIRSTHDR(&raw const message);
-        if header.is_null()
-            || (*header).cmsg_level != libc::SOL_SOCKET
-            || (*header).cmsg_type != libc::SCM_RIGHTS
-            || (*header).cmsg_len < libc::CMSG_LEN(4) as usize
-        {
-            return HelperHandback::Missing;
-        }
-        let descriptor = std::ptr::read_unaligned(libc::CMSG_DATA(header).cast::<RawFd>());
-        if descriptor >= 0 {
-            HelperHandback::Descriptor(OwnedFd::from_raw_fd(descriptor))
-        } else {
-            HelperHandback::Missing
+        loop {
+            let mut payload = [0_u8; 8];
+            let mut iov = libc::iovec {
+                iov_base: payload.as_mut_ptr().cast(),
+                iov_len: payload.len(),
+            };
+            let mut control = [0_u8; 64];
+            let mut message: libc::msghdr = std::mem::zeroed();
+            message.msg_iov = &raw mut iov;
+            message.msg_iovlen = 1;
+            message.msg_control = control.as_mut_ptr().cast();
+            message.msg_controllen = control.len();
+            let received = libc::recvmsg(socket, &raw mut message, libc::MSG_CMSG_CLOEXEC);
+            if received < 0 && *libc::__errno_location() == libc::EINTR {
+                continue;
+            }
+            if message.msg_flags & (libc::MSG_TRUNC | libc::MSG_CTRUNC) != 0 {
+                return HelperHandback::Missing;
+            }
+            let header = libc::CMSG_FIRSTHDR(&raw const message);
+            if received == 8 && header.is_null() {
+                let stage = i32::from_ne_bytes(payload[..4].try_into().unwrap_or_default());
+                let errno = i32::from_ne_bytes(payload[4..].try_into().unwrap_or_default());
+                return HelperHandback::Failure { stage, errno };
+            }
+            if received != 1
+                || header.is_null()
+                || (*header).cmsg_level != libc::SOL_SOCKET
+                || (*header).cmsg_type != libc::SCM_RIGHTS
+                || (*header).cmsg_len != libc::CMSG_LEN(4) as usize
+                || !libc::CMSG_NXTHDR(&raw const message, header).is_null()
+            {
+                return HelperHandback::Missing;
+            }
+            let descriptor = std::ptr::read_unaligned(libc::CMSG_DATA(header).cast::<RawFd>());
+            return if descriptor >= 0 {
+                HelperHandback::Descriptor(OwnedFd::from_raw_fd(descriptor))
+            } else {
+                HelperHandback::Missing
+            };
         }
     }
 }
@@ -1264,10 +1342,12 @@ unsafe fn keep_only(retained: &[RawFd]) {
 #[cfg(test)]
 mod tests {
     use std::io::Write as _;
-    use std::net::{Ipv4Addr, SocketAddr, TcpListener};
+    use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
     use std::os::fd::AsRawFd as _;
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Stdio};
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
 
     use substrate_wire::{
         ApertureMechanism, ApertureMode, ConfinementRequest, NetworkMode, SandboxProfile,
@@ -1275,7 +1355,8 @@ mod tests {
 
     use super::{
         EgressAperture, GeneratedResolution, HelperHandback, InstalledAperture,
-        egress_apertures_fact, install, read_sandbox_pid, receive_descriptor, sandbox_pid_from,
+        egress_apertures_fact, handback_pair, install, listen_inside, read_sandbox_pid,
+        receive_descriptor, sandbox_pid_from,
     };
     use crate::{DriverErrorClass, HostConfig};
 
@@ -1291,6 +1372,31 @@ mod tests {
     /// lane this case does not have; what is proved here is that neither of them is reached.
     const PUBLIC_ADDRESS: SocketAddr =
         SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)), 443);
+
+    #[test]
+    fn helper_handback_preserves_record_boundaries() {
+        let (receiver, _sender) = handback_pair().expect("create the production handback");
+        let mut socket_type = 0_i32;
+        let mut length = u32::try_from(std::mem::size_of_val(&socket_type)).unwrap_or(4);
+        // SAFETY: the output pointer and its length describe `socket_type` exactly.
+        assert_eq!(
+            unsafe {
+                libc::getsockopt(
+                    receiver.as_raw_fd(),
+                    libc::SOL_SOCKET,
+                    libc::SO_TYPE,
+                    (&raw mut socket_type).cast(),
+                    &raw mut length,
+                )
+            },
+            0
+        );
+        assert_eq!(
+            socket_type,
+            libc::SOCK_SEQPACKET,
+            "the stage+errno record can be split on a stream socket"
+        );
+    }
 
     #[test]
     fn helper_failure_handback_preserves_stage_and_errno() {
@@ -1410,9 +1516,46 @@ mod tests {
         }
     }
 
+    #[test]
+    fn a_forced_bind_failure_names_its_stage_and_errno() {
+        let Some(sandbox) = Sandbox::open() else {
+            return;
+        };
+        let port = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .expect("reserve a host-side port number")
+            .local_addr()
+            .expect("read the reserved port")
+            .port();
+        let _first = listen_inside(sandbox.pid, port, None).expect("bind the first listener");
+        let failure = listen_inside(sandbox.pid, port, None)
+            .expect_err("a second listener on the same sandbox tuple must fail");
+        assert_eq!(failure.class, DriverErrorClass::Failed);
+        assert_eq!(failure.code, "exec.aperture-install-failed");
+        assert!(
+            failure.message.contains("stage 6"),
+            "the bind stage was lost: {}",
+            failure.message
+        );
+        assert!(
+            failure
+                .message
+                .contains(&format!("errno {}", libc::EADDRINUSE)),
+            "the bind errno was lost: {}",
+            failure.message
+        );
+        assert!(
+            failure
+                .message
+                .contains(&std::io::Error::from_raw_os_error(libc::EADDRINUSE).to_string()),
+            "the bind errno was not decoded: {}",
+            failure.message
+        );
+    }
+
     /// A model-free app-server: one listener, one fixed body, no protocol opinion.
     struct AppServer {
         address: SocketAddr,
+        stop: Arc<AtomicBool>,
         handle: Option<std::thread::JoinHandle<()>>,
     }
 
@@ -1420,8 +1563,16 @@ mod tests {
         fn start() -> Self {
             let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind app server");
             let address = listener.local_addr().expect("app server address");
+            let stop = Arc::new(AtomicBool::new(false));
+            let child_stop = Arc::clone(&stop);
             let handle = std::thread::spawn(move || {
-                while let Ok((mut stream, _)) = listener.accept() {
+                while !child_stop.load(AtomicOrdering::Acquire) {
+                    let Ok((mut stream, _)) = listener.accept() else {
+                        break;
+                    };
+                    if child_stop.load(AtomicOrdering::Acquire) {
+                        break;
+                    }
                     if stream.write_all(APP_SERVER_BODY).is_err() {
                         break;
                     }
@@ -1430,6 +1581,7 @@ mod tests {
             });
             Self {
                 address,
+                stop,
                 handle: Some(handle),
             }
         }
@@ -1437,8 +1589,11 @@ mod tests {
 
     impl Drop for AppServer {
         fn drop(&mut self) {
-            // The listener dies with the thread once the test drops its last connection.
-            self.handle.take();
+            self.stop.store(true, AtomicOrdering::Release);
+            let _ = TcpStream::connect(self.address);
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
         }
     }
 
@@ -1870,6 +2025,7 @@ mod tests {
     /// is only observable against a destination willing to send past it.
     struct Firehose {
         address: SocketAddr,
+        stop: Arc<AtomicBool>,
         handle: Option<std::thread::JoinHandle<()>>,
     }
 
@@ -1877,8 +2033,16 @@ mod tests {
         fn start() -> Self {
             let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind firehose");
             let address = listener.local_addr().expect("firehose address");
+            let stop = Arc::new(AtomicBool::new(false));
+            let child_stop = Arc::clone(&stop);
             let handle = std::thread::spawn(move || {
-                while let Ok((mut stream, _)) = listener.accept() {
+                while !child_stop.load(AtomicOrdering::Acquire) {
+                    let Ok((mut stream, _)) = listener.accept() else {
+                        break;
+                    };
+                    if child_stop.load(AtomicOrdering::Acquire) {
+                        break;
+                    }
                     let chunk = [b'x'; 4096];
                     let mut sent = 0_u64;
                     while sent < FIREHOSE_BYTES {
@@ -1894,6 +2058,7 @@ mod tests {
             });
             Self {
                 address,
+                stop,
                 handle: Some(handle),
             }
         }
@@ -1901,7 +2066,11 @@ mod tests {
 
     impl Drop for Firehose {
         fn drop(&mut self) {
-            self.handle.take();
+            self.stop.store(true, AtomicOrdering::Release);
+            let _ = TcpStream::connect(self.address);
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
         }
     }
 
