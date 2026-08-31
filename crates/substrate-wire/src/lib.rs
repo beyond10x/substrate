@@ -2636,11 +2636,19 @@ pub fn validate_read_only_roots(roots: &[ReadOnlyRoot]) -> Result<(), WireValida
         if !is_absolute_canonical(&root.host_path) || !is_absolute_canonical(&root.mount) {
             return Err(WireValidationError::InvalidReadOnlyRootPath);
         }
-        if RESERVED_MOUNTS.iter().any(|owned| {
-            root.mount == *owned || (*owned != "/" && is_path_beneath(&root.mount, owned))
-        }) || root.mount == EXECUTION_CAPSULE_MOUNT
-            || is_path_beneath(&root.mount, EXECUTION_CAPSULE_MOUNT)
-        {
+        let owned_mount = RESERVED_MOUNTS
+            .iter()
+            .copied()
+            .chain([
+                EXECUTION_CAPSULE_MOUNT,
+                EXEC_SCRATCH_MOUNT,
+                APERTURE_HOSTS_PATH,
+                APERTURE_CA_BUNDLE_PATH,
+            ])
+            .any(|owned| {
+                root.mount == owned || (owned != "/" && is_path_beneath(&root.mount, owned))
+            });
+        if owned_mount {
             return Err(WireValidationError::ReservedReadOnlyRootMount);
         }
         if !seen.insert(root.mount.as_str()) {
@@ -3217,6 +3225,12 @@ pub fn canonical_json(value: &Value) -> Result<String, WireValidationError> {
 #[cfg(test)]
 mod tests {
     use super::{
+        APERTURE_CA_BUNDLE_PATH, APERTURE_HOSTS_PATH, EXEC_SCRATCH_MOUNT,
+        EXECUTION_CAPSULE_HASH_DOMAIN, EXECUTION_CAPSULE_MOUNT, MAX_PTY_WINDOW_COLUMNS,
+        MAX_PTY_WINDOW_ROWS, MAX_READ_ONLY_ROOTS, ReadOnlyRoot, WireValidationError,
+        WorkspaceAccess, validate_read_only_roots, validate_workspace_access,
+    };
+    use super::{
         Base64Content, Base64Encoding, ExecutionCapsuleFile, ExecutionCapsuleFileRole,
         ExecutionCapsuleInput, OutputStream, PipeClientFrame, PipeServerFrame,
         canonical_execution_capsule_hash, canonical_json, canonical_query, canonical_request_hash,
@@ -3224,11 +3238,6 @@ mod tests {
     };
     use super::{
         CapabilityFacts, PipeSessionStartInput, PtyWindow, SessionMode, validate_session_window,
-    };
-    use super::{
-        EXECUTION_CAPSULE_HASH_DOMAIN, EXECUTION_CAPSULE_MOUNT, MAX_PTY_WINDOW_COLUMNS,
-        MAX_PTY_WINDOW_ROWS, MAX_READ_ONLY_ROOTS, ReadOnlyRoot, WireValidationError,
-        WorkspaceAccess, validate_read_only_roots, validate_workspace_access,
     };
     use super::{SESSION_PROTOCOL_ERROR_CODES, SessionProtocolErrorCode};
     use serde::Deserialize as _;
@@ -3909,7 +3918,17 @@ mod tests {
             WireValidationError::ReservedReadOnlyRootMount,
             "including the capsule's, which ADR 0009 owns"
         );
-        for mount in ["/runtime/bin", "/usr/local", "/workspace/cache"] {
+        for mount in [
+            "/runtime/bin",
+            "/usr/local",
+            "/workspace/cache",
+            EXEC_SCRATCH_MOUNT,
+            "/scratch/cache",
+            APERTURE_HOSTS_PATH,
+            "/etc/hosts/generated",
+            APERTURE_CA_BUNDLE_PATH,
+            "/etc/ssl/certs/ca-certificates.crt/generated",
+        ] {
             assert_eq!(
                 validate_read_only_roots(&[root("/home/someone/.cargo", mount)])
                     .expect_err("refused"),
