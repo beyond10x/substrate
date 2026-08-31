@@ -54,7 +54,7 @@ toml = "1.0"
 tower = { version = "0.5", features = ["util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
-ulid = { version = "1.2", features = ["serde"] }
+ulid = { version = "3.0", features = ["serde"] }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"
