@@ -40,7 +40,7 @@ prefix.
 
 ## Status
 
-**Tagged `0.2.3` (2026-08-30) — a keyless-signed daemon image. Development bundles, not a stable
+**Tagged `0.2.4` (2026-08-31) — a keyless-signed daemon image. Development bundles, not a stable
 published contract.**
 
 | area | state |
@@ -49,7 +49,7 @@ published contract.**
 | 0.2.0 bundle, runtime, portable lane, delegated Linux lane | green |
 | 0.4.0 successor development bundle | adds independently verified read-only execution capsules; the delegated model-free lane proves capsule/config/hook binding and correlated native hook evidence before model dispatch |
 | phase 4, [raw pipe sessions](adr/0007-protocol-processes-use-raw-pipe-sessions.md) | source-typed bounded raw-pipe primitive, distinct durable session identity, leased start, single-attachment Unix-WebSocket route ([plan 04](docs/plan/04-direct-byte-plane.md)) |
-| daemon image release | [`.github/workflows/release.yml`](.github/workflows/release.yml) publishes, keyless-signs and digest-pins `ghcr.io/beyond10x/b10x-substrate-daemon:<version>` on an annotated bare-version tag whose commit has a green gate run; a pre-release tag publishes nothing. `0.2.3` is published at `sha256:ab101582…`, keyless-signed. It needs no repository secret: the image push, the release and the changelog commit all use the run's own `GITHUB_TOKEN`. The changelog digest line lands by pull request — `main` is protected and declines a direct push |
+| daemon image release | [`.github/workflows/release.yml`](.github/workflows/release.yml) publishes, keyless-signs and digest-pins `ghcr.io/beyond10x/b10x-substrate-daemon:<version>` on an annotated bare-version tag whose commit has a green gate run; a pre-release tag publishes nothing. `0.2.4` is published at `sha256:18b4bf9…`, keyless-signed. It needs no repository secret: the image push and signing use the run's own `GITHUB_TOKEN` and OIDC identity. The changelog digest line lands by pull request — `main` is protected and declines a direct push |
 | stable publication | **not done.** The contract bundles' OCI packaging, signing and digest pinning are separate release work; no bundle is a stable published contract |
 | phase 4, [pty sessions](adr/0019-pty-is-a-second-session-mode.md) | a terminal is a second session **mode** on the same route family, not a second resource: `mode: "pty"` with a required 1–1000-cell window, a `resize` frame, and the `sessions.pty` fact published only after a startup probe allocated a pair, made it controlling inside a throwaway sandbox and round-tripped a window through the child. Absent, the mode is refused `session.pty-unserved` (501) and **never** served as pipes |
 | network session authority, Git sources | **absent** |
