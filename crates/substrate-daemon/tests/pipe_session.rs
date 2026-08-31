@@ -1867,7 +1867,7 @@ async fn every_refusal_a_pty_attach_can_raise_has_a_row_in_the_register() {
         .collect();
     assert!(
         rows.contains(&code.as_str()),
-        "GET {path} refuses a second attachment with {code} and the message {:?}. \
+        "a second attachment is refused with {code} and the message {:?}. \
          0.10.0/refusals.json says it lists every refusal a session can raise, and it lists \
          {rows:?} — {code} is not among them, so a client that receives it has nothing to look up.",
         refusal["error"]["message"]
