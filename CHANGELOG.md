@@ -9,6 +9,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [0.3.1] — 2026-09-01
 
+Image: `ghcr.io/beyond10x/b10x-substrate-daemon:0.3.1` at
+`sha256:48068ba167487fa84fe77e0acf7f8e3f556060f4d220a074d9b9f60f9af71ebf`, keyless-signed; verify
+with `cosign verify`.
+
 ### Changed
 
 - Updated `ed25519-dalek` to 3.0.0, `jsonschema` to 0.52.1, `tokio-tungstenite` to 0.30.0 and
