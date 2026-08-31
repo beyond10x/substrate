@@ -14,6 +14,13 @@ It does not decide product policy, run agent loops, or understand connector vend
 
 Public documentation: <https://beyond10x.github.io/substrate/>
 
+Source: <https://github.com/beyond10x/substrate/> · Security reports:
+<https://github.com/beyond10x/substrate/security/advisories/new>
+
+Substrate is licensed under [Apache-2.0](LICENSE), including all beyond10x-owned material in its
+reachable history. Third-party material retains its own licence. Public source does not make the
+development wire contract stable.
+
 ## Where it sits
 
 | direction | what |
@@ -33,8 +40,8 @@ prefix.
 
 ## Status
 
-**Tagged `0.2.1` (2026-08-29) — a public documentation and distribution release with no runtime or
-wire change. Development bundles, not a stable published contract.**
+**Tagged `0.2.3` (2026-08-30) — a keyless-signed daemon image. Development bundles, not a stable
+published contract.**
 
 | area | state |
 |---|---|
@@ -64,12 +71,18 @@ The table is the gate's own order (`scripts/gate.sh`).
 | lint | `cargo clippy --workspace --all-targets --locked -- -D warnings` |
 | links | `cargo xtask check-links` — rejects machine-local and broken repository-relative links |
 | ADRs | `cargo xtask check-adrs` |
+| secrets | `cargo xtask check-secrets` — scans every reachable commit, including root trees |
+| dependencies | `cargo xtask check-advisories` — rejects RustSec findings, HTTP/2 and publishable crates |
+| licences | `cargo xtask check-licenses` — verifies Apache-2.0 workspace metadata and deterministic third-party notices |
 | contract bundle 0.1.0 | `python3 scripts/check-contract-bundle.py` |
 | contract bundle 0.2.0 | `python3 scripts/check-contract-bundle-0.2.0.py` |
 | contract bundle 0.3.0 | `python3 scripts/check-contract-bundle-0.3.0.py` |
 | contract bundle 0.4.0 | `python3 scripts/check-contract-bundle-0.4.0.py` |
 | contract bundle 0.5.0 | `cargo xtask check-bundle 0.5.0` — re-renders from its authored source and compares bytes |
 | contract bundle 0.6.0 | `cargo xtask check-bundle 0.6.0` |
+| contract bundle 0.7.0 | `cargo xtask check-bundle 0.7.0` |
+| contract bundle 0.8.0 | `cargo xtask check-bundle 0.8.0` |
+| contract bundle 0.9.0 | `cargo xtask check-bundle 0.9.0` — checks the multi-major registry and served catch-all paths |
 | contract JSON | `cargo xtask check-json` — every JSON under `contracts/` is classified by exactly one bundled schema, or it fails closed |
 | toolchain | `cargo xtask check-toolchain` |
 
@@ -93,8 +106,9 @@ stopped being the fixed point of its own source, which a hand-written checker ca
 The four `scripts/render-contract-bundle*.py` and their `check-contract-bundle*.py` partners are
 **not tooling** — they are the reproducibility proof of the frozen `0.1.0`–`0.4.0` bundles, which
 are immutable, and `0.4.0`'s own `generator.name` points at one of them. They stay in Python and
-are not ported. `render-bundle` is the renderer for `0.5.0` onward, and a test asserts it still
-reproduces the frozen `0.4.0` byte for byte.
+are not ported. `render-bundle` dispatches to the frozen renderer for `0.5.0`–`0.8.0` and the
+versioned multi-major renderer for `0.9.0`; a test asserts the original renderer still reproduces
+the frozen `0.4.0` byte for byte.
 
 `crates/substrate-daemon/tests/runtime_vectors.rs` is the clean-room runner — an independent
 Unix-socket HTTP lane that spawns the shipped `substrate-daemon` binary and asserts only on the
@@ -117,7 +131,7 @@ The runner prints its current portable or delegated case inventory from each fre
 this document deliberately pins no counts that drift as adversarial coverage grows.
 
 `cargo xtask check-json` fails closed on unclassified or schema-invalid contract JSON and
-meta-validates every Draft 2020-12 schema offline, across all eight released bundles. Classification
+meta-validates every Draft 2020-12 schema offline, across all nine released bundles. Classification
 used to live in a Python module the four checkers imported — shared live machinery, not any one
 bundle's reproducibility proof — so it moved with the rest of the tooling, and the four checkers no
 longer do it. They verify everything else about the bundles they froze.
@@ -253,7 +267,9 @@ must:
 1. place the daemon in a delegated cgroup subtree carrying `cpu`, `memory` and `pids`;
 2. keep the delegation root itself **process-free** — for example systemd `Delegate=yes` plus
    `DelegateSubgroup=daemon`;
-3. pass that root through `--cgroup-root`.
+3. provide the configured bubblewrap binary and `/usr/bin/socat`, which the runtime probe uses to
+   prove that the seccomp profile denies host Unix-socket access;
+4. pass that root through `--cgroup-root`.
 
 The runtime probe enables and tests the controllers, bubblewrap namespaces, cgroup kill and the
 swap-inclusive memory bound **before** it advertises exec.

@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
-use axum::body::Body;
+use axum::body::{Body, to_bytes};
 use axum::extract::{Path, RawQuery, State};
 use axum::http::{HeaderMap, Request, StatusCode};
 use axum::middleware::{self, Next};
-use axum::response::Response;
+use axum::response::{IntoResponse as _, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Router};
-use substrate_wire::{Success, validate_operation_id};
+use substrate_wire::{ErrorClass, ErrorDetail, Failure, Success, validate_operation_id};
 
 use super::events::{
     event_list, event_stream, reconciliation_snapshot_create, reconciliation_snapshot_get,
@@ -30,6 +30,10 @@ use super::workspaces::{
 };
 use super::{App, CONTRACT_BUNDLE, CONTRACT_BUNDLE_SHA256, Identity};
 
+// A mutation diff can contain two maximum-sized files and JSON escaping can expand its bytes.
+// Keep envelope rewriting bounded, but above the largest response the handlers can produce.
+const V2_ENVELOPE_LIMIT: usize = super::BODY_LIMIT * 8;
+
 pub fn router(app: Arc<App>) -> Router {
     Router::new()
         .route("/v1/machine", get(machine_get))
@@ -44,21 +48,25 @@ pub fn router(app: Arc<App>) -> Router {
                 .put(workspace_file_write)
                 .delete(workspace_file_delete),
         )
-        .route(
-            "/v2/workspaces/{workspace_id}/files/{*path}",
-            get(workspace_file_read_v2).put(workspace_file_replace_v2),
-        )
-        .route(
-            "/v2/workspaces/{workspace_id}/tree",
-            get(workspace_tree_read_v2),
-        )
-        .route(
-            "/v2/workspaces/{workspace_id}/file-edits/{*path}",
-            post(workspace_file_edit_v2),
-        )
-        .route(
-            "/v2/workspaces/{workspace_id}/file-patches/{*path}",
-            post(workspace_file_patch_v2),
+        .merge(
+            Router::new()
+                .route(
+                    "/v2/workspaces/{workspace_id}/files/{*path}",
+                    get(workspace_file_read_v2).put(workspace_file_replace_v2),
+                )
+                .route(
+                    "/v2/workspaces/{workspace_id}/tree",
+                    get(workspace_tree_read_v2),
+                )
+                .route(
+                    "/v2/workspaces/{workspace_id}/file-edits/{*path}",
+                    post(workspace_file_edit_v2),
+                )
+                .route(
+                    "/v2/workspaces/{workspace_id}/file-patches/{*path}",
+                    post(workspace_file_patch_v2),
+                )
+                .route_layer(middleware::from_fn(v2_envelope)),
         )
         .route("/v1/execs", post(exec_start))
         .route("/v1/execs/{exec_id}", get(exec_get).delete(exec_retire))
@@ -103,6 +111,60 @@ pub fn router(app: Arc<App>) -> Router {
         .fallback(route_not_found)
         .layer(middleware::from_fn(contract_identity))
         .with_state(app)
+}
+
+/// V2 was added after the shared durable-operation machinery, whose stored answers intentionally
+/// preserve the v1 bytes frozen in every released bundle. Keep that machinery byte-identical and
+/// version the route-selected envelope at the HTTP boundary, including refusals and replays.
+async fn v2_envelope(request: Request<Body>, next: Next) -> Response {
+    let response = next.run(request).await;
+    let (mut parts, body) = response.into_parts();
+    let bytes = match to_bytes(body, V2_ENVELOPE_LIMIT).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::error!(%error, "v2 response exceeded the closed envelope bound");
+            return v2_envelope_failure();
+        }
+    };
+    let mut document: serde_json::Value = match serde_json::from_slice(&bytes) {
+        Ok(document) => document,
+        Err(error) => {
+            tracing::error!(%error, "v2 handler returned a non-JSON envelope");
+            return v2_envelope_failure();
+        }
+    };
+    let Some(object) = document.as_object_mut() else {
+        return v2_envelope_failure();
+    };
+    object.insert("api_version".to_owned(), serde_json::json!("v2"));
+    let encoded = match serde_json::to_vec(&document) {
+        Ok(encoded) => encoded,
+        Err(error) => {
+            tracing::error!(%error, "v2 envelope serialization failed");
+            return v2_envelope_failure();
+        }
+    };
+    parts.headers.remove(axum::http::header::CONTENT_LENGTH);
+    Response::from_parts(parts, Body::from(encoded))
+}
+
+fn v2_envelope_failure() -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        axum::Json(Failure {
+            api_version: "v2".to_owned(),
+            request_id: "v2-envelope-failed".to_owned(),
+            error: ErrorDetail {
+                class: ErrorClass::Failed,
+                code: "response.envelope-failed".to_owned(),
+                message: "Response could not be encoded in the selected API envelope.".to_owned(),
+                retriable: false,
+                address: Some("response".to_owned()),
+                operation: None,
+            },
+        }),
+    )
+        .into_response()
 }
 
 async fn contract_identity(request: Request<Body>, next: Next) -> Response {

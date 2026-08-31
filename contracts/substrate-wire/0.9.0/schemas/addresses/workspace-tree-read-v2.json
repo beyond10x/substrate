@@ -1,0 +1,15 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.9.0:address:workspace-tree-read-v2",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "workspace_id": {
+      "$ref": "../common.json#/$defs/workspace-id"
+    }
+  },
+  "required": [
+    "workspace_id"
+  ],
+  "title": "workspace-tree-read-v2 normalized route address",
+  "type": "object"
+}

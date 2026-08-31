@@ -1,7 +1,7 @@
 use std::os::fd::AsRawFd as _;
 use std::os::unix::fs::MetadataExt as _;
 use std::os::unix::process::CommandExt as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use chrono::Utc;
@@ -196,9 +196,23 @@ fn probe_lease_clock() -> bool {
 }
 
 fn probe_bubblewrap(config: &HostConfig) -> bool {
-    if !config.bubblewrap.is_file() {
+    // GNU netcat accepts `-U` as an unknown option, while OpenBSD netcat uses it for Unix sockets.
+    // Socat's address form is stable and names the socket family explicitly, so the probe cannot
+    // mistake a command-line refusal for the seccomp refusal it is measuring.
+    let socat = Path::new("/usr/bin/socat");
+    if !config.bubblewrap.is_file() || !socat.is_file() {
         return false;
     }
+    let Ok(seccomp) = crate::seccomp::profile() else {
+        return false;
+    };
+    let Ok(sentinel) = tempfile::tempdir() else {
+        return false;
+    };
+    let socket = sentinel.path().join("host.sock");
+    let Ok(_listener) = std::os::unix::net::UnixListener::bind(&socket) else {
+        return false;
+    };
     let mut command = Command::new(&config.bubblewrap);
     command
         .env_clear()
@@ -229,17 +243,26 @@ fn probe_bubblewrap(config: &HostConfig) -> bool {
             "/dev",
             "--tmpfs",
             "/tmp",
+        ])
+        .args(["--dir", "/runtime", "--ro-bind"])
+        .arg(sentinel.path())
+        .arg("/runtime/sentinel")
+        .arg("--seccomp")
+        .arg(seccomp.as_raw_fd().to_string())
+        .args([
             "--",
-            "/usr/bin/env",
-            "-u",
-            "PWD",
-            "--",
-            "/usr/bin/true",
+            "/usr/bin/socat",
+            "-",
+            "UNIX-CONNECT:/runtime/sentinel/host.sock",
         ])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    command.status().is_ok_and(|status| status.success())
+        .stderr(Stdio::piped());
+    let Ok(output) = command.output() else {
+        return false;
+    };
+    !output.status.success()
+        && String::from_utf8_lossy(&output.stderr).contains("socket(1, 1, 0): Permission denied")
 }
 
 /// The fixed, non-secret string the pass-through probe puts in its sealed memory.

@@ -28,6 +28,8 @@ An admitted host exec receives:
 - a separate writable `/workspace`;
 - read-only system inputs and, when requested, a digest-verified read-only `/runtime` capsule;
 - no usable network interface in the minimum no-egress profile;
+- a syscall filter that refuses new Unix-domain sockets and `io_uring_setup`, closing host-IPC and
+  asynchronous-I/O paths that namespace isolation alone does not remove;
 - PID and memory-plus-swap bounds with cumulatively observed CPU;
 - bounded stdout and stderr capture that keeps draining after truncation;
 - timeout, cancellation, and whole-cgroup termination.
@@ -58,9 +60,11 @@ deployment, or wait for capacity. They never masquerade as successful execution.
 
 ## What the minimum host does not claim
 
-The boundary does not claim protection from a compromised kernel or syscall-level seccomp
-containment. A development execution capsule verifies the capsule's own bytes; it does not attest
-the host kernel, interpreter, libraries, or base system.
+The boundary does not claim protection from a compromised kernel or comprehensive syscall
+allowlisting. Its seccomp rules close the named AF_UNIX and io_uring paths; they are part of the
+minimum confinement floor, not a claim that every kernel interface has been reduced to an allowlist.
+A development execution capsule verifies the capsule's own bytes; it does not attest the host
+kernel, interpreter, libraries, or base system.
 
 Read [operations and observations](./operations.md) to see how refusals and uncertain outcomes are
 made durable.

@@ -16,8 +16,9 @@ process.
 - `curl`
 - `jq` for readable JSON output
 
-Bubblewrap and a delegated cgroup v2 subtree are additional requirements for process execution.
-They are not needed merely to start the daemon and inspect its facts.
+Bubblewrap, `/usr/bin/socat`, and a delegated cgroup v2 subtree are additional requirements for
+process execution. The probe uses `socat` to prove that a sandbox cannot reach the host's Unix
+socket namespace. They are not needed merely to start the daemon and inspect its facts.
 
 ## Build the workspace
 
@@ -74,7 +75,8 @@ A Linux host that serves exec needs all of the following:
 2. user, mount, PID, IPC, UTS, and network namespaces;
 3. a delegated cgroup v2 subtree with `cpu`, `memory`, and `pids` controllers;
 4. a process-free delegation root;
-5. the delegation passed with `--cgroup-root`.
+5. `/usr/bin/socat` for the host-IPC confinement probe;
+6. the delegation passed with `--cgroup-root`.
 
 The daemon probes the backend before advertising execution. Missing enforcement produces a refusal,
 not weaker isolation.

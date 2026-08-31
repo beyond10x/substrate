@@ -75,6 +75,11 @@ const config: Config = {
         {to: '/docs/concepts/confinement', label: 'Confinement', position: 'left'},
         {to: '/docs/reference/contract', label: 'Contract', position: 'left'},
         {to: '/docs/status', label: 'Status', position: 'left'},
+        {
+          href: 'https://github.com/beyond10x/substrate',
+          label: 'Source',
+          position: 'right',
+        },
       ],
     },
     footer: {
@@ -96,6 +101,18 @@ const config: Config = {
             {label: 'Deployment postures', to: '/docs/guides/deployment'},
             {label: 'Contract reference', to: '/docs/reference/contract'},
             {label: 'Status and limitations', to: '/docs/status'},
+          ],
+        },
+        {
+          title: 'Project',
+          items: [
+            {label: 'Source', href: 'https://github.com/beyond10x/substrate'},
+            {label: 'Apache-2.0 licence', href: 'https://github.com/beyond10x/substrate/blob/main/LICENSE'},
+            {label: 'Security', to: '/docs/security'},
+            {
+              label: 'Report privately',
+              href: 'https://github.com/beyond10x/substrate/security/advisories/new',
+            },
           ],
         },
         {

@@ -8,10 +8,9 @@ on:
     paths:
       - .github/workflows/pages.yml
       - website/**
+  # This job is a required check, so every pull request must create its context. The locked build is
+  # cheap enough to prefer one unconditional check over a path-filtered check that can stay pending.
   pull_request:
-    paths:
-      - .github/workflows/pages.yml
-      - website/**
   workflow_dispatch:
 
 permissions:
@@ -53,6 +52,10 @@ jobs:
       - name: Type-check website
         working-directory: website
         run: npm run typecheck
+
+      - name: Audit website dependencies
+        working-directory: website
+        run: npm audit --audit-level=moderate
 
       - name: Build website
         working-directory: website

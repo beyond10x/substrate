@@ -5,8 +5,9 @@ description: What the current Substrate development release serves, and what rem
 
 # Development release, not a stable published contract
 
-Substrate has a tagged repository release and reproducible development contract bundles. Stable
-publication still requires complete packaging, signing, and digest pinning.
+Substrate has a tagged, keyless-signed daemon image and reproducible development contract bundles.
+The daemon distribution is published; stable contract publication still requires separate bundle
+signing and digest pinning.
 
 The current implementation is a Linux host slice. Treat every capability as deployment-specific and
 verify it through `GET /v1/machine`.
@@ -23,6 +24,7 @@ verify it through `GET /v1/machine`.
 | limits | body, path, output, retention, concurrency, process, memory, CPU, and duration bounds |
 | sessions | leased raw-pipe development slice with one Unix-WebSocket attachment |
 | capsules | digest-verified read-only runtime material beside a writable workspace |
+| distribution | Apache-2.0 source and a keyless-signed daemon image |
 
 ## Explicitly absent
 
@@ -32,7 +34,7 @@ verify it through `GET /v1/machine`.
 - workloads, images, volumes, and endpoints
 - Docker and Kubernetes drivers
 - cross-machine scheduling
-- stable signed runtime packaging
+- stable signed contract-bundle publication
 - a production hosted trust envelope
 
 Absent features are not stubs. They are missing from capability facts and answer with `unserved` or
@@ -44,6 +46,8 @@ a specific refusal when requested.
 - A verified capsule identifies its provided bytes, not the entire host runtime closure.
 - Static-bearer TCP is development-only and is not suitable for public or shared ingress.
 - One daemon is one trust domain; it is not a multi-tenant isolation layer.
+- Development bundle `0.9.0` declares v1 and v2 routes, while the daemon still advertises the
+  deliberately older `substrate-wire/0.4.0` contract header.
 
 ## Reading status safely
 

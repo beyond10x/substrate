@@ -2,7 +2,7 @@
 format: aep.planning-md/1
 id: story:docker-driver-entry-gate
 kind: story
-status: draft
+status: proposed
 title: The Docker driver entry gate is proven before any Docker code
 summary: Plan 03's three unchecked entry criteria, proven mechanically; held until phase 4 exits by roadmap order.
 owner: substrate
@@ -15,7 +15,7 @@ relations:
 - depends_on: story:pty-sessions
 - depends_on: story:sealed-secret-slots
 - depends_on: story:network-session-authority
-revision: 4
+revision: 5
 ---
 # Story: The Docker driver entry gate is proven before any Docker code
 

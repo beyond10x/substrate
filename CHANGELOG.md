@@ -7,8 +7,35 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- **Substrate is Apache-2.0.** Atlas ADR 0010 grants Apache-2.0 across all beyond10x-owned
+  Substrate history without rewriting a frozen contract byte. The repository, public site and
+  daemon image carry the licence and public security-reporting path; third-party material retains
+  its own licence.
+- **The public distribution is fail-closed.** GitHub secret and dependency protections, private
+  vulnerability reporting, action SHA pinning, locked audit-clean website dependencies and
+  deterministic third-party notices join the existing full-history and RustSec gates.
+
 ### Added
 
+- **Contract bundle [`contracts/substrate-wire/0.9.0`](contracts/substrate-wire/0.9.0)**, an
+  additive successor to `0.8.0`: `adds_routes: 5`, `preserves_routes: 26`. One operation registry
+  now declares every served API major, the five existing v2 workspace byte-plane routes carry v2
+  schemas and envelopes, and the preserved v1 file routes declare the catch-all path the daemon
+  actually serves. Accepted as [ADR 0018](adr/0018-one-registry-declares-every-served-api-major.md).
+- **Confinement and observation hardening.** Declared host roots cannot expose host IPC; delegated
+  context is authenticated before replay lookup; reads stay bounded even when metadata is stale;
+  aperture setup preserves its failing stage and errno; seccomp denies Unix sockets and
+  `io_uring_setup`; aperture state is reconciled fail-closed; and live pipe-output backpressure is
+  terminal rather than silently lossy. Accepted as [ADRs 0015–0017](adr/README.md).
+- **Repository and release gates are fail-closed.** The gate now scans every reachable Git object
+  for secrets, checks RustSec advisories and forbidden HTTP/2 dependencies, keeps bot credential
+  validation in Rust, and checks all nine contract bundles. The release workflow tests the exact
+  daemon binary extracted from the image before the one permitted push, refuses an existing tag
+  image or release, and publishes its GitHub release only after signature verification and an
+  anonymous image pull. Docker ignores local build and website dependency trees, reducing the
+  measured review build context from 6.49 GB to 17 MB.
 - **An egress aperture can carry a declared byte ceiling, and crossing it refuses the run by name.**
   `--egress-aperture <name>=<host>:<port>/tcp[/max=<size>]` bounds one run's
   `to_destination + from_destination` over that aperture; `<size>` is a decimal byte count with an

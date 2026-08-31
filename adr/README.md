@@ -20,3 +20,7 @@ with YAML frontmatter containing `date` and `status`. Draft design questions rem
 | [0012](0012-secret-slots-are-sealed-memfds.md) | Secret slots are sealed memfds | accepted |
 | [0013](0013-egress-apertures-are-declared-by-the-operator.md) | Egress apertures are declared by the operator and referenced by name | accepted |
 | [0014](0014-apertures-carry-a-declared-byte-ceiling.md) | An egress aperture carries a declared byte ceiling | accepted |
+| [0015](0015-declared-host-roots-carry-no-host-ipc.md) | Declared host roots carry no host IPC | accepted |
+| [0016](0016-pipe-output-backpressure-is-terminal.md) | Pipe output backpressure is terminal | accepted |
+| [0017](0017-delegated-context-is-verified-before-replay.md) | Delegated context is verified before replay | accepted |
+| [0018](0018-one-registry-declares-every-served-api-major.md) | One registry declares every served API major | accepted |

@@ -2,7 +2,7 @@
 format: aep.planning-md/1
 id: story:pty-sessions
 kind: story
-status: draft
+status: active
 title: PTY sessions are a distinct session kind with resize
 summary: Design 05 section 2 fixes the pty kind and frames; README lists PTY as absent; needs ADR and a successor bundle before code.
 owner: substrate
@@ -12,7 +12,7 @@ tags:
 - wire
 relations:
 - decomposes: epic:byte-plane-completion
-revision: 6
+revision: 9
 ---
 # Story: PTY sessions are a distinct session kind with resize
 
@@ -147,3 +147,22 @@ than verified in this tree.
 ## Citation refresh — 2026-08-30
 
 `SessionMode` was cited at `lib.rs:1196`; it is `:1227` at `5749353`. Line numbers in this store drift with every wire change — the symbol name is what survives, so cite both and trust the name.
+
+## Scope corrections — 2026-08-30, from the implementation
+
+The `## Scope` section above marks five lines `inferred`. The implementing work checked all five
+against the tree before building on them. **Two were wrong.** They are corrected here rather than
+edited above, so the change is visible.
+
+| Inferred line | Verdict |
+|---|---|
+| `Cargo.toml:37` is `nix` at features `["fs", "user"]`, and `substrate-host` does not depend on `nix` | **correct** |
+| `crates/substrate-wire/src/lib.rs` `SessionMode` | **correct** |
+| `crates/substrate-daemon/src/app/routes.rs:69-85` | **correct**, and untouched — the route family was reused, `adds_routes: 0` |
+| `crates/substrate-store/src/sessions.rs` needs work for ADR 0008 durable identity | **wrong.** The store serialises the whole `PipeSession` as JSON (`upsert_session`, `crates/substrate-store/src/sessions.rs:614`), so a new `SessionMode` variant persists with **zero** store changes. `substrate-store` was never touched |
+| "`0.7.0` is the frontier" | **wrong/stale.** `0.8.0` was the frontier; `0.9.0` is the successor this story cut |
+
+The scope's own confidence line said **high for where the work lands**, and that held: every *cited*
+path resolved and the primary surfaces were right. What did not hold was the inferred half, in both
+directions — one crate named that needed nothing, one version number a release behind. Recorded
+because the next wave selects on this section.

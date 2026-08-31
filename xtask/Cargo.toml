@@ -12,11 +12,16 @@ anyhow.workspace = true
 clap.workspace = true
 fancy-regex.workspace = true
 hex.workspace = true
+pulldown-cmark.workspace = true
+rustsec.workspace = true
 jsonschema.workspace = true
+libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 substrate-wire = { path = "../crates/substrate-wire" }
+tempfile.workspace = true
+toml.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

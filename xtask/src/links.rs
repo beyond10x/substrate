@@ -5,6 +5,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{Context, Result, bail};
+use pulldown_cmark::{Event, Options, Parser, Tag};
 
 use crate::report::Report;
 
@@ -27,42 +28,55 @@ pub fn check(root: &Path) -> Result<Report> {
         let source = fs::read_to_string(&document)
             .with_context(|| format!("cannot read {}", document.display()))?;
         let directory = document.parent().unwrap_or(&root).to_path_buf();
-        for (index, line) in source.lines().enumerate() {
-            let number = index + 1;
-            for raw in link_targets(line) {
-                let target = target_text(raw);
-                if target.is_empty() || target.starts_with('#') {
-                    continue;
+        for (event, range) in Parser::new_ext(&source, Options::all()).into_offset_iter() {
+            let Event::Start(
+                Tag::Link {
+                    dest_url: target, ..
                 }
-                if is_machine_local(target) {
-                    failures.push(format!("{relative}:{number}: machine-local link: {target}"));
-                    continue;
-                }
-                let (scheme, path) = split_scheme_and_path(target);
-                if !scheme.is_empty() {
-                    if !EXTERNAL.contains(&scheme.as_str()) {
-                        failures.push(format!(
-                            "{relative}:{number}: unsupported link scheme: {target}"
-                        ));
-                    }
-                    continue;
-                }
-                let decoded = percent_decode(path);
-                if decoded.is_empty() {
-                    continue;
-                }
-                let resolved = resolve(&directory, &decoded);
-                if !resolved.starts_with(&root) {
+                | Tag::Image {
+                    dest_url: target, ..
+                },
+            ) = event
+            else {
+                continue;
+            };
+            let number = source[..range.start]
+                .bytes()
+                .filter(|byte| *byte == b'\n')
+                .count()
+                + 1;
+            let target = target.as_ref();
+            if target.is_empty() || target.starts_with('#') {
+                continue;
+            }
+            if is_machine_local(target) {
+                failures.push(format!("{relative}:{number}: machine-local link: {target}"));
+                continue;
+            }
+            let (scheme, path) = split_scheme_and_path(target);
+            if !scheme.is_empty() {
+                if !EXTERNAL.contains(&scheme.as_str()) {
                     failures.push(format!(
-                        "{relative}:{number}: link escapes repository: {target}"
-                    ));
-                    continue;
-                }
-                if !resolved.exists() {
-                    failures.push(format!(
-                        "{relative}:{number}: missing link target: {target}"
+                        "{relative}:{number}: unsupported link scheme: {target}"
                     ));
                 }
+                continue;
+            }
+            let decoded = percent_decode(path);
+            if decoded.is_empty() {
+                continue;
+            }
+            let resolved = resolve(&directory, &decoded);
+            if !resolved.starts_with(&root) {
+                failures.push(format!(
+                    "{relative}:{number}: link escapes repository: {target}"
+                ));
+                continue;
+            }
+            if !resolved.exists() {
+                failures.push(format!(
+                    "{relative}:{number}: missing link target: {target}"
+                ));
             }
         }
     }
@@ -98,54 +112,14 @@ fn markdown_documents(root: &Path) -> Result<Vec<String>> {
         String::from_utf8(output.stdout).context("`git ls-files` printed invalid UTF-8")?;
     let mut documents: Vec<String> = listing
         .lines()
-        .filter(|line| !line.is_empty())
+        // Vendored crate Rustdoc uses Markdown link syntax for intra-doc paths such as
+        // `crate::Type`; those are resolved by rustdoc, not against the repository filesystem.
+        // The vendored bytes are dependency source rather than Substrate documentation.
+        .filter(|line| !line.is_empty() && !line.starts_with("vendor/"))
         .map(ToOwned::to_owned)
         .collect();
     documents.sort();
     Ok(documents)
-}
-
-/// The target of every `[text](target)` and `![text](target)` on one line.
-fn link_targets(line: &str) -> Vec<&str> {
-    let bytes = line.as_bytes();
-    let mut targets = Vec::new();
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] != b'[' {
-            index += 1;
-            continue;
-        }
-        let Some(offset) = line[index + 1..].find(']') else {
-            break;
-        };
-        let close = index + 1 + offset;
-        if bytes.get(close + 1) != Some(&b'(') {
-            index += 1;
-            continue;
-        }
-        let open = close + 2;
-        let Some(width) = line[open..].find(')') else {
-            break;
-        };
-        if width == 0 {
-            index += 1;
-            continue;
-        }
-        targets.push(&line[open..open + width]);
-        index = open + width + 1;
-    }
-    targets
-}
-
-/// The destination itself: `<a b.md>` unwrapped, or the first whitespace-delimited word.
-fn target_text(raw: &str) -> &str {
-    let value = raw.trim();
-    if let Some(rest) = value.strip_prefix('<')
-        && let Some(end) = rest.find('>')
-    {
-        return &rest[..end];
-    }
-    value.split_whitespace().next().unwrap_or("")
 }
 
 fn is_machine_local(target: &str) -> bool {
@@ -384,6 +358,43 @@ mod tests {
             report.failure_text(),
             "README.md:2: missing link target: docs/absent.md"
         );
+    }
+
+    #[test]
+    fn commonmark_reference_and_multiline_links_are_checked() {
+        let directory = repository(&[(
+            "README.md",
+            concat!(
+                "[reference][missing]\n",
+                "\n",
+                "[missing]: docs/reference-absent.md\n",
+                "\n",
+                "[multiline](\n",
+                "  docs/multiline-absent.md\n",
+                ")\n",
+            ),
+        )]);
+        let report = check(directory.path()).expect("check runs");
+        let text = report.failure_text();
+        assert!(
+            text.contains("missing link target: docs/reference-absent.md"),
+            "{text}"
+        );
+        assert!(
+            text.contains("missing link target: docs/multiline-absent.md"),
+            "{text}"
+        );
+        assert_eq!(report.failures().len(), 2, "{text}");
+    }
+
+    #[test]
+    fn vendored_rustdoc_links_are_left_to_rustdoc() {
+        let directory = repository(&[(
+            "vendor/crate/src/docs/type.md",
+            "[`Type`](crate::Type) and [module](super::module)\n",
+        )]);
+        let report = check(directory.path()).expect("check runs");
+        assert_eq!(report.failures(), &[] as &[String]);
     }
 
     #[test]

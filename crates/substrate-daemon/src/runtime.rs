@@ -6,6 +6,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::os::unix::fs::{FileTypeExt as _, MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::delegation::{DelegatedContextPolicy, TrustedKey};
 use crate::{App, Identity, SystemAuthority, router};
@@ -211,9 +212,15 @@ struct TcpConnectionPermit {
 
 struct TcpConnectionLimits {
     global: Arc<Semaphore>,
-    by_source: Mutex<BTreeMap<IpAddr, Arc<Semaphore>>>,
+    by_source: Mutex<BTreeMap<IpAddr, TcpSourceLimit>>,
     per_source: usize,
     max_sources: usize,
+    sequence: AtomicU64,
+}
+
+struct TcpSourceLimit {
+    semaphore: Arc<Semaphore>,
+    last_used: u64,
 }
 
 impl TcpConnectionLimits {
@@ -223,20 +230,37 @@ impl TcpConnectionLimits {
             by_source: Mutex::new(BTreeMap::new()),
             per_source: 16,
             max_sources: 1_024,
+            sequence: AtomicU64::new(1),
         }
     }
 
     fn acquire(&self, source: IpAddr) -> Option<TcpConnectionPermit> {
         let source_limit = {
             let mut sources = self.by_source.lock();
-            if let Some(limit) = sources.get(&source) {
-                Arc::clone(limit)
+            let sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
+            if let Some(limit) = sources.get_mut(&source) {
+                limit.last_used = sequence;
+                Arc::clone(&limit.semaphore)
             } else {
                 if sources.len() >= self.max_sources {
-                    return None;
+                    let idle = sources
+                        .iter()
+                        .filter(|(_, entry)| {
+                            entry.semaphore.available_permits() == self.per_source
+                                && Arc::strong_count(&entry.semaphore) == 1
+                        })
+                        .min_by_key(|(_, entry)| entry.last_used)
+                        .map(|(address, _)| *address);
+                    sources.remove(&idle?);
                 }
                 let limit = Arc::new(Semaphore::new(self.per_source));
-                sources.insert(source, Arc::clone(&limit));
+                sources.insert(
+                    source,
+                    TcpSourceLimit {
+                        semaphore: Arc::clone(&limit),
+                        last_used: sequence,
+                    },
+                );
                 limit
             }
         };
@@ -1052,6 +1076,32 @@ mod tests {
             max_buffer_bytes: 8 * 1024,
             max_headers: 8,
             keep_alive: false,
+        }
+    }
+
+    #[test]
+    fn tcp_source_limit_evicts_only_idle_sources() {
+        let limits = TcpConnectionLimits {
+            global: Arc::new(Semaphore::new(8)),
+            by_source: Mutex::new(BTreeMap::new()),
+            per_source: 1,
+            max_sources: 2,
+            sequence: AtomicU64::new(1),
+        };
+        let active = limits.acquire("127.0.0.1".parse().unwrap()).unwrap();
+        assert!(limits.acquire("127.0.0.2".parse().unwrap()).is_some());
+        assert!(
+            limits.acquire("127.0.0.3".parse().unwrap()).is_some(),
+            "the idle second source is evicted"
+        );
+        assert!(limits.acquire("127.0.0.1".parse().unwrap()).is_none());
+        drop(active);
+        for octet in 4..=255 {
+            assert!(
+                limits
+                    .acquire(format!("127.0.0.{octet}").parse().unwrap())
+                    .is_some()
+            );
         }
     }
 

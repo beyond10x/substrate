@@ -944,7 +944,21 @@ async fn bound_refusal_matrix_is_durable_replayable_conflict_safe_and_never_disp
     );
     let mut changed = request.clone();
     changed["action"]["request"]["query"]["unexpected"] = json!("two");
-    assert_bound_refusal_case(&harness, &request, &changed, "request.schema-invalid").await;
+    let before = harness.driver.dispatch_count.load(Ordering::SeqCst);
+    let first = harness.execute(&request).await;
+    assert_eq!(first["body"]["error"]["code"], "request.schema-invalid");
+    assert_eq!(harness.execute(&request).await, first);
+    let current_refusal = harness.execute(&changed).await;
+    assert_eq!(current_refusal["status"], 422);
+    assert_eq!(
+        current_refusal["body"]["error"]["code"],
+        "request.schema-invalid"
+    );
+    assert_eq!(
+        harness.driver.dispatch_count.load(Ordering::SeqCst),
+        before,
+        "current request validation before replay must not dispatch"
+    );
 
     let harness = Harness::open(false);
     let request = refusal_request(

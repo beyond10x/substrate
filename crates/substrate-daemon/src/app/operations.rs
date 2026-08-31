@@ -118,6 +118,7 @@ pub(super) async fn decode_mutation<T: DeserializeOwned>(
         Ok(verified) => (verified, None),
         Err(refusal) => (None, Some(refusal)),
     };
+    let (invalid_query, invalid_envelope) = invalid_envelope(object, raw_query);
     match app
         .store_io(|| {
             app.store
@@ -127,6 +128,21 @@ pub(super) async fn decode_mutation<T: DeserializeOwned>(
     {
         Ok(None) => {}
         Ok(Some(reservation)) => {
+            // Replay is still a request in the current trust posture. An existing ledger row is
+            // immutable, so these refusals are returned without trying to replace its outcome.
+            if invalid_query {
+                return Err(schema_invalid(request_id, Some(&operation), "query"));
+            }
+            if invalid_envelope {
+                return Err(schema_invalid(request_id, Some(&operation), "input"));
+            }
+            if let Some(refusal) = refusal {
+                return Err(delegated_context_refusal(
+                    request_id,
+                    Some(&operation),
+                    refusal,
+                ));
+            }
             if let Some(response) =
                 grant_conflict(app, &scope, &operation, request_id, attribution.as_ref()).await
             {
@@ -139,31 +155,22 @@ pub(super) async fn decode_mutation<T: DeserializeOwned>(
         }
         Err(error) => return Err(store_failure(request_id, Some(&operation), &error)),
     }
-    let new = NewOperation {
+    let new = bound_new_operation(
+        app,
+        identity,
         scope,
-        operation: operation.clone(),
-        operation_kind: operation_kind.to_owned(),
-        request_hash: request_hash.clone(),
-        accepted_at: app.authority.now().to_rfc3339(),
-        capability_snapshot: None,
-        actor: identity.actor.clone(),
-        principal: identity.principal.clone(),
-        grant_ref: attribution.as_ref().map(|value| value.grant_ref.clone()),
-        platform_principal: attribution
-            .as_ref()
-            .map(|value| value.platform_principal.clone()),
-        resource: None,
-    };
-    if !query_is_empty(raw_query) {
+        &operation,
+        operation_kind,
+        &request_hash,
+        attribution.as_ref(),
+    );
+    if invalid_query {
         let response = schema_invalid(request_id, Some(&operation), "query");
         return Err(record_bound_refusal(app, request_id, &new, response).await);
     }
     // Still closed: `op`, `input`, and the one optional sibling. Anything else is the same
     // strict-request refusal `0.6.0` gave, at the same address.
-    if object
-        .keys()
-        .any(|member| !matches!(member.as_str(), "op" | "input" | "delegated_context"))
-    {
+    if invalid_envelope {
         let response = schema_invalid(request_id, Some(&operation), "input");
         return Err(record_bound_refusal(app, request_id, &new, response).await);
     }
@@ -181,6 +188,40 @@ pub(super) async fn decode_mutation<T: DeserializeOwned>(
         request_hash,
         attribution,
     })
+}
+
+fn invalid_envelope(
+    object: &serde_json::Map<String, Value>,
+    raw_query: Option<&str>,
+) -> (bool, bool) {
+    let invalid_member = object
+        .keys()
+        .any(|member| !matches!(member.as_str(), "op" | "input" | "delegated_context"));
+    (!query_is_empty(raw_query), invalid_member)
+}
+
+fn bound_new_operation(
+    app: &App,
+    identity: &Identity,
+    scope: Scope,
+    operation: &str,
+    operation_kind: &str,
+    request_hash: &str,
+    attribution: Option<&VerifiedContext>,
+) -> NewOperation {
+    NewOperation {
+        scope,
+        operation: operation.to_owned(),
+        operation_kind: operation_kind.to_owned(),
+        request_hash: request_hash.to_owned(),
+        accepted_at: app.authority.now().to_rfc3339(),
+        capability_snapshot: None,
+        actor: identity.actor.clone(),
+        principal: identity.principal.clone(),
+        grant_ref: attribution.map(|value| value.grant_ref.clone()),
+        platform_principal: attribution.map(|value| value.platform_principal.clone()),
+        resource: None,
+    }
 }
 
 /// The one new envelope member (ADR 0011), read as a raw string before anything interprets it.

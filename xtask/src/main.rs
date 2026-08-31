@@ -7,13 +7,18 @@
 //! frozen bundles `0.1.0`–`0.4.0` (AGENTS.md invariant 6), not tooling.
 
 mod adrs;
+mod advisories;
+mod bot_files;
 mod bundle;
 mod json;
+mod licenses;
 mod links;
 mod package;
 mod render;
+mod render_v2;
 mod repo;
 mod report;
+mod secrets;
 mod toolchain;
 
 use std::path::PathBuf;
@@ -32,6 +37,18 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Reject dependencies affected by a current `RustSec` vulnerability.
+    #[command(name = "check-advisories")]
+    Advisories,
+    /// Verify workspace licensing and the locked graph's deterministic third-party notices.
+    #[command(name = "check-licenses")]
+    Licenses,
+    /// Scan every reachable commit with the checksum-pinned Gitleaks release.
+    #[command(name = "check-secrets")]
+    Secrets,
+    /// Reject bot configuration or key files with unsafe Unix metadata.
+    #[command(name = "check-bot-files")]
+    BotFiles(bot_files::Args),
     /// Reject a Rust toolchain version that the three pinning files do not agree on.
     #[command(name = "check-toolchain")]
     Toolchain {
@@ -72,6 +89,10 @@ fn main() -> ExitCode {
 fn dispatch() -> Result<ExitCode> {
     let cli = Cli::parse();
     let report = match cli.command {
+        Command::Advisories => advisories::check(&repo::root()?)?,
+        Command::Licenses => licenses::check(&repo::root()?)?,
+        Command::Secrets => secrets::check(&repo::root()?)?,
+        Command::BotFiles(args) => bot_files::check(&args),
         Command::Toolchain { root } => {
             let root = match root {
                 Some(root) => root,
@@ -84,7 +105,25 @@ fn dispatch() -> Result<ExitCode> {
         Command::CheckJson(args) => return json::run(&args),
         Command::PackageBundle(args) => return package::run(&args),
         Command::CheckBundle(args) => return bundle::run(&args),
-        Command::RenderBundle(args) => return render::run(&args),
+        Command::RenderBundle(args) => {
+            let root = repo::root()?;
+            let source = args
+                .source
+                .clone()
+                .unwrap_or_else(|| root.join("xtask/bundle-source"));
+            let authored_bundle = source.join(&args.version).join("documents/bundle.json");
+            let document: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&authored_bundle)?)?;
+            let generator = document
+                .pointer("/generator/name")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            return if generator == "xtask/src/render_v2.rs" {
+                render_v2::run(&args)
+            } else {
+                render::run(&args)
+            };
+        }
     };
     Ok(report.emit())
 }
