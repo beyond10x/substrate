@@ -51,6 +51,10 @@ jobs:
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          # `cargo xtask check-secrets` verifies every reachable commit and refuses a shallow
+          # history whose Gitleaks count cannot agree with Git's. The full history is therefore
+          # security input, not checkout convenience.
+          fetch-depth: 0
           persist-credentials: false
 
       # The runner ships its own rustup, so no third-party Rust action is used. `rust-toolchain.toml`
