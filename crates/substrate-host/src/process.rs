@@ -1,5 +1,5 @@
 use std::collections::{HashMap, HashSet};
-use std::fs::OpenOptions;
+use std::fs::{File, OpenOptions};
 use std::io::{self, Write as _};
 use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
@@ -59,6 +59,7 @@ struct Execution {
     notify: Notify,
     cancellation_requested: AtomicBool,
     delivered_signal: Mutex<Option<Signal>>,
+    pipe_backpressure: AtomicBool,
     pipe: Option<PipeState>,
 }
 
@@ -89,6 +90,7 @@ impl Execution {
             notify: Notify::new(),
             cancellation_requested: AtomicBool::new(false),
             delivered_signal: Mutex::new(None),
+            pipe_backpressure: AtomicBool::new(false),
             pipe,
         }
     }
@@ -116,6 +118,7 @@ impl ProcessRuntime {
         };
         let process_trees_reconciled = runtime.reconcile_orphans()?;
         runtime.reconcile_capsules(process_trees_reconciled)?;
+        runtime.reconcile_apertures(process_trees_reconciled)?;
         Ok(runtime)
     }
 
@@ -247,6 +250,77 @@ impl ProcessRuntime {
         Ok(())
     }
 
+    fn reconcile_apertures(&self, process_trees_reconciled: bool) -> Result<(), DriverError> {
+        let root = self.config.aperture_root();
+        let entries = match std::fs::read_dir(&root) {
+            Ok(entries) => entries,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => {
+                return Err(DriverError::failed(
+                    "aperture.reconcile-failed",
+                    format!("aperture root: {error}"),
+                ));
+            }
+        };
+        for (index, entry) in entries.enumerate() {
+            if !process_trees_reconciled {
+                return Err(DriverError::failed(
+                    "aperture.reconcile-unproven",
+                    "Stale aperture cleanup requires successful cgroup-root reconciliation.",
+                ));
+            }
+            if index >= self.config.max_tracked_execs {
+                return Err(DriverError::failed(
+                    "aperture.reconcile-limit",
+                    "Stale aperture count exceeds the configured tracked-exec bound.",
+                ));
+            }
+            let entry = entry.map_err(|error| {
+                DriverError::failed(
+                    "aperture.reconcile-failed",
+                    format!("aperture entry: {error}"),
+                )
+            })?;
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                return Err(DriverError::failed(
+                    "aperture.reconcile-invalid",
+                    "The aperture root contains a non-UTF-8 entry.",
+                ));
+            };
+            if !name.starts_with("aperture-")
+                || !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+            {
+                return Err(DriverError::failed(
+                    "aperture.reconcile-invalid",
+                    "The aperture root contains an unexpected entry.",
+                ));
+            }
+            let path = entry.path();
+            let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+                DriverError::failed(
+                    "aperture.reconcile-failed",
+                    format!("stale aperture metadata: {error}"),
+                )
+            })?;
+            if !metadata.file_type().is_dir() || metadata.file_type().is_symlink() {
+                return Err(DriverError::failed(
+                    "aperture.reconcile-invalid",
+                    "A stale aperture is not a private directory.",
+                ));
+            }
+            std::fs::remove_dir_all(&path).map_err(|error| {
+                DriverError::failed(
+                    "aperture.reconcile-failed",
+                    format!("stale aperture cleanup: {error}"),
+                )
+            })?;
+        }
+        Ok(())
+    }
+
     pub async fn start(
         &self,
         id: &str,
@@ -347,7 +421,7 @@ impl ProcessRuntime {
             Some(aperture) => match crate::egress::GeneratedResolution::prepare(
                 aperture,
                 self.config.ca_bundle.as_deref(),
-                &self.config.capsule_root,
+                &self.config.aperture_root(),
             ) {
                 Ok(value) => Some(value),
                 Err(error) => return contain_cgroup(&cgroup, error),
@@ -381,7 +455,7 @@ impl ProcessRuntime {
             Ok(slots) => slots,
             Err(error) => return contain_cgroup(&cgroup, error),
         };
-        let mut command = self.command(
+        let (mut command, seccomp) = match self.command(
             workspace,
             input,
             sync_fd,
@@ -390,7 +464,10 @@ impl ProcessRuntime {
             &slots,
             resolution.as_ref(),
             info_fd,
-        );
+        ) {
+            Ok(value) => value,
+            Err(error) => return contain_cgroup(&cgroup, error),
+        };
         let write_fd = sync_write.as_raw_fd();
         let placements = slots.placements();
         let mut retained = slots.retained(Some(sync_fd));
@@ -399,6 +476,9 @@ impl ProcessRuntime {
             retained.sort_unstable();
             retained.dedup();
         }
+        retained.push(u32::try_from(seccomp.as_raw_fd()).expect("seccomp descriptor fits u32"));
+        retained.sort_unstable();
+        retained.dedup();
         // SAFETY: pre_exec runs after fork; it invokes only async-signal-safe libc calls and does
         // not allocate. The captured descriptors are plain integers owned by the parent until spawn,
         // and the two vectors are built before the fork and only read after it.
@@ -1092,7 +1172,9 @@ impl ProcessRuntime {
         slots: &crate::secrets::SecretSlotSet,
         resolution: Option<&crate::egress::GeneratedResolution>,
         info_fd: Option<RawFd>,
-    ) -> Command {
+    ) -> Result<(Command, File), DriverError> {
+        let seccomp = crate::seccomp::profile()?;
+        let seccomp_fd = seccomp.as_raw_fd();
         let mut command = Command::new(&self.config.bubblewrap);
         command
             .env_clear()
@@ -1132,6 +1214,7 @@ impl ProcessRuntime {
                 "--tmpfs",
                 "/tmp",
             ]);
+        command.arg("--seccomp").arg(seccomp_fd.to_string());
         if let Some(capsule) = capsule {
             command
                 .arg("--ro-bind")
@@ -1193,7 +1276,7 @@ impl ProcessRuntime {
             command.arg(format!("PWD={value}"));
         }
         command.args(&input.argv);
-        command
+        Ok((command, seccomp))
     }
 
     fn prepare_capsule(
@@ -1301,6 +1384,7 @@ async fn run_child(
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let stdout_sender = pipe_sender.clone();
+    let stdout_execution = pipe_sender.as_ref().map(|_| Arc::clone(&execution));
     let stdout_task = tokio::spawn(async move {
         drain_capped(
             stdout,
@@ -1308,9 +1392,11 @@ async fn run_child(
             stdout_sender,
             PipeStream::Stdout,
             frame_limit,
+            stdout_execution,
         )
         .await
     });
+    let stderr_execution = pipe_sender.as_ref().map(|_| Arc::clone(&execution));
     let stderr_task = tokio::spawn(async move {
         drain_capped(
             stderr,
@@ -1318,6 +1404,7 @@ async fn run_child(
             pipe_sender,
             PipeStream::Stderr,
             frame_limit,
+            stderr_execution,
         )
         .await
     });
@@ -1333,8 +1420,10 @@ async fn run_child(
         .await;
     let (stdout, stdout_truncated) = stdout_task.await.unwrap_or_else(|_| (Vec::new(), true));
     let (stderr, stderr_truncated) = stderr_task.await.unwrap_or_else(|_| (Vec::new(), true));
-    // Read the counters while the forwarder is still alive, then let it go: the forwarder is in
-    // this run's cgroup, so reconciliation would otherwise be racing the thing it is about to kill.
+    // Quiesce the whole run tree before the terminal counter sample. The shared mapping remains
+    // owned by `aperture`, so killing and reaping the relay cannot invalidate it and no relay can
+    // increment a counter after the observation is built.
+    let cgroup_reconciled = reconcile_cgroup(&cgroup).await;
     let aperture_exhausted = ceiling_reached(aperture_exhausted, aperture.as_ref());
     let applied_aperture = aperture
         .as_ref()
@@ -1344,7 +1433,6 @@ async fn run_child(
         || cpu_exhausted
         || aperture_exhausted
         || execution.cancellation_requested.load(Ordering::Acquire);
-    let cgroup_reconciled = reconcile_cgroup(&cgroup).await;
     let capsule_reconciled = capsule.is_none_or(|capsule| capsule.directory.close().is_ok());
     let resolution_reconciled = resolution.is_none_or(crate::egress::GeneratedResolution::close);
     let mut observation = execution.observation.lock();
@@ -1355,6 +1443,7 @@ async fn run_child(
     observation.output_complete = true;
     observation.resource.observed_at = Utc::now();
     record_aperture(&mut observation, applied_aperture, aperture_exhausted);
+    record_pipe_backpressure(&mut observation, &execution);
     match status {
         _ if !cgroup_reconciled
             || !capsule_reconciled
@@ -1390,6 +1479,17 @@ async fn run_child(
     }
     drop(observation);
     execution.notify.notify_waiters();
+}
+
+fn record_pipe_backpressure(observation: &mut ExecObservation, execution: &Execution) {
+    if execution.pipe_backpressure.load(Ordering::Acquire) {
+        observation.resource.refusal = Some(substrate_wire::ExecRefusal {
+            class: substrate_wire::ErrorClass::Exhausted,
+            code: "session.output-backpressure".to_owned(),
+            message: "The raw-pipe live output queue was not drained within its declared bound."
+                .to_owned(),
+        });
+    }
 }
 
 /// Whether this run reached its declared aperture ceiling — asked once more after the wait.
@@ -1462,6 +1562,11 @@ async fn wait_for_child(
                 break child.wait().await;
             }
             _ = cpu_poll.tick() => {
+                if execution.pipe_backpressure.load(Ordering::Acquire) {
+                    let _ = cgroup.kill_all();
+                    close_live_output(execution).await;
+                    break child.wait().await;
+                }
                 // The ceiling before the CPU budget, on the same tick: a run that spends its
                 // budget waiting on an aperture it has already exhausted hit the ceiling, and the
                 // refusal has to say so (ADR 0014).
@@ -1651,6 +1756,7 @@ async fn drain_capped<R>(
     sender: Option<mpsc::Sender<PipeFrame>>,
     stream: PipeStream,
     frame_limit: usize,
+    execution: Option<Arc<Execution>>,
 ) -> (Vec<u8>, bool)
 where
     R: AsyncRead + Unpin,
@@ -1676,21 +1782,30 @@ where
         if retained < count {
             truncated = true;
         }
-        if let Some(sender) = &sender {
+        if let Some(sender) = &sender
+            && execution
+                .as_ref()
+                .is_none_or(|execution| !execution.pipe_backpressure.load(Ordering::Acquire))
+        {
             // The live channel carries only bytes retained under the same admitted output bound.
             // Continue draining excess child output without forwarding it so the child cannot
             // block and a consumer cannot observe more bytes than Substrate attested.
             for chunk in buffer[..retained].chunks(frame_limit) {
-                if sender
-                    .send(PipeFrame {
-                        stream,
-                        bytes: chunk.to_vec(),
-                    })
-                    .await
-                    .is_err()
-                {
-                    truncated = true;
-                    break;
+                match sender.try_send(PipeFrame {
+                    stream,
+                    bytes: chunk.to_vec(),
+                }) {
+                    Ok(()) => {}
+                    Err(mpsc::error::TrySendError::Full(_)) => {
+                        if let Some(execution) = &execution {
+                            execution.pipe_backpressure.store(true, Ordering::Release);
+                            execution
+                                .cancellation_requested
+                                .store(true, Ordering::Release);
+                        }
+                        break;
+                    }
+                    Err(mpsc::error::TrySendError::Closed(_)) => break,
                 }
             }
         }
@@ -2204,6 +2319,13 @@ mod tests {
             b"stale runtime",
         )
         .expect("stale bytes");
+        std::fs::create_dir_all(config.aperture_root().join("aperture-crashed"))
+            .expect("stale aperture");
+        std::fs::write(
+            config.aperture_root().join("aperture-crashed/hosts"),
+            b"stale generated mapping",
+        )
+        .expect("stale generated bytes");
         let capability = CapabilitySnapshot {
             snapshot: format!("sha256:{}", "7".repeat(64)),
             driver: HostDriverKind::Host,
@@ -2220,13 +2342,19 @@ mod tests {
                 .count(),
             0
         );
+        assert_eq!(
+            std::fs::read_dir(config.aperture_root())
+                .expect("list aperture root")
+                .count(),
+            0
+        );
 
         let outside = root.path().join("outside");
         std::fs::create_dir(&outside).expect("outside");
         std::fs::write(outside.join("keep"), b"operator data").expect("outside marker");
         symlink(&outside, config.capsule_root.join("capsule-symlink"))
             .expect("malicious stale link");
-        let error = ProcessRuntime::new(config.clone(), capability)
+        let error = ProcessRuntime::new(config.clone(), capability.clone())
             .err()
             .expect("symlink refuses");
         assert_eq!(error.code, "capsule.reconcile-invalid");
@@ -2237,6 +2365,18 @@ mod tests {
 
         std::fs::remove_file(config.capsule_root.join("capsule-symlink"))
             .expect("remove test symlink");
+        symlink(&outside, config.aperture_root().join("aperture-symlink"))
+            .expect("malicious stale aperture link");
+        let error = ProcessRuntime::new(config.clone(), capability.clone())
+            .err()
+            .expect("aperture symlink refuses");
+        assert_eq!(error.code, "aperture.reconcile-invalid");
+        assert_eq!(
+            std::fs::read(outside.join("keep")).expect("outside retained"),
+            b"operator data"
+        );
+        std::fs::remove_file(config.aperture_root().join("aperture-symlink"))
+            .expect("remove test aperture symlink");
         std::fs::create_dir(config.capsule_root.join("capsule-unproven"))
             .expect("unproven capsule");
         config.cgroup_root = None;
@@ -2419,6 +2559,7 @@ mod tests {
             Some(sender),
             PipeStream::Stdout,
             64,
+            None,
         ));
         writer.write_all(b"abcdef").await.unwrap();
         drop(writer);
@@ -2432,7 +2573,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn closing_a_saturated_live_queue_unblocks_bounded_capture() {
+    async fn saturating_a_live_queue_is_terminal_without_falsifying_durable_truncation() {
         use tokio::io::AsyncWriteExt as _;
 
         let (mut writer, reader) = tokio::io::duplex(1_024);
@@ -2453,6 +2594,7 @@ mod tests {
             Some(sender),
             PipeStream::Stdout,
             1,
+            Some(std::sync::Arc::clone(&execution)),
         ));
         writer
             .write_all(b"queue saturation must not block timeout")
@@ -2466,7 +2608,17 @@ mod tests {
             .expect("closed receiver releases drain")
             .unwrap();
         assert!(!captured.is_empty());
-        assert!(truncated);
+        assert!(!truncated, "all bytes still fit the durable capture bound");
+        assert!(
+            execution
+                .pipe_backpressure
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
+        assert!(
+            execution
+                .cancellation_requested
+                .load(std::sync::atomic::Ordering::Acquire)
+        );
     }
 
     #[test]

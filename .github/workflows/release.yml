@@ -290,9 +290,23 @@ jobs:
           printf '%s' "$GHCR_TOKEN" \
             | docker login ghcr.io --username "$GHCR_USER" --password-stdin
 
+      - name: Refuse an existing release or image version tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          if gh release view "${VERSION}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            echo "refused: GitHub release ${VERSION} already exists; a release rerun never overwrites it." >&2
+            exit 1
+          fi
+          if docker manifest inspect "${IMAGE}:${VERSION}" >/dev/null 2>&1; then
+            echo "refused: ${IMAGE}:${VERSION} already exists; canonical image tags are write-once." >&2
+            exit 1
+          fi
+
       # SOURCE_SHA becomes `org.opencontainers.image.revision` on the published image
       # (Dockerfile:13-14), so the image says which commit produced it.
-      - name: Build and push the daemon image
+      - name: Build, smoke-test and push the daemon image once
         id: build
         run: |
           set -euo pipefail
@@ -304,9 +318,35 @@ jobs:
             --provenance=false \
             --sbom=false \
             --metadata-file image-metadata.json \
-            --push \
+            --load \
             .
-          digest=$(jq -er '."containerimage.digest"' image-metadata.json)
+          docker run --rm --entrypoint /usr/local/bin/substrate-daemon \
+            "${IMAGE}:${VERSION}" --help >/dev/null
+
+          container=$(docker create "${IMAGE}:${VERSION}")
+          mkdir -p target/image-under-test
+          docker cp \
+            "${container}:/usr/local/bin/substrate-daemon" \
+            target/image-under-test/substrate-daemon
+          docker rm "${container}"
+          chmod 0755 target/image-under-test/substrate-daemon
+          SUBSTRATE_VECTORS_DAEMON="${PWD}/target/image-under-test/substrate-daemon" \
+            cargo test --release --locked \
+              -p substrate-daemon --test runtime_vectors -- --nocapture
+
+          git fetch --force --no-tags origin "+refs/tags/${VERSION}:refs/tags/${VERSION}"
+          current_sha=$(git rev-parse "refs/tags/${VERSION}^{commit}")
+          if [ "$current_sha" != "$SOURCE_SHA" ]; then
+            echo "refused: release tag moved from ${SOURCE_SHA} to ${current_sha} before publication." >&2
+            exit 1
+          fi
+          if docker manifest inspect "${IMAGE}:${VERSION}" >/dev/null 2>&1; then
+            echo "refused: ${IMAGE}:${VERSION} appeared before push; it will not be overwritten." >&2
+            exit 1
+          fi
+          docker push "${IMAGE}:${VERSION}"
+          digest=$(docker buildx imagetools inspect "${IMAGE}:${VERSION}" \
+            --format '{{json .Manifest.Digest}}' | tr -d '"')
           case "$digest" in
             sha256:*) ;;
             *) echo "refused: buildx reported no image digest ('${digest}')." >&2; exit 1 ;;
@@ -346,6 +386,15 @@ jobs:
             "${IMAGE}@${DIGEST}" > cosign-verify.json
           jq -e 'length > 0' cosign-verify.json > /dev/null
           echo "identity=${identity}" >> "$GITHUB_OUTPUT"
+
+      - name: Prove the image is anonymously retrievable
+        id: anonymous
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          anonymous_config=$(mktemp -d)
+          DOCKER_CONFIG="$anonymous_config" docker pull "${IMAGE}@${DIGEST}"
 
       # Everything below announces. Nothing above it did.
 
@@ -417,6 +466,7 @@ jobs:
       # by whoever pushed the tag. `--verify-tag` refuses if the tag vanished between preflight and
       # here.
       - name: Publish the GitHub release
+        id: publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -425,7 +475,9 @@ jobs:
             --repo "${GITHUB_REPOSITORY}" \
             --title "${VERSION}" \
             --notes-file release-notes.md \
+            --draft \
             --verify-tag
+          gh release edit "${VERSION}" --repo "${GITHUB_REPOSITORY}" --draft=false
 
       # The digest also belongs in `CHANGELOG.md` under this version's heading, on `main`
       # (AGENTS.md, section "Releases": the changelog is cut under a version heading at release).
@@ -436,84 +488,16 @@ jobs:
       #
       # Idempotent: re-running replaces this version's digest line rather than stacking a second
       # one. Retried against a fresh `origin/main` because `main` can move while a release builds.
-      - name: Record the digest in CHANGELOG.md on main
+      - name: Describe the required changelog pull request
         env:
-          RELEASE_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           DIGEST: ${{ steps.build.outputs.digest }}
         run: |
-          set -euo pipefail
-
-          bot_user="github-actions[bot]"
-          bot_id=41898282
-          digest_line="Image: \`${IMAGE}:${VERSION}\` at \`${DIGEST}\`, keyless-signed; verify with \`cosign verify\`."
-
-          attempt=1
-          while [ "$attempt" -le 3 ]; do
-            git fetch --no-tags origin '+refs/heads/main:refs/remotes/origin/main'
-            git checkout --force -B release-changelog origin/main
-
-            awk -v heading="## [${VERSION}]" -v line="$digest_line" '
-              index($0, heading) == 1 { print; print ""; print line; inserted = 1; state = 1; next }
-              # Eat the blank line and any digest line a previous run left under this heading,
-              # then restore exactly one blank before the section body.
-              state == 1 && $0 == "" { next }
-              state == 1 && index($0, "Image: `" ) == 1 { next }
-              state == 1 { print ""; state = 0; print; next }
-              { print }
-              END { if (!inserted) { print "refused: no \"" heading "\" heading in CHANGELOG.md" > "/dev/stderr"; exit 1 } }
-            ' CHANGELOG.md > CHANGELOG.next
-            mv CHANGELOG.next CHANGELOG.md
-
-            if git diff --quiet -- CHANGELOG.md; then
-              echo "CHANGELOG.md on main already records ${DIGEST}; nothing to push"
-              exit 0
-            fi
-
-            git -c "user.name=${bot_user}" \
-                -c "user.email=${bot_id}+${bot_user}@users.noreply.github.com" \
-                commit --only CHANGELOG.md --file - <<COMMIT
-          docs(changelog): record the ${VERSION} daemon image digest
-
-          - ${IMAGE}:${VERSION} is ${DIGEST}
-          - Built from ${SOURCE_SHA} and keyless-signed; cosign verify passed in the release run
-          COMMIT
-
-            if git \
-              -c 'credential.https://github.com.helper=' \
-              -c 'credential.https://github.com.helper=!f() { echo username=x-access-token; echo "password=${RELEASE_TOKEN}"; }; f' \
-              push origin HEAD:main 2> push-error.txt; then
-              echo "recorded ${DIGEST} in CHANGELOG.md on main"
-              exit 0
-            fi
-            cat push-error.txt >&2
-
-            # Two rejections that look alike in an exit code and are nothing alike in cause. A race
-            # is worth another attempt against a fresh `origin/main`; a protected branch is not --
-            # every retry fails identically, and three of them only bury the real message. Branch
-            # protection here requires the "Full gate" status check, which a direct push to `main`
-            # can never satisfy because no gate run exists for a commit that was never pushed.
-            if grep -qE 'GH006|protected branch' push-error.txt; then
-              echo "refused: \`main\` is a protected branch and a direct push cannot satisfy its" >&2
-              echo "required status check. This is not a race and retrying will not help." >&2
-              echo "" >&2
-              echo "The image IS published, signed and verified, and the GitHub release names the" >&2
-              echo "digest. Only CHANGELOG.md is behind. Record it with a pull request:" >&2
-              echo "" >&2
-              echo "  ## [${VERSION}] — <date>" >&2
-              echo "" >&2
-              echo "  ${digest_line}" >&2
-              exit 1
-            fi
-
-            echo "push rejected and the error is not branch protection; main may have moved." >&2
-            echo "retrying against a fresh origin/main (attempt ${attempt})" >&2
-            attempt=$(( attempt + 1 ))
-          done
-
-          echo "refused: could not record the digest in CHANGELOG.md on main after 3 attempts." >&2
-          echo "The image is published and signed; add the digest line by hand." >&2
-          exit 1
+          {
+            echo "CHANGELOG.md is protected by the Full gate and is not pushed directly."
+            echo "Open a bot-authored pull request adding:"
+            echo
+            echo "Image: \`${IMAGE}:${VERSION}\` at \`${DIGEST}\`, keyless-signed; verify with \`cosign verify\`."
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Release summary
         if: always()
@@ -529,7 +513,9 @@ jobs:
             echo "| digest | \`${DIGEST:-<not built>}\` |"
             echo "| SOURCE_SHA | \`${SOURCE_SHA}\` |"
             echo "| gate run | ${GATE_RUN_URL} |"
-            echo "| signature | keyless, verified against the workflow identity before announcing |"
+            echo "| signature step | ${{ steps.verify.outcome }} |"
+            echo "| anonymous pull step | ${{ steps.anonymous.outcome }} |"
+            echo "| release publication step | ${{ steps.publish.outcome }} |"
             echo
             echo "The wire contract bundles remain **development** bundles; this release makes none of them a stable contract."
           } >> "$GITHUB_STEP_SUMMARY"

@@ -439,6 +439,7 @@ async fn v2_file_mutations_enforce_digest_cas_and_return_bounded_diffs() {
         )
         .await;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(created_file["api_version"], "v2");
     let digest = created_file["result"]["after_sha256"]
         .as_str()
         .expect("after digest")
@@ -455,6 +456,7 @@ async fn v2_file_mutations_enforce_digest_cas_and_return_bounded_diffs() {
         )
         .await;
     assert_eq!(status, StatusCode::OK);
+    assert_eq!(tree["api_version"], "v2");
     assert_eq!(tree["result"]["truncated"], false);
     assert_eq!(
         tree["result"]["items"],
@@ -534,6 +536,7 @@ async fn v2_file_mutations_enforce_digest_cas_and_return_bounded_diffs() {
         )
         .await;
     assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(stale["api_version"], "v2");
     assert_eq!(stale["error"]["code"], "workspace.stale-content");
 }
 

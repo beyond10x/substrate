@@ -1,0 +1,150 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.9.0:runner-result",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "pass"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "diagnostics": {
+            "maxItems": 0
+          },
+          "expected_match": {
+            "const": true
+          },
+          "postconditions": {
+            "items": {
+              "properties": {
+                "matched": {
+                  "const": true
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "fail"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "anyOf": [
+          {
+            "properties": {
+              "expected_match": {
+                "const": false
+              }
+            }
+          },
+          {
+            "properties": {
+              "diagnostics": {
+                "minItems": 1
+              }
+            }
+          },
+          {
+            "properties": {
+              "postconditions": {
+                "contains": {
+                  "properties": {
+                    "matched": {
+                      "const": false
+                    }
+                  },
+                  "required": [
+                    "matched"
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "properties": {
+    "diagnostics": {
+      "items": {
+        "type": "string"
+      },
+      "type": "array"
+    },
+    "expected_match": {
+      "type": "boolean"
+    },
+    "format": {
+      "const": "b10x.substrate-runner-result.v1"
+    },
+    "postconditions": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "actual": {},
+          "expected": {},
+          "matched": {
+            "type": "boolean"
+          },
+          "operator": {
+            "enum": [
+              "equals",
+              "not-equals",
+              "lte",
+              "gte"
+            ]
+          },
+          "pointer": {
+            "$ref": "common.json#/$defs/rfc6901-pointer"
+          }
+        },
+        "required": [
+          "pointer",
+          "operator",
+          "expected",
+          "actual",
+          "matched"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    },
+    "status": {
+      "enum": [
+        "pass",
+        "fail"
+      ]
+    },
+    "vector_id": {
+      "pattern": "^[a-z][a-z0-9-]+$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "format",
+    "vector_id",
+    "status",
+    "expected_match",
+    "postconditions",
+    "diagnostics"
+  ],
+  "title": "Clean-room runner result",
+  "type": "object"
+}

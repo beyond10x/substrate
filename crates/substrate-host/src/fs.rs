@@ -469,11 +469,7 @@ impl GuardedFilesystem {
                 "file",
             ));
         }
-        let mut bytes = Vec::with_capacity(usize::try_from(size).unwrap_or(0));
-        File::from(fd)
-            .read_to_end(&mut bytes)
-            .map_err(|error| io_failed("workspace.read-failed", error))?;
-        Ok(bytes)
+        read_bounded_complete(File::from(fd), size, self.max_file_bytes)
     }
 
     fn create_parent_directories(&self, root_name: &str, path: &str) -> Result<(), DriverError> {
@@ -577,26 +573,12 @@ impl GuardedFilesystem {
             return Err(io_failed("workspace.write-failed", error));
         }
         sync_fd(parent_fd.as_raw_fd())?;
-        let observed = openat2(
-            workspace.as_raw_fd(),
-            path,
-            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-            0,
-        )?;
-        let stat = fstat(observed.as_raw_fd())?;
-        if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
-            return Err(path_escape());
-        }
-        let mut actual = Vec::new();
-        File::from(observed)
-            .read_to_end(&mut actual)
-            .map_err(|error| io_failed("workspace.observe-failed", error))?;
         Ok(FileObservation {
             kind: FileKind::File,
             workspace: workspace_id.to_owned(),
             path: path.to_owned(),
-            size: u64::try_from(actual.len()).expect("usize fits u64"),
-            sha256: hex::encode(Sha256::digest(actual)),
+            size: u64::try_from(content.len()).expect("usize fits u64"),
+            sha256: hex::encode(Sha256::digest(content)),
             atomic_replacement: true,
             observed_at: Utc::now(),
         })
@@ -718,6 +700,25 @@ impl GuardedFilesystem {
             0,
         )
     }
+}
+
+fn read_bounded_complete(
+    file: File,
+    observed_size: u64,
+    max_file_bytes: u64,
+) -> Result<Vec<u8>, DriverError> {
+    let mut bytes = Vec::with_capacity(usize::try_from(observed_size).unwrap_or(0));
+    file.take(max_file_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(|error| io_failed("workspace.read-failed", error))?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > max_file_bytes {
+        return Err(DriverError::exhausted(
+            "workspace.file-limit",
+            "File exceeds the probed complete-file limit.",
+            "file",
+        ));
+    }
+    Ok(bytes)
 }
 
 fn openat2(
@@ -1467,8 +1468,19 @@ mod tests {
 
     use super::{
         DESTROY_BATCH_ITEMS, GuardedFilesystem, WorkspaceDestroyBatch, openat2,
-        remove_children_batch, validate_root_name,
+        read_bounded_complete, remove_children_batch, validate_root_name,
     };
+
+    #[test]
+    fn a_file_growing_after_metadata_is_still_read_under_the_complete_file_bound() {
+        let directory = tempdir().expect("tempdir");
+        let path = directory.path().join("growing");
+        std::fs::write(&path, vec![b'x'; 1_025]).expect("grown file");
+        let file = std::fs::File::open(path).expect("file");
+        let error = read_bounded_complete(file, 1, 1_024)
+            .expect_err("bytes beyond stale metadata must be detected");
+        assert_eq!(error.code, "workspace.file-limit");
+    }
 
     #[test]
     fn a_directory_the_operator_already_owns_is_served_under_its_own_name() {

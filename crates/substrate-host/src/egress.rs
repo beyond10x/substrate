@@ -442,7 +442,7 @@ fn listen_inside(
         }
     }
     drop(child_end);
-    let listener = receive_descriptor(parent_fd);
+    let handback = receive_descriptor(parent_fd);
     let mut status = 0;
     // SAFETY: reaping a child this process just forked.
     unsafe {
@@ -453,12 +453,19 @@ fn listen_inside(
     } else {
         -1
     };
-    match (listener, helper_exit) {
-        (Some(listener), 0) => Ok(listener),
+    match (handback, helper_exit) {
+        (HelperHandback::Descriptor(listener), 0) => Ok(listener),
+        (HelperHandback::Failure { stage, errno }, _) => Err(DriverError::failed(
+            "exec.aperture-install-failed",
+            format!(
+                "The egress aperture could not be installed exactly as declared (stage {stage}, errno {errno}: {}).",
+                io::Error::from_raw_os_error(errno)
+            ),
+        )),
         (_, code) => Err(DriverError::failed(
             "exec.aperture-install-failed",
             format!(
-                "The egress aperture could not be installed exactly as declared (stage {code})."
+                "The egress aperture could not be installed exactly as declared (stage {code}, errno unavailable)."
             ),
         )),
     }
@@ -488,17 +495,17 @@ unsafe fn helper_body(
         // The cgroup next, and before any socket exists: a forwarder that outlives its sandbox
         // while holding sockets is what `cgroup.kill` has to be able to reach.
         if cgroup_fd >= 0 && !join_cgroup(cgroup_fd) {
-            return 2;
+            return helper_failure(handback_fd, 2);
         }
         if libc::setns(owner_fd, libc::CLONE_NEWUSER) != 0 {
-            return 3;
+            return helper_failure(handback_fd, 3);
         }
         if libc::setns(netns_fd, libc::CLONE_NEWNET) != 0 {
-            return 4;
+            return helper_failure(handback_fd, 4);
         }
         let listener = libc::socket(libc::AF_INET, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0);
         if listener < 0 {
-            return 5;
+            return helper_failure(handback_fd, 5);
         }
         let one: libc::c_int = 1;
         libc::setsockopt(
@@ -515,15 +522,29 @@ unsafe fn helper_body(
             u32::try_from(std::mem::size_of::<libc::sockaddr_in>()).unwrap_or(16),
         ) != 0
         {
-            return 6;
+            return helper_failure(handback_fd, 6);
         }
         if libc::listen(listener, 16) != 0 {
-            return 7;
+            return helper_failure(handback_fd, 7);
         }
         if !send_descriptor(handback_fd, listener) {
-            return 8;
+            return helper_failure(handback_fd, 8);
         }
         0
+    }
+}
+
+/// Reports the failing stage and the thread-local errno without allocation in the post-fork child.
+unsafe fn helper_failure(handback_fd: RawFd, stage: i32) -> i32 {
+    unsafe {
+        let errno = *libc::__errno_location();
+        let record = [stage, errno];
+        let _ = libc::write(
+            handback_fd,
+            record.as_ptr().cast(),
+            std::mem::size_of_val(&record),
+        );
+        stage
     }
 }
 
@@ -1142,7 +1163,7 @@ unsafe fn send_descriptor(socket: RawFd, descriptor: RawFd) -> bool {
         let mut payload = [0_u8; 1];
         let mut iov = libc::iovec {
             iov_base: payload.as_mut_ptr().cast(),
-            iov_len: 1,
+            iov_len: payload.len(),
         };
         let mut control = [0_u8; 64];
         let mut message: libc::msghdr = std::mem::zeroed();
@@ -1164,14 +1185,20 @@ unsafe fn send_descriptor(socket: RawFd, descriptor: RawFd) -> bool {
 }
 
 /// Receives one descriptor sent as `SCM_RIGHTS`, or nothing if the sender failed before sending.
-fn receive_descriptor(socket: RawFd) -> Option<OwnedFd> {
+enum HelperHandback {
+    Descriptor(OwnedFd),
+    Failure { stage: i32, errno: i32 },
+    Missing,
+}
+
+fn receive_descriptor(socket: RawFd) -> HelperHandback {
     // SAFETY: a `recvmsg` into stack buffers of the sizes its own macros computed, followed by a
     // bounds-checked read of exactly the descriptor the kernel placed in the control message.
     unsafe {
-        let mut payload = [0_u8; 1];
+        let mut payload = [0_u8; 8];
         let mut iov = libc::iovec {
             iov_base: payload.as_mut_ptr().cast(),
-            iov_len: 1,
+            iov_len: payload.len(),
         };
         let mut control = [0_u8; 64];
         let mut message: libc::msghdr = std::mem::zeroed();
@@ -1179,8 +1206,14 @@ fn receive_descriptor(socket: RawFd) -> Option<OwnedFd> {
         message.msg_iovlen = 1;
         message.msg_control = control.as_mut_ptr().cast();
         message.msg_controllen = control.len();
-        if libc::recvmsg(socket, &raw mut message, 0) != 1 {
-            return None;
+        let received = libc::recvmsg(socket, &raw mut message, 0);
+        if received == 8 {
+            let stage = i32::from_ne_bytes(payload[..4].try_into().unwrap_or_default());
+            let errno = i32::from_ne_bytes(payload[4..].try_into().unwrap_or_default());
+            return HelperHandback::Failure { stage, errno };
+        }
+        if received != 1 {
+            return HelperHandback::Missing;
         }
         let header = libc::CMSG_FIRSTHDR(&raw const message);
         if header.is_null()
@@ -1188,10 +1221,14 @@ fn receive_descriptor(socket: RawFd) -> Option<OwnedFd> {
             || (*header).cmsg_type != libc::SCM_RIGHTS
             || (*header).cmsg_len < libc::CMSG_LEN(4) as usize
         {
-            return None;
+            return HelperHandback::Missing;
         }
         let descriptor = std::ptr::read_unaligned(libc::CMSG_DATA(header).cast::<RawFd>());
-        (descriptor >= 0).then(|| OwnedFd::from_raw_fd(descriptor))
+        if descriptor >= 0 {
+            HelperHandback::Descriptor(OwnedFd::from_raw_fd(descriptor))
+        } else {
+            HelperHandback::Missing
+        }
     }
 }
 
@@ -1237,8 +1274,8 @@ mod tests {
     };
 
     use super::{
-        EgressAperture, GeneratedResolution, InstalledAperture, egress_apertures_fact, install,
-        read_sandbox_pid, sandbox_pid_from,
+        EgressAperture, GeneratedResolution, HelperHandback, InstalledAperture,
+        egress_apertures_fact, install, read_sandbox_pid, receive_descriptor, sandbox_pid_from,
     };
     use crate::{DriverErrorClass, HostConfig};
 
@@ -1254,6 +1291,50 @@ mod tests {
     /// lane this case does not have; what is proved here is that neither of them is reached.
     const PUBLIC_ADDRESS: SocketAddr =
         SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7)), 443);
+
+    #[test]
+    fn helper_failure_handback_preserves_stage_and_errno() {
+        let mut sockets = [-1_i32; 2];
+        // SAFETY: `sockets` is writable storage for exactly two descriptors.
+        assert_eq!(
+            unsafe {
+                libc::socketpair(
+                    libc::AF_UNIX,
+                    libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC,
+                    0,
+                    sockets.as_mut_ptr(),
+                )
+            },
+            0
+        );
+        let mut payload = Vec::new();
+        payload.extend_from_slice(&7_i32.to_ne_bytes());
+        payload.extend_from_slice(&libc::EADDRINUSE.to_ne_bytes());
+        // SAFETY: both descriptors are live and payload is valid for its declared length.
+        assert_eq!(
+            unsafe {
+                libc::send(
+                    sockets[1],
+                    payload.as_ptr().cast(),
+                    payload.len(),
+                    libc::MSG_NOSIGNAL,
+                )
+            },
+            8
+        );
+        match receive_descriptor(sockets[0]) {
+            HelperHandback::Failure { stage, errno } => {
+                assert_eq!(stage, 7);
+                assert_eq!(errno, libc::EADDRINUSE);
+            }
+            _ => panic!("failure handback was not preserved"),
+        }
+        // SAFETY: the test owns both descriptors and closes each once.
+        unsafe {
+            libc::close(sockets[0]);
+            libc::close(sockets[1]);
+        }
+    }
 
     /// A throwaway sandbox held open at bubblewrap's own `--block-fd` barrier.
     ///

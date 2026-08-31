@@ -28,6 +28,7 @@ done
 # The delegation root must be process-free: move this process into a child group.
 mkdir -p "${root}/runner"
 echo $$ > "${root}/runner/cgroup.procs"
+echo "+cpu +memory +pids" > "${root}/cgroup.subtree_control"
 
 echo "delegated-lane: root ${root}, controllers ${controllers}"
 exec env SUBSTRATE_VECTORS_CGROUP_ROOT="${root}" \

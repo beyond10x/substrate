@@ -40,9 +40,50 @@ use tokio::task::JoinHandle;
 
 /// The shipped binary, built by cargo before this integration test runs.
 const DAEMON: &str = env!("CARGO_BIN_EXE_substrate-daemon");
+const CGROUP_EXEC: &str = env!("CARGO_BIN_EXE_substrate-cgroup-exec");
+const DAEMON_OVERRIDE_VARIABLE: &str = "SUBSTRATE_VECTORS_DAEMON";
+
+fn daemon_binary() -> PathBuf {
+    std::env::var_os(DAEMON_OVERRIDE_VARIABLE).map_or_else(|| PathBuf::from(DAEMON), PathBuf::from)
+}
 
 /// Selects the delegated lane, mirroring the predecessor's `--cgroup-root` argument.
 const CGROUP_ROOT_VARIABLE: &str = "SUBSTRATE_VECTORS_CGROUP_ROOT";
+
+struct DelegatedCgroup(PathBuf);
+
+impl DelegatedCgroup {
+    fn acquire() -> Option<Self> {
+        let parent = std::env::var_os(CGROUP_ROOT_VARIABLE).map(PathBuf::from)?;
+        let path = parent.join(format!("substrate-test-{}", ulid::Ulid::new()));
+        std::fs::create_dir(&path).expect("create per-test delegated cgroup root");
+        std::fs::create_dir(path.join("daemon")).expect("create daemon cgroup");
+        std::fs::write(path.join("cgroup.subtree_control"), "+cpu +memory +pids")
+            .expect("delegate cpu, memory and pids to per-exec child cgroups");
+        Some(Self(path))
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for DelegatedCgroup {
+    fn drop(&mut self) {
+        std::fs::remove_dir(self.0.join("daemon")).unwrap_or_else(|error| {
+            panic!(
+                "per-test daemon cgroup {} was not empty at teardown: {error}",
+                self.0.join("daemon").display()
+            )
+        });
+        std::fs::remove_dir(&self.0).unwrap_or_else(|error| {
+            panic!(
+                "per-test delegated cgroup {} was not empty at teardown: {error}",
+                self.0.display()
+            )
+        });
+    }
+}
 
 /// The RFC 6455 sample key and the accept value it forces, as in `tests/websocket.rs`.
 const HANDSHAKE_KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
@@ -240,7 +281,7 @@ impl Daemon {
         let socket = root.join("substrate.sock");
         let workspaces = root.join("workspaces");
         let mut command = vec![
-            DAEMON.to_owned(),
+            daemon_binary().display().to_string(),
             "--socket".to_owned(),
             socket.display().to_string(),
             "--state".to_owned(),
@@ -276,6 +317,17 @@ impl Daemon {
         }
         if require_delegated_context {
             command.push("--require-delegated-context".to_owned());
+        }
+        if let Some(cgroup_root) = cgroup_root {
+            let mut wrapped = vec![
+                CGROUP_EXEC.to_owned(),
+                cgroup_root
+                    .join("daemon/cgroup.procs")
+                    .display()
+                    .to_string(),
+            ];
+            wrapped.append(&mut command);
+            command = wrapped;
         }
         let mut child = Command::new(&command[0])
             .args(&command[1..])
@@ -414,7 +466,7 @@ async fn check_startup_refusal(root: &Path) {
     let socket = root.join("unmapped.sock");
     let output = tokio::time::timeout(
         Duration::from_secs(10),
-        Command::new(DAEMON)
+        Command::new(daemon_binary())
             .args([
                 "--socket",
                 &socket.display().to_string(),
@@ -456,7 +508,7 @@ async fn check_aperture_term_refusal(root: &Path) {
     ] {
         let output = tokio::time::timeout(
             Duration::from_secs(10),
-            Command::new(DAEMON)
+            Command::new(daemon_binary())
                 .args([
                     "--socket",
                     &socket.display().to_string(),
@@ -650,12 +702,25 @@ const FILL_PROGRAM: &str = concat!(
 );
 
 const TREE_PROGRAM: &str = concat!(
-    "import os,signal,time;",
-    "signal.signal(signal.SIGTERM,signal.SIG_IGN);",
-    "os.fork();time.sleep(60)",
+    "import os,signal,time\n",
+    "signal.signal(signal.SIGTERM,signal.SIG_IGN)\n",
+    "os.fork()\n",
+    "with open('/workspace/.tree-ready','w') as ready:\n",
+    " ready.write('ready')\n",
+    " ready.flush()\n",
+    " os.fsync(ready.fileno())\n",
+    "time.sleep(60)\n",
 );
 
-const TRAP_PROGRAM: &str = "trap 'exit 0' TERM; echo ready; while :; do sleep 1; done";
+const TRAP_PROGRAM: &str = concat!(
+    "import os,signal,time\n",
+    "signal.signal(signal.SIGTERM,lambda _signal,_frame: os._exit(0))\n",
+    "with open('/workspace/.trap-ready','w') as ready:\n",
+    " ready.write('ready')\n",
+    " ready.flush()\n",
+    " os.fsync(ready.fileno())\n",
+    "while True: time.sleep(1)\n",
+);
 
 const EXITED_CLEANLY: fn() -> Value = || json!({ "code": 0, "signal": null });
 
@@ -676,6 +741,29 @@ fn decoded(output: &Value) -> Vec<u8> {
     BASE64
         .decode(output["content"]["data"].as_str().expect("output data"))
         .expect("base64 output")
+}
+
+async fn wait_for_workspace_file(daemon: &Daemon, workspace: &str, path: &str, request: &str) {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let (status, payload) = daemon
+            .call(
+                "GET",
+                &format!(
+                    "/v1/workspaces/{workspace}/files/{path}?mode=file&offset=0&limit_bytes=16"
+                ),
+                request,
+                None,
+            )
+            .await;
+        match status {
+            200 => return,
+            404 if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            _ => panic!("workspace readiness marker {path}: {status} {payload}"),
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -909,7 +997,7 @@ async fn check_confined_execs(
     assert_eq!(status, 202, "{running}");
     let exec_id = text(&running["result"]["id"]);
     let cgroup_name = text(&running["result"]["applied"]["cgroup"]);
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_for_workspace_file(daemon, workspace, ".tree-ready", "req_clean_tree_ready").await;
     let (status, cancelled) = daemon
         .call(
             "POST",
@@ -941,7 +1029,7 @@ async fn check_confined_execs(
                 &ExecInput::new(
                     workspace,
                     snapshot,
-                    &["/usr/bin/sh", "-c", TRAP_PROGRAM],
+                    &["/usr/bin/python3", "-c", TRAP_PROGRAM],
                     false,
                 )
                 .build(),
@@ -949,7 +1037,7 @@ async fn check_confined_execs(
         )
         .await;
     assert_eq!(status, 202, "{trapping}");
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    wait_for_workspace_file(daemon, workspace, ".trap-ready", "req_clean_trap_ready").await;
     let (status, trapped) = daemon
         .call(
             "POST",
@@ -3013,7 +3101,7 @@ const DELEGATED_CASES: usize = 54;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {
-    let delegated = std::env::var_os(CGROUP_ROOT_VARIABLE).map(PathBuf::from);
+    let delegated = DelegatedCgroup::acquire();
     let temporary = TempDir::with_prefix("substrate-cleanroom-").expect("clean-room directory");
     let root = temporary.path();
     // `mkdtemp(3)` — and so Python's `tempfile.TemporaryDirectory` — creates 0700; Rust's
@@ -3045,7 +3133,7 @@ async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {
     let slots = vec![format!("{SECRET_SLOT_NAME}={}", slot_file.display())];
     let daemon = Daemon::start(
         root,
-        delegated.as_deref(),
+        delegated.as_ref().map(DelegatedCgroup::path),
         &declared,
         &slots,
         &[delegated_key_flag()],
@@ -3055,7 +3143,7 @@ async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {
     check_dual_daemon_refusal(&daemon).await;
     let passed = check_http_journey(
         &daemon,
-        delegated.as_deref(),
+        delegated.as_ref().map(DelegatedCgroup::path),
         inside.port(),
         outside.port(),
         firehose.port(),
@@ -3128,7 +3216,7 @@ fn exiting_firehose_program(port: u16) -> String {
 /// finished on its own — with `applied.network.bytes` summing to exactly the declared ceiling.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_run_stopped_at_the_ceiling_names_the_bound_even_when_its_child_exits_first() {
-    let Some(delegated) = std::env::var_os(CGROUP_ROOT_VARIABLE).map(PathBuf::from) else {
+    let Some(delegated) = DelegatedCgroup::acquire() else {
         return;
     };
     let temporary = TempDir::with_prefix("substrate-adversarial-").expect("clean-room directory");
@@ -3140,7 +3228,7 @@ async fn a_run_stopped_at_the_ceiling_names_the_bound_even_when_its_child_exits_
         "{ADVERSARIAL_APERTURE}=127.0.0.1:{}/tcp/max={ADVERSARIAL_CEILING_BYTES}",
         firehose.port()
     )];
-    let daemon = Daemon::start(root, Some(delegated.as_path()), &declared, &[], &[], false).await;
+    let daemon = Daemon::start(root, Some(delegated.path()), &declared, &[], &[], false).await;
 
     let (status, machine) = daemon
         .call("GET", "/v1/machine", "req_adversarial_machine", None)

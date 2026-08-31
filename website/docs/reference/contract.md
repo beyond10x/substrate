@@ -26,12 +26,30 @@ Query this first. Do not infer support from a version number or deployment label
 | `POST` | `/v1/workspaces` | create a workspace through a keyed operation |
 | `GET` | `/v1/workspaces/{workspace_id}` | read observed workspace state |
 | `DELETE` | `/v1/workspaces/{workspace_id}` | destroy a workspace through a keyed operation |
-| `GET` | `/v1/workspaces/{workspace_id}/files/{path}` | read a bounded file range |
-| `PUT` | `/v1/workspaces/{workspace_id}/files/{path}` | atomically replace a file |
-| `DELETE` | `/v1/workspaces/{workspace_id}/files/{path}` | delete a guarded path |
+| `GET` | `/v1/workspaces/{workspace_id}/files/{*path}` | read a bounded file range |
+| `PUT` | `/v1/workspaces/{workspace_id}/files/{*path}` | atomically replace a file |
+| `DELETE` | `/v1/workspaces/{workspace_id}/files/{*path}` | delete a guarded path |
 | `POST` | `/v1/workspaces/{workspace_id}/lease/renew` | renew workspace liveness |
 
 The current host slice serves empty workspace creation. Git source materialization is absent.
+
+### Development v2 byte plane
+
+Bundle `0.9.0` declares the already-served v2 workspace byte plane. It adds no new resource family:
+it gives file operations closed request shapes for bounded directory reads, byte replacement,
+edits, and patches.
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/v2/workspaces/{workspace_id}/files/{*path}` | read bounded file bytes |
+| `GET` | `/v2/workspaces/{workspace_id}/tree` | read a bounded directory tree |
+| `PUT` | `/v2/workspaces/{workspace_id}/files/{*path}` | atomically replace file bytes |
+| `POST` | `/v2/workspaces/{workspace_id}/file-edits/{*path}` | apply one bounded positional edit |
+| `POST` | `/v2/workspaces/{workspace_id}/file-patches/{*path}` | apply one bounded patch |
+
+The daemon deliberately continues to advertise `substrate-wire/0.4.0` in `x-b10x-contract`.
+Bundle `0.9.0` exists for development consumers to pin and verify before the server claims it; its
+existence is not a stability or compatibility promise.
 
 ## Execs
 

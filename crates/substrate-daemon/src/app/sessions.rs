@@ -1121,6 +1121,11 @@ async fn send_pipe_terminal(
     if !is_pipe_terminal(observation.resource.state) {
         return Err(());
     }
+    if let Some(refusal) = &observation.resource.refusal
+        && refusal.code == "session.output-backpressure"
+    {
+        send_pipe_protocol_error(socket, sequence, &refusal.code, &refusal.message, policy).await?;
+    }
     if observation.stdout_truncated {
         send_pipe_server_frame(
             socket,

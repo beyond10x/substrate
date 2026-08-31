@@ -1642,6 +1642,8 @@ pub enum WireValidationError {
     ReservedReadOnlyRootMount,
     #[error("two declared read-only roots name the same mount point")]
     DuplicateReadOnlyRootMount,
+    #[error("two declared read-only root mount trees overlap")]
+    OverlappingReadOnlyRootMount,
     #[error("named secret slots are outside the closed bounds")]
     InvalidSecretSlotBounds,
     #[error("a named secret slot is not a legal slot name")]
@@ -1802,14 +1804,29 @@ pub fn validate_read_only_roots(roots: &[ReadOnlyRoot]) -> Result<(), WireValida
         if !is_absolute_canonical(&root.host_path) || !is_absolute_canonical(&root.mount) {
             return Err(WireValidationError::InvalidReadOnlyRootPath);
         }
-        if RESERVED_MOUNTS.contains(&root.mount.as_str()) || root.mount == EXECUTION_CAPSULE_MOUNT {
+        if RESERVED_MOUNTS.iter().any(|owned| {
+            root.mount == *owned || (*owned != "/" && is_path_beneath(&root.mount, owned))
+        }) || root.mount == EXECUTION_CAPSULE_MOUNT
+            || is_path_beneath(&root.mount, EXECUTION_CAPSULE_MOUNT)
+        {
             return Err(WireValidationError::ReservedReadOnlyRootMount);
         }
         if !seen.insert(root.mount.as_str()) {
             return Err(WireValidationError::DuplicateReadOnlyRootMount);
         }
+        if seen.iter().any(|other| {
+            *other != root.mount
+                && (is_path_beneath(other, &root.mount) || is_path_beneath(&root.mount, other))
+        }) {
+            return Err(WireValidationError::OverlappingReadOnlyRootMount);
+        }
     }
     Ok(())
+}
+
+fn is_path_beneath(path: &str, ancestor: &str) -> bool {
+    path.strip_prefix(ancestor)
+        .is_some_and(|suffix| suffix.starts_with('/'))
 }
 
 /// One operator-declared secret slot, named and placed by a start (ADR 0012).
@@ -2660,6 +2677,18 @@ mod tests {
             WireValidationError::ReservedReadOnlyRootMount,
             "including the capsule's, which ADR 0009 owns"
         );
+        for mount in ["/runtime/bin", "/usr/local", "/workspace/cache"] {
+            assert_eq!(
+                validate_read_only_roots(&[root("/home/someone/.cargo", mount)])
+                    .expect_err("refused"),
+                WireValidationError::ReservedReadOnlyRootMount,
+                "{mount}"
+            );
+        }
+        assert!(
+            validate_read_only_roots(&[root("/home/someone/.cargo", "/runtime2")]).is_ok(),
+            "component comparison must not reject a similarly prefixed name"
+        );
     }
 
     #[test]
@@ -2672,6 +2701,18 @@ mod tests {
             ])
             .expect_err("refused"),
             WireValidationError::DuplicateReadOnlyRootMount
+        );
+    }
+
+    #[test]
+    fn two_roots_cannot_overlap_mount_trees() {
+        assert_eq!(
+            validate_read_only_roots(&[
+                root("/home/someone/.cargo", "/toolchain"),
+                root("/home/someone/.rustup", "/toolchain/rustup"),
+            ])
+            .expect_err("refused"),
+            WireValidationError::OverlappingReadOnlyRootMount
         );
     }
 

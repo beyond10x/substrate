@@ -86,6 +86,7 @@ jobs:
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
+            ~/.cargo/bin
             ~/.cargo/registry
             ~/.cargo/git
             target
@@ -110,6 +111,13 @@ jobs:
           echo "== lanes this job will run =="
           echo "portable lane:  RUNS   — cargo test runs tests/runtime_vectors.rs with no SUBSTRATE_VECTORS_CGROUP_ROOT"
           echo "delegated lane: ABSENT — no delegated cgroup root is passed; the lane is not executed and is not claimed to pass"
+
+      - name: Install the pinned licence inventory tool
+        run: |
+          if ! cargo-about --version 2>/dev/null | grep -qx 'cargo-about 0.9.1'; then
+            cargo install cargo-about --version 0.9.1 --locked
+          fi
+          cargo-about --version
 
       # Bare invocation: the job fails with the gate's own exit status. Do not add a pipeline here.
       - name: Run the full gate

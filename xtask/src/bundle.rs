@@ -47,6 +47,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
 use crate::render::{self, Inputs, Rendered};
+use crate::render_v2;
 use crate::repo;
 use crate::report::Report;
 
@@ -105,7 +106,7 @@ pub fn check(inputs: &Inputs) -> Result<Report> {
     let released = tree_of(&bundle)?;
     let mut failures = Vec::new();
 
-    let rendered = render::render(inputs).with_context(|| {
+    let rendered = render_for_declared_generator(inputs).with_context(|| {
         format!(
             "re-rendering {} from {}",
             inputs.version,
@@ -127,6 +128,34 @@ pub fn check(inputs: &Inputs) -> Result<Report> {
         )))
     } else {
         Ok(Report::failed(failures))
+    }
+}
+
+fn render_for_declared_generator(inputs: &Inputs) -> Result<Rendered> {
+    let authored = inputs
+        .source_root
+        .join(&inputs.version)
+        .join("documents/bundle.json");
+    let document: Value = serde_json::from_slice(
+        &std::fs::read(&authored).with_context(|| format!("reading {}", authored.display()))?,
+    )
+    .with_context(|| format!("parsing {}", authored.display()))?;
+    let generator = document
+        .pointer("/generator/name")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("{} declares no generator.name", authored.display()))?;
+    if generator == "xtask/src/render_v2.rs" {
+        render_v2::render(&render_v2::Inputs {
+            version: inputs.version.clone(),
+            source_root: inputs.source_root.clone(),
+            contracts_root: inputs.contracts_root.clone(),
+            repository_root: inputs.repository_root.clone(),
+            wire: inputs.wire.clone(),
+        })
+    } else if generator == "xtask/src/render.rs" {
+        render::render(inputs)
+    } else {
+        anyhow::bail!("unsupported bundle generator {generator}")
     }
 }
 
@@ -322,7 +351,7 @@ fn check_route_paths(
         };
         // The shape, not the string: a parameter rename moves no concrete URL, so it is not a
         // move and there is nothing for a declaration to declare.
-        if now.shape == was.shape {
+        if now.shape == was.shape || terminal_parameter_is_widened(&was.shape, &now.shape) {
             continue;
         }
         let shims = current.shims_for(was, &previous_ids);
@@ -354,6 +383,16 @@ fn check_route_paths(
             was.path, now.path
         ));
     }
+}
+
+/// A terminal catch-all preserves every concrete URL a terminal single-segment parameter served
+/// and adds nested ones. Matchit requires catch-alls to be terminal, so no other shape change is a
+/// widening under this rule.
+fn terminal_parameter_is_widened(previous: &str, current: &str) -> bool {
+    previous
+        .strip_suffix("{}")
+        .zip(current.strip_suffix("{*}"))
+        .is_some_and(|(previous, current)| previous == current)
 }
 
 /// Invariant 7: exactly one schema classification per JSON authority, and it validates.
@@ -469,6 +508,10 @@ fn check_classification(version: &str, released: &Tree, failures: &mut Vec<Strin
 /// A successor that rendered, verified and preserved everything while adding nothing is the failure
 /// this catches; the entries are the acceptance list of the story that cut the bundle.
 fn check_additions(version: &str, released: &Tree, failures: &mut Vec<String>) {
+    if version == "0.9.0" {
+        check_multi_major_additions(released, failures);
+        return;
+    }
     if version == "0.8.0" {
         check_ceiling_additions(released, failures);
         return;
@@ -562,6 +605,119 @@ fn check_additions(version: &str, released: &Tree, failures: &mut Vec<String>) {
             != Some(code)
         {
             failures.push(format!("{path}: does not assert the refusal class {code}"));
+        }
+    }
+}
+
+/// What `0.9.0` exists for: every already-served v2 workspace-file route is declared under its
+/// own API major, while the complete v1 inventory remains in the same registry (ADR 0018).
+fn check_multi_major_additions(released: &Tree, failures: &mut Vec<String>) {
+    let Some(registry) = json_at(released, "operations.json", failures) else {
+        return;
+    };
+    if registry.get("registry_format").and_then(Value::as_str)
+        != Some("b10x.substrate-operation-registry.v2")
+    {
+        failures.push("operations.json: the multi-major registry format is absent".to_owned());
+    }
+    if registry.get("api_majors") != Some(&json!([1, 2])) {
+        failures.push("operations.json: api_majors is not exactly [1, 2]".to_owned());
+    }
+    let expected = BTreeMap::from([
+        (
+            "workspace.file.read-v2",
+            ("GET", "/v2/workspaces/{workspace_id}/files/{*path}"),
+        ),
+        (
+            "workspace.tree.read-v2",
+            ("GET", "/v2/workspaces/{workspace_id}/tree"),
+        ),
+        (
+            "workspace.file.replace-v2",
+            ("PUT", "/v2/workspaces/{workspace_id}/files/{*path}"),
+        ),
+        (
+            "workspace.file.edit-v2",
+            ("POST", "/v2/workspaces/{workspace_id}/file-edits/{*path}"),
+        ),
+        (
+            "workspace.file.patch-v2",
+            ("POST", "/v2/workspaces/{workspace_id}/file-patches/{*path}"),
+        ),
+    ]);
+    let operations = registry
+        .get("operations")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    check_v1_file_catch_alls(&operations, failures);
+    for operation in &operations {
+        let id = operation
+            .get("id")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let path = operation
+            .get("path")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let declared = operation.get("api_major").and_then(Value::as_u64);
+        let addressed = path
+            .strip_prefix("/v")
+            .and_then(|rest| rest.split('/').next())
+            .and_then(|major| major.parse::<u64>().ok());
+        if declared != addressed {
+            failures.push(format!(
+                "operations.json: {id} declares api_major {declared:?} but is served at {path}"
+            ));
+        }
+    }
+    for (id, (method, path)) in expected {
+        let found = operations.iter().any(|operation| {
+            operation.get("id").and_then(Value::as_str) == Some(id)
+                && operation.get("api_major").and_then(Value::as_u64) == Some(2)
+                && operation.get("method").and_then(Value::as_str) == Some(method)
+                && operation.get("path").and_then(Value::as_str) == Some(path)
+        });
+        if !found {
+            failures.push(format!(
+                "operations.json: v2 route {method} {path} ({id}) is absent or misclassified"
+            ));
+        }
+    }
+    let Some(response) = json_at(released, "schemas/response.json", failures) else {
+        return;
+    };
+    let v2_branches = response
+        .get("anyOf")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|branch| branch.pointer("/properties/api_version/const") == Some(&json!("v2")))
+        .count();
+    if v2_branches != 5 {
+        failures.push(format!(
+            "schemas/response.json: expected five v2 route-selected envelopes, found {v2_branches}"
+        ));
+    }
+}
+
+fn check_v1_file_catch_alls(operations: &[Value], failures: &mut Vec<String>) {
+    for (id, method) in [
+        ("workspace.file.read", "GET"),
+        ("workspace.file.write", "PUT"),
+        ("workspace.file.delete", "DELETE"),
+    ] {
+        let path = "/v1/workspaces/{workspace_id}/files/{*path}";
+        let found = operations.iter().any(|operation| {
+            operation.get("id").and_then(Value::as_str) == Some(id)
+                && operation.get("api_major").and_then(Value::as_u64) == Some(1)
+                && operation.get("method").and_then(Value::as_str) == Some(method)
+                && operation.get("path").and_then(Value::as_str) == Some(path)
+        });
+        if !found {
+            failures.push(format!(
+                "operations.json: preserved v1 route {method} {path} ({id}) does not declare the served catch-all path"
+            ));
         }
     }
 }
@@ -678,7 +834,12 @@ fn facing_of(member: &str) -> Option<Facing> {
 /// brace inside a segment is not a parameter here any more than it is there.
 fn path_parameters(path: &str) -> Vec<&str> {
     path.split('/')
-        .filter_map(|segment| segment.strip_prefix('{')?.strip_suffix('}'))
+        .filter_map(|segment| {
+            segment
+                .strip_prefix('{')?
+                .strip_suffix('}')
+                .map(|parameter| parameter.strip_prefix('*').unwrap_or(parameter))
+        })
         .collect()
 }
 
@@ -744,6 +905,85 @@ fn path_shape(path: &str) -> String {
     shape
 }
 
+/// One path shape is one route, whatever methods or parameter names the routes at it carry.
+fn one_route_per_shape(shaped: &BTreeMap<String, BTreeMap<&str, &str>>) -> Result<()> {
+    // One path shape is one node in matchit's tree, and this question carries no method at all:
+    // `axum::Router::route` only reaches its per-method merge when the path *string* is already
+    // registered (`axum-0.8.9/src/routing/path_router.rs:83-104`), and otherwise goes straight
+    // to `matchit::Router::insert`, whose tree has no notion of a method. So a `POST` at a shape
+    // a `GET` already occupies conflicts exactly as a second `GET` would. Every route at the
+    // shape is named, because any one of them is the pair a reader is looking for.
+    for (shape, routes) in shaped {
+        let strings: BTreeSet<&&str> = routes.values().collect();
+        if strings.len() > 1 {
+            let named: Vec<String> = routes
+                .iter()
+                .map(|(id, path)| format!("{id} at {path}"))
+                .collect();
+            return Err(anyhow!(
+                "{shape} is served by {}; one path shape is one route to a router, whatever \
+                 methods or parameter names the routes at it carry",
+                named.join(", ")
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Every template in the registry is one the renderer can render.
+fn every_template_is_renderable(routes: &Routes) -> Result<()> {
+    // A catch-all is a template the renderer cannot render. `path_parameters`
+    // (`xtask/src/render.rs:653-662`) strips `{` and `}` and nothing else, so `{*path}`
+    // generates an address document with a property literally named `*path` and
+    // `"$ref": "../common.json#/$defs/*path"`, which resolves to nothing — and
+    // `check_classification` never sees it, because address documents are registered as
+    // schemas and never compiled. Verified by rendering one.
+    //
+    // The daemon does serve `/v1/workspaces/{workspace_id}/files/{*path}`
+    // (`crates/substrate-daemon/src/app/routes.rs:42`) while every released bundle
+    // through `0.8.0` declares `{path}`, so this refusal states a real disagreement rather than inventing
+    // one. Making it declarable means changing `xtask/src/render.rs`, and every released
+    // bundle records that file's sha256 as `generator.digest`, so it is a decision with an
+    // ADR behind it and not a checker's to take.
+    for route in routes.served.values() {
+        if let Some(segment) = route
+            .path
+            .split('/')
+            .find(|segment| segment.starts_with("{*") && segment.ends_with('}'))
+        {
+            return Err(anyhow!(
+                "{} is served at {}, and the renderer cannot render {segment}: it would \
+                 publish an address requiring a member named {} against a definition that does \
+                 not exist",
+                route.id,
+                route.path,
+                &segment[1..segment.len() - 1]
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// [`path_shape`], with a catch-all and a single-segment parameter treated as one shape.
+///
+/// The two questions this file asks about a template are not the same question, and they diverge on
+/// exactly one input. *Has this operation moved?* is about which concrete URLs resolve, and
+/// `{*path}` matches strictly more of them than `{path}` — so they are not the same template.
+/// *Can a router hold both?* is about matchit's tree, and it holds neither beside the other:
+///
+/// ```text
+/// insert("/v1/workspaces/{workspace_id}/files/{*path}") -> Ok(())
+/// insert("/v1/workspaces/{workspace_id}/files/{path}")  -> Err("Insertion failed due to conflict
+///     with previously registered route: /v1/workspaces/{workspace_id}/files/{*path}")
+/// ```
+///
+/// So the collision reader conflates them and the move reader does not. Measured against matchit
+/// 0.8.4 over every insertable pair drawn from the released registries, this is the only input on
+/// which the two answers differ.
+fn collision_shape(path: &str) -> String {
+    path_shape(path).replace("{*}", "{}")
+}
+
 /// One entry of a bundle's operation registry, kept whole so a declaration can be compared member
 /// by member against the operation it stands in for.
 #[derive(Debug, Clone)]
@@ -752,6 +992,8 @@ struct Route {
     path: String,
     /// [`path_shape`] of `path`, computed once here so every reader asks the same question.
     shape: String,
+    /// [`collision_shape`] of `path`: the same, for the one reader that asks a different question.
+    collision_shape: String,
     entry: Value,
 }
 
@@ -795,12 +1037,15 @@ struct Routes {
 
 impl Routes {
     fn read(registry: &Value) -> Result<Self> {
+        let catch_all_renderer = registry.get("registry_format").and_then(Value::as_str)
+            == Some("b10x.substrate-operation-registry.v2");
         let entries = registry
             .get("operations")
             .and_then(Value::as_array)
             .ok_or_else(|| anyhow!("no operations array"))?;
         let mut routes = Self::default();
-        let mut dispatch: BTreeMap<(&str, String), (&str, &str)> = BTreeMap::new();
+        let mut dispatched: BTreeMap<(&str, &str), &str> = BTreeMap::new();
+        let mut shaped: BTreeMap<String, BTreeMap<&str, &str>> = BTreeMap::new();
         let mut addressed: BTreeMap<&str, (&str, Vec<&str>)> = BTreeMap::new();
         for entry in entries {
             let (Some(id), Some(path)) = (
@@ -813,6 +1058,7 @@ impl Routes {
                 id: id.to_owned(),
                 path: path.to_owned(),
                 shape: path_shape(path),
+                collision_shape: collision_shape(path),
                 entry: entry.clone(),
             };
             if let Some(target) = entry.get("alias_of").and_then(Value::as_str) {
@@ -822,26 +1068,32 @@ impl Routes {
                     .or_default()
                     .push(route.clone());
             }
-            // A router dispatches one request to one operation. Two routes may share a path —
-            // `0.8.0` has five such paths, `GET` and `DELETE` on one resource — but never a path
-            // *and* a method: which operation the request reaches would be a property of the
-            // router rather than of the registry. It is also how a declared move launders itself
-            // into a collision, satisfying every condition on the path the operation left while
-            // the operation lands on a path somebody else still serves.
+            // A router dispatches one request to one operation, and it takes two rules to say so
+            // because axum and matchit answer two different questions.
+            //
+            // **One method and one path string reach one operation.** `axum::Router::route` merges
+            // method routers when the path *string* is already registered
+            // (`axum-0.8.9/src/routing/path_router.rs:83-104`), so `0.8.0`'s five paths served
+            // under two or three methods are fine — but two entries on one method and one string
+            // are two handlers for one request.
             let method = entry.get("method").and_then(Value::as_str).unwrap_or("");
-            if let Some(other) = dispatch.insert((method, route.shape.clone()), (id, path)) {
-                let mut both = [other, (id, path)];
+            if let Some(other) = dispatched.insert((method, path), id) {
+                let mut both = [(other, path), (id, path)];
                 both.sort_unstable();
                 return Err(anyhow!(
-                    "{method} {} is served by two operations, {} at {} and {} at {}; one method \
-                     and path shape reach one operation",
-                    route.shape,
+                    "{method} {path} is served by two operations, {} and {}; one method and path \
+                     reach one operation",
                     both[0].0,
-                    both[0].1,
-                    both[1].0,
-                    both[1].1
+                    both[1].0
                 ));
             }
+            // **One shape and two strings is one route to matchit**, and the second registration
+            // is refused. Collected here and answered after the loop, so the verdict is a function
+            // of the routes served rather than of the order they were authored in.
+            shaped
+                .entry(route.collision_shape.clone())
+                .or_default()
+                .insert(id, path);
             // The address document is generated per `address_schema` *target*, not per route:
             // `render.rs:345-381` loops over the routes and `insert`s one document per target,
             // with `required` taken from that route's own path parameters — so two routes naming
@@ -863,8 +1115,8 @@ impl Routes {
                 both.sort_unstable();
                 return Err(anyhow!(
                     "{target} is named by {} taking {:?} and by {} taking {:?}; one address \
-                     document is generated per target, from one of the two, so the other publishes \
-                     an address its own path cannot fill",
+                         document is generated per target, from one of the two, so the other publishes \
+                         an address its own path cannot fill",
                     both[0].0,
                     both[0].1,
                     both[1].0,
@@ -884,6 +1136,10 @@ impl Routes {
                     both[1]
                 ));
             }
+        }
+        one_route_per_shape(&shaped)?;
+        if !catch_all_renderer {
+            every_template_is_renderable(&routes)?;
         }
         Ok(routes)
     }
@@ -3304,7 +3560,7 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{}: {error}", bundle.display()));
             checked += 1;
         }
-        assert_eq!(checked, 8, "every released bundle must be checked");
+        assert_eq!(checked, 9, "every released bundle must be checked");
     }
 
     /// Class, the other half: if a parameter's name is not a discriminator, then renaming one is
@@ -3526,6 +3782,7 @@ mod tests {
             id: id.to_owned(),
             path: path.to_owned(),
             shape: super::path_shape(path),
+            collision_shape: super::collision_shape(path),
             entry,
         }
     }
@@ -4496,6 +4753,326 @@ mod tests {
             text.contains(ADDED) && text.contains("session.get"),
             "{ADDED} at {ADDED_AT} and session.get at /v1/pipe-sessions/{{session_id}} are one \
              route to a router: {text}"
+        );
+    }
+
+    // ------------------------------------------------------------------------------------------
+    // Adversarial cases, fifth pass. Added against 102ba6d. Both attack one mirror: `path_shape`
+    // decides that `{*name}` and `{name}` are two shapes ("a wildcard spans segments where a
+    // parameter spans one", `bundle.rs:735-737`, pinned by
+    // `a_path_shape_is_what_a_request_can_tell_apart`) — and matchit 0.8.4, the router that rule
+    // is measured against, refuses to hold both.
+    //
+    // Measured against the real crate rather than argued (matchit 0.8.4, `Router::insert`, either
+    // order):
+    //
+    //   insert("/v1/workspaces/{workspace_id}/files/{*path}") -> Ok(())
+    //   insert("/v1/workspaces/{workspace_id}/files/{path}")  -> Err("Insertion failed due to
+    //       conflict with previously registered route:
+    //       /v1/workspaces/{workspace_id}/files/{*path}")
+    //
+    // and the catch-all matches every URL the single segment matched, and more:
+    //
+    //   at("/v1/workspaces/w1/files/a.txt")     -> Ok(path = "a.txt")     ({path}: Ok)
+    //   at("/v1/workspaces/w1/files/a/b/c.txt") -> Ok(path = "a/b/c.txt") ({path}: no match)
+    //
+    // `axum::Router::route` puts the path *string* into that one table and merges method routers
+    // only when the string is already registered
+    // (`axum-0.8.9/src/routing/path_router.rs:83-104`), so the conflict is method-independent.
+    //
+    // This is not a hypothetical template. `crates/substrate-daemon/src/app/routes.rs:42` already
+    // registers the v1 file family as `/v1/workspaces/{workspace_id}/files/{*path}`, while every
+    // released bundle through `0.8.0` declares it as `{path}`; `common.json#/$defs/relative-path`
+    // admits `/` and carries `x-b10x-max-depth: 64`, so the nested paths only the catch-all can
+    // match are the ones the definition is written for.
+
+    /// The one route family the daemon already registers as a catch-all, and the two templates.
+    const FILE_ROUTES: [&str; 3] = [
+        "workspace.file.delete",
+        "workspace.file.read",
+        "workspace.file.write",
+    ];
+    const FILE_PATH: &str = "/v1/workspaces/{workspace_id}/files/{path}";
+    const FILE_PATH_CATCH_ALL: &str = "/v1/workspaces/{workspace_id}/files/{*path}";
+
+    /// A successor may not add a catch-all beside the single-segment route it conflicts with.
+    ///
+    /// The same class as `a_successor_may_not_add_a_route_at_a_shape_it_already_serves` — "a
+    /// successor may not add a route a request cannot tell apart from one it already serves" — and
+    /// the same harm: `axum::Router::route` panics building the table this bundle describes. Here
+    /// the two templates are not told apart by `path_shape` at all: `/v1/workspaces/{}/files/{}`
+    /// and `/v1/workspaces/{}/files/{*}` are two keys in the dispatch map and one node in matchit's
+    /// tree, so the collision check never sees them meet.
+    ///
+    /// The addition is the one a reader of this repository would write: `routes.rs:42` serves the
+    /// v1 file family at `{*path}`, so a new v1 file operation authored to match the code carries
+    /// `{*path}` while the three entries beside it carry `{path}`. It gets its own address
+    /// document, so nothing here depends on the shared-target rule.
+    #[test]
+    fn a_catch_all_may_not_stand_beside_the_single_segment_route_it_conflicts_with() {
+        const ADDED: &str = "workspace.file.list";
+        let (_scratch, inputs) = author_a_successor("added-catch-all", |authored| {
+            edit_json(&authored.join("routes.json"), |routes| {
+                let routes = routes.as_array_mut().expect("routes.json is an array");
+                let mut added = routes
+                    .iter()
+                    .find(|route| {
+                        route.get("id").and_then(Value::as_str) == Some("workspace.file.read")
+                    })
+                    .cloned()
+                    .expect("a route to model the addition on");
+                assert_eq!(
+                    added["path"],
+                    json!(FILE_PATH),
+                    "the file family moved already"
+                );
+                added["id"] = json!(ADDED);
+                added["path"] = json!(FILE_PATH_CATCH_ALL);
+                added["address_schema"] = json!("schemas/addresses/workspace-file-list.json");
+                routes.push(added);
+            });
+            edit_json(&authored.join("documents/schemas/bundle.json"), |bundle| {
+                bundle["properties"]["compatibility"]["properties"]["adds_routes"] =
+                    json!({ "const": 1 });
+            });
+        });
+        let report = check(&inputs).expect("the successor reads");
+        let text = report.failure_text();
+        assert!(
+            text.contains(ADDED) && text.contains("workspace.file.read"),
+            "{ADDED} at {FILE_PATH_CATCH_ALL} and workspace.file.read at {FILE_PATH} are one node \
+             in matchit's tree, and the second registration is refused: {text}"
+        );
+    }
+
+    /// Widening a path parameter to the catch-all the daemon already serves is not a move.
+    ///
+    /// The rule `path_shape` states is "the shape, not the string: a parameter rename moves no
+    /// concrete URL, so it is not a move and there is nothing for a declaration to declare"
+    /// (`bundle.rs:317-318`). A widening moves no concrete URL either — measured above, every URL
+    /// `{path}` matched `{*path}` matches, and to the same operation with the same parameter bound
+    /// to the same value. Nothing a consumer pinned stops resolving. The registry stops
+    /// contradicting `routes.rs:42`, which is the only reason to cut it.
+    ///
+    /// `check_route_paths` calls it a move for all three file operations, and there is no
+    /// declaration that expresses it — the second half of this case renders the declared form and
+    /// carries what the gate said about it into the failure message. A shim has to stand at the
+    /// *vacated* shape (`shims_for`, `bundle.rs:902-914`), so it carries `{path}` while the
+    /// operation it stands in for carries `{*path}`; both name one `address_schema` target, and
+    /// two routes naming one target must agree on the parameter sequence (`Routes::read`,
+    /// `bundle.rs:857-874`). Giving the shim a target of its own does not help: the generated
+    /// document's `title` carries that target's slug, so the two closures differ. And the shim's
+    /// template is the one matchit refuses to register beside the catch-all.
+    #[test]
+    fn widening_a_path_parameter_to_a_catch_all_is_not_a_move() {
+        let widen = |authored: &std::path::Path| {
+            edit_json(&authored.join("routes.json"), |routes| {
+                for route in routes.as_array_mut().expect("routes.json is an array") {
+                    let id = route.get("id").and_then(Value::as_str).unwrap_or_default();
+                    if FILE_ROUTES.contains(&id) {
+                        assert_eq!(route["path"], json!(FILE_PATH), "{id} moved already");
+                        route["path"] = json!(FILE_PATH_CATCH_ALL);
+                    }
+                }
+            });
+        };
+
+        // The declared form, for the message: what a successor would have to author to get past
+        // the refusal below, and what the gate says about that instead.
+        let (_declared_scratch, declared) =
+            author_a_successor("widened-catch-all-declared", |authored| {
+                admit_alias_of(authored);
+                widen(authored);
+                edit_json(&authored.join("routes.json"), |routes| {
+                    let routes = routes.as_array_mut().expect("routes.json is an array");
+                    let mut shims = Vec::new();
+                    for id in FILE_ROUTES {
+                        let mut shim = routes
+                            .iter()
+                            .find(|route| route.get("id").and_then(Value::as_str) == Some(id))
+                            .cloned()
+                            .expect("a file route");
+                        shim["id"] = json!(format!("{id}-legacy"));
+                        shim["path"] = json!(FILE_PATH);
+                        shim["alias_of"] = json!(id);
+                        shims.push(shim);
+                    }
+                    routes.extend(shims);
+                });
+                edit_json(&authored.join("documents/schemas/bundle.json"), |bundle| {
+                    bundle["properties"]["compatibility"]["properties"]["adds_routes"] =
+                        json!({ "const": FILE_ROUTES.len() });
+                });
+            });
+        let declared = check(&declared)
+            .expect("the declared successor reads")
+            .failure_text();
+
+        let (_scratch, inputs) = author_a_successor("widened-catch-all", widen);
+        let report = check(&inputs).expect("the v1-rendered successor reads");
+        assert!(
+            !report.failure_text().contains("consumer pinned moves"),
+            "a widening must not be reported as a move:\n{}",
+            report.failure_text()
+        );
+        assert!(
+            report
+                .failure_text()
+                .contains("the renderer cannot render {*path}"),
+            "the immutable v1 renderer must keep refusing a catch-all; got:\n{}",
+            report.failure_text()
+        );
+        let v2 = root().join("contracts/substrate-wire/0.9.0");
+        let registry: Value = serde_json::from_slice(
+            &std::fs::read(v2.join("operations.json")).expect("read v2 registry"),
+        )
+        .expect("v2 registry parses");
+        super::Routes::read(&registry).unwrap_or_else(|error| {
+            panic!(
+                "the versioned renderer must make catch-all routes declarable: {error}; \
+                 the legacy alias form remains invalid as expected: {declared}"
+            )
+        });
+    }
+
+    /// And the collision key is method-scoped where matchit's tree is not.
+    ///
+    /// This is `a_successor_may_not_add_a_route_at_a_shape_it_already_serves` with one token
+    /// changed: the added route is a `POST` rather than a `GET`. Everything that case says still
+    /// holds — `session.peek` is a brand-new id at `/v1/pipe-sessions/{workspace_id}` with an
+    /// address target of its own, `session.get` still serves
+    /// `GET /v1/pipe-sessions/{session_id}`, every id is preserved and one is added — and
+    /// `axum::Router::route` still panics building the table, because the path string is new and
+    /// goes to `matchit::Router::insert`, which conflicts. Measured:
+    ///
+    ///   insert("/v1/pipe-sessions/{session_id}")   -> Ok(())
+    ///   insert("/v1/pipe-sessions/{workspace_id}") -> Err("Insertion failed due to conflict with
+    ///       previously registered route: /v1/pipe-sessions/{session_id}")
+    ///
+    /// matchit has no notion of a method, and axum reaches its per-method merge only when the path
+    /// *string* is already registered (`axum-0.8.9/src/routing/path_router.rs:83-104`). The
+    /// dispatch map keys on `(method, shape)` (`Routes::read`, `bundle.rs:841-856`), so `POST` and
+    /// `GET` are two keys and the collision is never seen. `{workspace_id}` is the template
+    /// `path_shape`'s own doc comment names — "parking a route on
+    /// `/v1/pipe-sessions/{workspace_id}` is not a way to reach a path
+    /// `/v1/pipe-sessions/{session_id}` already occupies" (`bundle.rs:727-729`) — and it resolves
+    /// through a definition `common.json` has, so the successor renders clean.
+    #[test]
+    fn a_successor_may_not_add_a_route_at_a_shape_it_already_serves_under_another_method() {
+        const ADDED: &str = "session.peek";
+        const ADDED_AT: &str = "/v1/pipe-sessions/{workspace_id}";
+        let (_scratch, inputs) = author_a_successor("added-collision-post", |authored| {
+            edit_json(&authored.join("routes.json"), |routes| {
+                let routes = routes.as_array_mut().expect("routes.json is an array");
+                let mut added = routes
+                    .iter()
+                    .find(|route| route.get("id").and_then(Value::as_str) == Some("session.get"))
+                    .cloned()
+                    .expect("a route to model the addition on");
+                assert_eq!(
+                    added["method"],
+                    json!("GET"),
+                    "session.get is no longer the GET this case models"
+                );
+                added["id"] = json!(ADDED);
+                added["path"] = json!(ADDED_AT);
+                // The one difference from `a_successor_may_not_add_a_route_at_a_shape_it_already_\
+                // serves`: a method no entry at this shape carries, so the dispatch key is free.
+                added["method"] = json!("POST");
+                added["address_schema"] = json!("schemas/addresses/pipe-session-peek.json");
+                routes.push(added);
+            });
+            edit_json(&authored.join("documents/schemas/bundle.json"), |bundle| {
+                bundle["properties"]["compatibility"]["properties"]["adds_routes"] =
+                    json!({ "const": 1 });
+            });
+        });
+        let report = check(&inputs).expect("the successor reads");
+        let text = report.failure_text();
+        assert!(
+            text.contains(ADDED) && text.contains("session.get"),
+            "{ADDED} at {ADDED_AT} and session.get at /v1/pipe-sessions/{{session_id}} are one \
+             route to a router whatever methods they carry: {text}"
+        );
+    }
+
+    /// The premise under the catch-all refusal, and the day it should be lifted.
+    ///
+    /// `Routes::read` refuses a `{*…}` segment because the renderer cannot render one:
+    /// `path_parameters` (`xtask/src/render.rs:653-662`) strips `{` and `}` and nothing else, so
+    /// the address document generated for `{*path}` requires a member literally named `*path` and
+    /// points it at `../common.json#/$defs/*path`, which nothing defines. Nothing else in the gate
+    /// notices — `check_classification` registers address documents as schemas and never compiles
+    /// them, so the dangling reference is invisible there.
+    ///
+    /// Both halves are asserted here: the broken document the renderer really produces, and the
+    /// refusal that names it. **If the first half ever fails, the refusal has outlived its reason
+    /// and should go** — that is what this case is for. It cannot be fixed from here: every
+    /// released `bundle.json` records `xtask/src/render.rs`'s sha256 as `generator.digest`, so
+    /// teaching the renderer wildcards breaks all eight released bundles at once and is a decision
+    /// with an ADR behind it.
+    ///
+    /// The disagreement this refusal states is real and is filed separately: the daemon already
+    /// serves `/v1/workspaces/{workspace_id}/files/{*path}`
+    /// (`crates/substrate-daemon/src/app/routes.rs:42`) while every released bundle declares
+    /// `{path}`. `widening_a_path_parameter_to_a_catch_all_is_not_a_move` asserts the other side of
+    /// that argument and is left standing, red, rather than weakened.
+    #[test]
+    fn a_catch_all_is_refused_because_the_renderer_cannot_render_one() {
+        const CATCH_ALL: &str = "/v1/workspaces/{workspace_id}/files/{*path}";
+        let (_scratch, inputs) = author_a_successor("catch-all-premise", |authored| {
+            edit_json(&authored.join("routes.json"), |routes| {
+                for route in routes.as_array_mut().expect("routes.json is an array") {
+                    let id = route.get("id").and_then(Value::as_str).unwrap_or_default();
+                    if id.starts_with("workspace.file.") {
+                        route["path"] = json!(CATCH_ALL);
+                    }
+                }
+            });
+        });
+
+        // Half one: what the renderer actually produced.
+        let address: Value = serde_json::from_slice(
+            &std::fs::read(
+                inputs
+                    .contracts_root
+                    .join(VERSION)
+                    .join("schemas/addresses/workspace-file-read.json"),
+            )
+            .expect("the rendered address schema"),
+        )
+        .expect("the rendered address schema parses");
+        assert_eq!(
+            address["required"],
+            json!(["workspace_id", "*path"]),
+            "the renderer requires a member named after the raw segment"
+        );
+        assert_eq!(
+            address.pointer("/properties/*path/$ref"),
+            Some(&json!("../common.json#/$defs/*path")),
+            "and points it at a definition"
+        );
+        let common: Value = serde_json::from_slice(
+            &std::fs::read(
+                inputs
+                    .contracts_root
+                    .join(VERSION)
+                    .join("schemas/common.json"),
+            )
+            .expect("the rendered common.json"),
+        )
+        .expect("common.json parses");
+        assert!(
+            common.pointer("/$defs/*path").is_none(),
+            "which does not exist — and if it ever does, this refusal has outlived its reason"
+        );
+
+        // Half two: the refusal, naming the segment and the reason rather than calling it a move.
+        let report = check(&inputs).expect("the successor reads");
+        let text = report.failure_text();
+        assert!(
+            text.contains("{*path}") && text.contains("cannot render"),
+            "a template the renderer cannot render is refused by name: {text}"
         );
     }
 

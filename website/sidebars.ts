@@ -30,6 +30,7 @@ const sidebars: SidebarsConfig = {
         {type: 'doc', id: 'reference/contract', label: 'Contract surface'},
       ],
     },
+    {type: 'doc', id: 'security', label: 'Security'},
     {type: 'doc', id: 'status', label: 'Status and limitations'},
   ],
 };

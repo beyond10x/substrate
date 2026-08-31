@@ -1,0 +1,264 @@
+{
+  "$defs": {
+    "delegated-context": {
+      "description": "Optional signed delegated-context document (ADR 0011): a compact JWS, alg EdDSA over Ed25519, typ substrate-delegated-context+jwt, audience urn:b10x:substrate. Sibling to op and input, so it is outside the canonical request hash. Substrate verifies binding and records attribution; it never evaluates the grant.",
+      "maxLength": 4096,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$",
+      "type": "string"
+    }
+  },
+  "$id": "urn:b10x:substrate-wire:0.9.0:request",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "delegated_context": {
+          "$ref": "#/$defs/delegated-context"
+        },
+        "input": {
+          "$ref": "inputs/workspace-create.json"
+        },
+        "op": {
+          "$ref": "common.json#/$defs/operation-id"
+        }
+      },
+      "required": [
+        "op",
+        "input"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "delegated_context": {
+          "$ref": "#/$defs/delegated-context"
+        },
+        "input": {
+          "$ref": "inputs/workspace-file-write.json"
+        },
+        "op": {
+          "$ref": "common.json#/$defs/operation-id"
+        }
+      },
+      "required": [
+        "op",
+        "input"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "delegated_context": {
+          "$ref": "#/$defs/delegated-context"
+        },
+        "input": {
+          "$ref": "inputs/workspace-file-delete.json"
+        },
+        "op": {
+          "$ref": "common.json#/$defs/operation-id"
+        }
+      },
+      "required": [
+        "op",
+        "input"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "delegated_context": {
+          "$ref": "#/$defs/delegated-context"
+        },
+        "input": {
+          "$ref": "inputs/workspace-destroy.json"
+        },
+        "op": {
+          "$ref": "common.json#/$defs/operation-id"
+        }
+      },
+      "required": [
+        "op",
+        "input"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "delegated_context": {
+          "$ref": "#/$defs/delegated-context"
+        },
+        "input": {
+          "$ref": "inputs/exec-start.json"
+        },
+        "op": {
+          "$ref": "common.json#/$defs/operation-id"
+        }
+      },
+      "required": [
+        "op",
+        "input"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "delegated_context": {
+          "$ref": "#/$defs/delegated-context"
+        },
+        "input": {
+          "$ref": "inputs/exec-signal.json"
+        },
+        "op": {
+          "$ref": "common.json#/$defs/operation-id"
+        }
+      },
+      "required": [
+        "op",
+        "input"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "delegated_context": {
+          "$ref": "#/$defs/delegated-context"
+        },
+        "input": {
+          "$ref": "inputs/exec-retire.json"
+        },
+        "op": {
+          "$ref": "common.json#/$defs/operation-id"
+        }
+      },
+      "required": [
+        "op",
+        "input"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "delegated_context": {
+          "$ref": "#/$defs/delegated-context"
+        },
+        "input": {
+          "$ref": "inputs/pipe-session-start.json"
+        },
+        "op": {
+          "$ref": "common.json#/$defs/operation-id"
+        }
+      },
+      "required": [
+        "op",
+        "input"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "delegated_context": {
+          "$ref": "#/$defs/delegated-context"
+        },
+        "input": {
+          "$ref": "inputs/exec-signal.json"
+        },
+        "op": {
+          "$ref": "common.json#/$defs/operation-id"
+        }
+      },
+      "required": [
+        "op",
+        "input"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "delegated_context": {
+          "$ref": "#/$defs/delegated-context"
+        },
+        "input": {
+          "$ref": "inputs/pipe-session-retire.json"
+        },
+        "op": {
+          "$ref": "common.json#/$defs/operation-id"
+        }
+      },
+      "required": [
+        "op",
+        "input"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "delegated_context": {
+          "$ref": "#/$defs/delegated-context"
+        },
+        "input": {
+          "$ref": "inputs/lease-renew.json"
+        },
+        "op": {
+          "$ref": "common.json#/$defs/operation-id"
+        }
+      },
+      "required": [
+        "op",
+        "input"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "delegated_context": {
+          "$ref": "#/$defs/delegated-context"
+        },
+        "input": {
+          "$ref": "inputs/lease-renew.json"
+        },
+        "op": {
+          "$ref": "common.json#/$defs/operation-id"
+        }
+      },
+      "required": [
+        "op",
+        "input"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "delegated_context": {
+          "$ref": "#/$defs/delegated-context"
+        },
+        "input": {
+          "$ref": "inputs/lease-renew.json"
+        },
+        "op": {
+          "$ref": "common.json#/$defs/operation-id"
+        }
+      },
+      "required": [
+        "op",
+        "input"
+      ],
+      "type": "object"
+    }
+  ],
+  "description": "The route registry selects one branch; no generic input object is authoritative. Each branch admits the optional delegated_context member beside op and input and keeps its closed policy.",
+  "title": "Closed phase-3 mutation request union"
+}

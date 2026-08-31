@@ -2,7 +2,8 @@
 
 This directory contains the self-contained public Docusaurus site for Substrate. Its `docs/` tree
 is written for people arriving cold. It does not publish or link to the repository's internal design
-records, plans, reviews, ADRs, status files, or private source.
+records, plans, reviews, ADRs or status files. Atlas ADR 0010 explicitly authorises the public
+repository, licence and private vulnerability-reporting destinations linked by the site.
 
 ## Develop
 
@@ -17,6 +18,7 @@ The local site is served at <http://localhost:3000/substrate/>.
 
 ```bash
 npm run typecheck
+npm audit --audit-level=moderate
 npm run build
 ```
 

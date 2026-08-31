@@ -5,6 +5,7 @@ mod egress;
 mod fs;
 mod probe;
 mod process;
+mod seccomp;
 mod secrets;
 
 use std::collections::HashSet;
@@ -107,6 +108,10 @@ impl HostConfig {
             egress_apertures: Vec::new(),
             ca_bundle: None,
         }
+    }
+
+    fn aperture_root(&self) -> PathBuf {
+        self.workspace_root.join(".substrate-apertures")
     }
 }
 
@@ -466,6 +471,18 @@ impl HostDriver {
             .map_err(|error| {
                 DriverError::failed("capsule.root-failed", format!("capsule root mode: {error}"))
             })?;
+        let aperture_root = config.aperture_root();
+        std::fs::create_dir_all(&aperture_root).map_err(|error| {
+            DriverError::failed("aperture.root-failed", format!("aperture root: {error}"))
+        })?;
+        std::fs::set_permissions(&aperture_root, std::fs::Permissions::from_mode(0o700)).map_err(
+            |error| {
+                DriverError::failed(
+                    "aperture.root-failed",
+                    format!("aperture root mode: {error}"),
+                )
+            },
+        )?;
         let filesystem = Arc::new(fs::GuardedFilesystem::open(
             &config.workspace_root,
             config.max_file_bytes,

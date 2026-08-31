@@ -8,7 +8,7 @@ key="${B10X_BOT_KEY:-${config_root}/b10x-bot.private-key.pem}"
 org="${B10X_BOT_ORG:-beyond10x}"
 
 script_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-python3 "${script_root}/check-bot-files.py" "$config" "$key"
+(cd "${script_root}/.." && cargo xtask check-bot-files --config "$config" --key "$key") >&2
 
 app_id="${B10X_BOT_APP_ID:-$(jq -er '.app_id' "$config")}"
 
