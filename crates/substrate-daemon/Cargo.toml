@@ -49,6 +49,7 @@ zeroize.workspace = true
 [dev-dependencies]
 # The clean-room runner (tests/runtime_vectors.rs) interrupts the daemon it spawned; `signal`
 # is a test-only feature of the `nix` dependency this crate already carries.
+hex.workspace = true
 nix = { workspace = true, features = ["signal"] }
 rusqlite.workspace = true
 tempfile.workspace = true

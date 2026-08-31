@@ -627,7 +627,7 @@ fn advertised_contract_bundle_digest_matches_the_named_bundle() {
         .join(CONTRACT_BUNDLE)
         .join("bundle.json");
     let bytes = std::fs::read(&bundle).expect("contract bundle manifest bytes");
-    let actual = format!("{:x}", Sha256::digest(&bytes));
+    let actual = hex::encode(Sha256::digest(&bytes));
     assert_eq!(
         actual,
         CONTRACT_BUNDLE_SHA256,
