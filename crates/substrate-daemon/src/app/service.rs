@@ -113,23 +113,23 @@ impl Authority for SystemAuthority {
     }
 
     fn request_id(&self) -> String {
-        format!("req_{}", Ulid::new())
+        format!("req_{}", Ulid::generate())
     }
 
     fn workspace_id(&self) -> String {
-        format!("ws_{}", Ulid::new())
+        format!("ws_{}", Ulid::generate())
     }
 
     fn exec_id(&self) -> String {
-        format!("ex_{}", Ulid::new())
+        format!("ex_{}", Ulid::generate())
     }
 
     fn session_id(&self) -> String {
-        format!("ses_{}", Ulid::new())
+        format!("ses_{}", Ulid::generate())
     }
 
     fn snapshot_id(&self) -> String {
-        format!("snap_{}", Ulid::new())
+        format!("snap_{}", Ulid::generate())
     }
 
     fn lease_clock(&self) -> Result<LeaseClock, String> {

@@ -7,6 +7,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- Updated `ed25519-dalek` to 3.0.0, `jsonschema` to 0.52.1, `tokio-tungstenite` to 0.30.0 and
+  `ulid` to 3.0.0, refreshed every compatible transitive dependency and regenerated the
+  deterministic third-party licence inventory. Dependabot now groups future Rust updates into one
+  gateable rollup.
+
 ## [0.3.0] — 2026-08-31
 
 ### Added
