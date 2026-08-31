@@ -7,6 +7,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- Updated `ed25519-dalek` to 3.0.0, `jsonschema` to 0.52.1, `tokio-tungstenite` to 0.30.0 and
+  `ulid` to 3.0.0, refreshed every compatible transitive dependency and regenerated the
+  deterministic third-party licence inventory. Dependabot now groups future Rust updates into one
+  gateable rollup.
+
+## [0.3.0] — 2026-08-31
+
 ### Added
 
 - **A public builder-oriented Rust SDK.** `b10x-substrate-sdk` verifies the daemon-advertised
@@ -35,10 +44,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ### Changed
 
 - Updated the locked Rust dependency set to `base64` 0.23.1, `hyper` 1.11.1, `nix` 0.31.3,
-  `rusqlite` 0.40.2, `sha2` 0.11.0, `ed25519-dalek` 3.0.0, `jsonschema` 0.52.1,
-  `tokio-tungstenite` 0.30.0 and `ulid` 3.0.0, with the deterministic third-party licence
-  inventory regenerated from the resulting graph. Dependabot now groups future Rust updates into
-  one gateable rollup.
+  `rusqlite` 0.40.2 and `sha2` 0.11.0, with the deterministic third-party licence inventory
+  regenerated from the resulting graph.
 
 ## [0.2.4] — 2026-08-31
 
