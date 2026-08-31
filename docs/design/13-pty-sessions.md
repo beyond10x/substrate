@@ -1,8 +1,9 @@
 # Design 13: a PTY is a second session mode, not a second session resource
 
-**Status:** proposed · **Date:** 2026-08-30
+**Status:** accepted as [ADR 0019](../../adr/0019-pty-is-a-second-session-mode.md) · **Date:** 2026-08-30
 
-This document precedes the ADR that `story:pty-sessions` names as its first evidence item. It fixes
+This document precedes the ADR that `story:pty-sessions` names as its first evidence item. Accepted
+by the operator on 2026-08-31 as ADR 0019. It fixes
 which enum grows, whether a terminal adds a route family, the frame set, the resize bounds and what
 the child observes, where the capability fact lives, and the named refusal when the host cannot give
 a terminal. It claims **no ADR number**: `adr/` admits `accepted` and `superseded` only

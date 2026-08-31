@@ -24,3 +24,4 @@ with YAML frontmatter containing `date` and `status`. Draft design questions rem
 | [0016](0016-pipe-output-backpressure-is-terminal.md) | Pipe output backpressure is terminal | accepted |
 | [0017](0017-delegated-context-is-verified-before-replay.md) | Delegated context is verified before replay | accepted |
 | [0018](0018-one-registry-declares-every-served-api-major.md) | One registry declares every served API major | accepted |
+| [0019](0019-pty-is-a-second-session-mode.md) | A PTY is a second session mode | accepted |
