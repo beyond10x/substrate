@@ -9,6 +9,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [0.2.4] — 2026-08-31
 
+Image: `ghcr.io/beyond10x/b10x-substrate-daemon:0.2.4` at `sha256:18b4bf966ffab38eb76801204dadfb413e898e5110272514accdf8d6e1ec083b`, keyless-signed; verify with `cosign verify`.
+
 ### Changed
 
 - **Substrate is Apache-2.0.** Atlas ADR 0010 grants Apache-2.0 across all beyond10x-owned
