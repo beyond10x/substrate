@@ -55,7 +55,7 @@ struct DelegatedCgroup(PathBuf);
 impl DelegatedCgroup {
     fn acquire() -> Option<Self> {
         let parent = std::env::var_os(CGROUP_ROOT_VARIABLE).map(PathBuf::from)?;
-        let path = parent.join(format!("substrate-test-{}", ulid::Ulid::new()));
+        let path = parent.join(format!("substrate-test-{}", ulid::Ulid::generate()));
         std::fs::create_dir(&path).expect("create per-test delegated cgroup root");
         std::fs::create_dir(path.join("daemon")).expect("create daemon cgroup");
         std::fs::write(path.join("cgroup.subtree_control"), "+cpu +memory +pids")

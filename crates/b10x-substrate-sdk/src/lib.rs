@@ -186,7 +186,7 @@ impl Client {
         input: &I,
         operation_id: Option<String>,
     ) -> Result<(String, O), SdkError> {
-        let operation_id = operation_id.unwrap_or_else(|| Ulid::new().to_string());
+        let operation_id = operation_id.unwrap_or_else(|| Ulid::generate().to_string());
         substrate_wire::validate_operation_id(&operation_id)
             .map_err(|error| SdkError::Protocol(error.to_string()))?;
         let envelope = substrate_wire::Mutation {
@@ -1120,7 +1120,7 @@ mod tests {
             lease_ttl_ms: None,
         };
         let mutation = substrate_wire::Mutation {
-            op: ulid::Ulid::new().to_string(),
+            op: ulid::Ulid::generate().to_string(),
             input,
             delegated_context: None,
         };

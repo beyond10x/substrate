@@ -93,7 +93,7 @@ impl ProjectQuotas {
         let Some(_) = range else {
             return false;
         };
-        let probe = root.join(format!(".substrate-quota-probe-{}", ulid::Ulid::new()));
+        let probe = root.join(format!(".substrate-quota-probe-{}", ulid::Ulid::generate()));
         if std::fs::create_dir(&probe).is_err() {
             return false;
         }

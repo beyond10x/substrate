@@ -539,7 +539,7 @@ impl GuardedFilesystem {
             )?
         };
         refuse_unsafe_existing(parent_fd.as_raw_fd(), name)?;
-        let temporary_name = format!(".substrate-{}.tmp", Ulid::new());
+        let temporary_name = format!(".substrate-{}.tmp", Ulid::generate());
         let temporary = CString::new(temporary_name.as_str()).expect("ULID has no NUL");
         // SAFETY: parent fd and temporary name are valid; O_EXCL prevents aliasing an existing path.
         let fd = unsafe {
@@ -885,7 +885,7 @@ fn flatten_directory_batch(
     counters.processed += entries.len();
     for (entry_name, file_type, _) in entries {
         if file_type == libc::S_IFDIR {
-            let flattened = CString::new(format!(".substrate-gc-{}", Ulid::new()))
+            let flattened = CString::new(format!(".substrate-gc-{}", Ulid::generate()))
                 .expect("generated cleanup identity has no NUL");
             // SAFETY: both directory fds are owned and both names are NUL-terminated.
             if unsafe {
@@ -1570,7 +1570,7 @@ mod tests {
         if !filesystem.openat2_available() {
             return;
         }
-        let minted = format!("ws_{}", ulid::Ulid::new());
+        let minted = format!("ws_{}", ulid::Ulid::generate());
         assert!(minted.starts_with("ws_"));
         filesystem
             .create_workspace(&minted)

@@ -55,7 +55,7 @@ async fn managed_external_daemon_serves_the_typed_workspace_journey() {
         .output_bytes(64 * 1024)
         .build()
         .expect("complete execution policy");
-    let operation_id = ulid::Ulid::new().to_string();
+    let operation_id = ulid::Ulid::generate().to_string();
     let result = workspace
         .command("/usr/bin/true")
         .policy(policy)

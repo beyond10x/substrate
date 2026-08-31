@@ -43,7 +43,7 @@ impl Transport {
         let mut stream = UnixStream::connect(&self.socket)
             .await
             .map_err(|error| SdkError::Transport(error.to_string()))?;
-        let request_id = format!("sdk_{}", Ulid::new());
+        let request_id = format!("sdk_{}", Ulid::generate());
         let mut head = format!(
             "{method} {path} HTTP/1.1\r\nHost: localhost\r\nx-request-id: {request_id}\r\nConnection: close\r\n"
         );

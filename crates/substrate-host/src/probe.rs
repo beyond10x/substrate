@@ -545,7 +545,7 @@ fn probe_cgroup(config: &HostConfig) -> bool {
     {
         return false;
     }
-    let probe = root.join(format!("probe-{}", ulid::Ulid::new()));
+    let probe = root.join(format!("probe-{}", ulid::Ulid::generate()));
     if std::fs::create_dir(&probe).is_err() {
         return false;
     }
