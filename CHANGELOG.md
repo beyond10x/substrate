@@ -7,6 +7,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- Updated the locked Rust dependency set to `base64` 0.23.1, `hyper` 1.11.1, `nix` 0.31.3,
+  `rusqlite` 0.40.2 and `sha2` 0.11.0, with the deterministic third-party licence inventory
+  regenerated from the resulting graph.
+
 ## [0.2.4] — 2026-08-31
 
 Image: `ghcr.io/beyond10x/b10x-substrate-daemon:0.2.4` at `sha256:18b4bf966ffab38eb76801204dadfb413e898e5110272514accdf8d6e1ec083b`, keyless-signed; verify with `cosign verify`.

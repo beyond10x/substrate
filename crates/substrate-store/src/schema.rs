@@ -38,7 +38,7 @@ impl Store {
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "synchronous", "FULL")?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
-        connection.pragma_update(None, "busy_timeout", 5_000_u64)?;
+        connection.pragma_update(None, "busy_timeout", 5_000_i64)?;
         connection.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS operations (
