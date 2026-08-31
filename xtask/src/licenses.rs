@@ -17,7 +17,9 @@ pub fn check(root: &Path) -> Result<Report> {
     let version = Command::new("cargo-about")
         .arg("--version")
         .output()
-        .context("starting cargo-about; install cargo-about 0.9.1 with cargo install --locked")?;
+        .context(
+            "starting cargo-about; install cargo-about 0.9.1 with cargo install --locked --features cli",
+        )?;
     let observed = String::from_utf8_lossy(&version.stdout).trim().to_owned();
     if !version.status.success() || observed != CARGO_ABOUT_VERSION {
         failures.push(format!(

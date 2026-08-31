@@ -115,7 +115,7 @@ jobs:
       - name: Install the pinned licence inventory tool
         run: |
           if ! cargo-about --version 2>/dev/null | grep -qx 'cargo-about 0.9.1'; then
-            cargo install cargo-about --version 0.9.1 --locked
+            cargo install cargo-about --version 0.9.1 --locked --features cli
           fi
           cargo-about --version
 
