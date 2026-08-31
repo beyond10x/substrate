@@ -7,6 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-08-31
+
 ### Added
 
 - **A public builder-oriented Rust SDK.** `b10x-substrate-sdk` verifies the daemon-advertised
