@@ -28,3 +28,4 @@ with YAML frontmatter containing `date` and `status`. Draft design questions rem
 | [0020](0020-writable-storage-uses-delegated-project-quotas.md) | Writable storage uses delegated project quotas | accepted |
 | [0021](0021-execution-metrics-are-explicit-exact-observations.md) | Execution metrics are explicit exact observations | accepted |
 | [0022](0022-the-rust-sdk-remains-a-wire-client.md) | The Rust SDK remains a wire client | accepted |
+| [0023](0023-workspace-write-access-is-explicit.md) | Workspace write access is explicit | accepted |

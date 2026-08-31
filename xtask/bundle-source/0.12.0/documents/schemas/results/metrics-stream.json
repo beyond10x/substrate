@@ -1,0 +1,31 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.12.0:result:metrics-stream",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "frame_schema": {
+      "const": "schemas/metrics-stream-frame.json"
+    },
+    "latest_wins": {
+      "const": true
+    },
+    "protocol": {
+      "const": "b10x.substrate-metrics.v1"
+    },
+    "replay": {
+      "const": false
+    },
+    "sample_interval_ms": {
+      "const": 1000
+    }
+  },
+  "required": [
+    "protocol",
+    "frame_schema",
+    "sample_interval_ms",
+    "latest_wins",
+    "replay"
+  ],
+  "title": "metrics-stream operation result",
+  "type": "object"
+}

@@ -54,6 +54,7 @@ pub fn probe(config: &HostConfig, openat2: bool) -> CapabilitySnapshot {
     let unprivileged = effective_uid() != 0;
     let close_range = probe_close_range();
     let exec = namespaces && cgroup && unprivileged && close_range && backend.is_some();
+    let workspace_scoped_write = exec && probe_workspace_scoped_write(config);
     // Every clause is a proof and the fact is absent unless all of them hold. Nothing is probed at
     // all when no slot is declared, so a daemon that wants none pays nothing.
     //
@@ -114,6 +115,7 @@ pub fn probe(config: &HostConfig, openat2: bool) -> CapabilitySnapshot {
             network: true,
         }),
         exec_no_egress: exec.then_some(true),
+        exec_workspace_scoped_write: workspace_scoped_write.then_some(true),
         exec_cgroup_limits: exec.then_some(CgroupLimitFacts {
             processes: true,
             memory: true,
@@ -176,6 +178,67 @@ pub fn probe(config: &HostConfig, openat2: bool) -> CapabilitySnapshot {
         valid_until: None,
         facts,
     }
+}
+
+/// Proves ADR 0023's mount ordering in a disposable tree rather than publishing it from a
+/// bubblewrap version or a constant.
+fn probe_workspace_scoped_write(config: &HostConfig) -> bool {
+    let Ok(root) = tempfile::tempdir() else {
+        return false;
+    };
+    let workspace = root.path().join("workspace");
+    let allowed = workspace.join("allowed");
+    let blocked = workspace.join("blocked");
+    if std::fs::create_dir_all(&allowed).is_err() || std::fs::create_dir_all(&blocked).is_err() {
+        return false;
+    }
+    let status = Command::new(&config.bubblewrap)
+        .env_clear()
+        .args([
+            "--unshare-user",
+            "--unshare-ipc",
+            "--unshare-pid",
+            "--unshare-net",
+            "--unshare-uts",
+            "--new-session",
+            "--die-with-parent",
+            "--clearenv",
+            "--ro-bind",
+            "/usr",
+            "/usr",
+            "--ro-bind-try",
+            "/bin",
+            "/bin",
+            "--ro-bind-try",
+            "/lib",
+            "/lib",
+            "--ro-bind-try",
+            "/lib64",
+            "/lib64",
+            "--proc",
+            "/proc",
+            "--dev",
+            "/dev",
+            "--ro-bind",
+        ])
+        .arg(&workspace)
+        .arg("/workspace")
+        .arg("--bind")
+        .arg(&allowed)
+        .arg("/workspace/allowed")
+        .args([
+            "--chdir",
+            "/workspace",
+            "--",
+            "/bin/sh",
+            "-c",
+            "echo yes >allowed/probe && ! echo no >blocked/probe && ! echo no >root-probe",
+        ])
+        .status();
+    status.is_ok_and(|status| status.success())
+        && allowed.join("probe").is_file()
+        && !blocked.join("probe").exists()
+        && !workspace.join("root-probe").exists()
 }
 
 fn probe_resource_usage(config: &HostConfig) -> bool {

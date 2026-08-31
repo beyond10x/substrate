@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
+use std::ffi::CString;
 use std::fs::{File, OpenOptions};
 use std::io::{self, Write as _};
 use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
+use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::os::unix::process::{CommandExt as _, ExitStatusExt as _};
 use std::path::{Path, PathBuf};
@@ -143,6 +145,16 @@ impl Drop for PreparedScratch {
             let _ = self.observation.quotas.release(&self.observation.path);
         }
     }
+}
+
+/// Stable directory objects used for narrower workspace mounts.
+///
+/// Paths are checked at admission for useful refusals, then opened component by component without
+/// following links. Bubblewrap consumes `/proc/self/fd/N`, so a concurrent rename cannot redirect
+/// an already-admitted mount.
+struct PreparedWorkspaceAccess {
+    root: OwnedFd,
+    subtrees: Vec<(OwnedFd, String)>,
 }
 
 impl Execution {
@@ -554,6 +566,11 @@ impl ProcessRuntime {
         if let Err(error) = self.admit(id, workspace, input) {
             return DispatchOutcome::NotDispatched(error);
         }
+        let workspace_access =
+            match Self::prepare_workspace_access(workspace, &input.workspace_access) {
+                Ok(value) => value,
+                Err(error) => return DispatchOutcome::NotDispatched(error),
+            };
         let capsule = match self.prepare_capsule(input.capsule.as_ref()) {
             Ok(value) => value,
             Err(error) => return DispatchOutcome::NotDispatched(error),
@@ -672,6 +689,7 @@ impl ProcessRuntime {
             resolution.as_ref(),
             info_fd,
             scratch.as_ref(),
+            workspace_access.as_ref(),
         ) {
             Ok(value) => value,
             Err(error) => return contain_cgroup(&cgroup, error),
@@ -685,6 +703,23 @@ impl ProcessRuntime {
             retained.dedup();
         }
         retained.push(u32::try_from(seccomp.as_raw_fd()).expect("seccomp descriptor fits u32"));
+        let workspace_fds = workspace_access
+            .as_ref()
+            .into_iter()
+            .flat_map(|access| {
+                std::iter::once(access.root.as_raw_fd()).chain(
+                    access
+                        .subtrees
+                        .iter()
+                        .map(|(directory, _)| directory.as_raw_fd()),
+                )
+            })
+            .collect::<Vec<_>>();
+        retained.extend(
+            workspace_fds
+                .iter()
+                .map(|fd| u32::try_from(*fd).expect("workspace descriptor fits u32")),
+        );
         retained.sort_unstable();
         retained.dedup();
         // SAFETY: pre_exec runs after fork; it invokes only async-signal-safe libc calls and does
@@ -694,6 +729,13 @@ impl ProcessRuntime {
             command.as_std_mut().pre_exec(move || {
                 if libc::close(write_fd) != 0 {
                     return Err(std::io::Error::last_os_error());
+                }
+                for fd in &workspace_fds {
+                    let flags = libc::fcntl(*fd, libc::F_GETFD);
+                    if flags < 0 || libc::fcntl(*fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) != 0
+                    {
+                        return Err(std::io::Error::last_os_error());
+                    }
                 }
                 crate::secrets::place_and_close(&placements, &retained)?;
                 if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
@@ -800,6 +842,7 @@ impl ProcessRuntime {
                     AppliedNetwork::Aperture(installed.applied())
                 }),
             profile: SandboxProfile::Workspace,
+            workspace_access: input.workspace_access.clone(),
             capsule: applied_capsule,
             // What was mounted, not what was asked for: `admit` refused anything it could not
             // mount exactly as declared, so by here the two are the same list — and a reader gets
@@ -1306,6 +1349,142 @@ impl ProcessRuntime {
         Ok(())
     }
 
+    /// Validates both the wire shape and the live workspace objects ADR 0023 will mount.
+    fn admit_workspace_access(
+        workspace: &Path,
+        access: &substrate_wire::WorkspaceAccess,
+        published: Option<bool>,
+    ) -> Result<(), DriverError> {
+        substrate_wire::validate_workspace_access(access).map_err(|error| {
+            DriverError::refused(
+                "exec.workspace-access-invalid",
+                format!("The requested workspace access is invalid: {error}"),
+                "workspace_access",
+            )
+        })?;
+        if access.is_read_write() {
+            return Ok(());
+        }
+        if published != Some(true) {
+            return Err(DriverError::unserved(
+                "exec.workspace-scoped-write-unserved",
+                "The active host has not proved read-only and scoped workspace mounts.",
+                "workspace_access",
+            ));
+        }
+        let Some(subtrees) = access.writable_subtrees() else {
+            return Ok(());
+        };
+        for subtree in subtrees {
+            let mut current = workspace.to_path_buf();
+            for component in subtree.split('/') {
+                current.push(component);
+                let metadata = std::fs::symlink_metadata(&current).map_err(|_| {
+                    DriverError::refused(
+                        "exec.workspace-subtree-absent",
+                        format!("Writable workspace subtree {subtree} is absent."),
+                        "workspace_access.writable_subtrees",
+                    )
+                })?;
+                if metadata.file_type().is_symlink() {
+                    return Err(DriverError::refused(
+                        "exec.workspace-subtree-symlink",
+                        format!("Writable workspace subtree {subtree} crosses a symlink."),
+                        "workspace_access.writable_subtrees",
+                    ));
+                }
+                if !metadata.is_dir() {
+                    return Err(DriverError::refused(
+                        "exec.workspace-subtree-not-directory",
+                        format!("Writable workspace subtree {subtree} is not a directory."),
+                        "workspace_access.writable_subtrees",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Pins every narrower workspace mount to the directory object that admission inspected.
+    fn prepare_workspace_access(
+        workspace: &Path,
+        access: &substrate_wire::WorkspaceAccess,
+    ) -> Result<Option<PreparedWorkspaceAccess>, DriverError> {
+        if access.is_read_write() {
+            return Ok(None);
+        }
+        let workspace = CString::new(workspace.as_os_str().as_bytes()).map_err(|_| {
+            DriverError::refused(
+                "exec.workspace-access-invalid",
+                "The adopted workspace path contains a NUL byte.",
+                "workspace_access",
+            )
+        })?;
+        // SAFETY: the C string is terminated and the successful descriptor is immediately owned.
+        let root = unsafe {
+            libc::open(
+                workspace.as_ptr(),
+                libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+            )
+        };
+        if root < 0 {
+            return Err(DriverError::refused(
+                "exec.workspace-root-changed",
+                "The adopted workspace changed before its narrower mount could be pinned.",
+                "workspace_access",
+            ));
+        }
+        // SAFETY: `open` returned a new descriptor owned by this scope.
+        let root = unsafe { OwnedFd::from_raw_fd(root) };
+        let mut subtrees = Vec::new();
+        if let Some(paths) = access.writable_subtrees() {
+            for path in paths {
+                // Start from a separate open description so walking one subtree never changes the
+                // root used by another. `openat` is component-wise and refuses every symlink.
+                // SAFETY: fcntl duplicates the live root descriptor.
+                let duplicate = unsafe { libc::fcntl(root.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) };
+                if duplicate < 0 {
+                    return Err(DriverError::failed(
+                        "exec.workspace-pin-failed",
+                        "The admitted workspace root could not be duplicated.",
+                    ));
+                }
+                // SAFETY: fcntl returned a new descriptor owned by this scope.
+                let mut current = unsafe { OwnedFd::from_raw_fd(duplicate) };
+                for component in path.split('/') {
+                    let component = CString::new(component).map_err(|_| {
+                        DriverError::refused(
+                            "exec.workspace-access-invalid",
+                            "A writable workspace subtree contains a NUL byte.",
+                            "workspace_access.writable_subtrees",
+                        )
+                    })?;
+                    // SAFETY: both the directory descriptor and C string are live for this call.
+                    let next = unsafe {
+                        libc::openat(
+                            current.as_raw_fd(),
+                            component.as_ptr(),
+                            libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+                        )
+                    };
+                    if next < 0 {
+                        return Err(DriverError::refused(
+                            "exec.workspace-subtree-changed",
+                            format!(
+                                "Writable workspace subtree {path} changed before it could be pinned."
+                            ),
+                            "workspace_access.writable_subtrees",
+                        ));
+                    }
+                    // SAFETY: openat returned a new descriptor owned by this scope.
+                    current = unsafe { OwnedFd::from_raw_fd(next) };
+                }
+                subtrees.push((current, path.clone()));
+            }
+        }
+        Ok(Some(PreparedWorkspaceAccess { root, subtrees }))
+    }
+
     /// Every rule ADR 0012 names about *which* slots a start may ask for, before anything is read.
     ///
     /// Order matters. Shape first, because it is the caller's mistake and does not depend on this
@@ -1439,6 +1618,11 @@ impl ProcessRuntime {
             ));
         }
         Self::admit_read_only_roots(&input.read_only_roots)?;
+        Self::admit_workspace_access(
+            workspace,
+            &input.workspace_access,
+            self.capability.facts.exec_workspace_scoped_write,
+        )?;
         Self::admit_secret_slots(
             &self.config,
             self.capability.facts.secrets_slots.as_ref(),
@@ -1572,6 +1756,7 @@ impl ProcessRuntime {
         resolution: Option<&crate::egress::GeneratedResolution>,
         info_fd: Option<RawFd>,
         scratch: Option<&PreparedScratch>,
+        workspace_access: Option<&PreparedWorkspaceAccess>,
     ) -> Result<(Command, File), DriverError> {
         let seccomp = crate::seccomp::profile()?;
         let seccomp_fd = seccomp.as_raw_fd();
@@ -1659,10 +1844,22 @@ impl ProcessRuntime {
                 .arg(&scratch.observation.path)
                 .arg(substrate_wire::EXEC_SCRATCH_MOUNT);
         }
+        if let Some(access) = workspace_access {
+            command
+                .arg("--ro-bind")
+                .arg(format!("/proc/self/fd/{}", access.root.as_raw_fd()))
+                .arg("/workspace");
+            for (directory, subtree) in &access.subtrees {
+                command
+                    .arg("--bind")
+                    .arg(format!("/proc/self/fd/{}", directory.as_raw_fd()))
+                    .arg(Path::new("/workspace").join(subtree));
+            }
+        } else {
+            command.arg("--bind").arg(workspace).arg("/workspace");
+        }
         command
-            .arg("--bind")
-            .arg(workspace)
-            .args(["/workspace", "--chdir", "/workspace", "--block-fd"])
+            .args(["--chdir", "/workspace", "--block-fd"])
             .arg(sync_fd.to_string());
         if let Some(info_fd) = info_fd {
             command.arg("--info-fd").arg(info_fd.to_string());
@@ -3010,6 +3207,42 @@ mod tests {
     }
 
     #[test]
+    fn scoped_workspace_access_refuses_absence_files_and_symlinks() {
+        let root = tempfile::tempdir().expect("workspace");
+        std::fs::create_dir(root.path().join("allowed")).expect("allowed");
+        std::fs::write(root.path().join("file"), b"not a directory").expect("file");
+        symlink(root.path().join("allowed"), root.path().join("link")).expect("symlink");
+
+        let scoped = |path: &str| substrate_wire::WorkspaceAccess::Scoped {
+            writable_subtrees: vec![path.to_owned()],
+        };
+        ProcessRuntime::admit_workspace_access(root.path(), &scoped("allowed"), Some(true))
+            .expect("real directory admitted");
+        for (path, code) in [
+            ("missing", "exec.workspace-subtree-absent"),
+            ("file", "exec.workspace-subtree-not-directory"),
+            ("link", "exec.workspace-subtree-symlink"),
+        ] {
+            let error =
+                ProcessRuntime::admit_workspace_access(root.path(), &scoped(path), Some(true))
+                    .expect_err("refused");
+            assert_eq!(error.code, code);
+        }
+    }
+
+    #[test]
+    fn narrower_workspace_access_never_degrades_when_the_fact_is_absent() {
+        let root = tempfile::tempdir().expect("workspace");
+        let error = ProcessRuntime::admit_workspace_access(
+            root.path(),
+            &substrate_wire::WorkspaceAccess::ReadOnly,
+            None,
+        )
+        .expect_err("unserved");
+        assert_eq!(error.code, "exec.workspace-scoped-write-unserved");
+    }
+
+    #[test]
     fn capsule_materialization_verifies_bytes_and_cleans_private_directory() {
         let root = tempfile::tempdir().expect("root");
         let mut config = HostConfig::minimum(root.path().join("workspaces"));
@@ -3225,6 +3458,7 @@ mod tests {
                 cpu_millis: 1_000,
             },
             wait: false,
+            workspace_access: substrate_wire::WorkspaceAccess::ReadWrite,
             scratch: None,
             measurements: std::collections::BTreeSet::new(),
             capsule: None,
@@ -3300,6 +3534,7 @@ mod tests {
                 cpu_millis: 1_000,
             },
             wait: false,
+            workspace_access: substrate_wire::WorkspaceAccess::ReadWrite,
             scratch: None,
             measurements: std::collections::BTreeSet::new(),
             capsule: None,
@@ -3573,6 +3808,7 @@ mod tests {
                 cpu_millis: 1_000,
             },
             wait: false,
+            workspace_access: substrate_wire::WorkspaceAccess::ReadWrite,
             scratch: None,
             measurements: std::collections::BTreeSet::new(),
             capsule: None,

@@ -537,6 +537,7 @@ mod tests {
                 cpu_millis: 1_000,
             },
             wait: false,
+            workspace_access: substrate_wire::WorkspaceAccess::ReadWrite,
             scratch: None,
             measurements: std::collections::BTreeSet::new(),
             read_only_roots: Vec::new(),
@@ -727,6 +728,7 @@ mod tests {
         assert!(!hash.contains(SENTINEL));
 
         let applied = AppliedConfinement {
+            workspace_access: substrate_wire::WorkspaceAccess::ReadWrite,
             capability_snapshot: format!("sha256:{}", "7".repeat(64)),
             cgroup: "substrate-ex_test".to_owned(),
             filesystem: AppliedFilesystem::WorkspaceReadWriteSystemReadOnly,

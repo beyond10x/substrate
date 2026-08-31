@@ -1,0 +1,311 @@
+{
+  "$schema": "schemas/refusals.json",
+  "format": "b10x.substrate-session-refusals.v1",
+  "refusals": [
+    {
+      "arrives": [
+        "http-response"
+      ],
+      "class": "conflict",
+      "code": "session.already-attached",
+      "message": "The session already has its single permitted attachment.",
+      "retriable": false,
+      "status": 409
+    },
+    {
+      "arrives": [
+        "http-response"
+      ],
+      "class": "exhausted",
+      "code": "session.attachment-capacity",
+      "message": "The bounded session attachment capacity is exhausted.",
+      "retriable": false,
+      "status": 429
+    },
+    {
+      "arrives": [
+        "protocol-error-frame"
+      ],
+      "class": "refused",
+      "code": "session.base64-invalid",
+      "message": "Input content is not valid standard base64.",
+      "retriable": false
+    },
+    {
+      "arrives": [
+        "http-response"
+      ],
+      "class": "unserved",
+      "code": "session.confinement-unavailable",
+      "message": "Sessions require complete namespaces and cgroup limits, whole-tree kill, explicit leases, no egress, and bounded output.",
+      "retriable": false,
+      "status": 501
+    },
+    {
+      "arrives": [
+        "protocol-error-frame"
+      ],
+      "class": "exhausted",
+      "code": "session.control-rate-exceeded",
+      "message": "The attachment sent more control frames than the published rate admits; ping shares the budget.",
+      "retriable": false
+    },
+    {
+      "arrives": [
+        "protocol-error-frame"
+      ],
+      "class": "refused",
+      "code": "session.driver-refused",
+      "message": "The driver refused the frame and the loop could not name the reason more precisely; its own code is in the message.",
+      "retriable": false
+    },
+    {
+      "arrives": [
+        "protocol-error-frame"
+      ],
+      "class": "refused",
+      "code": "session.frame-invalid",
+      "message": "The client frame is outside the closed vocabulary of the mode this attachment serves.",
+      "retriable": false
+    },
+    {
+      "arrives": [
+        "protocol-error-frame"
+      ],
+      "class": "exhausted",
+      "code": "session.frame-limit",
+      "message": "One input frame is outside the admitted frame bound.",
+      "retriable": false
+    },
+    {
+      "arrives": [
+        "protocol-error-frame"
+      ],
+      "class": "refused",
+      "code": "session.input-close-unserved",
+      "message": "A pty session has no half-close; send the terminal's own end-of-file character as input.",
+      "retriable": false
+    },
+    {
+      "arrives": [
+        "protocol-error-frame"
+      ],
+      "class": "refused",
+      "code": "session.input-closed",
+      "message": "Input is already closed and cannot be written or closed again.",
+      "retriable": false
+    },
+    {
+      "arrives": [
+        "protocol-error-frame"
+      ],
+      "class": "exhausted",
+      "code": "session.input-limit",
+      "message": "Cumulative input is outside the admitted byte bound.",
+      "retriable": false
+    },
+    {
+      "arrives": [
+        "http-response"
+      ],
+      "class": "exhausted",
+      "code": "session.limit-unserved",
+      "message": "The declared session bounds exceed the host development profile.",
+      "retriable": false,
+      "status": 429
+    },
+    {
+      "arrives": [
+        "http-response"
+      ],
+      "class": "conflict",
+      "code": "session.not-attachable",
+      "message": "The session is not attachable: it is not running under an active lease, or its attachment right is already consumed.",
+      "retriable": false,
+      "status": 409
+    },
+    {
+      "arrives": [
+        "protocol-error-frame"
+      ],
+      "class": "refused",
+      "code": "session.not-pipe",
+      "message": "The exec this operation names is not a raw-pipe session.",
+      "retriable": false
+    },
+    {
+      "arrives": [
+        "protocol-error-frame"
+      ],
+      "class": "refused",
+      "code": "session.not-pty",
+      "message": "A resize frame belongs to a pty session; this attachment serves raw pipes.",
+      "retriable": false
+    },
+    {
+      "arrives": [
+        "protocol-error-frame"
+      ],
+      "class": "exhausted",
+      "code": "session.output-backpressure",
+      "message": "The live output queue was not drained within its declared bound.",
+      "retriable": false
+    },
+    {
+      "arrives": [
+        "exec-observation"
+      ],
+      "class": "exhausted",
+      "code": "session.output-limit",
+      "evidence": "the-declared-output-bound-ends-a-terminal-session-rather-than-truncating-it",
+      "message": "The declared output bound ended the terminal session.",
+      "retriable": false
+    },
+    {
+      "arrives": [
+        "protocol-error-frame"
+      ],
+      "class": "refused",
+      "code": "session.pty-ended",
+      "message": "The pty session has ended; its child already finished, so nothing can observe this.",
+      "retriable": false
+    },
+    {
+      "arrives": [
+        "http-response"
+      ],
+      "class": "exhausted",
+      "code": "session.pty-exhausted",
+      "evidence": "a-host-that-cannot-allocate-a-terminal-is-exhausted-and-retriable",
+      "message": "The host could not allocate a pseudoterminal for this session.",
+      "retriable": true,
+      "status": 429
+    },
+    {
+      "arrives": [
+        "http-response"
+      ],
+      "class": "failed",
+      "code": "session.pty-failed",
+      "message": "A pseudoterminal was allocated and the driver could not make it usable.",
+      "retriable": false,
+      "status": 500
+    },
+    {
+      "arrives": [
+        "http-response",
+        "protocol-error-frame"
+      ],
+      "class": "unserved",
+      "code": "session.pty-unserved",
+      "evidence": "a-terminal-is-unserved-by-name-and-never-served-as-pipes",
+      "message": "This deployment did not prove it can give a confined process a controlling terminal.",
+      "retriable": false,
+      "status": 501
+    },
+    {
+      "arrives": [
+        "internal"
+      ],
+      "class": "failed",
+      "code": "session.read-timeout",
+      "message": "An output poll deadline elapsed with no frame; substrate polls again and no client is told.",
+      "retriable": false
+    },
+    {
+      "arrives": [
+        "protocol-error-frame"
+      ],
+      "class": "failed",
+      "code": "session.resize-failed",
+      "message": "The kernel refused the resize.",
+      "retriable": false
+    },
+    {
+      "arrives": [
+        "protocol-error-frame"
+      ],
+      "class": "refused",
+      "code": "session.resize-invalid",
+      "message": "A resize names 1 to 1000 cells on each axis of a pty session.",
+      "retriable": false
+    },
+    {
+      "arrives": [
+        "protocol-error-frame"
+      ],
+      "class": "refused",
+      "code": "session.sequence-invalid",
+      "message": "Client sequences must be contiguous and start at one.",
+      "retriable": false
+    },
+    {
+      "arrives": [
+        "protocol-error-frame"
+      ],
+      "class": "refused",
+      "code": "session.signal-invalid",
+      "message": "A signal frame is outside the closed signal or grace bounds.",
+      "retriable": false
+    },
+    {
+      "arrives": [
+        "http-response"
+      ],
+      "class": "failed",
+      "code": "session.stdin-missing",
+      "message": "A raw-pipe process did not expose stdin.",
+      "retriable": false,
+      "status": 500
+    },
+    {
+      "arrives": [
+        "protocol-error-frame"
+      ],
+      "class": "refused",
+      "code": "session.timeout-invalid",
+      "message": "A read deadline of zero is not a deadline.",
+      "retriable": false
+    },
+    {
+      "arrives": [
+        "http-response"
+      ],
+      "class": "unserved",
+      "code": "session.unserved",
+      "message": "The selected driver does not serve sessions.",
+      "retriable": false,
+      "status": 501
+    },
+    {
+      "arrives": [
+        "http-response"
+      ],
+      "class": "refused",
+      "code": "session.wait-invalid",
+      "message": "A session cannot use synchronous exec wait.",
+      "retriable": false,
+      "status": 422
+    },
+    {
+      "arrives": [
+        "http-response"
+      ],
+      "class": "refused",
+      "code": "session.window-invalid",
+      "evidence": "a-pty-start-without-a-window-is-refused-and-never-defaulted",
+      "message": "A pty session declares an initial window within the closed cell bounds, and a raw-pipe session declares none.",
+      "retriable": false,
+      "status": 422
+    },
+    {
+      "arrives": [
+        "protocol-error-frame"
+      ],
+      "class": "failed",
+      "code": "session.write-failed",
+      "message": "Substrate could not deliver input and does not pretend it arrived.",
+      "retriable": false
+    }
+  ]
+}

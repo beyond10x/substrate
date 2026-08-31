@@ -212,6 +212,7 @@ impl Driver for PipeFixtureDriver {
                 observed_at: Utc::now(),
                 requested: input.exec.sandbox.clone(),
                 applied: Some(AppliedConfinement {
+                    workspace_access: substrate_wire::WorkspaceAccess::ReadWrite,
                     read_only_roots: Vec::new(),
                     secret_slots: Vec::new(),
                     capability_snapshot: SNAPSHOT.to_owned(),
@@ -1390,6 +1391,7 @@ async fn the_two_entry_points_name_one_refusal_for_a_pty_start_that_earns_two() 
                 cpu_millis: 1_000,
             },
             wait: true,
+            workspace_access: substrate_wire::WorkspaceAccess::ReadWrite,
             scratch: None,
             measurements: std::collections::BTreeSet::new(),
             read_only_roots: Vec::new(),

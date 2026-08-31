@@ -1,0 +1,292 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.12.0:input:exec-start",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "argv": {
+      "items": {
+        "maxLength": 4096,
+        "minLength": 1,
+        "pattern": "^[^\\u0000]+$",
+        "type": "string"
+      },
+      "maxItems": 256,
+      "minItems": 1,
+      "type": "array"
+    },
+    "capsule": {
+      "additionalProperties": false,
+      "properties": {
+        "entrypoint": {
+          "$ref": "../common.json#/$defs/relative-path"
+        },
+        "files": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "content": {
+                "additionalProperties": false,
+                "properties": {
+                  "data": {
+                    "$ref": "../common.json#/$defs/canonical-base64-capsule-file"
+                  },
+                  "encoding": {
+                    "const": "base64"
+                  }
+                },
+                "required": [
+                  "encoding",
+                  "data"
+                ],
+                "type": "object"
+              },
+              "executable": {
+                "type": "boolean"
+              },
+              "path": {
+                "$ref": "../common.json#/$defs/relative-path"
+              },
+              "role": {
+                "enum": [
+                  "runtime",
+                  "configuration",
+                  "hook",
+                  "protocol-sidecar"
+                ]
+              },
+              "sha256": {
+                "pattern": "^[0-9a-f]{64}$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "path",
+              "role",
+              "executable",
+              "sha256",
+              "content"
+            ],
+            "type": "object"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "type": "array",
+          "x-b10x-max-decoded-bytes": 524288,
+          "x-b10x-order": "strict-utf8-bytewise-path"
+        },
+        "manifest_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        }
+      },
+      "required": [
+        "manifest_sha256",
+        "entrypoint",
+        "files"
+      ],
+      "type": "object",
+      "x-b10x-entrypoint": "must-name-an-executable-file",
+      "x-b10x-manifest-hash": "b10x.execution-capsule.v1"
+    },
+    "env": {
+      "additionalProperties": false,
+      "properties": {
+        "allow": {
+          "items": {
+            "enum": [
+              "LANG",
+              "LC_ALL",
+              "PATH",
+              "TERM",
+              "TZ"
+            ]
+          },
+          "maxItems": 5,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "set": {
+          "additionalProperties": {
+            "maxLength": 4096,
+            "type": "string"
+          },
+          "maxProperties": 64,
+          "propertyNames": {
+            "allOf": [
+              {
+                "pattern": "^[A-Z][A-Z0-9_]{0,127}$"
+              },
+              {
+                "not": {
+                  "pattern": "(?i)(authorization|bearer|credential|password|secret|token|proxy)"
+                }
+              }
+            ]
+          },
+          "type": "object"
+        }
+      },
+      "required": [
+        "allow",
+        "set"
+      ],
+      "type": "object"
+    },
+    "lease_ttl_ms": {
+      "maximum": 86400000,
+      "minimum": 1000,
+      "type": "integer"
+    },
+    "limits": {
+      "additionalProperties": false,
+      "properties": {
+        "cpu_millis": {
+          "maximum": 86400000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "memory_bytes": {
+          "maximum": 1099511627776,
+          "minimum": 1048576,
+          "type": "integer"
+        },
+        "output_bytes": {
+          "maximum": 1048576,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "processes": {
+          "maximum": 4096,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "timeout_ms": {
+          "maximum": 86400000,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "timeout_ms",
+        "output_bytes",
+        "processes",
+        "memory_bytes",
+        "cpu_millis"
+      ],
+      "type": "object"
+    },
+    "measurements": {
+      "items": {
+        "const": "resource-usage"
+      },
+      "maxItems": 1,
+      "type": "array",
+      "uniqueItems": true
+    },
+    "sandbox": {
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "else": {
+            "not": {
+              "required": [
+                "aperture"
+              ]
+            }
+          },
+          "if": {
+            "properties": {
+              "network": {
+                "const": "aperture"
+              }
+            },
+            "required": [
+              "network"
+            ]
+          }
+        }
+      ],
+      "properties": {
+        "aperture": {
+          "maxLength": 64,
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "type": "string",
+          "x-b10x-never-carries": "a-destination"
+        },
+        "capability_snapshot": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "network": {
+          "enum": [
+            "none",
+            "aperture"
+          ]
+        },
+        "profile": {
+          "const": "workspace"
+        },
+        "require": {
+          "const": true
+        }
+      },
+      "required": [
+        "capability_snapshot",
+        "profile",
+        "network",
+        "require"
+      ],
+      "type": "object",
+      "x-b10x-reach-is-configuration": "a-request-selects-a-declared-name"
+    },
+    "scratch": {
+      "$ref": "../common.json#/$defs/storage-limit"
+    },
+    "secret_slots": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "fd": {
+            "maximum": 63,
+            "minimum": 3,
+            "type": "integer"
+          },
+          "slot": {
+            "maxLength": 64,
+            "pattern": "^[a-z][a-z0-9_]{0,63}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "slot",
+          "fd"
+        ],
+        "type": "object"
+      },
+      "maxItems": 8,
+      "type": "array",
+      "x-b10x-distinct": "slot-and-fd",
+      "x-b10x-mapping-environment": "SUBSTRATE_SECRET_SLOTS",
+      "x-b10x-never-carries": "value-path-or-length"
+    },
+    "wait": {
+      "type": "boolean"
+    },
+    "workspace": {
+      "$ref": "../common.json#/$defs/workspace-id"
+    },
+    "workspace_access": {
+      "$ref": "../common.json#/$defs/workspace-access"
+    }
+  },
+  "required": [
+    "workspace",
+    "argv",
+    "env",
+    "sandbox",
+    "limits",
+    "wait"
+  ],
+  "title": "exec-start operation input",
+  "type": "object"
+}
