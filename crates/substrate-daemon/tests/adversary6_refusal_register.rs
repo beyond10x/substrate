@@ -2,7 +2,7 @@
 //! Sixth adversarial pass. The published refusal register's `retriable` column, read back off the
 //! wire.
 //!
-//! `contracts/substrate-wire/0.9.0/refusals.json` is new in this unit (added by
+//! `contracts/substrate-wire/0.10.0/refusals.json` is new in this unit (added by
 //! `5c5637b fix(sessions): re-derive two enumerations, and close what they missed`) and its own
 //! title is "Every refusal a session can raise, and what a client does with it". Whether a refusal
 //! is worth retrying is one of its four columns, and it is the column a client acts on: a `429`
@@ -343,7 +343,7 @@ fn pty_start(workspace: &str) -> Value {
 fn register_row(code: &str) -> Value {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("contracts/substrate-wire/0.9.0/refusals.json");
+        .join("contracts/substrate-wire/0.10.0/refusals.json");
     let register: Value =
         serde_json::from_slice(&std::fs::read(&path).expect("the refusal register")).expect("JSON");
     register["refusals"]
@@ -352,7 +352,7 @@ fn register_row(code: &str) -> Value {
         .iter()
         .find(|row| row["code"].as_str() == Some(code))
         .cloned()
-        .unwrap_or_else(|| panic!("{code} has no row in 0.9.0/refusals.json"))
+        .unwrap_or_else(|| panic!("{code} has no row in 0.10.0/refusals.json"))
 }
 
 /// A session refusal a client receives says what the published register says it says.
@@ -367,7 +367,7 @@ fn register_row(code: &str) -> Value {
 /// `detail.retriable = false;` — applied to every driver refusal, unconditionally, before the body
 /// is written and before the same detail is committed to the durable operation ledger.
 ///
-/// So the register and the vector `contracts/substrate-wire/0.9.0/vectors/http/pty-session-exhausted.json`
+/// So the register and the vector `contracts/substrate-wire/0.10.0/vectors/http/pty-session-exhausted.json`
 /// publish `retriable: true` for a 429 the client is told is `retriable: false`. Design 13 states
 /// the reason the true value is the true one: "Allocation failure is `exhausted` and retriable
 /// because the host's pty count is a global resource other tenants can fill and free."
@@ -411,7 +411,7 @@ async fn a_session_refusal_carries_the_retriable_the_register_publishes_for_it()
         ] {
             if sent != published {
                 wrong.push(format!(
-                    "{code}: 0.9.0/refusals.json publishes {column} {published}, \
+                    "{code}: 0.10.0/refusals.json publishes {column} {published}, \
                      the daemon sends {column} {sent}"
                 ));
             }
@@ -419,7 +419,7 @@ async fn a_session_refusal_carries_the_retriable_the_register_publishes_for_it()
     }
     assert!(
         wrong.is_empty(),
-        "0.9.0/refusals.json says it gives every session refusal \"whether it is worth retrying\", \
+        "0.10.0/refusals.json says it gives every session refusal \"whether it is worth retrying\", \
          and a client acts on that column: a 429 that is retriable is a backoff and a 429 that is \
          not is a stop. These rows are contradicted by the response the daemon actually sends:\n{}",
         wrong.join("\n")

@@ -48,7 +48,12 @@ edits, and patches.
 | `POST` | `/v2/workspaces/{workspace_id}/file-patches/{*path}` | apply one bounded patch |
 
 The daemon deliberately continues to advertise `substrate-wire/0.4.0` in `x-b10x-contract`.
-Bundle `0.9.0` exists for development consumers to pin and verify before the server claims it; its
+Bundle `0.10.0` succeeds `0.9.0` without adding a route. It adds a `pty` session mode with a
+required bounded terminal window, a closed resize-capable frame vocabulary, and a capability fact
+that is present only after the host proves terminal allocation and resize behavior. Without that
+fact, PTY start is refused and is never served as raw pipes.
+
+Bundle `0.10.0` exists for development consumers to pin and verify before the server claims it; its
 existence is not a stability or compatibility promise.
 
 ## Execs
@@ -64,19 +69,20 @@ existence is not a stability or compatibility promise.
 
 Exec start is served only when the daemon verified its complete host confinement floor.
 
-## Raw-pipe sessions
+## Sessions
 
 | Method | Path | Purpose |
 |---|---|---|
 | `GET` | `/v1/pipe-sessions` | read session capability information |
-| `POST` | `/v1/pipe-sessions` | start a leased raw-pipe session |
+| `POST` | `/v1/pipe-sessions` | start a leased raw-pipe or PTY session |
 | `GET` | `/v1/pipe-sessions/{session_id}` | read observed session state |
 | `GET` | `/v1/pipe-sessions/{session_id}/attach` | attach the one bounded WebSocket channel |
 | `POST` | `/v1/pipe-sessions/{session_id}/signal` | signal the underlying process |
 | `POST` | `/v1/pipe-sessions/{session_id}/lease/renew` | renew session liveness |
 | `DELETE` | `/v1/pipe-sessions/{session_id}` | retire a session |
 
-Raw-pipe sessions are a development slice. PTY and network session authority are not implemented.
+Sessions are a development slice. Raw pipes remain the default; PTY mode requires a bounded initial
+window and a verified `sessions.pty` machine fact. Production network session authority is absent.
 
 ## Recovery and events
 

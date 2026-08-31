@@ -1,0 +1,66 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "command": {
+      "argv": [
+        "/fixture/flood-terminal"
+      ],
+      "mode": "pty",
+      "operation": "session.start",
+      "output_limit_bytes": 65536,
+      "window": {
+        "columns": 80,
+        "rows": 24
+      }
+    },
+    "kind": "driver",
+    "port": "lifecycle"
+  },
+  "context": {
+    "authority": "driver-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000"
+  },
+  "covers": [
+    "route.session.start",
+    "session.pty-output-bound"
+  ],
+  "expected": {
+    "kind": "driver-outcome",
+    "outcome": {
+      "code": "session.output-limit",
+      "state": "cancelled"
+    }
+  },
+  "id": "the-declared-output-bound-ends-a-terminal-session-rather-than-truncating-it",
+  "layer": "driver",
+  "phase": 4,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/truncated_frames_delivered",
+      "expected": 0,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/session_state",
+      "expected": "cancelled",
+      "operator": "equals"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "session",
+      "name": "durable-pipe",
+      "state": {
+        "exec": "ex_vector",
+        "id": "ses_vector"
+      }
+    }
+  ]
+}

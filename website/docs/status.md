@@ -22,14 +22,13 @@ verify it through `GET /v1/machine`.
 | durability | operation reservation before dispatch, persisted terminal observations and output |
 | recovery | operation lookup, bounded events, reconciliation snapshots, restart-to-unknown |
 | limits | body, path, output, retention, concurrency, process, memory, CPU, and duration bounds |
-| sessions | leased raw-pipe development slice with one Unix-WebSocket attachment |
+| sessions | leased raw-pipe and probe-gated PTY modes with one Unix-WebSocket attachment |
 | capsules | digest-verified read-only runtime material beside a writable workspace |
 | distribution | Apache-2.0 source and a keyless-signed daemon image |
 
 ## Explicitly absent
 
 - Git workspace sources and snapshots
-- PTY sessions
 - production network session authority
 - workloads, images, volumes, and endpoints
 - Docker and Kubernetes drivers
@@ -46,7 +45,7 @@ a specific refusal when requested.
 - A verified capsule identifies its provided bytes, not the entire host runtime closure.
 - Static-bearer TCP is development-only and is not suitable for public or shared ingress.
 - One daemon is one trust domain; it is not a multi-tenant isolation layer.
-- Development bundle `0.9.0` declares v1 and v2 routes, while the daemon still advertises the
+- Development bundle `0.10.0` declares v1 and v2 routes plus the PTY session mode, while the daemon still advertises the
   deliberately older `substrate-wire/0.4.0` contract header.
 
 ## Reading status safely

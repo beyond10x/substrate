@@ -187,7 +187,7 @@ pub(super) async fn pipe_session_capabilities(
         Success::observed(
             request_id,
             PipeSessionCapabilities {
-                // Bound, not written out, and `0.9.0` rather than `0.4.0`: this document carries
+                // Bound, not written out, and `0.10.0` rather than `0.4.0`: this document carries
                 // `modes` and the window and control-rate ceilings, which `0.4.0`'s closed
                 // nine-property schema forbids, so naming `0.4.0` made the body validate against no
                 // released bundle at all. See `PIPE_SESSION_CAPABILITY_CONTRACT` for why this is not
@@ -833,7 +833,9 @@ pub(super) async fn pipe_session_attach(
                     "The bounded session attachment capacity is exhausted.",
                 ),
                 Some("session"),
-                true,
+                substrate_wire::session_refusal_is_retriable(
+                    substrate_wire::SESSION_ATTACHMENT_CAPACITY,
+                ),
             );
         }
     };
@@ -1331,7 +1333,7 @@ async fn send_pipe_protocol_error(
 /// The terminal frames one attachment is owed, in the vocabulary its own mode publishes.
 ///
 /// A `pty` attachment gets no `truncated` frame: the published vocabulary has no branch for one
-/// (`contracts/substrate-wire/0.9.0/schemas/pty-channel-frame.json`, `x-b10x-no-truncated`),
+/// (`contracts/substrate-wire/0.10.0/schemas/pty-channel-frame.json`, `x-b10x-no-truncated`),
 /// reaching the output bound *ends* a terminal session and names itself on the exec observation's
 /// refusal field instead, and a terminal stream has no per-stream offset for a client to rejoin at
 /// — which is why design 13 removed the statement rather than relocating it. The observation still
@@ -1348,7 +1350,7 @@ async fn send_pipe_terminal(
         return Err(());
     }
     if let Some(refusal) = &observation.resource.refusal
-        && refusal.code == "session.output-backpressure"
+        && refusal.code == substrate_wire::SESSION_OUTPUT_BACKPRESSURE
     {
         send_pipe_protocol_error(
             socket,

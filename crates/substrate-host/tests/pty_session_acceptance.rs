@@ -421,8 +421,8 @@ async fn a_pty_session_resize_delivers_sigwinch_to_the_child() {
 /// Design 13 and ADR 0014: reaching the declared output bound **ends** a terminal session and says
 /// so by name. Design 05 gave the pty no `truncated` frame, and a terminal stream has no offset to
 /// resume from, so a transcript that silently stopped would be unrecoverable — which is the whole
-/// reason the refusal field exists. Bundle `0.9.0` states it as
-/// `contracts/substrate-wire/0.9.0/vectors/driver/pty-session-output-bound-ends-the-session.json`:
+/// reason the refusal field exists. Bundle `0.10.0` states it as
+/// `contracts/substrate-wire/0.10.0/vectors/driver/pty-session-output-bound-ends-the-session.json`:
 /// `state: cancelled`, `code: session.output-limit`, `truncated_frames_delivered: 0`.
 ///
 /// The flag `drain_capped` raises is only ever read from the 1 ms supervision tick

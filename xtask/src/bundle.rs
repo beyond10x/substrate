@@ -2090,7 +2090,7 @@ fn resize_window(branch: usize, axis: &str, bound: &str) -> String {
     format!("/oneOf/{branch}/properties/window/properties/{axis}/{bound}")
 }
 
-/// The coverage half of `0.9.0`: every pty requirement carries evidence, and each refusal is read
+/// The coverage half of `0.10.0`: every pty requirement carries evidence, and each refusal is read
 /// out of the vector that asserts it rather than out of prose.
 fn check_pty_coverage(released: &Tree, failures: &mut Vec<String>) {
     let required_requirements = [
@@ -4279,7 +4279,7 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{}: {error}", bundle.display()));
             checked += 1;
         }
-        assert_eq!(checked, 9, "every released bundle must be checked");
+        assert_eq!(checked, 10, "every released bundle must be checked");
     }
 
     /// Class, the other half: if a parameter's name is not a discriminator, then renaming one is

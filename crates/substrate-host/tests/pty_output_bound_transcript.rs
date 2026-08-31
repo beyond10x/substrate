@@ -3,7 +3,7 @@
 //! Design 13 removed the truncation statement from the pty vocabulary on purpose: reaching the
 //! declared output bound **ends** the session and names itself on the exec observation's refusal
 //! field, because design 05 gave the pty no `truncated` frame and a terminal stream has no offset
-//! to resume from. `contracts/substrate-wire/0.9.0/schemas/pty-channel-frame.json` carries
+//! to resume from. `contracts/substrate-wire/0.10.0/schemas/pty-channel-frame.json` carries
 //! `x-b10x-no-truncated` and no `truncated` branch, and `xtask/src/bundle.rs:754-760` refuses a
 //! bundle that grows one.
 //!

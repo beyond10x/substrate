@@ -358,7 +358,7 @@ impl ProcessRuntime {
         // **The mode gate is outermost, and nothing precedes it at either entry point.** That is
         // the whole ordering rule, and it is a rule rather than a preference because the two ports
         // are two implementations of one contract: a request that earns several refusals must not
-        // be told a different one by each. `0.9.0` states it in
+        // be told a different one by each. `0.10.0` states it in
         // `vectors/http/pty-session-unserved-outranks-a-missing-window.json` and in the
         // `session.pty-refusal-order` coverage requirement.
         //
@@ -1779,7 +1779,7 @@ fn record_pipe_backpressure(observation: &mut ExecObservation, execution: &Execu
     if execution.pipe_backpressure.load(Ordering::Acquire) {
         observation.resource.refusal = Some(substrate_wire::ExecRefusal {
             class: substrate_wire::ErrorClass::Exhausted,
-            code: "session.output-backpressure".to_owned(),
+            code: substrate_wire::SESSION_OUTPUT_BACKPRESSURE.to_owned(),
             message: "The raw-pipe live output queue was not drained within its declared bound."
                 .to_owned(),
         });
@@ -2912,7 +2912,7 @@ mod tests {
     /// Two refusals, and the ordering is the point of the first: the request with no published
     /// `sessions.pty` fact also carries **no window**, so it earns `session.window-invalid` too and
     /// the case only passes if the fact really is checked before the window shape — the order
-    /// `0.9.0` states in `vectors/http/pty-session-unserved-outranks-a-missing-window.json`. The
+    /// `0.10.0` states in `vectors/http/pty-session-unserved-outranks-a-missing-window.json`. The
     /// second request has the fact and a window and has lost the confinement floor, so it earns
     /// `exec.sandbox-unavailable`. Neither answer is a pipe session (design 13, invariant 3).
     #[tokio::test]
@@ -3172,6 +3172,7 @@ mod tests {
             Some(sender),
             PipeStream::Stdout,
             64,
+            None,
             None,
             true,
         ));

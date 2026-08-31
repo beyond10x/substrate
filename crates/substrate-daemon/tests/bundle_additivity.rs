@@ -4,9 +4,9 @@
 //! checks that a successor's own additions are present. Nothing compares a preserved operation's
 //! *schemas* against its predecessor's, so the one change that cannot be additive — making a
 //! request field a client never sent into a required one — passes `cargo xtask check-bundle`
-//! today. Demonstrated on `0.9.0`: appending `"mode"` to
+//! today. Demonstrated on `0.10.0`: appending `"mode"` to
 //! `schemas/inputs/pipe-session-start.json`'s `required` array, re-rendering, and running
-//! `check-bundle 0.9.0` exits 0.
+//! `check-bundle 0.10.0` exits 0.
 //!
 //! Portable lane. Reads the released bundles and nothing else.
 

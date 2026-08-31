@@ -27,7 +27,7 @@ use std::process::Command;
 
 use serde_json::Value;
 
-const VERSION: &str = "0.9.0";
+const VERSION: &str = "0.10.0";
 const DOCUMENT: &str = "documents/schemas/pty-channel-frame.json";
 
 fn repo_root() -> PathBuf {

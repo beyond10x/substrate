@@ -1,6 +1,6 @@
 //! The refusal order this wave made a decision, asserted at the port that does not obey it.
 //!
-//! `0.9.0` states the order in a bundle document — `vectors/http/pty-session-unserved-outranks-a-
+//! `0.10.0` states the order in a bundle document — `vectors/http/pty-session-unserved-outranks-a-
 //! missing-window.json`, coverage requirement `session.pty-refusal-order` — and the daemon obeys it
 //! (`crates/substrate-daemon/src/app/operations.rs:558-582`: the fact, then the window shape). The
 //! driver port checks the two in the opposite order
@@ -62,7 +62,7 @@ fn pty_start(snapshot: &str, window: Option<substrate_wire::PtyWindow>) -> PipeS
 
 /// A windowless `mode: "pty"` start on a driver with no `sessions.pty` fact.
 ///
-/// Both refusals apply. `0.9.0` decided which one answers, and the decision is that the fact
+/// Both refusals apply. `0.10.0` decided which one answers, and the decision is that the fact
 /// outranks the window shape: `session.window-invalid` invites a client on a terminal-less
 /// deployment to add a window and retry into a refusal it can never get past, and
 /// `session.pty-unserved` says stop. The driver port answers the other one.

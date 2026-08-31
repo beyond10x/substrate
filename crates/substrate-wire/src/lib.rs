@@ -109,18 +109,20 @@ pub const SESSION_RESIZE_FAILED: &str = "session.resize-failed";
 pub const SESSION_INPUT_CLOSE_UNSERVED: &str = "session.input-close-unserved";
 /// The declared output bound ended the session (ADR 0014's refusal field, design 13).
 pub const SESSION_OUTPUT_LIMIT: &str = "session.output-limit";
+/// The live output queue was not drained within its declared bound.
+pub const SESSION_OUTPUT_BACKPRESSURE: &str = "session.output-backpressure";
 
 /// The bundle whose result schema the session capability document conforms to.
 ///
 /// **Not the same claim as the `x-b10x-contract` header.** The header is what the *server*
 /// advertises, and `AGENTS.md` invariant 6 scopes moving it as its own change with its own clients
 /// to notify. This is a field inside one result document, and every released bundle declares it
-/// `{"const": "substrate-wire/<that bundle's own version>"}` — `0.3.0` through `0.9.0`, without
+/// `{"const": "substrate-wire/<that bundle's own version>"}` — `0.3.0` through `0.10.0`, without
 /// exception — so its value is definitionally *the bundle whose schema this document conforms to*.
-/// A document carrying `modes` and the window and control-rate ceilings is shaped by `0.9.0` and by
+/// A document carrying `modes` and the window and control-rate ceilings is shaped by `0.10.0` and by
 /// no earlier bundle, so naming anything else is a false statement about its own shape: `0.4.0`'s
 /// schema is `additionalProperties: false` over nine properties and forbids all five.
-pub const PIPE_SESSION_CAPABILITY_CONTRACT: &str = "substrate-wire/0.9.0";
+pub const PIPE_SESSION_CAPABILITY_CONTRACT: &str = "substrate-wire/0.10.0";
 
 /// The session is not attachable in its current state.
 pub const SESSION_NOT_ATTACHABLE: &str = "session.not-attachable";
@@ -200,6 +202,7 @@ pub enum SessionProtocolErrorCode {
     InputLimit,
     NotPipe,
     NotPty,
+    OutputBackpressure,
     PtyEnded,
     PtyUnserved,
     ResizeFailed,
@@ -212,7 +215,7 @@ pub enum SessionProtocolErrorCode {
 
 impl SessionProtocolErrorCode {
     /// Every member, so a caller can enumerate the class rather than remember it.
-    pub const ALL: [Self; 18] = [
+    pub const ALL: [Self; 19] = [
         Self::Base64Invalid,
         Self::ControlRateExceeded,
         Self::DriverRefused,
@@ -223,6 +226,7 @@ impl SessionProtocolErrorCode {
         Self::InputLimit,
         Self::NotPipe,
         Self::NotPty,
+        Self::OutputBackpressure,
         Self::PtyEnded,
         Self::PtyUnserved,
         Self::ResizeFailed,
@@ -247,6 +251,7 @@ impl SessionProtocolErrorCode {
             Self::InputLimit => SESSION_INPUT_LIMIT,
             Self::NotPipe => SESSION_NOT_PIPE,
             Self::NotPty => SESSION_NOT_PTY,
+            Self::OutputBackpressure => SESSION_OUTPUT_BACKPRESSURE,
             Self::PtyEnded => SESSION_PTY_ENDED,
             Self::PtyUnserved => SESSION_PTY_UNSERVED,
             Self::ResizeFailed => SESSION_RESIZE_FAILED,
@@ -308,7 +313,7 @@ impl<'de> Deserialize<'de> for SessionProtocolErrorCode {
 /// Derived from [`SessionProtocolErrorCode::ALL`] and checked against it by
 /// `every_protocol_error_variant_has_a_wire_word`, so a variant added without a word — or a word
 /// added without a variant — fails the suite rather than shipping.
-pub const SESSION_PROTOCOL_ERROR_CODES: [&str; 18] = [
+pub const SESSION_PROTOCOL_ERROR_CODES: [&str; 19] = [
     SESSION_BASE64_INVALID,
     SESSION_CONTROL_RATE_EXCEEDED,
     SESSION_DRIVER_REFUSED,
@@ -319,6 +324,7 @@ pub const SESSION_PROTOCOL_ERROR_CODES: [&str; 18] = [
     SESSION_INPUT_LIMIT,
     SESSION_NOT_PIPE,
     SESSION_NOT_PTY,
+    SESSION_OUTPUT_BACKPRESSURE,
     SESSION_PTY_ENDED,
     SESSION_PTY_UNSERVED,
     SESSION_RESIZE_FAILED,
@@ -366,7 +372,7 @@ pub fn session_refusal_is_retriable(code: &str) -> bool {
 /// the same as wire-word order — `SESSION_INPUT_CLOSED` precedes `SESSION_INPUT_CLOSE_UNSERVED`
 /// here and `session.input-close-unserved` precedes `session.input-closed` on the wire. Nothing
 /// depends on either order: every consumer collects into a `BTreeSet`.
-pub const SESSION_REFUSAL_CODES: [&str; 31] = [
+pub const SESSION_REFUSAL_CODES: [&str; 32] = [
     SESSION_ALREADY_ATTACHED,
     SESSION_ATTACHMENT_CAPACITY,
     SESSION_BASE64_INVALID,
@@ -382,6 +388,7 @@ pub const SESSION_REFUSAL_CODES: [&str; 31] = [
     SESSION_NOT_ATTACHABLE,
     SESSION_NOT_PIPE,
     SESSION_NOT_PTY,
+    SESSION_OUTPUT_BACKPRESSURE,
     SESSION_OUTPUT_LIMIT,
     SESSION_PTY_ENDED,
     SESSION_PTY_EXHAUSTED,
@@ -402,7 +409,7 @@ pub const SESSION_REFUSAL_CODES: [&str; 31] = [
 
 /// The refusal codes this story introduced, a view of [`SESSION_REFUSAL_CODES`].
 ///
-/// Kept as its own list because `xtask`'s `check_pty_additions` asks a question about `0.9.0`
+/// Kept as its own list because `xtask`'s `check_pty_additions` asks a question about `0.10.0`
 /// specifically — that the bundle this unit cut names each of them — which is a narrower claim than
 /// the register's, and a claim about a version rather than about the crate.
 pub const SESSION_PTY_REFUSAL_CODES: [&str; 10] = [

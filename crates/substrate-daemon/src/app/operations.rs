@@ -1111,7 +1111,7 @@ pub(super) async fn finish_driver_error(
     error: &DriverError,
 ) -> Response {
     // **Per code, from one place.** This used to be `detail.retriable = false;` — every driver
-    // refusal, unconditionally — which contradicted `contracts/substrate-wire/0.9.0/refusals.json`
+    // refusal, unconditionally — which contradicted `contracts/substrate-wire/0.10.0/refusals.json`
     // and `vectors/http/pty-session-exhausted.json`, both of which publish `retriable: true` for
     // `session.pty-exhausted` on design 13's reason: "the host's pty count is a global resource
     // other tenants can fill and free". Deriving it from `DriverErrorClass` instead is the other
@@ -1183,7 +1183,7 @@ pub(super) async fn finish_dispatch_absence(
     error: &DriverError,
 ) -> Response {
     // **Per code, from one place.** This used to be `detail.retriable = false;` — every driver
-    // refusal, unconditionally — which contradicted `contracts/substrate-wire/0.9.0/refusals.json`
+    // refusal, unconditionally — which contradicted `contracts/substrate-wire/0.10.0/refusals.json`
     // and `vectors/http/pty-session-exhausted.json`, both of which publish `retriable: true` for
     // `session.pty-exhausted` on design 13's reason: "the host's pty count is a global resource
     // other tenants can fill and free". Deriving it from `DriverErrorClass` instead is the other
@@ -1224,7 +1224,7 @@ pub(super) async fn finish_pipe_session_dispatch_absence(
     error: &DriverError,
 ) -> Response {
     // **Per code, from one place.** This used to be `detail.retriable = false;` — every driver
-    // refusal, unconditionally — which contradicted `contracts/substrate-wire/0.9.0/refusals.json`
+    // refusal, unconditionally — which contradicted `contracts/substrate-wire/0.10.0/refusals.json`
     // and `vectors/http/pty-session-exhausted.json`, both of which publish `retriable: true` for
     // `session.pty-exhausted` on design 13's reason: "the host's pty count is a global resource
     // other tenants can fill and free". Deriving it from `DriverErrorClass` instead is the other

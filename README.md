@@ -84,6 +84,7 @@ The table is the gate's own order (`scripts/gate.sh`).
 | contract bundle 0.7.0 | `cargo xtask check-bundle 0.7.0` |
 | contract bundle 0.8.0 | `cargo xtask check-bundle 0.8.0` |
 | contract bundle 0.9.0 | `cargo xtask check-bundle 0.9.0` — checks the multi-major registry and served catch-all paths |
+| contract bundle 0.10.0 | `cargo xtask check-bundle 0.10.0` — checks the PTY mode, closed frame vocabulary and refusal register |
 | contract JSON | `cargo xtask check-json` — every JSON under `contracts/` is classified by exactly one bundled schema, or it fails closed |
 | toolchain | `cargo xtask check-toolchain` |
 
@@ -108,7 +109,7 @@ The four `scripts/render-contract-bundle*.py` and their `check-contract-bundle*.
 **not tooling** — they are the reproducibility proof of the frozen `0.1.0`–`0.4.0` bundles, which
 are immutable, and `0.4.0`'s own `generator.name` points at one of them. They stay in Python and
 are not ported. `render-bundle` dispatches to the frozen renderer for `0.5.0`–`0.8.0` and the
-versioned multi-major renderer for `0.9.0`; a test asserts the original renderer still reproduces
+versioned multi-major renderer for `0.9.0` and later; a test asserts the original renderer still reproduces
 the frozen `0.4.0` byte for byte.
 
 `crates/substrate-daemon/tests/runtime_vectors.rs` is the clean-room runner — an independent

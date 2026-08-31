@@ -1171,7 +1171,7 @@ async fn the_absent_pty_fact_outranks_a_missing_window() {
 
 /// A terminal has no `truncated` frame, and reaching the output bound ends the session instead.
 ///
-/// `contracts/substrate-wire/0.9.0/schemas/pty-channel-frame.json` carries
+/// `contracts/substrate-wire/0.10.0/schemas/pty-channel-frame.json` carries
 /// `x-b10x-no-truncated: "reaching-the-output-bound-ends-the-session-through-the-exec-refusal"` and
 /// no `truncated` branch in its `oneOf`; `xtask/src/bundle.rs:754-760` refuses a bundle whose pty
 /// vocabulary grows one; `vectors/driver/pty-session-output-bound-ends-the-session.json` states
@@ -1199,7 +1199,7 @@ async fn a_pty_attachment_is_never_sent_a_truncated_frame() {
 // Adversary pass 3. Added cases only; nothing above this line was altered.
 // ---------------------------------------------------------------------------
 
-/// The `protocol-error` codes `0.9.0` publishes for a pty attachment, read out of the bundle.
+/// The `protocol-error` codes `0.10.0` publishes for a pty attachment, read out of the bundle.
 ///
 /// `schemas/pty-channel-frame.json`'s `protocol-error` branch carries `x-b10x-codes`, an annotation
 /// this wave introduced — the raw-pipe vocabulary next door has none. It is the only place a client
@@ -1208,7 +1208,7 @@ async fn a_pty_attachment_is_never_sent_a_truncated_frame() {
 fn published_pty_protocol_error_codes() -> Vec<String> {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("contracts/substrate-wire/0.9.0/schemas/pty-channel-frame.json");
+        .join("contracts/substrate-wire/0.10.0/schemas/pty-channel-frame.json");
     let document: Value =
         serde_json::from_slice(&std::fs::read(&path).expect("pty frame schema")).expect("JSON");
     let codes = document
@@ -1262,7 +1262,7 @@ async fn pty_protocol_error_code(frame: &Value) -> String {
 /// `substrate_wire::SESSION_INPUT_CLOSE_UNSERVED` was minted in the round before this one for one
 /// condition — "a pty has no half-close; a client ends input with the terminal's own end-of-file
 /// character" (`crates/substrate-wire/src/lib.rs:106-107`) — and the driver port raises it for that
-/// condition (`crates/substrate-host/src/process.rs:742-749`). `0.9.0` publishes it on the pty
+/// condition (`crates/substrate-host/src/process.rs:742-749`). `0.10.0` publishes it on the pty
 /// vocabulary's `protocol-error` branch, so a client that reads the contract expects it. The
 /// attachment loop never reaches the driver: it short-circuits on `mode == SessionMode::Pty` and
 /// answers `session.frame-invalid`, a literal
@@ -1277,7 +1277,7 @@ async fn a_pty_attachment_that_closes_input_is_told_in_the_code_minted_for_it() 
     assert_eq!(
         code,
         substrate_wire::SESSION_INPUT_CLOSE_UNSERVED,
-        "the driver port and 0.9.0's pty protocol-error branch both name this condition \
+        "the driver port and 0.10.0's pty protocol-error branch both name this condition \
          session.input-close-unserved; the attachment loop answers something else"
     );
 }
@@ -1314,7 +1314,7 @@ async fn every_protocol_error_code_a_pty_attachment_can_receive_is_published() {
     }
     assert!(
         unpublished.is_empty(),
-        "0.9.0/schemas/pty-channel-frame.json publishes {published:?} for a pty attachment, and \
+        "0.10.0/schemas/pty-channel-frame.json publishes {published:?} for a pty attachment, and \
          these reach one anyway:\n{}",
         unpublished.join("\n")
     );
@@ -1444,7 +1444,7 @@ async fn pipe_protocol_error_code(frame: &Value) -> String {
 /// over — and the half of that class round 3 did not close.
 ///
 /// `schemas/pipe-channel-frame.json` has no `resize` branch in any released bundle (`0.4.0` through
-/// `0.9.0`: `stdin`, `close-input`, `signal`, `output`, `truncated`, `exit`, `protocol-error`), so a
+/// `0.10.0`: `stdin`, `close-input`, `signal`, `output`, `truncated`, `exit`, `protocol-error`), so a
 /// `resize` reaching a raw-pipe attachment is a frame outside the closed vocabulary of the mode that
 /// attachment serves. `substrate_wire::SESSION_FRAME_INVALID` is defined as exactly that
 /// (`crates/substrate-wire/src/lib.rs:117`), and `substrate_wire::SESSION_NOT_PTY` as "The exec this
@@ -1484,11 +1484,11 @@ async fn a_resize_on_a_raw_pipe_attachment_is_not_answered_as_an_out_of_bounds_w
     );
 }
 
-/// `0.9.0`'s pty resize branch carries `x-b10x-out-of-bounds: "session.resize-invalid"`, and it
+/// `0.10.0`'s pty resize branch carries `x-b10x-out-of-bounds: "session.resize-invalid"`, and it
 /// holds only for out-of-bounds windows that happen to fit in a `u16`.
 ///
 /// The branch declares `columns` and `rows` as `{"type": "integer", "minimum": 1, "maximum": 1000}`
-/// (`contracts/substrate-wire/0.9.0/schemas/pty-channel-frame.json`), and the annotation next to
+/// (`contracts/substrate-wire/0.10.0/schemas/pty-channel-frame.json`), and the annotation next to
 /// them names the one code a window outside that range earns. 1001 earns it. 65536 does not:
 /// `PipeClientFrame::Resize` carries a `PtyWindow` whose axes are `u16`
 /// (`crates/substrate-wire/src/lib.rs:1456-1459`), so the frame fails `serde_json::from_slice`
@@ -1591,7 +1591,7 @@ async fn a_resize_over_the_control_rate_is_answered_in_the_published_vocabulary(
     };
     assert_eq!(
         frame.opcode, 0x1,
-        "0.9.0/schemas/pty-channel-frame.json publishes a closed server vocabulary of output, exit \
+        "0.10.0/schemas/pty-channel-frame.json publishes a closed server vocabulary of output, exit \
          and protocol-error, and every other way a client frame can be refused answers with a \
          protocol-error carrying a published code. Crossing the rate the resize branch says it is \
          rated on answers with {described} — a bound no document publishes, refused in a word no \
@@ -1639,12 +1639,12 @@ fn published_capability_schema(contract: &str) -> Value {
 /// Before this unit the body had exactly those nine and validated. This unit added five —
 /// `modes`, `max_window_columns`, `max_window_rows`, `max_controls_per_window`, `control_window_ms`
 /// — and left `contract` at `0.4.0`. The body now validates against no released bundle: not
-/// `0.4.0`'s, which forbids the five, and not `0.9.0`'s, whose `contract` is
-/// `{"const": "substrate-wire/0.9.0"}`.
+/// `0.4.0`'s, which forbids the five, and not `0.10.0`'s, whose `contract` is
+/// `{"const": "substrate-wire/0.10.0"}`.
 ///
 /// Nothing catches it because `session.capabilities` has no executable vector: the only vector
 /// naming it is `vectors/driver/pipe-session-capabilities.json`, which is absent from
-/// `/conformance/executable_vectors`, and which expects `"contract": "substrate-wire/0.9.0"`.
+/// `/conformance/executable_vectors`, and which expects `"contract": "substrate-wire/0.10.0"`.
 ///
 /// Portable lane.
 #[tokio::test(flavor = "multi_thread")]
@@ -1685,7 +1685,7 @@ async fn the_capability_document_is_admitted_by_the_contract_it_names() {
         "GET /v1/pipe-sessions answers {contract}, whose result schema is closed over \
          {declared:?}. The body carries {undeclared:?} as well, so it is admitted by no released \
          bundle: {contract}'s schema forbids these properties, and the bundle that declares them \
-         (0.9.0) requires \"contract\": \"substrate-wire/0.9.0\"."
+         (0.10.0) requires \"contract\": \"substrate-wire/0.10.0\"."
     );
 }
 
@@ -1714,7 +1714,7 @@ async fn the_capability_document_is_admitted_by_the_contract_it_names() {
 async fn every_integer_window_the_pty_resize_branch_declares_out_of_bounds_earns_that_code() {
     let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
-        .join("contracts/substrate-wire/0.9.0/schemas/pty-channel-frame.json");
+        .join("contracts/substrate-wire/0.10.0/schemas/pty-channel-frame.json");
     let document: Value =
         serde_json::from_slice(&std::fs::read(&path).expect("pty frame schema")).expect("JSON");
     let branch = document["oneOf"]
@@ -1816,7 +1816,7 @@ async fn refused_attach(address: SocketAddr, path: &str) -> (u16, Value) {
 /// Every refusal a pty attach can raise has a row in the register that says it lists them all.
 ///
 /// `refusals.json`'s own title is "Every refusal a session can raise, and what a client does with
-/// it", and the `0.9.0` CHANGELOG entry says it "gives every session refusal its class, where it
+/// it", and the `0.10.0` CHANGELOG entry says it "gives every session refusal its class, where it
 /// arrives, whether it is worth retrying, the sentence substrate sends".
 ///
 /// `check_pty_refusal_class` (`xtask/src/bundle.rs:494`) enforces that claim only over
@@ -1854,7 +1854,7 @@ async fn every_refusal_a_pty_attach_can_raise_has_a_row_in_the_register() {
         &std::fs::read(
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join("../..")
-                .join("contracts/substrate-wire/0.9.0/refusals.json"),
+                .join("contracts/substrate-wire/0.10.0/refusals.json"),
         )
         .expect("the refusal register"),
     )
@@ -1868,7 +1868,7 @@ async fn every_refusal_a_pty_attach_can_raise_has_a_row_in_the_register() {
     assert!(
         rows.contains(&code.as_str()),
         "GET {path} refuses a second attachment with {code} and the message {:?}. \
-         0.9.0/refusals.json says it lists every refusal a session can raise, and it lists \
+         0.10.0/refusals.json says it lists every refusal a session can raise, and it lists \
          {rows:?} — {code} is not among them, so a client that receives it has nothing to look up.",
         refusal["error"]["message"]
     );
@@ -1920,8 +1920,8 @@ async fn a_pty_start_window_outside_the_declared_range_is_refused_in_the_publish
     }
     assert!(
         wrong.is_empty(),
-        "0.9.0/schemas/inputs/pipe-session-start.json declares the window axes as integers in \
-         1..=1000 and 0.9.0/refusals.json gives session.window-invalid as the 422 a bad window \
+        "0.10.0/schemas/inputs/pipe-session-start.json declares the window axes as integers in \
+         1..=1000 and 0.10.0/refusals.json gives session.window-invalid as the 422 a bad window \
          earns. columns 0 earns it. These do not:\n{}",
         wrong.join("\n")
     );
@@ -1955,7 +1955,7 @@ async fn send_ping(client: &mut WebSocketClient) {
 ///
 /// And ping is the half a terminal client actually crosses. `PipeSessionCapabilities`'s own doc
 /// says so — "`Ping` shares the budget, so a client choosing a keepalive interval needs both
-/// numbers" (`crates/substrate-wire/src/lib.rs:1603-1610`) — and the `0.9.0` CHANGELOG repeats it.
+/// numbers" (`crates/substrate-wire/src/lib.rs:1603-1610`) — and the `0.10.0` CHANGELOG repeats it.
 /// A client that reads `max_controls_per_window: 120` and `control_window_ms: 60000` off the
 /// document, picks a keepalive, and gets it slightly wrong crosses the rate with a ping. It is then
 /// answered with a bare 1008 close carrying "pty control-frame rate exceeded": not a branch of the
@@ -2005,7 +2005,7 @@ async fn crossing_the_control_rate_with_a_ping_is_answered_in_the_published_voca
         frame.opcode,
         0x1,
         "GET /v1/pipe-sessions publishes max_controls_per_window {} over control_window_ms {}, \
-         ping shares that budget, and 0.9.0/refusals.json gives crossing it exactly one row: \
+         ping shares that budget, and 0.10.0/refusals.json gives crossing it exactly one row: \
          {} arriving as a protocol-error-frame. Crossing it with a ping answered with {described}.",
         substrate_wire::MAX_SESSION_CONTROLS_PER_WINDOW,
         substrate_wire::SESSION_CONTROL_WINDOW_MS,
@@ -2024,7 +2024,7 @@ async fn crossing_the_control_rate_with_a_ping_is_answered_in_the_published_voca
 ///
 /// JSON Schema 2020-12 defines `"type": "integer"` as "any number with a zero fractional part", so
 /// `80.0` is an integer to every conforming validator, and
-/// `0.9.0/schemas/pty-channel-frame.json`'s resize branch declares the axes
+/// `0.10.0/schemas/pty-channel-frame.json`'s resize branch declares the axes
 /// `{"type": "integer", "minimum": 1, "maximum": 1000}`. `{"columns": 80.0, "rows": 24.0}` is
 /// therefore a valid member of the published client vocabulary, in bounds on both axes, and the
 /// only published answer to it is that the window is applied.
@@ -2032,7 +2032,7 @@ async fn crossing_the_control_rate_with_a_ping_is_answered_in_the_published_voca
 /// `PtyWindow`'s axes are `u64` (`crates/substrate-wire/src/lib.rs:1492-1493`), and `serde_json`
 /// will not read `80.0` into one, so the frame fails `from_slice::<PipeClientFrame>` and the client
 /// is told `session.frame-invalid` — whose published meaning is "The client frame is outside the
-/// closed vocabulary of the mode this attachment serves" (`0.9.0/refusals.json`). The frame is
+/// closed vocabulary of the mode this attachment serves" (`0.10.0/refusals.json`). The frame is
 /// inside it. Any client whose window came out of a division rather than a literal writes this:
 /// `json.dumps({"columns": width / 2})` in Python is `80.0`.
 ///
@@ -2068,7 +2068,7 @@ async fn a_resize_whose_axes_have_a_zero_fractional_part_is_inside_the_published
             columns: 132,
             rows: 43
         }],
-        "0.9.0/schemas/pty-channel-frame.json declares the resize axes as JSON Schema integers in \
+        "0.10.0/schemas/pty-channel-frame.json declares the resize axes as JSON Schema integers in \
          1..=1000, and 132.0 and 43.0 are integers with a zero fractional part to every conforming \
          validator. {frame} is an admitted member of the published client vocabulary with a window \
          in bounds on both axes, so the only published outcome is that the window reaches the \
@@ -2126,11 +2126,130 @@ async fn a_client_sequence_with_a_zero_fractional_part_is_inside_the_published_v
             columns: 132,
             rows: 43
         }],
-        "0.9.0/schemas/pty-channel-frame.json declares every client frame's sequence as a JSON \
+        "0.10.0/schemas/pty-channel-frame.json declares every client frame's sequence as a JSON \
          Schema integer in 1..=18446744073709551615, and 1.0 is an integer with a zero fractional \
          part to every conforming validator — the same reading round 5 adopted for the window axes \
          one property over. {frame} is an admitted member of the published client vocabulary with \
          a first sequence and an in-bounds window, so the only published outcome is that the \
          window reaches the terminal. Substrate answered: {described}"
     );
+}
+
+/// Reads the bounded JSON failure returned when a WebSocket upgrade is refused.
+async fn refused_upgrade(address: SocketAddr, path: &str) -> (u16, Value) {
+    let mut stream = TcpStream::connect(address)
+        .await
+        .expect("connect refused-upgrade client");
+    let request = format!(
+        "GET {path} HTTP/1.1\r\nHost: {address}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {HANDSHAKE_KEY}\r\n\r\n"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write refused-upgrade handshake");
+    let mut head = Vec::new();
+    while !head.ends_with(b"\r\n\r\n") {
+        assert!(head.len() < 16 * 1_024, "bounded handshake response");
+        let mut byte = [0_u8; 1];
+        stream
+            .read_exact(&mut byte)
+            .await
+            .expect("read refused-upgrade head");
+        head.push(byte[0]);
+    }
+    let head = std::str::from_utf8(&head).expect("ASCII handshake response");
+    let status = head
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|value| value.parse::<u16>().ok())
+        .expect("HTTP handshake status");
+    let length = head
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse::<usize>().ok())?
+        })
+        .expect("a refusal carries a bounded JSON body");
+    let mut body = vec![0_u8; length];
+    stream
+        .read_exact(&mut body)
+        .await
+        .expect("read refused-upgrade body");
+    (
+        status,
+        serde_json::from_slice(&body).expect("JSON refusal body"),
+    )
+}
+
+impl Harness {
+    /// Starts one pty session under a caller-chosen operation id, avoiding replay in capacity tests.
+    async fn start_pty_as(&self, workspace: &str, operation: &str) -> String {
+        let (status, session) = self
+            .call(
+                Method::POST,
+                "/v1/pipe-sessions",
+                mutation(
+                    operation,
+                    pty_start(workspace, Some(json!({"columns": 80, "rows": 24}))),
+                ),
+            )
+            .await;
+        assert_eq!(status, StatusCode::ACCEPTED, "{session}");
+        session["result"]["id"]
+            .as_str()
+            .expect("pty session id")
+            .to_owned()
+    }
+}
+
+fn published_refusal_row(code: &str) -> Value {
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("contracts/substrate-wire/0.10.0/refusals.json");
+    let register: Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("the refusal register")).expect("JSON");
+    register["refusals"]
+        .as_array()
+        .expect("register rows")
+        .iter()
+        .find(|row| row["code"].as_str() == Some(code))
+        .cloned()
+        .unwrap_or_else(|| panic!("{code} has no row in 0.10.0/refusals.json"))
+}
+
+/// The attach path uses the same per-code retry fact that the published refusal register uses.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_attachment_capacity_refusal_carries_the_retriable_the_register_publishes() {
+    let harness = Harness::with_terminals().await;
+    let workspace = harness.create_workspace("01JADV7WORKSPACE00000001").await;
+    let mut held = Vec::new();
+    for index in 0..32_u32 {
+        let session = harness
+            .start_pty_as(&workspace, &format!("01JADV7ATTACHCAPACITY{index:04}"))
+            .await;
+        held.push(
+            harness
+                .attach(&format!("/v1/pipe-sessions/{session}/attach"))
+                .await,
+        );
+    }
+    let overflow = harness
+        .start_pty_as(&workspace, "01JADV7ATTACHCAPACITYXX1")
+        .await;
+    let (status, body) = refused_upgrade(
+        harness.server.address,
+        &format!("/v1/pipe-sessions/{overflow}/attach"),
+    )
+    .await;
+    assert_eq!(
+        body["error"]["code"].as_str(),
+        Some(substrate_wire::SESSION_ATTACHMENT_CAPACITY),
+        "the thirty-third attachment must be the capacity refusal: {body}"
+    );
+    let row = published_refusal_row(substrate_wire::SESSION_ATTACHMENT_CAPACITY);
+    assert_eq!(body["error"]["class"], row["class"]);
+    assert_eq!(json!(status), row["status"]);
+    assert_eq!(body["error"]["retriable"], row["retriable"]);
 }

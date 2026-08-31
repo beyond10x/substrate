@@ -22,7 +22,7 @@ published, signed and digest-pinned, but no contract bundle is published as stab
 | CI | [`.github/workflows/gate.yml`](.github/workflows/gate.yml) runs `bash scripts/gate.sh` bare on push to `main`, on pull request and on dispatch, so the job's status is the gate's own; branch protection on `main` requires the `Full gate` check; the first green run is [33275398365](https://github.com/beyond10x/substrate/actions/runs/33275398365). The delegated lane is **absent** there, never reported as passed: a hosted runner has neither bubblewrap nor a delegated cgroup subtree | either give the delegated lane a runner that has both, or keep it the named local pre-release step it is today |
 | Release | [`Dockerfile`](Dockerfile) builds the daemon and `cargo xtask package-bundle <version> --out <dir>` emits a deterministic OCI image layout from a frozen bundle (0.4.0 → manifest `sha256:3758e80bc39f1eb03b15c69410608c9ef1d2ba8095c7e707c6988dbb5894ab00`); daemon image `0.2.3` is published, keyless-signed and verified at `sha256:ab10158266b579d705ce8422c7d2a6e783cde950d30e100f61ca6befc4d0beda`; no workflow publishes or signs the bundle layout | make the existing GHCR package anonymously pullable; publish and sign a contract bundle layout (`story:contract-bundle-oci-artifact`) |
 | Boundary | accepted: standalone, generic execution data plane, Flux-free ([ADR 0001](adr/0001-substrate-is-standalone-and-flux-free.md)) | enforce ADRs 0001–0006 in dependency and conformance tests |
-| Wire contract | bundles 0.1.0–0.8.0 remain frozen and reproducible; 0.9.0 is the current development successor, preserves all 26 routes and adds declarations for the five already-served v2 byte-plane routes in one multi-major registry | package, sign and digest-pin a complete runtime closure and a stable release without changing development authority implicitly |
+| Wire contract | bundles 0.1.0–0.9.0 remain frozen and reproducible; 0.10.0 is the current development successor, preserves all 31 routes and adds PTY as a second session mode without adding a route | package, sign and digest-pin a complete runtime closure and a stable release without changing development authority implicitly |
 | Drivers | Linux host driver implemented; absent delegation keeps exec facts absent and answers `exec.sandbox-unavailable` (501, error class `unserved`) rather than degrading, proven by the portable lane of [`crates/substrate-daemon/tests/runtime_vectors.rs`](crates/substrate-daemon/tests/runtime_vectors.rs); the delegated lane runs only when that test is given `SUBSTRATE_VECTORS_CGROUP_ROOT`, which the gate and CI do not do | retain the delegated lane as a pre-release step and add no optimistic facts |
 | Security | `openat2` beneath/no-link/no-mount I/O, atomic replacement, cleared/shaped environment, namespace no-egress, pids/memory+swap plus cumulatively observed CPU cgroup bounds, backend-identity-bound capability snapshots, output draining, timeout, whole-tree kill, exact capsule-byte verification, read-only `/runtime`, separate writable `/workspace`, owner-private durable state, and bounded normal/restart capsule cleanup are enforced; static-bearer TCP is explicitly development-only | implement the accepted short-lived scoped hosted trust-envelope profile and retain the inline capsule proof while defining a signed complete runtime closure separately |
 | Stack integration | trust, session, event, federation, and contract-release seams accepted in umbrella ADRs 0015–0019 | keep later features behind their named phases |
@@ -35,10 +35,10 @@ trust this page.
 
 - The Rust workspace has five crates — `substrate-wire`, `substrate-store`, `substrate-host`,
   `substrate-daemon` and the offline `substrate-contract-check` ([`Cargo.toml`](Cargo.toml),
-  `[workspace] members`). 0.9.0 is the current development bundle and every earlier bundle
+  `[workspace] members`). 0.10.0 is the current development bundle and every earlier bundle
   directory is frozen; [`scripts/gate.sh`](scripts/gate.sh) runs the four Python bundle checkers
-  plus `cargo xtask check-bundle` for 0.5.0 through 0.9.0 on every invocation, so a green
-  gate is evidence that all nine still hold. 0.5.0 is the first bundle whose checker is a `cargo xtask` verb
+  plus `cargo xtask check-bundle` for 0.5.0 through 0.10.0 on every invocation, so a green
+  gate is evidence that all ten still hold. 0.5.0 is the first bundle whose checker is a `cargo xtask` verb
   rather than a Python script; the four frozen pairs stay Python as the reproducibility proof of the bundles they
   froze. The one recorded exception to immutability is the 2026-08-24 brand rename, which
   re-rendered every bundle in place (AGENTS.md invariant 6). No development bundle becomes a stable
@@ -88,7 +88,7 @@ trust this page.
   limits, capped fair maintenance across reopen, lease clocks, symlink escape refusal, and strict
   minimum host limits. `cargo test --workspace --locked` is the command that counts them; this page
   does not restate the number.
-- All seven bundle trees classify every JSON document and meta-validate their declared Draft 2020-12
+- All ten bundle trees classify every JSON document and meta-validate their declared Draft 2020-12
   schemas with the pinned standards validator. Semantic relations and fixed authorities are checked
   offline, and `cargo xtask check-json` ([`xtask/src/json.rs`](xtask/src/json.rs)) carries the
   negative tests proving unclassified JSON, invalid payloads, invalid schemas and invalid
@@ -118,11 +118,11 @@ trust this page.
   [`Cargo.toml`](Cargo.toml) and the [`Dockerfile`](Dockerfile) builder tag agree.
 - Git, reconnect, workloads, images, volumes, endpoints, Docker and Kubernetes are absent
   rather than stubbed: `contracts/substrate-wire/0.4.0/operations.json` closes 26 operations and
-  none of them is one of those — and `contracts/substrate-wire/0.9.0/operations.json` still closes
-  the same 26, because a terminal arrived as a `mode` field rather than as a route family. The
+  none of them is one of those — and `contracts/substrate-wire/0.10.0/operations.json` closes
+  31, preserving 0.9.0's v1 and v2 routes because a terminal arrived as a `mode` field rather than as a route family. The
   development session is the sole phase-4 byte-plane slice, in two modes: raw pipes under
   [ADR 0007](adr/0007-protocol-processes-use-raw-pipe-sessions.md) and a terminal under
-  [design 13](docs/design/13-pty-sessions.md).
+  [ADR 0019](adr/0019-pty-is-a-second-session-mode.md).
 
 ## How this page is refreshed
 

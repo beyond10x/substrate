@@ -76,7 +76,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   pipes; an allocation failure at start is `session.pty-exhausted` (429, `exhausted`, retriable).
   `--new-session` is not dropped to make a terminal work: that would weaken the confinement floor of
   every non-pty exec to serve one feature.
-- **Contract bundle [`contracts/substrate-wire/0.10.0`](contracts/substrate-wire/0.10.0)**, an
+- **Session refusals are closed and actionable.** The bundle register names all 32 refusal codes,
+  their arrival surface, class, status and retry fact; protocol-error frames use a closed typed
+  vocabulary. The attachment-capacity path now reads the same per-code retry table as the register,
+  so its HTTP response cannot contradict the published `retriable: false` decision.
+- **Contract bundle [`contracts/substrate-wire/0.10.0`](contracts/substrate-wire/0.10.0)**, 251 files, an
   additive successor to `0.9.0`: `adds_routes: 0`, `preserves_routes: 31`. It adds the `mode` and
   `window` start fields, the `sessions.pty` fact, the served-modes capability document and
   `schemas/pty-channel-frame.json`. Every earlier bundle directory keeps its bytes, and
