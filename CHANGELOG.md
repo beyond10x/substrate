@@ -16,6 +16,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [0.3.0] — 2026-08-31
 
+Image: `ghcr.io/beyond10x/b10x-substrate-daemon:0.3.0` at
+`sha256:9217023c2b21837e30d00e5d01cb4ac53095bb32df7b836fa2a514b2931a9902`, keyless-signed; verify
+with `cosign verify`.
+
 ### Added
 
 - **A public builder-oriented Rust SDK.** `b10x-substrate-sdk` verifies the daemon-advertised
