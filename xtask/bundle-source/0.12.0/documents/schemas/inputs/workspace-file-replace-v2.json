@@ -1,0 +1,66 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.12.0:input:workspace-file-replace-v2",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "content": {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "$ref": "../common.json#/$defs/canonical-base64-file"
+        },
+        "encoding": {
+          "const": "base64"
+        }
+      },
+      "required": [
+        "encoding",
+        "data"
+      ],
+      "type": "object"
+    },
+    "create_parents": {
+      "default": false,
+      "type": "boolean"
+    },
+    "expected": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "state": {
+              "const": "absent"
+            }
+          },
+          "required": [
+            "state"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "sha256": {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "state": {
+              "const": "sha256"
+            }
+          },
+          "required": [
+            "state",
+            "sha256"
+          ],
+          "type": "object"
+        }
+      ]
+    }
+  },
+  "required": [
+    "content",
+    "expected"
+  ],
+  "title": "workspace-file-replace-v2 operation input",
+  "type": "object"
+}

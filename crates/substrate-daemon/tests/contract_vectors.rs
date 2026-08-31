@@ -168,6 +168,7 @@ impl VectorDriver {
                     required: true,
                 },
                 applied: Some(AppliedConfinement {
+                    workspace_access: substrate_wire::WorkspaceAccess::ReadWrite,
                     read_only_roots: Vec::new(),
                     secret_slots: Vec::new(),
                     capability_snapshot: SNAPSHOT.to_owned(),
@@ -399,6 +400,14 @@ impl Driver for VectorDriver {
         let mut observation = Self::signal_observation();
         id.clone_into(&mut observation.resource.id);
         observation.resource.workspace.clone_from(&input.workspace);
+        observation.resource.requested.clone_from(&input.sandbox);
+        observation
+            .resource
+            .applied
+            .as_mut()
+            .expect("vector confinement")
+            .workspace_access
+            .clone_from(&input.workspace_access);
         observation.resource.state = ExecState::Running;
         observation.resource.exit = None;
         observation.output_complete = false;
@@ -826,6 +835,15 @@ async fn successor_pipe_session_positive_and_adversarial_vectors_execute_exactly
     seed_workspace(&harness.store);
     assert_exact_http(&harness.execute(&refusal).await, &refusal);
     assert_eq!(harness.driver.start_count.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn workspace_scoped_write_vector_executes_the_production_boundary() {
+    let vector = bundle_vector("0.12.0", "http", "workspace-scoped-write");
+    let harness = Harness::open(false);
+    seed_workspace(&harness.store);
+    assert_exact_http(&harness.execute(&vector).await, &vector);
+    assert_eq!(harness.driver.start_count.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test(flavor = "multi_thread")]

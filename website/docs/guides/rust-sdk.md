@@ -19,7 +19,7 @@ Add the client and Tokio to your application:
 
 ```toml
 [dependencies]
-b10x-substrate-sdk = "=0.3.0"
+b10x-substrate-sdk = "=0.4.0"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -112,7 +112,7 @@ binary as the child. It does not run the service in-process.
 
 ```toml
 [dependencies]
-b10x-substrate-sdk = { version = "=0.3.0", features = ["linked-daemon"] }
+b10x-substrate-sdk = { version = "=0.4.0", features = ["linked-daemon"] }
 ```
 
 Call the child entrypoint before parsing your application's command line, then select linked mode:

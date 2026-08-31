@@ -7,6 +7,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.4.0] — 2026-09-01
+
+### Added
+
+- **Exact workspace write authority.** Exec and raw-pipe starts can retain the historical
+  whole-workspace read/write mode, make the workspace read-only, or name a canonical set of
+  writable subtrees. The driver refuses absence, aliases, overlaps and symlinks, proves the mount
+  ordering before advertising it, and records the exact applied mode. The Rust SDK exposes this
+  policy together with apertures, scratch, read-only roots, secret slots, capsules and exact
+  resource measurements.
+- **Contract bundle [`contracts/substrate-wire/0.12.0`](contracts/substrate-wire/0.12.0)**, an
+  additive successor to `0.11.0`, preserving all 33 routes and adding the workspace-access request,
+  capability and applied-confinement shapes plus an executable scoped-write vector.
+
 ## [0.3.1] — 2026-09-01
 
 Image: `ghcr.io/beyond10x/b10x-substrate-daemon:0.3.1` at

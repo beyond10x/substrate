@@ -59,6 +59,10 @@ exact, explicitly requested resource-usage observation. Bundle `0.11.0` exists f
 consumers to pin and verify before the server claims it; its existence is not a stability or
 compatibility promise.
 
+Bundle `0.12.0` succeeds `0.11.0`, preserves all 33 routes, and adds exact read-only or scoped
+workspace write authority to execution requests and applied confinement. It remains a development
+contract and does not make earlier bundles mutable.
+
 ### Metrics
 
 | Method | Path | Purpose |

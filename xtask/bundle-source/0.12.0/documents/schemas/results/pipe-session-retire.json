@@ -1,0 +1,27 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.12.0:result:pipe-session-retire",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "absent": {
+      "const": true
+    },
+    "id": {
+      "$ref": "../common.json#/$defs/session-id"
+    },
+    "kind": {
+      "const": "session"
+    },
+    "observed_at": {
+      "$ref": "../common.json#/$defs/timestamp"
+    }
+  },
+  "required": [
+    "kind",
+    "id",
+    "absent",
+    "observed_at"
+  ],
+  "title": "pipe-session-retire operation result",
+  "type": "object"
+}

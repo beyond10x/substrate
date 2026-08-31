@@ -1,0 +1,76 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.12.0:result:workspace-file-mutation-v2",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "after_sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "atomic_replacement": {
+      "const": true
+    },
+    "before_sha256": {
+      "oneOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "diff": {
+      "additionalProperties": false,
+      "properties": {
+        "binary": {
+          "type": "boolean"
+        },
+        "text": {
+          "maxLength": 2097152,
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "text",
+        "truncated",
+        "binary"
+      ],
+      "type": "object"
+    },
+    "kind": {
+      "const": "file"
+    },
+    "observed_at": {
+      "$ref": "../common.json#/$defs/timestamp"
+    },
+    "path": {
+      "$ref": "../common.json#/$defs/relative-path"
+    },
+    "size": {
+      "maximum": 1048576,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "workspace": {
+      "$ref": "../common.json#/$defs/workspace-id"
+    }
+  },
+  "required": [
+    "kind",
+    "workspace",
+    "path",
+    "size",
+    "before_sha256",
+    "after_sha256",
+    "atomic_replacement",
+    "diff",
+    "observed_at"
+  ],
+  "title": "workspace-file-mutation-v2 operation result",
+  "type": "object"
+}

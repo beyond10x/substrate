@@ -1,0 +1,19 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.12.0:input:workspace-tree-read-v2",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "include_hidden": {
+      "default": false,
+      "type": "boolean"
+    },
+    "limit_items": {
+      "maximum": 1000,
+      "minimum": 1,
+      "type": "integer"
+    }
+  },
+  "required": [],
+  "title": "workspace-tree-read-v2 operation input",
+  "type": "object"
+}

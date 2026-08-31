@@ -1,0 +1,115 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "kind": "http",
+    "operation": "reconciliation.snapshot.create",
+    "request": {
+      "body": {},
+      "headers": {
+        "x-request-id": "req_snapshot_empty1"
+      },
+      "method": "POST",
+      "path": "/v1/reconciliation-snapshots",
+      "query": {}
+    },
+    "valid_address": true,
+    "valid_input": true
+  },
+  "context": {
+    "actor": "vector-client",
+    "authority": "http-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000",
+    "transport": {
+      "authenticated": true,
+      "kind": "unix",
+      "reachable": false
+    }
+  },
+  "covers": [
+    "snapshot.empty",
+    "ledger.snapshot-independent"
+  ],
+  "expected": {
+    "kind": "http-response",
+    "response": {
+      "body": {
+        "api_version": "v1",
+        "request_id": "req_snapshot_empty1",
+        "result": {
+          "expires_at": "2026-08-13T12:05:00Z",
+          "generation": 41,
+          "history": {
+            "first_seq": null,
+            "item_count": 0,
+            "through_seq": 0,
+            "truncated": false
+          },
+          "id": "snap_01JPHASE3EMPTY",
+          "item_count": 0,
+          "partitions": {
+            "execs": 0,
+            "provenance_events": 0,
+            "workspaces": 0
+          },
+          "resume_cursor": "ev2.scope_vector_subject.41.1",
+          "source_scope": "scope_vector_subject",
+          "through_seq": 1
+        }
+      },
+      "status": 201
+    }
+  },
+  "id": "empty-snapshot-is-non-keyed-at-ledger-capacity",
+  "layer": "http",
+  "phase": 3,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/materialized_item_count",
+      "expected": 0,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/operation_row_count_delta",
+      "expected": 0,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/control_event_cause",
+      "expected": "reconciliation.snapshot.create",
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/event_seq",
+      "expected": 1,
+      "operator": "equals"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "snapshot",
+      "name": "empty-subject",
+      "state": {
+        "current_execs": 0,
+        "current_workspaces": 0,
+        "provenance_events": 0
+      }
+    },
+    {
+      "kind": "operation",
+      "name": "ledger-at-capacity",
+      "state": {
+        "global_bytes": 4294967296,
+        "global_rows": 1000000,
+        "subject_bytes": 536870912,
+        "subject_rows": 100000
+      }
+    }
+  ]
+}
