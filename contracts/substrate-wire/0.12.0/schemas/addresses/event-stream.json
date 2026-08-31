@@ -1,0 +1,9 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.12.0:address:event-stream",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {},
+  "required": [],
+  "title": "event-stream normalized route address",
+  "type": "object"
+}

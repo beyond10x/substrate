@@ -95,6 +95,7 @@ fn pty_start(snapshot: &str) -> PipeSessionStartInput {
                 cpu_millis: 5_000,
             },
             wait: false,
+            workspace_access: substrate_wire::WorkspaceAccess::ReadWrite,
             scratch: None,
             measurements: std::collections::BTreeSet::new(),
             read_only_roots: Vec::new(),

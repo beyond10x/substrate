@@ -89,6 +89,7 @@ The table is the gate's own order (`scripts/gate.sh`).
 | contract bundle 0.9.0 | `cargo xtask check-bundle 0.9.0` — checks the multi-major registry and served catch-all paths |
 | contract bundle 0.10.0 | `cargo xtask check-bundle 0.10.0` — checks the PTY mode, closed frame vocabulary and refusal register |
 | contract bundle 0.11.0 | `cargo xtask check-bundle 0.11.0` — checks hard writable-storage quotas, exact opt-in resource observations and both metrics routes |
+| contract bundle 0.12.0 | `cargo xtask check-bundle 0.12.0` — checks exact read-only/scoped workspace access and its applied observation |
 | contract JSON | `cargo xtask check-json` — every JSON under `contracts/` is classified by exactly one bundled schema, or it fails closed |
 | toolchain | `cargo xtask check-toolchain` |
 

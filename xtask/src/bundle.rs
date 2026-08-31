@@ -508,6 +508,10 @@ fn check_classification(version: &str, released: &Tree, failures: &mut Vec<Strin
 /// A successor that rendered, verified and preserved everything while adding nothing is the failure
 /// this catches; the entries are the acceptance list of the story that cut the bundle.
 fn check_additions(version: &str, released: &Tree, failures: &mut Vec<String>) {
+    if version == "0.12.0" {
+        check_workspace_access_additions(released, failures);
+        return;
+    }
     if version == "0.11.0" {
         check_resource_accounting_additions(released, failures);
         return;
@@ -534,6 +538,52 @@ fn check_additions(version: &str, released: &Tree, failures: &mut Vec<String>) {
     }
     if version == "0.5.0" {
         check_secret_slot_additions(released, failures);
+    }
+}
+
+/// What `0.12.0` exists for: exact read-only and scoped workspace write authority.
+fn check_workspace_access_additions(released: &Tree, failures: &mut Vec<String>) {
+    let require = |path: &str, pointer: &str, what: &str, failures: &mut Vec<String>| {
+        let Some(document) = json_at(released, path, failures) else {
+            return;
+        };
+        if document.pointer(pointer).is_none() {
+            failures.push(format!("{path}: {what} is absent at {pointer}"));
+        }
+    };
+    for (path, pointer, what) in [
+        (
+            "schemas/common.json",
+            "/$defs/workspace-access",
+            "the closed workspace access vocabulary",
+        ),
+        (
+            "schemas/inputs/exec-start.json",
+            "/properties/workspace_access",
+            "the execution workspace access request",
+        ),
+        (
+            "schemas/capability.json",
+            "/properties/facts/properties/exec.workspace-scoped-write",
+            "the proved scoped-write capability",
+        ),
+        (
+            "schemas/resource.json",
+            "/$defs/confinement-applied/oneOf/0/properties/workspace_access",
+            "the applied workspace access observation",
+        ),
+        (
+            "vectors/http/workspace-scoped-write.json",
+            "/action/request/body/input/workspace_access",
+            "the executable scoped-write request",
+        ),
+        (
+            "vectors/http/workspace-scoped-write.json",
+            "/expected/response/body/result/applied/workspace_access",
+            "the executable scoped-write observation",
+        ),
+    ] {
+        require(path, pointer, what, failures);
     }
 }
 
@@ -4381,7 +4431,7 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{}: {error}", bundle.display()));
             checked += 1;
         }
-        assert_eq!(checked, 11, "every released bundle must be checked");
+        assert_eq!(checked, 12, "every released bundle must be checked");
     }
 
     /// Class, the other half: if a parameter's name is not a discriminator, then renaming one is

@@ -90,6 +90,7 @@ fn pty_start(snapshot: &str, argv: &[&str], window: PtyWindow) -> PipeSessionSta
                 cpu_millis: 5_000,
             },
             wait: false,
+            workspace_access: substrate_wire::WorkspaceAccess::ReadWrite,
             scratch: None,
             measurements: std::collections::BTreeSet::new(),
             read_only_roots: Vec::new(),

@@ -31,6 +31,10 @@ pub use model::{
     Operation, OperationState, OutputStream, PipeFrame, PipeSessionObservation, PipeSessionState,
     Refusal, RefusalClass, RunOutput, Signal, WorkspaceObservation, WorkspaceState,
 };
+pub use substrate_wire::{
+    AppliedConfinement, ExecMeasurement, ExecUsage, ExecutionCapsuleInput, ReadOnlyRoot,
+    SecretSlotRequest, StorageLimit, WorkspaceAccess,
+};
 pub use transport::EventStream;
 
 use transport::{Transport, decode_result, encode_path};
@@ -345,6 +349,14 @@ impl Workspace {
             argv: vec![program.into()],
             allowed_environment: Vec::new(),
             environment: BTreeMap::new(),
+            workspace_access: WorkspaceAccess::default(),
+            network: substrate_wire::NetworkMode::None,
+            aperture: None,
+            scratch: None,
+            measurements: BTreeSet::new(),
+            read_only_roots: Vec::new(),
+            secret_slots: Vec::new(),
+            capsule: None,
             policy: None,
             lease_ttl: None,
             operation_id: None,
@@ -357,6 +369,14 @@ impl Workspace {
             argv: vec![program.into()],
             allowed_environment: Vec::new(),
             environment: BTreeMap::new(),
+            workspace_access: WorkspaceAccess::default(),
+            network: substrate_wire::NetworkMode::None,
+            aperture: None,
+            scratch: None,
+            measurements: BTreeSet::new(),
+            read_only_roots: Vec::new(),
+            secret_slots: Vec::new(),
+            capsule: None,
             policy: None,
             lease_ttl: None,
             input_limit_bytes: None,
@@ -492,6 +512,14 @@ pub struct CommandBuilder {
     argv: Vec<String>,
     allowed_environment: Vec<BaselineEnvironment>,
     environment: BTreeMap<String, String>,
+    workspace_access: WorkspaceAccess,
+    network: substrate_wire::NetworkMode,
+    aperture: Option<String>,
+    scratch: Option<StorageLimit>,
+    measurements: BTreeSet<ExecMeasurement>,
+    read_only_roots: Vec<ReadOnlyRoot>,
+    secret_slots: Vec<SecretSlotRequest>,
+    capsule: Option<ExecutionCapsuleInput>,
     policy: Option<ExecutionPolicy>,
     lease_ttl: Option<Duration>,
     operation_id: Option<String>,
@@ -503,6 +531,14 @@ pub struct PipeSessionBuilder {
     argv: Vec<String>,
     allowed_environment: Vec<BaselineEnvironment>,
     environment: BTreeMap<String, String>,
+    workspace_access: WorkspaceAccess,
+    network: substrate_wire::NetworkMode,
+    aperture: Option<String>,
+    scratch: Option<StorageLimit>,
+    measurements: BTreeSet<ExecMeasurement>,
+    read_only_roots: Vec<ReadOnlyRoot>,
+    secret_slots: Vec<SecretSlotRequest>,
+    capsule: Option<ExecutionCapsuleInput>,
     policy: Option<ExecutionPolicy>,
     lease_ttl: Option<Duration>,
     input_limit_bytes: Option<u64>,
@@ -533,6 +569,42 @@ impl PipeSessionBuilder {
 
     pub fn env(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
         self.environment.insert(name.into(), value.into());
+        self
+    }
+
+    pub fn workspace_access(mut self, access: WorkspaceAccess) -> Self {
+        self.workspace_access = access;
+        self
+    }
+
+    pub fn aperture(mut self, name: impl Into<String>) -> Self {
+        self.network = substrate_wire::NetworkMode::Aperture;
+        self.aperture = Some(name.into());
+        self
+    }
+
+    pub fn scratch(mut self, limit: StorageLimit) -> Self {
+        self.scratch = Some(limit);
+        self
+    }
+
+    pub fn measure(mut self, measurement: ExecMeasurement) -> Self {
+        self.measurements.insert(measurement);
+        self
+    }
+
+    pub fn read_only_root(mut self, root: ReadOnlyRoot) -> Self {
+        self.read_only_roots.push(root);
+        self
+    }
+
+    pub fn secret_slot(mut self, slot: SecretSlotRequest) -> Self {
+        self.secret_slots.push(slot);
+        self
+    }
+
+    pub fn capsule(mut self, capsule: ExecutionCapsuleInput) -> Self {
+        self.capsule = Some(capsule);
         self
     }
 
@@ -591,8 +663,8 @@ impl PipeSessionBuilder {
             },
             sandbox: substrate_wire::ConfinementRequest {
                 capability_snapshot: self.workspace.client.machine().capability_snapshot,
-                network: substrate_wire::NetworkMode::None,
-                aperture: None,
+                network: self.network,
+                aperture: self.aperture,
                 profile: substrate_wire::SandboxProfile::Workspace,
                 required: true,
             },
@@ -600,11 +672,12 @@ impl PipeSessionBuilder {
                 .wire()
                 .map_err(|error| SdkError::Protocol(error.to_owned()))?,
             wait: false,
-            scratch: None,
-            measurements: BTreeSet::new(),
-            read_only_roots: Vec::new(),
-            secret_slots: Vec::new(),
-            capsule: None,
+            workspace_access: self.workspace_access,
+            scratch: self.scratch,
+            measurements: self.measurements,
+            read_only_roots: self.read_only_roots,
+            secret_slots: self.secret_slots,
+            capsule: self.capsule,
             lease_ttl_ms: Some(required_duration_millis(lease_ttl)?),
         };
         let input = AdvertisedPipeSessionStart {
@@ -652,6 +725,14 @@ impl PipeSession {
         let fresh = self.client.get_pipe_session(&self.observed.id).await?;
         self.observed = fresh.observed;
         Ok(&self.observed)
+    }
+
+    /// The execution observation behind this session, including applied confinement and usage.
+    pub async fn exec_observation(&self) -> Result<ExecObservation, SdkError> {
+        self.client
+            .get_exec(&self.observed.exec_id)
+            .await
+            .map(|exec| exec.observed)
     }
 
     pub async fn attach(&self) -> Result<PipeChannel, SdkError> {
@@ -873,6 +954,42 @@ impl CommandBuilder {
         self
     }
 
+    pub fn workspace_access(mut self, access: WorkspaceAccess) -> Self {
+        self.workspace_access = access;
+        self
+    }
+
+    pub fn aperture(mut self, name: impl Into<String>) -> Self {
+        self.network = substrate_wire::NetworkMode::Aperture;
+        self.aperture = Some(name.into());
+        self
+    }
+
+    pub fn scratch(mut self, limit: StorageLimit) -> Self {
+        self.scratch = Some(limit);
+        self
+    }
+
+    pub fn measure(mut self, measurement: ExecMeasurement) -> Self {
+        self.measurements.insert(measurement);
+        self
+    }
+
+    pub fn read_only_root(mut self, root: ReadOnlyRoot) -> Self {
+        self.read_only_roots.push(root);
+        self
+    }
+
+    pub fn secret_slot(mut self, slot: SecretSlotRequest) -> Self {
+        self.secret_slots.push(slot);
+        self
+    }
+
+    pub fn capsule(mut self, capsule: ExecutionCapsuleInput) -> Self {
+        self.capsule = Some(capsule);
+        self
+    }
+
     pub fn policy(mut self, policy: ExecutionPolicy) -> Self {
         self.policy = Some(policy);
         self
@@ -924,8 +1041,8 @@ impl CommandBuilder {
             },
             sandbox: substrate_wire::ConfinementRequest {
                 capability_snapshot,
-                network: substrate_wire::NetworkMode::None,
-                aperture: None,
+                network: self.network,
+                aperture: self.aperture,
                 profile: substrate_wire::SandboxProfile::Workspace,
                 required: true,
             },
@@ -933,11 +1050,12 @@ impl CommandBuilder {
                 .wire()
                 .map_err(|error| SdkError::Protocol(error.to_owned()))?,
             wait,
-            scratch: None,
-            measurements: BTreeSet::new(),
-            read_only_roots: Vec::new(),
-            secret_slots: Vec::new(),
-            capsule: None,
+            workspace_access: self.workspace_access,
+            scratch: self.scratch,
+            measurements: self.measurements,
+            read_only_roots: self.read_only_roots,
+            secret_slots: self.secret_slots,
+            capsule: self.capsule,
             lease_ttl_ms: duration_millis(self.lease_ttl)?,
         };
         let (_, observed): (_, substrate_wire::Exec) = self
@@ -1112,6 +1230,7 @@ mod tests {
                 cpu_millis: 100,
             },
             wait: false,
+            workspace_access: substrate_wire::WorkspaceAccess::ReadWrite,
             scratch: None,
             measurements: BTreeSet::new(),
             read_only_roots: Vec::new(),

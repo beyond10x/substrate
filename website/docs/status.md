@@ -46,8 +46,8 @@ a specific refusal when requested.
 - A verified capsule identifies its provided bytes, not the entire host runtime closure.
 - Static-bearer TCP is development-only and is not suitable for public or shared ingress.
 - One daemon is one trust domain; it is not a multi-tenant isolation layer.
-- Development bundle `0.11.0` declares v1 and v2 routes, the PTY session mode, storage quotas and
-  metrics, while the daemon still advertises the
+- Development bundle `0.12.0` declares v1 and v2 routes, the PTY session mode, storage quotas,
+  exact workspace write access and metrics, while the daemon still advertises the
   deliberately older `substrate-wire/0.4.0` contract header.
 
 ## Reading status safely

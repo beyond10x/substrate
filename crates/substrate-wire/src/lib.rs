@@ -34,6 +34,8 @@ pub const EXEC_SCRATCH_MOUNT: &str = "/scratch";
 /// Small on purpose. A closure that needs many roots is a closure that should be assembled rather
 /// than enumerated, and a long list is a request nobody reviewed.
 pub const MAX_READ_ONLY_ROOTS: u32 = 4;
+/// Largest number of distinct writable workspace subtrees in one execution.
+pub const MAX_WORKSPACE_WRITABLE_SUBTREES: u32 = 64;
 /// How many secret slots one start may name (ADR 0012).
 ///
 /// A slot is a credential, and a process that needs many credentials is a process that has been
@@ -1071,6 +1073,9 @@ pub struct AppliedConfinement {
     pub filesystem: AppliedFilesystem,
     pub network: AppliedNetwork,
     pub profile: SandboxProfile,
+    /// Effective access to the adopted workspace (ADR 0023).
+    #[serde(default, skip_serializing_if = "WorkspaceAccess::is_read_write")]
+    pub workspace_access: WorkspaceAccess,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capsule: Option<AppliedExecutionCapsule>,
     /// Every declared host root that was mounted (ADR 0010).
@@ -1096,6 +1101,39 @@ pub enum AppliedFilesystem {
     WorkspaceReadWriteSystemReadOnly,
     #[serde(rename = "workspace-rw-capsule-ro-system-ro")]
     WorkspaceReadWriteCapsuleReadOnlySystemReadOnly,
+}
+
+/// Write authority granted inside the adopted workspace (ADR 0023).
+///
+/// The default is the historical whole-workspace read-write behavior. Keeping it the default and
+/// omitting it from serialized requests preserves every request emitted before this capability.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)]
+pub enum WorkspaceAccess {
+    /// The complete workspace is writable.
+    #[default]
+    ReadWrite,
+    /// No workspace path is writable.
+    ReadOnly,
+    /// Only the named workspace-relative directories are writable.
+    Scoped { writable_subtrees: Vec<String> },
+}
+
+impl WorkspaceAccess {
+    /// Whether this is the backwards-compatible whole-workspace mode.
+    #[must_use]
+    pub fn is_read_write(&self) -> bool {
+        matches!(self, Self::ReadWrite)
+    }
+
+    /// The exact scoped directories, or none for the two unscoped modes.
+    #[must_use]
+    pub fn writable_subtrees(&self) -> Option<&[String]> {
+        match self {
+            Self::Scoped { writable_subtrees } => Some(writable_subtrees),
+            Self::ReadWrite | Self::ReadOnly => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1302,6 +1340,9 @@ pub struct ExecStartInput {
     pub sandbox: ConfinementRequest,
     pub limits: ExecLimits,
     pub wait: bool,
+    /// Effective write authority requested for `/workspace` (ADR 0023).
+    #[serde(default, skip_serializing_if = "WorkspaceAccess::is_read_write")]
+    pub workspace_access: WorkspaceAccess,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scratch: Option<StorageLimit>,
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
@@ -2163,6 +2204,11 @@ pub struct CapabilityFacts {
     pub exec_namespaces: Option<NamespaceFacts>,
     #[serde(rename = "exec.no-egress", skip_serializing_if = "Option::is_none")]
     pub exec_no_egress: Option<bool>,
+    #[serde(
+        rename = "exec.workspace-scoped-write",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub exec_workspace_scoped_write: Option<bool>,
     #[serde(rename = "exec.cgroup-limits", skip_serializing_if = "Option::is_none")]
     pub exec_cgroup_limits: Option<CgroupLimitFacts>,
     #[serde(rename = "exec.cgroup-kill", skip_serializing_if = "Option::is_none")]
@@ -2248,6 +2294,7 @@ impl Default for CapabilityFacts {
             exec_argv_only: None,
             exec_namespaces: None,
             exec_no_egress: None,
+            exec_workspace_scoped_write: None,
             exec_cgroup_limits: None,
             exec_cgroup_kill: None,
             exec_output_limit_bytes: None,
@@ -2419,6 +2466,14 @@ pub enum WireValidationError {
     DuplicateReadOnlyRootMount,
     #[error("two declared read-only root mount trees overlap")]
     OverlappingReadOnlyRootMount,
+    #[error("writable workspace subtrees are outside the closed bounds")]
+    InvalidWorkspaceAccessBounds,
+    #[error("a writable workspace subtree is not a safe relative path")]
+    InvalidWorkspaceWritableSubtree,
+    #[error("writable workspace subtrees are not in canonical order")]
+    NonCanonicalWorkspaceWritableSubtrees,
+    #[error("two writable workspace subtree trees overlap")]
+    OverlappingWorkspaceWritableSubtrees,
     #[error("named secret slots are outside the closed bounds")]
     InvalidSecretSlotBounds,
     #[error("a named secret slot is not a legal slot name")]
@@ -2596,6 +2651,42 @@ pub fn validate_read_only_roots(roots: &[ReadOnlyRoot]) -> Result<(), WireValida
                 && (is_path_beneath(other, &root.mount) || is_path_beneath(&root.mount, other))
         }) {
             return Err(WireValidationError::OverlappingReadOnlyRootMount);
+        }
+    }
+    Ok(())
+}
+
+/// Checks the closed, lexical portion of ADR 0023's workspace access contract.
+///
+/// Host-side existence and symlink checks follow separately because this crate performs no I/O.
+///
+/// # Errors
+///
+/// Returns the first bound, path, order, duplicate or overlap violation.
+pub fn validate_workspace_access(access: &WorkspaceAccess) -> Result<(), WireValidationError> {
+    let WorkspaceAccess::Scoped { writable_subtrees } = access else {
+        return Ok(());
+    };
+    if writable_subtrees.is_empty()
+        || writable_subtrees.len() > MAX_WORKSPACE_WRITABLE_SUBTREES as usize
+    {
+        return Err(WireValidationError::InvalidWorkspaceAccessBounds);
+    }
+    let mut previous: Option<&str> = None;
+    for subtree in writable_subtrees {
+        validate_relative_path(subtree)
+            .map_err(|_| WireValidationError::InvalidWorkspaceWritableSubtree)?;
+        if previous.is_some_and(|value| value >= subtree.as_str()) {
+            return Err(WireValidationError::NonCanonicalWorkspaceWritableSubtrees);
+        }
+        previous = Some(subtree);
+    }
+    for (index, subtree) in writable_subtrees.iter().enumerate() {
+        if writable_subtrees[index + 1..]
+            .iter()
+            .any(|other| is_path_beneath(other, subtree) || is_path_beneath(subtree, other))
+        {
+            return Err(WireValidationError::OverlappingWorkspaceWritableSubtrees);
         }
     }
     Ok(())
@@ -3137,7 +3228,7 @@ mod tests {
     use super::{
         EXECUTION_CAPSULE_HASH_DOMAIN, EXECUTION_CAPSULE_MOUNT, MAX_PTY_WINDOW_COLUMNS,
         MAX_PTY_WINDOW_ROWS, MAX_READ_ONLY_ROOTS, ReadOnlyRoot, WireValidationError,
-        validate_read_only_roots,
+        WorkspaceAccess, validate_read_only_roots, validate_workspace_access,
     };
     use super::{SESSION_PROTOCOL_ERROR_CODES, SessionProtocolErrorCode};
     use serde::Deserialize as _;
@@ -3741,6 +3832,33 @@ mod tests {
             validate_read_only_roots(&[]).is_ok(),
             "and none is the default"
         );
+    }
+
+    #[test]
+    fn workspace_access_is_canonical_and_never_normalised_silently() {
+        assert!(validate_workspace_access(&WorkspaceAccess::ReadWrite).is_ok());
+        assert!(validate_workspace_access(&WorkspaceAccess::ReadOnly).is_ok());
+        assert!(
+            validate_workspace_access(&WorkspaceAccess::Scoped {
+                writable_subtrees: vec!["artifacts".to_owned(), "target/debug".to_owned()],
+            })
+            .is_ok()
+        );
+        for paths in [
+            vec![],
+            vec!["/absolute"],
+            vec!["target/../outside"],
+            vec!["target", "target/debug"],
+            vec!["z", "a"],
+            vec!["same", "same"],
+        ] {
+            assert!(
+                validate_workspace_access(&WorkspaceAccess::Scoped {
+                    writable_subtrees: paths.into_iter().map(str::to_owned).collect(),
+                })
+                .is_err()
+            );
+        }
     }
 
     #[test]

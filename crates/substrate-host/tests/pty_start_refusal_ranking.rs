@@ -69,6 +69,7 @@ fn start(
                 cpu_millis: 5_000,
             },
             wait,
+            workspace_access: substrate_wire::WorkspaceAccess::ReadWrite,
             scratch: None,
             measurements: std::collections::BTreeSet::new(),
             read_only_roots: Vec::new(),
