@@ -882,6 +882,83 @@ async fn pipe_session_clock_refusal_is_durable_when_the_clock_recovers() {
     );
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn pipe_output_backpressure_is_a_durable_named_terminal_observation() {
+    let start = bundle_vector("0.4.0", "http", "pipe-session-start");
+    let harness = Harness::open(false);
+    seed_workspace(&harness.store);
+    assert_exact_http(&harness.execute(&start).await, &start);
+
+    let mut terminal = harness
+        .driver
+        .observed_exec
+        .lock()
+        .expect("observed exec lock")
+        .clone()
+        .expect("running pipe observation");
+    terminal.resource.state = ExecState::Cancelled;
+    terminal.resource.exit = Some(substrate_wire::ExecExit {
+        code: None,
+        signal: Some(substrate_wire::Signal::Kill),
+    });
+    terminal.resource.refusal = Some(substrate_wire::ExecRefusal {
+        class: substrate_wire::ErrorClass::Exhausted,
+        code: substrate_wire::SESSION_OUTPUT_BACKPRESSURE.to_owned(),
+        message: "The raw-pipe live output queue was not drained within its declared bound."
+            .to_owned(),
+    });
+    terminal.stdout = b"durably captured before cancellation".to_vec();
+    terminal.output_complete = true;
+    *harness
+        .driver
+        .observed_exec
+        .lock()
+        .expect("observed exec lock") = Some(terminal);
+
+    let get = json!({
+        "action": {
+            "kind": "http",
+            "request": {
+                "headers": { "x-request-id": "req_pipe_backpressure_get" },
+                "method": "GET",
+                "path": "/v1/pipe-sessions/ses_vector",
+                "query": {}
+            }
+        },
+        "context": { "subject": "local:1000" }
+    });
+    let observed = harness.execute(&get).await;
+    assert_eq!(observed["status"], 200, "{observed}");
+    assert_eq!(observed["body"]["result"]["state"], "cancelled");
+
+    let stored = harness
+        .store
+        .exec(&vector_scope(), "ex_vector")
+        .expect("exec lookup")
+        .expect("durable pipe exec");
+    assert_eq!(stored.resource.state, ExecState::Cancelled);
+    assert_eq!(
+        stored
+            .resource
+            .refusal
+            .as_ref()
+            .expect("named terminal refusal")
+            .code,
+        substrate_wire::SESSION_OUTPUT_BACKPRESSURE
+    );
+    assert_eq!(stored.stdout, b"durably captured before cancellation");
+    assert!(stored.output_complete);
+
+    *harness
+        .driver
+        .observed_exec
+        .lock()
+        .expect("observed exec lock") = None;
+    let replayed = harness.execute(&get).await;
+    assert_eq!(replayed["status"], 200, "{replayed}");
+    assert_eq!(replayed["body"]["result"]["state"], "cancelled");
+}
+
 #[test]
 fn executable_manifest_is_the_exact_review_branch_set() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

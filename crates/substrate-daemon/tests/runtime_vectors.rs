@@ -3321,6 +3321,71 @@ async fn missing_delegated_context_is_refused_by_name_when_required() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn required_delegated_context_is_verified_before_a_successful_replay() {
+    let temporary = TempDir::with_prefix("substrate-delegated-replay-").expect("case directory");
+    let daemon = delegated_daemon(temporary.path(), true).await;
+    let operation = "01JPHASE2DELEGREPLAY001";
+    let input = json!({
+        "source": "empty",
+        "labels": { "case": "required-context-before-replay" }
+    });
+    let context = delegated_context(&delegated_claims());
+
+    let (status, created) = daemon
+        .call(
+            "POST",
+            "/v1/workspaces",
+            "req_delegated_replay_create",
+            Some(&attributed_mutation(operation, &input, &context)),
+        )
+        .await;
+    assert_eq!(status, 201, "{created}");
+    let original_row = ledger_row(&daemon, operation, "req_delegated_replay_row").await;
+
+    expect_error(
+        &daemon
+            .call(
+                "POST",
+                "/v1/workspaces",
+                "req_delegated_replay_absent",
+                Some(&mutation(operation, &input)),
+            )
+            .await,
+        422,
+        "delegated-context.absent",
+    );
+    expect_error(
+        &daemon
+            .call(
+                "POST",
+                "/v1/workspaces",
+                "req_delegated_replay_malformed",
+                Some(&attributed_mutation(operation, &input, "not-a-compact-jws")),
+            )
+            .await,
+        422,
+        "delegated-context.malformed",
+    );
+
+    let (status, replayed) = daemon
+        .call(
+            "POST",
+            "/v1/workspaces",
+            "req_delegated_replay_valid",
+            Some(&attributed_mutation(operation, &input, &context)),
+        )
+        .await;
+    assert_eq!(status, 201, "{replayed}");
+    assert_eq!(replayed["result"], created["result"]);
+    assert_eq!(
+        ledger_row(&daemon, operation, "req_delegated_replay_row_after").await,
+        original_row,
+        "replay authorization must not rewrite first-write attribution"
+    );
+    daemon.close().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn delegated_context_bound_to_another_subject_is_refused() {
     let temporary = TempDir::with_prefix("substrate-delegated-bound-").expect("case directory");
     let daemon = delegated_daemon(temporary.path(), false).await;
