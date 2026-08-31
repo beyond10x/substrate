@@ -349,8 +349,8 @@ export default function Home(): ReactNode {
             </div>
             <p>
               Guarded workspaces, capability-gated exec, durable operations, events, leases and a
-              raw-pipe development slice are served today. Docker, Kubernetes, workloads, images,
-              PTY, Git sources and stable signed packaging are absent.
+              leased raw-pipe and probe-gated PTY development slice are served today. Docker,
+              Kubernetes, workloads, images, Git sources and stable signed packaging are absent.
             </p>
             <Link to="/docs/status">Read status and limitations <span aria-hidden="true">↗</span></Link>
           </div>
