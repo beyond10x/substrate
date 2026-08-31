@@ -7,6 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.3.1] — 2026-09-01
+
 ### Changed
 
 - Updated `ed25519-dalek` to 3.0.0, `jsonschema` to 0.52.1, `tokio-tungstenite` to 0.30.0 and

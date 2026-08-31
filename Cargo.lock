@@ -172,7 +172,7 @@ dependencies = [
 
 [[package]]
 name = "b10x-substrate-daemon"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -210,7 +210,7 @@ dependencies = [
 
 [[package]]
 name = "b10x-substrate-host"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "async-trait",
  "b10x-substrate-wire",
@@ -232,7 +232,7 @@ dependencies = [
 
 [[package]]
 name = "b10x-substrate-sdk"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "b10x-substrate-daemon",
  "b10x-substrate-wire",
@@ -252,7 +252,7 @@ dependencies = [
 
 [[package]]
 name = "b10x-substrate-store"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "b10x-substrate-wire",
  "chrono",
@@ -266,7 +266,7 @@ dependencies = [
 
 [[package]]
 name = "b10x-substrate-wire"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -1990,7 +1990,7 @@ dependencies = [
 
 [[package]]
 name = "substrate-contract-check"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "jsonschema",
  "serde_json",
@@ -2561,7 +2561,7 @@ checksum = "3ad82d2a33cdc9674dc7465672f271e096168fcdbe0f799d9e6db8c5892679dc"
 
 [[package]]
 name = "xtask"
-version = "0.3.0"
+version = "0.3.1"
 dependencies = [
  "anyhow",
  "b10x-substrate-wire",
