@@ -52,7 +52,19 @@ pub fn check(root: &Path) -> Result<Report> {
 
     let expected = std::fs::read(root.join("THIRD_PARTY_LICENSES.html"))
         .context("reading THIRD_PARTY_LICENSES.html")?;
-    let actual = std::fs::read(generated.path()).context("reading generated notices")?;
+    if expected.contains(&b'\r') {
+        failures.push(
+            "THIRD_PARTY_LICENSES.html: committed notice must use canonical LF line endings"
+                .to_owned(),
+        );
+    }
+    // cargo-about 0.9.1 writes CRLF on every platform. The repository byte form is LF so Git's
+    // `core.autocrlf` cannot make a locally generated notice disagree with a clean CI checkout.
+    let actual =
+        String::from_utf8(std::fs::read(generated.path()).context("reading generated notices")?)
+            .context("cargo-about generated non-UTF-8 notices")?
+            .replace("\r\n", "\n")
+            .into_bytes();
     if expected != actual {
         failures.push(
             "THIRD_PARTY_LICENSES.html: not the cargo-about 0.9.1 fixed point of Cargo.lock"
