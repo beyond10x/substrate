@@ -2,12 +2,12 @@
 format: aep.planning-md/1
 id: story:full-review-git-recovery
 kind: story
-status: active
+status: implemented
 title: The full-review work starts from a verified Git database
 summary: Corrupt local objects and unmerged worktrees are recovered without losing user work.
 relations:
 - decomposes: epic:release-hardening
-revision: 3
+revision: 4
 ---
 # Story: Git and worktree recovery
 

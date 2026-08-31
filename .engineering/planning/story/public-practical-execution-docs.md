@@ -2,7 +2,7 @@
 format: aep.planning-md/1
 id: story:public-practical-execution-docs
 kind: story
-status: active
+status: implemented
 title: The public site teaches practical confined execution
 summary: Runnable terminal guides show arbitrary commands, storage and process bounds, output recovery and exact resource observations for agent and non-agent workloads.
 owner: substrate
@@ -12,7 +12,7 @@ tags:
 - website
 relations:
 - decomposes: epic:resource-bounded-execution
-revision: 3
+revision: 4
 ---
 ## Intent
 

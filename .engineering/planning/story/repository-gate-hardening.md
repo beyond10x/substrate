@@ -2,12 +2,12 @@
 format: aep.planning-md/1
 id: story:repository-gate-hardening
 kind: story
-status: active
+status: implemented
 title: The repository gate proves history, dependencies, links and publication fences
 summary: Make every previously false-green repository check fail closed.
 relations:
 - decomposes: epic:release-hardening
-revision: 3
+revision: 4
 ---
 # Story: Repository gate hardening
 

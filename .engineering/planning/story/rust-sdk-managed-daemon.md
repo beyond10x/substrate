@@ -2,7 +2,7 @@
 format: aep.planning-md/1
 id: story:rust-sdk-managed-daemon
 kind: story
-status: draft
+status: implemented
 title: The Rust SDK owns a private daemon child
 summary: External and linked-current-executable builders start, verify, stop and reap a separate daemon process.
 owner: substrate
@@ -11,7 +11,7 @@ tags:
 relations:
 - decomposes: epic:rust-sdk
 - depends_on: story:rust-sdk-client
-revision: 1
+revision: 4
 ---
 # Story: The Rust SDK owns a private daemon child
 

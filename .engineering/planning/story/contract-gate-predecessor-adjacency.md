@@ -2,12 +2,12 @@
 format: aep.planning-md/1
 id: story:contract-gate-predecessor-adjacency
 kind: story
-status: active
+status: implemented
 title: The contract gate refuses a bundle that names a non-adjacent predecessor
 summary: compatibility.predecessor is read from the bundle and never checked against released order, so an older predecessor hides every route added since it.
 relations:
 - decomposes: epic:release-hardening
-revision: 3
+revision: 4
 ---
 # Story: The contract gate refuses a bundle that names a non-adjacent predecessor
 

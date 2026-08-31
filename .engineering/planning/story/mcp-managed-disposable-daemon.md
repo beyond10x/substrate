@@ -2,7 +2,7 @@
 format: aep.planning-md/1
 id: story:mcp-managed-disposable-daemon
 kind: story
-status: draft
+status: proposed
 title: Launch a disposable Substrate daemon behind MCP
 summary: A local MCP adapter owns one fresh daemon lifecycle and projects its public operations for harness testing.
 owner: substrate
@@ -12,7 +12,8 @@ tags:
 - testing
 relations:
 - decomposes: epic:mcp-test-surface
-revision: 1
+- depends_on: story:sdk-promoted-contract-parity
+revision: 2
 ---
 # Story: Launch a disposable daemon behind MCP
 

@@ -2,7 +2,7 @@
 format: aep.planning-md/1
 id: story:execution-resource-metrics
 kind: story
-status: active
+status: implemented
 title: Execs expose exact live and terminal resource usage
 summary: Opted-in runs expose monotonic wall time and kernel CPU, memory, process and I/O observations through GET and latest-wins WebSocket delivery.
 owner: substrate
@@ -12,7 +12,7 @@ tags:
 - wire
 relations:
 - decomposes: epic:resource-bounded-execution
-revision: 3
+revision: 4
 ---
 ## Intent
 

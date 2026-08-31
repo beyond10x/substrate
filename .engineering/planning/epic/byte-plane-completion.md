@@ -2,14 +2,14 @@
 format: aep.planning-md/1
 id: epic:byte-plane-completion
 kind: epic
-status: draft
+status: active
 title: Byte-plane completion
 summary: 'Phase 4''s remaining exit criteria whose design is already accepted: PTY sessions, sealed memfd secret slots, and network session transport with single-use proof-bound authority.'
 owner: substrate
 tags:
 - phase-4
 - wire
-revision: 4
+revision: 7
 ---
 # Epic: Byte-plane completion
 
@@ -88,3 +88,7 @@ scope was written. Four of the six are implemented; `story:pty-sessions` and
 `story:network-session-authority` remain drafts, each now carrying a proposed design
 (`docs/design/13-pty-sessions.md`, `docs/design/14-network-session-authority.md`) and each awaiting
 operator acceptance before code.
+
+## Reconciled state — 2026-09-01
+
+PTY, sealed secret slots, destination-bound egress, the aperture ceiling and their probe evidence are implemented. Network session authority is the only remaining phase-4 capability. Its implementation now depends on the production TLS listener and hosted trust-envelope admission because the accepted proof-bound authority is meaningful only on the production remote path. Phase 4 closes when that story and its clean-room evidence close.

@@ -2,7 +2,7 @@
 format: aep.planning-md/1
 id: story:rust-sdk-client
 kind: story
-status: draft
+status: implemented
 title: The Rust SDK exposes typed workspace and execution handles
 summary: Builders, typed handles and ledger-aware recovery cover the daemon-advertised core contract.
 owner: substrate
@@ -10,7 +10,7 @@ tags:
 - sdk
 relations:
 - decomposes: epic:rust-sdk
-revision: 1
+revision: 4
 ---
 # Story: The Rust SDK exposes typed workspace and execution handles
 

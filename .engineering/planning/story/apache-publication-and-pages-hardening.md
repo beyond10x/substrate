@@ -2,7 +2,7 @@
 format: aep.planning-md/1
 id: story:apache-publication-and-pages-hardening
 kind: story
-status: draft
+status: implemented
 title: Substrate is Apache-2.0 with a hardened public distribution
 summary: Relicense beyond10x-owned history, expose a safe public support surface, and gate the source, site and image for public use.
 owner: substrate
@@ -12,7 +12,7 @@ tags:
 - website
 relations:
 - decomposes: epic:release-hardening
-revision: 1
+revision: 4
 ---
 # Story: Substrate is Apache-2.0 with a hardened public distribution
 

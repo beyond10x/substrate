@@ -11,6 +11,8 @@ tags:
 - wire
 relations:
 - decomposes: epic:byte-plane-completion
+- depends_on: story:production-tls-control-listener
+- depends_on: story:hosted-trust-envelope-admission
 revision: 6
 ---
 # Story: Network session transport over TLS with single-use proof-bound authority

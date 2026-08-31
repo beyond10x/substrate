@@ -2,7 +2,7 @@
 format: aep.planning-md/1
 id: story:workspace-and-scratch-quotas
 kind: story
-status: active
+status: implemented
 title: Workspaces and exec scratch carry hard storage quotas
 summary: Quota-enabled hosts enforce declared byte and inode ceilings on persistent workspaces and per-exec /scratch without scan-based approximation.
 owner: substrate
@@ -12,7 +12,7 @@ tags:
 - wire
 relations:
 - decomposes: epic:resource-bounded-execution
-revision: 3
+revision: 4
 ---
 ## Intent
 

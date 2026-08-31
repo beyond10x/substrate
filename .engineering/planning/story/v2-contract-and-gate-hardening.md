@@ -2,12 +2,12 @@
 format: aep.planning-md/1
 id: story:v2-contract-and-gate-hardening
 kind: story
-status: active
+status: implemented
 title: The successor bundle declares every served API major and closes compatibility gaps
 summary: Contract v2 workspace routes, wildcard paths, predecessor order and transitive schemas.
 relations:
 - decomposes: epic:release-hardening
-revision: 3
+revision: 4
 ---
 # Story: V2 contracts and compatibility hardening
 

@@ -2,7 +2,7 @@
 format: aep.planning-md/1
 id: story:pty-sessions
 kind: story
-status: active
+status: implemented
 title: PTY sessions are a distinct session kind with resize
 summary: Design 05 section 2 fixes the pty kind and frames; README lists PTY as absent; needs ADR and a successor bundle before code.
 owner: substrate
@@ -12,7 +12,7 @@ tags:
 - wire
 relations:
 - decomposes: epic:byte-plane-completion
-revision: 9
+revision: 10
 ---
 # Story: PTY sessions are a distinct session kind with resize
 
