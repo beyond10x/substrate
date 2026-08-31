@@ -2101,6 +2101,7 @@ fn contain_cgroup(cgroup: &Cgroup, error: DriverError) -> DispatchOutcome<ExecOb
 /// `[substrate: output truncated]` into a merged terminal transcript would both speak a statement
 /// the published frame vocabulary has no branch for and destroy the last
 /// `TRUNCATION_MARKER.len()` bytes the child actually wrote inside the bound.
+#[allow(clippy::too_many_arguments)] // Reader, durable bound, live channel and refusal facts are one drain contract.
 async fn drain_capped<R>(
     reader: Option<R>,
     limit: usize,
