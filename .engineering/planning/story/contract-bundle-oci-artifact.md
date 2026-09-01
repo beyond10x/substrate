@@ -13,7 +13,7 @@ tags:
 relations:
 - decomposes: epic:release-hardening
 - depends_on: story:signed-daemon-image
-revision: 12
+revision: 13
 ---
 # Story: The 0.4.0 contract bundle is a signed, digest-pinned OCI artifact
 
@@ -151,3 +151,10 @@ which before the job is written.
 - Annotated tag `0.4.1` names fully gated protected-main merge `961be39`; release preflight passed against gate run `33457279192`.
 - The first publication attempt copied deterministic bundle `0.12.0` to public GHCR digest `sha256:dd901e848c821aca7d55f7b8cf5ee893e1d99a1428b348e32e7ed1045a375319`, then the authenticated immediate ORAS readback failed before signing. A failed-job rerun proved the tag exists at the identical digest but hit the same readback boundary; no daemon image or GitHub release was announced.
 - The follow-up changes GHCR login identity from the repository owner to `github.actor` and makes the post-publish proof explicitly anonymous with a bounded retry. Offline workflow tests pin both properties. Live signing, anonymous ORAS proof and the protected-main changelog pull request remain required before implementation status is earned.
+
+## 0.4.2 recovery evidence — 2026-09-01
+
+- Annotated tag `0.4.2` names protected-main merge `0687551`; the exact push gate run `33460337507` passed before the tag was created.
+- Release run `33460657507` anonymously resolved the existing write-once `0.12.0` tag at `sha256:dd901e848c821aca7d55f7b8cf5ee893e1d99a1428b348e32e7ed1045a375319`, then failed while asking `oras manifest fetch --descriptor` for the development/version annotations. OCI registry descriptors carry digest, media type and size; those annotations are members of the manifest content. The run stopped before signing, daemon publication or GitHub release creation.
+- The recovery change fetches the anonymous manifest after independently comparing the resolved digest, validates its two annotations, and adds an explicit `workflow_dispatch` recovery for an existing annotated tag. Recovery is accepted only from `refs/heads/main`, re-verifies the immutable tag, its main ancestry, its tagged `Cargo.toml` version and the exact recorded gate success, and never moves the tag.
+- The corrected command passed live, credential-free against the public GHCR object. All 10 focused workflow tests and `bash scripts/gate.sh` passed with 2,557 JSON documents across all 12 frozen bundles. Live keyless signing, daemon publication, GitHub release readback and the protected-main changelog pull request remain required before this story can move to `implemented`.

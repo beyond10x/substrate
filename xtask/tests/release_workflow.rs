@@ -104,6 +104,21 @@ fn registry_login_and_bundle_readback_use_their_narrow_identities() {
     assert!(publish < anonymous && anonymous <= readback);
     assert!(readback < bounded_retry && bounded_retry < sign);
     position("was not anonymously resolvable after publication");
+    position("oras manifest fetch \"${BUNDLE_IMAGE}@${remote_digest}\"");
+    assert!(!WORKFLOW.contains("remote_descriptor=$(DOCKER_CONFIG=\"$anonymous_config\""));
+    assert!(
+        !WORKFLOW.contains("oras manifest fetch --descriptor \"${BUNDLE_IMAGE}@${remote_digest}\"")
+    );
+}
+
+#[test]
+fn a_partial_release_can_recover_only_an_existing_tag_from_protected_main() {
+    position("workflow_dispatch:");
+    position("Existing annotated release tag to recover after a partial failure");
+    position("github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name");
+    position("[ \"$WORKFLOW_REF\" != \"refs/heads/main\" ]");
+    position("git show \"${source_sha}:Cargo.toml\"");
+    position("[ \"$EVENT_NAME\" = \"push\" ] && [ \"$source_sha\" != \"$EVENT_SHA\" ]");
 }
 
 #[test]
