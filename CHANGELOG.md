@@ -7,7 +7,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
-## [0.4.1] — 2026-09-01
+## [0.4.2] — 2026-09-01
+
+### Added
+
+- **Production network control is server-authenticated TLS.** ADR 0024 fixes a distinct TLS 1.3
+  HTTPS/WSS listener, explicit owner-safe key material, atomic certificate rotation, no forwarded-
+  address trust and no client-certificate principal mapping. Hosted request identity remains a
+  separate coordinated trust-envelope decision.
+
+### Fixed
+
+- **Contract-bundle publication proves the consumer path.** GHCR login uses the Actions actor, and
+  post-publish bundle resolution runs without credentials with a bounded visibility-propagation
+  retry. This lets a release reuse the exact write-once `0.12.0` bundle after proving its public
+  digest instead of depending on the publisher credential's read behavior.
+
+## [0.4.1] — 2026-09-01 (unpublished)
+
+The annotated tag reached bundle upload, but its workflow refused before signing, daemon-image
+publication or GitHub release announcement. The tag and the uploaded write-once bundle are retained;
+`0.4.2` is the recovery release and never moves or overwrites either one.
 
 ### Added
 
