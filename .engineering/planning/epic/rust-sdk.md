@@ -2,14 +2,14 @@
 format: aep.planning-md/1
 id: epic:rust-sdk
 kind: epic
-status: active
+status: implemented
 title: Public Rust SDK
 summary: A typed Rust client makes governed workspace and process execution straightforward without collapsing the daemon boundary.
 owner: substrate
 tags:
 - rust
 - sdk
-revision: 4
+revision: 6
 ---
 # Epic: Public Rust SDK
 
@@ -27,4 +27,8 @@ Typed client and recovery, managed daemon ownership, approved package publicatio
 
 ## Reconciled state — 2026-09-01
 
-Typed local client handles, managed daemon ownership and the public SDK journey are implemented. The epic remains active for registry publication evidence and parity with the contract frontier the daemon eventually advertises. Remote HTTPS/WSS transport is deliberately owned by epic:remote-serving so the local SDK boundary is not confused with hosted authentication.
+Typed local and remote clients, managed daemon ownership, the public SDK journey and parity with the
+daemon-advertised contract frontier are implemented. Registry publication was deliberately archived:
+ADR 0030 replaces it with source consumption by local path or exact Git revision, and the repository
+gate refuses every publishable workspace member. Remote HTTPS/WSS transport remains owned by
+`epic:remote-serving`; its implementation does not keep this SDK epic open.

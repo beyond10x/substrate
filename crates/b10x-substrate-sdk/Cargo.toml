@@ -2,14 +2,14 @@
 name = "b10x-substrate-sdk"
 description = "Typed Rust client and managed-daemon launcher for b10x Substrate"
 homepage = "https://beyond10x.github.io/substrate/"
-documentation = "https://docs.rs/b10x-substrate-sdk"
+documentation = "https://beyond10x.github.io/substrate/docs/guides/rust-sdk"
 edition.workspace = true
 license.workspace = true
 readme = "README.md"
 repository.workspace = true
 rust-version.workspace = true
 version.workspace = true
-publish = true
+publish = false
 keywords = ["sandbox", "sdk", "execution", "workspace"]
 categories = ["api-bindings", "asynchronous"]
 

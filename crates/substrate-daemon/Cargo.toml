@@ -2,14 +2,14 @@
 name = "b10x-substrate-daemon"
 description = "Standalone substrate HTTP daemon"
 homepage = "https://beyond10x.github.io/substrate/"
-documentation = "https://docs.rs/b10x-substrate-daemon"
+documentation = "https://beyond10x.github.io/substrate/docs/guides/deployment"
 edition.workspace = true
 license.workspace = true
 readme = "README.md"
 repository.workspace = true
 rust-version.workspace = true
 version.workspace = true
-publish = true
+publish = false
 keywords = ["sandbox", "daemon", "execution", "workspace"]
 categories = ["command-line-utilities"]
 

@@ -2,14 +2,14 @@
 name = "b10x-substrate-store"
 description = "Durable substrate operation and resource state"
 homepage = "https://beyond10x.github.io/substrate/"
-documentation = "https://docs.rs/b10x-substrate-store"
+documentation = "https://beyond10x.github.io/substrate/"
 edition.workspace = true
 license.workspace = true
 readme = "README.md"
 repository.workspace = true
 rust-version.workspace = true
 version.workspace = true
-publish = true
+publish = false
 keywords = ["sandbox", "execution", "sqlite"]
 categories = ["database"]
 

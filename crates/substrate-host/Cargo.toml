@@ -2,14 +2,14 @@
 name = "b10x-substrate-host"
 description = "Linux host driver for the standalone substrate"
 homepage = "https://beyond10x.github.io/substrate/"
-documentation = "https://docs.rs/b10x-substrate-host"
+documentation = "https://beyond10x.github.io/substrate/docs/concepts/confinement"
 edition.workspace = true
 license.workspace = true
 readme = "README.md"
 repository.workspace = true
 rust-version.workspace = true
 version.workspace = true
-publish = true
+publish = false
 keywords = ["sandbox", "linux", "execution"]
 categories = ["os::linux-apis"]
 

@@ -2,7 +2,7 @@
 format: aep.planning-md/1
 id: story:rust-sdk-publication
 kind: story
-status: active
+status: archived
 title: The Rust SDK and runtime chain are owner-released Rust packages
 summary: An explicit allowlist, package gate and manual token-off-GitHub release make the SDK consumable without sibling paths.
 owner: substrate
@@ -13,7 +13,7 @@ tags:
 relations:
 - decomposes: epic:rust-sdk
 - depends_on: story:contract-bundle-oci-artifact
-revision: 6
+revision: 8
 ---
 # Story: The Rust SDK and runtime chain are owner-released Rust packages
 
@@ -37,3 +37,18 @@ The implementation, package allowlist, exact internal version edges, package-con
 - Two package runs were byte-identical. Predicted registry checksums are wire `c622fcee231eb2fe7c238b122642b3e9b2734d2d0023e2d1e0e4d2bf3c710c88`, store `fe785c9fd580c40ec8f207fa2edc19c9543bf8bc9c9a802ffb9ca5ffd1bffd10`, host `9aefc892172da3d348953b93dd07ada7d2deb43e13010e66937c66e4b9bdd16e`, daemon `f134c26509711060c6257ecd17e04101116f23571737c595021e01f396299866`, SDK `e45d37f8eb28f10b39c1f910f6715d467f90736108e904e781f59031f527adab`.
 - Temporary-registry dependency resolution and SDK `linked-daemon` verification passed. The owner-private Cargo credentials file exists, but token validity and `publish-new` scope remain intentionally unproven until the operator-authorized live publication.
 - Closure still requires the contract-bundle dependency, five live registry checksums, and credential-free clean-room default SDK, linked-daemon and daemon installation tests.
+
+## Disposition — source distribution replaces registry publication
+
+No b10x Substrate crate was published to crates.io. The operator clarified that b10x does not use
+that registry as a general distribution surface, so completing the original acceptance would create
+an unwanted permanent external release rather than close a product need.
+
+ADR 0030 replaces registry publication with source consumption from a local path or exact Git
+revision and keeps signed GitHub/GHCR artifacts as the release surfaces. Every workspace package is
+now non-publishable, and `cargo xtask check-packages` fails closed on any future `publish = true`
+while retaining the five runtime packages' names, exact internal edges, SPDX metadata, READMEs and
+public documentation targets.
+
+This story is archived as deliberately superseded, not marked implemented: its crates.io outcome
+did not happen and is no longer desired.

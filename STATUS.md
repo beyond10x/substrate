@@ -50,11 +50,13 @@ workflow itself was merged through protected `main` at `693f7d5` after its full 
 Each fact names the file, test or script that proves it, so a reader can re-check it rather than
 trust this page.
 
-- The Rust workspace has five approved runtime registry packages — `b10x-substrate-wire`,
+- The Rust workspace has five source-distributed runtime packages — `b10x-substrate-wire`,
   `b10x-substrate-store`, `b10x-substrate-host`, `b10x-substrate-daemon` and
-  `b10x-substrate-sdk` — plus the private offline `substrate-contract-check` and `xtask`
-  ([`Cargo.toml`](Cargo.toml), `[workspace] members`). `cargo xtask check-packages` refuses any
-  other publishable member and checks exact internal release versions and archive contents.
+  `b10x-substrate-sdk` — plus non-publishable MCP and tooling packages
+  ([`Cargo.toml`](Cargo.toml), `[workspace] members`). Every member sets `publish = false`;
+  `cargo xtask check-packages` checks that closed posture plus exact internal release versions,
+  package names, SPDX metadata, READMEs and public documentation targets. Consumers use a local
+  path or exact Git revision; tagged releases publish GitHub and GHCR artifacts, not crates.io.
   0.15.0 is the current development bundle and every earlier bundle
   directory is frozen; [`scripts/gate.sh`](scripts/gate.sh) runs the four Python bundle checkers
   plus `cargo xtask check-bundle` for 0.5.0 through 0.15.0 on every invocation, so a green

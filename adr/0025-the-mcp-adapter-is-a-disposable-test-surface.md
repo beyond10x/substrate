@@ -32,8 +32,8 @@ part of the surface.
 
 The adapter is development and conformance tooling, not production ingress. It authenticates no
 remote principal, opens no network listener, supplies no policy defaults and claims no MCP stability
-independent of its matching Substrate release. Adding HTTP MCP transport, OAuth, a sixth crates.io
-package or product policy requires a successor decision.
+independent of its matching Substrate release. Adding HTTP MCP transport, OAuth, any crate-registry
+publication or product policy requires a successor decision.
 
 The binary also ships as a separate, keyless-signed public image:
 `ghcr.io/beyond10x/b10x-substrate-mcp:<substrate-version>`. It has no exposed port or volume and is

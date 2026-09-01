@@ -1,6 +1,8 @@
 # Design 18: a Rust SDK remains a wire client
 
-**Status:** accepted as [ADR 0022](../../adr/0022-the-rust-sdk-remains-a-wire-client.md) ·
+**Status:** accepted as [ADR 0022](../../adr/0022-the-rust-sdk-remains-a-wire-client.md), with
+source distribution amended by
+[ADR 0030](../../adr/0030-rust-crates-are-source-distributed-and-non-publishable.md) ·
 **Date:** 2026-08-31
 
 ## Problem
@@ -19,7 +21,7 @@ it can re-execute a private child; every resource operation still crosses the Un
 
 ### One high-level client over the advertised contract
 
-The owner-released `b10x-substrate-sdk` connects to an owner-private Unix socket, reads
+The source-distributed `b10x-substrate-sdk` connects to an owner-private Unix socket, reads
 `GET /v1/machine`, and verifies the `substrate-wire/0.4.0` contract name and digest before it serves
 requests. Its public surface is SDK-owned `Machine`, `Workspace`, `Exec`, `RunOutput`,
 `PipeSession`, `Event`, `Operation` and error types plus builders and resource handles. It does not
@@ -62,17 +64,17 @@ process. The linked feature may call the daemon composition entrypoint only afte
 preserves kernel peer credentials, independent failure, socket permissions and one behavior in
 external and linked deployments.
 
-### Public packages are an explicit exception, not a relaxed gate
+### Runtime crates are source-distributed and non-publishable
 
-The approved registry packages are `b10x-substrate-wire`, `b10x-substrate-store`,
+The source package names are `b10x-substrate-wire`, `b10x-substrate-store`,
 `b10x-substrate-host`, `b10x-substrate-daemon` and `b10x-substrate-sdk`. Runtime dependencies use
-the exact workspace release version. `xtask` and contract-checking packages remain private. The
-gate changes from "everything is private" to that closed allowlist and packages each approved
-crate before a tag may release it.
+the exact workspace release version, and every workspace package sets `publish = false`. The gate
+checks the complete non-publishable set plus the runtime packages' fixed names, exact internal
+edges, SPDX metadata, READMEs and public documentation targets.
 
-The first release is the next development minor and does not make any wire bundle stable. A human
-operator publishes the crates from the fully gated annotated tag in dependency order using a
-scoped crates.io token held off GitHub. The existing release workflow gains no registry secret.
+Consumers use a local path or an exact Git revision. Tagged releases publish signed GitHub and
+GHCR artifacts but no crate registry upload, registry credential or docs.rs page. This distribution
+choice does not make any wire bundle stable.
 
 ## Failure handling
 
@@ -89,6 +91,5 @@ scoped crates.io token held off GitHub. The existing release workflow gains no r
 
 This design adds no route, request field, response field, event, capability or refusal. Frozen
 contract bundles do not move and the daemon continues to advertise `substrate-wire/0.4.0`.
-Publication changes Rust package names and public Rust APIs only. The SDK is versioned below 1.0
-and pins the exact runtime chain used by linked mode.
-
+Source distribution changes Rust package metadata and public Rust APIs only. The SDK is versioned
+below 1.0 and pins the exact runtime chain used by linked mode.
