@@ -336,6 +336,13 @@ at `scripts/bot-token.sh:8` — `org="${B10X_BOT_ORG:-beyond10x}"` — **is** th
 lives in (`git remote -v` shows `github.com/beyond10x/substrate`), so the default is right here. Set
 `B10X_BOT_ORG` only to mint against a different org.
 
+**Bot authentication does not bypass protected `main`.** A direct `scripts/as-bot.sh push origin
+main` is rejected with `GH006` because the required checks are only created after the commit is
+published on a branch. Push a bot-owned branch, open its pull request with `scripts/bot-gh.sh`, wait
+for the required checks on that exact head, and merge through the protected-branch path. Do not
+retry the direct push or weaken protection; this is the ordinary path for every workstation-authored
+change, including release preparation.
+
 **One exception, and it is narrower rather than looser: CI releases use `GITHUB_TOKEN` for registry
 and GitHub-release API writes.** `.github/workflows/release.yml` uses the run's own token for both
 GHCR artifacts and the GitHub release, makes no git commit or push, and holds no App key. The App is
