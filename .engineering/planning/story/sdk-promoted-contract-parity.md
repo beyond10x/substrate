@@ -9,10 +9,11 @@ owner: substrate
 tags:
 - contract
 - sdk
+- wave/remote-foundation-01
 relations:
 - decomposes: epic:rust-sdk
 - depends_on: story:promote-development-contract-frontier
-revision: 2
+revision: 3
 ---
 # Story: The Rust SDK covers the promoted contract
 

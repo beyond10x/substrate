@@ -10,10 +10,11 @@ tags:
 - identity
 - remote
 - security
+- wave/remote-foundation-01
 relations:
 - decomposes: epic:remote-serving
 - depends_on: story:production-tls-control-listener
-revision: 2
+revision: 3
 ---
 # Story: Hosted requests use the accepted trust envelope
 

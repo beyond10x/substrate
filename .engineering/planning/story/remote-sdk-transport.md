@@ -10,12 +10,13 @@ tags:
 - remote
 - sdk
 - tls
+- wave/remote-foundation-01
 relations:
 - decomposes: epic:remote-serving
 - depends_on: story:production-tls-control-listener
 - depends_on: story:hosted-trust-envelope-admission
 - depends_on: story:sdk-promoted-contract-parity
-revision: 2
+revision: 3
 ---
 # Story: The Rust SDK connects over HTTPS and WSS
 
