@@ -21,9 +21,20 @@ From a source checkout:
 cargo build --release --locked -p b10x-substrate-mcp --bin substrate-mcp
 ```
 
-The crate is intentionally `publish = false`. A successor release can publish the separately
-signed `b10x-substrate-mcp` container image; no such image is claimed by the current `0.4.2`
-release.
+The crate is intentionally `publish = false`. Release `0.5.0` publishes the separately signed
+container at
+`ghcr.io/beyond10x/b10x-substrate-mcp@sha256:3fc28533df606b1db8d5583c3f4288551393ecf15c293c7815bfe8f599976316`.
+Run it with no network, a read-only root and only an ephemeral private `/tmp`:
+
+```bash
+docker run --rm -i \
+  --network=none \
+  --read-only \
+  --tmpfs /tmp:rw,nosuid,nodev,noexec,size=16m,mode=700 \
+  ghcr.io/beyond10x/b10x-substrate-mcp@sha256:3fc28533df606b1db8d5583c3f4288551393ecf15c293c7815bfe8f599976316
+```
+
+That container remains disposable test tooling, not production ingress.
 
 ## Connect Codex
 

@@ -42,8 +42,8 @@ non-publishable.
 
 ## Status
 
-**Tagged `0.4.2` (2026-09-01) — a keyless-signed daemon image and signed development bundle. Not a stable
-published contract.**
+**Tagged `0.5.0` (2026-09-01) — keyless-signed daemon, disposable MCP, and development-bundle
+images. Not a stable published contract.**
 
 | area | state |
 |---|---|
@@ -52,8 +52,8 @@ published contract.**
 | 0.4.0 successor development bundle | adds independently verified read-only execution capsules; the delegated model-free lane proves capsule/config/hook binding and correlated native hook evidence before model dispatch |
 | phase 4, [raw pipe sessions](adr/0007-protocol-processes-use-raw-pipe-sessions.md) | source-typed bounded raw-pipe primitive, distinct durable session identity, leased start, single-attachment Unix-WebSocket route ([plan 04](docs/plan/04-direct-byte-plane.md)) |
 | Rust SDK | `b10x-substrate-sdk` provides typed builders, resource handles, durable-operation recovery, event streams, explicit-root HTTPS/WSS and separately supervised external or linked daemon children; current source verifies the explicitly promoted `substrate-wire/0.15.0` name and inner digest before serving an operation |
-| tagged artifact release | [`.github/workflows/release.yml`](.github/workflows/release.yml) publishes the daemon image and the explicitly pinned current development bundle on an annotated bare-version tag whose commit has a green gate run. It copies `cargo xtask package-bundle`'s exact OCI layout to `ghcr.io/beyond10x/b10x-substrate-wire:<bundle-version>`, keyless-signs and verifies both digests before the GitHub release, and refuses an existing canonical tag. It needs no repository secret. The exact changelog digest lines land by bot-authored pull request because `main` is protected |
-| stable publication | **not done.** The latest published OCI bundle is signed `0.12.0` and remains annotated `development`; current source's `0.15.0` successor is not yet published, and neither state makes a development contract stable |
+| tagged artifact release | [`0.5.0`](https://github.com/beyond10x/substrate/releases/tag/0.5.0) publishes the daemon, disposable MCP adapter and explicitly pinned `0.15.0` development bundle. The workflow keyless-signs and verifies all three exact digests, proves anonymous retrieval, and refuses an existing canonical tag. It needs no repository secret |
+| stable publication | **not done.** The published, signed OCI bundle is `0.15.0` and remains annotated `development`; signed distribution does not make the contract stable |
 | phase 4, [pty sessions](adr/0019-pty-is-a-second-session-mode.md) | a terminal is a second session **mode** on the same route family, not a second resource: `mode: "pty"` with a required 1–1000-cell window, a `resize` frame, and the `sessions.pty` fact published only after a startup probe allocated a pair, made it controlling inside a throwaway sandbox and round-tripped a window through the child. Absent, the mode is refused `session.pty-unserved` (501) and **never** served as pipes |
 | network session authority | hosted-only 60-second, one-use bearer authority bound to an Ed25519 key and the accepting TLS 1.3 exporter; Unix retains kernel peer authority and development TCP serves no session mutation routes |
 | Git sources | **absent** |
@@ -72,7 +72,7 @@ The table is the gate's own order (`scripts/gate.sh`).
 
 | step | command |
 |---|---|
-| tests | `cargo test --workspace --locked` |
+| tests | `cargo test --workspace --release --locked` |
 | format | `cargo fmt --all --check` |
 | lint | `cargo clippy --workspace --all-targets --locked -- -D warnings` |
 | links | `cargo xtask check-links` — rejects machine-local and broken repository-relative links |
@@ -85,17 +85,7 @@ The table is the gate's own order (`scripts/gate.sh`).
 | contract bundle 0.2.0 | `python3 scripts/check-contract-bundle-0.2.0.py` |
 | contract bundle 0.3.0 | `python3 scripts/check-contract-bundle-0.3.0.py` |
 | contract bundle 0.4.0 | `python3 scripts/check-contract-bundle-0.4.0.py` |
-| contract bundle 0.5.0 | `cargo xtask check-bundle 0.5.0` — re-renders from its authored source and compares bytes |
-| contract bundle 0.6.0 | `cargo xtask check-bundle 0.6.0` |
-| contract bundle 0.7.0 | `cargo xtask check-bundle 0.7.0` |
-| contract bundle 0.8.0 | `cargo xtask check-bundle 0.8.0` |
-| contract bundle 0.9.0 | `cargo xtask check-bundle 0.9.0` — checks the multi-major registry and served catch-all paths |
-| contract bundle 0.10.0 | `cargo xtask check-bundle 0.10.0` — checks the PTY mode, closed frame vocabulary and refusal register |
-| contract bundle 0.11.0 | `cargo xtask check-bundle 0.11.0` — checks hard writable-storage quotas, exact opt-in resource observations and both metrics routes |
-| contract bundle 0.12.0 | `cargo xtask check-bundle 0.12.0` — checks exact read-only/scoped workspace access and its applied observation |
-| contract bundle 0.13.0 | `cargo xtask check-bundle 0.13.0` — checks the exact hosted Identity audience, route scopes and four safe authentication refusals |
-| contract bundle 0.14.0 | `cargo xtask check-bundle 0.14.0` — checks bounded, one-use session attachment authority bound to its Ed25519 key and accepting TLS channel |
-| contract bundle 0.15.0 | `cargo xtask check-bundle 0.15.0` — checks the exact breaking route rename from `/v1/pipe-sessions` to `/v1/sessions`, with no alias or unrelated drift |
+| contract bundles 0.5.0–0.15.0 | `cargo xtask check-bundles 0.5.0 … 0.15.0` — bounded parallel fixed-point, compatibility, classification and version-addition checks; `check-bundle <version>` remains the focused form |
 | contract JSON | `cargo xtask check-json` — every JSON under `contracts/` is classified by exactly one bundled schema, or it fails closed |
 | toolchain | `cargo xtask check-toolchain` |
 
@@ -104,7 +94,7 @@ Rust 1.97, edition 2024 — the toolchain is pinned by `rust-toolchain.toml`, an
 builder tag disagree. `.github/workflows/gate.yml` runs the same gate on push and pull request.
 
 Every check the gate runs is a `cargo xtask` verb — anything that runs in a b10x foundation
-repository is Rust. Two verbs are not gate steps because `cargo test --workspace --locked`, the
+repository is Rust. Two verbs are not gate steps because `cargo test --workspace --release --locked`, the
 gate's first step, already covers them:
 
 | verb | what it does |
@@ -112,8 +102,9 @@ gate's first step, already covers them:
 | `cargo xtask package-bundle <version> --out <dir>` | packages a released bundle as a deterministic OCI image layout, so a consumer can pin one manifest digest |
 | `cargo xtask render-bundle <version> --out <dir>` | renders a bundle tree from `substrate-wire` and the authored source at `xtask/bundle-source/<version>/`; this is how a successor bundle is cut, and it refuses to write anywhere under `contracts/` |
 
-`cargo xtask check-bundle <version>` **is** a gate step, from `0.5.0` on. It replaces the
-per-version Python checker: re-rendering and comparing bytes catches a released tree that has
+`cargo xtask check-bundles <version>...` runs the 0.5.0-and-later gate checks concurrently with a
+bounded worker count and deterministic reporting. Its focused `check-bundle <version>` form runs
+the same check for one bundle. Re-rendering and comparing bytes catches a released tree that has
 stopped being the fixed point of its own source, which a hand-written checker cannot see.
 
 The four `scripts/render-contract-bundle*.py` and their `check-contract-bundle*.py` partners are
@@ -126,7 +117,7 @@ the frozen `0.4.0` byte for byte.
 `crates/substrate-daemon/tests/runtime_vectors.rs` is the clean-room runner — an independent
 Unix-socket HTTP lane that spawns the shipped `substrate-daemon` binary and asserts only on the
 wire, linking no implementation. It has no gate step of its own because the gate's first step,
-`cargo test --workspace --locked`, runs it. **`bash scripts/delegated-lane.sh` runs that lane**, and needs no privilege: it asks systemd for a
+`cargo test --workspace --release --locked`, runs it. **`bash scripts/delegated-lane.sh` runs that lane**, and needs no privilege: it asks systemd for a
 delegated scope (`systemd-run --user -p Delegate=yes --scope`), moves itself into a child group so
 the delegation root stays process-free, and sets the variable. A user session's own scope is
 root-owned, so trying to `mkdir` in it fails and the lane reports itself **absent, not passed**
@@ -137,7 +128,7 @@ Set `SUBSTRATE_VECTORS_CGROUP_ROOT=<delegated-root>` by hand instead,
 shaped-environment, pids/memory, timeout, truncation and whole-tree cancellation cases:
 
 ```console
-cargo test --workspace --locked -- --nocapture   # the runner prints its case inventory
+cargo test --workspace --release --locked -- --nocapture   # the runner prints its case inventory
 ```
 
 The runner prints its current portable or delegated case inventory from each fresh execution;

@@ -9,6 +9,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [0.5.0] — 2026-09-01
 
+Daemon image: `ghcr.io/beyond10x/b10x-substrate-daemon:0.5.0` at
+`sha256:5dc8a1a6b61c9b652817c0ae54a4504c23bf781a6fed3cb7617e535bf7c9e786`, keyless-signed;
+verify with `cosign verify`.
+
+Disposable MCP image: `ghcr.io/beyond10x/b10x-substrate-mcp:0.5.0` at
+`sha256:3fc28533df606b1db8d5583c3f4288551393ecf15c293c7815bfe8f599976316`, development-only and
+keyless-signed; verify with `cosign verify`.
+
+Contract bundle: `ghcr.io/beyond10x/b10x-substrate-wire:0.15.0` at
+`sha256:ba95171e3a05d7917e4083759107132ad6fb707003e791e15b47d9fb20424ac8`, annotated
+`development`, keyless-signed; verify with `cosign verify`. Publication, digest pinning and a
+verified signature do not make the development contract stable.
+
 ### Added
 
 - **Hosted raw-pipe attachment authority is one-use and TLS-channel-bound.** A scoped hosted client
@@ -52,9 +65,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `c0a6f82601debdca988f6c3cf93b89ebb7d086b8c9f74b4b7c9fb17d664357b3` together. Its direct
   predecessor is 0.14.0; it replaces exactly eight `/v1/pipe-sessions` route addresses, preserves
   all 26 non-session addresses and every operation id, and retains the hosted attachment-authority
-  semantics added in 0.14.0. This is a deliberate pre-1.0 break. The latest separately signed OCI
-  distribution remains 0.12.0 at
-  `sha256:dd901e848c821aca7d55f7b8cf5ee893e1d99a1428b348e32e7ed1045a375319`. The clean-room shipped-
+  semantics added in 0.14.0. This is a deliberate pre-1.0 break. Its separately signed OCI
+  distribution is 0.15.0 at
+  `sha256:ba95171e3a05d7917e4083759107132ad6fb707003e791e15b47d9fb20424ac8`. The clean-room shipped-
   binary lane checks the pair on every HTTP response and WebSocket route probe, while SDK fixtures
   reject missing, older, unknown and wrong-digest claims before serving an operation. The bundle
   remains development, not stable.

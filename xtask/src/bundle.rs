@@ -62,6 +62,20 @@ pub struct Args {
     pub source: Option<PathBuf>,
 }
 
+/// `cargo xtask check-bundles <version>...` — the bounded parallel gate form.
+#[derive(Debug, Parser)]
+pub struct ManyArgs {
+    /// Released bundle versions to verify.
+    #[arg(required = true, num_args = 1..)]
+    pub versions: Vec<String>,
+    /// Released bundle root (default `contracts/substrate-wire`).
+    #[arg(long, value_name = "DIR")]
+    pub contracts_root: Option<PathBuf>,
+    /// Authored source root (default `xtask/bundle-source`).
+    #[arg(long, value_name = "DIR")]
+    pub source: Option<PathBuf>,
+}
+
 pub fn run(args: &Args) -> Result<ExitCode> {
     let root = repo::root()?;
     let contracts = args
@@ -79,6 +93,70 @@ pub fn run(args: &Args) -> Result<ExitCode> {
         repository_root: root,
         wire: render::wire_constants(),
     })?
+    .emit())
+}
+
+pub fn run_many(args: &ManyArgs) -> Result<ExitCode> {
+    let root = repo::root()?;
+    let contracts = args
+        .contracts_root
+        .clone()
+        .unwrap_or_else(|| root.join("contracts/substrate-wire"));
+    let source = args
+        .source
+        .clone()
+        .unwrap_or_else(|| root.join("xtask/bundle-source"));
+    let wire = render::wire_constants();
+    let width = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(args.versions.len());
+    let mut summaries = Vec::new();
+    let mut failures = Vec::new();
+
+    for batch in args.versions.chunks(width) {
+        let reports = std::thread::scope(|scope| {
+            let workers = batch
+                .iter()
+                .map(|version| {
+                    let inputs = Inputs {
+                        version: version.clone(),
+                        source_root: source.clone(),
+                        contracts_root: contracts.clone(),
+                        repository_root: root.clone(),
+                        wire: wire.clone(),
+                    };
+                    scope.spawn(move || check(&inputs))
+                })
+                .collect::<Vec<_>>();
+            batch
+                .iter()
+                .zip(workers)
+                .map(|(version, worker)| {
+                    worker.join().map_err(|_| {
+                        anyhow!("contract bundle worker for substrate-wire/{version} panicked")
+                    })?
+                })
+                .collect::<Result<Vec<_>>>()
+        });
+        for (version, report) in batch.iter().zip(reports?) {
+            let (summary, local) = report.into_parts();
+            if local.is_empty() {
+                summaries.push(summary);
+            } else {
+                failures.extend(
+                    local
+                        .into_iter()
+                        .map(|failure| format!("substrate-wire/{version}: {failure}")),
+                );
+            }
+        }
+    }
+
+    Ok(if failures.is_empty() {
+        Report::passed(summaries.join("\n"))
+    } else {
+        Report::failed(failures)
+    }
     .emit())
 }
 

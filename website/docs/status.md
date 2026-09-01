@@ -26,9 +26,9 @@ verify it through `GET /v1/machine`.
 | observations | explicit live and terminal wall, CPU, memory peak/current, process, OOM, block-I/O, and scratch usage facts |
 | sessions | leased raw-pipe and probe-gated PTY modes at `/v1/sessions`, with one Unix-WebSocket or authority-bound hosted WSS attachment |
 | Rust SDK source | complete promoted-contract coverage over Unix or explicit-root TLS 1.3 HTTPS/WSS, with serializable observations, exact optional facts, keyed mutations, PTY resize, metrics and snapshots |
-| disposable MCP source | private stdio adapter over the SDK; bounded tools/resources, caller operation IDs, portable named refusal and native delegated cleanup evidence |
+| disposable MCP | private stdio adapter over the SDK; bounded tools/resources, caller operation IDs, portable named refusal and native delegated cleanup evidence; published as a separately signed 0.5.0 image |
 | capsules | digest-verified read-only runtime material beside a writable workspace |
-| distribution | Apache-2.0 source and a keyless-signed daemon image |
+| distribution | Apache-2.0 source plus keyless-signed 0.5.0 daemon and MCP images and the signed 0.15.0 development bundle |
 
 ## Explicitly absent
 
@@ -49,11 +49,10 @@ a specific refusal when requested.
 - Production TLS admits callers only through online Identity resolution. Identity unavailability
   fails closed, and no cached authority or caller-written identity is used.
 - One daemon is one trust domain; it is not a multi-tenant isolation layer.
-- Current development source advertises `substrate-wire/0.15.0` and the SHA-256 of its inner
-  `bundle.json` as one claim. The tagged `0.4.2` daemon and signed development bundle remain on
-  `substrate-wire/0.12.0`; do not mix that release with a client built only for the successor.
-  Version `0.15.0` deliberately replaces `/v1/pipe-sessions` with `/v1/sessions` and serves no
-  compatibility alias.
+- Tagged release `0.5.0` and current development source advertise `substrate-wire/0.15.0` and the
+  SHA-256 of its inner `bundle.json` as one claim. Version `0.15.0` deliberately replaces
+  `/v1/pipe-sessions` with `/v1/sessions` and serves no compatibility alias. The published bundle
+  remains a development contract.
 
 ## Reading status safely
 

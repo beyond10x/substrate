@@ -14,8 +14,9 @@ pipe-session operations to 0.2.0's nineteen; 0.4.0 keeps those 26 and adds six e
 driver vectors without adding a route, 0.10.0 adds a terminal to the same 31 operations by growing a
 field rather than a route family ([ADR 0019](adr/0019-pty-is-a-second-session-mode.md)), and 0.11.0
 preserves those routes while adding two metrics routes plus hard writable-storage quota requests.
-This is development conformance, not stable contract publication: daemon image `0.3.1` is
-published, signed and digest-pinned, but no contract bundle is published as stable.
+This is development conformance, not stable contract publication. Release `0.5.0` publishes,
+keyless-signs, verifies and anonymously reads back the daemon, disposable MCP adapter and current
+`0.15.0` development bundle; none of that makes the wire contract stable.
 
 Production TLS 1.3 HTTPS/WSS transport is implemented in current source with explicit identity
 files, atomic SIGHUP rotation and fail-closed hosted Identity admission. Five-minute opaque access
@@ -25,25 +26,24 @@ per-request authority and proof-bound WSS. A node-bound Kubernetes serving profi
 Docker/Kubernetes drivers and a direct
 Firecracker driver remain proposed. The observed development EKS nodes expose no KVM device or microVM RuntimeClass,
 so Firecracker live conformance needs a dedicated KVM-capable node pool and is absent on the
-current nodes. Substrate `0.4.2` is merged and annotated at commit `0687551`; it carries ADRs 0024
-and 0025 plus the `0.12.0` bundle, scoped workspace writes and broader SDK parity. Recovery release
-run `33462225323` reused and verified the frozen bundle, built the tagged daemon source, signed and
-verified both digests, proved anonymous retrieval and published the GitHub release. The recovery
-workflow itself was merged through protected `main` at `693f7d5` after its full gate passed.
+current nodes. Substrate `0.5.0` is annotated at commit `fcb48e5`; release run
+[`33498193209`](https://github.com/beyond10x/substrate/actions/runs/33498193209) built the tagged
+source, signed and verified all three digests, proved anonymous retrieval and published the GitHub
+release only after the exact tagged commit's Full gate succeeded.
 
 | Area | State | Next proof |
 |---|---|---|
-| Source | the standalone public repository `beyond10x/substrate` (`git remote -v`), public under atlas ADR 0003 ([CHANGELOG.md](CHANGELOG.md), 0.2.1); the latest annotated tag and verified GitHub release are `0.4.2` at `0687551` | keep the portable-document and credential invariants enforced — `cargo xtask check-links` and `cargo xtask check-secrets` are full-gate steps |
+| Source | the standalone public repository `beyond10x/substrate` (`git remote -v`), public under atlas ADR 0003 ([CHANGELOG.md](CHANGELOG.md), 0.2.1); the latest annotated tag and verified GitHub release are `0.5.0` at `fcb48e5` | keep the portable-document and credential invariants enforced — `cargo xtask check-links` and `cargo xtask check-secrets` are full-gate steps |
 | CI | [`.github/workflows/gate.yml`](.github/workflows/gate.yml) runs `bash scripts/gate.sh` bare on push to `main`, on pull request and on dispatch, so the job's status is the gate's own; branch protection on `main` requires the `Full gate` check; the first green run is [33275398365](https://github.com/beyond10x/substrate/actions/runs/33275398365). The delegated lane is **absent** there, never reported as passed: a hosted runner has neither bubblewrap nor a delegated cgroup subtree | either give the delegated lane a runner that has both, or keep it the named local pre-release step it is today |
-| Release | recovery run `33462225323` published, keyless-signed, verified and anonymously read back daemon `ghcr.io/beyond10x/b10x-substrate-daemon:0.4.2` at `sha256:1aac0c63c1f1e7dae2dff8f1f20a06b4d7f5461b61bb172b4a8a3f137cd2f6d1` and development bundle `ghcr.io/beyond10x/b10x-substrate-wire:0.12.0` at `sha256:dd901e848c821aca7d55f7b8cf5ee893e1d99a1428b348e32e7ed1045a375319`; the public release is [0.4.2](https://github.com/beyond10x/substrate/releases/tag/0.4.2), authored by `github-actions[bot]`; both digest lines and the implemented release story are on protected `main`; the bundle remains development, not stable | retain write-once tags, anonymous readback and signature verification in every later release |
+| Release | run [`33498193209`](https://github.com/beyond10x/substrate/actions/runs/33498193209) published, keyless-signed, verified and anonymously read back daemon `ghcr.io/beyond10x/b10x-substrate-daemon:0.5.0` at `sha256:5dc8a1a6b61c9b652817c0ae54a4504c23bf781a6fed3cb7617e535bf7c9e786`, disposable MCP `ghcr.io/beyond10x/b10x-substrate-mcp:0.5.0` at `sha256:3fc28533df606b1db8d5583c3f4288551393ecf15c293c7815bfe8f599976316`, and development bundle `ghcr.io/beyond10x/b10x-substrate-wire:0.15.0` at `sha256:ba95171e3a05d7917e4083759107132ad6fb707003e791e15b47d9fb20424ac8`; the public release is [0.5.0](https://github.com/beyond10x/substrate/releases/tag/0.5.0), authored by `github-actions[bot]`; the bundle remains development, not stable | retain write-once tags, anonymous readback and signature verification in every later release |
 | Boundary | accepted: standalone, generic execution data plane, Flux-free ([ADR 0001](adr/0001-substrate-is-standalone-and-flux-free.md)) | enforce ADRs 0001–0006 in dependency and conformance tests |
-| Wire contract | bundles 0.1.0–0.15.0 remain frozen and reproducible; 0.15.0 is the advertised development frontier at inner `bundle.json` digest `c0a6f82601debdca988f6c3cf93b89ebb7d086b8c9f74b4b7c9fb17d664357b3`, replacing exactly eight `/v1/pipe-sessions` addresses with `/v1/sessions` while preserving the other 26 addresses and every operation id; the gate also retains the recorded 0.12.0 lineage bridge | notify and observe consumer compatibility, publish the successor only through a later eligible release, and do not describe it as stable |
+| Wire contract | bundles 0.1.0–0.15.0 remain frozen and reproducible; published 0.15.0 is the advertised development frontier at inner `bundle.json` digest `c0a6f82601debdca988f6c3cf93b89ebb7d086b8c9f74b4b7c9fb17d664357b3`, replacing exactly eight `/v1/pipe-sessions` addresses with `/v1/sessions` while preserving the other 26 addresses and every operation id; the gate also retains the recorded 0.12.0 lineage bridge | notify and observe consumer compatibility, and do not describe the published bundle as stable |
 | Drivers | Linux host driver implemented; absent delegation keeps exec, resource-accounting and project-quota facts absent and answers named `unserved` refusals rather than degrading; the delegated execution lane runs only when given `SUBSTRATE_VECTORS_CGROUP_ROOT`, and project quotas require a separately provisioned filesystem and exclusive ID range | retain the delegated lane as a pre-release step and add no optimistic facts |
 | Security | `openat2` beneath/no-link/no-mount I/O, atomic replacement, cleared/shaped environment, namespace no-egress, pids/memory+swap plus cumulatively observed CPU cgroup bounds, backend-identity-bound capability snapshots, output draining, timeout, whole-tree kill, exact capsule-byte verification, read-only `/runtime`, separate writable `/workspace`, owner-private durable state, and bounded normal/restart capsule cleanup are enforced; static-bearer TCP is loopback-only and explicitly development-only; production network transport is TLS 1.3 with owner-safe identity material, atomic rotation, online exact-audience Identity admission and one-use key/channel-bound WSS attachment authority | retain negative hosted-auth and session-authority conformance without weakening the inline capsule proof |
 | Stack integration | trust, session, event, federation, and contract-release seams accepted in umbrella ADRs 0015–0019; the planning store now carries dependency-gated remote-serving, Kubernetes, Docker and Firecracker tracks | accept each track's design/ADR and environment gate before capability code; keep product policy outside Substrate |
 | Implementation | the phase-4 raw-pipe slice has distinct durable session identity, session-native lifecycle operations, one scoped Unix-WebSocket attachment, atomic terminal/restart projection and verified execution capsules, proven by [`crates/substrate-daemon/tests`](crates/substrate-daemon/tests) — `pipe_session.rs`, `websocket.rs`, `contract_vectors.rs`. A pty is a second **mode** on that same slice, with the controlling terminal acquired inside the sandbox after bubblewrap's `setsid`; the delegated lane of [`runtime_vectors.rs`](crates/substrate-daemon/tests/runtime_vectors.rs) drives an interactive shell through one — echo, a resize the child reads back with `TIOCGWINSZ`, and whole-tree cleanup on attachment loss — and the portable lane proves `session.pty-unserved`. The delegated model-free harness lane with correlated hook evidence is a recorded prior observation ([Plan 04](docs/plan/04-direct-byte-plane.md)), not something this repository re-runs in its own gate | retain the raw-pipe, capsule and terminal evidence while adding only separately gated authority and release work |
 | Rust SDK | current source verifies the promoted 0.15.0 name and inner digest before serving an operation; sends session requests only to `/v1/sessions`; exposes typed guarded-file, PTY, metrics, snapshot, event and bounded-output APIs; preserves optional capability facts; accepts caller ids on every mutation; serializes SDK observations; supervises an external or linked daemon; and connects remotely over explicit-root TLS 1.3 HTTPS/WSS with per-request Identity authority and fresh proof-bound session authority | retain local/remote parity and distribute the SDK from source rather than crates.io |
-| MCP test surface | current source provides a private SDK-only `substrate-mcp` stdio binary with bounded JSONL, a closed tool/resource vocabulary, exact refusal projection, caller operation ids, per-instance authority tracking and ordered cleanup; portable and delegated shipped-binary lanes plus a manual real-Codex run prove the intended harness surface | publish the separately signed adapter image with the next eligible release; keep HTTP, OAuth and production ingress absent |
+| MCP test surface | current source provides a private SDK-only `substrate-mcp` stdio binary with bounded JSONL, a closed tool/resource vocabulary, exact refusal projection, caller operation ids, per-instance authority tracking and ordered cleanup; portable and delegated shipped-binary lanes plus a manual real-Codex run prove the intended harness surface; release 0.5.0 publishes its separately signed image at `sha256:3fc28533df606b1db8d5583c3f4288551393ecf15c293c7815bfe8f599976316` | keep HTTP, OAuth and production ingress absent |
 
 ## Repository facts
 
@@ -59,7 +59,7 @@ trust this page.
   path or exact Git revision; tagged releases publish GitHub and GHCR artifacts, not crates.io.
   0.15.0 is the current development bundle and every earlier bundle
   directory is frozen; [`scripts/gate.sh`](scripts/gate.sh) runs the four Python bundle checkers
-  plus `cargo xtask check-bundle` for 0.5.0 through 0.15.0 on every invocation, so a green
+  plus bounded-parallel `cargo xtask check-bundles` for 0.5.0 through 0.15.0 on every invocation, so a green
   gate is evidence that all fifteen still hold. 0.5.0 is the first bundle whose checker is a `cargo xtask` verb
   rather than a Python script; the four frozen pairs stay Python as the reproducibility proof of the bundles they
   froze. The one recorded exception to immutability is the 2026-08-24 brand rename, which
@@ -108,9 +108,9 @@ trust this page.
   across signal and expiry, exact post-commit event effects, subject-local wake hints,
   restart-to-unknown without redispatch, observed-effect and store-failure recovery, real WebSocket
   limits, capped fair maintenance across reopen, lease clocks, symlink escape refusal, and strict
-  minimum host limits. `cargo test --workspace --locked` is the command that counts them; this page
+  minimum host limits. `cargo test --workspace --release --locked` is the command that counts them; this page
   does not restate the number.
-- All twelve bundle trees classify every JSON document and meta-validate their declared Draft 2020-12
+- All fifteen bundle trees classify every JSON document and meta-validate their declared Draft 2020-12
   schemas with the pinned standards validator. Semantic relations and fixed authorities are checked
   offline, and `cargo xtask check-json` ([`xtask/src/json.rs`](xtask/src/json.rs)) carries the
   negative tests proving unclassified JSON, invalid payloads, invalid schemas and invalid
@@ -138,8 +138,8 @@ trust this page.
 - The toolchain is pinned, not floating: [`rust-toolchain.toml`](rust-toolchain.toml) declares the
   channel, and `cargo xtask check-toolchain` fails the gate unless it, the `rust-version` in
   [`Cargo.toml`](Cargo.toml) and the [`Dockerfile`](Dockerfile) builder tag agree.
-- Git, reconnect, workloads, images, volumes, endpoints, production remote TLS/auth, Docker,
-  Kubernetes and Firecracker are absent
+- Git workspace sources, workloads, images, volumes, endpoints, Docker, Kubernetes and Firecracker
+  are absent
   rather than stubbed: `contracts/substrate-wire/0.4.0/operations.json` closes 26 operations and
   none of them is one of those — and `contracts/substrate-wire/0.10.0/operations.json` closes
   31, preserving 0.9.0's v1 and v2 routes because a terminal arrived as a `mode` field rather than as a route family. The
@@ -158,12 +158,12 @@ python3 scripts/check-contract-bundle.py             # 0.1.0 counts
 python3 scripts/check-contract-bundle-0.2.0.py       # 0.2.0 counts
 python3 scripts/check-contract-bundle-0.3.0.py       # 0.3.0 counts
 cargo xtask check-bundle 0.15.0                     # the current Wire contract row
-cargo test --workspace --locked -- --nocapture       # the clean-room case inventory
+cargo test --workspace --release --locked -- --nocapture       # the clean-room case inventory
 cargo xtask check-toolchain                          # the pinned channel
 cargo xtask package-bundle 0.15.0 --out <dir>        # the current OCI manifest digest
 ```
 
-`cargo test --workspace --locked` is the first step of the gate and reports its own totals. The
+`cargo test --workspace --release --locked` is the first step of the gate and reports its own totals. The
 Release row's repository-controlled claims are checked by
 [`xtask/tests/release_workflow.rs`](xtask/tests/release_workflow.rs): the current bundle pin, exact
 OCI-layout copy, write-once tag checks, digest-signing and verification order, development status

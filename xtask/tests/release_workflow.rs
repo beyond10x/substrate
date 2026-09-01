@@ -11,7 +11,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const WORKFLOW: &str = include_str!("../../.github/workflows/release.yml");
-const MCP_DOCKERFILE: &str = include_str!("../../Dockerfile.mcp");
+const GATE_WORKFLOW: &str = include_str!("../../.github/workflows/gate.yml");
+const DOCKERFILE: &str = include_str!("../../Dockerfile");
 
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -171,14 +172,46 @@ fn bundle_visibility_is_proven_before_the_daemon_tag_is_mutated() {
 
 #[test]
 fn mcp_image_is_stdio_only_and_its_exact_binary_is_smoke_tested() {
-    assert!(MCP_DOCKERFILE.contains("gcr.io/distroless/cc-debian12:nonroot@sha256:"));
-    assert!(MCP_DOCKERFILE.contains("ENTRYPOINT [\"/usr/local/bin/substrate-mcp\"]"));
-    assert!(!MCP_DOCKERFILE.contains("EXPOSE"));
-    assert!(!MCP_DOCKERFILE.contains("VOLUME"));
-    position("Dockerfile.mcp");
+    let mcp = DOCKERFILE
+        .split_once(" AS mcp\n")
+        .expect("named MCP runtime stage")
+        .1
+        .split_once("\nFROM daemon AS release")
+        .expect("default daemon alias after MCP runtime stage")
+        .0;
+    assert!(DOCKERFILE.contains("gcr.io/distroless/cc-debian12:nonroot@sha256:"));
+    assert!(mcp.contains("ENTRYPOINT [\"/usr/local/bin/substrate-mcp\"]"));
+    assert!(!mcp.contains("EXPOSE"));
+    assert!(!mcp.contains("VOLUME"));
+    position("--target mcp");
     position("SUBSTRATE_MCP_BINARY=\"${PWD}/target/mcp-image-under-test/substrate-mcp\"");
     position("SUBSTRATE_MCP_DOCKER_IMAGE=\"${MCP_IMAGE}:${VERSION}\"");
     position("-p b10x-substrate-mcp --test stdio -- --nocapture");
+}
+
+#[test]
+fn release_compiles_both_runtime_binaries_once() {
+    assert_eq!(
+        DOCKERFILE.matches("cargo build --locked --release").count(),
+        1
+    );
+    assert!(DOCKERFILE.contains("-p b10x-substrate-daemon --bin substrate-daemon"));
+    assert!(DOCKERFILE.contains("-p b10x-substrate-mcp --bin substrate-mcp"));
+    assert!(DOCKERFILE.contains(" AS daemon\n"));
+    assert!(DOCKERFILE.contains(" AS mcp\n"));
+    position("--target daemon");
+    position("--target mcp");
+}
+
+#[test]
+fn gate_cache_excludes_workspace_build_outputs() {
+    assert!(
+        GATE_WORKFLOW
+            .contains("uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6")
+    );
+    assert!(GATE_WORKFLOW.contains("cache-workspace-crates: \"false\""));
+    assert!(GATE_WORKFLOW.contains("cache-all-crates: \"false\""));
+    assert!(!GATE_WORKFLOW.contains("uses: actions/cache@"));
 }
 
 #[test]
@@ -198,7 +231,7 @@ fn protected_main_gets_a_pull_request_stanza_not_a_direct_push() {
 
 #[test]
 fn every_third_party_action_is_pinned_to_a_commit() {
-    for line in WORKFLOW.lines().map(str::trim) {
+    for line in WORKFLOW.lines().chain(GATE_WORKFLOW.lines()).map(str::trim) {
         let Some(action) = line.strip_prefix("uses: ") else {
             continue;
         };
