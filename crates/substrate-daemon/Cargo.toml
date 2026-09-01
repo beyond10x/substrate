@@ -33,8 +33,11 @@ http.workspace = true
 http-body-util.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
+libc.workspace = true
 nix = { workspace = true, features = ["signal"] }
 parking_lot.workspace = true
+rustls.workspace = true
+rustls-pemfile.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_urlencoded.workspace = true
@@ -45,11 +48,13 @@ substrate-store = { package = "b10x-substrate-store", path = "../substrate-store
 substrate-wire = { package = "b10x-substrate-wire", path = "../substrate-wire", version = "=0.4.2" }
 thiserror.workspace = true
 tokio.workspace = true
+tokio-rustls.workspace = true
 tower.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 ulid.workspace = true
 zeroize.workspace = true
+x509-parser.workspace = true
 
 [dev-dependencies]
 # The clean-room runner (tests/runtime_vectors.rs) interrupts the daemon it spawned; `signal`
@@ -58,6 +63,7 @@ hex.workspace = true
 nix = { workspace = true, features = ["signal"] }
 rusqlite.workspace = true
 tempfile.workspace = true
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
 
 [lints]
 workspace = true

@@ -7,7 +7,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64URL;
 use clap::Parser;
 use substrate_daemon::{
-    DaemonConfig, DelegatedContextKey, EgressAperture, SecretSlot, TcpDaemonConfig, serve,
+    DaemonConfig, DelegatedContextKey, EgressAperture, SecretSlot, TcpDaemonConfig,
+    TlsDaemonConfig, serve,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -302,6 +303,33 @@ struct Arguments {
 
     #[arg(long, env = "SUBSTRATE_TCP_DEVELOPMENT_ONLY", requires = "tcp_listen")]
     tcp_development_only: bool,
+
+    /// Bind the production HTTPS/WSS control listener (ADR 0024).
+    #[arg(
+        long,
+        env = "SUBSTRATE_TLS_LISTEN",
+        requires_all = ["tls_certificate_chain", "tls_private_key"],
+        conflicts_with = "tcp_listen"
+    )]
+    tls_listen: Option<SocketAddr>,
+
+    /// PEM certificate chain for the production listener. Reloaded atomically on SIGHUP.
+    #[arg(
+        long,
+        env = "SUBSTRATE_TLS_CERTIFICATE_CHAIN",
+        value_name = "PATH",
+        requires = "tls_listen"
+    )]
+    tls_certificate_chain: Option<PathBuf>,
+
+    /// Owner-private PEM private key for the production listener. Reloaded atomically on SIGHUP.
+    #[arg(
+        long,
+        env = "SUBSTRATE_TLS_PRIVATE_KEY",
+        value_name = "PATH",
+        requires = "tls_listen"
+    )]
+    tls_private_key: Option<PathBuf>,
 }
 
 impl From<Arguments> for DaemonConfig {
@@ -321,6 +349,15 @@ impl From<Arguments> for DaemonConfig {
             private_overlay: arguments.tcp_private_overlay,
             development_only: arguments.tcp_development_only,
         });
+        let tls = arguments.tls_listen.map(|listen| TlsDaemonConfig {
+            listen,
+            certificate_chain: arguments
+                .tls_certificate_chain
+                .expect("clap requires a certificate chain with TLS"),
+            private_key: arguments
+                .tls_private_key
+                .expect("clap requires a private key with TLS"),
+        });
         Self {
             socket: arguments.socket,
             state: arguments.state,
@@ -337,6 +374,7 @@ impl From<Arguments> for DaemonConfig {
             delegated_context_keys: arguments.delegated_context_keys,
             require_delegated_context: arguments.require_delegated_context,
             tcp,
+            tls,
         }
     }
 }

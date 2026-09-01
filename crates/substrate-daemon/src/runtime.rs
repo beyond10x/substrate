@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::delegation::{DelegatedContextPolicy, TrustedKey};
+use crate::tls::{TlsDaemonConfig, load_server_config};
 use crate::{App, Identity, SystemAuthority, router};
 use anyhow::{Context as _, anyhow, bail};
 use axum::extract::{Request, State};
@@ -26,6 +27,7 @@ use substrate_store::Store;
 use subtle::ConstantTimeEq as _;
 use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use tokio_rustls::TlsAcceptor;
 use tracing::{info, warn};
 use zeroize::Zeroizing;
 
@@ -335,6 +337,8 @@ pub struct DaemonConfig {
     /// refuses every mutation, and that is a configuration mistake, not a runtime one.
     pub require_delegated_context: bool,
     pub tcp: Option<TcpDaemonConfig>,
+    /// Production HTTPS/WSS listener. It is distinct from development static-bearer TCP.
+    pub tls: Option<TlsDaemonConfig>,
 }
 
 /// One operator-declared trusted key for delegated context: a `kid`, its issuer, public material.
@@ -419,6 +423,7 @@ impl DaemonConfig {
             delegated_context_keys: Vec::new(),
             require_delegated_context: false,
             tcp: None,
+            tls: None,
         }
     }
 }
@@ -431,7 +436,12 @@ impl DaemonConfig {
 /// and after serving if the shutdown signal cannot be installed.
 #[allow(clippy::too_many_lines)] // Startup proof, ownership, and accept-loop cleanup stay adjacent.
 pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
-    if config.tcp.is_none() && config.allow_uids.is_empty() {
+    if config.tcp.is_some() && config.tls.is_some() {
+        bail!(
+            "tls.listener-config-invalid: development TCP and production TLS are mutually exclusive"
+        );
+    }
+    if config.tcp.is_none() && config.tls.is_none() && config.allow_uids.is_empty() {
         bail!("at least one explicit --allow-uid mapping is required");
     }
     if config.deployment.is_empty()
@@ -444,7 +454,7 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
     }
     prepare_private_state_path(&config.state)?;
     let _instance_lock = lock_state_identity(&config.state)?;
-    if config.tcp.is_none() {
+    if config.tcp.is_none() && config.tls.is_none() {
         prepare_socket(&config.socket)?;
     }
     if config.event_retention == 0 {
@@ -461,6 +471,18 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
         &config.delegated_context_keys,
         config.require_delegated_context,
     )?;
+    let tls_identity = config
+        .tls
+        .as_ref()
+        .map(|tls| {
+            load_server_config(tls).map_err(|error| {
+                anyhow!(
+                    "{}: production TLS identity material refused",
+                    error.startup_code()
+                )
+            })
+        })
+        .transpose()?;
     let store = Arc::new(
         Store::open_with_event_retention(&config.state, config.event_retention)
             .context("open durable state")?,
@@ -505,6 +527,11 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
     });
     if let Some(tcp) = config.tcp.as_ref() {
         let result = serve_tcp(Arc::clone(&app), tcp).await;
+        lease_sweeper.abort();
+        return result;
+    }
+    if let (Some(tls), Some(identity)) = (config.tls.as_ref(), tls_identity) {
+        let result = serve_tls(Arc::clone(&app), tls, identity).await;
         lease_sweeper.abort();
         return result;
     }
@@ -813,6 +840,9 @@ async fn serve_tcp(app: Arc<App>, config: &TcpDaemonConfig) -> anyhow::Result<()
     if !config.private_overlay {
         bail!("hosted TCP requires an explicitly configured private overlay");
     }
+    if !config.listen.ip().is_loopback() {
+        bail!("tls.listener-config-invalid: development static-bearer TCP must bind loopback");
+    }
     if !valid_path_prefix(&config.path_prefix) {
         bail!("hosted TCP path prefix must be absolute, lowercase, and have no trailing slash");
     }
@@ -897,6 +927,129 @@ async fn serve_tcp(app: Arc<App>, config: &TcpDaemonConfig) -> anyhow::Result<()
         .await
         .map_err(|error| anyhow!("driver shutdown refused: {}: {}", error.code, error.message))?;
     Ok(())
+}
+
+/// Serve the production transport while application identity remains fail-closed.
+///
+/// ADR 0024 deliberately does not turn a transport certificate into a caller identity. The next
+/// Remote Foundation story replaces this pre-admission refusal with the hosted trust-envelope
+/// verifier; until then no application handler can observe a fabricated remote subject.
+async fn serve_tls(
+    app: Arc<App>,
+    config: &TlsDaemonConfig,
+    mut identity: Arc<rustls::ServerConfig>,
+) -> anyhow::Result<()> {
+    if config.listen.port() == 0 {
+        bail!("tls.listener-config-invalid: production TLS requires a nonzero listen port");
+    }
+    let mut reload = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
+        .context("tls.listener-config-invalid: install SIGHUP reload signal")?;
+    let service =
+        router(Arc::clone(&app)).layer(middleware::from_fn(refuse_unverified_hosted_request));
+    let listener = TcpListener::bind(config.listen)
+        .await
+        .context("tls.listener-config-invalid: bind production TLS listener")?;
+    info!(listen = %config.listen, "substrate production HTTPS/WSS transport ready");
+    let policy = UnixTransportPolicy::production();
+    let limits = TcpConnectionLimits::production();
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
+    let mut connections = tokio::task::JoinSet::new();
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => {
+                let Ok((stream, address)) = accepted else {
+                    warn!("transient production TLS accept failure");
+                    tokio::time::sleep(policy.accept_retry_delay).await;
+                    continue;
+                };
+                let Some(permit) = limits.acquire(address.ip()) else {
+                    warn!(source = %address.ip(), "refused TLS peer at connection capacity");
+                    continue;
+                };
+                let acceptor = TlsAcceptor::from(Arc::clone(&identity));
+                let service = service.clone();
+                connections.spawn(serve_tls_connection(
+                    stream, address, permit, acceptor, service, policy,
+                ));
+            }
+            joined = connections.join_next(), if !connections.is_empty() => {
+                if let Some(Err(error)) = joined {
+                    warn!(%error, "TLS connection task failed");
+                }
+            }
+            signal = reload.recv() => {
+                if signal.is_none() {
+                    bail!("tls.listener-config-invalid: SIGHUP reload signal stream ended");
+                }
+                match load_server_config(config) {
+                    Ok(replacement) => {
+                        identity = replacement;
+                        info!(code = "tls.identity-reloaded", "production TLS identity reloaded");
+                    }
+                    Err(_) => {
+                        warn!(
+                            code = "tls.reload-invalid",
+                            certificate_chain = %config.certificate_chain.display(),
+                            private_key = %config.private_key.display(),
+                            "production TLS identity reload refused"
+                        );
+                    }
+                }
+            }
+            signal = &mut shutdown => {
+                signal?;
+                break;
+            }
+        }
+    }
+    drop(listener);
+    drain_tcp_connections(&mut connections).await;
+    app.driver
+        .shutdown()
+        .await
+        .map_err(|error| anyhow!("driver shutdown refused: {}: {}", error.code, error.message))?;
+    Ok(())
+}
+
+async fn serve_tls_connection(
+    stream: tokio::net::TcpStream,
+    address: SocketAddr,
+    permit: TcpConnectionPermit,
+    acceptor: TlsAcceptor,
+    service: Router,
+    policy: UnixTransportPolicy,
+) {
+    let handshake = tokio::time::timeout(policy.header_read_timeout, acceptor.accept(stream)).await;
+    let tls = match handshake {
+        Ok(Ok(tls)) => tls,
+        Ok(Err(_)) => {
+            warn!(source = %address.ip(), "TLS handshake refused");
+            return;
+        }
+        Err(_) => {
+            warn!(source = %address.ip(), "TLS handshake timed out");
+            return;
+        }
+    };
+    let io = TokioIo::new(tls);
+    let builder = http1_builder(policy);
+    let connection = builder
+        .serve_connection(io, TowerToHyperService::new(service))
+        .with_upgrades();
+    match enforce_connection_lifetime(permit, policy.connection_lifetime, connection).await {
+        Ok(Ok(())) => {}
+        Ok(Err(_)) => warn!(source = %address.ip(), "TLS HTTP connection failed"),
+        Err(_) => warn!(source = %address.ip(), "TLS connection lifetime expired"),
+    }
+}
+
+async fn refuse_unverified_hosted_request(_request: Request, _next: Next) -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        "hosted trust envelope admission is not available\n",
+    )
+        .into_response()
 }
 
 async fn drain_tcp_connections(connections: &mut tokio::task::JoinSet<()>) {
