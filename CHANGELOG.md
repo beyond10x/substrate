@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- **Production HTTPS/WSS requests use current Identity authority.** The TLS listener resolves one
+  five-minute opaque access credential over direct, explicitly rooted HTTPS for exact audience
+  `urn:b10x:substrate`, validates the closed authority document, derives a tenant-bound subject and
+  enforces `observe`, `workspaces` or `exec` before handler dispatch. Missing, invalid,
+  under-scoped and unavailable authority fail closed by four named refusals; revocation applies on
+  the next request because no authority is cached.
 - **A disposable local MCP test adapter drives Substrate through the public SDK.** The private
   `substrate-mcp` binary owns one fresh linked daemon, exposes a bounded closed stdio tool/resource
   surface, preserves caller operation ids and exact refusals, and performs ordered exec/workspace/
@@ -22,10 +28,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
-- **The daemon and Rust SDK now claim development contract `substrate-wire/0.12.0` together.**
+- **The daemon and Rust SDK now claim development contract `substrate-wire/0.13.0` together.**
   Both use the inner `bundle.json` digest
-  `1c82595a186ef1fa830a10e45fc842a037bb6bb7c5aafdc74e417681790e6360`; the separately signed
-  OCI distribution remains at
+  `7ab665c0a50cd8521a28b2b4c2302b7d460a1978b105d956711dbe6702a843bf`; its direct predecessor is
+  0.12.0, it preserves all 33 routes, adds none, and declares the hosted Identity audience,
+  route-scope mapping and four authentication refusals. The latest separately signed OCI
+  distribution remains 0.12.0 at
   `sha256:dd901e848c821aca7d55f7b8cf5ee893e1d99a1428b348e32e7ed1045a375319`. The clean-room shipped-
   binary lane checks the pair on every HTTP response and WebSocket route probe, while SDK fixtures
   reject missing, older, unknown and wrong-digest claims before serving an operation. The bundle

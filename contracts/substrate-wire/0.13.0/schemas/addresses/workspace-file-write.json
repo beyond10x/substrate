@@ -1,0 +1,19 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.13.0:address:workspace-file-write",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "path": {
+      "$ref": "../common.json#/$defs/relative-path"
+    },
+    "workspace_id": {
+      "$ref": "../common.json#/$defs/workspace-id"
+    }
+  },
+  "required": [
+    "workspace_id",
+    "path"
+  ],
+  "title": "workspace-file-write normalized route address",
+  "type": "object"
+}

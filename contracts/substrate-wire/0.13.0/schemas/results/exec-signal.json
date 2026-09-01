@@ -1,0 +1,6 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.13.0:result:exec-signal",
+  "$ref": "../resource.json#/$defs/exec",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "exec-signal operation result"
+}

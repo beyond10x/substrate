@@ -4,22 +4,33 @@ use std::net::SocketAddr;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
+use axum::extract::State;
+use axum::http::{HeaderMap, StatusCode};
+use axum::response::{IntoResponse as _, Response};
+use axum::routing::get;
+use axum::{Json, Router};
+use hyper::server::conn::http1;
+use hyper_util::rt::TokioIo;
+use hyper_util::service::TowerToHyperService;
 use nix::sys::signal::{Signal, kill};
 use nix::unistd::Pid;
 use rcgen::{CertificateParams, KeyPair, date_time_ymd};
 use rustls::pki_types::{CertificateDer, ServerName};
-use rustls::{ClientConfig, RootCertStore};
+use rustls::{ClientConfig, RootCertStore, ServerConfig};
+use serde_json::json;
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpStream;
 use tokio::process::{Child, Command};
-use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
+use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 const SERVER_NAME: &str = "substrate.test";
-const HOSTED_UNAVAILABLE: &str = "hosted trust envelope admission is not available";
+const IDENTITY_NAME: &str = "127.0.0.1";
 
 struct TestIdentity {
     certificate_pem: String,
@@ -28,7 +39,11 @@ struct TestIdentity {
 }
 
 fn identity(not_before: (i32, u8, u8), not_after: (i32, u8, u8)) -> TestIdentity {
-    let mut params = CertificateParams::new([SERVER_NAME.to_owned()]).expect("certificate params");
+    identity_for(SERVER_NAME, not_before, not_after)
+}
+
+fn identity_for(name: &str, not_before: (i32, u8, u8), not_after: (i32, u8, u8)) -> TestIdentity {
+    let mut params = CertificateParams::new([name.to_owned()]).expect("certificate params");
     params.not_before = date_time_ymd(not_before.0, not_before.1, not_before.2);
     params.not_after = date_time_ymd(not_after.0, not_after.1, not_after.2);
     let key = KeyPair::generate().expect("private key");
@@ -72,6 +87,8 @@ fn daemon_command(
     listen: SocketAddr,
     certificate: &Path,
     private_key: &Path,
+    identity_origin: &str,
+    identity_ca: &Path,
 ) -> Command {
     std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))
         .expect("private daemon root");
@@ -91,9 +108,126 @@ fn daemon_command(
         .arg(certificate)
         .arg("--tls-private-key")
         .arg(private_key)
+        .arg("--hosted-identity-origin")
+        .arg(identity_origin)
+        .arg("--hosted-identity-ca-bundle")
+        .arg(identity_ca)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     command
+}
+
+#[derive(Clone)]
+struct AuthorityState {
+    origin: String,
+    observe: String,
+    workspace: String,
+    exec: String,
+    unavailable: String,
+    revoked: Arc<AtomicBool>,
+}
+
+fn access_credential(fill: char) -> String {
+    format!("identity_{}_v1_{}", "access", fill.to_string().repeat(43))
+}
+
+async fn resolve_authority(State(state): State<AuthorityState>, headers: HeaderMap) -> Response {
+    if headers
+        .get("x-b10x-audience")
+        .and_then(|value| value.to_str().ok())
+        != Some("urn:b10x:substrate")
+    {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let credential = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "));
+    if credential == Some(state.unavailable.as_str()) {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+    let scope =
+        if credential == Some(state.observe.as_str()) && !state.revoked.load(Ordering::SeqCst) {
+            "observe"
+        } else if credential == Some(state.workspace.as_str()) {
+            "workspaces"
+        } else if credential == Some(state.exec.as_str()) {
+            "exec"
+        } else {
+            return StatusCode::UNAUTHORIZED.into_response();
+        };
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("wall time")
+        .as_secs();
+    let now = i64::try_from(now).expect("wall time fits");
+    Json(json!({
+        "iss": state.origin,
+        "sub": "sensitive-subject-marker",
+        "aud": "urn:b10x:substrate",
+        "iat": now,
+        "nbf": now,
+        "exp": now + 300,
+        "jti": "sensitive-jti-marker",
+        "act": {"sub": "sensitive-actor-marker"},
+        "scope": scope,
+        "principal_kind": "human",
+        "tenant_id": "sensitive-tenant-marker",
+        "email": null,
+        "groups": []
+    }))
+    .into_response()
+}
+
+async fn start_identity_authority(
+    identity: &TestIdentity,
+) -> (AuthorityState, tokio::task::JoinHandle<()>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind Identity authority");
+    let address = listener.local_addr().expect("Identity address");
+    let origin = format!("https://{address}");
+    let state = AuthorityState {
+        origin,
+        observe: access_credential('o'),
+        workspace: access_credential('w'),
+        exec: access_credential('e'),
+        unavailable: access_credential('u'),
+        revoked: Arc::new(AtomicBool::new(false)),
+    };
+    let mut certificates = rustls_pemfile::certs(&mut identity.certificate_pem.as_bytes())
+        .collect::<Result<Vec<_>, _>>()
+        .expect("Identity certificate");
+    let private_key = rustls_pemfile::private_key(&mut identity.private_key_pem.as_bytes())
+        .expect("Identity private key parse")
+        .expect("Identity private key");
+    let mut tls = ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+        .with_no_client_auth()
+        .with_single_cert(std::mem::take(&mut certificates), private_key)
+        .expect("Identity TLS config");
+    tls.alpn_protocols = vec![b"http/1.1".to_vec()];
+    let acceptor = TlsAcceptor::from(Arc::new(tls));
+    let service = Router::new()
+        .route("/v1/access-authority", get(resolve_authority))
+        .with_state(state.clone());
+    let task = tokio::spawn(async move {
+        loop {
+            let Ok((stream, _)) = listener.accept().await else {
+                return;
+            };
+            let acceptor = acceptor.clone();
+            let service = service.clone();
+            tokio::spawn(async move {
+                let Ok(tls) = acceptor.accept(stream).await else {
+                    return;
+                };
+                let _ = http1::Builder::new()
+                    .serve_connection(TokioIo::new(tls), TowerToHyperService::new(service))
+                    .await;
+            });
+        }
+    });
+    (state, task)
 }
 
 fn connector(roots: impl IntoIterator<Item = CertificateDer<'static>>) -> TlsConnector {
@@ -204,11 +338,22 @@ async fn production_tls_refuses_unverified_routes_and_rotates_atomically() {
     let root = TempDir::new().expect("temporary root");
     let first = current_identity();
     let second = current_identity();
+    let authority_identity = identity_for(IDENTITY_NAME, (2025, 1, 1), (2035, 1, 1));
+    let identity_ca = root.path().join("identity-ca.pem");
+    std::fs::write(&identity_ca, &authority_identity.certificate_pem).expect("Identity CA");
+    let (authority, authority_task) = start_identity_authority(&authority_identity).await;
     let (certificate, private_key) = write_identity(root.path(), &first);
     let address = unused_address();
-    let mut child = daemon_command(root.path(), address, &certificate, &private_key)
-        .spawn()
-        .expect("spawn TLS daemon");
+    let mut child = daemon_command(
+        root.path(),
+        address,
+        &certificate,
+        &private_key,
+        &authority.origin,
+        &identity_ca,
+    )
+    .spawn()
+    .expect("spawn TLS daemon");
     let trusted = connector([
         first.certificate_der.clone(),
         second.certificate_der.clone(),
@@ -233,20 +378,82 @@ async fn production_tls_refuses_unverified_routes_and_rotates_atomically() {
     )
     .await;
     let response = String::from_utf8(response).expect("HTTPS response text");
+    assert!(response.starts_with("HTTP/1.1 401"), "{response}");
+    assert!(response.contains("auth.credential-absent"), "{response}");
+    assert!(
+        response
+            .to_ascii_lowercase()
+            .contains("x-b10x-contract: substrate-wire/0.13.0"),
+        "{response}"
+    );
+
+    let valid_request = format!(
+        "GET /v1/machine HTTP/1.1\r\nHost: substrate.test\r\nAuthorization: Bearer {}\r\nConnection: keep-alive\r\n\r\n",
+        authority.observe
+    );
+    let response = request(&mut https, valid_request.as_bytes()).await;
+    let response = String::from_utf8(response).expect("admitted response text");
+    assert!(response.starts_with("HTTP/1.1 200"), "{response}");
+
+    let spoofed = format!(
+        "GET /v1/machine HTTP/1.1\r\nHost: substrate.test\r\nAuthorization: Bearer {}\r\nX-Substrate-Subject: attacker\r\nX-Substrate-Tenant: attacker\r\nForwarded: for=203.0.113.9\r\nConnection: keep-alive\r\n\r\n",
+        authority.workspace
+    );
+    let response = request(&mut https, spoofed.as_bytes()).await;
+    let response = String::from_utf8(response).expect("scope refusal text");
+    assert!(response.starts_with("HTTP/1.1 403"), "{response}");
+    assert!(response.contains("auth.scope-denied"), "{response}");
+
+    let workspace_body =
+        r#"{"op":"01JPHASE2WORKSPACECREATE","input":{"source":"empty","labels":{}}}"#;
+    let denied_mutation = format!(
+        "POST /v1/workspaces HTTP/1.1\r\nHost: substrate.test\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{workspace_body}",
+        authority.observe,
+        workspace_body.len()
+    );
+    let response = request(&mut https, denied_mutation.as_bytes()).await;
+    let response = String::from_utf8(response).expect("pre-durability scope refusal text");
+    assert!(response.starts_with("HTTP/1.1 403"), "{response}");
+    assert!(response.contains("auth.scope-denied"), "{response}");
+
+    let invalid = access_credential('x');
+    let invalid_request = format!(
+        "GET /v1/machine HTTP/1.1\r\nHost: substrate.test\r\nAuthorization: Bearer {invalid}\r\nConnection: keep-alive\r\n\r\n"
+    );
+    let response = request(&mut https, invalid_request.as_bytes()).await;
+    let response = String::from_utf8(response).expect("invalid authority text");
+    assert!(response.starts_with("HTTP/1.1 401"), "{response}");
+    assert!(response.contains("auth.authority-invalid"), "{response}");
+
+    let unavailable_request = format!(
+        "GET /v1/machine HTTP/1.1\r\nHost: substrate.test\r\nAuthorization: Bearer {}\r\nConnection: keep-alive\r\n\r\n",
+        authority.unavailable
+    );
+    let response = request(&mut https, unavailable_request.as_bytes()).await;
+    let response = String::from_utf8(response).expect("unavailable authority text");
     assert!(response.starts_with("HTTP/1.1 503"), "{response}");
-    assert!(response.contains(HOSTED_UNAVAILABLE), "{response}");
+    assert!(
+        response.contains("auth.authority-unavailable"),
+        "{response}"
+    );
+
+    authority.revoked.store(true, Ordering::SeqCst);
+    let response = request(&mut https, valid_request.as_bytes()).await;
+    let response = String::from_utf8(response).expect("revoked authority text");
+    assert!(response.starts_with("HTTP/1.1 401"), "{response}");
+    assert!(response.contains("auth.authority-invalid"), "{response}");
+    authority.revoked.store(false, Ordering::SeqCst);
 
     let mut wss = connect(address, &trusted, SERVER_NAME)
         .await
         .expect("trusted WSS transport");
-    let response = request(
-        &mut wss,
-        b"GET /v1/pipe-sessions/ses_test/attach HTTP/1.1\r\nHost: substrate.test\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: AAAAAAAAAAAAAAAAAAAAAA==\r\n\r\n",
-    )
-    .await;
+    let wss_request = format!(
+        "GET /v1/pipe-sessions/ses_test/attach HTTP/1.1\r\nHost: substrate.test\r\nAuthorization: Bearer {}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: AAAAAAAAAAAAAAAAAAAAAA==\r\n\r\n",
+        authority.exec
+    );
+    let response = request(&mut wss, wss_request.as_bytes()).await;
     let response = String::from_utf8(response).expect("WSS refusal text");
-    assert!(response.starts_with("HTTP/1.1 503"), "{response}");
-    assert!(response.contains(HOSTED_UNAVAILABLE), "{response}");
+    assert!(response.starts_with("HTTP/1.1 404"), "{response}");
 
     let mut plaintext = TcpStream::connect(address).await.expect("plaintext socket");
     plaintext
@@ -294,15 +501,11 @@ async fn production_tls_refuses_unverified_routes_and_rotates_atomically() {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
 
-    let response = request(
-        &mut existing,
-        b"GET /v1/machine HTTP/1.1\r\nHost: substrate.test\r\nConnection: keep-alive\r\n\r\n",
-    )
-    .await;
+    let response = request(&mut existing, valid_request.as_bytes()).await;
     assert!(
         String::from_utf8(response)
             .expect("existing response")
-            .starts_with("HTTP/1.1 503"),
+            .starts_with("HTTP/1.1 200"),
         "an existing connection did not keep serving after rotation"
     );
     assert_eq!(peer_leaf(&existing), first.certificate_der.as_ref());
@@ -333,6 +536,25 @@ async fn production_tls_refuses_unverified_routes_and_rotates_atomically() {
         !logs.contains(&second.private_key_pem),
         "private key leaked"
     );
+    assert!(!logs.contains(&authority.observe), "credential leaked");
+    for claim in [
+        "sensitive-subject-marker",
+        "sensitive-actor-marker",
+        "sensitive-tenant-marker",
+        "sensitive-jti-marker",
+    ] {
+        assert!(!logs.contains(claim), "authority claim leaked: {claim}");
+    }
+    let state = rusqlite::Connection::open(root.path().join("state.sqlite"))
+        .expect("open daemon state after shutdown");
+    let operations: i64 = state
+        .query_row("SELECT count(*) FROM operations", [], |row| row.get(0))
+        .expect("operation count");
+    assert_eq!(
+        operations, 0,
+        "scope refusal reached durable operation admission"
+    );
+    authority_task.abort();
 }
 
 async fn startup_output(identity: &TestIdentity, key: StartupKey<'_>) -> std::process::Output {
@@ -348,10 +570,17 @@ async fn startup_output(identity: &TestIdentity, key: StartupKey<'_>) -> std::pr
                 .expect("private-key permissions");
         }
     }
-    daemon_command(root.path(), unused_address(), &certificate, &private_key)
-        .output()
-        .await
-        .expect("run invalid TLS daemon")
+    daemon_command(
+        root.path(),
+        unused_address(),
+        &certificate,
+        &private_key,
+        "https://127.0.0.1:9",
+        &certificate,
+    )
+    .output()
+    .await
+    .expect("run invalid TLS daemon")
 }
 
 enum StartupKey<'a> {

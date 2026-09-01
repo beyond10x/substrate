@@ -15,9 +15,9 @@ pub const API_VERSION: &str = "v1";
 ///
 /// This is the SHA-256 of the inner immutable `bundle.json`, not the outer OCI manifest digest.
 /// Moving either member is an explicit coordinated promotion (Atlas ADR 0019).
-pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.12.0";
+pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.13.0";
 pub const ADVERTISED_CONTRACT_BUNDLE_SHA256: &str =
-    "1c82595a186ef1fa830a10e45fc842a037bb6bb7c5aafdc74e417681790e6360";
+    "7ab665c0a50cd8521a28b2b4c2302b7d460a1978b105d956711dbe6702a843bf";
 pub const MAX_FILE_BYTES: u64 = 1_048_576;
 pub const MAX_IO_BYTES: u64 = 1_048_576;
 pub const MAX_LIST_ITEMS: u32 = 1_000;
@@ -138,6 +138,22 @@ pub const SESSION_OUTPUT_BACKPRESSURE: &str = "session.output-backpressure";
 /// no earlier bundle, so naming anything else is a false statement about its own shape: `0.4.0`'s
 /// schema is `additionalProperties: false` over nine properties and forbids all five.
 pub const PIPE_SESSION_CAPABILITY_CONTRACT: &str = "substrate-wire/0.10.0";
+
+/// Hosted production admission received no Identity access credential (ADR 0026).
+pub const AUTH_CREDENTIAL_ABSENT: &str = "auth.credential-absent";
+/// Identity did not resolve the credential to an authority Substrate can admit (ADR 0026).
+pub const AUTH_AUTHORITY_INVALID: &str = "auth.authority-invalid";
+/// The resolved authority does not carry the exact scope for the addressed route (ADR 0026).
+pub const AUTH_SCOPE_DENIED: &str = "auth.scope-denied";
+/// The current Identity authority could not be resolved and no cached authority was used.
+pub const AUTH_AUTHORITY_UNAVAILABLE: &str = "auth.authority-unavailable";
+/// Every pre-handler refusal the hosted production listener can return.
+pub const HOSTED_AUTH_REFUSAL_CODES: [&str; 4] = [
+    AUTH_AUTHORITY_INVALID,
+    AUTH_AUTHORITY_UNAVAILABLE,
+    AUTH_CREDENTIAL_ABSENT,
+    AUTH_SCOPE_DENIED,
+];
 
 /// The session is not attachable in its current state.
 pub const SESSION_NOT_ATTACHABLE: &str = "session.not-attachable";
@@ -3837,8 +3853,8 @@ mod tests {
         let version = ADVERTISED_CONTRACT_BUNDLE
             .strip_prefix("substrate-wire/")
             .expect("advertised contract prefix");
-        assert_eq!(version, "0.12.0", "the reviewed promotion target moved");
-        let bytes = include_bytes!("../../../contracts/substrate-wire/0.12.0/bundle.json");
+        assert_eq!(version, "0.13.0", "the reviewed promotion target moved");
+        let bytes = include_bytes!("../../../contracts/substrate-wire/0.13.0/bundle.json");
         assert_eq!(
             hex::encode(Sha256::digest(bytes)),
             ADVERTISED_CONTRACT_BUNDLE_SHA256

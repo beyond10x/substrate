@@ -1,0 +1,25 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.13.0:input:exec-signal",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "grace_ms": {
+      "maximum": 30000,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "signal": {
+      "enum": [
+        "INT",
+        "TERM",
+        "KILL"
+      ]
+    }
+  },
+  "required": [
+    "signal",
+    "grace_ms"
+  ],
+  "title": "exec-signal operation input",
+  "type": "object"
+}

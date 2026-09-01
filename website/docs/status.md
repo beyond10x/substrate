@@ -17,7 +17,7 @@ verify it through `GET /v1/machine`.
 | Area | Current state |
 |---|---|
 | personal transport | owner-permissioned Unix socket with kernel-derived local identity |
-| production network transport | TLS 1.3 HTTPS/WSS with explicit identity files, atomic SIGHUP rotation and fail-closed pre-admission until hosted caller verification exists |
+| production network transport | TLS 1.3 HTTPS/WSS with explicit identity files, atomic SIGHUP rotation and five-minute exact-audience Identity admission resolved before every route |
 | workspaces | empty source, guarded file access, atomic replacement, destruction, leases |
 | exec | available only with the complete probed Linux confinement floor |
 | durability | operation reservation before dispatch, persisted terminal observations and output |
@@ -38,7 +38,7 @@ verify it through `GET /v1/machine`.
 - Docker and Kubernetes drivers
 - cross-machine scheduling
 - stable signed contract-bundle publication
-- a production hosted trust envelope
+- remote HTTPS/WSS transport in the Rust SDK
 
 Absent features are not stubs. They are missing from capability facts and answer with `unserved` or
 a specific refusal when requested.
@@ -48,13 +48,12 @@ a specific refusal when requested.
 - The minimum host boundary does not claim protection from kernel compromise.
 - A verified capsule identifies its provided bytes, not the entire host runtime closure.
 - Static-bearer TCP is loopback-only, development-only, and unsuitable for public or shared ingress.
-- Production TLS authenticates the daemon but currently admits no application request because the
-  hosted caller verifier remains absent.
+- Production TLS admits callers only through online Identity resolution. Identity unavailability
+  fails closed, and no cached authority or caller-written identity is used.
 - One daemon is one trust domain; it is not a multi-tenant isolation layer.
-- Current development source advertises `substrate-wire/0.12.0` and the SHA-256 of its inner
-  `bundle.json` as one claim. The tagged `0.4.2` daemon image predates that promotion and still
-  advertises `substrate-wire/0.4.0`; do not mix that image with a client built from the promoted
-  source.
+- Current development source advertises `substrate-wire/0.13.0` and the SHA-256 of its inner
+  `bundle.json` as one claim. The tagged `0.4.2` daemon and signed development bundle remain on
+  `substrate-wire/0.12.0`; do not mix that release with a client built only for the successor.
 
 ## Reading status safely
 

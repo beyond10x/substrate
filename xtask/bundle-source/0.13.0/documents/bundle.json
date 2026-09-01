@@ -1,0 +1,33 @@
+{
+  "$schema": "schemas/bundle.json",
+  "api_version": "v1",
+  "bundle_format": "b10x.contract-bundle.v1",
+  "compatibility": {
+    "adds_routes": {
+      "$compat": "adds_routes"
+    },
+    "kind": "additive-v1",
+    "predecessor": "0.12.0",
+    "preserves_routes": {
+      "$compat": "preserves_routes"
+    }
+  },
+  "conformance": {
+    "$vectors": "conformance"
+  },
+  "files": {
+    "$files": "manifest"
+  },
+  "generator": {
+    "digest": {
+      "$generator": "digest"
+    },
+    "name": "xtask/src/render_v2.rs",
+    "version": "2"
+  },
+  "name": "substrate-wire",
+  "origin": "b10x",
+  "source_base_commit": null,
+  "status": "development",
+  "version": "0.13.0"
+}

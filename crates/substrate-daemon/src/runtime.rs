@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::delegation::{DelegatedContextPolicy, TrustedKey};
+use crate::hosted::{HostedAdmission, HostedIdentityConfig, require_hosted_authority};
 use crate::tls::{TlsDaemonConfig, load_server_config};
 use crate::{App, Identity, SystemAuthority, router};
 use anyhow::{Context as _, anyhow, bail};
@@ -339,6 +340,8 @@ pub struct DaemonConfig {
     pub tcp: Option<TcpDaemonConfig>,
     /// Production HTTPS/WSS listener. It is distinct from development static-bearer TCP.
     pub tls: Option<TlsDaemonConfig>,
+    /// Identity authority resolved for every production TLS request (ADR 0026).
+    pub hosted_identity: Option<HostedIdentityConfig>,
 }
 
 /// One operator-declared trusted key for delegated context: a `kid`, its issuer, public material.
@@ -424,6 +427,7 @@ impl DaemonConfig {
             require_delegated_context: false,
             tcp: None,
             tls: None,
+            hosted_identity: None,
         }
     }
 }
@@ -439,6 +443,11 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
     if config.tcp.is_some() && config.tls.is_some() {
         bail!(
             "tls.listener-config-invalid: development TCP and production TLS are mutually exclusive"
+        );
+    }
+    if config.tls.is_some() != config.hosted_identity.is_some() {
+        bail!(
+            "auth.listener-config-invalid: production TLS and hosted Identity admission require each other"
         );
     }
     if config.tcp.is_none() && config.tls.is_none() && config.allow_uids.is_empty() {
@@ -482,6 +491,11 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
                 )
             })
         })
+        .transpose()?;
+    let hosted_admission = config
+        .hosted_identity
+        .as_ref()
+        .map(HostedAdmission::load)
         .transpose()?;
     let store = Arc::new(
         Store::open_with_event_retention(&config.state, config.event_retention)
@@ -531,7 +545,12 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
         return result;
     }
     if let (Some(tls), Some(identity)) = (config.tls.as_ref(), tls_identity) {
-        let result = serve_tls(Arc::clone(&app), tls, identity).await;
+        let hosted_admission = hosted_admission.ok_or_else(|| {
+            anyhow!(
+                "auth.listener-config-invalid: production TLS requires hosted Identity admission"
+            )
+        })?;
+        let result = serve_tls(Arc::clone(&app), tls, identity, hosted_admission).await;
         lease_sweeper.abort();
         return result;
     }
@@ -938,14 +957,17 @@ async fn serve_tls(
     app: Arc<App>,
     config: &TlsDaemonConfig,
     mut identity: Arc<rustls::ServerConfig>,
+    hosted_admission: HostedAdmission,
 ) -> anyhow::Result<()> {
     if config.listen.port() == 0 {
         bail!("tls.listener-config-invalid: production TLS requires a nonzero listen port");
     }
     let mut reload = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
         .context("tls.listener-config-invalid: install SIGHUP reload signal")?;
-    let service =
-        router(Arc::clone(&app)).layer(middleware::from_fn(refuse_unverified_hosted_request));
+    let service = router(Arc::clone(&app)).layer(middleware::from_fn_with_state(
+        Arc::new(hosted_admission),
+        require_hosted_authority,
+    ));
     let listener = TcpListener::bind(config.listen)
         .await
         .context("tls.listener-config-invalid: bind production TLS listener")?;
@@ -1042,14 +1064,6 @@ async fn serve_tls_connection(
         Ok(Err(_)) => warn!(source = %address.ip(), "TLS HTTP connection failed"),
         Err(_) => warn!(source = %address.ip(), "TLS connection lifetime expired"),
     }
-}
-
-async fn refuse_unverified_hosted_request(_request: Request, _next: Next) -> Response {
-    (
-        StatusCode::SERVICE_UNAVAILABLE,
-        "hosted trust envelope admission is not available\n",
-    )
-        .into_response()
 }
 
 async fn drain_tcp_connections(connections: &mut tokio::task::JoinSet<()>) {

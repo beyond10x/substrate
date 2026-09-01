@@ -16,8 +16,8 @@ scope. There is no unauthenticated personal-development mode. Reachable unauthen
 listeners are refused at startup, and non-loopback control traffic requires TLS/mTLS or a configured
 trusted tunnel.
 
-Hosted deployments validate short-lived identity-issued service material through
-`architecture/adr/0015-foundation-trust-envelope.md`.
+Hosted deployments validate short-lived identity-issued authority through
+[ADR 0026](../../adr/0026-hosted-admission-resolves-opaque-identity-authority.md).
 Substrate stores only the accepted claims required for local admission and provenance; organization
 membership and role evaluation remain outside.
 
@@ -74,9 +74,10 @@ uses a distinct credential and is disabled by default.
    an explicit expiry, default 30 days and hard maximum 90 days, and may overlap during rotation.
    Revocation is an atomic configuration generation change, invalidates capability/auth caches, and
    applies before the next request. The generated bearer file is owner read/write only.
-2. **Hosted identity:** RFC 0001 is accepted by architecture ADR 0015. Hosted material has a
-   five-minute maximum lifetime and 60-second connected revocation bound; hosted auth remains phase
-   7 and does not enter the minimum host slice.
+2. **Hosted identity:** ADR 0026 resolves Identity's five-minute opaque access credential online for
+   one exact audience and route scope before handler dispatch. Identity unavailability fails closed,
+   and a completed revocation applies on the next request; hosted auth does not alter Unix peer
+   identity or the minimum host slice.
 3. **Secret slots:** no secret slot is served by the minimum host slice. Later host exec support uses
    a sealed Linux `memfd` passed at a declared child descriptor; only the slot-to-descriptor mapping
    (never the value) may appear in the shaped environment. Acquisition happens after all admission

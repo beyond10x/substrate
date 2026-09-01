@@ -1,0 +1,197 @@
+{
+  "$defs": {
+    "api-version": {
+      "enum": [
+        "v1",
+        "v2"
+      ]
+    },
+    "canonical-base64-capsule-file": {
+      "maxLength": 349528,
+      "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$",
+      "type": "string",
+      "x-b10x-max-decoded-bytes": 262144
+    },
+    "canonical-base64-file": {
+      "oneOf": [
+        {
+          "maxLength": 1398100,
+          "pattern": "^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$",
+          "type": "string"
+        },
+        {
+          "maxLength": 1398104,
+          "minLength": 1398104,
+          "pattern": "^[A-Za-z0-9+/]{1398102}==$",
+          "type": "string"
+        }
+      ],
+      "x-b10x-max-decoded-bytes": 1048576
+    },
+    "empty-input": {
+      "additionalProperties": false,
+      "properties": {},
+      "required": [],
+      "type": "object"
+    },
+    "event-cursor": {
+      "maxLength": 512,
+      "pattern": "^ev2\\.scope_[A-Za-z0-9_-]+\\.[1-9][0-9]*\\.(?:0|[1-9][0-9]*)$",
+      "type": "string"
+    },
+    "exec-id": {
+      "pattern": "^ex_[A-Za-z0-9]+$",
+      "type": "string"
+    },
+    "labels": {
+      "additionalProperties": {
+        "maxLength": 256,
+        "type": "string"
+      },
+      "maxProperties": 64,
+      "propertyNames": {
+        "maxLength": 128,
+        "pattern": "^[A-Za-z0-9_.-]+$"
+      },
+      "type": "object"
+    },
+    "operation-id": {
+      "maxLength": 128,
+      "minLength": 16,
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string"
+    },
+    "positive-u64": {
+      "maximum": 18446744073709551615,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "relative-path": {
+      "maxLength": 4096,
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$))(?!.*\\u0000).+$",
+      "type": "string",
+      "x-b10x-max-depth": 64
+    },
+    "request-id": {
+      "maxLength": 128,
+      "minLength": 8,
+      "pattern": "^[A-Za-z0-9_-]+$",
+      "type": "string"
+    },
+    "rfc6901-pointer": {
+      "maxLength": 4096,
+      "pattern": "^(?:/(?:[^~/]|~[01])*)*$",
+      "type": "string"
+    },
+    "session-id": {
+      "pattern": "^ses_[A-Za-z0-9]+$",
+      "type": "string"
+    },
+    "snapshot-cursor": {
+      "maxLength": 512,
+      "pattern": "^sp2\\.snap_[A-Za-z0-9]+\\.[1-9][0-9]*$",
+      "type": "string"
+    },
+    "snapshot-id": {
+      "pattern": "^snap_[A-Za-z0-9]+$",
+      "type": "string"
+    },
+    "source-scope": {
+      "maxLength": 256,
+      "pattern": "^scope_[A-Za-z0-9_-]+$",
+      "type": "string"
+    },
+    "storage-limit": {
+      "additionalProperties": false,
+      "properties": {
+        "max_bytes": {
+          "maximum": 1099511627776,
+          "minimum": 1048576,
+          "multipleOf": 1024,
+          "type": "integer"
+        },
+        "max_inodes": {
+          "maximum": 1048576,
+          "minimum": 16,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "max_bytes",
+        "max_inodes"
+      ],
+      "type": "object"
+    },
+    "timestamp": {
+      "format": "date-time",
+      "maxLength": 35,
+      "pattern": "^[0-9]{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12][0-9]|3[01])T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\\.[0-9]{1,9})?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])$",
+      "type": "string"
+    },
+    "u64": {
+      "maximum": 18446744073709551615,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "workspace-access": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "const": "read-write"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "const": "read-only"
+            }
+          },
+          "required": [
+            "mode"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "mode": {
+              "const": "scoped"
+            },
+            "writable_subtrees": {
+              "items": {
+                "$ref": "#/$defs/relative-path"
+              },
+              "maxItems": 64,
+              "minItems": 1,
+              "type": "array",
+              "uniqueItems": true,
+              "x-b10x-non-overlapping": true,
+              "x-b10x-order": "strict-utf8-bytewise-path"
+            }
+          },
+          "required": [
+            "mode",
+            "writable_subtrees"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "workspace-id": {
+      "pattern": "^ws_[A-Za-z0-9]+$",
+      "type": "string"
+    }
+  },
+  "$id": "urn:b10x:substrate-wire:0.13.0:common",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Substrate phase-3 scalar and envelope definitions"
+}
