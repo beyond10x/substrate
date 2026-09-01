@@ -2,12 +2,14 @@
 format: aep.planning-md/1
 id: story:aperture-install-failure-loses-its-errno
 kind: story
-status: active
+status: implemented
 title: An aperture install failure names its stage and loses its errno
 summary: The sandbox helper reports through _exit(stage), so a stage-6 bind failure carries no errno; the delegated lane fails on it about one run in ten.
+tags:
+- wave/remote-foundation-01
 relations:
 - decomposes: epic:release-hardening
-revision: 4
+revision: 6
 ---
 # Story: An aperture install failure names its stage and loses its errno
 

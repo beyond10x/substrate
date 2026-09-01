@@ -10,10 +10,11 @@ tags:
 - deferred
 - mcp
 - testing
+- wave/remote-foundation-01
 relations:
 - decomposes: epic:mcp-test-surface
 - depends_on: story:sdk-promoted-contract-parity
-revision: 2
+revision: 3
 ---
 # Story: Launch a disposable daemon behind MCP
 

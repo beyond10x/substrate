@@ -8,12 +8,13 @@ summary: 'Design 05 decisions 3-4: at most 60 s, redeems once, channel-bound; re
 owner: substrate
 tags:
 - daemon
+- wave/remote-foundation-01
 - wire
 relations:
 - decomposes: epic:byte-plane-completion
 - depends_on: story:production-tls-control-listener
 - depends_on: story:hosted-trust-envelope-admission
-revision: 6
+revision: 7
 ---
 # Story: Network session transport over TLS with single-use proof-bound authority
 

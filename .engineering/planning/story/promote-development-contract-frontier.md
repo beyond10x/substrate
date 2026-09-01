@@ -10,12 +10,13 @@ tags:
 - contract
 - release
 - remote
+- wave/remote-foundation-01
 relations:
 - decomposes: epic:release-hardening
 - depends_on: story:confinement-runtime-hardening
 - depends_on: story:aperture-install-failure-loses-its-errno
 - depends_on: story:contract-bundle-oci-artifact
-revision: 2
+revision: 3
 ---
 # Story: The daemon advertises the implemented contract frontier
 

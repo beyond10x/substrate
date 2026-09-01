@@ -10,10 +10,11 @@ tags:
 - remote
 - security
 - tls
+- wave/remote-foundation-01
 relations:
 - decomposes: epic:remote-serving
 - depends_on: story:promote-development-contract-frontier
-revision: 2
+revision: 3
 ---
 # Story: Production control traffic uses TLS
 

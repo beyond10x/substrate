@@ -9,10 +9,11 @@ owner: substrate
 tags:
 - release
 - sdk
+- wave/remote-foundation-01
 relations:
 - decomposes: epic:rust-sdk
 - depends_on: story:contract-bundle-oci-artifact
-revision: 4
+revision: 5
 ---
 # Story: The Rust SDK and runtime chain are owner-released Rust packages
 

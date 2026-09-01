@@ -9,10 +9,11 @@ owner: substrate
 tags:
 - contracts
 - release
+- wave/remote-foundation-01
 relations:
 - decomposes: epic:release-hardening
 - depends_on: story:signed-daemon-image
-revision: 10
+revision: 11
 ---
 # Story: The 0.4.0 contract bundle is a signed, digest-pinned OCI artifact
 
