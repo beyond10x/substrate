@@ -7,8 +7,8 @@
 # `ghcr.io/beyond10x/b10x-substrate-wire:<bundle-version>` and the development-only
 # `ghcr.io/beyond10x/b10x-substrate-mcp:<version>`, all keyless-signed with cosign. Their
 # digests are written to the GitHub release and emitted as the exact `CHANGELOG.md` stanza that must
-# land through the protected-main pull-request path. `b10x-substrate-*` is the published-package
-# prefix fixed by README.md:31.
+# land through the protected-main pull-request path. `b10x-substrate-*` is the source-package prefix
+# fixed by README.md.
 #
 # What this workflow refuses, and why each refusal is a refusal rather than a warning:
 #
@@ -836,10 +836,11 @@ jobs:
             digest pinning and a verified signature do not make it a stable contract. A
             stable-contract decision is its own ADR under atlas ADR 0019
             (\`architecture/adr/0019-substrate-contract-release-and-conformance.md\`).
-          - **The image's posture is development, not hosted.** Its \`EXPOSE 8080\` and \`VOLUME\`
-            describe the static-bearer TCP posture that design 06, section 1, marks
-            \`development_only\`. The hosted trust envelope is accepted in design and not
-            implemented; do not run this image as a hosted deployment.
+          - **The image's default posture is development, not hosted.** Its \`EXPOSE 8080\` and
+            \`VOLUME\` describe the static-bearer TCP posture that design 06, section 1, marks
+            \`development_only\`. The binary also implements the production TLS/Identity profile,
+            but a hosted deployment must explicitly supply that profile's certificates, trust
+            roots and authority settings; the default container command does not do so.
           - **The MCP image is local test tooling, not production ingress.** It has no listener,
             authentication or remote transport and is intended for an attached stdio harness with
             \`--network=none\`. Its tool surface is not a stable contract independent of Substrate.
