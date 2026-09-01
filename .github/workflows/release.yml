@@ -292,7 +292,7 @@ jobs:
       - name: Log in to GHCR
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GHCR_USER: ${{ github.repository_owner }}
+          GHCR_USER: ${{ github.actor }}
         run: |
           set -euo pipefail
           printf '%s' "$GHCR_TOKEN" \
@@ -390,8 +390,11 @@ jobs:
           PACKAGE_DIGEST: ${{ steps.bundle-package.outputs.digest }}
         run: |
           set -euo pipefail
+          anonymous_config=$(mktemp -d)
+          trap 'rm -rf "$anonymous_config"' EXIT
           if [ "$EXISTS" != true ]; then
-            if remote_digest=$(oras resolve "${BUNDLE_IMAGE}:${BUNDLE_VERSION}" 2>&1); then
+            if remote_digest=$(DOCKER_CONFIG="$anonymous_config" \
+                oras resolve "${BUNDLE_IMAGE}:${BUNDLE_VERSION}" 2>&1); then
               if [ "$remote_digest" != "$PACKAGE_DIGEST" ]; then
                 echo "refused: ${BUNDLE_IMAGE}:${BUNDLE_VERSION} appeared at ${remote_digest}, not ${PACKAGE_DIGEST}; it will not be overwritten." >&2
                 exit 1
@@ -412,12 +415,33 @@ jobs:
             fi
           fi
 
-          remote_digest=$(oras resolve "${BUNDLE_IMAGE}:${BUNDLE_VERSION}")
+          # Read back through a credential-free client. A successful authenticated push is not
+          # evidence that consumers can retrieve the package, and GHCR can briefly lag after a
+          # new public tag appears. Bound the wait and retain the final registry answer.
+          remote_digest=
+          resolve_error=
+          for attempt in 1 2 3 4 5; do
+            if remote_digest=$(DOCKER_CONFIG="$anonymous_config" \
+                oras resolve "${BUNDLE_IMAGE}:${BUNDLE_VERSION}" 2>&1); then
+              break
+            fi
+            resolve_error=$remote_digest
+            remote_digest=
+            if [ "$attempt" -lt 5 ]; then
+              sleep $((attempt * 2))
+            fi
+          done
+          if [ -z "$remote_digest" ]; then
+            echo "refused: ${BUNDLE_IMAGE}:${BUNDLE_VERSION} was not anonymously resolvable after publication:" >&2
+            printf '%s\n' "$resolve_error" >&2
+            exit 1
+          fi
           if [ "$remote_digest" != "$PACKAGE_DIGEST" ]; then
             echo "refused: published bundle resolves to ${remote_digest}, not packaged digest ${PACKAGE_DIGEST}." >&2
             exit 1
           fi
-          remote_descriptor=$(oras manifest fetch --descriptor "${BUNDLE_IMAGE}@${remote_digest}")
+          remote_descriptor=$(DOCKER_CONFIG="$anonymous_config" \
+            oras manifest fetch --descriptor "${BUNDLE_IMAGE}@${remote_digest}")
           printf '%s\n' "$remote_descriptor" \
             | jq -e \
                 --arg digest "$PACKAGE_DIGEST" \

@@ -81,8 +81,29 @@ fn release_copies_the_packagers_exact_manifest() {
     position("cargo xtask package-bundle \"${BUNDLE_VERSION}\" --out \"${BUNDLE_LAYOUT}\"");
     position("oras resolve --oci-layout \"${BUNDLE_LAYOUT}:${BUNDLE_VERSION}\"");
     position("oras cp --from-oci-layout");
-    position("remote_digest=$(oras resolve \"${BUNDLE_IMAGE}:${BUNDLE_VERSION}\")");
+    position("oras resolve \"${BUNDLE_IMAGE}:${BUNDLE_VERSION}\" 2>&1");
     position("if [ \"$remote_digest\" != \"$PACKAGE_DIGEST\" ]");
+}
+
+#[test]
+fn registry_login_and_bundle_readback_use_their_narrow_identities() {
+    position("GHCR_USER: ${{ github.actor }}");
+    assert!(!WORKFLOW.contains("GHCR_USER: ${{ github.repository_owner }}"));
+
+    let publish = position("Publish or reuse the exact development contract-bundle layout");
+    let anonymous = WORKFLOW[publish..]
+        .find("anonymous_config=$(mktemp -d)")
+        .map(|offset| publish + offset)
+        .expect("bundle publication must create a credential-free readback context");
+    let readback = WORKFLOW[anonymous..]
+        .find("DOCKER_CONFIG=\"$anonymous_config\"")
+        .map(|offset| anonymous + offset)
+        .expect("bundle readback must be anonymous");
+    let bounded_retry = position("for attempt in 1 2 3 4 5");
+    let sign = position("Sign the development contract bundle keylessly");
+    assert!(publish < anonymous && anonymous <= readback);
+    assert!(readback < bounded_retry && bounded_retry < sign);
+    position("was not anonymously resolvable after publication");
 }
 
 #[test]
@@ -92,7 +113,7 @@ fn canonical_tags_are_never_overwritten() {
     let bundle_push = position("oras cp --from-oci-layout");
     assert!(refusal < daemon_push);
     assert!(refusal < bundle_push);
-    assert!(occurrences("oras resolve \"${BUNDLE_IMAGE}:${BUNDLE_VERSION}\"") >= 2);
+    assert!(occurrences("oras resolve \"${BUNDLE_IMAGE}:${BUNDLE_VERSION}\"") >= 3);
     position("reusing byte-identical ${BUNDLE_IMAGE}:${BUNDLE_VERSION}");
     position("not deterministic package ${PACKAGE_DIGEST}; it will not be overwritten");
     position("appeared at ${remote_digest}, not ${PACKAGE_DIGEST}; it will not be overwritten");
