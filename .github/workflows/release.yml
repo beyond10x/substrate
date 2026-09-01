@@ -1,6 +1,8 @@
 # Publishes the daemon image and the explicitly pinned current development contract bundle for a
 # release tag: an **annotated bare-version tag** on `main` (AGENTS.md § "Releases" — "the bare
-# version … annotated, at a fully gated `main` commit"). The results are
+# version … annotated, at a fully gated `main` commit"). A deliberate manual recovery may name an
+# existing eligible tag after a partial release failed; it runs the current protected-main workflow
+# against the immutable tagged source and never moves the tag. The results are
 # `ghcr.io/beyond10x/b10x-substrate-daemon:<version>` and
 # `ghcr.io/beyond10x/b10x-substrate-wire:<bundle-version>`, both keyless-signed with cosign. Their
 # digests are written to the GitHub release and emitted as the exact `CHANGELOG.md` stanza that must
@@ -62,6 +64,12 @@ on:
       # not alternation — so this is "digits, dot, digits, dot, digits" and the anchored regex in
       # the preflight job is what actually decides. `0.2.2-rc.0` fails both.
       - '[0-9]+.[0-9]+.[0-9]+'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Existing annotated release tag to recover after a partial failure
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -110,7 +118,7 @@ jobs:
       # `0.2` and `0.2.2.1` produce nothing.
       - name: Refuse a tag that is not the bare version form
         env:
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
         run: |
           set -euo pipefail
           if ! printf '%s' "$TAG" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$'; then
@@ -126,8 +134,10 @@ jobs:
       - name: Require an annotated tag at a main commit
         id: tag
         env:
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
           EVENT_SHA: ${{ github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+          WORKFLOW_REF: ${{ github.ref }}
         run: |
           set -euo pipefail
           git fetch --force --no-tags origin "+refs/tags/${TAG}:refs/tags/${TAG}"
@@ -142,10 +152,14 @@ jobs:
 
           source_sha=$(git rev-parse "refs/tags/${TAG}^{commit}")
 
-          # SOURCE_SHA is the tag's commit. The event's own SHA is checked against it rather than
-          # trusted: the label the image carries must be the commit the tag names.
-          if [ "$source_sha" != "$EVENT_SHA" ]; then
+          # A tag-push event must itself name the peeled commit. A recovery dispatch instead runs
+          # only the workflow merged to protected main, while the source remains the immutable tag.
+          if [ "$EVENT_NAME" = "push" ] && [ "$source_sha" != "$EVENT_SHA" ]; then
             echo "refused: the tag peels to ${source_sha} but the event reports ${EVENT_SHA}." >&2
+            exit 1
+          fi
+          if [ "$EVENT_NAME" = "workflow_dispatch" ] && [ "$WORKFLOW_REF" != "refs/heads/main" ]; then
+            echo "refused: release recovery must dispatch the workflow from refs/heads/main, not ${WORKFLOW_REF}." >&2
             exit 1
           fi
 
@@ -157,7 +171,7 @@ jobs:
 
           # The version the image is tagged with and the version the binary reports must be one
           # number. `[workspace.package] version` is the manifest's single source (Cargo.toml:17).
-          manifest_version=$(awk '
+          manifest_version=$(git show "${source_sha}:Cargo.toml" | awk '
             /^\[workspace\.package\]$/ { in_block = 1; next }
             /^\[/                      { in_block = 0 }
             in_block && /^version[[:space:]]*=/ {
@@ -440,14 +454,14 @@ jobs:
             echo "refused: published bundle resolves to ${remote_digest}, not packaged digest ${PACKAGE_DIGEST}." >&2
             exit 1
           fi
-          remote_descriptor=$(DOCKER_CONFIG="$anonymous_config" \
-            oras manifest fetch --descriptor "${BUNDLE_IMAGE}@${remote_digest}")
-          printf '%s\n' "$remote_descriptor" \
+          # A registry descriptor carries media type, digest and size. OCI annotations live on the
+          # manifest itself, so inspect the manifest content after the digest comparison above.
+          remote_manifest=$(DOCKER_CONFIG="$anonymous_config" \
+            oras manifest fetch "${BUNDLE_IMAGE}@${remote_digest}")
+          printf '%s\n' "$remote_manifest" \
             | jq -e \
-                --arg digest "$PACKAGE_DIGEST" \
                 --arg version "$BUNDLE_VERSION" \
-                '.digest == $digest
-                 and .annotations["org.opencontainers.image.version"] == $version
+                '.annotations["org.opencontainers.image.version"] == $version
                  and .annotations["dev.b10x.contract.status"] == "development"' >/dev/null
           echo "resolved ${BUNDLE_IMAGE}:${BUNDLE_VERSION} -> ${remote_digest} (development)"
           echo "digest=${remote_digest}" >> "$GITHUB_OUTPUT"
@@ -578,7 +592,7 @@ jobs:
       # contract bundles under `contracts/substrate-wire/` are **development** bundles: publishing
       # and signing one does not make it a stable contract, and a stable-contract decision is its
       # own ADR under atlas ADR 0019
-      # (`architecture/adr/0019-contract-release-and-conformance.md`, cited by path because it
+      # (`architecture/adr/0019-substrate-contract-release-and-conformance.md`, cited by path because it
       # lives outside this repository — AGENTS.md, section "Links"). The image's `VOLUME` and
       # `EXPOSE 8080` (Dockerfile:16-17) describe the development-only TCP posture that
       # `docs/design/06-authentication-secrets-and-trust.md`, section 1, marks `development_only`;
@@ -629,7 +643,8 @@ jobs:
           ## Verify the signatures
 
           Both artifacts are signed keylessly through Sigstore. Each certificate identity is this
-          workflow at this tag, so a signature from any other workflow, ref or repository fails:
+          workflow at the ref that performed the release, so a signature from any other workflow,
+          ref or repository fails:
 
           \`\`\`console
           cosign verify \\
@@ -649,7 +664,7 @@ jobs:
             \`${BUNDLE_IMAGE}:${BUNDLE_VERSION}\` remains a **development** bundle; OCI publication,
             digest pinning and a verified signature do not make it a stable contract. A
             stable-contract decision is its own ADR under atlas ADR 0019
-            (\`architecture/adr/0019-contract-release-and-conformance.md\`).
+            (\`architecture/adr/0019-substrate-contract-release-and-conformance.md\`).
           - **The image's posture is development, not hosted.** Its \`EXPOSE 8080\` and \`VOLUME\`
             describe the static-bearer TCP posture that design 06, section 1, marks
             \`development_only\`. The hosted trust envelope is accepted in design and not
