@@ -24,6 +24,7 @@ verify it through `GET /v1/machine`.
 | limits | body, path, output, retention, concurrency, process, memory, CPU, duration, and probe-gated writable-storage bounds |
 | observations | explicit live and terminal wall, CPU, memory peak/current, process, OOM, block-I/O, and scratch usage facts |
 | sessions | leased raw-pipe and probe-gated PTY modes with one Unix-WebSocket attachment |
+| Rust SDK source | complete promoted-contract coverage, serializable observations, exact optional facts, keyed mutations, PTY resize, metrics and snapshots |
 | capsules | digest-verified read-only runtime material beside a writable workspace |
 | distribution | Apache-2.0 source and a keyless-signed daemon image |
 

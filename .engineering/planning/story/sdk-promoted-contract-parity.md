@@ -2,7 +2,7 @@
 format: aep.planning-md/1
 id: story:sdk-promoted-contract-parity
 kind: story
-status: proposed
+status: implemented
 title: The Rust SDK covers the promoted contract
 summary: Typed builders and observations cover the promoted PTY, confinement, quota and metrics surface without exposing driver internals.
 owner: substrate
@@ -13,7 +13,7 @@ tags:
 relations:
 - decomposes: epic:rust-sdk
 - depends_on: story:promote-development-contract-frontier
-revision: 4
+revision: 6
 ---
 # Story: The Rust SDK covers the promoted contract
 

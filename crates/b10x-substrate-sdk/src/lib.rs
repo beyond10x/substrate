@@ -26,18 +26,46 @@ use ulid::Ulid;
 
 pub use managed::{ManagedDaemon, ManagedDaemonBuilder, run_daemon_child_if_requested};
 pub use model::{
-    BaselineEnvironment, Event, EventPage, ExecExit, ExecObservation, ExecState, ExecutionPolicy,
-    ExecutionPolicyBuilder, FileContents, FileObservation, Lease, Machine, ObservedRefusal,
-    Operation, OperationState, OutputStream, PipeFrame, PipeSessionObservation, PipeSessionState,
+    BaselineEnvironment, CONTRACT, CONTRACT_SHA256, DigestedFileContents, Event, EventPage,
+    ExecExit, ExecObservation, ExecState, ExecutionPolicy, ExecutionPolicyBuilder, FileContents,
+    FileObservation, Lease, Machine, MetricsObservation, MetricsSample, ObservedRefusal, Operation,
+    OperationState, OutputPage, OutputStream, PipeFrame, PipeSessionObservation, PipeSessionState,
     Refusal, RefusalClass, RunOutput, Signal, WorkspaceObservation, WorkspaceState,
 };
 pub use substrate_wire::{
-    AppliedConfinement, ExecMeasurement, ExecUsage, ExecutionCapsuleInput, ReadOnlyRoot,
-    SecretSlotRequest, StorageLimit, WorkspaceAccess,
+    AppliedConfinement, DigestedFileSlice, DirectoryEntry, DirectoryEntryKind, DirectoryPage,
+    ExecMeasurement, ExecUsage, ExecutionCapsuleInput, ExpectedFileState, FileEditInput,
+    FileMutationResult, FilePatchInput, GitSource, GitSourceEnvelope, LinePatchEdit,
+    MAX_EVENT_PAGE_ITEMS, MAX_FILE_BYTES, MAX_IO_BYTES, MAX_LIST_ITEMS, MAX_PTY_WINDOW_COLUMNS,
+    MAX_PTY_WINDOW_ROWS, MAX_SNAPSHOT_PAGE_ITEMS, MetricsResourceKind, PipeSessionCapabilities,
+    PtyWindow, RESOURCE_USAGE_SAMPLE_INTERVAL_MS, ReadOnlyRoot, SecretSlotRequest,
+    SessionAttachmentState, SessionMode, SnapshotMetadata, SnapshotPage, StorageLimit,
+    TextMatchPolicy, WorkspaceAccess, WorkspaceTree, WorkspaceTreeEntry,
 };
-pub use transport::EventStream;
+pub use transport::{EventStream, MetricsStream};
 
 use transport::{Transport, decode_result, encode_path};
+
+/// Largest input budget accepted by one session.
+pub const MAX_SESSION_INPUT_BYTES: u64 = 16 * 1024 * 1024;
+/// Largest individual client frame accepted by one session.
+pub const MAX_SESSION_FRAME_BYTES: u64 = 64 * 1024;
+/// Largest declared live-output queue accepted by one session.
+pub const MAX_SESSION_QUEUED_FRAMES: u32 = 16;
+/// Largest process count accepted by an execution policy.
+pub const MAX_EXEC_PROCESSES: u32 = 4_096;
+/// Smallest memory ceiling accepted by an execution policy.
+pub const MIN_EXEC_MEMORY_BYTES: u64 = 1024 * 1024;
+/// Largest memory ceiling accepted by an execution policy.
+pub const MAX_EXEC_MEMORY_BYTES: u64 = 1024 * 1024 * 1024 * 1024;
+/// Largest wall-clock or cumulative CPU duration accepted by an execution policy.
+pub const MAX_EXEC_DURATION: Duration = Duration::from_hours(24);
+
+#[derive(Serialize)]
+struct SnapshotPageQuery<'a> {
+    cursor: Option<&'a str>,
+    limit: u32,
+}
 
 #[derive(Debug, Error)]
 #[non_exhaustive]
@@ -106,7 +134,9 @@ impl Client {
     pub fn workspace(&self) -> WorkspaceBuilder {
         WorkspaceBuilder {
             client: self.clone(),
+            source: substrate_wire::WorkspaceSource::Empty(substrate_wire::EmptySource::Empty),
             labels: BTreeMap::new(),
+            storage: None,
             lease_ttl: None,
             operation_id: None,
         }
@@ -143,6 +173,63 @@ impl Client {
         let path = format!("/v1/ops/{}", encode_path(id.as_ref()));
         let record: substrate_wire::OperationRecord = self.get(&path).await?;
         Ok(record.into())
+    }
+
+    pub async fn session_capabilities(&self) -> Result<PipeSessionCapabilities, SdkError> {
+        self.get("/v1/pipe-sessions").await
+    }
+
+    pub async fn metrics(
+        &self,
+        resource_kind: MetricsResourceKind,
+        resource_id: impl AsRef<str>,
+    ) -> Result<MetricsObservation, SdkError> {
+        let query = serde_urlencoded::to_string(substrate_wire::MetricsQuery {
+            resource_kind,
+            resource_id: resource_id.as_ref().to_owned(),
+        })
+        .map_err(|error| SdkError::Protocol(error.to_string()))?;
+        let observed: substrate_wire::MetricsObservation =
+            self.get(&format!("/v1/metrics?{query}")).await?;
+        Ok(observed.into())
+    }
+
+    pub async fn metrics_stream(
+        &self,
+        exec_id: impl AsRef<str>,
+    ) -> Result<MetricsStream, SdkError> {
+        self.inner.transport.metrics_stream(exec_id.as_ref()).await
+    }
+
+    pub async fn create_reconciliation_snapshot(&self) -> Result<SnapshotMetadata, SdkError> {
+        let body = serde_json::to_vec(&substrate_wire::EmptyInput {})
+            .map_err(|error| SdkError::Protocol(error.to_string()))?;
+        let response = self
+            .inner
+            .transport
+            .request("POST", "/v1/reconciliation-snapshots", Some(&body))
+            .await?;
+        decode_result(&response)
+    }
+
+    pub async fn reconciliation_snapshot_page(
+        &self,
+        snapshot_id: impl AsRef<str>,
+        cursor: Option<&str>,
+        limit: u32,
+    ) -> Result<SnapshotPage, SdkError> {
+        if limit == 0 || limit > MAX_SNAPSHOT_PAGE_ITEMS {
+            return Err(SdkError::Protocol(
+                "snapshot limit is outside 1..=1000".to_owned(),
+            ));
+        }
+        let query = serde_urlencoded::to_string(SnapshotPageQuery { cursor, limit })
+            .map_err(|error| SdkError::Protocol(error.to_string()))?;
+        self.get(&format!(
+            "/v1/reconciliation-snapshots/{}?{query}",
+            encode_path(snapshot_id.as_ref())
+        ))
+        .await
     }
 
     pub async fn events(&self, cursor: Option<&str>, limit: u32) -> Result<EventPage, SdkError> {
@@ -285,7 +372,9 @@ impl ClientBuilder {
 #[must_use]
 pub struct WorkspaceBuilder {
     client: Client,
+    source: substrate_wire::WorkspaceSource,
     labels: BTreeMap<String, String>,
+    storage: Option<StorageLimit>,
     lease_ttl: Option<Duration>,
     operation_id: Option<String>,
 }
@@ -295,8 +384,29 @@ impl WorkspaceBuilder {
         self
     }
 
+    pub fn git(
+        mut self,
+        source: impl Into<String>,
+        reference: impl Into<String>,
+        depth: u16,
+    ) -> Self {
+        self.source = substrate_wire::WorkspaceSource::Git(GitSourceEnvelope {
+            git: GitSource {
+                source: source.into(),
+                reference: reference.into(),
+                depth,
+            },
+        });
+        self
+    }
+
     pub fn label(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.labels.insert(key.into(), value.into());
+        self
+    }
+
+    pub fn storage(mut self, limit: StorageLimit) -> Self {
+        self.storage = Some(limit);
         self
     }
 
@@ -311,10 +421,18 @@ impl WorkspaceBuilder {
     }
 
     pub async fn create(self) -> Result<Workspace, SdkError> {
+        if self
+            .storage
+            .is_some_and(|limit| !limit.within_contract_bounds())
+        {
+            return Err(SdkError::Protocol(
+                "workspace storage quota is outside the contract bound".to_owned(),
+            ));
+        }
         let input = substrate_wire::WorkspaceCreateInput {
-            source: substrate_wire::WorkspaceSource::Empty(substrate_wire::EmptySource::Empty),
+            source: self.source,
             labels: self.labels,
-            storage: None,
+            storage: self.storage,
             lease_ttl_ms: duration_millis(self.lease_ttl)?,
         };
         let (_, observed): (_, substrate_wire::Workspace) = self
@@ -382,8 +500,17 @@ impl Workspace {
             input_limit_bytes: None,
             frame_limit_bytes: None,
             queued_frames: None,
+            mode: SessionMode::Pipes,
+            window: None,
             operation_id: None,
         }
+    }
+
+    pub fn pty_session(&self, program: impl Into<String>, window: PtyWindow) -> PipeSessionBuilder {
+        let mut builder = self.pipe_session(program);
+        builder.mode = SessionMode::Pty;
+        builder.window = Some(window);
+        builder
     }
 
     pub async fn refresh(&mut self) -> Result<&WorkspaceObservation, SdkError> {
@@ -438,10 +565,55 @@ impl Workspace {
         })
     }
 
+    pub async fn read_directory(
+        &self,
+        path: impl AsRef<str>,
+        cursor: Option<&str>,
+        limit_items: u32,
+    ) -> Result<DirectoryPage, SdkError> {
+        if limit_items == 0 || limit_items > MAX_LIST_ITEMS {
+            return Err(SdkError::Protocol(
+                "directory limit is outside its contract bound".to_owned(),
+            ));
+        }
+        substrate_wire::validate_relative_path(path.as_ref())
+            .map_err(|error| SdkError::Protocol(error.to_string()))?;
+        let query = serde_urlencoded::to_string(substrate_wire::FileReadQuery {
+            mode: substrate_wire::FileMode::Directory,
+            offset: None,
+            limit_bytes: None,
+            cursor: cursor.map(ToOwned::to_owned),
+            limit_items: Some(limit_items),
+        })
+        .map_err(|error| SdkError::Protocol(error.to_string()))?;
+        let target = format!(
+            "/v1/workspaces/{}/files/{}?{query}",
+            encode_path(&self.observed.id),
+            encode_path(path.as_ref())
+        );
+        let result: substrate_wire::FileReadResult = self.client.get(&target).await?;
+        match result {
+            substrate_wire::FileReadResult::Directory(page) => Ok(page),
+            substrate_wire::FileReadResult::File(_) => Err(SdkError::Protocol(
+                "daemon returned a file for a directory read".to_owned(),
+            )),
+        }
+    }
+
     pub async fn write_file(
         &self,
         path: impl AsRef<str>,
         bytes: impl AsRef<[u8]>,
+    ) -> Result<FileObservation, SdkError> {
+        self.write_file_with_operation_id(path, bytes, None::<String>)
+            .await
+    }
+
+    pub async fn write_file_with_operation_id(
+        &self,
+        path: impl AsRef<str>,
+        bytes: impl AsRef<[u8]>,
+        operation_id: impl Into<Option<String>>,
     ) -> Result<FileObservation, SdkError> {
         substrate_wire::validate_relative_path(path.as_ref())
             .map_err(|error| SdkError::Protocol(error.to_string()))?;
@@ -452,22 +624,30 @@ impl Workspace {
             ));
         }
         let input = substrate_wire::FileWriteInput {
-            content: substrate_wire::Base64Content {
-                encoding: substrate_wire::Base64Encoding::Base64,
-                data: base64::engine::general_purpose::STANDARD.encode(bytes.as_ref()),
-            },
+            content: base64_content(bytes.as_ref()),
         };
         let target = format!(
             "/v1/workspaces/{}/files/{}",
             encode_path(&self.observed.id),
             encode_path(path.as_ref())
         );
-        let (_, observed): (_, substrate_wire::FileObservation) =
-            self.client.mutation("PUT", &target, &input, None).await?;
+        let (_, observed): (_, substrate_wire::FileObservation) = self
+            .client
+            .mutation("PUT", &target, &input, operation_id.into())
+            .await?;
         Ok(observed.into())
     }
 
     pub async fn delete_file(&self, path: impl AsRef<str>) -> Result<bool, SdkError> {
+        self.delete_file_with_operation_id(path, None::<String>)
+            .await
+    }
+
+    pub async fn delete_file_with_operation_id(
+        &self,
+        path: impl AsRef<str>,
+        operation_id: impl Into<Option<String>>,
+    ) -> Result<bool, SdkError> {
         substrate_wire::validate_relative_path(path.as_ref())
             .map_err(|error| SdkError::Protocol(error.to_string()))?;
         let target = format!(
@@ -477,12 +657,26 @@ impl Workspace {
         );
         let (_, absent): (_, substrate_wire::FileAbsence) = self
             .client
-            .mutation("DELETE", &target, &substrate_wire::EmptyInput {}, None)
+            .mutation(
+                "DELETE",
+                &target,
+                &substrate_wire::EmptyInput {},
+                operation_id.into(),
+            )
             .await?;
         Ok(absent.absent)
     }
 
     pub async fn renew_lease(&mut self, ttl: Duration) -> Result<&WorkspaceObservation, SdkError> {
+        self.renew_lease_with_operation_id(ttl, None::<String>)
+            .await
+    }
+
+    pub async fn renew_lease_with_operation_id(
+        &mut self,
+        ttl: Duration,
+        operation_id: impl Into<Option<String>>,
+    ) -> Result<&WorkspaceObservation, SdkError> {
         let input = substrate_wire::LeaseRenewInput {
             ttl_ms: required_duration_millis(ttl)?,
         };
@@ -490,19 +684,157 @@ impl Workspace {
             "/v1/workspaces/{}/lease/renew",
             encode_path(&self.observed.id)
         );
-        let (_, observed): (_, substrate_wire::Workspace) =
-            self.client.mutation("POST", &target, &input, None).await?;
+        let (_, observed): (_, substrate_wire::Workspace) = self
+            .client
+            .mutation("POST", &target, &input, operation_id.into())
+            .await?;
         self.observed = observed.into();
         Ok(&self.observed)
     }
 
     pub async fn destroy(self) -> Result<bool, SdkError> {
+        self.destroy_with_operation_id(None::<String>).await
+    }
+
+    pub async fn destroy_with_operation_id(
+        self,
+        operation_id: impl Into<Option<String>>,
+    ) -> Result<bool, SdkError> {
         let target = format!("/v1/workspaces/{}", encode_path(&self.observed.id));
         let (_, absent): (_, substrate_wire::WorkspaceAbsence) = self
             .client
-            .mutation("DELETE", &target, &substrate_wire::EmptyInput {}, None)
+            .mutation(
+                "DELETE",
+                &target,
+                &substrate_wire::EmptyInput {},
+                operation_id.into(),
+            )
             .await?;
         Ok(absent.absent)
+    }
+
+    pub async fn read_file_v2(
+        &self,
+        path: impl AsRef<str>,
+        offset: u64,
+        limit_bytes: u64,
+    ) -> Result<DigestedFileContents, SdkError> {
+        validate_file_read(path.as_ref(), limit_bytes)?;
+        let query = serde_urlencoded::to_string(substrate_wire::FileReadQuery {
+            mode: substrate_wire::FileMode::File,
+            offset: Some(offset),
+            limit_bytes: Some(limit_bytes),
+            cursor: None,
+            limit_items: None,
+        })
+        .map_err(|error| SdkError::Protocol(error.to_string()))?;
+        let target = format!(
+            "/v2/workspaces/{}/files/{}?{query}",
+            encode_path(&self.observed.id),
+            encode_path(path.as_ref())
+        );
+        let slice: substrate_wire::DigestedFileSlice = self.client.get(&target).await?;
+        slice.try_into()
+    }
+
+    pub async fn tree(
+        &self,
+        limit_items: u32,
+        include_hidden: bool,
+    ) -> Result<WorkspaceTree, SdkError> {
+        let query = substrate_wire::WorkspaceTreeQuery {
+            limit_items,
+            include_hidden,
+        };
+        query
+            .validate()
+            .map_err(|error| SdkError::Protocol(error.to_string()))?;
+        let query = serde_urlencoded::to_string(query)
+            .map_err(|error| SdkError::Protocol(error.to_string()))?;
+        self.client
+            .get(&format!(
+                "/v2/workspaces/{}/tree?{query}",
+                encode_path(&self.observed.id)
+            ))
+            .await
+    }
+
+    pub async fn replace_file(
+        &self,
+        path: impl AsRef<str>,
+        bytes: impl AsRef<[u8]>,
+        expected: ExpectedFileState,
+        create_parents: bool,
+        operation_id: impl Into<Option<String>>,
+    ) -> Result<FileMutationResult, SdkError> {
+        validate_file_mutation(path.as_ref(), bytes.as_ref())?;
+        expected
+            .validate()
+            .map_err(|error| SdkError::Protocol(error.to_string()))?;
+        let input = substrate_wire::FileReplaceInput {
+            content: base64_content(bytes.as_ref()),
+            expected,
+            create_parents,
+        };
+        self.file_mutation("PUT", "files", path.as_ref(), &input, operation_id.into())
+            .await
+    }
+
+    pub async fn edit_file(
+        &self,
+        path: impl AsRef<str>,
+        input: FileEditInput,
+        operation_id: impl Into<Option<String>>,
+    ) -> Result<FileMutationResult, SdkError> {
+        substrate_wire::validate_relative_path(path.as_ref())
+            .map_err(|error| SdkError::Protocol(error.to_string()))?;
+        self.file_mutation(
+            "POST",
+            "file-edits",
+            path.as_ref(),
+            &input,
+            operation_id.into(),
+        )
+        .await
+    }
+
+    pub async fn patch_file(
+        &self,
+        path: impl AsRef<str>,
+        input: FilePatchInput,
+        operation_id: impl Into<Option<String>>,
+    ) -> Result<FileMutationResult, SdkError> {
+        substrate_wire::validate_relative_path(path.as_ref())
+            .map_err(|error| SdkError::Protocol(error.to_string()))?;
+        self.file_mutation(
+            "POST",
+            "file-patches",
+            path.as_ref(),
+            &input,
+            operation_id.into(),
+        )
+        .await
+    }
+
+    async fn file_mutation<I: Serialize>(
+        &self,
+        method: &str,
+        route: &str,
+        path: &str,
+        input: &I,
+        operation_id: Option<String>,
+    ) -> Result<FileMutationResult, SdkError> {
+        let target = format!(
+            "/v2/workspaces/{}/{}/{}",
+            encode_path(&self.observed.id),
+            route,
+            encode_path(path)
+        );
+        let (_, result) = self
+            .client
+            .mutation(method, &target, input, operation_id)
+            .await?;
+        Ok(result)
     }
 }
 
@@ -544,6 +876,8 @@ pub struct PipeSessionBuilder {
     input_limit_bytes: Option<u64>,
     frame_limit_bytes: Option<u64>,
     queued_frames: Option<u32>,
+    mode: SessionMode,
+    window: Option<PtyWindow>,
     operation_id: Option<String>,
 }
 
@@ -639,6 +973,12 @@ impl PipeSessionBuilder {
     }
 
     pub async fn start(self) -> Result<PipeSession, SdkError> {
+        if self.argv.first().is_none_or(String::is_empty) {
+            return Err(SdkError::Builder { field: "program" });
+        }
+        substrate_wire::validate_session_window(self.mode, self.window.as_ref())
+            .map_err(|error| SdkError::Protocol(error.to_string()))?;
+        validate_execution_storage(&self.workspace_access, self.scratch)?;
         let policy = self.policy.ok_or(SdkError::Builder { field: "policy" })?;
         let lease_ttl = self.lease_ttl.ok_or(SdkError::Builder { field: "lease" })?;
         let input_limit_bytes = self.input_limit_bytes.ok_or(SdkError::Builder {
@@ -650,6 +990,21 @@ impl PipeSessionBuilder {
         let queued_frames = self.queued_frames.ok_or(SdkError::Builder {
             field: "queued_frames",
         })?;
+        if input_limit_bytes == 0 || input_limit_bytes > MAX_SESSION_INPUT_BYTES {
+            return Err(SdkError::Protocol(
+                "session input limit is outside its contract bound".to_owned(),
+            ));
+        }
+        if frame_limit_bytes == 0 || frame_limit_bytes > MAX_SESSION_FRAME_BYTES {
+            return Err(SdkError::Protocol(
+                "session frame limit is outside its contract bound".to_owned(),
+            ));
+        }
+        if queued_frames == 0 || queued_frames > MAX_SESSION_QUEUED_FRAMES {
+            return Err(SdkError::Protocol(
+                "session queue limit is outside its contract bound".to_owned(),
+            ));
+        }
         let exec = substrate_wire::ExecStartInput {
             workspace: self.workspace.observed.id.clone(),
             argv: self.argv,
@@ -680,11 +1035,13 @@ impl PipeSessionBuilder {
             capsule: self.capsule,
             lease_ttl_ms: Some(required_duration_millis(lease_ttl)?),
         };
-        let input = AdvertisedPipeSessionStart {
+        let input = substrate_wire::PipeSessionStartInput {
             exec,
             input_limit_bytes,
             frame_limit_bytes,
             queued_frames,
+            mode: self.mode,
+            window: self.window,
         };
         let (_, observed): (_, substrate_wire::PipeSession) = self
             .workspace
@@ -696,14 +1053,6 @@ impl PipeSessionBuilder {
             observed: observed.into(),
         })
     }
-}
-
-#[derive(Serialize)]
-struct AdvertisedPipeSessionStart {
-    exec: substrate_wire::ExecStartInput,
-    input_limit_bytes: u64,
-    frame_limit_bytes: u64,
-    queued_frames: u32,
 }
 
 #[derive(Clone)]
@@ -744,6 +1093,7 @@ impl PipeSession {
         Ok(PipeChannel {
             socket,
             next_sequence: 1,
+            mode: self.observed.mode,
         })
     }
 
@@ -751,6 +1101,16 @@ impl PipeSession {
         &mut self,
         signal: Signal,
         grace: Duration,
+    ) -> Result<&PipeSessionObservation, SdkError> {
+        self.signal_with_operation_id(signal, grace, None::<String>)
+            .await
+    }
+
+    pub async fn signal_with_operation_id(
+        &mut self,
+        signal: Signal,
+        grace: Duration,
+        operation_id: impl Into<Option<String>>,
     ) -> Result<&PipeSessionObservation, SdkError> {
         let input = substrate_wire::ExecSignalInput {
             signal: signal.into(),
@@ -760,8 +1120,10 @@ impl PipeSession {
             "/v1/pipe-sessions/{}/signal",
             encode_path(&self.observed.id)
         );
-        let (_, observed): (_, substrate_wire::PipeSession) =
-            self.client.mutation("POST", &target, &input, None).await?;
+        let (_, observed): (_, substrate_wire::PipeSession) = self
+            .client
+            .mutation("POST", &target, &input, operation_id.into())
+            .await?;
         self.observed = observed.into();
         Ok(&self.observed)
     }
@@ -770,6 +1132,15 @@ impl PipeSession {
         &mut self,
         ttl: Duration,
     ) -> Result<&PipeSessionObservation, SdkError> {
+        self.renew_lease_with_operation_id(ttl, None::<String>)
+            .await
+    }
+
+    pub async fn renew_lease_with_operation_id(
+        &mut self,
+        ttl: Duration,
+        operation_id: impl Into<Option<String>>,
+    ) -> Result<&PipeSessionObservation, SdkError> {
         let input = substrate_wire::LeaseRenewInput {
             ttl_ms: required_duration_millis(ttl)?,
         };
@@ -777,17 +1148,31 @@ impl PipeSession {
             "/v1/pipe-sessions/{}/lease/renew",
             encode_path(&self.observed.id)
         );
-        let (_, observed): (_, substrate_wire::PipeSession) =
-            self.client.mutation("POST", &target, &input, None).await?;
+        let (_, observed): (_, substrate_wire::PipeSession) = self
+            .client
+            .mutation("POST", &target, &input, operation_id.into())
+            .await?;
         self.observed = observed.into();
         Ok(&self.observed)
     }
 
     pub async fn retire(self) -> Result<bool, SdkError> {
+        self.retire_with_operation_id(None::<String>).await
+    }
+
+    pub async fn retire_with_operation_id(
+        self,
+        operation_id: impl Into<Option<String>>,
+    ) -> Result<bool, SdkError> {
         let target = format!("/v1/pipe-sessions/{}", encode_path(&self.observed.id));
         let (_, absent): (_, substrate_wire::SessionAbsence) = self
             .client
-            .mutation("DELETE", &target, &substrate_wire::EmptyInput {}, None)
+            .mutation(
+                "DELETE",
+                &target,
+                &substrate_wire::EmptyInput {},
+                operation_id.into(),
+            )
             .await?;
         Ok(absent.absent)
     }
@@ -796,6 +1181,7 @@ impl PipeSession {
 pub struct PipeChannel {
     socket: tokio_tungstenite::WebSocketStream<tokio::net::UnixStream>,
     next_sequence: u64,
+    mode: SessionMode,
 }
 
 impl PipeChannel {
@@ -812,9 +1198,33 @@ impl PipeChannel {
     }
 
     pub async fn close_input(&mut self) -> Result<(), SdkError> {
+        if self.mode == SessionMode::Pty {
+            return Err(SdkError::Protocol(
+                "a pty has no close-input frame; send the terminal EOF byte".to_owned(),
+            ));
+        }
         let frame = serde_json::json!({
             "kind": "close-input",
             "sequence": self.take_sequence()?,
+        });
+        self.send(frame).await
+    }
+
+    pub async fn resize(&mut self, window: PtyWindow) -> Result<(), SdkError> {
+        if self.mode != SessionMode::Pty {
+            return Err(SdkError::Protocol(
+                "resize belongs to a pty session".to_owned(),
+            ));
+        }
+        if !window.within_bounds() {
+            return Err(SdkError::Protocol(
+                "terminal window is outside the contract bound".to_owned(),
+            ));
+        }
+        let frame = serde_json::json!({
+            "kind": "resize",
+            "sequence": self.take_sequence()?,
+            "window": window,
         });
         self.send(frame).await
     }
@@ -1026,6 +1436,7 @@ impl CommandBuilder {
         if self.argv.first().is_none_or(String::is_empty) {
             return Err(SdkError::Builder { field: "program" });
         }
+        validate_execution_storage(&self.workspace_access, self.scratch)?;
         let policy = self.policy.ok_or(SdkError::Builder { field: "policy" })?;
         let capability_snapshot = self.workspace.client.machine().capability_snapshot;
         let input = substrate_wire::ExecStartInput {
@@ -1112,33 +1523,68 @@ impl Exec {
         signal: Signal,
         grace: Duration,
     ) -> Result<&ExecObservation, SdkError> {
+        self.signal_with_operation_id(signal, grace, None::<String>)
+            .await
+    }
+
+    pub async fn signal_with_operation_id(
+        &mut self,
+        signal: Signal,
+        grace: Duration,
+        operation_id: impl Into<Option<String>>,
+    ) -> Result<&ExecObservation, SdkError> {
         let input = substrate_wire::ExecSignalInput {
             signal: signal.into(),
             grace_ms: required_duration_millis(grace)?,
         };
         let target = format!("/v1/execs/{}/signal", encode_path(&self.observed.id));
-        let (_, observed): (_, substrate_wire::Exec) =
-            self.client.mutation("POST", &target, &input, None).await?;
+        let (_, observed): (_, substrate_wire::Exec) = self
+            .client
+            .mutation("POST", &target, &input, operation_id.into())
+            .await?;
         self.observed = observed.into();
         Ok(&self.observed)
     }
 
     pub async fn renew_lease(&mut self, ttl: Duration) -> Result<&ExecObservation, SdkError> {
+        self.renew_lease_with_operation_id(ttl, None::<String>)
+            .await
+    }
+
+    pub async fn renew_lease_with_operation_id(
+        &mut self,
+        ttl: Duration,
+        operation_id: impl Into<Option<String>>,
+    ) -> Result<&ExecObservation, SdkError> {
         let input = substrate_wire::LeaseRenewInput {
             ttl_ms: required_duration_millis(ttl)?,
         };
         let target = format!("/v1/execs/{}/lease/renew", encode_path(&self.observed.id));
-        let (_, observed): (_, substrate_wire::Exec) =
-            self.client.mutation("POST", &target, &input, None).await?;
+        let (_, observed): (_, substrate_wire::Exec) = self
+            .client
+            .mutation("POST", &target, &input, operation_id.into())
+            .await?;
         self.observed = observed.into();
         Ok(&self.observed)
     }
 
     pub async fn retire(self) -> Result<bool, SdkError> {
+        self.retire_with_operation_id(None::<String>).await
+    }
+
+    pub async fn retire_with_operation_id(
+        self,
+        operation_id: impl Into<Option<String>>,
+    ) -> Result<bool, SdkError> {
         let target = format!("/v1/execs/{}", encode_path(&self.observed.id));
         let (_, absent): (_, substrate_wire::ExecAbsence) = self
             .client
-            .mutation("DELETE", &target, &substrate_wire::EmptyInput {}, None)
+            .mutation(
+                "DELETE",
+                &target,
+                &substrate_wire::EmptyInput {},
+                operation_id.into(),
+            )
             .await?;
         Ok(absent.absent)
     }
@@ -1172,6 +1618,43 @@ impl Exec {
             }
         }
     }
+
+    pub async fn output_page(
+        &self,
+        stream: OutputStream,
+        offset: u64,
+        limit_bytes: u64,
+    ) -> Result<OutputPage, SdkError> {
+        if limit_bytes == 0 || limit_bytes > MAX_IO_BYTES {
+            return Err(SdkError::Protocol(
+                "output limit is outside its contract bound".to_owned(),
+            ));
+        }
+        let query = serde_urlencoded::to_string(substrate_wire::ExecOutputQuery {
+            stream: stream.into(),
+            offset,
+            limit_bytes,
+        })
+        .map_err(|error| SdkError::Protocol(error.to_string()))?;
+        let target = format!(
+            "/v1/execs/{}/output?{query}",
+            encode_path(&self.observed.id)
+        );
+        let slice: substrate_wire::OutputSlice = self.client.get(&target).await?;
+        Ok(OutputPage {
+            exec: slice.exec,
+            stream: slice.stream.into(),
+            offset: slice.offset,
+            next_offset: slice.next_offset,
+            bytes: slice
+                .content
+                .decode()
+                .map_err(|error| SdkError::Protocol(error.to_string()))?,
+            eof: slice.eof,
+            truncated: slice.truncated,
+            observed_at: slice.observed_at,
+        })
+    }
 }
 
 struct Captured {
@@ -1186,6 +1669,50 @@ fn duration_millis(value: Option<Duration>) -> Result<Option<u64>, SdkError> {
 fn required_duration_millis(value: Duration) -> Result<u64, SdkError> {
     u64::try_from(value.as_millis())
         .map_err(|_| SdkError::Protocol("duration exceeds the wire range".to_owned()))
+}
+
+fn base64_content(bytes: &[u8]) -> substrate_wire::Base64Content {
+    substrate_wire::Base64Content {
+        encoding: substrate_wire::Base64Encoding::Base64,
+        data: base64::engine::general_purpose::STANDARD.encode(bytes),
+    }
+}
+
+fn validate_file_read(path: &str, limit_bytes: u64) -> Result<(), SdkError> {
+    substrate_wire::validate_relative_path(path)
+        .map_err(|error| SdkError::Protocol(error.to_string()))?;
+    if limit_bytes == 0 || limit_bytes > MAX_IO_BYTES {
+        return Err(SdkError::Protocol(
+            "file read limit is outside its contract bound".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_file_mutation(path: &str, bytes: &[u8]) -> Result<(), SdkError> {
+    substrate_wire::validate_relative_path(path)
+        .map_err(|error| SdkError::Protocol(error.to_string()))?;
+    let maximum = usize::try_from(MAX_FILE_BYTES).unwrap_or(usize::MAX);
+    if bytes.len() > maximum {
+        return Err(SdkError::Protocol(
+            "file exceeds the write bound".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_execution_storage(
+    access: &WorkspaceAccess,
+    scratch: Option<StorageLimit>,
+) -> Result<(), SdkError> {
+    substrate_wire::validate_workspace_access(access)
+        .map_err(|error| SdkError::Protocol(error.to_string()))?;
+    if scratch.is_some_and(|limit| !limit.within_contract_bounds()) {
+        return Err(SdkError::Protocol(
+            "scratch storage quota is outside the contract bound".to_owned(),
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

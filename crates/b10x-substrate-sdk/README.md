@@ -35,6 +35,11 @@ Every execution bound is explicit: the SDK deliberately supplies no product-poli
 Managed linked mode remains a separate re-executed child and is opt-in through the `linked-daemon`
 feature.
 
+Current development source additionally covers the complete promoted contract: guarded v2 file
+operations, bounded output pages, PTY sessions and resize, pull/stream metrics, reconciliation
+snapshots, caller-supplied operation ids for every mutation, and exact capability-fact absence.
+All public observations are serializable for protocol adapters such as MCP servers.
+
 The SDK and its wire contract are under development and are not stable. See the
 [public Rust SDK guide](https://beyond10x.github.io/substrate/docs/guides/rust-sdk) for lifecycle,
 error, and deployment details.

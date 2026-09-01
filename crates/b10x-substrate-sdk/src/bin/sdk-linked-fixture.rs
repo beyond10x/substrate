@@ -7,7 +7,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let data_dir = std::env::args_os()
         .nth(1)
         .ok_or("the fixture needs a data directory")?;
-    let managed = b10x_substrate_sdk::ManagedDaemon::builder()
+    let mut managed = b10x_substrate_sdk::ManagedDaemon::builder()
         .data_dir(data_dir)
         .deployment("sdk_linked_test")
         .linked_current_exe()

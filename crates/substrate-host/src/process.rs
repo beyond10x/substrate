@@ -255,6 +255,30 @@ impl ProcessRuntime {
         Ok(true)
     }
 
+    /// Kill and observe every tracked process tree before the daemon runtime is allowed to exit.
+    pub async fn shutdown(&self) -> Result<(), DriverError> {
+        let mut ids = self.executions.lock().keys().cloned().collect::<Vec<_>>();
+        ids.sort_unstable();
+        let mut first_error = None;
+        for id in ids {
+            let input = ExecSignalInput {
+                signal: Signal::Kill,
+                grace_ms: 0,
+            };
+            if let Err(error) = self.signal(&id, &input).await
+                && error.code != "resource.not-found"
+                && first_error.is_none()
+            {
+                first_error = Some(error);
+            }
+        }
+        if let Some(error) = first_error {
+            Err(error)
+        } else {
+            Ok(())
+        }
+    }
+
     fn reconcile_capsules(&self, process_trees_reconciled: bool) -> Result<(), DriverError> {
         let entries = match std::fs::read_dir(&self.config.capsule_root) {
             Ok(entries) => entries,
