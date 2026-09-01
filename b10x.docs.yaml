@@ -1,0 +1,25 @@
+schema: b10x-docs/v1
+repository:
+  id: substrate
+  url: https://github.com/beyond10x/substrate
+surfaces:
+  - id: docs
+    name: Substrate
+    summary: Confined execution with explicit capabilities, durable operations, and observed outcomes.
+    kind: documentation
+    canonicalUrl: https://beyond10x.github.io/substrate/
+    maturity: development
+    availability: published
+    discoverability: public
+    audiences: [adopter, developer, operator]
+    journeys: [build-agents, operate-services]
+    capabilities: [confined-execution, operation-ledger, execution-contract]
+    sections:
+      - {label: Getting started, url: https://beyond10x.github.io/substrate/docs/getting-started, kind: quickstart}
+      - {label: Boundary, url: https://beyond10x.github.io/substrate/docs/concepts/boundary, kind: docs}
+      - {label: Contract, url: https://beyond10x.github.io/substrate/docs/reference/contract, kind: reference}
+      - {label: Status, url: https://beyond10x.github.io/substrate/docs/status, kind: status}
+      - {label: Source, url: https://github.com/beyond10x/substrate, kind: source}
+    accent: "#72b7ff"
+    mark: website/static/img/mark.svg
+    shell: {integration: docusaurus, revision: 6323bfdaf73609247e8dabcc9df410ab280a1960}
