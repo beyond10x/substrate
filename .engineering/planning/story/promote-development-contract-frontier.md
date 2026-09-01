@@ -2,7 +2,7 @@
 format: aep.planning-md/1
 id: story:promote-development-contract-frontier
 kind: story
-status: active
+status: implemented
 title: The daemon advertises the implemented contract frontier
 summary: A clean-room consumer pins the current additive bundle before the daemon advances x-b10x-contract from 0.4.0.
 owner: substrate
@@ -16,7 +16,7 @@ relations:
 - depends_on: story:confinement-runtime-hardening
 - depends_on: story:aperture-install-failure-loses-its-errno
 - depends_on: story:contract-bundle-oci-artifact
-revision: 5
+revision: 7
 ---
 # Story: The daemon advertises the implemented contract frontier
 
@@ -46,3 +46,10 @@ New capability behavior, contract stability, protocol identifier renames and a g
 - `bash scripts/gate.sh`, `bash scripts/delegated-lane.sh`, `npm run typecheck` and `npm run build` passed in the implementation worktree.
 - Public release notes and website pages distinguish the inner contract digest from the outer signed OCI digest and continue to label the bundle development.
 - Harness compatibility observation remains required before this story moves from active to implemented.
+
+## Consumer observation — 2026-09-01
+
+- Substrate promotion merged through protected `main` as `79d3e4b`; exact-main full-gate run `33466513213` concluded success.
+- Harness kept its released Substrate `0.4.0` host/wire pin. Its standing live Unix-socket test against `79d3e4b` proved workspace create, write and read compatibility.
+- The observation found that Harness published `run` while always requesting `resource-usage` on a host where Substrate correctly withheld that fact and answered `exec.metrics-unserved`. Harness PR 9 made publication require the exact fact instead of advertising an unusable tool.
+- Harness compatibility fix merged as `c587bcf`; exact-main run `33467112033` passed the full gate and MSRV 1.97 job. No Metaharness or product-composition change was required.
