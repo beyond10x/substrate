@@ -133,7 +133,7 @@ impl ManagedDaemonBuilder {
                 "event retention must be nonzero".to_owned(),
             ));
         }
-        let temporary = if self.temporary {
+        let mut temporary = if self.temporary {
             Some(
                 tempfile::Builder::new()
                     .prefix("b10x-substrate-")
@@ -244,7 +244,12 @@ impl ManagedDaemonBuilder {
             match Client::builder().unix_socket(&socket).connect().await {
                 Ok(client) => break client,
                 Err(error @ SdkError::ContractMismatch { .. }) => {
-                    let _ = terminate_child(&mut child, self.shutdown_grace).await;
+                    if let Err(cleanup) = terminate_child(&mut child, self.shutdown_grace).await {
+                        let retained = retain_temporary(&mut temporary);
+                        return Err(SdkError::Startup(format!(
+                            "contract mismatch cleanup is unproven ({cleanup}); temporary state retained at {retained}"
+                        )));
+                    }
                     return Err(error);
                 }
                 Err(_) if tokio::time::Instant::now() < deadline => {
@@ -252,7 +257,12 @@ impl ManagedDaemonBuilder {
                 }
                 Err(error) => {
                     let diagnostics = diagnostics(&stderr).await;
-                    let _ = terminate_child(&mut child, self.shutdown_grace).await;
+                    if let Err(cleanup) = terminate_child(&mut child, self.shutdown_grace).await {
+                        let retained = retain_temporary(&mut temporary);
+                        return Err(SdkError::Startup(format!(
+                            "readiness failed ({error}); child cleanup is unproven ({cleanup}); temporary state retained at {retained}: {diagnostics}"
+                        )));
+                    }
                     return Err(SdkError::Startup(format!(
                         "readiness deadline elapsed ({error}): {diagnostics}"
                     )));
@@ -288,13 +298,10 @@ impl ManagedDaemon {
         self.child.as_ref().and_then(Child::id)
     }
 
-    pub async fn shutdown(mut self) -> Result<(), SdkError> {
-        let Some(mut child) = self.child.take() else {
-            return Ok(());
-        };
-        terminate_child(&mut child, self.shutdown_grace).await?;
-        self.temporary.take();
-        Ok(())
+    /// Stop the owned daemon. On any kill or wait error, ownership remains in `self` so dropping or
+    /// retrying cannot detach the child from its temporary state directory.
+    pub async fn shutdown(&mut self) -> Result<(), SdkError> {
+        terminate_owned(&mut self.child, &mut self.temporary, self.shutdown_grace).await
     }
 }
 
@@ -347,6 +354,27 @@ async fn terminate_child(child: &mut Child, grace: Duration) -> Result<(), SdkEr
         .await
         .map(|_| ())
         .map_err(|error| SdkError::Shutdown(error.to_string()))
+}
+
+async fn terminate_owned(
+    child: &mut Option<Child>,
+    temporary: &mut Option<tempfile::TempDir>,
+    grace: Duration,
+) -> Result<(), SdkError> {
+    let Some(owned) = child.as_mut() else {
+        return Ok(());
+    };
+    terminate_child(owned, grace).await?;
+    child.take();
+    temporary.take();
+    Ok(())
+}
+
+fn retain_temporary(temporary: &mut Option<tempfile::TempDir>) -> String {
+    temporary.take().map(tempfile::TempDir::keep).map_or_else(
+        || "<durable-data-dir>".to_owned(),
+        |path| path.display().to_string(),
+    )
 }
 
 async fn diagnostics(stderr: &Arc<Mutex<Vec<u8>>>) -> String {
@@ -412,5 +440,41 @@ pub async fn run_daemon_child_if_requested() -> Result<bool, SdkError> {
             }
         }
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Child, Command, Duration, terminate_owned};
+    use nix::sys::signal::{Signal, kill};
+    use nix::sys::wait::waitpid;
+    use nix::unistd::Pid;
+
+    #[tokio::test]
+    async fn unknown_child_absence_retains_child_and_temporary_root_ownership() {
+        let temporary = tempfile::tempdir().expect("temporary owned root");
+        let path = temporary.path().to_owned();
+        std::fs::write(path.join("marker"), b"owned").expect("write ownership marker");
+        let mut spawned = Command::new("/usr/bin/sleep");
+        spawned.arg("60").kill_on_drop(true);
+        let child = spawned.spawn().expect("spawn child");
+        let pid = Pid::from_raw(i32::try_from(child.id().expect("child pid")).expect("i32 pid"));
+        kill(pid, Signal::SIGKILL).expect("kill child outside tokio ownership");
+        tokio::task::spawn_blocking(move || waitpid(pid, None))
+            .await
+            .expect("join external reap")
+            .expect("externally reap child");
+
+        let mut child: Option<Child> = Some(child);
+        let mut temporary = Some(temporary);
+        terminate_owned(&mut child, &mut temporary, Duration::from_millis(10))
+            .await
+            .expect_err("unknown child absence must remain an error");
+        assert!(child.is_some(), "child ownership was discarded on error");
+        assert!(
+            temporary.is_some(),
+            "temporary ownership was discarded on error"
+        );
+        assert!(path.join("marker").is_file(), "temporary state was removed");
     }
 }

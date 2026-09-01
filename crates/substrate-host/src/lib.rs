@@ -216,6 +216,9 @@ impl DriverError {
 pub trait Driver: Send + Sync {
     fn machine(&self) -> CapabilitySnapshot;
 
+    /// Quiesce every process tree owned by this driver before its serving runtime exits.
+    async fn shutdown(&self) -> Result<(), DriverError>;
+
     /// Declares the deterministic physical root identity before any workspace mutation.
     ///
     /// # Errors
@@ -658,6 +661,10 @@ impl HostDriver {
 
 #[async_trait]
 impl Driver for HostDriver {
+    async fn shutdown(&self) -> Result<(), DriverError> {
+        self.processes.shutdown().await
+    }
+
     fn machine(&self) -> CapabilitySnapshot {
         self.capability.clone()
     }

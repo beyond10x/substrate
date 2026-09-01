@@ -7,6 +7,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- **The public Rust SDK covers the promoted development contract.** It now exposes guarded v2 file
+  operations, bounded directory/tree and exec-output pages, reconciliation snapshots, PTY start and
+  resize, metrics pull and stream, complete session observations, exact optional capability facts,
+  serializable observations, public request bounds and caller-supplied operation ids for every
+  mutation.
+
 ### Changed
 
 - **The daemon and Rust SDK now claim development contract `substrate-wire/0.12.0` together.**
@@ -19,6 +27,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   remains development, not stable.
 
 ### Fixed
+
+- **Orderly daemon shutdown quiesces every owned process tree before the runtime exits.** Unix and
+  TCP connection tasks are owned and drained, the driver shutdown contract is mandatory, and the
+  delegated SDK lane proves that both an active PTY workload and its exact exec cgroup are absent
+  before managed-daemon shutdown returns. Kill or wait errors retain the managed child and temporary
+  root for retry or drop cleanup.
+- WebSocket upgrade refusals retain their typed refusal body and contract headers instead of
+  collapsing into a transport string.
 
 - **Release recovery inspects the remote OCI manifest, not its descriptor.** Registry descriptors
   carry digest, media type and size while the required development/version annotations live in the

@@ -22,7 +22,12 @@ Add the client and Tokio to your application:
 [dependencies]
 b10x-substrate-sdk = "=0.4.0"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+ulid = "3"
 ```
+
+That dependency is the latest crates.io SDK release. The parity APIs later on this page describe
+current development source and will ship in a successor release; they are not retroactive claims
+about `0.4.0`.
 
 Then connect, create an empty workspace, and state every execution limit explicitly:
 
@@ -76,6 +81,85 @@ If the host cannot prove the required confinement, `run()` returns `SdkError::Re
 daemon's canonical class, code, address, retry fact, and operation id. A non-zero program exit is
 instead a successful observation in `RunOutput`.
 
+## Preserve capability absence
+
+Use the exact fact set when deciding whether to offer an operation. `None` means the daemon did not
+prove the guarantee; it does not mean a negative fact was observed.
+
+```rust
+let machine = client.machine();
+if machine.facts.sessions_pty == Some(true) {
+    // A PTY request may now be attempted. Dispatch can still return a named refusal.
+}
+
+if let Some(usage) = machine.facts.exec_resource_usage {
+    println!("memory peak available: {}", usage.memory_peak);
+} else {
+    println!("this deployment did not prove the complete usage counter set");
+}
+```
+
+The older convenience booleans remain available, but they deliberately collapse information. Use
+`Machine::facts` for admission, schema projection, or an agent-facing adapter.
+
+## Drive a terminal and observe usage
+
+PTY is a mode of the leased session resource, not a shell-string exec. State the initial window and
+all channel bounds, attach once, and resize through the typed channel:
+
+```rust
+use b10x_substrate_sdk::{ExecMeasurement, PtyWindow};
+
+let session = workspace
+    .pty_session("/usr/bin/bash", PtyWindow { columns: 100, rows: 30 })
+    .policy(policy)
+    .measure(ExecMeasurement::ResourceUsage)
+    .lease(Duration::from_secs(30))
+    .input_limit_bytes(1024 * 1024)
+    .frame_limit_bytes(16 * 1024)
+    .queued_frames(8)
+    .start()
+    .await?;
+
+let mut terminal = session.attach().await?;
+terminal.resize(PtyWindow { columns: 120, rows: 40 }).await?;
+terminal.write(b"printf 'hello from a pty\\n'\n").await?;
+```
+
+Request `ExecMeasurement::ResourceUsage` only when the exact fact is present. Then use
+`Client::metrics` for a point-in-time observation or `Client::metrics_stream` for latest-wins live
+samples. A host that cannot expose every declared counter keeps the fact absent and returns a named
+refusal; the SDK does not manufacture partial metrics.
+
+## Guard file changes and recovery
+
+The development SDK covers the v2 compare-and-set byte plane and lets every mutation keep a caller
+operation id:
+
+```rust
+use b10x_substrate_sdk::ExpectedFileState;
+
+let operation_id = ulid::Ulid::generate().to_string();
+let changed = workspace
+    .replace_file(
+        "src/config.txt",
+        b"mode=confined\n",
+        ExpectedFileState::Absent,
+        true,
+        Some(operation_id.clone()),
+    )
+    .await?;
+
+let recorded = client.operation(&operation_id).await?;
+assert_eq!(recorded.id, operation_id);
+println!("new digest: {}", changed.after_sha256);
+```
+
+`read_file_v2` returns a bounded byte page plus the complete-file digest; `tree` returns a bounded
+recursive view. `create_reconciliation_snapshot` and `reconciliation_snapshot_page` provide a
+barriered recovery view after an event-history gap. `Exec::output_page` exposes the same explicit
+offset and byte limit instead of allocating an unbounded transcript.
+
 ## Connect to a daemon you own
 
 The default SDK does not start a daemon. If your application should supervise one, point it at the
@@ -85,7 +169,7 @@ installed `substrate-daemon` binary and an explicit durable data directory:
 use b10x_substrate_sdk::ManagedDaemon;
 
 # async fn example() -> Result<(), b10x_substrate_sdk::SdkError> {
-let daemon = ManagedDaemon::builder()
+    let mut daemon = ManagedDaemon::builder()
     .data_dir("run/my-application-substrate")
     .deployment("my_application")
     .external_binary("/usr/local/bin/substrate-daemon")
@@ -127,7 +211,7 @@ async fn main() -> Result<(), b10x_substrate_sdk::SdkError> {
         return Ok(());
     }
 
-    let daemon = ManagedDaemon::builder()
+    let mut daemon = ManagedDaemon::builder()
         .data_dir("run/my-application-substrate")
         .deployment("my_application")
         .linked_current_exe()

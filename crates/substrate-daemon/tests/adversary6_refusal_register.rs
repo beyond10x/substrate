@@ -88,6 +88,10 @@ impl RefusingDriver {
 
 #[async_trait]
 impl Driver for RefusingDriver {
+    async fn shutdown(&self) -> Result<(), DriverError> {
+        self.host.shutdown().await
+    }
+
     fn machine(&self) -> CapabilitySnapshot {
         let mut capability = self.host.machine();
         SNAPSHOT.clone_into(&mut capability.snapshot);

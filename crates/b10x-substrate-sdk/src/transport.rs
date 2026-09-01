@@ -12,7 +12,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 use ulid::Ulid;
 
 use crate::model::{CONTRACT, CONTRACT_SHA256, EventStreamFrame};
-use crate::{EventPage, SdkError};
+use crate::{EventPage, MetricsSample, SdkError};
 
 const MAX_RESPONSE_HEAD: usize = 16 * 1024;
 const MAX_RESPONSE_BODY: usize = 4 * 1024 * 1024;
@@ -79,6 +79,17 @@ impl Transport {
         Ok(EventStream { socket })
     }
 
+    pub async fn metrics_stream(&self, exec_id: &str) -> Result<MetricsStream, SdkError> {
+        let query = serde_urlencoded::to_string(substrate_wire::MetricsStreamQuery {
+            exec_id: exec_id.to_owned(),
+        })
+        .map_err(|error| SdkError::Protocol(error.to_string()))?;
+        let socket = self
+            .websocket(&format!("/v1/metrics/stream?{query}"))
+            .await?;
+        Ok(MetricsStream { socket })
+    }
+
     pub(crate) async fn websocket(
         &self,
         path: &str,
@@ -89,9 +100,33 @@ impl Transport {
         let request = format!("ws://localhost{path}")
             .into_client_request()
             .map_err(|error| SdkError::Protocol(error.to_string()))?;
-        let (socket, response) = tokio_tungstenite::client_async(request, stream)
-            .await
-            .map_err(|error| SdkError::Transport(error.to_string()))?;
+        let (socket, response) = match tokio_tungstenite::client_async(request, stream).await {
+            Ok(upgraded) => upgraded,
+            Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+                let headers = response
+                    .headers()
+                    .iter()
+                    .filter_map(|(name, value)| {
+                        Some((
+                            name.as_str().to_ascii_lowercase(),
+                            value.to_str().ok()?.to_owned(),
+                        ))
+                    })
+                    .collect();
+                verify_contract_headers(&headers)?;
+                let response = HttpResponse {
+                    status: response.status().as_u16(),
+                    body: response.body().clone().unwrap_or_default(),
+                };
+                return match decode_result::<serde_json::Value>(&response) {
+                    Err(error) => Err(error),
+                    Ok(_) => Err(SdkError::Protocol(
+                        "WebSocket refusal carried a success envelope".to_owned(),
+                    )),
+                };
+            }
+            Err(error) => return Err(SdkError::Transport(error.to_string())),
+        };
         let headers = response
             .headers()
             .iter()
@@ -109,6 +144,36 @@ impl Transport {
 
 pub struct EventStream {
     socket: WebSocketStream<UnixStream>,
+}
+
+pub struct MetricsStream {
+    socket: WebSocketStream<UnixStream>,
+}
+
+impl MetricsStream {
+    pub async fn next_sample(&mut self) -> Result<Option<MetricsSample>, SdkError> {
+        while let Some(message) = self.socket.next().await {
+            let message = message.map_err(|error| SdkError::Transport(error.to_string()))?;
+            match message {
+                Message::Text(text) => {
+                    let frame: substrate_wire::MetricsStreamFrame = serde_json::from_str(&text)
+                        .map_err(|error| SdkError::Protocol(error.to_string()))?;
+                    let substrate_wire::MetricsStreamFrame::Usage { exec, usage } = frame;
+                    return Ok(Some(MetricsSample { exec, usage }));
+                }
+                Message::Close(_) => return Ok(None),
+                Message::Ping(bytes) => {
+                    use futures_util::SinkExt as _;
+                    self.socket
+                        .send(Message::Pong(bytes))
+                        .await
+                        .map_err(|error| SdkError::Transport(error.to_string()))?;
+                }
+                Message::Binary(_) | Message::Pong(_) | Message::Frame(_) => {}
+            }
+        }
+        Ok(None)
+    }
 }
 
 impl EventStream {

@@ -517,6 +517,7 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
     let connection_limits = ConnectionLimits::new(&allowed, transport_policy);
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
+    let mut connections = tokio::task::JoinSet::new();
     info!(socket = %config.socket.display(), "substrate ready");
 
     loop {
@@ -539,7 +540,7 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
                     principal: peer.pid.map(|pid| format!("pid:{pid}")),
                 };
                 let service = router(Arc::clone(&app)).layer(Extension(identity));
-                tokio::spawn(async move {
+                connections.spawn(async move {
                     let io = TokioIo::new(stream);
                     let builder = http1_builder(transport_policy);
                     let connection = builder
@@ -558,6 +559,11 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
                     }
                 });
             }
+            joined = connections.join_next(), if !connections.is_empty() => {
+                if let Some(Err(error)) = joined {
+                    warn!(%error, "unix connection task failed");
+                }
+            }
             signal = &mut shutdown => {
                 signal?;
                 break;
@@ -566,6 +572,18 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
     }
     lease_sweeper.abort();
     drop(listener);
+    connections.abort_all();
+    while let Some(result) = connections.join_next().await {
+        if let Err(error) = result
+            && !error.is_cancelled()
+        {
+            warn!(%error, "unix connection task failed while stopping");
+        }
+    }
+    app.driver
+        .shutdown()
+        .await
+        .map_err(|error| anyhow!("driver shutdown refused: {}: {}", error.code, error.message))?;
     drop(socket_cleanup);
     Ok(())
 }
@@ -809,7 +827,7 @@ async fn serve_tcp(app: Arc<App>, config: &TcpDaemonConfig) -> anyhow::Result<()
         actor: config.actor.clone(),
         principal: None,
     };
-    let service = router(app)
+    let service = router(Arc::clone(&app))
         .layer(Extension(identity))
         .layer(middleware::from_fn_with_state(auth, require_tcp_bearer));
     let service = if config.path_prefix == "/" {
@@ -873,6 +891,15 @@ async fn serve_tcp(app: Arc<App>, config: &TcpDaemonConfig) -> anyhow::Result<()
         }
     }
     drop(listener);
+    drain_tcp_connections(&mut connections).await;
+    app.driver
+        .shutdown()
+        .await
+        .map_err(|error| anyhow!("driver shutdown refused: {}: {}", error.code, error.message))?;
+    Ok(())
+}
+
+async fn drain_tcp_connections(connections: &mut tokio::task::JoinSet<()>) {
     let drained = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         while let Some(result) = connections.join_next().await {
             if let Err(error) = result {
@@ -884,7 +911,13 @@ async fn serve_tcp(app: Arc<App>, config: &TcpDaemonConfig) -> anyhow::Result<()
     if drained.is_err() {
         connections.abort_all();
     }
-    Ok(())
+    while let Some(result) = connections.join_next().await {
+        if let Err(error) = result
+            && !error.is_cancelled()
+        {
+            warn!(%error, "TCP connection task failed while stopping");
+        }
+    }
 }
 
 async fn shutdown_signal() -> anyhow::Result<()> {

@@ -50,4 +50,11 @@ export SUBSTRATE_VECTORS_CGROUP_ROOT="${root}"
 # daemon that owns a root and fatal for six drivers that share one.
 cargo test -p b10x-substrate-host --locked -- --nocapture --test-threads=1
 
+# The public SDK owns a separate clean-room journey against the shipped daemon binary. It proves
+# PTY resize, live metrics and orderly whole-tree cleanup through SDK types only; without this
+# explicit command that test would be absent from the daemon-only lane below.
+cargo build -p b10x-substrate-daemon --bin substrate-daemon --locked
+SUBSTRATE_TEST_DAEMON="${PWD}/target/debug/substrate-daemon" \
+  cargo test -p b10x-substrate-sdk --test managed --locked -- --nocapture --test-threads=1
+
 exec cargo test -p b10x-substrate-daemon --test runtime_vectors -- --nocapture "$@"

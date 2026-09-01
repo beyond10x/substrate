@@ -199,6 +199,10 @@ impl VectorDriver {
 
 #[async_trait]
 impl Driver for VectorDriver {
+    async fn shutdown(&self) -> Result<(), DriverError> {
+        Ok(())
+    }
+
     fn machine(&self) -> CapabilitySnapshot {
         let facts = substrate_wire::CapabilityFacts {
             exec_namespaces: Some(substrate_wire::NamespaceFacts {

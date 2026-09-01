@@ -2,9 +2,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use serde::Deserialize;
-#[cfg(feature = "linked-daemon")]
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// The daemon contract this SDK release understands.
@@ -13,7 +11,7 @@ pub const CONTRACT: &str = substrate_wire::ADVERTISED_CONTRACT_BUNDLE;
 pub const CONTRACT_SHA256: &str = substrate_wire::ADVERTISED_CONTRACT_BUNDLE_SHA256;
 
 /// Verified facts needed by the high-level SDK.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 #[allow(
     clippy::struct_excessive_bools,
@@ -25,6 +23,8 @@ pub struct Machine {
     pub configuration_generation: u64,
     pub probed_at: DateTime<Utc>,
     pub valid_until: Option<DateTime<Utc>>,
+    /// The exact verified fact set. An absent fact remains `None`; it is never collapsed to false.
+    pub facts: substrate_wire::CapabilityFacts,
     pub guarded_workspace_io: bool,
     pub exec_argv_only: bool,
     pub exec_no_egress: bool,
@@ -44,6 +44,7 @@ impl From<substrate_wire::CapabilitySnapshot> for Machine {
             configuration_generation: value.config_generation,
             probed_at: value.probed_at,
             valid_until: value.valid_until,
+            facts: facts.clone(),
             guarded_workspace_io: facts.workspace_guarded_io == Some(true),
             exec_argv_only: facts.exec_argv_only == Some(true),
             exec_no_egress: facts.exec_no_egress == Some(true),
@@ -56,7 +57,7 @@ impl From<substrate_wire::CapabilitySnapshot> for Machine {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum WorkspaceState {
     Ready,
@@ -78,7 +79,7 @@ impl From<substrate_wire::WorkspaceState> for WorkspaceState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Lease {
     pub ttl: Duration,
@@ -96,7 +97,7 @@ impl From<substrate_wire::LeaseObservation> for Lease {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct WorkspaceObservation {
     pub id: String,
@@ -118,7 +119,7 @@ impl From<substrate_wire::Workspace> for WorkspaceObservation {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct FileObservation {
     pub workspace: String,
@@ -142,7 +143,7 @@ impl From<substrate_wire::FileObservation> for FileObservation {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct FileContents {
     pub workspace: String,
@@ -153,7 +154,43 @@ pub struct FileContents {
     pub observed_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// One bounded v2 file slice with the digest of the complete file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct DigestedFileContents {
+    pub workspace: String,
+    pub path: String,
+    pub size: u64,
+    pub sha256: String,
+    pub offset: u64,
+    pub next_offset: u64,
+    pub bytes: Vec<u8>,
+    pub eof: bool,
+    pub observed_at: DateTime<Utc>,
+}
+
+impl TryFrom<substrate_wire::DigestedFileSlice> for DigestedFileContents {
+    type Error = crate::SdkError;
+
+    fn try_from(value: substrate_wire::DigestedFileSlice) -> Result<Self, Self::Error> {
+        Ok(Self {
+            workspace: value.workspace,
+            path: value.path,
+            size: value.size,
+            sha256: value.sha256,
+            offset: value.offset,
+            next_offset: value.next_offset,
+            bytes: value
+                .content
+                .decode()
+                .map_err(|error| crate::SdkError::Protocol(error.to_string()))?,
+            eof: value.eof,
+            observed_at: value.observed_at,
+        })
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum ExecState {
     Accepted,
@@ -183,14 +220,14 @@ impl From<substrate_wire::ExecState> for ExecState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ExecExit {
     pub code: Option<u8>,
     pub signal: Option<Signal>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ExecObservation {
     pub id: String,
@@ -203,6 +240,20 @@ pub struct ExecObservation {
     pub exit: Option<ExecExit>,
     pub lease: Option<Lease>,
     pub refusal: Option<ObservedRefusal>,
+}
+
+/// One explicitly bounded page of captured output.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct OutputPage {
+    pub exec: String,
+    pub stream: OutputStream,
+    pub offset: u64,
+    pub next_offset: u64,
+    pub bytes: Vec<u8>,
+    pub eof: bool,
+    pub truncated: bool,
+    pub observed_at: DateTime<Utc>,
 }
 
 impl From<substrate_wire::Exec> for ExecObservation {
@@ -229,7 +280,7 @@ impl From<substrate_wire::Exec> for ExecObservation {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct RunOutput {
     pub exec: ExecObservation,
@@ -239,7 +290,7 @@ pub struct RunOutput {
     pub stderr_truncated: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum PipeSessionState {
     Accepted,
@@ -265,18 +316,22 @@ impl From<substrate_wire::SessionState> for PipeSessionState {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct PipeSessionObservation {
     pub id: String,
     pub exec_id: String,
     pub workspace: String,
     pub state: PipeSessionState,
+    pub mode: substrate_wire::SessionMode,
+    pub attachment: substrate_wire::SessionAttachmentState,
     pub observed_at: DateTime<Utc>,
+    pub capability_snapshot: String,
     pub lease: Lease,
     pub input_limit_bytes: u64,
     pub frame_limit_bytes: u64,
     pub queued_frames: u32,
+    pub exit: Option<ExecExit>,
 }
 
 impl From<substrate_wire::PipeSession> for PipeSessionObservation {
@@ -286,16 +341,23 @@ impl From<substrate_wire::PipeSession> for PipeSessionObservation {
             exec_id: value.exec,
             workspace: value.workspace,
             state: value.state.into(),
+            mode: value.mode,
+            attachment: value.attachment,
             observed_at: value.observed_at,
+            capability_snapshot: value.capability_snapshot,
             lease: value.lease.into(),
             input_limit_bytes: value.limits.input_bytes,
             frame_limit_bytes: value.limits.frame_bytes,
             queued_frames: value.limits.queued_frames,
+            exit: value.exit.map(|exit| ExecExit {
+                code: exit.code,
+                signal: exit.signal.map(Into::into),
+            }),
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum PipeFrame {
     Output {
@@ -319,7 +381,7 @@ pub enum PipeFrame {
     },
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OutputStream {
     Stdout,
     Stderr,
@@ -334,7 +396,16 @@ impl From<substrate_wire::OutputStream> for OutputStream {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+impl From<OutputStream> for substrate_wire::OutputStream {
+    fn from(value: OutputStream) -> Self {
+        match value {
+            OutputStream::Stdout => Self::Stdout,
+            OutputStream::Stderr => Self::Stderr,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Signal {
     Interrupt,
     Terminate,
@@ -361,7 +432,7 @@ impl From<substrate_wire::Signal> for Signal {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RefusalClass {
     Refused,
     Conflict,
@@ -382,7 +453,7 @@ impl From<substrate_wire::ErrorClass> for RefusalClass {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Refusal {
     pub class: RefusalClass,
@@ -406,7 +477,7 @@ impl From<substrate_wire::ErrorDetail> for Refusal {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ObservedRefusal {
     pub class: RefusalClass,
@@ -414,7 +485,7 @@ pub struct ObservedRefusal {
     pub message: String,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Event {
     pub generation: u64,
@@ -448,7 +519,7 @@ impl From<substrate_wire::Event> for Event {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct EventPage {
     pub source_scope: String,
@@ -472,7 +543,7 @@ impl From<substrate_wire::EventPage> for EventPage {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub enum OperationState {
     Refused,
@@ -481,7 +552,7 @@ pub enum OperationState {
     Terminal,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Operation {
     pub id: String,
@@ -490,6 +561,39 @@ pub struct Operation {
     pub resource: Option<String>,
     pub result: Option<Value>,
     pub refusal: Option<Refusal>,
+}
+
+/// One point-in-time resource measurement returned by `/v1/metrics`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "resource_kind", rename_all = "lowercase")]
+pub enum MetricsObservation {
+    Exec {
+        exec: String,
+        usage: substrate_wire::ExecUsage,
+    },
+    Workspace {
+        workspace: String,
+        storage: substrate_wire::StorageUsage,
+    },
+}
+
+impl From<substrate_wire::MetricsObservation> for MetricsObservation {
+    fn from(value: substrate_wire::MetricsObservation) -> Self {
+        match value {
+            substrate_wire::MetricsObservation::Exec { exec, usage } => Self::Exec { exec, usage },
+            substrate_wire::MetricsObservation::Workspace { workspace, storage } => {
+                Self::Workspace { workspace, storage }
+            }
+        }
+    }
+}
+
+/// One latest-wins metrics stream sample.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct MetricsSample {
+    pub exec: String,
+    pub usage: substrate_wire::ExecUsage,
 }
 
 impl From<substrate_wire::OperationRecord> for Operation {
@@ -600,12 +704,17 @@ impl ExecutionPolicyBuilder {
         };
         if policy.timeout.is_zero()
             || policy.cpu_time.is_zero()
-            || policy.memory_bytes == 0
+            || policy.timeout > crate::MAX_EXEC_DURATION
+            || policy.cpu_time > crate::MAX_EXEC_DURATION
+            || policy.memory_bytes < crate::MIN_EXEC_MEMORY_BYTES
+            || policy.memory_bytes > crate::MAX_EXEC_MEMORY_BYTES
             || policy.processes == 0
+            || policy.processes > crate::MAX_EXEC_PROCESSES
             || policy.output_bytes == 0
+            || policy.output_bytes > crate::MAX_IO_BYTES
         {
             return Err(crate::SdkError::Protocol(
-                "execution-policy bounds must be nonzero".to_owned(),
+                "execution-policy value is outside its contract bound".to_owned(),
             ));
         }
         policy
@@ -644,7 +753,6 @@ pub(crate) struct EventStreamFrame {
     pub cursor: Option<String>,
 }
 
-#[cfg(feature = "linked-daemon")]
 #[cfg(feature = "linked-daemon")]
 #[derive(Debug, Serialize)]
 pub(crate) struct LinkedChildConfig {
