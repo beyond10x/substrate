@@ -34,7 +34,7 @@ daemon merely because a higher layer can attach different account labels.
 Current source can terminate TLS 1.3 for HTTP and WebSocket control traffic with an explicit server
 identity:
 
-```console
+```bash
 substrate-daemon \
   --socket /run/substrate/local.sock \
   --state /var/lib/substrate/state.sqlite \
@@ -76,7 +76,7 @@ audience registry with this exact relying-party profile:
 Clients send the resulting credential as a bearer. For example, after obtaining it through the
 deployment's Identity login flow:
 
-```console
+```bash
 curl --cacert ./substrate-ca.pem \
   --header "Authorization: Bearer $SUBSTRATE_ACCESS_TOKEN" \
   https://substrate.example.com:8443/v1/machine
