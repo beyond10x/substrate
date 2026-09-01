@@ -52,3 +52,9 @@ separate consumer-coordinated contract-header change.
 The full API and lifecycle closure are recorded in
 [design 18](../docs/design/18-rust-sdk-and-managed-daemon.md).
 
+## Distribution amendment
+
+[ADR 0030](0030-rust-crates-are-source-distributed-and-non-publishable.md) replaces only this
+record's registry-publication decision. The runtime chain and SDK keep their fixed package names
+and exact internal edges but are source-distributed with `publish = false`; GitHub and GHCR remain
+the release surfaces.

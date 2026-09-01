@@ -1,14 +1,13 @@
-//! Keep registry publication closed and prove that every approved archive can be assembled.
+//! Keep every workspace package non-publishable and verify the source-consumption boundary.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::process::Command;
 
 use anyhow::{Context as _, Result};
 
 use crate::report::Report;
 
-const PUBLIC_PACKAGES: [(&str, &str); 5] = [
+const SOURCE_PACKAGES: [(&str, &str); 5] = [
     ("crates/substrate-wire", "b10x-substrate-wire"),
     ("crates/substrate-store", "b10x-substrate-store"),
     ("crates/substrate-host", "b10x-substrate-host"),
@@ -20,36 +19,9 @@ pub fn check(root: &Path) -> Result<Report> {
     let mut failures = Vec::new();
     let packages = check_manifests(root, &mut failures)?;
 
-    for (_, name) in PUBLIC_PACKAGES {
-        let output = Command::new("cargo")
-            .current_dir(root)
-            .args([
-                "package",
-                "--package",
-                name,
-                "--locked",
-                "--allow-dirty",
-                "--list",
-            ])
-            .output()
-            .with_context(|| format!("starting cargo package for {name}"))?;
-        if !output.status.success() {
-            failures.push(format!(
-                "{name}: cargo package --list failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ));
-            continue;
-        }
-        let package_list = String::from_utf8_lossy(&output.stdout);
-        let files: BTreeSet<&str> = package_list.lines().collect();
-        if !files.contains("README.md") {
-            failures.push(format!("{name}: package archive omits README.md"));
-        }
-    }
-
     if failures.is_empty() {
         Ok(Report::passed(format!(
-            "{} approved registry packages are version-locked and assemble with SPDX metadata and README",
+            "{} source-distributed runtime packages are non-publishable, version-locked, and carry SPDX metadata and README",
             packages.len()
         )))
     } else {
@@ -74,8 +46,8 @@ fn check_manifests(root: &Path, failures: &mut Vec<String>) -> Result<BTreeMap<S
         .and_then(|value| value.get("members"))
         .and_then(toml::Value::as_array)
         .context("workspace.members is absent")?;
-    let approved: BTreeMap<&str, &str> = PUBLIC_PACKAGES.into_iter().collect();
-    let approved_names: BTreeSet<&str> = PUBLIC_PACKAGES.iter().map(|(_, name)| *name).collect();
+    let approved: BTreeMap<&str, &str> = SOURCE_PACKAGES.into_iter().collect();
+    let approved_names: BTreeSet<&str> = SOURCE_PACKAGES.iter().map(|(_, name)| *name).collect();
     let mut observed = BTreeMap::new();
 
     for member in members {
@@ -99,18 +71,20 @@ fn check_manifests(root: &Path, failures: &mut Vec<String>) -> Result<BTreeMap<S
             Some(expected_name) => {
                 if name != *expected_name {
                     failures.push(format!(
-                        "{member}/Cargo.toml: approved package must be named {expected_name}, not {name}"
+                        "{member}/Cargo.toml: source package must be named {expected_name}, not {name}"
                     ));
                 }
-                if publish != Some(true) {
+                if publish != Some(false) {
                     failures.push(format!(
-                        "{member}/Cargo.toml: approved package must set publish = true"
+                        "{member}/Cargo.toml: source-distributed package must set publish = false"
                     ));
                 }
                 if package.get("readme").and_then(toml::Value::as_str) != Some("README.md") {
                     failures.push(format!(
-                        "{member}/Cargo.toml: approved package must set readme = \"README.md\""
+                        "{member}/Cargo.toml: source-distributed package must set readme = \"README.md\""
                     ));
+                } else if !root.join(member).join("README.md").is_file() {
+                    failures.push(format!("{member}/README.md: source README is absent"));
                 }
                 if package
                     .get("license")
@@ -119,7 +93,16 @@ fn check_manifests(root: &Path, failures: &mut Vec<String>) -> Result<BTreeMap<S
                     != Some(true)
                 {
                     failures.push(format!(
-                        "{member}/Cargo.toml: approved package must inherit the workspace SPDX licence"
+                        "{member}/Cargo.toml: source-distributed package must inherit the workspace SPDX licence"
+                    ));
+                }
+                if package
+                    .get("documentation")
+                    .and_then(toml::Value::as_str)
+                    .is_none_or(|url| !url.starts_with("https://beyond10x.github.io/substrate/"))
+                {
+                    failures.push(format!(
+                        "{member}/Cargo.toml: source-distributed package must link the public Substrate documentation"
                     ));
                 }
                 check_dependencies(member, &manifest, &approved_names, &exact_version, failures);
@@ -131,9 +114,11 @@ fn check_manifests(root: &Path, failures: &mut Vec<String>) -> Result<BTreeMap<S
             None => {}
         }
     }
-    for (member, name) in PUBLIC_PACKAGES {
+    for (member, name) in SOURCE_PACKAGES {
         if observed.get(member).map(String::as_str) != Some(name) {
-            failures.push(format!("{member}: approved registry package is absent"));
+            failures.push(format!(
+                "{member}: source-distributed runtime package is absent"
+            ));
         }
     }
     Ok(observed)
@@ -169,17 +154,59 @@ fn check_dependencies(
 
 #[cfg(test)]
 mod tests {
-    use super::PUBLIC_PACKAGES;
+    use std::fmt::Write as _;
+
+    use super::{SOURCE_PACKAGES, check};
 
     #[test]
-    fn public_package_names_are_unique_and_prefixed() {
-        let mut names = PUBLIC_PACKAGES
+    fn source_package_names_are_unique_and_prefixed() {
+        let mut names = SOURCE_PACKAGES
             .iter()
             .map(|(_, name)| *name)
             .collect::<Vec<_>>();
         assert!(names.iter().all(|name| name.starts_with("b10x-substrate-")));
         names.sort_unstable();
         names.dedup();
-        assert_eq!(names.len(), PUBLIC_PACKAGES.len());
+        assert_eq!(names.len(), SOURCE_PACKAGES.len());
+    }
+
+    #[test]
+    fn a_publishable_workspace_member_is_refused() {
+        let directory = tempfile::tempdir().expect("temporary workspace");
+        let members = SOURCE_PACKAGES
+            .iter()
+            .map(|(member, _)| format!("\"{member}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        std::fs::write(
+            directory.path().join("Cargo.toml"),
+            format!(
+                "[workspace]\nmembers = [{members}]\n\n[workspace.package]\nversion = \"0.4.2\"\n"
+            ),
+        )
+        .expect("workspace manifest");
+
+        for (member, name) in SOURCE_PACKAGES {
+            let package_directory = directory.path().join(member);
+            std::fs::create_dir_all(&package_directory).expect("package directory");
+            std::fs::write(package_directory.join("README.md"), format!("# {name}\n"))
+                .expect("package README");
+            let mut manifest = format!(
+                "[package]\nname = \"{name}\"\nversion = \"0.4.2\"\nreadme = \"README.md\"\nlicense.workspace = true\ndocumentation = \"https://beyond10x.github.io/substrate/\"\n"
+            );
+            if member == "crates/substrate-host" {
+                writeln!(manifest, "publish = true").expect("manifest text");
+            } else {
+                writeln!(manifest, "publish = false").expect("manifest text");
+            }
+            std::fs::write(package_directory.join("Cargo.toml"), manifest)
+                .expect("package manifest");
+        }
+
+        let report = check(directory.path()).expect("package check");
+        assert_eq!(
+            report.failure_text(),
+            "crates/substrate-host/Cargo.toml: source-distributed package must set publish = false"
+        );
     }
 }

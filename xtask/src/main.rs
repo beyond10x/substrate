@@ -46,7 +46,7 @@ enum Command {
     /// Verify workspace licensing and the locked graph's deterministic third-party notices.
     #[command(name = "check-licenses")]
     Licenses,
-    /// Verify the closed public-crate allowlist and each registry package's contents.
+    /// Refuse publishable members and verify the runtime source-package boundary.
     #[command(name = "check-packages")]
     Packages,
     /// Scan every reachable commit with the checksum-pinned Gitleaks release.

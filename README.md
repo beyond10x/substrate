@@ -36,8 +36,9 @@ released native `substrate-daemon` artifact or `b10x-substrate-sdk`. The SDK's o
 may package the daemon solely to re-execute it as a separate child; resource operations still cross
 the authenticated Unix socket.
 
-The product and binary name are `substrate`. The approved registry packages use the
-`b10x-substrate-*` prefix.
+The product and binary name are `substrate`. Rust source packages use the `b10x-substrate-*`
+prefix and are consumed from a local path or exact Git revision; every workspace package is
+non-publishable.
 
 ## Status
 
@@ -79,7 +80,7 @@ The table is the gate's own order (`scripts/gate.sh`).
 | secrets | `cargo xtask check-secrets` — scans every reachable commit, including root trees |
 | dependencies | `cargo xtask check-advisories` — rejects RustSec findings and HTTP/2 |
 | licences | `cargo xtask check-licenses` — verifies Apache-2.0 workspace metadata and deterministic third-party notices |
-| packages | `cargo xtask check-packages` — enforces the five-package registry allowlist, exact internal versions, and complete package archives |
+| packages | `cargo xtask check-packages` — refuses every publishable workspace package and verifies the five runtime source packages' fixed names, exact internal versions, SPDX metadata, READMEs and public documentation targets |
 | contract bundle 0.1.0 | `python3 scripts/check-contract-bundle.py` |
 | contract bundle 0.2.0 | `python3 scripts/check-contract-bundle-0.2.0.py` |
 | contract bundle 0.3.0 | `python3 scripts/check-contract-bundle-0.3.0.py` |

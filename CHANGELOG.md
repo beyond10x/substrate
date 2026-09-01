@@ -40,6 +40,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- **Rust crates are source-distributed and cannot be published accidentally.** All workspace
+  packages now set `publish = false`; `cargo xtask check-packages` refuses any publishable member
+  while retaining fixed runtime package names, exact internal edges, SPDX metadata, READMEs and
+  public documentation targets. Consumers use a path or exact Git revision. Releases remain signed
+  GitHub/GHCR artifacts and require no crates.io credential or docs.rs claim (ADR 0030).
 - **Session HTTP routes are now `/v1/sessions`, with no legacy alias.** The daemon and Rust SDK
   claim development contract `substrate-wire/0.15.0` and inner `bundle.json` digest
   `c0a6f82601debdca988f6c3cf93b89ebb7d086b8c9f74b4b7c9fb17d664357b3` together. Its direct

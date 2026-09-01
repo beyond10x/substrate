@@ -170,7 +170,7 @@ bundles' reproducibility proof (invariant 6), not as tooling.
 | `check-secrets` | a reachable Git object carrying a credential, or an incomplete history scan | yes |
 | `check-advisories` | a RustSec vulnerability or forbidden HTTP/2 dependency | yes |
 | `check-licenses` | non-Apache workspace metadata, an unreviewed dependency licence or third-party notice drift | yes |
-| `check-packages` | a registry package outside the five-name allowlist, a loose internal version edge, or a package without inherited SPDX metadata and its README | yes |
+| `check-packages` | a publishable workspace package, a loose internal version edge, or a source runtime package without inherited SPDX metadata, its README and a public documentation target | yes |
 | `package-bundle <version> --out <dir>` | produces a released bundle as a deterministic OCI image layout | no — under `cargo test` |
 | `render-bundle <version> --out <dir>` | produces a bundle tree from `substrate-wire` and `xtask/bundle-source/<version>/`; refuses to write anywhere under `contracts/` | no — under `cargo test` |
 | `check-bundle <version>` | a released bundle whose bytes are not the fixed point of `xtask/bundle-source/<version>/` | yes, `0.5.0` through `0.15.0` |
@@ -257,13 +257,12 @@ Maintain `CHANGELOG.md` in Keep a Changelog form and cut it under a version head
 tag is the bare version — `0.2.0`, the version and nothing else (atlas § *Naming*) — annotated, at a
 fully gated `main` commit. The full gate comes first; component steps alone are not enough.
 
-The five approved crates are published manually from that fully gated annotated tag, in dependency
-order: `b10x-substrate-wire`, `b10x-substrate-store`, `b10x-substrate-host`,
-`b10x-substrate-daemon`, then `b10x-substrate-sdk`. Use an operator-held scoped crates.io token and
-`cargo publish --locked -p <package>` for each; wait for each dependency to become visible before
-publishing its consumer. Never add that token to GitHub or automate this through the image release
-workflow. `cargo xtask check-packages` proves the closed allowlist and package contents before the
-tag; crates.io is the authority for whether an already-published version can be uploaded.
+**No Substrate crate is published to crates.io.** Every workspace package sets `publish = false`;
+Rust consumers use a local path or an exact Git revision. `cargo xtask check-packages` fails closed
+if any member becomes publishable and retains the runtime source boundary: fixed package names,
+exact internal versions, inherited SPDX metadata, checked-in READMEs and public documentation
+targets. Tagged releases publish GitHub and GHCR artifacts only. Reintroducing a registry is a new
+distribution decision, not a release convenience (ADR 0030).
 
 **Pushing that tag runs [`.github/workflows/release.yml`](.github/workflows/release.yml)**, which
 builds `Dockerfile` and `Dockerfile.mcp` and packages the explicitly pinned current development bundle with
