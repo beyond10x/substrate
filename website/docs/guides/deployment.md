@@ -23,8 +23,8 @@ This is the posture used in [getting started](../getting-started.md).
 
 Private-network and hosted compositions require deployment identity, scoped authority, encrypted
 transport, rotation, and operational controls around the same data-plane contract. Current source
-serves the control plane over TLS with online Identity admission; proof-bound network session
-authority and the remote SDK transport remain separate work.
+serves the control plane over TLS with online Identity admission, proof-bound network session
+authority and an explicit-trust remote Rust SDK.
 
 One daemon remains one trust domain. Do not multiplex mutually untrusted tenants through the same
 daemon merely because a higher layer can attach different account labels.

@@ -71,12 +71,12 @@ impl Transport {
     }
 
     pub fn remote(
-        endpoint: String,
-        trust_roots: PathBuf,
+        endpoint: &str,
+        trust_roots: &std::path::Path,
         server_identity: String,
         token_provider: Arc<dyn AccessTokenProvider>,
     ) -> Result<Self, SdkError> {
-        let uri = Uri::from_str(&endpoint)
+        let uri = Uri::from_str(endpoint)
             .map_err(|_| SdkError::Protocol("remote endpoint is invalid".to_owned()))?;
         if uri.scheme_str() != Some("https")
             || uri.authority().is_none()
@@ -107,7 +107,7 @@ impl Transport {
         }
         let dns_name = DnsName::try_from(server_identity)
             .map_err(|_| SdkError::Protocol("server identity is not a DNS name".to_owned()))?;
-        let connector = load_connector(&trust_roots)?;
+        let connector = load_connector(trust_roots)?;
         Ok(Self {
             kind: TransportKind::Remote(RemoteTransport {
                 authority,
@@ -767,6 +767,7 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 mod tests {
     use super::{CONTRACT, CONTRACT_SHA256, Transport, verify_contract_headers};
     use crate::SdkError;
+    use futures_util::SinkExt as _;
     use std::collections::BTreeMap;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::UnixListener;
@@ -779,6 +780,29 @@ mod tests {
                 digest.to_owned(),
             ),
         ])
+    }
+
+    #[allow(
+        clippy::result_large_err,
+        clippy::unnecessary_wraps,
+        reason = "tungstenite's handshake callback requires this exact result type"
+    )]
+    fn add_contract_headers(
+        _: &tokio_tungstenite::tungstenite::handshake::server::Request,
+        mut response: tokio_tungstenite::tungstenite::handshake::server::Response,
+    ) -> Result<
+        tokio_tungstenite::tungstenite::handshake::server::Response,
+        tokio_tungstenite::tungstenite::handshake::server::ErrorResponse,
+    > {
+        response.headers_mut().insert(
+            "x-b10x-contract",
+            CONTRACT.parse().expect("contract header"),
+        );
+        response.headers_mut().insert(
+            "x-b10x-contract-bundle-sha256",
+            CONTRACT_SHA256.parse().expect("digest header"),
+        );
+        Ok(response)
     }
 
     fn assert_mismatch(
@@ -867,6 +891,46 @@ content-length: not-a-number\r\n\r\n",
             matches!(error, SdkError::ContractMismatch { .. }),
             "{error}"
         );
+        server.await.expect("fake daemon task");
+    }
+
+    #[tokio::test]
+    async fn an_event_stream_gap_preserves_its_code_and_cursor() {
+        let temporary = tempfile::tempdir().expect("temporary socket directory");
+        let socket = temporary.path().join("daemon.sock");
+        let listener = UnixListener::bind(&socket).expect("bind fake daemon");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept SDK connection");
+            let mut websocket = tokio_tungstenite::accept_hdr_async(stream, add_contract_headers)
+                .await
+                .expect("upgrade event stream");
+            websocket
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    serde_json::json!({
+                        "kind": "gap",
+                        "page": null,
+                        "code": "event.retention-gap",
+                        "cursor": "ev2.scope_test.41.1"
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .expect("send gap frame");
+        });
+
+        let mut events = Transport::new(socket)
+            .event_stream(None, 10)
+            .await
+            .expect("open event stream");
+        let error = events.next_page().await.expect_err("gap must be surfaced");
+        match error {
+            SdkError::EventGap { code, cursor } => {
+                assert_eq!(code, "event.retention-gap");
+                assert_eq!(cursor.as_deref(), Some("ev2.scope_test.41.1"));
+            }
+            other => panic!("gap produced another error: {other}"),
+        }
         server.await.expect("fake daemon task");
     }
 }

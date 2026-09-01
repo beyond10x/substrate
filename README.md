@@ -50,7 +50,7 @@ published contract.**
 | 0.2.0 bundle, runtime, portable lane, delegated Linux lane | green |
 | 0.4.0 successor development bundle | adds independently verified read-only execution capsules; the delegated model-free lane proves capsule/config/hook binding and correlated native hook evidence before model dispatch |
 | phase 4, [raw pipe sessions](adr/0007-protocol-processes-use-raw-pipe-sessions.md) | source-typed bounded raw-pipe primitive, distinct durable session identity, leased start, single-attachment Unix-WebSocket route ([plan 04](docs/plan/04-direct-byte-plane.md)) |
-| Rust SDK | `b10x-substrate-sdk` provides typed builders, resource handles, durable-operation recovery, event streams and separately supervised external or linked daemon children; current source verifies the explicitly promoted `substrate-wire/0.15.0` name and inner digest before serving an operation |
+| Rust SDK | `b10x-substrate-sdk` provides typed builders, resource handles, durable-operation recovery, event streams, explicit-root HTTPS/WSS and separately supervised external or linked daemon children; current source verifies the explicitly promoted `substrate-wire/0.15.0` name and inner digest before serving an operation |
 | tagged artifact release | [`.github/workflows/release.yml`](.github/workflows/release.yml) publishes the daemon image and the explicitly pinned current development bundle on an annotated bare-version tag whose commit has a green gate run. It copies `cargo xtask package-bundle`'s exact OCI layout to `ghcr.io/beyond10x/b10x-substrate-wire:<bundle-version>`, keyless-signs and verifies both digests before the GitHub release, and refuses an existing canonical tag. It needs no repository secret. The exact changelog digest lines land by bot-authored pull request because `main` is protected |
 | stable publication | **not done.** The latest published OCI bundle is signed `0.12.0` and remains annotated `development`; current source's `0.15.0` successor is not yet published, and neither state makes a development contract stable |
 | phase 4, [pty sessions](adr/0019-pty-is-a-second-session-mode.md) | a terminal is a second session **mode** on the same route family, not a second resource: `mode: "pty"` with a required 1–1000-cell window, a `resize` frame, and the `sessions.pty` fact published only after a startup probe allocated a pair, made it controlling inside a throwaway sandbox and round-tripped a window through the child. Absent, the mode is refused `session.pty-unserved` (501) and **never** served as pipes |
@@ -340,6 +340,13 @@ invalid, under-scoped and temporarily unresolvable authority answers `auth.crede
 `auth.authority-invalid`, `auth.scope-denied` or `auth.authority-unavailable`; there is no cached or
 caller-written fallback. There is no production plaintext fallback and no verification-disable
 flag.
+
+The Rust SDK addresses this listener only when the caller supplies the exact HTTPS origin, PEM
+trust roots, expected DNS identity and an asynchronous Identity access-token provider. It uses the
+same TLS 1.3 configuration for HTTP and WSS, refreshes once only after a named authentication 401,
+and mints a fresh one-use attachment authority for every hosted session connection. See the
+[public Rust SDK guide](https://beyond10x.github.io/substrate/docs/guides/rust-sdk#connect-to-a-remote-daemon)
+for a complete builder example.
 
 ## What is enforced
 

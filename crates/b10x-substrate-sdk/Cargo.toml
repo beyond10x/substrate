@@ -40,5 +40,8 @@ tokio-tungstenite.workspace = true
 ulid.workspace = true
 zeroize.workspace = true
 
+[dev-dependencies]
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
+
 [lints]
 workspace = true

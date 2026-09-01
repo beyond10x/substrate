@@ -25,7 +25,7 @@ verify it through `GET /v1/machine`.
 | limits | body, path, output, retention, concurrency, process, memory, CPU, duration, and probe-gated writable-storage bounds |
 | observations | explicit live and terminal wall, CPU, memory peak/current, process, OOM, block-I/O, and scratch usage facts |
 | sessions | leased raw-pipe and probe-gated PTY modes at `/v1/sessions`, with one Unix-WebSocket or authority-bound hosted WSS attachment |
-| Rust SDK source | complete promoted-contract coverage, serializable observations, exact optional facts, keyed mutations, PTY resize, metrics and snapshots |
+| Rust SDK source | complete promoted-contract coverage over Unix or explicit-root TLS 1.3 HTTPS/WSS, with serializable observations, exact optional facts, keyed mutations, PTY resize, metrics and snapshots |
 | disposable MCP source | private stdio adapter over the SDK; bounded tools/resources, caller operation IDs, portable named refusal and native delegated cleanup evidence |
 | capsules | digest-verified read-only runtime material beside a writable workspace |
 | distribution | Apache-2.0 source and a keyless-signed daemon image |
@@ -37,7 +37,6 @@ verify it through `GET /v1/machine`.
 - Docker and Kubernetes drivers
 - cross-machine scheduling
 - stable signed contract-bundle publication
-- remote HTTPS/WSS transport in the Rust SDK
 
 Absent features are not stubs. They are missing from capability facts and answer with `unserved` or
 a specific refusal when requested.

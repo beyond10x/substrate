@@ -43,3 +43,30 @@ All public observations are serializable for protocol adapters such as MCP serve
 The SDK and its wire contract are under development and are not stable. See the
 [public Rust SDK guide](https://beyond10x.github.io/substrate/docs/guides/rust-sdk) for lifecycle,
 error, and deployment details.
+
+Remote mode uses the same handles and requires every trust input explicitly:
+
+```rust,no_run
+use b10x_substrate_sdk::{AccessToken, Client, SdkError};
+
+# async fn example() -> Result<(), b10x_substrate_sdk::SdkError> {
+let client = Client::builder()
+    .https_endpoint("https://127.0.0.1:8443/")
+    .trust_roots("/etc/my-service/substrate-ca.pem")
+    .server_identity("substrate.example.com")
+    .token_provider(|_reason| async {
+        // Replace this illustrative source with the deployment's Identity client.
+        let value = std::env::var("SUBSTRATE_ACCESS_TOKEN")
+            .map_err(|_| SdkError::TokenUnavailable)?;
+        AccessToken::new(value)
+    })
+    .connect()
+    .await?;
+let _machine = client.machine();
+# Ok(())
+# }
+```
+
+There are no ambient system roots, redirects, proxies, plaintext fallback, credential store, or
+certificate-verification bypass. Each request obtains authority from the provider; a hosted
+session attachment additionally mints a fresh one-use authority bound to its TLS 1.3 channel.

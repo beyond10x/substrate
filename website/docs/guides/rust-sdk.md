@@ -81,6 +81,55 @@ If the host cannot prove the required confinement, `run()` returns `SdkError::Re
 daemon's canonical class, code, address, retry fact, and operation id. A non-zero program exit is
 instead a successful observation in `RunOutput`.
 
+## Connect to a remote daemon
+
+Remote mode keeps the same `Client`, workspace, exec, event, metrics, and session handles. It adds
+four required trust inputs: the exact HTTPS origin, a PEM root bundle dedicated to that endpoint,
+the DNS identity expected in its certificate, and an asynchronous provider for short-lived
+Identity access credentials.
+
+```rust
+use b10x_substrate_sdk::{
+    AccessToken, AccessTokenReason, Client, SdkError,
+};
+
+async fn obtain_from_identity(
+    _reason: AccessTokenReason,
+) -> Result<String, SdkError> {
+    // Call your deployment's Identity client or workload-identity broker here.
+    // Do not log or persist the returned opaque credential.
+    todo!()
+}
+
+let client = Client::builder()
+    // The endpoint host is the TCP destination and HTTP Host authority.
+    .https_endpoint("https://10.24.8.17:8443/")
+    .trust_roots("/etc/my-service/substrate-ca.pem")
+    // Certificate verification remains bound to this DNS name.
+    .server_identity("substrate.example.com")
+    .token_provider(|reason| async move {
+        AccessToken::new(obtain_from_identity(reason).await?)
+    })
+    .connect()
+    .await?;
+
+let workspace = client.workspace().empty().create().await?;
+```
+
+This deliberately has no system-root default, redirect handling, environment proxy, plaintext
+fallback, credential store, or certificate-verification switch. The provider is called for each
+request and once more after a named authentication failure, so it can rotate an expired or revoked
+credential. A mutation keeps the same serialized body and operation id through that refresh.
+
+`event_stream`, `metrics_stream`, and `PipeSession::attach` automatically use `wss://` with the
+same roots and server identity. Each remote session attachment generates a new ephemeral signing
+key, mints a one-use authority, and binds its proof to the accepting TLS 1.3 channel. A disconnected
+attachment is terminal; calling `attach` again never replays the previous authority.
+
+The token provider's failure text and credential bytes are never copied into `SdkError`. Hosted
+authentication and scope failures remain the daemon's typed refusals, while unknown roots and DNS
+name mismatches are transport errors before HTTP admission.
+
 ## Preserve capability absence
 
 Use the exact fact set when deciding whether to offer an operation. `None` means the daemon did not
