@@ -43,7 +43,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 use std::rc::Rc;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use fancy_regex::{Regex, RegexBuilder};
 use serde::de::{self, Deserialize, MapAccess, SeqAccess, Visitor};
@@ -90,22 +90,51 @@ pub fn check(repo_root: &Path, contracts: &Path, versions: &[String]) -> Result<
         versions.to_vec()
     };
 
+    // Bundles are immutable, independent inputs. Validate at most one per available CPU at once,
+    // then fold results back in the caller's version order so diagnostics and the success summary
+    // remain deterministic. A bounded worker set cuts the hosted gate's 58-second all-bundle pass
+    // without turning fifteen schema registries into an unbounded memory spike.
+    let width = std::thread::available_parallelism()
+        .map_or(1, std::num::NonZeroUsize::get)
+        .min(versions.len().max(1));
+    let mut checked = Vec::with_capacity(versions.len());
+    for batch in versions.chunks(width) {
+        let results = std::thread::scope(|scope| {
+            let workers = batch
+                .iter()
+                .map(|version| {
+                    let bundle = contracts.join(version);
+                    scope.spawn(move || {
+                        // The predecessor read a missing directory as an empty one: `Path.rglob`
+                        // on an absent path yields nothing. A named guarantee that cannot be
+                        // checked is a refusal here (invariant 3).
+                        if !bundle.is_dir() {
+                            return (
+                                0,
+                                vec![format!("no bundle directory at {}", bundle.display())],
+                            );
+                        }
+                        check_bundle(&bundle, version, repo_root)
+                    })
+                })
+                .collect::<Vec<_>>();
+            batch
+                .iter()
+                .zip(workers)
+                .map(|(version, worker)| {
+                    worker.join().map_err(|_| {
+                        anyhow!("contract JSON worker for substrate-wire/{version} panicked")
+                    })
+                })
+                .collect::<Result<Vec<_>>>()
+        });
+        checked.extend(results?);
+    }
+
     let mut failures = Vec::new();
     let mut inventory = Vec::new();
     let mut total = 0usize;
-    for version in &versions {
-        let bundle = contracts.join(version);
-        // The predecessor read a missing directory as an empty one: `Path.rglob` on an absent path
-        // yields nothing, so a mistyped version classified zero documents and passed. A named
-        // guarantee that cannot be checked is a refusal here (invariant 3).
-        if !bundle.is_dir() {
-            failures.push(format!(
-                "substrate-wire/{version}: no bundle directory at {}",
-                bundle.display()
-            ));
-            continue;
-        }
-        let (count, local) = check_bundle(&bundle, version, repo_root);
+    for (version, (count, local)) in versions.iter().zip(checked) {
         inventory.push(format!("{version} {count}"));
         total += count;
         failures.extend(

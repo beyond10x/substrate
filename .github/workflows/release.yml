@@ -265,9 +265,9 @@ jobs:
     name: Build, sign and publish daemon, MCP adapter and development bundle
     needs: preflight
     runs-on: ubuntu-latest
-    # A release build is a cold `cargo build --release` of the whole workspace inside the image;
-    # there is deliberately no build cache here (a release runs rarely, and a warm cache is one
-    # more input to trust in the artifact an operator is asked to verify).
+    # A release build is cold with respect to earlier runs. Within this job, one pinned builder
+    # stage compiles both binaries once and the two minimal runtime targets reuse that exact stage;
+    # no cache from an earlier release is an input to an artifact an operator is asked to verify.
     timeout-minutes: 120
     permissions:
       # `write`, not `read`: this job creates the GitHub release with `GITHUB_TOKEN`. It does not
@@ -516,8 +516,8 @@ jobs:
           DOCKER_CONFIG="$anonymous_config" \
             oras manifest fetch --descriptor "${BUNDLE_IMAGE}@${BUNDLE_DIGEST}" >/dev/null
 
-      # SOURCE_SHA becomes `org.opencontainers.image.revision` on the published image
-      # (Dockerfile:13-14), so the image says which commit produced it.
+      # SOURCE_SHA becomes `org.opencontainers.image.revision` on the published daemon target, so
+      # the image says which commit produced it.
       - name: Build, smoke-test and push the daemon image once
         id: build
         env:
@@ -526,6 +526,7 @@ jobs:
           set -euo pipefail
           docker buildx build \
             --file Dockerfile \
+            --target daemon \
             --platform linux/amd64 \
             --build-arg "SOURCE_SHA=${SOURCE_SHA}" \
             --tag "${IMAGE}:${VERSION}" \
@@ -597,7 +598,8 @@ jobs:
         run: |
           set -euo pipefail
           docker buildx build \
-            --file Dockerfile.mcp \
+            --file Dockerfile \
+            --target mcp \
             --platform linux/amd64 \
             --build-arg "SOURCE_SHA=${SOURCE_SHA}" \
             --tag "${MCP_IMAGE}:${VERSION}" \
@@ -741,8 +743,8 @@ jobs:
       # and signing one does not make it a stable contract, and a stable-contract decision is its
       # own ADR under atlas ADR 0019
       # (`architecture/adr/0019-substrate-contract-release-and-conformance.md`, cited by path because it
-      # lives outside this repository — AGENTS.md, section "Links"). The image's `VOLUME` and
-      # `EXPOSE 8080` (Dockerfile:16-17) describe the development-only TCP posture that
+      # lives outside this repository — AGENTS.md, section "Links"). The daemon target's `VOLUME`
+      # and `EXPOSE 8080` describe the development-only TCP posture that
       # `docs/design/06-authentication-secrets-and-trust.md`, section 1, marks `development_only`;
       # the notes must not read as a hosted posture.
       - name: Compose release notes

@@ -82,8 +82,10 @@ fallible termination routine cannot cause the temporary root to drop on an unkno
 
 ## Image and evidence
 
-`Dockerfile.mcp` builds one distroless nonroot binary and declares no port or volume. The release
-publishes it write-once and keyless-signs/verifies its digest. Its mandatory container smoke uses a
+The `mcp` target in `Dockerfile` contains one distroless nonroot binary and declares no port or
+volume. The shared pinned builder compiles it together with the daemon once, while the two runtime
+targets remain separate. The release publishes it write-once and keyless-signs/verifies its digest.
+Its mandatory container smoke uses a
 read-only root, private tmpfs and `--network=none`, then proves the portable named confinement refusal
 and complete container removal. It never treats missing delegated confinement as a positive pass.
 

@@ -148,9 +148,8 @@ In order: `cargo test --workspace --release --locked`, `cargo fmt --all --check`
 `cargo xtask check-adrs`, `cargo xtask check-secrets`, `cargo xtask check-advisories`,
 `cargo xtask check-licenses`, `cargo xtask check-packages`,
 `check-contract-bundle.py`, `check-contract-bundle-0.2.0.py`,
-`-0.3.0.py`, `-0.4.0.py`, `cargo xtask check-bundle 0.5.0`, `check-bundle 0.6.0`, `check-bundle 0.7.0`,
-`check-bundle 0.8.0`, `check-bundle 0.9.0`, `check-bundle 0.10.0`, `check-bundle 0.11.0`,
-`check-bundle 0.12.0`, `check-bundle 0.13.0`, `check-bundle 0.14.0`, `check-bundle 0.15.0`,
+`-0.3.0.py`, `-0.4.0.py`, one bounded
+`cargo xtask check-bundles 0.5.0 ... 0.15.0`,
 `cargo xtask check-json` and `cargo xtask check-toolchain`.
 Green here is the bar for `main`.
 The former brand is fenced org-wide by `scripts/check-org-brand.sh` in the **atlas** repo, not here.
@@ -173,12 +172,13 @@ bundles' reproducibility proof (invariant 6), not as tooling.
 | `check-packages` | a publishable workspace package, a loose internal version edge, or a source runtime package without inherited SPDX metadata, its README and a public documentation target | yes |
 | `package-bundle <version> --out <dir>` | produces a released bundle as a deterministic OCI image layout | no — under `cargo test` |
 | `render-bundle <version> --out <dir>` | produces a bundle tree from `substrate-wire` and `xtask/bundle-source/<version>/`; refuses to write anywhere under `contracts/` | no — under `cargo test` |
-| `check-bundle <version>` | a released bundle whose bytes are not the fixed point of `xtask/bundle-source/<version>/` | yes, `0.5.0` through `0.15.0` |
+| `check-bundle <version>` | a released bundle whose bytes are not the fixed point of `xtask/bundle-source/<version>/` | no — focused form of the batched gate check |
+| `check-bundles <version>...` | the same checks with a bounded worker count and deterministic version-order reporting | yes, `0.5.0` through `0.15.0` in one invocation |
 | `check-json [<version>...]` | JSON beneath a released bundle that no bundled schema classifies, that its schema rejects, or that is not in deterministic source form | yes, all fifteen |
 
 **`cargo xtask package-bundle <version> --out <dir>`** packages a released bundle as a
 deterministic OCI image layout. It is not a gate step of its own: its cases run under
-`cargo test --workspace --locked`, the gate's first step.
+`cargo test --workspace --release --locked`, the gate's first step.
 
 **`cargo xtask render-bundle <version>` is how a successor bundle is cut.** The original renderer
 is frozen for `0.5.0`–`0.8.0`; `0.9.0` and later select the versioned multi-major renderer.
@@ -205,7 +205,7 @@ insertion order, which a sorted-key bundle preserves nowhere.
 reason.** `crates/substrate-daemon/tests/runtime_vectors.rs` spawns the *shipped* binary
 (`env!("CARGO_BIN_EXE_substrate-daemon")`) and drives it over its Unix socket with a
 hand-written HTTP/1.1 and WebSocket client, so it links no implementation and asserts only on
-the wire; `cargo test --workspace --locked` runs it. Its portable lane asserts three named
+the wire; `cargo test --workspace --release --locked` runs it. Its portable lane asserts three named
 refusals — `exec.sandbox-unavailable` (501), `exec.secret-slots-unserved` (501) and
 `exec.secret-slot-descriptor-invalid` (422) — plus `session.pty-unserved` (501) — across 68 cases,
 and its delegated lane 95. Both totals include one route/refusal probe for every operation in the
@@ -220,7 +220,7 @@ delegated lane cannot run here: a user session's own scope is root-owned, so `mk
 and an absent lane looks identical to a green one if you only read `cargo test`.
 
 **The gate verifies every released bundle, not just `0.1.0`.** `scripts/gate.sh:20-23` runs the
-four frozen Python checkers, and the lines after them run `cargo xtask check-bundle` for `0.5.0`
+four frozen Python checkers, and the line after them runs `cargo xtask check-bundles` for `0.5.0`
 through `0.15.0`, so
 a green gate *is* evidence that all fifteen still hold. Cutting a successor bundle therefore means
 **adding its check to `scripts/gate.sh`** — a bundle whose check is not in the gate is unverified
@@ -234,11 +234,12 @@ A successor that needs a new `{"$wire": …}` binding therefore **cannot have on
 from `xtask/src/bundle.rs` instead, which no bundle hashes (`check_aperture_additions`, added for
 `0.6.0`, does exactly this for `MAX_EGRESS_APERTURES`).
 
-**From `0.5.0` on, that check is `cargo xtask check-bundle <version>`, not a fifth Python checker.**
-It re-renders the bundle from `xtask/bundle-source/<version>/` and compares bytes, so it verifies
-strictly more than a hand-written checker: a released tree that is no longer the fixed point of its
-own source fails, whatever else about it still looks well-formed. The four Python checkers stay for
-`0.1.0`–`0.4.0`, which have no authored source tree and never will.
+**From `0.5.0` on, the focused check is `cargo xtask check-bundle <version>`, not a fifth Python
+checker; the gate batches those checks through `check-bundles`.** It re-renders each bundle from
+`xtask/bundle-source/<version>/` and compares bytes, so it verifies strictly more than a hand-written
+checker: a released tree that is no longer the fixed point of its own source fails, whatever else
+about it still looks well-formed. The four Python checkers stay for `0.1.0`–`0.4.0`, which have no
+authored source tree and never will.
 
 **A green local gate does not guarantee a green CI.** The steps mirror each other, and
 `.github/workflows/gate.yml` runs the same `bash scripts/gate.sh` on push and pull request. The
@@ -265,7 +266,8 @@ targets. Tagged releases publish GitHub and GHCR artifacts only. Reintroducing a
 distribution decision, not a release convenience (ADR 0030).
 
 **Pushing that tag runs [`.github/workflows/release.yml`](.github/workflows/release.yml)**, which
-builds `Dockerfile` and `Dockerfile.mcp` and packages the explicitly pinned current development bundle with
+builds the distinct `daemon` and `mcp` runtime targets from one shared pinned builder in `Dockerfile`
+and packages the explicitly pinned current development bundle with
 `cargo xtask package-bundle`. It publishes
 `ghcr.io/beyond10x/b10x-substrate-daemon:<version>` and
 `ghcr.io/beyond10x/b10x-substrate-mcp:<version>`, plus
@@ -289,11 +291,15 @@ package visibility leaves a safe retry path.
 `packages: write` and `id-token: write` exist on the release job and nowhere else; that job holds
 `contents: write` only to create the GitHub release. Everything it does uses the run's own
 `GITHUB_TOKEN`; **the release needs no repository secret at all** (§ *Bot identity*). The GitHub
-release records all artifact digests and exact `cosign verify` commands. **`0.2.3` is published**:
-`ghcr.io/beyond10x/b10x-substrate-daemon:0.2.3` at
-`sha256:ab10158266b579d705ce8422c7d2a6e783cde950d30e100f61ca6befc4d0beda`, keyless-signed and
-`cosign verify`-ed in the run before anything announced. No contract-bundle tag has been published
-yet; the bundle workflow landed after the latest release tag.
+release records all artifact digests and exact `cosign verify` commands. **`0.5.0` is published**
+by run `33498193209`: daemon `ghcr.io/beyond10x/b10x-substrate-daemon:0.5.0` at
+`sha256:5dc8a1a6b61c9b652817c0ae54a4504c23bf781a6fed3cb7617e535bf7c9e786`, disposable MCP
+`ghcr.io/beyond10x/b10x-substrate-mcp:0.5.0` at
+`sha256:3fc28533df606b1db8d5583c3f4288551393ecf15c293c7815bfe8f599976316`, and development bundle
+`ghcr.io/beyond10x/b10x-substrate-wire:0.15.0` at
+`sha256:ba95171e3a05d7917e4083759107132ad6fb707003e791e15b47d9fb20424ac8`. All three were
+keyless-signed, `cosign verify`-ed with the exact tagged workflow identity, and anonymously read
+back before the GitHub release was announced.
 
 `main` is protected by the `Full gate` status check, so the workflow never pushes a changelog commit
 or creates a `GITHUB_TOKEN` pull request whose events GitHub would suppress. After every signature

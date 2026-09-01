@@ -27,6 +27,10 @@ impl Report {
         }
     }
 
+    pub(crate) fn into_parts(self) -> (String, Vec<String>) {
+        (self.summary, self.failures)
+    }
+
     #[cfg(test)]
     pub fn failures(&self) -> &[String] {
         &self.failures

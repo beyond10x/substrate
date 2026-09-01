@@ -83,6 +83,9 @@ enum Command {
     /// Verify a released contract bundle directory against its authored source.
     #[command(name = "check-bundle")]
     CheckBundle(bundle::Args),
+    /// Verify released bundle directories concurrently with a bounded worker count.
+    #[command(name = "check-bundles")]
+    CheckBundles(bundle::ManyArgs),
     /// Render a contract bundle from substrate-wire and its authored source tree.
     #[command(name = "render-bundle")]
     RenderBundle(render::Args),
@@ -120,6 +123,7 @@ fn dispatch() -> Result<ExitCode> {
         Command::CheckJson(args) => return json::run(&args),
         Command::PackageBundle(args) => return package::run(&args),
         Command::CheckBundle(args) => return bundle::run(&args),
+        Command::CheckBundles(args) => return bundle::run_many(&args),
         Command::RenderBundle(args) => {
             let root = repo::root()?;
             let source = args

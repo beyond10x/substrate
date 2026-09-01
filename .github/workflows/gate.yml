@@ -83,20 +83,19 @@ jobs:
           cargo fmt --version
           cargo clippy --version
 
-      # The key folds in both the lockfile and the toolchain pin, so the cache turns over when either
-      # changes. `hashFiles` tolerates a missing `rust-toolchain.toml` — a tree without it still
-      # hashes Cargo.lock.
-      - name: Cache cargo registry and build directory
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+      # The former broad cache uploaded the entire workspace target tree. Run 33497345920 restored
+      # 4.0 GiB for 68 seconds and saved it for another 59 seconds, even though Cargo then rebuilt
+      # every changed workspace crate. This Rust-aware cache retains Cargo home and dependency
+      # artifacts while pruning workspace outputs that are invalidated by the next source change.
+      # Its signed v2.9.2 tag peels to this exact commit.
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          path: |
-            ~/.cargo/bin
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
-          restore-keys: |
-            cargo-${{ runner.os }}-
+          prefix-key: substrate-gate-v1
+          shared-key: full-gate
+          cache-workspace-crates: "false"
+          cache-all-crates: "false"
+          cache-on-failure: "false"
 
       # Probed, not assumed: the ubuntu-24.04 image README lists no bubblewrap among its installed
       # apt packages, and a hosted runner is not inside a delegated cgroup subtree. This step
