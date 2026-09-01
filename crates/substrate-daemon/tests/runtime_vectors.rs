@@ -43,9 +43,9 @@ const DAEMON: &str = env!("CARGO_BIN_EXE_substrate-daemon");
 const CGROUP_EXEC: &str = env!("CARGO_BIN_EXE_substrate-cgroup-exec");
 const DAEMON_OVERRIDE_VARIABLE: &str = "SUBSTRATE_VECTORS_DAEMON";
 /// Pinned independently of the daemon implementation: the clean-room client verifies what ships.
-const ADVERTISED_CONTRACT: &str = "substrate-wire/0.14.0";
+const ADVERTISED_CONTRACT: &str = "substrate-wire/0.15.0";
 const ADVERTISED_CONTRACT_SHA256: &str =
-    "eea07e6894ae840b6b2bb161861a724115fef4dedd57e72386e9d71af348b092";
+    "c0a6f82601debdca988f6c3cf93b89ebb7d086b8c9f74b4b7c9fb17d664357b3";
 
 fn daemon_binary() -> PathBuf {
     std::env::var_os(DAEMON_OVERRIDE_VARIABLE).map_or_else(|| PathBuf::from(DAEMON), PathBuf::from)
@@ -1669,7 +1669,7 @@ fn pty_session_input(workspace: &str, snapshot: &str, window: Option<Value>) -> 
 async fn check_confined_pty(daemon: &Daemon, workspace: &str, snapshot: &str) -> usize {
     let mut passed = 0;
     let (status, capabilities) = daemon
-        .call("GET", "/v1/pipe-sessions", "req_clean_pty_modes", None)
+        .call("GET", "/v1/sessions", "req_clean_pty_modes", None)
         .await;
     assert_eq!(status, 200, "{capabilities}");
     assert_eq!(
@@ -1686,7 +1686,7 @@ async fn check_confined_pty(daemon: &Daemon, workspace: &str, snapshot: &str) ->
         &daemon
             .call(
                 "POST",
-                "/v1/pipe-sessions",
+                "/v1/sessions",
                 "req_clean_pty_nowindow",
                 Some(&mutation(
                     "01JPHASE2CLEANPTY000003",
@@ -1702,7 +1702,7 @@ async fn check_confined_pty(daemon: &Daemon, workspace: &str, snapshot: &str) ->
     let (status, session) = daemon
         .call(
             "POST",
-            "/v1/pipe-sessions",
+            "/v1/sessions",
             "req_clean_pty_start",
             Some(&mutation(
                 "01JPHASE2CLEANPTY000001",
@@ -1721,11 +1721,8 @@ async fn check_confined_pty(daemon: &Daemon, workspace: &str, snapshot: &str) ->
     let exec_id = text(&session["result"]["exec"]);
     passed += 1;
 
-    let mut channel = SessionChannel::open(
-        &daemon.socket,
-        &format!("/v1/pipe-sessions/{session_id}/attach"),
-    )
-    .await;
+    let mut channel =
+        SessionChannel::open(&daemon.socket, &format!("/v1/sessions/{session_id}/attach")).await;
     // Echo: the line discipline sends the typed bytes back before the child has done anything with
     // them, and the child's own answer follows.
     channel.input("stty size\n").await;
@@ -2018,7 +2015,7 @@ async fn check_promoted_route_inventory(daemon: &Daemon, workspace: &str) -> usi
         (
             "session.capabilities",
             "GET",
-            "/v1/pipe-sessions?unexpected=1".to_owned(),
+            "/v1/sessions?unexpected=1".to_owned(),
             None,
             422,
             "request.schema-invalid",
@@ -2026,7 +2023,7 @@ async fn check_promoted_route_inventory(daemon: &Daemon, workspace: &str) -> usi
         (
             "session.start",
             "POST",
-            "/v1/pipe-sessions".to_owned(),
+            "/v1/sessions".to_owned(),
             Some(invalid_body),
             422,
             "request.schema-invalid",
@@ -2034,7 +2031,7 @@ async fn check_promoted_route_inventory(daemon: &Daemon, workspace: &str) -> usi
         (
             "session.get",
             "GET",
-            "/v1/pipe-sessions/ses_missing?unexpected=1".to_owned(),
+            "/v1/sessions/ses_missing?unexpected=1".to_owned(),
             None,
             422,
             "request.schema-invalid",
@@ -2042,7 +2039,7 @@ async fn check_promoted_route_inventory(daemon: &Daemon, workspace: &str) -> usi
         (
             "session.signal",
             "POST",
-            "/v1/pipe-sessions/ses_missing/signal".to_owned(),
+            "/v1/sessions/ses_missing/signal".to_owned(),
             Some(invalid_body),
             422,
             "request.schema-invalid",
@@ -2050,7 +2047,7 @@ async fn check_promoted_route_inventory(daemon: &Daemon, workspace: &str) -> usi
         (
             "session.retire",
             "DELETE",
-            "/v1/pipe-sessions/ses_missing".to_owned(),
+            "/v1/sessions/ses_missing".to_owned(),
             Some(invalid_body),
             422,
             "request.schema-invalid",
@@ -2058,7 +2055,7 @@ async fn check_promoted_route_inventory(daemon: &Daemon, workspace: &str) -> usi
         (
             "session.lease.renew",
             "POST",
-            "/v1/pipe-sessions/ses_missing/lease/renew".to_owned(),
+            "/v1/sessions/ses_missing/lease/renew".to_owned(),
             Some(invalid_body),
             422,
             "request.schema-invalid",
@@ -2163,7 +2160,7 @@ async fn check_promoted_route_inventory(daemon: &Daemon, workspace: &str) -> usi
     let upgrade_probes = [
         (
             "session.attach",
-            "/v1/pipe-sessions/ses_missing/attach",
+            "/v1/sessions/ses_missing/attach",
             404,
             "resource.not-found",
         ),
@@ -2184,7 +2181,7 @@ async fn check_promoted_route_inventory(daemon: &Daemon, workspace: &str) -> usi
     let expected: BTreeSet<String> = {
         let registry = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
-            .join("contracts/substrate-wire/0.14.0/operations.json");
+            .join("contracts/substrate-wire/0.15.0/operations.json");
         let document: Value = serde_json::from_slice(
             &std::fs::read(&registry).expect("promoted operation registry bytes"),
         )
@@ -2194,7 +2191,7 @@ async fn check_promoted_route_inventory(daemon: &Daemon, workspace: &str) -> usi
             .expect("promoted operations array")
             .iter()
             .map(|operation| text(&operation["id"]))
-            // The clean-room daemon in this lane is deliberately the Unix listener. The 0.14
+            // The clean-room daemon in this lane is deliberately the Unix listener. The
             // authority mint route is hosted-TLS-only and its absence here is independently
             // asserted by the transport route-set tests.
             .filter(|id| id != "session.authority.mint")
@@ -2597,14 +2594,14 @@ async fn check_http_journey(
         // capability document does not advertise the mode either. Never a pipe session instead
         // (design 13, invariant 3).
         let (status, capabilities) = daemon
-            .call("GET", "/v1/pipe-sessions", "req_clean_pty_modes", None)
+            .call("GET", "/v1/sessions", "req_clean_pty_modes", None)
             .await;
         assert_eq!(status, 501, "{capabilities}");
         expect_error(
             &daemon
                 .call(
                     "POST",
-                    "/v1/pipe-sessions",
+                    "/v1/sessions",
                     "req_clean_pty_unserved",
                     Some(&mutation(
                         "01JPHASE2CLEANPTY000002",

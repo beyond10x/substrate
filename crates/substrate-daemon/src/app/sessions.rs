@@ -207,7 +207,7 @@ pub(super) async fn pipe_session_capabilities(
                 max_frame_bytes: PIPE_MAX_FRAME_BYTES,
                 max_queued_frames: PIPE_MAX_QUEUED_FRAMES,
                 // The per-mode gate lives here rather than in the operation registry: a
-                // `capability_predicate` on `POST /v1/pipe-sessions` would take the whole route
+                // `capability_predicate` on `POST /v1/sessions` would take the whole route
                 // away from a daemon that serves pipes perfectly well (design 13). Derived from the
                 // fact, so a host that loses the ability stops advertising the mode.
                 modes: served_session_modes(facts),
@@ -234,7 +234,7 @@ pub(super) async fn pipe_session_start(
         &identity,
         "session.start",
         "POST",
-        "/v1/pipe-sessions",
+        "/v1/sessions",
         raw_query.as_deref(),
         body,
         &request_id,
@@ -251,7 +251,7 @@ pub(super) async fn pipe_session_start(
             &request_id,
             "session.start",
             "POST",
-            "/v1/pipe-sessions",
+            "/v1/sessions",
             &mutation,
             response,
         )
@@ -272,7 +272,7 @@ pub(super) async fn pipe_session_start(
                 &request_id,
                 "session.start",
                 "POST",
-                "/v1/pipe-sessions",
+                "/v1/sessions",
                 &mutation,
                 not_found_with_operation(&request_id, &mutation.op),
             )
@@ -285,7 +285,7 @@ pub(super) async fn pipe_session_start(
                 &request_id,
                 "session.start",
                 "POST",
-                "/v1/pipe-sessions",
+                "/v1/sessions",
                 &mutation,
                 workspace_frozen_refusal(&request_id, &mutation.op),
             )
@@ -309,7 +309,7 @@ pub(super) async fn pipe_session_start(
                 &request_id,
                 "session.start",
                 "POST",
-                "/v1/pipe-sessions",
+                "/v1/sessions",
                 &mutation,
                 response,
             )
@@ -324,7 +324,7 @@ pub(super) async fn pipe_session_start(
         &identity,
         "session.start",
         "POST",
-        "/v1/pipe-sessions",
+        "/v1/sessions",
         &mutation,
         capability,
         Some(session_id.clone()),
@@ -494,7 +494,7 @@ pub(super) async fn pipe_session_retire(
     body: Body,
 ) -> Response {
     let request_id = request_id(&app, &headers);
-    let address = format!("/v1/pipe-sessions/{session_id}");
+    let address = format!("/v1/sessions/{session_id}");
     let mutation = match decode_mutation::<EmptyInput>(
         &app,
         &identity,
@@ -552,7 +552,7 @@ pub(super) async fn pipe_session_signal(
     body: Body,
 ) -> Response {
     let request_id = request_id(&app, &headers);
-    let address = format!("/v1/pipe-sessions/{session_id}/signal");
+    let address = format!("/v1/sessions/{session_id}/signal");
     let mutation = match decode_mutation::<ExecSignalInput>(
         &app,
         &identity,
@@ -671,7 +671,7 @@ pub(super) async fn pipe_session_lease_renew(
     body: Body,
 ) -> Response {
     let request_id = request_id(&app, &headers);
-    let address = format!("/v1/pipe-sessions/{session_id}/lease/renew");
+    let address = format!("/v1/sessions/{session_id}/lease/renew");
     let mutation = match decode_mutation::<LeaseRenewInput>(
         &app,
         &identity,

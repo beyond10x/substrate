@@ -50,9 +50,9 @@ published contract.**
 | 0.2.0 bundle, runtime, portable lane, delegated Linux lane | green |
 | 0.4.0 successor development bundle | adds independently verified read-only execution capsules; the delegated model-free lane proves capsule/config/hook binding and correlated native hook evidence before model dispatch |
 | phase 4, [raw pipe sessions](adr/0007-protocol-processes-use-raw-pipe-sessions.md) | source-typed bounded raw-pipe primitive, distinct durable session identity, leased start, single-attachment Unix-WebSocket route ([plan 04](docs/plan/04-direct-byte-plane.md)) |
-| Rust SDK | `b10x-substrate-sdk` provides typed builders, resource handles, durable-operation recovery, event streams and separately supervised external or linked daemon children; current source verifies the explicitly promoted `substrate-wire/0.14.0` name and inner digest before serving an operation |
+| Rust SDK | `b10x-substrate-sdk` provides typed builders, resource handles, durable-operation recovery, event streams and separately supervised external or linked daemon children; current source verifies the explicitly promoted `substrate-wire/0.15.0` name and inner digest before serving an operation |
 | tagged artifact release | [`.github/workflows/release.yml`](.github/workflows/release.yml) publishes the daemon image and the explicitly pinned current development bundle on an annotated bare-version tag whose commit has a green gate run. It copies `cargo xtask package-bundle`'s exact OCI layout to `ghcr.io/beyond10x/b10x-substrate-wire:<bundle-version>`, keyless-signs and verifies both digests before the GitHub release, and refuses an existing canonical tag. It needs no repository secret. The exact changelog digest lines land by bot-authored pull request because `main` is protected |
-| stable publication | **not done.** The latest published OCI bundle is signed `0.12.0` and remains annotated `development`; current source's `0.14.0` successor is not yet published, and neither state makes a development contract stable |
+| stable publication | **not done.** The latest published OCI bundle is signed `0.12.0` and remains annotated `development`; current source's `0.15.0` successor is not yet published, and neither state makes a development contract stable |
 | phase 4, [pty sessions](adr/0019-pty-is-a-second-session-mode.md) | a terminal is a second session **mode** on the same route family, not a second resource: `mode: "pty"` with a required 1–1000-cell window, a `resize` frame, and the `sessions.pty` fact published only after a startup probe allocated a pair, made it controlling inside a throwaway sandbox and round-tripped a window through the child. Absent, the mode is refused `session.pty-unserved` (501) and **never** served as pipes |
 | network session authority | hosted-only 60-second, one-use bearer authority bound to an Ed25519 key and the accepting TLS 1.3 exporter; Unix retains kernel peer authority and development TCP serves no session mutation routes |
 | Git sources | **absent** |
@@ -94,6 +94,7 @@ The table is the gate's own order (`scripts/gate.sh`).
 | contract bundle 0.12.0 | `cargo xtask check-bundle 0.12.0` — checks exact read-only/scoped workspace access and its applied observation |
 | contract bundle 0.13.0 | `cargo xtask check-bundle 0.13.0` — checks the exact hosted Identity audience, route scopes and four safe authentication refusals |
 | contract bundle 0.14.0 | `cargo xtask check-bundle 0.14.0` — checks bounded, one-use session attachment authority bound to its Ed25519 key and accepting TLS channel |
+| contract bundle 0.15.0 | `cargo xtask check-bundle 0.15.0` — checks the exact breaking route rename from `/v1/pipe-sessions` to `/v1/sessions`, with no alias or unrelated drift |
 | contract JSON | `cargo xtask check-json` — every JSON under `contracts/` is classified by exactly one bundled schema, or it fails closed |
 | toolchain | `cargo xtask check-toolchain` |
 
@@ -142,7 +143,7 @@ The runner prints its current portable or delegated case inventory from each fre
 this document deliberately pins no counts that drift as adversarial coverage grows.
 
 `cargo xtask check-json` fails closed on unclassified or schema-invalid contract JSON and
-meta-validates every Draft 2020-12 schema offline, across all fourteen released bundles. Classification
+meta-validates every Draft 2020-12 schema offline, across all fifteen released bundles. Classification
 used to live in a Python module the four checkers imported — shared live machinery, not any one
 bundle's reproducibility proof — so it moved with the rest of the tooling, and the four checkers no
 longer do it. They verify everything else about the bundles they froze.

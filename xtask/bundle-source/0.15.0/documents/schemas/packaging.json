@@ -1,0 +1,78 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.15.0:packaging",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "const": "schemas/packaging.json"
+    },
+    "archive": {
+      "additionalProperties": false,
+      "properties": {
+        "compression": {
+          "const": "none"
+        },
+        "format": {
+          "const": "posix-tar"
+        },
+        "gid": {
+          "const": 0
+        },
+        "group_name": {
+          "const": ""
+        },
+        "mode": {
+          "const": "files-0644-directories-0755"
+        },
+        "owner_name": {
+          "const": ""
+        },
+        "path_order": {
+          "const": "utf8-bytewise"
+        },
+        "source_date_epoch": {
+          "const": "source-commit-author-seconds"
+        },
+        "uid": {
+          "const": 0
+        }
+      },
+      "required": [
+        "format",
+        "compression",
+        "path_order",
+        "uid",
+        "gid",
+        "owner_name",
+        "group_name",
+        "mode",
+        "source_date_epoch"
+      ],
+      "type": "object"
+    },
+    "json_authority": {
+      "const": "checked-in-deterministic-source-form"
+    },
+    "release_blockers": {
+      "const": [
+        "source-commit-materialized",
+        "standards-inputs-digest-pinned",
+        "double-build-byte-identity",
+        "independent-runner-pass",
+        "private-oci-signature"
+      ]
+    },
+    "status": {
+      "const": "development"
+    }
+  },
+  "required": [
+    "$schema",
+    "status",
+    "json_authority",
+    "archive",
+    "release_blockers"
+  ],
+  "title": "Deterministic development packaging authority",
+  "type": "object"
+}

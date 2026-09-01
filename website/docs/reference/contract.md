@@ -47,7 +47,7 @@ edits, and patches.
 | `POST` | `/v2/workspaces/{workspace_id}/file-edits/{*path}` | apply one bounded positional edit |
 | `POST` | `/v2/workspaces/{workspace_id}/file-patches/{*path}` | apply one bounded patch |
 
-Current development source advertises `substrate-wire/0.13.0` in `x-b10x-contract` and its inner
+Current development source advertises `substrate-wire/0.15.0` in `x-b10x-contract` and its inner
 `bundle.json` SHA-256 in `x-b10x-contract-bundle-sha256`. The two headers are one claim. The signed
 outer OCI manifest has a different digest because it identifies the distribution package rather
 than the inner contract manifest.
@@ -74,6 +74,11 @@ hosted production-admission profile: exact Identity audience, five-minute online
 resolution, the `observe`/`workspaces`/`exec` route mapping and the four `auth.*` refusals a remote
 client can receive. It remains a development contract.
 
+Bundle `0.14.0` adds the hosted-only attachment-authority mint route and binds each one-use bearer
+to an Ed25519 key and the accepting TLS 1.3 channel. Bundle `0.15.0` then performs one deliberate
+pre-1.0 break: its eight session addresses move from `/v1/pipe-sessions` to `/v1/sessions`, with no
+redirect or compatibility alias. Operation ids and request/result schemas stay the same.
+
 ### Metrics
 
 | Method | Path | Purpose |
@@ -98,16 +103,18 @@ Exec start is served only when the daemon verified its complete host confinement
 
 | Method | Path | Purpose |
 |---|---|---|
-| `GET` | `/v1/pipe-sessions` | read session capability information |
-| `POST` | `/v1/pipe-sessions` | start a leased raw-pipe or PTY session |
-| `GET` | `/v1/pipe-sessions/{session_id}` | read observed session state |
-| `GET` | `/v1/pipe-sessions/{session_id}/attach` | attach the one bounded WebSocket channel |
-| `POST` | `/v1/pipe-sessions/{session_id}/signal` | signal the underlying process |
-| `POST` | `/v1/pipe-sessions/{session_id}/lease/renew` | renew session liveness |
-| `DELETE` | `/v1/pipe-sessions/{session_id}` | retire a session |
+| `GET` | `/v1/sessions` | read session capability information |
+| `POST` | `/v1/sessions` | start a leased raw-pipe or PTY session |
+| `GET` | `/v1/sessions/{session_id}` | read observed session state |
+| `GET` | `/v1/sessions/{session_id}/attach` | attach the one bounded WebSocket channel |
+| `POST` | `/v1/sessions/{session_id}/attachment-authorities` | mint one bounded hosted WSS attachment authority |
+| `POST` | `/v1/sessions/{session_id}/signal` | signal the underlying process |
+| `POST` | `/v1/sessions/{session_id}/lease/renew` | renew session liveness |
+| `DELETE` | `/v1/sessions/{session_id}` | retire a session |
 
 Sessions are a development slice. Raw pipes remain the default; PTY mode requires a bounded initial
-window and a verified `sessions.pty` machine fact. Production network session authority is absent.
+window and a verified `sessions.pty` machine fact. Hosted attachment requires a short-lived,
+one-use key-and-channel-bound authority; Unix attachment continues to use kernel peer credentials.
 
 ## Recovery and events
 

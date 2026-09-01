@@ -14,17 +14,10 @@
 //!    hand-edit anywhere in the tree fails here and nowhere else has to look for it.
 //! 2. **Manifest integrity.** `bundle.json` lists every other file once, with its exact length,
 //!    digest and media type — the same self-description a consumer verifies after unpacking.
-//! 3. **Compatibility.** The declared predecessor exists, the declared `preserves_routes` and
-//!    `adds_routes` are the counts the two route inventories actually produce, no route the
-//!    predecessor served has been dropped, and no operation both bundles serve answers at a
-//!    different path. An additive successor that quietly removed a route would otherwise still pass
-//!    its own schema, and one that quietly *moved* a route would pass with `adds_routes: 0` and
-//!    nothing at all to report — the inventories are compared on id **and** path for that reason. A
-//!    deliberate move is declared by keeping the predecessor's path answering, through a **new**
-//!    entry whose `alias_of` names the operation that moved and which serves that path the way the
-//!    predecessor served it. Nothing weaker is a declaration: an entry the predecessor already had
-//!    would let two operations trade paths and each vouch for the other, and an entry under another
-//!    method or scope resolves the URL only to refuse what a pinned consumer sends.
+//! 3. **Compatibility.** Additive successors preserve every id and route address. The one closed
+//!    exception is `0.15.0` from `0.14.0`: Atlas ADR 0022 and Substrate ADR 0028 authorise exactly
+//!    eight `/v1/pipe-sessions` addresses to become `/v1/sessions`. Its declaration enumerates all
+//!    pairs, and the checker refuses any other removal, addition or operation-entry change.
 //! 4. **Classification** (invariant 7). Every JSON under `schemas/` declares the pinned Draft
 //!    2020-12 meta-schema and validates against it; every other JSON declares exactly one `$schema`
 //!    pointing under `schemas/`, and validates against it. Unclassified JSON fails closed.
@@ -279,6 +272,21 @@ fn check_compatibility(inputs: &Inputs, released: &Tree, failures: &mut Vec<Stri
         }
     };
 
+    let kind = bundle
+        .pointer("/compatibility/kind")
+        .and_then(Value::as_str);
+    if kind == Some("breaking-development-v1") {
+        check_session_route_rename(inputs, &bundle, predecessor, &previous, &current, failures);
+        return;
+    }
+    if kind != Some("additive-v1") {
+        failures.push(format!(
+            "bundle.json: unsupported compatibility.kind {}",
+            kind.unwrap_or("<absent>")
+        ));
+        return;
+    }
+
     let (previous_ids, current_ids) = (previous.ids(), current.ids());
     let preserves = previous_ids.intersection(&current_ids).count() as u64;
     let adds = current_ids.difference(&previous_ids).count() as u64;
@@ -309,6 +317,231 @@ fn check_compatibility(inputs: &Inputs, released: &Tree, failures: &mut Vec<Stri
         ));
     }
     check_route_paths(&previous, &current, released, inputs, predecessor, failures);
+}
+
+/// The only accepted breaking route migration.
+///
+/// This is deliberately closed to one successor pair. Supporting another breaking successor means
+/// adding another accepted decision and another exact checker, not making this branch generic.
+const SESSION_ROUTE_REPLACEMENTS: [(&str, &str, &str, &str); 8] = [
+    (
+        "session.capabilities",
+        "GET",
+        "/v1/pipe-sessions",
+        "/v1/sessions",
+    ),
+    ("session.start", "POST", "/v1/pipe-sessions", "/v1/sessions"),
+    (
+        "session.get",
+        "GET",
+        "/v1/pipe-sessions/{session_id}",
+        "/v1/sessions/{session_id}",
+    ),
+    (
+        "session.attach",
+        "GET",
+        "/v1/pipe-sessions/{session_id}/attach",
+        "/v1/sessions/{session_id}/attach",
+    ),
+    (
+        "session.authority.mint",
+        "POST",
+        "/v1/pipe-sessions/{session_id}/attachment-authorities",
+        "/v1/sessions/{session_id}/attachment-authorities",
+    ),
+    (
+        "session.signal",
+        "POST",
+        "/v1/pipe-sessions/{session_id}/signal",
+        "/v1/sessions/{session_id}/signal",
+    ),
+    (
+        "session.retire",
+        "DELETE",
+        "/v1/pipe-sessions/{session_id}",
+        "/v1/sessions/{session_id}",
+    ),
+    (
+        "session.lease.renew",
+        "POST",
+        "/v1/pipe-sessions/{session_id}/lease/renew",
+        "/v1/sessions/{session_id}/lease/renew",
+    ),
+];
+
+fn check_session_route_rename(
+    inputs: &Inputs,
+    bundle: &Value,
+    predecessor: &str,
+    previous: &Routes,
+    current: &Routes,
+    failures: &mut Vec<String>,
+) {
+    const VERSION: &str = "0.15.0";
+    const PREDECESSOR: &str = "0.14.0";
+    if inputs.version != VERSION || predecessor != PREDECESSOR {
+        failures.push(format!(
+            "bundle.json: breaking-development-v1 is closed to {VERSION} from {PREDECESSOR}"
+        ));
+        return;
+    }
+
+    check_session_route_ids(previous, current, failures);
+
+    let previous_addresses = route_addresses(previous);
+    let current_addresses = route_addresses(current);
+    check_session_route_accounting(bundle, &previous_addresses, &current_addresses, failures);
+    check_session_route_entries(previous, current, failures);
+    check_session_route_address_sets(&previous_addresses, &current_addresses, failures);
+}
+
+fn check_session_route_ids(previous: &Routes, current: &Routes, failures: &mut Vec<String>) {
+    let (previous_ids, current_ids) = (previous.ids(), current.ids());
+    for missing in previous_ids.difference(&current_ids) {
+        failures.push(format!(
+            "operations.json: breaking route rename removed operation id {missing}"
+        ));
+    }
+    for added in current_ids.difference(&previous_ids) {
+        failures.push(format!(
+            "operations.json: breaking route rename added operation id {added}"
+        ));
+    }
+}
+
+fn check_session_route_accounting(
+    bundle: &Value,
+    previous_addresses: &BTreeSet<(String, String)>,
+    current_addresses: &BTreeSet<(String, String)>,
+    failures: &mut Vec<String>,
+) {
+    let preserves = previous_addresses.intersection(current_addresses).count() as u64;
+    let adds = current_addresses.difference(previous_addresses).count() as u64;
+    let removes = previous_addresses.difference(current_addresses).count() as u64;
+    for (pointer, actual) in [
+        ("/compatibility/preserves_routes", preserves),
+        ("/compatibility/adds_routes", adds),
+        ("/compatibility/removes_routes", removes),
+    ] {
+        if bundle.pointer(pointer).and_then(Value::as_u64) != Some(actual) {
+            failures.push(format!(
+                "bundle.json: {pointer} disagrees with the route-address inventories ({actual})"
+            ));
+        }
+    }
+
+    let expected_declaration = Value::Array(
+        SESSION_ROUTE_REPLACEMENTS
+            .iter()
+            .map(|(id, method, removed, added)| {
+                json!({
+                    "added": added,
+                    "id": id,
+                    "method": method,
+                    "removed": removed,
+                })
+            })
+            .collect(),
+    );
+    if bundle.pointer("/compatibility/route_replacements") != Some(&expected_declaration) {
+        failures.push(
+            "bundle.json: compatibility.route_replacements is not the exact eight-route session migration"
+                .to_owned(),
+        );
+    }
+}
+
+fn check_session_route_entries(previous: &Routes, current: &Routes, failures: &mut Vec<String>) {
+    let (previous_ids, current_ids) = (previous.ids(), current.ids());
+    let expected_ids: BTreeSet<&str> = SESSION_ROUTE_REPLACEMENTS.iter().map(|row| row.0).collect();
+    for id in previous_ids.intersection(&current_ids) {
+        let was = &previous.served[*id];
+        let now = &current.served[*id];
+        if expected_ids.contains(id) {
+            continue;
+        }
+        if was.entry != now.entry {
+            failures.push(format!(
+                "operations.json: non-session route {id} changed during the closed route rename"
+            ));
+        }
+    }
+
+    for (id, method, removed, added) in SESSION_ROUTE_REPLACEMENTS {
+        let (Some(was), Some(now)) = (previous.served.get(id), current.served.get(id)) else {
+            continue;
+        };
+        let was_method = was.entry.get("method").and_then(Value::as_str);
+        let now_method = now.entry.get("method").and_then(Value::as_str);
+        if was_method != Some(method)
+            || now_method != Some(method)
+            || was.path != removed
+            || now.path != added
+        {
+            failures.push(format!(
+                "operations.json: {id} is not the declared {method} {removed} -> {added} replacement"
+            ));
+            continue;
+        }
+        let mut normalised = now.entry.clone();
+        normalised["path"] = Value::String(removed.to_owned());
+        if normalised != was.entry {
+            failures.push(format!(
+                "operations.json: {id} changed beyond its declared route path"
+            ));
+        }
+    }
+}
+
+fn check_session_route_address_sets(
+    previous_addresses: &BTreeSet<(String, String)>,
+    current_addresses: &BTreeSet<(String, String)>,
+    failures: &mut Vec<String>,
+) {
+    let expected_removed: BTreeSet<(String, String)> = SESSION_ROUTE_REPLACEMENTS
+        .iter()
+        .map(|(_, method, removed, _)| ((*method).to_owned(), (*removed).to_owned()))
+        .collect();
+    let expected_added: BTreeSet<(String, String)> = SESSION_ROUTE_REPLACEMENTS
+        .iter()
+        .map(|(_, method, _, added)| ((*method).to_owned(), (*added).to_owned()))
+        .collect();
+    let actual_removed: BTreeSet<(String, String)> = previous_addresses
+        .difference(current_addresses)
+        .cloned()
+        .collect();
+    let actual_added: BTreeSet<(String, String)> = current_addresses
+        .difference(previous_addresses)
+        .cloned()
+        .collect();
+    if actual_removed != expected_removed {
+        failures.push(format!(
+            "operations.json: removed route addresses are not the exact session family: {actual_removed:?}"
+        ));
+    }
+    if actual_added != expected_added {
+        failures.push(format!(
+            "operations.json: added route addresses are not the exact session family: {actual_added:?}"
+        ));
+    }
+}
+
+fn route_addresses(routes: &Routes) -> BTreeSet<(String, String)> {
+    routes
+        .served
+        .values()
+        .map(|route| {
+            (
+                route
+                    .entry
+                    .get("method")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_owned(),
+                route.path.clone(),
+            )
+        })
+        .collect()
 }
 
 /// The one recorded bridge around `0.12.0`'s already-frozen non-adjacent compatibility block.
@@ -577,6 +810,10 @@ fn check_classification(version: &str, released: &Tree, failures: &mut Vec<Strin
 /// A successor that rendered, verified and preserved everything while adding nothing is the failure
 /// this catches; the entries are the acceptance list of the story that cut the bundle.
 fn check_additions(version: &str, released: &Tree, failures: &mut Vec<String>) {
+    if version == "0.15.0" {
+        check_session_route_rename_additions(released, failures);
+        return;
+    }
     if version == "0.14.0" {
         check_session_authority_additions(released, failures);
         return;
@@ -618,9 +855,54 @@ fn check_additions(version: &str, released: &Tree, failures: &mut Vec<String>) {
     }
 }
 
+/// What `0.15.0` exists for: the exact, alias-free session route rename.
+fn check_session_route_rename_additions(released: &Tree, failures: &mut Vec<String>) {
+    const CANONICAL_MINT: &str = "/v1/sessions/{session_id}/attachment-authorities";
+    check_session_authority_additions_at(released, CANONICAL_MINT, failures);
+
+    for (path, bytes) in released {
+        if matches!(path.as_str(), "bundle.json" | "schemas/bundle.json") {
+            continue;
+        }
+        if String::from_utf8_lossy(bytes).contains("/v1/pipe-sessions") {
+            failures.push(format!(
+                "{path}: 0.15.0 retains the removed /v1/pipe-sessions route spelling"
+            ));
+        }
+    }
+
+    let Some(admission) = json_at(released, "hosted-admission.json", failures) else {
+        return;
+    };
+    let exec_families = admission
+        .get("scopes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .find(|row| row.get("scope").and_then(Value::as_str) == Some("exec"))
+        .and_then(|row| row.get("route_families"));
+    if exec_families != Some(&json!(["execs", "sessions"])) {
+        failures.push(
+            "hosted-admission.json: exec scope does not name exactly execs and sessions".to_owned(),
+        );
+    }
+}
+
 /// What `0.14.0` exists for: bounded, one-use attachment authority bound to an Ed25519 key and
 /// the accepting TLS channel.
 fn check_session_authority_additions(released: &Tree, failures: &mut Vec<String>) {
+    check_session_authority_additions_at(
+        released,
+        "/v1/pipe-sessions/{session_id}/attachment-authorities",
+        failures,
+    );
+}
+
+fn check_session_authority_additions_at(
+    released: &Tree,
+    mint_path: &str,
+    failures: &mut Vec<String>,
+) {
     let Some(profile) = json_at(released, "session-authority.json", failures) else {
         return;
     };
@@ -653,8 +935,7 @@ fn check_session_authority_additions(released: &Tree, failures: &mut Vec<String>
             ));
         }
     }
-    if profile.pointer("/mint/path").and_then(Value::as_str)
-        != Some("/v1/pipe-sessions/{session_id}/attachment-authorities")
+    if profile.pointer("/mint/path").and_then(Value::as_str) != Some(mint_path)
         || profile.pointer("/mint/transport").and_then(Value::as_str) != Some("hosted-tls-only")
         || profile.get("redemption").and_then(Value::as_str)
             != Some("same-transaction-as-attachment-claim")
@@ -3325,6 +3606,103 @@ mod tests {
         }
     }
 
+    fn session_rename_parts() -> (
+        crate::render::Inputs,
+        Value,
+        Value,
+        super::Routes,
+        super::Routes,
+    ) {
+        let inputs = crate::render::Inputs {
+            version: "0.15.0".to_owned(),
+            ..inputs()
+        };
+        let released = super::tree_of(&inputs.contracts_root.join("0.15.0")).expect("0.15.0 reads");
+        let bundle: Value =
+            serde_json::from_slice(released.get("bundle.json").expect("0.15.0 manifest"))
+                .expect("0.15.0 manifest parses");
+        let current_registry: Value =
+            serde_json::from_slice(released.get("operations.json").expect("0.15.0 registry"))
+                .expect("0.15.0 registry parses");
+        let previous_registry: Value = serde_json::from_slice(
+            &std::fs::read(inputs.contracts_root.join("0.14.0").join("operations.json"))
+                .expect("0.14.0 registry"),
+        )
+        .expect("0.14.0 registry parses");
+        let previous = super::Routes::read(&previous_registry).expect("0.14.0 routes");
+        let current = super::Routes::read(&current_registry).expect("0.15.0 routes");
+        (inputs, bundle, current_registry, previous, current)
+    }
+
+    #[test]
+    fn the_closed_session_route_rename_holds() {
+        let (inputs, bundle, _, previous, current) = session_rename_parts();
+        let mut failures = Vec::new();
+        super::check_session_route_rename(
+            &inputs,
+            &bundle,
+            "0.14.0",
+            &previous,
+            &current,
+            &mut failures,
+        );
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn the_closed_session_route_rename_refuses_a_ninth_move() {
+        let (inputs, bundle, mut registry, previous, _) = session_rename_parts();
+        let route = registry["operations"]
+            .as_array_mut()
+            .expect("operations array")
+            .iter_mut()
+            .find(|route| route["id"] == "metrics.get")
+            .expect("metrics.get route");
+        route["path"] = json!("/v1/observations/metrics");
+        let current = super::Routes::read(&registry).expect("mutated routes");
+        let mut failures = Vec::new();
+        super::check_session_route_rename(
+            &inputs,
+            &bundle,
+            "0.14.0",
+            &previous,
+            &current,
+            &mut failures,
+        );
+        let text = failures.join("\n");
+        assert!(
+            text.contains("metrics.get") && text.contains("non-session route"),
+            "a ninth move must be named: {text}"
+        );
+    }
+
+    #[test]
+    fn the_closed_session_route_rename_refuses_semantic_drift() {
+        let (inputs, bundle, mut registry, previous, _) = session_rename_parts();
+        let route = registry["operations"]
+            .as_array_mut()
+            .expect("operations array")
+            .iter_mut()
+            .find(|route| route["id"] == "session.start")
+            .expect("session.start route");
+        route["required_scope"] = json!("admin");
+        let current = super::Routes::read(&registry).expect("mutated routes");
+        let mut failures = Vec::new();
+        super::check_session_route_rename(
+            &inputs,
+            &bundle,
+            "0.14.0",
+            &previous,
+            &current,
+            &mut failures,
+        );
+        let text = failures.join("\n");
+        assert!(
+            text.contains("session.start") && text.contains("beyond its declared route path"),
+            "scope drift must be refused: {text}"
+        );
+    }
+
     #[test]
     fn the_frozen_0_12_lineage_bridge_holds() {
         let inputs = bridge_inputs();
@@ -4711,7 +5089,7 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{}: {error}", bundle.display()));
             checked += 1;
         }
-        assert_eq!(checked, 14, "every released bundle must be checked");
+        assert_eq!(checked, 15, "every released bundle must be checked");
     }
 
     /// Class, the other half: if a parameter's name is not a discriminator, then renaming one is

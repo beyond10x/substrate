@@ -161,7 +161,7 @@ impl Client {
     }
 
     pub async fn get_pipe_session(&self, id: impl AsRef<str>) -> Result<PipeSession, SdkError> {
-        let path = format!("/v1/pipe-sessions/{}", encode_path(id.as_ref()));
+        let path = format!("/v1/sessions/{}", encode_path(id.as_ref()));
         let observed: substrate_wire::PipeSession = self.get(&path).await?;
         Ok(PipeSession {
             client: self.clone(),
@@ -176,7 +176,7 @@ impl Client {
     }
 
     pub async fn session_capabilities(&self) -> Result<PipeSessionCapabilities, SdkError> {
-        self.get("/v1/pipe-sessions").await
+        self.get("/v1/sessions").await
     }
 
     pub async fn metrics(
@@ -1046,7 +1046,7 @@ impl PipeSessionBuilder {
         let (_, observed): (_, substrate_wire::PipeSession) = self
             .workspace
             .client
-            .mutation("POST", "/v1/pipe-sessions", &input, self.operation_id)
+            .mutation("POST", "/v1/sessions", &input, self.operation_id)
             .await?;
         Ok(PipeSession {
             client: self.workspace.client,
@@ -1085,10 +1085,7 @@ impl PipeSession {
     }
 
     pub async fn attach(&self) -> Result<PipeChannel, SdkError> {
-        let target = format!(
-            "/v1/pipe-sessions/{}/attach",
-            encode_path(&self.observed.id)
-        );
+        let target = format!("/v1/sessions/{}/attach", encode_path(&self.observed.id));
         let socket = self.client.inner.transport.websocket(&target).await?;
         Ok(PipeChannel {
             socket,
@@ -1116,10 +1113,7 @@ impl PipeSession {
             signal: signal.into(),
             grace_ms: required_duration_millis(grace)?,
         };
-        let target = format!(
-            "/v1/pipe-sessions/{}/signal",
-            encode_path(&self.observed.id)
-        );
+        let target = format!("/v1/sessions/{}/signal", encode_path(&self.observed.id));
         let (_, observed): (_, substrate_wire::PipeSession) = self
             .client
             .mutation("POST", &target, &input, operation_id.into())
@@ -1145,7 +1139,7 @@ impl PipeSession {
             ttl_ms: required_duration_millis(ttl)?,
         };
         let target = format!(
-            "/v1/pipe-sessions/{}/lease/renew",
+            "/v1/sessions/{}/lease/renew",
             encode_path(&self.observed.id)
         );
         let (_, observed): (_, substrate_wire::PipeSession) = self
@@ -1164,7 +1158,7 @@ impl PipeSession {
         self,
         operation_id: impl Into<Option<String>>,
     ) -> Result<bool, SdkError> {
-        let target = format!("/v1/pipe-sessions/{}", encode_path(&self.observed.id));
+        let target = format!("/v1/sessions/{}", encode_path(&self.observed.id));
         let (_, absent): (_, substrate_wire::SessionAbsence) = self
             .client
             .mutation(

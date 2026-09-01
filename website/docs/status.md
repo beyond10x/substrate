@@ -24,7 +24,7 @@ verify it through `GET /v1/machine`.
 | recovery | operation lookup, bounded events, reconciliation snapshots, restart-to-unknown |
 | limits | body, path, output, retention, concurrency, process, memory, CPU, duration, and probe-gated writable-storage bounds |
 | observations | explicit live and terminal wall, CPU, memory peak/current, process, OOM, block-I/O, and scratch usage facts |
-| sessions | leased raw-pipe and probe-gated PTY modes with one Unix-WebSocket attachment |
+| sessions | leased raw-pipe and probe-gated PTY modes at `/v1/sessions`, with one Unix-WebSocket or authority-bound hosted WSS attachment |
 | Rust SDK source | complete promoted-contract coverage, serializable observations, exact optional facts, keyed mutations, PTY resize, metrics and snapshots |
 | disposable MCP source | private stdio adapter over the SDK; bounded tools/resources, caller operation IDs, portable named refusal and native delegated cleanup evidence |
 | capsules | digest-verified read-only runtime material beside a writable workspace |
@@ -33,7 +33,6 @@ verify it through `GET /v1/machine`.
 ## Explicitly absent
 
 - Git workspace sources and snapshots
-- production network session authority
 - workloads, images, volumes, and endpoints
 - Docker and Kubernetes drivers
 - cross-machine scheduling
@@ -51,9 +50,11 @@ a specific refusal when requested.
 - Production TLS admits callers only through online Identity resolution. Identity unavailability
   fails closed, and no cached authority or caller-written identity is used.
 - One daemon is one trust domain; it is not a multi-tenant isolation layer.
-- Current development source advertises `substrate-wire/0.13.0` and the SHA-256 of its inner
+- Current development source advertises `substrate-wire/0.15.0` and the SHA-256 of its inner
   `bundle.json` as one claim. The tagged `0.4.2` daemon and signed development bundle remain on
   `substrate-wire/0.12.0`; do not mix that release with a client built only for the successor.
+  Version `0.15.0` deliberately replaces `/v1/pipe-sessions` with `/v1/sessions` and serves no
+  compatibility alias.
 
 ## Reading status safely
 

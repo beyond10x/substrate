@@ -10,24 +10,24 @@ owner-private Unix socket, verifies the daemon's advertised contract, and return
 process, event, operation, and refusal observations.
 
 The SDK and wire contract are development releases below 1.0. Current development source verifies
-the explicitly promoted `substrate-wire/0.13.0` name and inner manifest digest before it serves an
+the explicitly promoted `substrate-wire/0.15.0` name and inner manifest digest before it serves an
 operation. Missing, older, unknown, and wrong-digest daemon claims are refused; a newer Rust type in
 the workspace does not by itself advance that pair.
 
 ## Connect and run an argv-only command
 
-Add the client and Tokio to your application:
+Clone Substrate beside your application, then add the client and Tokio. b10x does not publish these
+crates to crates.io; a path dependency makes the source you are testing explicit:
 
 ```toml
 [dependencies]
-b10x-substrate-sdk = "=0.4.0"
+b10x-substrate-sdk = { path = "../substrate/crates/b10x-substrate-sdk" }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ulid = "3"
 ```
 
-That dependency is the latest crates.io SDK release. The parity APIs later on this page describe
-current development source and will ship in a successor release; they are not retroactive claims
-about `0.4.0`.
+For a shared build, replace the path with an exact Git revision after that revision passes the
+repository gate. Do not use an unpinned branch and do not expect a crates.io package.
 
 Then connect, create an empty workspace, and state every execution limit explicitly:
 
@@ -197,7 +197,7 @@ binary as the child. It does not run the service in-process.
 
 ```toml
 [dependencies]
-b10x-substrate-sdk = { version = "=0.4.0", features = ["linked-daemon"] }
+b10x-substrate-sdk = { path = "../substrate/crates/b10x-substrate-sdk", features = ["linked-daemon"] }
 ```
 
 Call the child entrypoint before parsing your application's command line, then select linked mode:

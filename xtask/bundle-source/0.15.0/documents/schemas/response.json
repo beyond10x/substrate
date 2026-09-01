@@ -1,0 +1,9 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.15.0:response",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "anyOf": {
+    "$routes": "response-branches"
+  },
+  "description": "The route registry selects one branch; no generic result value is authoritative.",
+  "title": "Closed phase-3 success response union"
+}

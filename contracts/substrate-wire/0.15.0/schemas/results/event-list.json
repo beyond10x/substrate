@@ -1,0 +1,48 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.15.0:result:event-list",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "first_retained_seq": {
+      "maximum": 18446744073709551615,
+      "minimum": 1,
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "generation": {
+      "maximum": 18446744073709551615,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "items": {
+      "items": {
+        "$ref": "../event.json"
+      },
+      "maxItems": 1000,
+      "type": "array"
+    },
+    "next_cursor": {
+      "$ref": "../common.json#/$defs/event-cursor"
+    },
+    "source_scope": {
+      "$ref": "../common.json#/$defs/source-scope"
+    },
+    "through_seq": {
+      "maximum": 18446744073709551615,
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "source_scope",
+    "generation",
+    "items",
+    "next_cursor",
+    "through_seq",
+    "first_retained_seq"
+  ],
+  "title": "event-list operation result",
+  "type": "object"
+}

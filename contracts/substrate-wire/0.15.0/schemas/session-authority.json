@@ -1,0 +1,127 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.15.0:session-authority",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "const": "schemas/session-authority.json"
+    },
+    "authority": {
+      "additionalProperties": false,
+      "properties": {
+        "bearer_format": {
+          "const": "session_authority_v1_<43-base64url-characters>"
+        },
+        "id_format": {
+          "const": "sa_<26-crockford-base32-characters>"
+        },
+        "maximum_lifetime_seconds": {
+          "const": 60
+        },
+        "maximum_live_per_session": {
+          "const": 4
+        },
+        "stored_form": {
+          "const": "sha256-verifier-only"
+        }
+      },
+      "required": [
+        "bearer_format",
+        "id_format",
+        "maximum_lifetime_seconds",
+        "maximum_live_per_session",
+        "stored_form"
+      ],
+      "type": "object"
+    },
+    "binding": {
+      "additionalProperties": false,
+      "properties": {
+        "exporter_bytes": {
+          "const": 32
+        },
+        "exporter_context": {
+          "const": "none"
+        },
+        "exporter_label": {
+          "const": "EXPORTER-Substrate-Session-Authority-v1"
+        },
+        "key": {
+          "const": "ed25519"
+        },
+        "proof_timestamp_skew_seconds": {
+          "const": 10
+        },
+        "transcript_domain": {
+          "const": "substrate.session-authority.v1"
+        }
+      },
+      "required": [
+        "exporter_bytes",
+        "exporter_context",
+        "exporter_label",
+        "key",
+        "proof_timestamp_skew_seconds",
+        "transcript_domain"
+      ],
+      "type": "object"
+    },
+    "headers": {
+      "additionalProperties": false,
+      "properties": {
+        "authority": {
+          "const": "x-substrate-session-authority"
+        },
+        "authority_id": {
+          "const": "x-substrate-session-authority-id"
+        },
+        "proof": {
+          "const": "x-substrate-session-proof"
+        },
+        "timestamp": {
+          "const": "x-substrate-session-timestamp"
+        }
+      },
+      "required": [
+        "authority",
+        "authority_id",
+        "proof",
+        "timestamp"
+      ],
+      "type": "object"
+    },
+    "mint": {
+      "additionalProperties": false,
+      "properties": {
+        "method": {
+          "const": "POST"
+        },
+        "path": {
+          "const": "/v1/sessions/{session_id}/attachment-authorities"
+        },
+        "transport": {
+          "const": "hosted-tls-only"
+        }
+      },
+      "required": [
+        "method",
+        "path",
+        "transport"
+      ],
+      "type": "object"
+    },
+    "redemption": {
+      "const": "same-transaction-as-attachment-claim"
+    }
+  },
+  "required": [
+    "$schema",
+    "authority",
+    "binding",
+    "headers",
+    "mint",
+    "redemption"
+  ],
+  "title": "Proof-bound network session authority profile",
+  "type": "object"
+}

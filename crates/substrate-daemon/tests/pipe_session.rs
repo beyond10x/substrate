@@ -455,7 +455,7 @@ impl Harness {
         let (status, session) = self
             .call(
                 Method::POST,
-                "/v1/pipe-sessions",
+                "/v1/sessions",
                 mutation(
                     "01JPTYSESSIONSTART000001",
                     pty_start(&workspace, Some(json!({"columns": 80, "rows": 24}))),
@@ -516,7 +516,7 @@ impl Harness {
         let (status, session) = self
             .call(
                 Method::POST,
-                "/v1/pipe-sessions",
+                "/v1/sessions",
                 mutation(
                     "01JPIPESESSIONSTART00001",
                     json!({
@@ -786,7 +786,7 @@ impl WebSocketClient {
 async fn durable_pipe_start_single_attachment_and_terminal_output_are_scoped() {
     let harness = Harness::open().await;
     let (status, capabilities) = harness
-        .call(Method::GET, "/v1/pipe-sessions", Body::empty())
+        .call(Method::GET, "/v1/sessions", Body::empty())
         .await;
     assert_eq!(status, StatusCode::OK);
     // Round 5: the document names the bundle whose schema it conforms to, and it carries five
@@ -802,7 +802,7 @@ async fn durable_pipe_start_single_attachment_and_terminal_output_are_scoped() {
     let (status, renewed) = harness
         .call(
             Method::POST,
-            &format!("/v1/pipe-sessions/{session_id}/lease/renew"),
+            &format!("/v1/sessions/{session_id}/lease/renew"),
             mutation("01JPIPESESSIONRENEW00001", json!({"ttl_ms": 90_000})),
         )
         .await;
@@ -811,7 +811,7 @@ async fn durable_pipe_start_single_attachment_and_terminal_output_are_scoped() {
         renewed["result"]["lease"]["authorizing_operation"],
         "01JPIPESESSIONRENEW00001"
     );
-    let path = format!("/v1/pipe-sessions/{session_id}/attach");
+    let path = format!("/v1/sessions/{session_id}/attach");
     let mut client = Handshake::open(harness.server.address, &path)
         .await
         .upgraded();
@@ -871,7 +871,7 @@ async fn durable_pipe_start_single_attachment_and_terminal_output_are_scoped() {
     let (status, session) = harness
         .call(
             Method::GET,
-            &format!("/v1/pipe-sessions/{session_id}"),
+            &format!("/v1/sessions/{session_id}"),
             Body::empty(),
         )
         .await;
@@ -893,7 +893,7 @@ async fn durable_pipe_start_single_attachment_and_terminal_output_are_scoped() {
     let (status, absence) = harness
         .call(
             Method::DELETE,
-            &format!("/v1/pipe-sessions/{session_id}"),
+            &format!("/v1/sessions/{session_id}"),
             mutation("01JPIPESESSIONRETIRE001", json!({})),
         )
         .await;
@@ -903,7 +903,7 @@ async fn durable_pipe_start_single_attachment_and_terminal_output_are_scoped() {
         harness
             .call(
                 Method::GET,
-                &format!("/v1/pipe-sessions/{session_id}"),
+                &format!("/v1/sessions/{session_id}"),
                 Body::empty(),
             )
             .await
@@ -923,7 +923,7 @@ async fn durable_pipe_start_single_attachment_and_terminal_output_are_scoped() {
 async fn invalid_sequence_fails_closed_and_disconnect_cancels_the_session() {
     let harness = Harness::open().await;
     let (session_id, exec_id) = harness.start_pipe().await;
-    let path = format!("/v1/pipe-sessions/{session_id}/attach");
+    let path = format!("/v1/sessions/{session_id}/attach");
     let mut client = Handshake::open(harness.server.address, &path)
         .await
         .upgraded();
@@ -973,7 +973,7 @@ async fn capability_inspection_refuses_without_delegated_confinement() {
     let app = App::new(store, driver, "dep_pipe_refusal");
     let request = Request::builder()
         .method(Method::GET)
-        .uri("/v1/pipe-sessions")
+        .uri("/v1/sessions")
         .body(Body::empty())
         .expect("capability request");
     let response = router(app)
@@ -1002,7 +1002,7 @@ async fn a_pty_start_is_unserved_when_the_capability_fact_is_absent() {
     let (status, refusal) = harness
         .call(
             Method::POST,
-            "/v1/pipe-sessions",
+            "/v1/sessions",
             mutation(
                 "01JPTYSESSIONUNSERVED001",
                 pty_start(&workspace, Some(json!({"columns": 80, "rows": 24}))),
@@ -1045,11 +1045,7 @@ async fn a_window_is_required_for_pty_refused_for_pipes_and_never_defaulted() {
         let mut input = pty_start(&workspace, window);
         input["mode"] = json!(mode);
         let (status, refusal) = harness
-            .call(
-                Method::POST,
-                "/v1/pipe-sessions",
-                mutation(operation, input),
-            )
+            .call(Method::POST, "/v1/sessions", mutation(operation, input))
             .await;
         assert_eq!(
             status,
@@ -1066,14 +1062,14 @@ async fn a_window_is_required_for_pty_refused_for_pipes_and_never_defaulted() {
 }
 
 /// The capability document is the per-mode gate, because the registry's own gate cannot be: a
-/// `capability_predicate` on `POST /v1/pipe-sessions` would take the route away from a daemon that
+/// `capability_predicate` on `POST /v1/sessions` would take the route away from a daemon that
 /// serves pipes perfectly well (design 13). The ceilings are derived from the wire constants and
 /// are never a second source of truth.
 #[tokio::test(flavor = "multi_thread")]
 async fn session_capabilities_publish_the_served_modes_and_the_window_ceilings() {
     let harness = Harness::open().await;
     let (status, capabilities) = harness
-        .call(Method::GET, "/v1/pipe-sessions", Body::empty())
+        .call(Method::GET, "/v1/sessions", Body::empty())
         .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(capabilities["result"]["modes"], json!(["pipes"]));
@@ -1088,7 +1084,7 @@ async fn session_capabilities_publish_the_served_modes_and_the_window_ceilings()
 
     let terminals = Harness::with_terminals().await;
     let (status, capabilities) = terminals
-        .call(Method::GET, "/v1/pipe-sessions", Body::empty())
+        .call(Method::GET, "/v1/sessions", Body::empty())
         .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(capabilities["result"]["modes"], json!(["pipes", "pty"]));
@@ -1102,7 +1098,7 @@ async fn a_resize_outside_the_declared_bounds_is_a_protocol_error() {
     let harness = Harness::with_terminals().await;
     let (session_id, exec_id) = harness.start_pty().await;
     let mut socket = harness
-        .attach(&format!("/v1/pipe-sessions/{session_id}/attach"))
+        .attach(&format!("/v1/sessions/{session_id}/attach"))
         .await;
     socket
         .send_text(
@@ -1153,7 +1149,7 @@ async fn the_absent_pty_fact_outranks_a_missing_window() {
     let (status, refusal) = harness
         .call(
             Method::POST,
-            "/v1/pipe-sessions",
+            "/v1/sessions",
             mutation("01JPTYSESSIONORDER000001", pty_start(&workspace, None)),
         )
         .await;
@@ -1167,7 +1163,7 @@ async fn the_absent_pty_fact_outranks_a_missing_window() {
     let (status, refusal) = terminals
         .call(
             Method::POST,
-            "/v1/pipe-sessions",
+            "/v1/sessions",
             mutation("01JPTYSESSIONORDER000002", pty_start(&workspace, None)),
         )
         .await;
@@ -1190,7 +1186,7 @@ async fn a_pty_attachment_is_never_sent_a_truncated_frame() {
     let harness = Harness::with_terminals().await;
     let (session_id, exec_id) = harness.start_pty().await;
     let mut socket = harness
-        .attach(&format!("/v1/pipe-sessions/{session_id}/attach"))
+        .attach(&format!("/v1/sessions/{session_id}/attach"))
         .await;
     harness.driver.output_bound_reached(&exec_id);
     let frame = socket.next_json().await;
@@ -1247,7 +1243,7 @@ async fn pty_protocol_error_code(frame: &Value) -> String {
     let harness = Harness::with_terminals().await;
     let (session_id, _exec) = harness.start_pty().await;
     let mut socket = harness
-        .attach(&format!("/v1/pipe-sessions/{session_id}/attach"))
+        .attach(&format!("/v1/sessions/{session_id}/attach"))
         .await;
     socket
         .send_text(serde_json::to_vec(frame).expect("client frame").as_slice())
@@ -1353,7 +1349,7 @@ async fn the_two_entry_points_name_one_refusal_for_a_pty_start_that_earns_two() 
     let (status, refusal) = harness
         .call(
             Method::POST,
-            "/v1/pipe-sessions",
+            "/v1/sessions",
             mutation("01JPTYSESSIONWAIT0000001", body),
         )
         .await;
@@ -1433,7 +1429,7 @@ async fn pipe_protocol_error_code(frame: &Value) -> String {
     let harness = Harness::open().await;
     let (session_id, _exec) = harness.start_pipe().await;
     let mut socket = harness
-        .attach(&format!("/v1/pipe-sessions/{session_id}/attach"))
+        .attach(&format!("/v1/sessions/{session_id}/attach"))
         .await;
     socket
         .send_text(serde_json::to_vec(frame).expect("client frame").as_slice())
@@ -1549,7 +1545,7 @@ async fn every_window_the_pty_resize_branch_declares_out_of_bounds_earns_the_cod
 /// reason string (`crates/substrate-daemon/src/app/sessions.rs:1010-1016`): not a branch of the
 /// published `oneOf`, not a code in `x-b10x-codes`, and not a word a client can look up.
 ///
-/// The bound is unpublished too. `GET /v1/pipe-sessions` publishes every other bound a client has
+/// The bound is unpublished too. `GET /v1/sessions` publishes every other bound a client has
 /// to obey — `max_input_bytes`, `max_frame_bytes`, `max_queued_frames`, `max_window_columns`,
 /// `max_window_rows` — and not `max_controls_per_window` / `control_window`
 /// (`crates/substrate-daemon/src/app/sessions.rs:50-51`, `:65-66`). So the one bound a terminal
@@ -1562,7 +1558,7 @@ async fn a_resize_over_the_control_rate_is_answered_in_the_published_vocabulary(
     let harness = Harness::with_terminals().await;
     let (session_id, _exec) = harness.start_pty().await;
     let mut socket = harness
-        .attach(&format!("/v1/pipe-sessions/{session_id}/attach"))
+        .attach(&format!("/v1/sessions/{session_id}/attach"))
         .await;
     // One more than `PipeSessionPolicy::production().max_controls_per_window`, inside one window.
     for sequence in 1..=121_u64 {
@@ -1635,7 +1631,7 @@ fn published_capability_schema(contract: &str) -> Value {
     .expect("JSON")
 }
 
-/// `GET /v1/pipe-sessions` answers with a body the contract the body itself names admits.
+/// `GET /v1/sessions` answers with a body the contract the body itself names admits.
 ///
 /// The operation registry binds `session.capabilities` to
 /// `schemas/results/pipe-session-capabilities.json`, and the document answers with
@@ -1660,7 +1656,7 @@ fn published_capability_schema(contract: &str) -> Value {
 async fn the_capability_document_is_admitted_by_the_contract_it_names() {
     let harness = Harness::with_terminals().await;
     let (status, capabilities) = harness
-        .call(Method::GET, "/v1/pipe-sessions", Body::empty())
+        .call(Method::GET, "/v1/sessions", Body::empty())
         .await;
     assert_eq!(status, StatusCode::OK, "{capabilities}");
     let result = capabilities["result"]
@@ -1691,7 +1687,7 @@ async fn the_capability_document_is_admitted_by_the_contract_it_names() {
         .collect();
     assert!(
         undeclared.is_empty(),
-        "GET /v1/pipe-sessions answers {contract}, whose result schema is closed over \
+        "GET /v1/sessions answers {contract}, whose result schema is closed over \
          {declared:?}. The body carries {undeclared:?} as well, so it is admitted by no released \
          bundle: {contract}'s schema forbids these properties, and the bundle that declares them \
          (0.10.0) requires \"contract\": \"substrate-wire/0.10.0\"."
@@ -1850,7 +1846,7 @@ async fn refused_attach(address: SocketAddr, path: &str) -> (u16, Value) {
 async fn every_refusal_a_pty_attach_can_raise_has_a_row_in_the_register() {
     let harness = Harness::with_terminals().await;
     let (session_id, _exec) = harness.start_pty().await;
-    let path = format!("/v1/pipe-sessions/{session_id}/attach");
+    let path = format!("/v1/sessions/{session_id}/attach");
     let _held = harness.attach(&path).await;
     let (status, refusal) = refused_attach(harness.server.address, &path).await;
     assert_eq!(status, 409, "a second attach is refused: {refusal}");
@@ -1913,11 +1909,7 @@ async fn a_pty_start_window_outside_the_declared_range_is_refused_in_the_publish
         let mut input = pty_start(&workspace, Some(json!({"columns": columns, "rows": 24})));
         input["mode"] = json!("pty");
         let (status, refusal) = harness
-            .call(
-                Method::POST,
-                "/v1/pipe-sessions",
-                mutation(operation, input),
-            )
+            .call(Method::POST, "/v1/sessions", mutation(operation, input))
             .await;
         let code = refusal["error"]["code"].as_str().unwrap_or_default();
         if code != "session.window-invalid" {
@@ -1977,7 +1969,7 @@ async fn crossing_the_control_rate_with_a_ping_is_answered_in_the_published_voca
     let harness = Harness::with_terminals().await;
     let (session_id, _exec) = harness.start_pty().await;
     let mut socket = harness
-        .attach(&format!("/v1/pipe-sessions/{session_id}/attach"))
+        .attach(&format!("/v1/sessions/{session_id}/attach"))
         .await;
     // One more than the `max_controls_per_window` the capability document publishes, inside one
     // published `control_window_ms`.
@@ -2013,7 +2005,7 @@ async fn crossing_the_control_rate_with_a_ping_is_answered_in_the_published_voca
     assert_eq!(
         frame.opcode,
         0x1,
-        "GET /v1/pipe-sessions publishes max_controls_per_window {} over control_window_ms {}, \
+        "GET /v1/sessions publishes max_controls_per_window {} over control_window_ms {}, \
          ping shares that budget, and 0.10.0/refusals.json gives crossing it exactly one row: \
          {} arriving as a protocol-error-frame. Crossing it with a ping answered with {described}.",
         substrate_wire::MAX_SESSION_CONTROLS_PER_WINDOW,
@@ -2055,7 +2047,7 @@ async fn a_resize_whose_axes_have_a_zero_fractional_part_is_inside_the_published
     let harness = Harness::with_terminals().await;
     let (session_id, exec_id) = harness.start_pty().await;
     let mut socket = harness
-        .attach(&format!("/v1/pipe-sessions/{session_id}/attach"))
+        .attach(&format!("/v1/sessions/{session_id}/attach"))
         .await;
     let frame = "{\"kind\":\"resize\",\"sequence\":1,\"window\":{\"columns\":132.0,\"rows\":43.0}}";
     socket.send_text(frame.as_bytes()).await;
@@ -2117,7 +2109,7 @@ async fn a_client_sequence_with_a_zero_fractional_part_is_inside_the_published_v
     let harness = Harness::with_terminals().await;
     let (session_id, exec_id) = harness.start_pty().await;
     let mut socket = harness
-        .attach(&format!("/v1/pipe-sessions/{session_id}/attach"))
+        .attach(&format!("/v1/sessions/{session_id}/attach"))
         .await;
     let frame = "{\"kind\":\"resize\",\"sequence\":1.0,\"window\":{\"columns\":132,\"rows\":43}}";
     socket.send_text(frame.as_bytes()).await;
@@ -2198,7 +2190,7 @@ impl Harness {
         let (status, session) = self
             .call(
                 Method::POST,
-                "/v1/pipe-sessions",
+                "/v1/sessions",
                 mutation(
                     operation,
                     pty_start(workspace, Some(json!({"columns": 80, "rows": 24}))),
@@ -2240,7 +2232,7 @@ async fn the_attachment_capacity_refusal_carries_the_retriable_the_register_publ
             .await;
         held.push(
             harness
-                .attach(&format!("/v1/pipe-sessions/{session}/attach"))
+                .attach(&format!("/v1/sessions/{session}/attach"))
                 .await,
         );
     }
@@ -2249,7 +2241,7 @@ async fn the_attachment_capacity_refusal_carries_the_retriable_the_register_publ
         .await;
     let (status, body) = refused_upgrade(
         harness.server.address,
-        &format!("/v1/pipe-sessions/{overflow}/attach"),
+        &format!("/v1/sessions/{overflow}/attach"),
     )
     .await;
     assert_eq!(

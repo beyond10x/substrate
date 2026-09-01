@@ -1,0 +1,35 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.15.0:result:event-stream",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "channel_frames": {
+      "const": "schemas/event-stream-frame.json"
+    },
+    "max_catch_up_pages": {
+      "const": 16
+    },
+    "max_pending_frames": {
+      "const": 64
+    },
+    "protocol": {
+      "const": "b10x.substrate-events.v1"
+    },
+    "recovery": {
+      "const": "pull-from-last-cursor"
+    },
+    "wake_delivery": {
+      "const": "coalesced-state-notification"
+    }
+  },
+  "required": [
+    "protocol",
+    "channel_frames",
+    "max_catch_up_pages",
+    "max_pending_frames",
+    "wake_delivery",
+    "recovery"
+  ],
+  "title": "event-stream operation result",
+  "type": "object"
+}

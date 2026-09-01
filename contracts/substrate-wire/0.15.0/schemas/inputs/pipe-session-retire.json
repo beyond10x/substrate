@@ -1,0 +1,9 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.15.0:input:pipe-session-retire",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {},
+  "required": [],
+  "title": "pipe-session-retire operation input",
+  "type": "object"
+}

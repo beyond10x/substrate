@@ -1,0 +1,214 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.15.0:bundle",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "const": "schemas/bundle.json"
+    },
+    "api_version": {
+      "const": "v1"
+    },
+    "bundle_format": {
+      "const": "b10x.contract-bundle.v1"
+    },
+    "compatibility": {
+      "additionalProperties": false,
+      "properties": {
+        "adds_routes": {
+          "const": 8
+        },
+        "kind": {
+          "const": "breaking-development-v1"
+        },
+        "predecessor": {
+          "const": "0.14.0"
+        },
+        "preserves_routes": {
+          "const": 26
+        },
+        "removes_routes": {
+          "const": 8
+        },
+        "route_replacements": {
+          "const": [
+            {
+              "added": "/v1/sessions",
+              "id": "session.capabilities",
+              "method": "GET",
+              "removed": "/v1/pipe-sessions"
+            },
+            {
+              "added": "/v1/sessions",
+              "id": "session.start",
+              "method": "POST",
+              "removed": "/v1/pipe-sessions"
+            },
+            {
+              "added": "/v1/sessions/{session_id}",
+              "id": "session.get",
+              "method": "GET",
+              "removed": "/v1/pipe-sessions/{session_id}"
+            },
+            {
+              "added": "/v1/sessions/{session_id}/attach",
+              "id": "session.attach",
+              "method": "GET",
+              "removed": "/v1/pipe-sessions/{session_id}/attach"
+            },
+            {
+              "added": "/v1/sessions/{session_id}/attachment-authorities",
+              "id": "session.authority.mint",
+              "method": "POST",
+              "removed": "/v1/pipe-sessions/{session_id}/attachment-authorities"
+            },
+            {
+              "added": "/v1/sessions/{session_id}/signal",
+              "id": "session.signal",
+              "method": "POST",
+              "removed": "/v1/pipe-sessions/{session_id}/signal"
+            },
+            {
+              "added": "/v1/sessions/{session_id}",
+              "id": "session.retire",
+              "method": "DELETE",
+              "removed": "/v1/pipe-sessions/{session_id}"
+            },
+            {
+              "added": "/v1/sessions/{session_id}/lease/renew",
+              "id": "session.lease.renew",
+              "method": "POST",
+              "removed": "/v1/pipe-sessions/{session_id}/lease/renew"
+            }
+          ]
+        }
+      },
+      "required": [
+        "predecessor",
+        "kind",
+        "preserves_routes",
+        "adds_routes",
+        "removes_routes",
+        "route_replacements"
+      ],
+      "type": "object"
+    },
+    "conformance": {
+      "additionalProperties": false,
+      "properties": {
+        "design_vectors": {
+          "items": {
+            "pattern": "^vectors/(?:driver|http)/[a-z0-9-]+\\.json$",
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "executable_vectors": {
+          "items": {
+            "pattern": "^vectors/(?:driver|http)/[a-z0-9-]+\\.json$",
+            "type": "string"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "executable_vectors",
+        "design_vectors"
+      ],
+      "type": "object"
+    },
+    "files": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "byte_length": {
+            "maximum": 18446744073709551615,
+            "minimum": 0,
+            "type": "integer"
+          },
+          "media_type": {
+            "enum": [
+              "application/json",
+              "text/markdown"
+            ]
+          },
+          "path": {
+            "maxLength": 4096,
+            "minLength": 1,
+            "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+$",
+            "type": "string"
+          },
+          "sha256": {
+            "pattern": "^[0-9a-f]{64}$",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "media_type",
+          "byte_length",
+          "sha256"
+        ],
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array"
+    },
+    "generator": {
+      "additionalProperties": false,
+      "properties": {
+        "digest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "name": {
+          "const": "xtask/src/render_v2.rs"
+        },
+        "version": {
+          "const": "2"
+        }
+      },
+      "required": [
+        "name",
+        "version",
+        "digest"
+      ],
+      "type": "object"
+    },
+    "name": {
+      "const": "substrate-wire"
+    },
+    "origin": {
+      "const": "b10x"
+    },
+    "source_base_commit": {
+      "type": "null"
+    },
+    "status": {
+      "const": "development"
+    },
+    "version": {
+      "const": "0.15.0"
+    }
+  },
+  "required": [
+    "$schema",
+    "api_version",
+    "bundle_format",
+    "name",
+    "origin",
+    "version",
+    "status",
+    "source_base_commit",
+    "compatibility",
+    "generator",
+    "conformance",
+    "files"
+  ],
+  "title": "Substrate contract-bundle manifest",
+  "type": "object"
+}
