@@ -13,7 +13,7 @@ tags:
 relations:
 - decomposes: epic:release-hardening
 - depends_on: story:signed-daemon-image
-revision: 13
+revision: 14
 ---
 # Story: The 0.4.0 contract bundle is a signed, digest-pinned OCI artifact
 
@@ -158,3 +158,10 @@ which before the job is written.
 - Release run `33460657507` anonymously resolved the existing write-once `0.12.0` tag at `sha256:dd901e848c821aca7d55f7b8cf5ee893e1d99a1428b348e32e7ed1045a375319`, then failed while asking `oras manifest fetch --descriptor` for the development/version annotations. OCI registry descriptors carry digest, media type and size; those annotations are members of the manifest content. The run stopped before signing, daemon publication or GitHub release creation.
 - The recovery change fetches the anonymous manifest after independently comparing the resolved digest, validates its two annotations, and adds an explicit `workflow_dispatch` recovery for an existing annotated tag. Recovery is accepted only from `refs/heads/main`, re-verifies the immutable tag, its main ancestry, its tagged `Cargo.toml` version and the exact recorded gate success, and never moves the tag.
 - The corrected command passed live, credential-free against the public GHCR object. All 10 focused workflow tests and `bash scripts/gate.sh` passed with 2,557 JSON documents across all 12 frozen bundles. Live keyless signing, daemon publication, GitHub release readback and the protected-main changelog pull request remain required before this story can move to `implemented`.
+
+## Successful signed publication — 2026-09-01
+
+- Protected-main merge `693f7d5` carried the recovery workflow after Full gate run `33461841062` passed. Administrator-triggered workflow dispatch `33462225323` selected existing immutable tag `0.4.2`; its preflight re-verified annotated tag commit `0687551` and exact source gate `33460337507`.
+- The run reused development bundle `ghcr.io/beyond10x/b10x-substrate-wire:0.12.0` at `sha256:dd901e848c821aca7d55f7b8cf5ee893e1d99a1428b348e32e7ed1045a375319`, verified its manifest annotations without credentials, keyless-signed the digest, verified the certificate identity `https://github.com/beyond10x/substrate/.github/workflows/release.yml@refs/heads/main`, and proved anonymous retrieval.
+- The same run built tagged source `0687551`, passed the shipped-binary runtime-vector smoke test, and published `ghcr.io/beyond10x/b10x-substrate-daemon:0.4.2` at `sha256:1aac0c63c1f1e7dae2dff8f1f20a06b4d7f5461b61bb172b4a8a3f137cd2f6d1`. It keyless-signed and verified that digest under the same workflow identity and proved anonymous retrieval before announcement.
+- GitHub release `0.4.2` is public at `https://github.com/beyond10x/substrate/releases/tag/0.4.2`, non-draft, and API readback reports author `github-actions[bot]`. A separate local credential-free ORAS descriptor readback succeeded for both digests. This evidence branch records the two exact lines in `CHANGELOG.md`; the story remains active until that protected-main pull request merges.

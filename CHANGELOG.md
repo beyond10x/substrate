@@ -20,6 +20,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [0.4.2] — 2026-09-01
 
+Image: `ghcr.io/beyond10x/b10x-substrate-daemon:0.4.2` at
+`sha256:1aac0c63c1f1e7dae2dff8f1f20a06b4d7f5461b61bb172b4a8a3f137cd2f6d1`, keyless-signed;
+verify with `cosign verify`.
+
+Contract bundle: `ghcr.io/beyond10x/b10x-substrate-wire:0.12.0` at
+`sha256:dd901e848c821aca7d55f7b8cf5ee893e1d99a1428b348e32e7ed1045a375319`, annotated
+`development`, keyless-signed; verify with `cosign verify`. Publication, digest pinning and a
+verified signature do not make the development contract stable.
+
 ### Added
 
 - **Production network control is server-authenticated TLS.** ADR 0024 fixes a distinct TLS 1.3
