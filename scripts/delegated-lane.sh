@@ -63,4 +63,11 @@ SUBSTRATE_TEST_DAEMON="${PWD}/target/debug/substrate-daemon" \
 SUBSTRATE_MCP_CGROUP_ROOT="${root}" \
   cargo test -p b10x-substrate-mcp --test stdio --locked -- --nocapture --test-threads=1
 
+# The hosted WSS authority journey uses the same delegated root to start a real confined pipe
+# session, round-trip bytes through its TLS-bound attachment, and then prove one-use replay. Its
+# portable form seeds only the durable preflight state, so this explicit invocation is the evidence
+# that the network surface reaches a real sandbox rather than merely completing a handshake.
+cargo test -p b10x-substrate-daemon --test tls_listener \
+  hosted_wss_attachment_authority_is_one_use_and_channel_bound --locked -- --nocapture
+
 exec cargo test -p b10x-substrate-daemon --test runtime_vectors -- --nocapture "$@"

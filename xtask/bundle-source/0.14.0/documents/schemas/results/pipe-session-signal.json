@@ -1,0 +1,6 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.14.0:result:pipe-session-signal",
+  "$ref": "../resource.json#/$defs/pipe-session",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "pipe-session-signal operation result"
+}

@@ -1,0 +1,61 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "kind": "http",
+    "operation": "session.authority.mint",
+    "request": {
+      "body": {
+        "public_key": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+      },
+      "headers": {
+        "x-request-id": "req_session_authority_mint"
+      },
+      "method": "POST",
+      "path": "/v1/pipe-sessions/ses_vector/attachment-authorities",
+      "query": {}
+    },
+    "valid_address": true,
+    "valid_input": true
+  },
+  "context": {
+    "actor": "vector-client",
+    "authority": "http-harness",
+    "clock": "2026-09-01T07:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "hosted:vector",
+    "transport": {
+      "authenticated": true,
+      "kind": "tls",
+      "reachable": true
+    }
+  },
+  "covers": [
+    "route.session.authority.mint"
+  ],
+  "expected": {
+    "kind": "http-response",
+    "response": {
+      "body": {
+        "api_version": "v1",
+        "request_id": "req_session_authority_mint",
+        "result": {
+          "authority": "session_authority_v1_AQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQE",
+          "authority_id": "sa_01M1DY00000000000000000000",
+          "expires_at": "2026-09-01T07:01:00Z"
+        }
+      },
+      "status": 201
+    }
+  },
+  "id": "hosted-session-authority-mint-is-bounded",
+  "layer": "http",
+  "phase": 4,
+  "postconditions": [
+    {
+      "actual": "/driver/dispatch_count",
+      "expected": 0,
+      "operator": "equals"
+    }
+  ],
+  "setup": []
+}

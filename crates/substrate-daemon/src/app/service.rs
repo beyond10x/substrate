@@ -90,6 +90,14 @@ pub struct Identity {
     pub principal: Option<String>,
 }
 
+/// Transport fact selected by the listener, never by caller-written HTTP data (ADR 0027).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SessionTransport {
+    Unix,
+    DevelopmentTcp,
+    HostedTls { exporter: [u8; 32] },
+}
+
 pub trait Authority: Send + Sync {
     fn now(&self) -> DateTime<Utc>;
     fn request_id(&self) -> String;

@@ -16,9 +16,10 @@ use crate::execs::upsert_exec;
 use crate::leases::{LEASE_SWEEPER_ACTOR, lease_due, upsert_lease};
 use crate::{
     CommitEffect, CommitEffectSink, EventCursorError, ExecRetireReservation, ExecWrite,
-    ExpiredLease, LeaseClock, LeaseResource, NewLease, NewOperation, OperationCapacity,
-    Reservation, Scope, SessionAttachmentClaim, SnapshotReadError, Store, StoreConfig, StoreError,
-    StoredExec, WorkspaceAdmission, WorkspaceDestroyReservation, WorkspaceObservationWrite,
+    ExpiredLease, LeaseClock, LeaseResource, NewLease, NewOperation, NewSessionAuthority,
+    OperationCapacity, Reservation, Scope, SessionAttachmentClaim, SessionAuthorityLookup,
+    SessionAuthorityMint, SnapshotReadError, Store, StoreConfig, StoreError, StoredExec,
+    WorkspaceAdmission, WorkspaceDestroyReservation, WorkspaceObservationWrite,
 };
 
 #[derive(Default)]
@@ -1184,6 +1185,155 @@ fn restart_makes_pipe_session_nonattachable_without_redispatching_its_exec() {
             )
             .expect("repeat claim"),
         SessionAttachmentClaim::AlreadyClaimed
+    );
+}
+
+#[test]
+#[allow(clippy::too_many_lines)] // One authority transaction scenario keeps its setup adjacent.
+fn network_authority_verifier_and_attachment_right_are_consumed_atomically() {
+    let store = Store::open(":memory:").expect("open store");
+    let scope = scope("hosted:subject");
+    store
+        .put_workspace(&scope, "ws_authority", &workspace("ws_authority"))
+        .expect("seed workspace");
+    let start = operation_named(
+        "hosted:subject",
+        "01JSESSIONAUTHORITY000001",
+        "session.start",
+        "ses_authority",
+        &"c".repeat(64),
+    );
+    let lease = NewLease {
+        ttl_ms: 60_000,
+        clock: LeaseClock {
+            wall: "2026-09-01T07:00:00Z".parse().expect("time"),
+            boot_id: "boot-test".to_owned(),
+            boottime_ms: 1_000,
+        },
+        authorizing_operation: start.operation.clone(),
+        actor: "identity:test".to_owned(),
+        principal: None,
+    };
+    let mut running = exec("ex_authority", "ws_authority", ExecState::Accepted);
+    running.resource.lease = Some(lease.observation());
+    let provisional = pipe_session("ses_authority", "ex_authority", "ws_authority", &lease);
+    assert_eq!(
+        store
+            .reserve_pipe_session_start(&start, &provisional, &running, &lease, None)
+            .expect("reserve session"),
+        Reservation::Accepted
+    );
+    running.resource.state = ExecState::Running;
+    let mut ready = provisional;
+    ready.state = SessionState::Ready;
+    ready.attachment = SessionAttachmentState::Available;
+    store
+        .complete_pipe_session_start(
+            &scope,
+            &start.operation,
+            "2026-09-01T07:00:01Z",
+            202,
+            &ready,
+            &running,
+            &lease,
+        )
+        .expect("complete session start");
+
+    let now = "2026-09-01T07:00:02Z".parse().expect("mint time");
+    let authority = NewSessionAuthority {
+        authority_id: "sa_test".to_owned(),
+        bearer_sha256: [7; 32],
+        public_key: [9; 32],
+        expires_at: "2026-09-01T07:01:02Z".parse().expect("expiry"),
+    };
+    assert_eq!(
+        store
+            .mint_session_authority(&scope, "ses_authority", &authority, now)
+            .expect("mint authority"),
+        SessionAuthorityMint::Minted
+    );
+    assert_eq!(
+        store
+            .session_authority(&scope, "ses_authority", "sa_test", &[8; 32], now)
+            .expect("wrong bearer lookup"),
+        SessionAuthorityLookup::Unbound
+    );
+    assert_eq!(
+        store
+            .session_authority(
+                &scope,
+                "ses_authority",
+                "sa_test",
+                &[7; 32],
+                "2026-09-01T07:01:02Z".parse().expect("exact expiry"),
+            )
+            .expect("expiry lookup"),
+        SessionAuthorityLookup::Expired
+    );
+    assert_eq!(
+        store
+            .claim_pipe_session_attachment_with_authority(
+                &scope,
+                "ses_authority",
+                "sa_test",
+                &[8; 32],
+                now,
+            )
+            .expect("wrong bearer claim"),
+        SessionAttachmentClaim::AuthorityUnbound
+    );
+    assert_eq!(
+        store
+            .claim_pipe_session_attachment_with_authority(
+                &scope,
+                "ses_authority",
+                "sa_test",
+                &[7; 32],
+                now,
+            )
+            .expect("bound claim"),
+        SessionAttachmentClaim::Claimed
+    );
+    assert_eq!(
+        store
+            .claim_pipe_session_attachment_with_authority(
+                &scope,
+                "ses_authority",
+                "sa_test",
+                &[7; 32],
+                now,
+            )
+            .expect("replayed claim"),
+        SessionAttachmentClaim::AuthorityRedeemed
+    );
+    let resource_json: String = store
+        .connection
+        .lock()
+        .query_row(
+            "SELECT resource_json FROM sessions WHERE deployment = ?1 AND subject = ?2 AND id = ?3",
+            params![scope.deployment, scope.subject, "ses_authority"],
+            |row| row.get(0),
+        )
+        .expect("session resource json");
+    assert!(!resource_json.contains("sa_test"));
+    assert!(!resource_json.contains("070707"));
+    let mut terminal = store
+        .session(&scope, "ses_authority")
+        .expect("read session")
+        .expect("session");
+    terminal.state = SessionState::Cancelled;
+    crate::sessions::upsert_session(&store.connection.lock(), &scope, &terminal)
+        .expect("terminalise session");
+    let authority_rows: i64 = store
+        .connection
+        .lock()
+        .query_row("SELECT COUNT(*) FROM session_authorities", [], |row| {
+            row.get(0)
+        })
+        .expect("authority row count");
+    assert_eq!(
+        authority_rows, 0,
+        "terminal session retained authority state"
     );
 }
 

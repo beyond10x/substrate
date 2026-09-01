@@ -43,9 +43,9 @@ const DAEMON: &str = env!("CARGO_BIN_EXE_substrate-daemon");
 const CGROUP_EXEC: &str = env!("CARGO_BIN_EXE_substrate-cgroup-exec");
 const DAEMON_OVERRIDE_VARIABLE: &str = "SUBSTRATE_VECTORS_DAEMON";
 /// Pinned independently of the daemon implementation: the clean-room client verifies what ships.
-const ADVERTISED_CONTRACT: &str = "substrate-wire/0.13.0";
+const ADVERTISED_CONTRACT: &str = "substrate-wire/0.14.0";
 const ADVERTISED_CONTRACT_SHA256: &str =
-    "7ab665c0a50cd8521a28b2b4c2302b7d460a1978b105d956711dbe6702a843bf";
+    "eea07e6894ae840b6b2bb161861a724115fef4dedd57e72386e9d71af348b092";
 
 fn daemon_binary() -> PathBuf {
     std::env::var_os(DAEMON_OVERRIDE_VARIABLE).map_or_else(|| PathBuf::from(DAEMON), PathBuf::from)
@@ -2184,7 +2184,7 @@ async fn check_promoted_route_inventory(daemon: &Daemon, workspace: &str) -> usi
     let expected: BTreeSet<String> = {
         let registry = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
-            .join("contracts/substrate-wire/0.13.0/operations.json");
+            .join("contracts/substrate-wire/0.14.0/operations.json");
         let document: Value = serde_json::from_slice(
             &std::fs::read(&registry).expect("promoted operation registry bytes"),
         )
@@ -2194,6 +2194,10 @@ async fn check_promoted_route_inventory(daemon: &Daemon, workspace: &str) -> usi
             .expect("promoted operations array")
             .iter()
             .map(|operation| text(&operation["id"]))
+            // The clean-room daemon in this lane is deliberately the Unix listener. The 0.14
+            // authority mint route is hosted-TLS-only and its absence here is independently
+            // asserted by the transport route-set tests.
+            .filter(|id| id != "session.authority.mint")
             .collect()
     };
     let covered: BTreeSet<String> = probes

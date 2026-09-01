@@ -8,19 +8,23 @@ use axum::extract::{Path, RawQuery, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse as _, Response};
 use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64URL;
+use ed25519_dalek::{Signature, VerifyingKey};
 use futures_util::StreamExt as _;
 use parking_lot::Mutex as ParkingMutex;
+use sha2::{Digest as _, Sha256};
 use substrate_host::{DispatchOutcome, ExecObservation, PipeStream};
 use substrate_store::{
-    ExecWrite, Scope, SessionAttachmentClaim, SessionRetireReservation, StoredExec,
-    WorkspaceAdmission,
+    ExecWrite, NewSessionAuthority, Scope, SessionAttachmentClaim, SessionAuthorityLookup,
+    SessionAuthorityMint, SessionRetireReservation, StoredExec, WorkspaceAdmission,
 };
 use substrate_wire::{
     Base64Content, Base64Encoding, EmptyInput, ErrorClass, Exec, ExecKind, ExecSignalInput,
     ExecState, LeaseRenewInput, MAX_LEASE_TTL_MS, MAX_PTY_WINDOW_COLUMNS, MAX_PTY_WINDOW_ROWS,
     MIN_LEASE_TTL_MS, OutputStream, PipeClientFrame, PipeServerFrame, PipeSession,
-    PipeSessionCapabilities, PipeSessionLimits, PipeSessionStartInput, SessionAttachmentState,
-    SessionKind, SessionMode, SessionProtocolErrorCode, SessionState, Success,
+    PipeSessionCapabilities, PipeSessionLimits, PipeSessionStartInput, SessionAttachmentAuthority,
+    SessionAttachmentState, SessionAuthorityMintInput, SessionKind, SessionMode,
+    SessionProtocolErrorCode, SessionState, Success, session_authority_transcript,
 };
 use tokio::sync::Semaphore;
 
@@ -29,8 +33,9 @@ use super::operations::{
     begin, decode_mutation, finish_driver_error, finish_lease_store_error,
     finish_pipe_session_dispatch_absence, finish_pipe_session_dispatch_unknown,
     finish_pipe_session_observation, finish_pipe_session_start, new_lease, new_operation,
-    observation_from_stored, pipe_confinement_available, refuse_before_dispatch_response, replay,
-    reservation_response, stored_exec, validate_pipe_session_input,
+    observation_from_stored, pipe_confinement_available, read_bounded_body,
+    refuse_before_dispatch_response, replay, reservation_response, stored_exec,
+    validate_pipe_session_input,
 };
 use super::responses::{
     failure, not_found, not_found_with_operation, operation_ledger_capacity, outcome_unknown,
@@ -38,7 +43,7 @@ use super::responses::{
 };
 use super::{
     App, Identity, MAINTENANCE_DRIVER_TIMEOUT, PIPE_MAX_FRAME_BYTES, PIPE_MAX_INPUT_BYTES,
-    PIPE_MAX_QUEUED_FRAMES,
+    PIPE_MAX_QUEUED_FRAMES, SessionTransport,
 };
 
 #[derive(Clone, Copy)]
@@ -780,10 +785,326 @@ pub(super) async fn pipe_session_lease_renew(
     }
 }
 
+#[allow(clippy::too_many_lines)] // Mint keeps every secret-producing and durable bound adjacent.
+pub(super) async fn pipe_session_authority_mint(
+    State(app): State<Arc<App>>,
+    Extension(identity): Extension<Identity>,
+    Extension(transport): Extension<SessionTransport>,
+    headers: HeaderMap,
+    Path(session_id): Path<String>,
+    RawQuery(raw_query): RawQuery,
+    body: Body,
+) -> Response {
+    let request_id = request_id(&app, &headers);
+    if !matches!(transport, SessionTransport::HostedTls { .. }) {
+        return not_found(&request_id);
+    }
+    if !query_is_empty(raw_query.as_deref()) {
+        return schema_invalid(&request_id, None, "query");
+    }
+    let bytes = match read_bounded_body(body, &request_id).await {
+        Ok(bytes) => bytes,
+        Err(response) => return response,
+    };
+    let input: SessionAuthorityMintInput = match serde_json::from_slice(&bytes) {
+        Ok(input) => input,
+        Err(_) => return schema_invalid(&request_id, None, "input"),
+    };
+    let public_key = match decode_fixed_base64url::<32>(&input.public_key) {
+        Some(key) if VerifyingKey::from_bytes(&key).is_ok() => key,
+        _ => return schema_invalid(&request_id, None, "public_key"),
+    };
+    let now = app.authority.now();
+    let Some(expires_at) = now.checked_add_signed(chrono::Duration::seconds(
+        substrate_wire::SESSION_AUTHORITY_LIFETIME_SECONDS,
+    )) else {
+        return failure(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &request_id,
+            None,
+            ErrorClass::Failed,
+            "state.clock-unavailable",
+            "A bounded authority expiry could not be established.",
+            Some("state"),
+            true,
+        );
+    };
+    let mut authority_bytes = [0_u8; 32];
+    if getrandom::fill(&mut authority_bytes).is_err() {
+        return failure(
+            StatusCode::SERVICE_UNAVAILABLE,
+            &request_id,
+            None,
+            ErrorClass::Failed,
+            "state.entropy-unavailable",
+            "Secure authority generation is unavailable.",
+            Some("state"),
+            true,
+        );
+    }
+    let authority = format!("session_authority_v1_{}", BASE64URL.encode(authority_bytes));
+    let authority_id = format!("sa_{}", ulid::Ulid::generate());
+    let new_authority = NewSessionAuthority {
+        authority_id: authority_id.clone(),
+        bearer_sha256: Sha256::digest(authority.as_bytes()).into(),
+        public_key,
+        expires_at,
+    };
+    let scope = app.scope(&identity);
+    match app
+        .store_io(|| {
+            app.store
+                .mint_session_authority(&scope, &session_id, &new_authority, now)
+        })
+        .await
+    {
+        Ok(SessionAuthorityMint::Minted) => success(
+            StatusCode::CREATED,
+            Success::observed(
+                request_id,
+                SessionAttachmentAuthority {
+                    authority_id,
+                    authority,
+                    expires_at,
+                },
+            ),
+        ),
+        Ok(SessionAuthorityMint::Capacity) => failure(
+            StatusCode::TOO_MANY_REQUESTS,
+            &request_id,
+            None,
+            ErrorClass::Exhausted,
+            substrate_wire::SESSION_ATTACHMENT_CAPACITY,
+            "The bounded session attachment capacity is exhausted.",
+            Some("session-authority"),
+            substrate_wire::session_refusal_is_retriable(
+                substrate_wire::SESSION_ATTACHMENT_CAPACITY,
+            ),
+        ),
+        Ok(SessionAuthorityMint::NotAttachable) => failure(
+            StatusCode::CONFLICT,
+            &request_id,
+            None,
+            ErrorClass::Conflict,
+            substrate_wire::SESSION_NOT_ATTACHABLE,
+            "The session is not ready to mint an attachment authority.",
+            Some("session"),
+            false,
+        ),
+        Ok(SessionAuthorityMint::Missing) => not_found(&request_id),
+        Err(error) => store_failure(&request_id, None, &error),
+    }
+}
+
+struct VerifiedSessionAuthority {
+    authority_id: String,
+    bearer_sha256: [u8; 32],
+}
+
+#[allow(clippy::too_many_lines)] // Every authority byte is parsed and verified at one boundary.
+async fn verify_network_session_authority(
+    app: &App,
+    scope: &Scope,
+    session_id: &str,
+    headers: &HeaderMap,
+    exporter: &[u8; 32],
+    request_id: &str,
+) -> Result<VerifiedSessionAuthority, Response> {
+    let Some(authority_id) = exact_header(headers, substrate_wire::SESSION_AUTHORITY_ID_HEADER)
+    else {
+        return Err(authority_failure(
+            request_id,
+            StatusCode::UNAUTHORIZED,
+            ErrorClass::Refused,
+            substrate_wire::SESSION_AUTHORITY_ABSENT,
+            false,
+        ));
+    };
+    let Some(authority) = exact_header(headers, substrate_wire::SESSION_AUTHORITY_BEARER_HEADER)
+    else {
+        return Err(authority_failure(
+            request_id,
+            StatusCode::UNAUTHORIZED,
+            ErrorClass::Refused,
+            substrate_wire::SESSION_AUTHORITY_ABSENT,
+            false,
+        ));
+    };
+    let Some(timestamp) = exact_header(headers, substrate_wire::SESSION_AUTHORITY_TIMESTAMP_HEADER)
+    else {
+        return Err(authority_failure(
+            request_id,
+            StatusCode::UNAUTHORIZED,
+            ErrorClass::Refused,
+            substrate_wire::SESSION_AUTHORITY_ABSENT,
+            false,
+        ));
+    };
+    let Some(proof) = exact_header(headers, substrate_wire::SESSION_AUTHORITY_PROOF_HEADER) else {
+        return Err(authority_failure(
+            request_id,
+            StatusCode::UNAUTHORIZED,
+            ErrorClass::Refused,
+            substrate_wire::SESSION_AUTHORITY_ABSENT,
+            false,
+        ));
+    };
+    if !valid_authority_id(authority_id)
+        || !valid_authority_bearer(authority)
+        || timestamp.is_empty()
+        || timestamp.len() > 16
+        || !timestamp.bytes().all(|byte| byte.is_ascii_digit())
+        || proof.len() != 86
+    {
+        return Err(authority_unbound(request_id));
+    }
+    let Ok(timestamp_ms) = timestamp.parse::<i64>() else {
+        return Err(authority_unbound(request_id));
+    };
+    let now = app.authority.now();
+    if now.timestamp_millis().abs_diff(timestamp_ms)
+        > u64::try_from(substrate_wire::SESSION_AUTHORITY_PROOF_SKEW_SECONDS)
+            .unwrap_or(0)
+            .saturating_mul(1_000)
+    {
+        return Err(authority_unbound(request_id));
+    }
+    let Some(signature) = decode_fixed_base64url::<64>(proof) else {
+        return Err(authority_unbound(request_id));
+    };
+    let bearer_sha256: [u8; 32] = Sha256::digest(authority.as_bytes()).into();
+    let public_key = match app
+        .store_io(|| {
+            app.store
+                .session_authority(scope, session_id, authority_id, &bearer_sha256, now)
+        })
+        .await
+    {
+        Ok(SessionAuthorityLookup::Available { public_key }) => public_key,
+        Ok(SessionAuthorityLookup::Expired) => {
+            return Err(authority_failure(
+                request_id,
+                StatusCode::UNAUTHORIZED,
+                ErrorClass::Refused,
+                substrate_wire::SESSION_AUTHORITY_EXPIRED,
+                false,
+            ));
+        }
+        Ok(SessionAuthorityLookup::Redeemed) => {
+            return Err(authority_failure(
+                request_id,
+                StatusCode::CONFLICT,
+                ErrorClass::Conflict,
+                substrate_wire::SESSION_AUTHORITY_REDEEMED,
+                false,
+            ));
+        }
+        Ok(SessionAuthorityLookup::Unbound | SessionAuthorityLookup::Missing) => {
+            return Err(authority_unbound(request_id));
+        }
+        Err(error) => return Err(store_failure(request_id, None, &error)),
+    };
+    if !valid_channel_proof(
+        &public_key,
+        &signature,
+        authority_id,
+        exporter,
+        timestamp_ms,
+    ) {
+        return Err(authority_unbound(request_id));
+    }
+    Ok(VerifiedSessionAuthority {
+        authority_id: authority_id.to_owned(),
+        bearer_sha256,
+    })
+}
+
+fn valid_channel_proof(
+    public_key: &[u8; 32],
+    signature: &[u8; 64],
+    authority_id: &str,
+    exporter: &[u8; 32],
+    timestamp_ms: i64,
+) -> bool {
+    VerifyingKey::from_bytes(public_key).is_ok_and(|verifying_key| {
+        verifying_key
+            .verify_strict(
+                &session_authority_transcript(authority_id, exporter, timestamp_ms),
+                &Signature::from_bytes(signature),
+            )
+            .is_ok()
+    })
+}
+
+fn exact_header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    let mut values = headers.get_all(name).iter();
+    let value = values.next()?.to_str().ok()?;
+    if values.next().is_some() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn decode_fixed_base64url<const N: usize>(value: &str) -> Option<[u8; N]> {
+    let bytes = BASE64URL.decode(value).ok()?;
+    if BASE64URL.encode(&bytes) != value {
+        return None;
+    }
+    bytes.try_into().ok()
+}
+
+fn valid_authority_bearer(value: &str) -> bool {
+    value
+        .strip_prefix("session_authority_v1_")
+        .and_then(decode_fixed_base64url::<32>)
+        .is_some()
+}
+
+fn valid_authority_id(value: &str) -> bool {
+    value.strip_prefix("sa_").is_some_and(|ulid| {
+        ulid.len() == 26
+            && ulid.bytes().all(|byte| {
+                byte.is_ascii_digit()
+                    || matches!(byte, b'A'..=b'H' | b'J'..=b'K' | b'M'..=b'N' | b'P'..=b'T' | b'V'..=b'Z')
+            })
+    })
+}
+
+fn authority_unbound(request_id: &str) -> Response {
+    authority_failure(
+        request_id,
+        StatusCode::UNAUTHORIZED,
+        ErrorClass::Refused,
+        substrate_wire::SESSION_AUTHORITY_UNBOUND,
+        false,
+    )
+}
+
+fn authority_failure(
+    request_id: &str,
+    status: StatusCode,
+    class: ErrorClass,
+    code: &str,
+    retriable: bool,
+) -> Response {
+    failure(
+        status,
+        request_id,
+        None,
+        class,
+        code,
+        "The network session attachment authority was not admitted.",
+        Some("session-authority"),
+        retriable,
+    )
+}
+
 #[allow(clippy::too_many_lines)] // Attachment preflight keeps scope, lease, and capacity adjacent.
 pub(super) async fn pipe_session_attach(
     State(app): State<Arc<App>>,
     Extension(identity): Extension<Identity>,
+    Extension(transport): Extension<SessionTransport>,
     headers: HeaderMap,
     Path(session_id): Path<String>,
     RawQuery(raw_query): RawQuery,
@@ -795,6 +1116,25 @@ pub(super) async fn pipe_session_attach(
     }
     app.sweep_expired().await;
     let scope = app.scope(&identity);
+    let network_authority = match transport {
+        SessionTransport::Unix => None,
+        SessionTransport::HostedTls { exporter } => {
+            match verify_network_session_authority(
+                &app,
+                &scope,
+                &session_id,
+                &headers,
+                &exporter,
+                &request_id,
+            )
+            .await
+            {
+                Ok(authority) => Some(authority),
+                Err(response) => return response,
+            }
+        }
+        SessionTransport::DevelopmentTcp => return not_found(&request_id),
+    };
     let session = match app
         .store_io(|| app.store.session(&scope, &session_id))
         .await
@@ -859,10 +1199,19 @@ pub(super) async fn pipe_session_attach(
             );
         }
     };
+    let observed_at = app.authority.now();
     match app
-        .store_io(|| {
-            app.store
-                .claim_pipe_session_attachment(&scope, &session_id, app.authority.now())
+        .store_io(|| match network_authority.as_ref() {
+            Some(authority) => app.store.claim_pipe_session_attachment_with_authority(
+                &scope,
+                &session_id,
+                &authority.authority_id,
+                &authority.bearer_sha256,
+                observed_at,
+            ),
+            None => app
+                .store
+                .claim_pipe_session_attachment(&scope, &session_id, observed_at),
         })
         .await
     {
@@ -899,6 +1248,25 @@ pub(super) async fn pipe_session_attach(
                 false,
             );
         }
+        Ok(SessionAttachmentClaim::AuthorityExpired) => {
+            return authority_failure(
+                &request_id,
+                StatusCode::UNAUTHORIZED,
+                ErrorClass::Refused,
+                substrate_wire::SESSION_AUTHORITY_EXPIRED,
+                false,
+            );
+        }
+        Ok(SessionAttachmentClaim::AuthorityRedeemed) => {
+            return authority_failure(
+                &request_id,
+                StatusCode::CONFLICT,
+                ErrorClass::Conflict,
+                substrate_wire::SESSION_AUTHORITY_REDEEMED,
+                false,
+            );
+        }
+        Ok(SessionAttachmentClaim::AuthorityUnbound) => return authority_unbound(&request_id),
         Ok(SessionAttachmentClaim::Missing) => return not_found(&request_id),
         Err(error) => return store_failure(&request_id, None, &error),
     }
@@ -1480,4 +1848,73 @@ async fn terminate_pipe_session(app: &App, scope: &Scope, exec_id: &str) -> bool
     persist_pipe_observation(app, scope, &observation)
         .await
         .is_ok()
+}
+
+#[cfg(test)]
+mod authority_tests {
+    use axum::http::{HeaderMap, HeaderValue};
+    use ed25519_dalek::{Signer as _, SigningKey};
+
+    use super::{exact_header, valid_authority_bearer, valid_authority_id, valid_channel_proof};
+
+    #[test]
+    fn an_attachment_proof_is_bound_to_key_authority_channel_and_timestamp() {
+        let signing_key = SigningKey::from_bytes(&[3; 32]);
+        let authority_id = "sa_01JSESSIONAUTHORITYTEST";
+        let exporter = [4; 32];
+        let timestamp = 1_788_246_000_000;
+        let transcript =
+            substrate_wire::session_authority_transcript(authority_id, &exporter, timestamp);
+        let signature = signing_key.sign(&transcript).to_bytes();
+        let public_key = signing_key.verifying_key().to_bytes();
+        assert!(valid_channel_proof(
+            &public_key,
+            &signature,
+            authority_id,
+            &exporter,
+            timestamp
+        ));
+        assert!(!valid_channel_proof(
+            &public_key,
+            &signature,
+            authority_id,
+            &[5; 32],
+            timestamp
+        ));
+        assert!(!valid_channel_proof(
+            &public_key,
+            &signature,
+            "sa_other",
+            &exporter,
+            timestamp
+        ));
+        assert!(!valid_channel_proof(
+            &public_key,
+            &signature,
+            authority_id,
+            &exporter,
+            timestamp + 1
+        ));
+    }
+
+    #[test]
+    fn authority_bearers_and_headers_are_exact_and_bounded() {
+        let bearer = format!(
+            "session_authority_v1_{}",
+            base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, [7; 32])
+        );
+        assert!(valid_authority_bearer(&bearer));
+        assert!(!valid_authority_bearer(&(bearer.clone() + "=")));
+        assert!(!valid_authority_bearer("session_authority_v1_short"));
+        assert!(valid_authority_id("sa_01M1DY00000000000000000000"));
+        assert!(!valid_authority_id("sa_01m1dy00000000000000000000"));
+        assert!(!valid_authority_id("sa_01M1DY0000000000000000000I"));
+        assert!(!valid_authority_id("sa_short"));
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-test", HeaderValue::from_static("one"));
+        assert_eq!(exact_header(&headers, "x-test"), Some("one"));
+        headers.append("x-test", HeaderValue::from_static("two"));
+        assert_eq!(exact_header(&headers, "x-test"), None);
+    }
 }

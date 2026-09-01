@@ -59,6 +59,42 @@ async fn bound_refusal_response(app: Arc<super::App>, operation: &str) -> Value 
     .expect("response JSON")
 }
 
+#[tokio::test]
+async fn development_router_serves_neither_session_mint_nor_attachment() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let store = Arc::new(Store::open(":memory:").expect("state store"));
+    let driver = HostDriver::open(HostConfig::minimum(directory.path().join("workspaces")))
+        .expect("host driver");
+    let app = super::App::new(store, driver, "dep_transport_routes");
+    let identity = super::Identity {
+        subject: "development:test".to_owned(),
+        actor: "route-test".to_owned(),
+        principal: None,
+    };
+    for (method, uri) in [
+        ("POST", "/v1/pipe-sessions"),
+        ("GET", "/v1/pipe-sessions/ses_test/attach"),
+        ("POST", "/v1/pipe-sessions/ses_test/attachment-authorities"),
+    ] {
+        let response = super::development_router(Arc::clone(&app))
+            .layer(Extension(identity.clone()))
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("router response");
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::NOT_FOUND,
+            "{uri}"
+        );
+    }
+}
+
 fn effect(subject: &str, through_seq: u64) -> CommitEffect {
     CommitEffect {
         scope: Scope {

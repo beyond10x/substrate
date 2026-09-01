@@ -20,8 +20,8 @@ use super::responses::{
     not_found, not_found_at, query_is_empty, request_id, schema_invalid, store_failure, success,
 };
 use super::sessions::{
-    pipe_session_attach, pipe_session_capabilities, pipe_session_get, pipe_session_lease_renew,
-    pipe_session_retire, pipe_session_signal, pipe_session_start,
+    pipe_session_attach, pipe_session_authority_mint, pipe_session_capabilities, pipe_session_get,
+    pipe_session_lease_renew, pipe_session_retire, pipe_session_signal, pipe_session_start,
 };
 use super::workspaces::{
     workspace_create, workspace_destroy, workspace_file_delete, workspace_file_edit_v2,
@@ -29,14 +29,32 @@ use super::workspaces::{
     workspace_file_replace_v2, workspace_file_write, workspace_get, workspace_lease_renew,
     workspace_tree_read_v2,
 };
-use super::{App, CONTRACT_BUNDLE, CONTRACT_BUNDLE_SHA256, Identity};
+use super::{App, CONTRACT_BUNDLE, CONTRACT_BUNDLE_SHA256, Identity, SessionTransport};
 
 // A mutation diff can contain two maximum-sized files and JSON escaping can expand its bytes.
 // Keep envelope rewriting bounded, but above the largest response the handlers can produce.
 const V2_ENVELOPE_LIMIT: usize = super::BODY_LIMIT * 8;
 
 pub fn router(app: Arc<App>) -> Router {
-    Router::new()
+    router_for(app, SessionTransport::Unix)
+}
+
+pub(crate) fn development_router(app: Arc<App>) -> Router {
+    router_for(app, SessionTransport::DevelopmentTcp)
+}
+
+pub(crate) fn hosted_router(app: Arc<App>, exporter: [u8; 32]) -> Router {
+    router_for(app, SessionTransport::HostedTls { exporter })
+}
+
+fn router_for(app: Arc<App>, transport: SessionTransport) -> Router {
+    let pipe_collection = match transport {
+        SessionTransport::DevelopmentTcp => get(pipe_session_capabilities),
+        SessionTransport::Unix | SessionTransport::HostedTls { .. } => {
+            get(pipe_session_capabilities).post(pipe_session_start)
+        }
+    };
+    let router = Router::new()
         .route("/v1/machine", get(machine_get))
         .route("/v1/metrics", get(metrics_get))
         .route("/v1/metrics/stream", get(metrics_stream))
@@ -75,18 +93,25 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/v1/execs/{exec_id}", get(exec_get).delete(exec_retire))
         .route("/v1/execs/{exec_id}/output", get(exec_output_get))
         .route("/v1/execs/{exec_id}/signal", post(exec_signal))
-        .route(
-            "/v1/pipe-sessions",
-            get(pipe_session_capabilities).post(pipe_session_start),
-        )
+        .route("/v1/pipe-sessions", pipe_collection)
         .route(
             "/v1/pipe-sessions/{session_id}",
             get(pipe_session_get).delete(pipe_session_retire),
         )
-        .route(
-            "/v1/pipe-sessions/{session_id}/attach",
-            get(pipe_session_attach),
-        )
+        .merge(match transport {
+            SessionTransport::Unix | SessionTransport::HostedTls { .. } => Router::new().route(
+                "/v1/pipe-sessions/{session_id}/attach",
+                get(pipe_session_attach),
+            ),
+            SessionTransport::DevelopmentTcp => Router::new(),
+        })
+        .merge(match transport {
+            SessionTransport::HostedTls { .. } => Router::new().route(
+                "/v1/pipe-sessions/{session_id}/attachment-authorities",
+                post(pipe_session_authority_mint),
+            ),
+            SessionTransport::Unix | SessionTransport::DevelopmentTcp => Router::new(),
+        })
         .route(
             "/v1/pipe-sessions/{session_id}/signal",
             post(pipe_session_signal),
@@ -113,7 +138,13 @@ pub fn router(app: Arc<App>) -> Router {
         .route("/v1/ops/{operation_id}", get(operation_get))
         .fallback(route_not_found)
         .layer(middleware::from_fn(contract_identity))
-        .with_state(app)
+        .layer(Extension(transport));
+    let router = if matches!(transport, SessionTransport::DevelopmentTcp) {
+        router.method_not_allowed_fallback(route_not_found)
+    } else {
+        router
+    };
+    router.with_state(app)
 }
 
 /// V2 was added after the shared durable-operation machinery, whose stored answers intentionally

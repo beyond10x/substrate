@@ -29,7 +29,10 @@ pub use operations::{
     NewOperation, OperationCapacity, Reservation, ResourceCapacity, StoredAnswer,
 };
 pub use recovery::{RecoveryExec, RecoveryWorkspace};
-pub use sessions::{SessionAttachmentClaim, SessionRetireReservation};
+pub use sessions::{
+    NewSessionAuthority, SessionAttachmentClaim, SessionAuthorityLookup, SessionAuthorityMint,
+    SessionRetireReservation,
+};
 pub use snapshots::SnapshotReadError;
 pub use workspaces::{
     PendingWorkspaceDestroy, Tombstone, WorkspaceAdmission, WorkspaceDestroyReservation,
@@ -144,6 +147,8 @@ pub enum StoreError {
     SnapshotLimit,
     #[error("event does not match the closed Substrate event union")]
     InvalidEventShape,
+    #[error("stored session authority does not match its closed shape")]
+    InvalidSessionAuthority,
 }
 
 fn to_u64(value: i64) -> Result<u64, StoreError> {

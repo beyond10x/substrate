@@ -15,9 +15,9 @@ pub const API_VERSION: &str = "v1";
 ///
 /// This is the SHA-256 of the inner immutable `bundle.json`, not the outer OCI manifest digest.
 /// Moving either member is an explicit coordinated promotion (Atlas ADR 0019).
-pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.13.0";
+pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.14.0";
 pub const ADVERTISED_CONTRACT_BUNDLE_SHA256: &str =
-    "7ab665c0a50cd8521a28b2b4c2302b7d460a1978b105d956711dbe6702a843bf";
+    "eea07e6894ae840b6b2bb161861a724115fef4dedd57e72386e9d71af348b092";
 pub const MAX_FILE_BYTES: u64 = 1_048_576;
 pub const MAX_IO_BYTES: u64 = 1_048_576;
 pub const MAX_LIST_ITEMS: u32 = 1_000;
@@ -153,6 +153,40 @@ pub const HOSTED_AUTH_REFUSAL_CODES: [&str; 4] = [
     AUTH_AUTHORITY_UNAVAILABLE,
     AUTH_CREDENTIAL_ABSENT,
     AUTH_SCOPE_DENIED,
+];
+
+/// TLS 1.3 exporter label for proof-bound network session attachment (ADR 0027).
+pub const SESSION_AUTHORITY_EXPORTER_LABEL: &[u8] = b"EXPORTER-Substrate-Session-Authority-v1";
+/// Domain separator for the signed network session attachment transcript.
+pub const SESSION_AUTHORITY_TRANSCRIPT_DOMAIN: &str = "substrate.session-authority.v1";
+/// Maximum lifetime of a minted network session authority.
+pub const SESSION_AUTHORITY_LIFETIME_SECONDS: i64 = 60;
+/// Maximum accepted difference between a proof timestamp and daemon time.
+pub const SESSION_AUTHORITY_PROOF_SKEW_SECONDS: i64 = 10;
+/// Maximum number of unexpired authorities retained for one session.
+pub const MAX_LIVE_SESSION_AUTHORITIES: u32 = 4;
+/// Header carrying the non-secret authority identifier.
+pub const SESSION_AUTHORITY_ID_HEADER: &str = "x-substrate-session-authority-id";
+/// Header carrying the one-time authority bearer, distinct from hosted Identity authorization.
+pub const SESSION_AUTHORITY_BEARER_HEADER: &str = "x-substrate-session-authority";
+/// Header carrying the Unix-millisecond instant covered by the channel proof.
+pub const SESSION_AUTHORITY_TIMESTAMP_HEADER: &str = "x-substrate-session-timestamp";
+/// Header carrying the base64url Ed25519 signature over the channel transcript.
+pub const SESSION_AUTHORITY_PROOF_HEADER: &str = "x-substrate-session-proof";
+/// A hosted network attachment omitted required authority material.
+pub const SESSION_AUTHORITY_ABSENT: &str = "session.authority-absent";
+/// A hosted network attachment presented an expired authority.
+pub const SESSION_AUTHORITY_EXPIRED: &str = "session.authority-expired";
+/// A hosted network attachment presented an authority already consumed.
+pub const SESSION_AUTHORITY_REDEEMED: &str = "session.authority-redeemed";
+/// Authority material or its key-and-channel proof was invalid.
+pub const SESSION_AUTHORITY_UNBOUND: &str = "session.authority-unbound";
+/// Every refusal introduced by proof-bound network session authority.
+pub const SESSION_AUTHORITY_REFUSAL_CODES: [&str; 4] = [
+    SESSION_AUTHORITY_ABSENT,
+    SESSION_AUTHORITY_EXPIRED,
+    SESSION_AUTHORITY_REDEEMED,
+    SESSION_AUTHORITY_UNBOUND,
 ];
 
 /// The session is not attachable in its current state.
@@ -403,9 +437,13 @@ pub fn session_refusal_is_retriable(code: &str) -> bool {
 /// the same as wire-word order — `SESSION_INPUT_CLOSED` precedes `SESSION_INPUT_CLOSE_UNSERVED`
 /// here and `session.input-close-unserved` precedes `session.input-closed` on the wire. Nothing
 /// depends on either order: every consumer collects into a `BTreeSet`.
-pub const SESSION_REFUSAL_CODES: [&str; 32] = [
+pub const SESSION_REFUSAL_CODES: [&str; 36] = [
     SESSION_ALREADY_ATTACHED,
     SESSION_ATTACHMENT_CAPACITY,
+    SESSION_AUTHORITY_ABSENT,
+    SESSION_AUTHORITY_EXPIRED,
+    SESSION_AUTHORITY_REDEEMED,
+    SESSION_AUTHORITY_UNBOUND,
     SESSION_BASE64_INVALID,
     SESSION_CONFINEMENT_UNAVAILABLE,
     SESSION_CONTROL_RATE_EXCEEDED,
@@ -2007,6 +2045,53 @@ pub struct PipeSession {
     pub lease: LeaseObservation,
 }
 
+/// Hosted request to mint one proof-bound attachment authority (ADR 0027).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionAuthorityMintInput {
+    /// Raw 32-byte Ed25519 public key encoded as unpadded base64url.
+    pub public_key: String,
+}
+
+/// One-time authority returned only by the hosted mint response.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionAttachmentAuthority {
+    pub authority_id: String,
+    pub authority: String,
+    pub expires_at: DateTime<Utc>,
+}
+
+/// Bytes an attachment client signs and the daemon verifies for ADR 0027.
+///
+/// Length-prefixing prevents any field boundary from being reinterpreted. The timestamp is signed
+/// as its canonical decimal representation so implementations outside Rust can reproduce it.
+#[must_use]
+pub fn session_authority_transcript(
+    authority_id: &str,
+    exporter: &[u8; 32],
+    timestamp_ms: i64,
+) -> Vec<u8> {
+    let timestamp = timestamp_ms.to_string();
+    let mut transcript = Vec::with_capacity(
+        SESSION_AUTHORITY_TRANSCRIPT_DOMAIN.len()
+            + authority_id.len()
+            + exporter.len()
+            + timestamp.len()
+            + 32,
+    );
+    for part in [
+        SESSION_AUTHORITY_TRANSCRIPT_DOMAIN.as_bytes(),
+        authority_id.as_bytes(),
+        exporter.as_slice(),
+        timestamp.as_bytes(),
+    ] {
+        transcript.extend_from_slice(&(part.len() as u64).to_be_bytes());
+        transcript.extend_from_slice(part);
+    }
+    transcript
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionAbsence {
@@ -3557,6 +3642,24 @@ mod tests {
         );
     }
 
+    #[test]
+    fn session_authority_transcript_is_framed_and_channel_bound() {
+        let first = super::session_authority_transcript("sa_one", &[1; 32], 1_788_246_000_000);
+        let same = super::session_authority_transcript("sa_one", &[1; 32], 1_788_246_000_000);
+        let other_channel =
+            super::session_authority_transcript("sa_one", &[2; 32], 1_788_246_000_000);
+        let other_authority =
+            super::session_authority_transcript("sa_two", &[1; 32], 1_788_246_000_000);
+        assert_eq!(first, same);
+        assert_ne!(first, other_channel);
+        assert_ne!(first, other_authority);
+        assert!(
+            first
+                .windows(super::SESSION_AUTHORITY_TRANSCRIPT_DOMAIN.len())
+                .any(|window| window == super::SESSION_AUTHORITY_TRANSCRIPT_DOMAIN.as_bytes())
+        );
+    }
+
     /// Design 13: the client half of the pty vocabulary is `input`, `resize` and `signal`. The
     /// resize frame carries a window and nothing else, and a resize without one stays outside the
     /// closed vocabulary.
@@ -3853,8 +3956,8 @@ mod tests {
         let version = ADVERTISED_CONTRACT_BUNDLE
             .strip_prefix("substrate-wire/")
             .expect("advertised contract prefix");
-        assert_eq!(version, "0.13.0", "the reviewed promotion target moved");
-        let bytes = include_bytes!("../../../contracts/substrate-wire/0.13.0/bundle.json");
+        assert_eq!(version, "0.14.0", "the reviewed promotion target moved");
+        let bytes = include_bytes!("../../../contracts/substrate-wire/0.14.0/bundle.json");
         assert_eq!(
             hex::encode(Sha256::digest(bytes)),
             ADVERTISED_CONTRACT_BUNDLE_SHA256

@@ -168,6 +168,22 @@ impl Store {
                     id
                 );
 
+            CREATE TABLE IF NOT EXISTS session_authorities (
+                deployment TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                session_id TEXT NOT NULL,
+                authority_id TEXT NOT NULL,
+                bearer_sha256 BLOB NOT NULL CHECK (length(bearer_sha256) = 32),
+                public_key BLOB NOT NULL CHECK (length(public_key) = 32),
+                expires_at_ms INTEGER NOT NULL,
+                redeemed_at_ms INTEGER,
+                PRIMARY KEY (deployment, subject, session_id, authority_id),
+                FOREIGN KEY (deployment, subject, session_id)
+                    REFERENCES sessions (deployment, subject, id) ON DELETE CASCADE
+            ) WITHOUT ROWID;
+            CREATE INDEX IF NOT EXISTS session_authorities_expiry
+                ON session_authorities (expires_at_ms, deployment, subject, session_id);
+
             CREATE TABLE IF NOT EXISTS stream_meta (
                 deployment TEXT NOT NULL,
                 subject TEXT NOT NULL,

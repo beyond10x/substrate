@@ -1,5 +1,7 @@
 #![cfg(unix)]
 
+use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::net::SocketAddr;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
@@ -13,6 +15,10 @@ use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse as _, Response};
 use axum::routing::get;
 use axum::{Json, Router};
+use base64::Engine as _;
+use base64::engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD};
+use chrono::Utc;
+use ed25519_dalek::{Signer as _, SigningKey};
 use hyper::server::conn::http1;
 use hyper_util::rt::TokioIo;
 use hyper_util::service::TowerToHyperService;
@@ -22,6 +28,13 @@ use rcgen::{CertificateParams, KeyPair, date_time_ymd};
 use rustls::pki_types::{CertificateDer, ServerName};
 use rustls::{ClientConfig, RootCertStore, ServerConfig};
 use serde_json::json;
+use sha2::{Digest as _, Sha256};
+use substrate_store::{LeaseClock, NewLease, NewOperation, Reservation, Scope, Store, StoredExec};
+use substrate_wire::{
+    ConfinementRequest, Exec, ExecKind, ExecState, NetworkMode, PipeSession, PipeSessionLimits,
+    SandboxProfile, SessionAttachmentState, SessionKind, SessionMode, SessionState, Workspace,
+    WorkspaceKind, WorkspaceState, session_authority_transcript,
+};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::TcpStream;
@@ -114,6 +127,9 @@ fn daemon_command(
         .arg(identity_ca)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some(cgroup_root) = std::env::var_os("SUBSTRATE_VECTORS_CGROUP_ROOT") {
+        command.arg("--cgroup-root").arg(cgroup_root);
+    }
     command
 }
 
@@ -313,6 +329,417 @@ async fn request(stream: &mut TlsStream<TcpStream>, request: &[u8]) -> Vec<u8> {
     }
 }
 
+async fn upgrade_request(stream: &mut TlsStream<TcpStream>, request: &[u8]) -> Vec<u8> {
+    stream.write_all(request).await.expect("write WSS request");
+    let mut response = Vec::new();
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let mut byte = [0_u8; 1];
+        let count = tokio::time::timeout_at(deadline, stream.read(&mut byte))
+            .await
+            .expect("WSS response timeout")
+            .expect("read WSS response");
+        assert!(count > 0, "WSS response ended before complete headers");
+        response.push(byte[0]);
+        if response.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+            return response;
+        }
+    }
+}
+
+fn response_json(response: &[u8]) -> serde_json::Value {
+    let body = response
+        .windows(4)
+        .position(|bytes| bytes == b"\r\n\r\n")
+        .map(|offset| &response[offset + 4..])
+        .expect("HTTP response headers");
+    serde_json::from_slice(body).expect("JSON response body")
+}
+
+fn hosted_subject(origin: &str) -> String {
+    let mut digest = Sha256::new();
+    for field in [
+        origin,
+        "sensitive-tenant-marker",
+        "sensitive-subject-marker",
+    ] {
+        digest.update((field.len() as u64).to_be_bytes());
+        digest.update(field.as_bytes());
+    }
+    format!("hosted:{}", URL_SAFE_NO_PAD.encode(digest.finalize()))
+}
+
+#[allow(clippy::too_many_lines)]
+fn seed_ready_pipe_session(state_path: &Path, origin: &str) {
+    let store = Store::open(state_path).expect("open live daemon state");
+    let scope = Scope {
+        deployment: "tls-test".to_owned(),
+        subject: hosted_subject(origin),
+    };
+    let now = Utc::now();
+    let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
+        .expect("Linux boot id")
+        .trim()
+        .to_owned();
+    let uptime = std::fs::read_to_string("/proc/uptime").expect("Linux uptime");
+    let uptime = uptime.split_whitespace().next().expect("uptime seconds");
+    let (seconds, fraction) = uptime.split_once('.').unwrap_or((uptime, "0"));
+    let mut millis = fraction.chars().take(3).collect::<String>();
+    while millis.len() < 3 {
+        millis.push('0');
+    }
+    let boottime_ms = seconds
+        .parse::<u64>()
+        .expect("numeric uptime seconds")
+        .saturating_mul(1_000)
+        .saturating_add(millis.parse::<u64>().expect("numeric uptime milliseconds"));
+    let workspace = Workspace {
+        id: "ws_network_authority".to_owned(),
+        kind: WorkspaceKind::Workspace,
+        labels: BTreeMap::default(),
+        observed_at: now,
+        state: WorkspaceState::Ready,
+        storage: None,
+        lease: None,
+    };
+    let workspace_operation = NewOperation {
+        scope: scope.clone(),
+        operation: "01JNETWORKAUTHORITYWORKSP1".to_owned(),
+        operation_kind: "workspace.create".to_owned(),
+        request_hash: "b".repeat(64),
+        accepted_at: now.to_rfc3339(),
+        capability_snapshot: Some(format!("sha256:{}", "7".repeat(64))),
+        actor: "sensitive-actor-marker".to_owned(),
+        principal: None,
+        grant_ref: None,
+        platform_principal: None,
+        resource: Some(workspace.id.clone()),
+    };
+    assert_eq!(
+        store
+            .reserve_workspace_create(
+                &workspace_operation,
+                "ws-network-authority",
+                &workspace,
+                None
+            )
+            .expect("reserve network-authority workspace"),
+        Reservation::Accepted
+    );
+    store
+        .complete_workspace(
+            &scope,
+            &workspace_operation.operation,
+            &now.to_rfc3339(),
+            201,
+            "ws-network-authority",
+            &workspace,
+        )
+        .expect("complete network-authority workspace");
+    let operation = NewOperation {
+        scope: scope.clone(),
+        operation: "01JNETWORKAUTHORITY000001".to_owned(),
+        operation_kind: "session.start".to_owned(),
+        request_hash: "c".repeat(64),
+        accepted_at: now.to_rfc3339(),
+        capability_snapshot: Some(format!("sha256:{}", "7".repeat(64))),
+        actor: "sensitive-actor-marker".to_owned(),
+        principal: None,
+        grant_ref: None,
+        platform_principal: None,
+        resource: Some("ses_network_authority".to_owned()),
+    };
+    let lease = NewLease {
+        ttl_ms: 60_000,
+        clock: LeaseClock {
+            wall: now,
+            boot_id,
+            boottime_ms,
+        },
+        authorizing_operation: operation.operation.clone(),
+        actor: operation.actor.clone(),
+        principal: None,
+    };
+    let mut exec = StoredExec {
+        resource: Exec {
+            id: "ex_network_authority".to_owned(),
+            kind: ExecKind::Exec,
+            workspace: workspace.id,
+            state: ExecState::Accepted,
+            observed_at: now,
+            requested: ConfinementRequest {
+                capability_snapshot: format!("sha256:{}", "7".repeat(64)),
+                network: NetworkMode::None,
+                aperture: None,
+                profile: SandboxProfile::Workspace,
+                required: true,
+            },
+            applied: None,
+            exit: None,
+            usage: None,
+            lease: Some(lease.observation()),
+            refusal: None,
+        },
+        stdout: Vec::new(),
+        stderr: Vec::new(),
+        stdout_truncated: false,
+        stderr_truncated: false,
+        output_complete: false,
+        cgroup: None,
+        leader_pid: None,
+    };
+    let mut session = PipeSession {
+        id: "ses_network_authority".to_owned(),
+        kind: SessionKind::Session,
+        mode: SessionMode::Pipes,
+        exec: exec.resource.id.clone(),
+        workspace: exec.resource.workspace.clone(),
+        state: SessionState::Accepted,
+        attachment: SessionAttachmentState::Pending,
+        observed_at: now,
+        capability_snapshot: format!("sha256:{}", "7".repeat(64)),
+        limits: PipeSessionLimits {
+            input_bytes: 1_024,
+            frame_bytes: 256,
+            queued_frames: 4,
+        },
+        exit: None,
+        lease: lease.observation(),
+    };
+    assert_eq!(
+        store
+            .reserve_pipe_session_start(&operation, &session, &exec, &lease, None)
+            .expect("reserve network-authority session"),
+        Reservation::Accepted
+    );
+    exec.resource.state = ExecState::Running;
+    session.state = SessionState::Ready;
+    session.attachment = SessionAttachmentState::Available;
+    store
+        .complete_pipe_session_start(
+            &scope,
+            &operation.operation,
+            &now.to_rfc3339(),
+            202,
+            &session,
+            &exec,
+            &lease,
+        )
+        .expect("complete network-authority session");
+}
+
+fn channel_exporter(stream: &TlsStream<TcpStream>) -> [u8; 32] {
+    let mut exporter = [0_u8; 32];
+    stream
+        .get_ref()
+        .1
+        .export_keying_material(
+            &mut exporter,
+            substrate_wire::SESSION_AUTHORITY_EXPORTER_LABEL,
+            None,
+        )
+        .expect("TLS exporter");
+    exporter
+}
+
+fn attachment_request(
+    credential: &str,
+    session_id: &str,
+    authority_id: &str,
+    authority: &str,
+    timestamp_ms: i64,
+    proof: &[u8],
+) -> String {
+    format!(
+        "GET /v1/pipe-sessions/{session_id}/attach HTTP/1.1\r\nHost: substrate.test\r\nAuthorization: Bearer {credential}\r\nX-Substrate-Session-Authority-Id: {authority_id}\r\nX-Substrate-Session-Authority: {authority}\r\nX-Substrate-Session-Timestamp: {timestamp_ms}\r\nX-Substrate-Session-Proof: {}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: AAAAAAAAAAAAAAAAAAAAAA==\r\n\r\n",
+        URL_SAFE_NO_PAD.encode(proof)
+    )
+}
+
+async fn hosted_json(
+    address: SocketAddr,
+    trusted: &TlsConnector,
+    credential: &str,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+) -> (u16, serde_json::Value) {
+    let mut stream = connect(address, trusted, SERVER_NAME)
+        .await
+        .expect("hosted request connection");
+    let mut head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: substrate.test\r\nAuthorization: Bearer {credential}\r\nConnection: close\r\n"
+    );
+    if let Some(body) = body {
+        write!(
+            head,
+            "Content-Type: application/json\r\nContent-Length: {}\r\n",
+            body.len()
+        )
+        .expect("format hosted request headers");
+    }
+    head.push_str("\r\n");
+    if let Some(body) = body {
+        head.push_str(body);
+    }
+    let response = request(&mut stream, head.as_bytes()).await;
+    let status = std::str::from_utf8(&response)
+        .expect("hosted response text")
+        .split_whitespace()
+        .nth(1)
+        .expect("hosted response status")
+        .parse::<u16>()
+        .expect("numeric hosted response status");
+    (status, response_json(&response))
+}
+
+async fn provision_confined_pipe_session(
+    address: SocketAddr,
+    trusted: &TlsConnector,
+    authority: &AuthorityState,
+) -> String {
+    let (status, machine) = hosted_json(
+        address,
+        trusted,
+        &authority.observe,
+        "GET",
+        "/v1/machine",
+        None,
+    )
+    .await;
+    assert_eq!(status, 200, "machine capability: {machine}");
+    let snapshot = machine["result"]["snapshot"]
+        .as_str()
+        .expect("capability snapshot");
+    let workspace_body = json!({
+        "op": "01JNETWORKAUTHORITYWORKSP2",
+        "input": {"source": "empty", "labels": {}}
+    })
+    .to_string();
+    let (status, workspace) = hosted_json(
+        address,
+        trusted,
+        &authority.workspace,
+        "POST",
+        "/v1/workspaces",
+        Some(&workspace_body),
+    )
+    .await;
+    assert_eq!(status, 201, "workspace creation: {workspace}");
+    let workspace_id = workspace["result"]["id"].as_str().expect("workspace id");
+    let session_body = json!({
+        "op": "01JNETWORKAUTHORITYSESSION2",
+        "input": {
+            "exec": {
+                "argv": ["/bin/sh", "-c", "printf hosted-channel-ready; cat"],
+                "env": {"allow": [], "set": {}},
+                "lease_ttl_ms": 60000,
+                "limits": {
+                    "cpu_millis": 1000,
+                    "memory_bytes": 67_108_864,
+                    "output_bytes": 65536,
+                    "processes": 16,
+                    "timeout_ms": 30000
+                },
+                "sandbox": {
+                    "capability_snapshot": snapshot,
+                    "network": "none",
+                    "profile": "workspace",
+                    "require": true
+                },
+                "wait": false,
+                "workspace": workspace_id
+            },
+            "frame_limit_bytes": 65536,
+            "input_limit_bytes": 1_048_576,
+            "queued_frames": 16
+        }
+    })
+    .to_string();
+    let (status, session) = hosted_json(
+        address,
+        trusted,
+        &authority.exec,
+        "POST",
+        "/v1/pipe-sessions",
+        Some(&session_body),
+    )
+    .await;
+    assert_eq!(status, 202, "pipe-session start: {session}");
+    session["result"]["id"]
+        .as_str()
+        .expect("session id")
+        .to_owned()
+}
+
+async fn prove_pipe_bytes(stream: &mut TlsStream<TcpStream>) {
+    let payload = json!({
+        "kind": "stdin",
+        "sequence": 1,
+        "content": {"encoding": "base64", "data": STANDARD.encode(b"round-trip-marker\n")}
+    })
+    .to_string()
+    .into_bytes();
+    assert!(payload.len() <= 125, "bounded WebSocket client frame");
+    let mask = [0x11_u8, 0x22, 0x33, 0x44];
+    let mut frame = vec![
+        0x81,
+        0x80 | u8::try_from(payload.len()).expect("short frame"),
+    ];
+    frame.extend_from_slice(&mask);
+    frame.extend(
+        payload
+            .iter()
+            .enumerate()
+            .map(|(index, byte)| byte ^ mask[index % mask.len()]),
+    );
+    stream
+        .write_all(&frame)
+        .await
+        .expect("write WSS stdin frame");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let mut transcript = Vec::new();
+    while !transcript
+        .windows(b"round-trip-marker".len())
+        .any(|window| window == b"round-trip-marker")
+    {
+        let mut header = [0_u8; 2];
+        tokio::time::timeout_at(deadline, stream.read_exact(&mut header))
+            .await
+            .expect("WSS output timeout")
+            .expect("WSS frame header");
+        assert_eq!(header[1] & 0x80, 0, "server frame is unmasked");
+        let mut length = u64::from(header[1] & 0x7f);
+        if length == 126 {
+            let mut bytes = [0_u8; 2];
+            stream
+                .read_exact(&mut bytes)
+                .await
+                .expect("WSS frame length");
+            length = u64::from(u16::from_be_bytes(bytes));
+        } else if length == 127 {
+            let mut bytes = [0_u8; 8];
+            stream
+                .read_exact(&mut bytes)
+                .await
+                .expect("WSS frame length");
+            length = u64::from_be_bytes(bytes);
+        }
+        let mut body = vec![0_u8; usize::try_from(length).expect("bounded WSS frame")];
+        stream.read_exact(&mut body).await.expect("WSS frame body");
+        if header[0] & 0x0f == 1 {
+            let frame: serde_json::Value = serde_json::from_slice(&body).expect("session frame");
+            if frame["kind"] == "output" && frame["stream"] == "stdout" {
+                let bytes = STANDARD
+                    .decode(frame["content"]["data"].as_str().expect("stdout data"))
+                    .expect("base64 stdout");
+                transcript.extend_from_slice(&bytes);
+            }
+        }
+    }
+}
+
 fn peer_leaf(stream: &TlsStream<TcpStream>) -> Vec<u8> {
     stream
         .get_ref()
@@ -383,7 +810,7 @@ async fn production_tls_refuses_unverified_routes_and_rotates_atomically() {
     assert!(
         response
             .to_ascii_lowercase()
-            .contains("x-b10x-contract: substrate-wire/0.13.0"),
+            .contains("x-b10x-contract: substrate-wire/0.14.0"),
         "{response}"
     );
 
@@ -453,7 +880,8 @@ async fn production_tls_refuses_unverified_routes_and_rotates_atomically() {
     );
     let response = request(&mut wss, wss_request.as_bytes()).await;
     let response = String::from_utf8(response).expect("WSS refusal text");
-    assert!(response.starts_with("HTTP/1.1 404"), "{response}");
+    assert!(response.starts_with("HTTP/1.1 401"), "{response}");
+    assert!(response.contains("session.authority-absent"), "{response}");
 
     let mut plaintext = TcpStream::connect(address).await.expect("plaintext socket");
     plaintext
@@ -553,6 +981,175 @@ async fn production_tls_refuses_unverified_routes_and_rotates_atomically() {
     assert_eq!(
         operations, 0,
         "scope refusal reached durable operation admission"
+    );
+    authority_task.abort();
+}
+
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one TLS journey proves mint, channel binding, atomic redemption, replay, and secrecy"
+)]
+async fn hosted_wss_attachment_authority_is_one_use_and_channel_bound() {
+    let root = TempDir::new().expect("temporary root");
+    let daemon_identity = current_identity();
+    let authority_identity = identity_for(IDENTITY_NAME, (2025, 1, 1), (2035, 1, 1));
+    let identity_ca = root.path().join("identity-ca.pem");
+    std::fs::write(&identity_ca, &authority_identity.certificate_pem).expect("Identity CA");
+    let (authority_state, authority_task) = start_identity_authority(&authority_identity).await;
+    let (certificate, private_key) = write_identity(root.path(), &daemon_identity);
+    let address = unused_address();
+    let mut child = daemon_command(
+        root.path(),
+        address,
+        &certificate,
+        &private_key,
+        &authority_state.origin,
+        &identity_ca,
+    )
+    .spawn()
+    .expect("spawn TLS daemon");
+    let trusted = connector([daemon_identity.certificate_der.clone()]);
+    let ready = connect_when_ready(&mut child, address, &trusted).await;
+    drop(ready);
+    let delegated = std::env::var_os("SUBSTRATE_VECTORS_CGROUP_ROOT").is_some();
+    let session_id = if delegated {
+        provision_confined_pipe_session(address, &trusted, &authority_state).await
+    } else {
+        seed_ready_pipe_session(&root.path().join("state.sqlite"), &authority_state.origin);
+        "ses_network_authority".to_owned()
+    };
+
+    let signing_key = SigningKey::from_bytes(&[42_u8; 32]);
+    let public_key = URL_SAFE_NO_PAD.encode(signing_key.verifying_key().to_bytes());
+    let mint_body = serde_json::to_string(&json!({
+        "public_key": public_key
+    }))
+    .expect("mint body");
+    let mint_request = format!(
+        "POST /v1/pipe-sessions/{session_id}/attachment-authorities HTTP/1.1\r\nHost: substrate.test\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{mint_body}",
+        authority_state.exec,
+        mint_body.len()
+    );
+    let mut mint_connection = connect(address, &trusted, SERVER_NAME)
+        .await
+        .expect("mint HTTPS connection");
+    let minted = request(&mut mint_connection, mint_request.as_bytes()).await;
+    assert!(
+        minted.starts_with(b"HTTP/1.1 201"),
+        "{}",
+        String::from_utf8_lossy(&minted)
+    );
+    let minted = response_json(&minted);
+    let authority_id = minted["result"]["authority_id"]
+        .as_str()
+        .expect("authority id");
+    let authority = minted["result"]["authority"]
+        .as_str()
+        .expect("authority bearer");
+    let remaining_seconds = minted["result"]["expires_at"]
+        .as_str()
+        .expect("authority expiry")
+        .parse::<chrono::DateTime<Utc>>()
+        .expect("expiry timestamp")
+        .timestamp()
+        - Utc::now().timestamp();
+    assert!(
+        (59..=60).contains(&remaining_seconds),
+        "mint lifetime was {remaining_seconds} seconds"
+    );
+
+    let source = connect(address, &trusted, SERVER_NAME)
+        .await
+        .expect("proof source connection");
+    let source_exporter = channel_exporter(&source);
+    let mut target = connect(address, &trusted, SERVER_NAME)
+        .await
+        .expect("attachment target connection");
+    let target_exporter = channel_exporter(&target);
+    assert_ne!(source_exporter, target_exporter, "distinct TLS channels");
+    let timestamp_ms = Utc::now().timestamp_millis();
+    let wrong_proof = signing_key.sign(&session_authority_transcript(
+        authority_id,
+        &source_exporter,
+        timestamp_ms,
+    ));
+    let wrong_request = attachment_request(
+        &authority_state.exec,
+        &session_id,
+        authority_id,
+        authority,
+        timestamp_ms,
+        &wrong_proof.to_bytes(),
+    );
+    let response = request(&mut target, wrong_request.as_bytes()).await;
+    let response_text = String::from_utf8(response).expect("wrong-channel refusal text");
+    assert!(response_text.starts_with("HTTP/1.1 401"), "{response_text}");
+    assert!(
+        response_text.contains("session.authority-unbound"),
+        "{response_text}"
+    );
+
+    let timestamp_ms = Utc::now().timestamp_millis();
+    let proof = signing_key.sign(&session_authority_transcript(
+        authority_id,
+        &target_exporter,
+        timestamp_ms,
+    ));
+    let valid_request = attachment_request(
+        &authority_state.exec,
+        &session_id,
+        authority_id,
+        authority,
+        timestamp_ms,
+        &proof.to_bytes(),
+    );
+    let response = upgrade_request(&mut target, valid_request.as_bytes()).await;
+    let response_text = String::from_utf8_lossy(&response);
+    assert!(response_text.starts_with("HTTP/1.1 101"), "{response_text}");
+    if delegated {
+        prove_pipe_bytes(&mut target).await;
+    }
+
+    let mut replay = connect(address, &trusted, SERVER_NAME)
+        .await
+        .expect("replay connection");
+    let replay_request = attachment_request(
+        &authority_state.exec,
+        &session_id,
+        authority_id,
+        authority,
+        Utc::now().timestamp_millis(),
+        &proof.to_bytes(),
+    );
+    let response = request(&mut replay, replay_request.as_bytes()).await;
+    let response_text = String::from_utf8(response).expect("replay refusal text");
+    assert!(response_text.starts_with("HTTP/1.1 409"), "{response_text}");
+    assert!(
+        response_text.contains("session.authority-redeemed"),
+        "{response_text}"
+    );
+
+    signal(&child, Signal::SIGTERM);
+    let output = tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
+        .await
+        .expect("TLS daemon shutdown timed out")
+        .expect("wait for TLS daemon");
+    assert!(output.status.success(), "TLS daemon: {output:?}");
+    let logs = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!logs.contains(authority), "session authority leaked");
+    assert!(
+        !logs.contains(&URL_SAFE_NO_PAD.encode(proof.to_bytes())),
+        "session proof leaked"
+    );
+    assert!(!logs.contains(&public_key), "session public key leaked");
+    assert!(
+        !logs.contains(substrate_wire::SESSION_AUTHORITY_TRANSCRIPT_DOMAIN),
+        "session transcript marker leaked"
     );
     authority_task.abort();
 }

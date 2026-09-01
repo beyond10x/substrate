@@ -28,6 +28,7 @@ base64.workspace = true
 bytes.workspace = true
 chrono.workspace = true
 futures-util.workspace = true
+getrandom.workspace = true
 clap.workspace = true
 ed25519-dalek.workspace = true
 http.workspace = true
