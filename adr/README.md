@@ -34,3 +34,4 @@ with YAML frontmatter containing `date` and `status`. Draft design questions rem
 | [0026](0026-hosted-admission-resolves-opaque-identity-authority.md) | Hosted admission resolves opaque Identity authority | accepted |
 | [0027](0027-network-session-authority-is-key-and-channel-bound.md) | Network session authority is key- and channel-bound | accepted |
 | [0028](0028-session-is-the-canonical-route-resource-name.md) | Session is the canonical route and resource name | accepted |
+| [0029](0029-the-remote-sdk-shares-one-verified-https-wss-transport.md) | The remote SDK shares one verified HTTPS/WSS transport | accepted |

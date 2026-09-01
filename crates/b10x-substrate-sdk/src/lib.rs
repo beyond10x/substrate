@@ -10,7 +10,9 @@ mod model;
 mod transport;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -23,6 +25,7 @@ use thiserror::Error;
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
 use ulid::Ulid;
+use zeroize::Zeroizing;
 
 pub use managed::{ManagedDaemon, ManagedDaemonBuilder, run_daemon_child_if_requested};
 pub use model::{
@@ -78,6 +81,8 @@ pub enum SdkError {
     Protocol(String),
     #[error("builder field `{field}` is required")]
     Builder { field: &'static str },
+    #[error("the remote access-token provider is unavailable")]
+    TokenUnavailable,
     #[error("operation {operation_id} has no answered outcome")]
     UnknownOperation { operation_id: String },
     #[error("event history has a gap ({code})")]
@@ -96,6 +101,61 @@ pub enum SdkError {
     Startup(String),
     #[error("managed daemon shutdown failed: {0}")]
     Shutdown(String),
+}
+
+/// Why a remote request needs a hosted Identity access credential.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccessTokenReason {
+    /// A credential for a new HTTP or WebSocket request.
+    Request,
+    /// One replacement credential after a named hosted-authentication refusal.
+    RefreshAfterAuthorizationFailure,
+}
+
+/// One opaque hosted Identity access credential.
+///
+/// Its allocation is zeroed on drop and neither `Debug` nor `Display` exposes its bytes.
+pub struct AccessToken(Zeroizing<String>);
+
+impl AccessToken {
+    pub fn new(value: impl Into<String>) -> Result<Self, SdkError> {
+        let value = value.into();
+        let valid = value
+            .strip_prefix("identity_access_v1_")
+            .is_some_and(|token| {
+                token.len() == 43
+                    && token
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            });
+        if !valid {
+            return Err(SdkError::TokenUnavailable);
+        }
+        Ok(Self(Zeroizing::new(value)))
+    }
+
+    pub(crate) fn expose(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+/// Boxed future returned by an [`AccessTokenProvider`].
+pub type AccessTokenFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<AccessToken, SdkError>> + Send + 'a>>;
+
+/// Supplies short-lived hosted Identity authority without giving the SDK credential storage.
+pub trait AccessTokenProvider: Send + Sync {
+    fn access_token(&self, reason: AccessTokenReason) -> AccessTokenFuture<'_>;
+}
+
+impl<F, Fut> AccessTokenProvider for F
+where
+    F: Fn(AccessTokenReason) -> Fut + Send + Sync,
+    Fut: Future<Output = Result<AccessToken, SdkError>> + Send + 'static,
+{
+    fn access_token(&self, reason: AccessTokenReason) -> AccessTokenFuture<'_> {
+        Box::pin(self(reason))
+    }
 }
 
 #[derive(Clone)]
@@ -347,6 +407,10 @@ fn outcome<O: DeserializeOwned>(
 #[must_use]
 pub struct ClientBuilder {
     socket: Option<PathBuf>,
+    https_endpoint: Option<String>,
+    trust_roots: Option<PathBuf>,
+    server_identity: Option<String>,
+    token_provider: Option<Arc<dyn AccessTokenProvider>>,
 }
 
 impl ClientBuilder {
@@ -355,9 +419,58 @@ impl ClientBuilder {
         self
     }
 
+    /// Select a production remote endpoint. The value must be one exact HTTPS origin.
+    pub fn https_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.https_endpoint = Some(endpoint.into());
+        self
+    }
+
+    /// Supply the bounded PEM roots used only for this Substrate endpoint.
+    pub fn trust_roots(mut self, path: impl Into<PathBuf>) -> Self {
+        self.trust_roots = Some(path.into());
+        self
+    }
+
+    /// Set the DNS identity rustls must verify in the endpoint certificate.
+    pub fn server_identity(mut self, identity: impl Into<String>) -> Self {
+        self.server_identity = Some(identity.into());
+        self
+    }
+
+    /// Supply short-lived hosted Identity credentials asynchronously, once per request.
+    pub fn token_provider(mut self, provider: impl AccessTokenProvider + 'static) -> Self {
+        self.token_provider = Some(Arc::new(provider));
+        self
+    }
+
     pub async fn connect(self) -> Result<Client, SdkError> {
-        let socket = self.socket.ok_or(SdkError::Builder { field: "socket" })?;
-        let transport = Transport::new(socket);
+        let remote_field_is_set = self.https_endpoint.is_some()
+            || self.trust_roots.is_some()
+            || self.server_identity.is_some()
+            || self.token_provider.is_some();
+        let transport = match (self.socket, remote_field_is_set) {
+            (Some(socket), false) => Transport::new(socket),
+            (None, true) => Transport::remote(
+                self.https_endpoint.ok_or(SdkError::Builder {
+                    field: "https_endpoint",
+                })?,
+                self.trust_roots.ok_or(SdkError::Builder {
+                    field: "trust_roots",
+                })?,
+                self.server_identity.ok_or(SdkError::Builder {
+                    field: "server_identity",
+                })?,
+                self.token_provider.ok_or(SdkError::Builder {
+                    field: "token_provider",
+                })?,
+            )?,
+            (Some(_), true) => {
+                return Err(SdkError::Protocol(
+                    "unix_socket and https_endpoint are mutually exclusive".to_owned(),
+                ));
+            }
+            (None, false) => return Err(SdkError::Builder { field: "socket" }),
+        };
         let response = transport.request("GET", "/v1/machine", None).await?;
         let snapshot: substrate_wire::CapabilitySnapshot = decode_result(&response)?;
         Ok(Client {
@@ -1085,8 +1198,12 @@ impl PipeSession {
     }
 
     pub async fn attach(&self) -> Result<PipeChannel, SdkError> {
-        let target = format!("/v1/sessions/{}/attach", encode_path(&self.observed.id));
-        let socket = self.client.inner.transport.websocket(&target).await?;
+        let socket = self
+            .client
+            .inner
+            .transport
+            .session_websocket(&self.observed.id)
+            .await?;
         Ok(PipeChannel {
             socket,
             next_sequence: 1,
@@ -1173,7 +1290,7 @@ impl PipeSession {
 }
 
 pub struct PipeChannel {
-    socket: tokio_tungstenite::WebSocketStream<tokio::net::UnixStream>,
+    socket: transport::WebSocket,
     next_sequence: u64,
     mode: SessionMode,
 }

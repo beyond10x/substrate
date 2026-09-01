@@ -20,8 +20,13 @@ linked-daemon = ["dep:substrate-daemon"]
 [dependencies]
 base64.workspace = true
 chrono.workspace = true
+ed25519-dalek.workspace = true
 futures-util.workspace = true
+getrandom.workspace = true
+http.workspace = true
 nix = { workspace = true, features = ["process", "signal", "user"] }
+rustls.workspace = true
+rustls-pemfile.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_urlencoded.workspace = true
@@ -30,8 +35,10 @@ substrate-wire = { package = "b10x-substrate-wire", path = "../substrate-wire", 
 tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tokio-rustls.workspace = true
 tokio-tungstenite.workspace = true
 ulid.workspace = true
+zeroize.workspace = true
 
 [lints]
 workspace = true

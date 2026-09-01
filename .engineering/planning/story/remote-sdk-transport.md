@@ -2,7 +2,7 @@
 format: aep.planning-md/1
 id: story:remote-sdk-transport
 kind: story
-status: proposed
+status: active
 title: The Rust SDK connects over HTTPS and WSS
 summary: Explicit roots, server identity and an asynchronous token provider extend the SDK without changing its Unix-socket behavior.
 owner: substrate
@@ -16,7 +16,7 @@ relations:
 - depends_on: story:production-tls-control-listener
 - depends_on: story:hosted-trust-envelope-admission
 - depends_on: story:sdk-promoted-contract-parity
-revision: 3
+revision: 4
 ---
 # Story: The Rust SDK connects over HTTPS and WSS
 
