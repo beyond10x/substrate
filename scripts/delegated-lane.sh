@@ -57,4 +57,10 @@ cargo build -p b10x-substrate-daemon --bin substrate-daemon --locked
 SUBSTRATE_TEST_DAEMON="${PWD}/target/debug/substrate-daemon" \
   cargo test -p b10x-substrate-sdk --test managed --locked -- --nocapture --test-threads=1
 
+# The MCP adapter owns the same kind of exclusive delegated root, but runs after the SDK daemon has
+# fully stopped. Its shipped-binary journey executes sha256sum, reads exact output and metrics, then
+# leaves an active workload for EOF cleanup and proves both its pid and exact cgroup absent.
+SUBSTRATE_MCP_CGROUP_ROOT="${root}" \
+  cargo test -p b10x-substrate-mcp --test stdio --locked -- --nocapture --test-threads=1
+
 exec cargo test -p b10x-substrate-daemon --test runtime_vectors -- --nocapture "$@"

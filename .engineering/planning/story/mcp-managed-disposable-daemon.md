@@ -2,7 +2,7 @@
 format: aep.planning-md/1
 id: story:mcp-managed-disposable-daemon
 kind: story
-status: proposed
+status: implemented
 title: Launch a disposable Substrate daemon behind MCP
 summary: A local MCP adapter owns one fresh daemon lifecycle and projects its public operations for harness testing.
 owner: substrate
@@ -14,7 +14,7 @@ tags:
 relations:
 - decomposes: epic:mcp-test-surface
 - depends_on: story:sdk-promoted-contract-parity
-revision: 4
+revision: 7
 ---
 # Story: Launch a disposable daemon behind MCP
 
@@ -28,7 +28,7 @@ The adapter verifies the advertised contract and capability snapshot, preserves 
 
 ## Design-closure audit — 2026-09-01
 
-Implementation requires `docs/design/19-mcp-disposable-test-adapter.md` to be accepted after SDK parity. The adapter remains a private, development-only stdio composition over the SDK and Unix socket; it is not production ingress and does not imply public OCI publication.
+Implementation requires `docs/design/19-mcp-disposable-test-adapter.md` to be accepted after SDK parity. The adapter remains a private, development-only stdio composition over the SDK and Unix socket; it is not production ingress. ADR 0025 separately accepts public OCI distribution of that test-only binary without making the crate publishable or the MCP surface stable.
 
 The design must fix: a private SDK-only crate boundary; a custom bounded JSONL transport rather than an unbounded stdio helper; caller-supplied operation ids on every mutation; exact refusal/observation projection; no model-selected host roots, secret slots or apertures; tracked exec/workspace teardown before daemon shutdown; an exclusive process-free delegated cgroup root; and honest SIGKILL semantics. Portable OCI smoke proves the named sandbox refusal; positive execution stays in the native delegated lane until a separate container-runtime design supplies the confinement prerequisites.
 

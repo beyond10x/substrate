@@ -4,7 +4,8 @@
 # existing eligible tag after a partial release failed; it runs the current protected-main workflow
 # against the immutable tagged source and never moves the tag. The results are
 # `ghcr.io/beyond10x/b10x-substrate-daemon:<version>` and
-# `ghcr.io/beyond10x/b10x-substrate-wire:<bundle-version>`, both keyless-signed with cosign. Their
+# `ghcr.io/beyond10x/b10x-substrate-wire:<bundle-version>` and the development-only
+# `ghcr.io/beyond10x/b10x-substrate-mcp:<version>`, all keyless-signed with cosign. Their
 # digests are written to the GitHub release and emitted as the exact `CHANGELOG.md` stanza that must
 # land through the protected-main pull-request path. `b10x-substrate-*` is the published-package
 # prefix fixed by README.md:31.
@@ -21,10 +22,11 @@
 #     bar for `main` (AGENTS.md § "The gate"); this workflow reads that workflow's own conclusion
 #     for the exact tagged SHA rather than re-running a lookalike, so "the gate was green for this
 #     commit" means the recorded run, not a second opinion.
-#   * an existing daemon-image version tag, or a contract-bundle tag whose digest differs from the
-#     deterministic local package. Both canonical tags are write-once. A later daemon release may
-#     reuse the same byte-identical bundle, but it never replaces the bundle tag.
-#   * a signature that does not verify. Signing and `cosign verify` for **both** artifacts run before
+#   * an existing image version tag on an initial tag-push run, an existing image whose source label
+#     disagrees during explicit recovery, or a contract-bundle tag whose digest differs from the
+#     deterministic local package. All canonical tags are write-once. Recovery may verify and reuse
+#     an image already written by this same release; it never replaces an image or bundle tag.
+#   * a signature that does not verify. Signing and `cosign verify` for **all** artifacts run before
 #     the GitHub release is created, so a Sigstore failure fails the job with nothing announced.
 #     Registry writes cannot be rolled back here, but no release, changelog stanza or digest claim
 #     is emitted on their strength.
@@ -35,7 +37,7 @@
 # (push to GHCR) and `id-token: write` (the OIDC token keyless cosign signs with) and nothing else.
 # Neither write scope exists anywhere but that one job.
 #
-# Identity. Both GHCR pushes and the GitHub release use the run's own `GITHUB_TOKEN`, so the release
+# Identity. All GHCR pushes and the GitHub release use the run's own `GITHUB_TOKEN`, so the release
 # holds no credential that reaches beyond this repository. It carries no secret to set, rotate or
 # leak: GitHub mints it per run and expires it when the run ends.
 #
@@ -47,7 +49,7 @@
 # the digest-recording pull request through `scripts/as-bot.sh`, where the App key never enters this
 # public repository's Actions secrets. AGENTS.md § "Bot identity" records the exception.
 #
-# Protected `main` requires `Full gate`. The workflow therefore emits both exact digest lines in its
+# Protected `main` requires `Full gate`. The workflow therefore emits every exact digest line in its
 # summary after publication; a bot-authored pull request records them and receives the normal gate.
 #
 # Platform. `linux/amd64` only: the hosted runner is amd64 and a cross-built or emulated Rust
@@ -83,6 +85,7 @@ concurrency:
 
 env:
   IMAGE: ghcr.io/beyond10x/b10x-substrate-daemon
+  MCP_IMAGE: ghcr.io/beyond10x/b10x-substrate-mcp
   # Explicit, reviewable publication input. A successor bundle must move this pin in the same
   # change; deriving "largest directory" at release time would silently broaden what a tag ships.
   BUNDLE_IMAGE: ghcr.io/beyond10x/b10x-substrate-wire
@@ -259,7 +262,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   release:
-    name: Build, sign and publish daemon and development bundle
+    name: Build, sign and publish daemon, MCP adapter and development bundle
     needs: preflight
     runs-on: ubuntu-latest
     # A release build is a cold `cargo build --release` of the whole workspace inside the image;
@@ -301,7 +304,7 @@ jobs:
           docker buildx create --name b10x-release --driver docker-container --use
           docker buildx inspect --bootstrap
 
-      # `packages: write` on the GITHUB_TOKEN is what pushes both artifacts. No repository or
+      # `packages: write` on the GITHUB_TOKEN is what pushes all artifacts. No repository or
       # organization credential is added to this public repository.
       - name: Log in to GHCR
         env:
@@ -320,9 +323,11 @@ jobs:
         with:
           version: 1.3.3
 
-      - name: Refuse an existing release or daemon-image version tag
+      - name: Resolve write-once image version tags
+        id: artifact-state
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
           if gh release view "${VERSION}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
@@ -330,8 +335,22 @@ jobs:
             exit 1
           fi
           if docker manifest inspect "${IMAGE}:${VERSION}" >/dev/null 2>&1; then
-            echo "refused: ${IMAGE}:${VERSION} already exists; canonical image tags are write-once." >&2
-            exit 1
+            if [ "$EVENT_NAME" != workflow_dispatch ]; then
+              echo "refused: ${IMAGE}:${VERSION} already exists; initial release runs never reuse image tags." >&2
+              exit 1
+            fi
+            echo "daemon-exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "daemon-exists=false" >> "$GITHUB_OUTPUT"
+          fi
+          if docker manifest inspect "${MCP_IMAGE}:${VERSION}" >/dev/null 2>&1; then
+            if [ "$EVENT_NAME" != workflow_dispatch ]; then
+              echo "refused: ${MCP_IMAGE}:${VERSION} already exists; initial release runs never reuse image tags." >&2
+              exit 1
+            fi
+            echo "mcp-exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "mcp-exists=false" >> "$GITHUB_OUTPUT"
           fi
 
       # The packager reads the frozen directory and writes only under target/. Full checkout
@@ -501,6 +520,8 @@ jobs:
       # (Dockerfile:13-14), so the image says which commit produced it.
       - name: Build, smoke-test and push the daemon image once
         id: build
+        env:
+          EXISTS: ${{ steps.artifact-state.outputs.daemon-exists }}
         run: |
           set -euo pipefail
           docker buildx build \
@@ -533,11 +554,33 @@ jobs:
             echo "refused: release tag moved from ${SOURCE_SHA} to ${current_sha} before publication." >&2
             exit 1
           fi
-          if docker manifest inspect "${IMAGE}:${VERSION}" >/dev/null 2>&1; then
-            echo "refused: ${IMAGE}:${VERSION} appeared before push; it will not be overwritten." >&2
-            exit 1
+          if [ "$EXISTS" = true ]; then
+            docker pull "${IMAGE}:${VERSION}"
+            revision=$(docker image inspect "${IMAGE}:${VERSION}" \
+              --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
+            if [ "$revision" != "$SOURCE_SHA" ]; then
+              echo "refused: existing ${IMAGE}:${VERSION} names source ${revision}, not ${SOURCE_SHA}." >&2
+              exit 1
+            fi
+            docker run --rm --entrypoint /usr/local/bin/substrate-daemon \
+              "${IMAGE}:${VERSION}" --help >/dev/null
+            container=$(docker create "${IMAGE}:${VERSION}")
+            docker cp \
+              "${container}:/usr/local/bin/substrate-daemon" \
+              target/image-under-test/substrate-daemon
+            docker rm "${container}"
+            chmod 0755 target/image-under-test/substrate-daemon
+            SUBSTRATE_VECTORS_DAEMON="${PWD}/target/image-under-test/substrate-daemon" \
+              cargo test --release --locked \
+                -p b10x-substrate-daemon --test runtime_vectors -- --nocapture
+            echo "reusing ${IMAGE}:${VERSION} from the same tagged source ${SOURCE_SHA}"
+          else
+            if docker manifest inspect "${IMAGE}:${VERSION}" >/dev/null 2>&1; then
+              echo "refused: ${IMAGE}:${VERSION} appeared before push; it will not be overwritten." >&2
+              exit 1
+            fi
+            docker push "${IMAGE}:${VERSION}"
           fi
-          docker push "${IMAGE}:${VERSION}"
           digest=$(docker buildx imagetools inspect "${IMAGE}:${VERSION}" \
             --format '{{json .Manifest.Digest}}' | tr -d '"')
           case "$digest" in
@@ -545,6 +588,80 @@ jobs:
             *) echo "refused: buildx reported no image digest ('${digest}')." >&2; exit 1 ;;
           esac
           echo "pushed ${IMAGE}:${VERSION} -> ${digest}"
+          echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Build, smoke-test and push the disposable MCP image once
+        id: mcp-build
+        env:
+          EXISTS: ${{ steps.artifact-state.outputs.mcp-exists }}
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --file Dockerfile.mcp \
+            --platform linux/amd64 \
+            --build-arg "SOURCE_SHA=${SOURCE_SHA}" \
+            --tag "${MCP_IMAGE}:${VERSION}" \
+            --provenance=false \
+            --sbom=false \
+            --metadata-file mcp-image-metadata.json \
+            --load \
+            .
+
+          container=$(docker create "${MCP_IMAGE}:${VERSION}")
+          mkdir -p target/mcp-image-under-test
+          docker cp \
+            "${container}:/usr/local/bin/substrate-mcp" \
+            target/mcp-image-under-test/substrate-mcp
+          docker rm "${container}"
+          chmod 0755 target/mcp-image-under-test/substrate-mcp
+          SUBSTRATE_MCP_BINARY="${PWD}/target/mcp-image-under-test/substrate-mcp" \
+            cargo test --release --locked \
+              -p b10x-substrate-mcp --test stdio -- --nocapture
+          SUBSTRATE_MCP_DOCKER_IMAGE="${MCP_IMAGE}:${VERSION}" \
+            cargo test --release --locked \
+              -p b10x-substrate-mcp --test stdio -- --nocapture
+
+          git fetch --force --no-tags origin "+refs/tags/${VERSION}:refs/tags/${VERSION}"
+          current_sha=$(git rev-parse "refs/tags/${VERSION}^{commit}")
+          if [ "$current_sha" != "$SOURCE_SHA" ]; then
+            echo "refused: release tag moved from ${SOURCE_SHA} to ${current_sha} before MCP publication." >&2
+            exit 1
+          fi
+          if [ "$EXISTS" = true ]; then
+            docker pull "${MCP_IMAGE}:${VERSION}"
+            revision=$(docker image inspect "${MCP_IMAGE}:${VERSION}" \
+              --format '{{ index .Config.Labels "org.opencontainers.image.revision" }}')
+            if [ "$revision" != "$SOURCE_SHA" ]; then
+              echo "refused: existing ${MCP_IMAGE}:${VERSION} names source ${revision}, not ${SOURCE_SHA}." >&2
+              exit 1
+            fi
+            container=$(docker create "${MCP_IMAGE}:${VERSION}")
+            docker cp \
+              "${container}:/usr/local/bin/substrate-mcp" \
+              target/mcp-image-under-test/substrate-mcp
+            docker rm "${container}"
+            chmod 0755 target/mcp-image-under-test/substrate-mcp
+            SUBSTRATE_MCP_BINARY="${PWD}/target/mcp-image-under-test/substrate-mcp" \
+              cargo test --release --locked \
+                -p b10x-substrate-mcp --test stdio -- --nocapture
+            SUBSTRATE_MCP_DOCKER_IMAGE="${MCP_IMAGE}:${VERSION}" \
+              cargo test --release --locked \
+                -p b10x-substrate-mcp --test stdio -- --nocapture
+            echo "reusing ${MCP_IMAGE}:${VERSION} from the same tagged source ${SOURCE_SHA}"
+          else
+            if docker manifest inspect "${MCP_IMAGE}:${VERSION}" >/dev/null 2>&1; then
+              echo "refused: ${MCP_IMAGE}:${VERSION} appeared before push; it will not be overwritten." >&2
+              exit 1
+            fi
+            docker push "${MCP_IMAGE}:${VERSION}"
+          fi
+          digest=$(docker buildx imagetools inspect "${MCP_IMAGE}:${VERSION}" \
+            --format '{{json .Manifest.Digest}}' | tr -d '"')
+          case "$digest" in
+            sha256:*) ;;
+            *) echo "refused: buildx reported no MCP image digest ('${digest}')." >&2; exit 1 ;;
+          esac
+          echo "pushed ${MCP_IMAGE}:${VERSION} -> ${digest}"
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
       # Keyless: the certificate is issued against this job's OIDC token (`id-token: write`), so
@@ -557,6 +674,13 @@ jobs:
         run: |
           set -euo pipefail
           cosign sign --yes "${IMAGE}@${DIGEST}"
+
+      - name: Sign the disposable MCP image keylessly
+        env:
+          MCP_DIGEST: ${{ steps.mcp-build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cosign sign --yes "${MCP_IMAGE}@${MCP_DIGEST}"
 
       # The verification an operator will run, run here first. `--certificate-identity` is exact,
       # not a regex: it is this file, at this tag, and a signature from any other workflow, ref or
@@ -577,6 +701,21 @@ jobs:
           jq -e 'length > 0' cosign-verify.json > /dev/null
           echo "identity=${identity}" >> "$GITHUB_OUTPUT"
 
+      - name: Verify the MCP signature with the workflow identity
+        id: mcp-verify
+        env:
+          MCP_DIGEST: ${{ steps.mcp-build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          identity="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}"
+          echo "certificate identity: ${identity}"
+          cosign verify \
+            --certificate-identity "${identity}" \
+            --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+            "${MCP_IMAGE}@${MCP_DIGEST}" > mcp-cosign-verify.json
+          jq -e 'length > 0' mcp-cosign-verify.json >/dev/null
+          echo "identity=${identity}" >> "$GITHUB_OUTPUT"
+
       - name: Prove the image is anonymously retrievable
         id: anonymous
         env:
@@ -585,6 +724,15 @@ jobs:
           set -euo pipefail
           anonymous_config=$(mktemp -d)
           DOCKER_CONFIG="$anonymous_config" docker pull "${IMAGE}@${DIGEST}"
+
+      - name: Prove the MCP image is anonymously retrievable
+        id: mcp-anonymous
+        env:
+          MCP_DIGEST: ${{ steps.mcp-build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          anonymous_config=$(mktemp -d)
+          DOCKER_CONFIG="$anonymous_config" docker pull "${MCP_IMAGE}@${MCP_DIGEST}"
 
       # Everything below announces. Nothing above it did.
 
@@ -603,6 +751,8 @@ jobs:
           IDENTITY: ${{ steps.verify.outputs.identity }}
           BUNDLE_DIGEST: ${{ steps.bundle.outputs.digest }}
           BUNDLE_IDENTITY: ${{ steps.bundle-verify.outputs.identity }}
+          MCP_DIGEST: ${{ steps.mcp-build.outputs.digest }}
+          MCP_IDENTITY: ${{ steps.mcp-verify.outputs.identity }}
         run: |
           set -euo pipefail
           cat > release-notes.md <<NOTES
@@ -624,6 +774,22 @@ jobs:
           docker pull ${IMAGE}@${DIGEST}
           \`\`\`
 
+          ## Disposable MCP test image
+
+          | | |
+          | --- | --- |
+          | image | \`${MCP_IMAGE}:${VERSION}\` |
+          | digest | \`${MCP_DIGEST}\` |
+          | posture | local stdio development/conformance testing |
+
+          Run by digest with stdin attached, no network, a read-only root and private temporary
+          state:
+
+          \`\`\`console
+          docker run --rm -i --network=none --read-only --tmpfs /tmp:rw,nosuid,nodev \
+            ${MCP_IMAGE}@${MCP_DIGEST}
+          \`\`\`
+
           ## Development contract bundle
 
           | | |
@@ -642,7 +808,7 @@ jobs:
 
           ## Verify the signatures
 
-          Both artifacts are signed keylessly through Sigstore. Each certificate identity is this
+          All three artifacts are signed keylessly through Sigstore. Each certificate identity is this
           workflow at the ref that performed the release, so a signature from any other workflow,
           ref or repository fails:
 
@@ -656,6 +822,11 @@ jobs:
             --certificate-identity ${BUNDLE_IDENTITY} \\
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \\
             ${BUNDLE_IMAGE}@${BUNDLE_DIGEST}
+
+          cosign verify \\
+            --certificate-identity ${MCP_IDENTITY} \\
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \\
+            ${MCP_IMAGE}@${MCP_DIGEST}
           \`\`\`
 
           ## What this release does not claim
@@ -669,6 +840,9 @@ jobs:
             describe the static-bearer TCP posture that design 06, section 1, marks
             \`development_only\`. The hosted trust envelope is accepted in design and not
             implemented; do not run this image as a hosted deployment.
+          - **The MCP image is local test tooling, not production ingress.** It has no listener,
+            authentication or remote transport and is intended for an attached stdio harness with
+            \`--network=none\`. Its tool surface is not a stable contract independent of Substrate.
           - **The binary is not bit-for-bit reproducible.** The digest above is recorded;
             reproducing it from source independently is a later milestone.
           - **The delegated execution lane is not exercised by CI.** A host without a delegated
@@ -693,14 +867,15 @@ jobs:
             --verify-tag
           gh release edit "${VERSION}" --repo "${GITHUB_REPOSITORY}" --draft=false
 
-      # Both digests also belong in `CHANGELOG.md` under this version's heading (AGENTS.md,
+      # All artifact digests also belong in `CHANGELOG.md` under this version's heading (AGENTS.md,
       # section "Releases"). Protected `main` requires Full gate, so the release workflow neither
       # pushes it directly nor creates a GITHUB_TOKEN-authored PR whose events GitHub would suppress.
-      # It emits the exact bot-PR body after both signatures verify and the GitHub release exists.
+      # It emits the exact bot-PR body after every signature verifies and the GitHub release exists.
       - name: Describe the required changelog pull request
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
           BUNDLE_DIGEST: ${{ steps.bundle.outputs.digest }}
+          MCP_DIGEST: ${{ steps.mcp-build.outputs.digest }}
         run: |
           {
             echo "CHANGELOG.md is protected by the Full gate and is not pushed directly."
@@ -708,6 +883,7 @@ jobs:
             echo
             echo "Image: \`${IMAGE}:${VERSION}\` at \`${DIGEST}\`, keyless-signed; verify with \`cosign verify\`."
             echo "Contract bundle: \`${BUNDLE_IMAGE}:${BUNDLE_VERSION}\` at \`${BUNDLE_DIGEST}\`, annotated \`development\`, keyless-signed; verify with \`cosign verify\`."
+            echo "Disposable MCP image: \`${MCP_IMAGE}:${VERSION}\` at \`${MCP_DIGEST}\`, development-only and keyless-signed; verify with \`cosign verify\`."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Release summary
@@ -715,6 +891,7 @@ jobs:
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
           BUNDLE_DIGEST: ${{ steps.bundle.outputs.digest }}
+          MCP_DIGEST: ${{ steps.mcp-build.outputs.digest }}
         run: |
           {
             echo "### Release ${VERSION}"
@@ -725,11 +902,15 @@ jobs:
             echo "| digest | \`${DIGEST:-<not built>}\` |"
             echo "| development bundle | \`${BUNDLE_IMAGE}:${BUNDLE_VERSION}\` |"
             echo "| bundle digest | \`${BUNDLE_DIGEST:-<not built>}\` |"
+            echo "| disposable MCP image | \`${MCP_IMAGE}:${VERSION}\` |"
+            echo "| MCP digest | \`${MCP_DIGEST:-<not built>}\` |"
             echo "| SOURCE_SHA | \`${SOURCE_SHA}\` |"
             echo "| gate run | ${GATE_RUN_URL} |"
             echo "| daemon signature step | ${{ steps.verify.outcome }} |"
             echo "| bundle signature step | ${{ steps.bundle-verify.outcome }} |"
+            echo "| MCP signature step | ${{ steps.mcp-verify.outcome }} |"
             echo "| anonymous pull step | ${{ steps.anonymous.outcome }} |"
+            echo "| MCP anonymous pull step | ${{ steps.mcp-anonymous.outcome }} |"
             echo "| release publication step | ${{ steps.publish.outcome }} |"
             echo
             echo "The published wire contract remains a **development** bundle; this release does not make it stable."

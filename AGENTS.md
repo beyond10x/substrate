@@ -158,6 +158,8 @@ bundles' reproducibility proof (invariant 6), not as tooling.
 |---|---|---|
 | `check-toolchain [--root <dir>]` | a Rust version the three pinning files disagree on | yes |
 | `check-links` | a machine-local Markdown link, or a repository-relative target that is not there | yes |
+| `check-mcp-boundary` | a publishable MCP crate, a Substrate implementation dependency, an unpinned/featured MCP stack, or a built-in unbounded/remote transport | yes |
+| `mcp-codex-smoke --server <path>` | manually asks an authenticated ephemeral Codex run to exercise the shipped stdio adapter | no |
 | `check-adrs` | an ADR whose identity, frontmatter, index row or supersession link does not agree | yes |
 | `check-secrets` | a reachable Git object carrying a credential, or an incomplete history scan | yes |
 | `check-advisories` | a RustSec vulnerability or forbidden HTTP/2 dependency | yes |
@@ -205,7 +207,7 @@ promoted registry; the delegated cases also include an interactive shell driven 
 (`crates/substrate-daemon/tests/runtime_vectors.rs`, `PORTABLE_CASES` and `DELEGATED_CASES`). Its delegated lane runs only when
 `SUBSTRATE_VECTORS_CGROUP_ROOT` names a delegated cgroup v2 subtree the test process is inside;
 unset, those cases are **absent, never reported as passed** (invariant 3). **`bash scripts/delegated-lane.sh`
-runs that lane plus the host and public-SDK delegated cases, and needs no privilege** — it asks
+runs that lane plus the host, public-SDK and disposable-MCP delegated cases, and needs no privilege** — it asks
 systemd for a delegated scope, moves itself into a
 child group so the delegation root stays process-free, and sets the variable. Do not conclude the
 delegated lane cannot run here: a user session's own scope is root-owned, so `mkdir` in it fails,
@@ -258,17 +260,21 @@ workflow. `cargo xtask check-packages` proves the closed allowlist and package c
 tag; crates.io is the authority for whether an already-published version can be uploaded.
 
 **Pushing that tag runs [`.github/workflows/release.yml`](.github/workflows/release.yml)**, which
-builds the `Dockerfile` and packages the explicitly pinned current development bundle with
+builds `Dockerfile` and `Dockerfile.mcp` and packages the explicitly pinned current development bundle with
 `cargo xtask package-bundle`. It publishes
 `ghcr.io/beyond10x/b10x-substrate-daemon:<version>` and
-`ghcr.io/beyond10x/b10x-substrate-wire:<bundle-version>`, keyless-signs both digests and verifies
-both signatures **before** it announces anything. It refuses — publishing nothing — a tag that is
+`ghcr.io/beyond10x/b10x-substrate-mcp:<version>`, plus
+`ghcr.io/beyond10x/b10x-substrate-wire:<bundle-version>`; keyless-signs all three digests and verifies
+all three signatures **before** it announces anything. It refuses — publishing nothing — a tag that is
 not the bare version form (so `0.2.2-rc.0` produces nothing), a lightweight tag, a commit that is not
 an ancestor of `main`, a version that disagrees with `[workspace.package] version`, a commit for
-which `gate.yml` has not concluded `success`, an existing daemon version tag, or an existing bundle
-tag whose digest differs from the deterministic local package. A later daemon release may reuse a
-byte-identical bundle: the workflow verifies the digest, signs it again with that release's exact
-workflow identity, and never replaces the write-once tag. Release runs serialize globally because
+which `gate.yml` has not concluded `success`, an existing daemon or MCP version tag on an initial
+tag-push run, or an existing bundle tag whose digest differs from the deterministic local package.
+An explicit protected-`main` recovery dispatch may reuse an image already written by that same
+release only after its source-revision label and exact shipped binary pass again; it never replaces
+the write-once tag. A later daemon release may reuse a byte-identical bundle: the workflow verifies
+the digest, signs it again with that release's exact workflow identity, and never replaces the tag.
+Release runs serialize globally because
 consecutive daemon releases can name that same bundle. The workflow reads the recorded gate
 conclusion for the tagged SHA rather than re-running a lookalike, and copies the packager's exact OCI
 layout with ORAS rather than constructing another manifest at publication time. It proves the
@@ -278,17 +284,17 @@ package visibility leaves a safe retry path.
 `packages: write` and `id-token: write` exist on the release job and nowhere else; that job holds
 `contents: write` only to create the GitHub release. Everything it does uses the run's own
 `GITHUB_TOKEN`; **the release needs no repository secret at all** (§ *Bot identity*). The GitHub
-release records both digests and exact `cosign verify` commands. **`0.2.3` is published**:
+release records all artifact digests and exact `cosign verify` commands. **`0.2.3` is published**:
 `ghcr.io/beyond10x/b10x-substrate-daemon:0.2.3` at
 `sha256:ab10158266b579d705ce8422c7d2a6e783cde950d30e100f61ca6befc4d0beda`, keyless-signed and
 `cosign verify`-ed in the run before anything announced. No contract-bundle tag has been published
 yet; the bundle workflow landed after the latest release tag.
 
 `main` is protected by the `Full gate` status check, so the workflow never pushes a changelog commit
-or creates a `GITHUB_TOKEN` pull request whose events GitHub would suppress. After both signatures
-verify and the GitHub release exists, its summary emits the exact daemon and contract-bundle digest
-lines for a workstation's bot-authored pull request. That PR receives the same gate as every other
-change.
+or creates a `GITHUB_TOKEN` pull request whose events GitHub would suppress. After every signature
+verifies and the GitHub release exists, its summary emits the exact daemon, disposable-MCP and
+contract-bundle digest lines for a workstation's bot-authored pull request. That PR receives the
+same gate as every other change.
 
 A signed, digest-pinned OCI bundle is still **not a stable contract release**. The published
 artifact is annotated `dev.b10x.contract.status=development`; atlas ADR 0019 governs any later

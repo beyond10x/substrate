@@ -9,6 +9,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- **A disposable local MCP test adapter drives Substrate through the public SDK.** The private
+  `substrate-mcp` binary owns one fresh linked daemon, exposes a bounded closed stdio tool/resource
+  surface, preserves caller operation ids and exact refusals, and performs ordered exec/workspace/
+  daemon cleanup. Portable, delegated and real Codex clean-room journeys prove the surface; a new
+  repository gate keeps the crate private, SDK-only and free of remote or unbounded MCP transports.
 - **The public Rust SDK covers the promoted development contract.** It now exposes guarded v2 file
   operations, bounded directory/tree and exec-output pages, reconciliation snapshots, PTY start and
   resize, metrics pull and stream, complete session observations, exact optional capability facts,

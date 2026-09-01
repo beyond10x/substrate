@@ -21,6 +21,7 @@ run cargo xtask check-secrets
 run cargo xtask check-advisories
 run cargo xtask check-licenses
 run cargo xtask check-packages
+run cargo xtask check-mcp-boundary
 run python3 scripts/check-contract-bundle.py
 run python3 scripts/check-contract-bundle-0.2.0.py
 run python3 scripts/check-contract-bundle-0.3.0.py
