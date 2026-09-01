@@ -2646,7 +2646,10 @@ pub fn validate_read_only_roots(roots: &[ReadOnlyRoot]) -> Result<(), WireValida
                 APERTURE_CA_BUNDLE_PATH,
             ])
             .any(|owned| {
-                root.mount == owned || (owned != "/" && is_path_beneath(&root.mount, owned))
+                root.mount == owned
+                    || (owned != "/"
+                        && (is_path_beneath(&root.mount, owned)
+                            || is_path_beneath(owned, &root.mount)))
             });
         if owned_mount {
             return Err(WireValidationError::ReservedReadOnlyRootMount);
@@ -3926,8 +3929,10 @@ mod tests {
             "/scratch/cache",
             APERTURE_HOSTS_PATH,
             "/etc/hosts/generated",
+            "/etc",
             APERTURE_CA_BUNDLE_PATH,
             "/etc/ssl/certs/ca-certificates.crt/generated",
+            "/etc/ssl",
         ] {
             assert_eq!(
                 validate_read_only_roots(&[root("/home/someone/.cargo", mount)])
