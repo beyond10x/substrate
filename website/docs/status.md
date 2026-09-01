@@ -25,6 +25,7 @@ verify it through `GET /v1/machine`.
 | observations | explicit live and terminal wall, CPU, memory peak/current, process, OOM, block-I/O, and scratch usage facts |
 | sessions | leased raw-pipe and probe-gated PTY modes with one Unix-WebSocket attachment |
 | Rust SDK source | complete promoted-contract coverage, serializable observations, exact optional facts, keyed mutations, PTY resize, metrics and snapshots |
+| disposable MCP source | private stdio adapter over the SDK; bounded tools/resources, caller operation IDs, portable named refusal and native delegated cleanup evidence |
 | capsules | digest-verified read-only runtime material beside a writable workspace |
 | distribution | Apache-2.0 source and a keyless-signed daemon image |
 

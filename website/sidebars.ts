@@ -21,6 +21,7 @@ const sidebars: SidebarsConfig = {
       collapsed: false,
       items: [
         {type: 'doc', id: 'guides/rust-sdk', label: 'Rust SDK'},
+        {type: 'doc', id: 'guides/mcp-adapter', label: 'Test through MCP'},
         {type: 'doc', id: 'guides/run-a-command', label: 'Run a bounded command'},
         {type: 'doc', id: 'guides/storage-and-metrics', label: 'Storage and metrics'},
         {type: 'doc', id: 'guides/deployment', label: 'Deployment postures'},

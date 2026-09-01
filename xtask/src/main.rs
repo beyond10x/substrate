@@ -13,6 +13,8 @@ mod bundle;
 mod json;
 mod licenses;
 mod links;
+mod mcp;
+mod mcp_smoke;
 mod package;
 mod packages;
 mod render;
@@ -63,6 +65,12 @@ enum Command {
     /// Reject machine-local Markdown links and broken repository-relative targets.
     #[command(name = "check-links")]
     Links,
+    /// Verify the private MCP adapter stays behind the SDK and bounded stdio boundary.
+    #[command(name = "check-mcp-boundary")]
+    McpBoundary,
+    /// Run the manual credentialed Codex smoke against a shipped MCP binary.
+    #[command(name = "mcp-codex-smoke")]
+    McpCodexSmoke(mcp_smoke::Args),
     /// Validate ADR identity, frontmatter, index agreement, and supersession links.
     #[command(name = "check-adrs")]
     Adrs,
@@ -106,6 +114,8 @@ fn dispatch() -> Result<ExitCode> {
             toolchain::check(&root)
         }
         Command::Links => links::check(&repo::root()?)?,
+        Command::McpBoundary => mcp::check(&repo::root()?)?,
+        Command::McpCodexSmoke(args) => return mcp_smoke::run(&args),
         Command::Adrs => adrs::check(&repo::root()?)?,
         Command::CheckJson(args) => return json::run(&args),
         Command::PackageBundle(args) => return package::run(&args),

@@ -3,7 +3,7 @@
 //! The live registry and Sigstore transparency log are necessarily release-time evidence. These
 //! tests keep the repository-controlled half fail-closed: the current bundle is explicit, its
 //! deterministic OCI layout is the thing copied, canonical tags are checked before publication,
-//! both artifacts are signed and verified by digest before the GitHub release is announced, and
+//! all three artifacts are signed and verified by digest before the GitHub release is announced, and
 //! protected `main` is never pushed around. A byte-identical write-once bundle may be reused by a
 //! later daemon release, while a digest mismatch is always refused.
 
@@ -11,6 +11,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const WORKFLOW: &str = include_str!("../../.github/workflows/release.yml");
+const MCP_DOCKERFILE: &str = include_str!("../../Dockerfile.mcp");
 
 fn repository_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -119,15 +120,23 @@ fn a_partial_release_can_recover_only_an_existing_tag_from_protected_main() {
     position("[ \"$WORKFLOW_REF\" != \"refs/heads/main\" ]");
     position("git show \"${source_sha}:Cargo.toml\"");
     position("[ \"$EVENT_NAME\" = \"push\" ] && [ \"$source_sha\" != \"$EVENT_SHA\" ]");
+    position("daemon-exists=true");
+    position("mcp-exists=true");
+    assert_eq!(occurrences("from the same tagged source ${SOURCE_SHA}"), 2);
+    assert!(occurrences("org.opencontainers.image.revision") >= 2);
 }
 
 #[test]
 fn canonical_tags_are_never_overwritten() {
-    let refusal = position("Refuse an existing release or daemon-image version tag");
+    let refusal = position("Resolve write-once image version tags");
     let daemon_push = position("docker push \"${IMAGE}:${VERSION}\"");
+    let mcp_push = position("docker push \"${MCP_IMAGE}:${VERSION}\"");
     let bundle_push = position("oras cp --from-oci-layout");
     assert!(refusal < daemon_push);
+    assert!(refusal < mcp_push);
     assert!(refusal < bundle_push);
+    assert_eq!(occurrences("docker push \"${IMAGE}:${VERSION}\""), 1);
+    assert_eq!(occurrences("docker push \"${MCP_IMAGE}:${VERSION}\""), 1);
     assert!(occurrences("oras resolve \"${BUNDLE_IMAGE}:${BUNDLE_VERSION}\"") >= 3);
     position("reusing byte-identical ${BUNDLE_IMAGE}:${BUNDLE_VERSION}");
     position("not deterministic package ${PACKAGE_DIGEST}; it will not be overwritten");
@@ -135,17 +144,20 @@ fn canonical_tags_are_never_overwritten() {
 }
 
 #[test]
-fn both_artifacts_are_signed_and_verified_before_announcement() {
+fn all_artifacts_are_signed_and_verified_before_announcement() {
     let daemon_sign = position("cosign sign --yes \"${IMAGE}@${DIGEST}\"");
     let daemon_verify = position("\"${IMAGE}@${DIGEST}\" > cosign-verify.json");
     let bundle_sign = position("cosign sign --yes \"${BUNDLE_IMAGE}@${BUNDLE_DIGEST}\"");
     let bundle_verify =
         position("\"${BUNDLE_IMAGE}@${BUNDLE_DIGEST}\" > bundle-cosign-verify.json");
+    let mcp_sign = position("cosign sign --yes \"${MCP_IMAGE}@${MCP_DIGEST}\"");
+    let mcp_verify = position("\"${MCP_IMAGE}@${MCP_DIGEST}\" > mcp-cosign-verify.json");
     let announce = position("gh release create \"${VERSION}\"");
     assert!(daemon_sign < daemon_verify && daemon_verify < announce);
     assert!(bundle_sign < bundle_verify && bundle_verify < announce);
-    assert!(occurrences("https://token.actions.githubusercontent.com") >= 2);
-    assert!(occurrences(".github/workflows/release.yml@${GITHUB_REF}") >= 2);
+    assert!(mcp_sign < mcp_verify && mcp_verify < announce);
+    assert!(occurrences("https://token.actions.githubusercontent.com") >= 3);
+    assert!(occurrences(".github/workflows/release.yml@${GITHUB_REF}") >= 3);
 }
 
 #[test]
@@ -155,6 +167,18 @@ fn bundle_visibility_is_proven_before_the_daemon_tag_is_mutated() {
     assert!(anonymous_bundle < daemon_push);
     position("DOCKER_CONFIG=\"$anonymous_config\"");
     position("oras manifest fetch --descriptor \"${BUNDLE_IMAGE}@${BUNDLE_DIGEST}\"");
+}
+
+#[test]
+fn mcp_image_is_stdio_only_and_its_exact_binary_is_smoke_tested() {
+    assert!(MCP_DOCKERFILE.contains("gcr.io/distroless/cc-debian12:nonroot@sha256:"));
+    assert!(MCP_DOCKERFILE.contains("ENTRYPOINT [\"/usr/local/bin/substrate-mcp\"]"));
+    assert!(!MCP_DOCKERFILE.contains("EXPOSE"));
+    assert!(!MCP_DOCKERFILE.contains("VOLUME"));
+    position("Dockerfile.mcp");
+    position("SUBSTRATE_MCP_BINARY=\"${PWD}/target/mcp-image-under-test/substrate-mcp\"");
+    position("SUBSTRATE_MCP_DOCKER_IMAGE=\"${MCP_IMAGE}:${VERSION}\"");
+    position("-p b10x-substrate-mcp --test stdio -- --nocapture");
 }
 
 #[test]
