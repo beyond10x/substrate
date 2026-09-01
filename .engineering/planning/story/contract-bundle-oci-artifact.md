@@ -2,7 +2,7 @@
 format: aep.planning-md/1
 id: story:contract-bundle-oci-artifact
 kind: story
-status: active
+status: implemented
 title: The 0.4.0 contract bundle is a signed, digest-pinned OCI artifact
 summary: Design 07 fixes the packaging shape; consumers copy bundle bytes by hand today.
 owner: substrate
@@ -13,7 +13,7 @@ tags:
 relations:
 - decomposes: epic:release-hardening
 - depends_on: story:signed-daemon-image
-revision: 14
+revision: 16
 ---
 # Story: The 0.4.0 contract bundle is a signed, digest-pinned OCI artifact
 
@@ -165,3 +165,10 @@ which before the job is written.
 - The run reused development bundle `ghcr.io/beyond10x/b10x-substrate-wire:0.12.0` at `sha256:dd901e848c821aca7d55f7b8cf5ee893e1d99a1428b348e32e7ed1045a375319`, verified its manifest annotations without credentials, keyless-signed the digest, verified the certificate identity `https://github.com/beyond10x/substrate/.github/workflows/release.yml@refs/heads/main`, and proved anonymous retrieval.
 - The same run built tagged source `0687551`, passed the shipped-binary runtime-vector smoke test, and published `ghcr.io/beyond10x/b10x-substrate-daemon:0.4.2` at `sha256:1aac0c63c1f1e7dae2dff8f1f20a06b4d7f5461b61bb172b4a8a3f137cd2f6d1`. It keyless-signed and verified that digest under the same workflow identity and proved anonymous retrieval before announcement.
 - GitHub release `0.4.2` is public at `https://github.com/beyond10x/substrate/releases/tag/0.4.2`, non-draft, and API readback reports author `github-actions[bot]`. A separate local credential-free ORAS descriptor readback succeeded for both digests. This evidence branch records the two exact lines in `CHANGELOG.md`; the story remains active until that protected-main pull request merges.
+
+## Closure — 2026-09-01
+
+- Release evidence merged through protected `main` in PR #65 at `551bd7ef7a678951e09497e187608503738d98c6`.
+- The exact merge commit passed the Full gate in run `33463570207` (5m36s).
+- GitHub release `0.4.2`, daemon digest `sha256:1aac0c63c1f1e7dae2dff8f1f20a06b4d7f5461b61bb172b4a8a3f137cd2f6d1`, and development bundle digest `sha256:dd901e848c821aca7d55f7b8cf5ee893e1d99a1428b348e32e7ed1045a375319` are recorded in `CHANGELOG.md` and `STATUS.md` on `main`.
+- The release workflow verified both keyless signatures before publishing the GitHub release; anonymous digest readback succeeded for both artifacts.
