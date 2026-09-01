@@ -12,7 +12,7 @@ tags:
 relations:
 - decomposes: epic:release-hardening
 - depends_on: story:signed-daemon-image
-revision: 8
+revision: 9
 ---
 # Story: The 0.4.0 contract bundle is a signed, digest-pinned OCI artifact
 
@@ -114,3 +114,31 @@ cannot push to `main`, because `main` is protected and requires the `Full gate` 
 direct push can never satisfy. The daemon digest landed by pull request instead
 (`68d226f`). A bundle digest will need the same route or a different one, and the story should say
 which before the job is written.
+
+## Implementation — 2026-09-01 (publish/sign half)
+
+- `.github/workflows/release.yml` explicitly pins current development bundle `0.12.0`; a successor
+  must move that reviewable pin rather than being selected by directory order at release time.
+- One globally serialized release job refuses an existing GitHub release, daemon image tag or
+  contract-bundle tag before publication. The bundle absence check fails closed on authentication,
+  transport and registry errors and repeats immediately before upload; a canonical tag is never an
+  overwrite target.
+- The job runs `cargo xtask package-bundle`, checks the manifest digest and
+  `dev.b10x.contract.status=development` annotation locally, and uses pinned ORAS 1.3.3 to copy the
+  exact OCI Image Layout to `ghcr.io/beyond10x/b10x-substrate-wire:<bundle-version>`. It then
+  resolves the remote tag back to the packaged digest and checks the remote development annotation.
+- Cosign signs the bundle by digest with the tag-triggered workflow's OIDC identity and verifies the
+  exact certificate identity and GitHub Actions issuer before `gh release create`. Release notes
+  carry both immutable digests, both verification commands and the explicit non-stability statement.
+- Protected `main` is not pushed or bypassed. After both signatures verify, the workflow emits the
+  exact daemon and bundle digest lines for a workstation's `b10x-bot` pull request, which receives
+  the required `Full gate` check.
+- `xtask/tests/release_workflow.rs` fails closed offline on the current-bundle pin, exact-layout copy,
+  two write-once checks, digest signing/verification order, development wording, protected-main
+  route and commit-pinned actions. A local ORAS layout-to-layout round trip reproduced manifest
+  `sha256:dd901e848c821aca7d55f7b8cf5ee893e1d99a1428b348e32e7ed1045a375319`; `contracts/` stayed
+  clean.
+- **Live evidence remains intentionally absent:** this implementation task forbids publishing or
+  cutting a tag. `ghcr.io/beyond10x/b10x-substrate-wire:0.12.0` was still not found on 2026-09-01.
+  The story stays `active` until an eligible release observes the remote digest and verified
+  signature and a fully gated bot pull request records that observed digest in `CHANGELOG.md`.
