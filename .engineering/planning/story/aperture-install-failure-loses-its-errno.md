@@ -7,7 +7,7 @@ title: An aperture install failure names its stage and loses its errno
 summary: The sandbox helper reports through _exit(stage), so a stage-6 bind failure carries no errno; the delegated lane fails on it about one run in ten.
 relations:
 - decomposes: epic:release-hardening
-revision: 3
+revision: 4
 ---
 # Story: An aperture install failure names its stage and loses its errno
 
@@ -113,3 +113,57 @@ either way: it is what would tell these two symptoms apart.
 **Still verified, unchanged:** `scripts/gate.sh` has no delegated-lane reference, so the whole gate
 is unaffected; stage 6 is `libc::bind` with `SO_REUSEADDR` already set; the errno is lost at the
 `_exit(stage)` boundary and not in `install_failed`.
+
+## Implementation evidence — 2026-09-01
+
+The inherited implementation had begun sending `[stage, errno]` over the descriptor handback, but
+the production pair was still `SOCK_STREAM`, the receiver assumed one read returned the complete
+record, and coverage injected a payload rather than forcing the helper to fail. The failing-first
+test `helper_handback_preserves_record_boundaries` observed `SO_TYPE=1` (`SOCK_STREAM`) where a
+record-preserving channel was required.
+
+The completed path uses `SOCK_SEQPACKET | SOCK_CLOEXEC`; failure records and `SCM_RIGHTS` success
+handbacks are distinct packets. Sends suppress `SIGPIPE`, receive and reap retry `EINTR`, truncation
+and unexpected control messages fail closed, and the exit status remains the fallback when no
+record arrives. `a_forced_bind_failure_names_its_stage_and_errno` opens one listener inside a held
+sandbox, forces a second bind on the same tuple, and asserts the caller receives class `failed`,
+code `exec.aperture-install-failed`, stage 6, numeric `EADDRINUSE`, and its decoded OS error.
+
+### Named cause and fix
+
+The first local `bash scripts/delegated-lane.sh` reproduction failed in
+`an_aperture_without_a_ceiling_passes_the_same_traffic` at the in-namespace connect. The widened
+helper channel then caught the original bind symptom as stage 6, errno 99
+(`EADDRNOTAVAIL`, `Cannot assign requested address`). Together with the reported
+`Reach::Unreachable` (`ENETUNREACH`), this identifies one readiness race: bubblewrap publishes the
+child pid while its concurrent child has not necessarily raised `lo` yet. The helper now reads
+`IFF_UP` and retries only `EADDRNOTAVAIL`, using one bounded one-second budget. It does not configure
+the interface or widen the loopback-only network floor; every other bind errno is immediate.
+
+The module harness also detached every `AppServer` and `Firehose` thread: each `Drop` discarded its
+`JoinHandle` while the thread retained its listener and blocked in `accept`. The affected test was
+0/100 failures in isolation but failed once in a 20-run module sample with the prior server threads
+present. Both fixtures now stop, wake and join their thread, so the module sample does not accumulate
+listeners or scheduling pressure.
+
+### Evidence
+
+- Failing first: `cargo test -p b10x-substrate-host --locked
+  egress::tests::helper_handback_preserves_record_boundaries -- --exact --nocapture` ran one test and
+  failed with `left: 1`, `right: 5` before the production pair changed.
+- Focused final: `cargo fmt --all --check`, `cargo clippy -p b10x-substrate-host --all-targets
+  --locked -- -D warnings`, and `cargo test -p b10x-substrate-host --locked --lib egress::tests:: --
+  --test-threads=1 --nocapture` passed; the module ran 17 tests.
+- Required delegated module sample: 20 serial executions inside one `Delegate=yes` systemd scope,
+  after moving the runner into a child cgroup and enabling `cpu`, `memory` and `pids`, passed
+  **20/20 with 0 failures**. Earlier intermediate samples that failed were discarded rather than
+  counted green.
+- Integrated delegated lane: `bash scripts/delegated-lane.sh` passed 66 host unit tests, all host
+  integration tests, and 7/7 clean-room daemon tests. The lane printed its delegated cgroup root and
+  controllers, so this was executed rather than absent.
+- Full repository gate: `bash scripts/gate.sh` passed, including release tests, fmt, workspace
+  clippy, full-history secrets, advisories, licences, package assembly, all twelve bundle fixed
+  points, 2,557 classified contract JSON documents, and toolchain pins.
+
+This closes the accepted outcome in code and evidence. The story remains `active` until the operator
+chooses the lifecycle move.
