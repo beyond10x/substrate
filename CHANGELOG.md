@@ -7,6 +7,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- **Release recovery inspects the remote OCI manifest, not its descriptor.** Registry descriptors
+  carry digest, media type and size while the required development/version annotations live in the
+  manifest content. A failed eligible tag can be resumed explicitly from the protected-main
+  workflow without moving the tag or publishing from an unreviewed workflow ref.
+- Corrected the `0.4.0` entry's frozen `0.12.0` lineage: its compatibility block names `0.10.0`,
+  preserves 31 routes and adds two. Proving that it also preserves the complete `0.11.0` inventory
+  remains a separate gate before the daemon advertises it (atlas ADR 0019,
+  `architecture/adr/0019-substrate-contract-release-and-conformance.md`).
+
 ## [0.4.2] — 2026-09-01
 
 ### Added
@@ -50,8 +61,8 @@ publication or GitHub release announcement. The tag and the uploaded write-once 
   policy together with apertures, scratch, read-only roots, secret slots, capsules and exact
   resource measurements.
 - **Contract bundle [`contracts/substrate-wire/0.12.0`](contracts/substrate-wire/0.12.0)**, an
-  additive successor to `0.11.0`, preserving all 33 routes and adding the workspace-access request,
-  capability and applied-confinement shapes plus an executable scoped-write vector.
+  additive successor to `0.10.0`, preserving 31 routes and adding two workspace-access routes plus
+  the request, capability and applied-confinement shapes and an executable scoped-write vector.
 
 ## [0.3.1] — 2026-09-01
 
