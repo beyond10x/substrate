@@ -34,11 +34,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
-- **The daemon and Rust SDK now claim development contract `substrate-wire/0.14.0` together.**
-  Both use the inner `bundle.json` digest
-  `eea07e6894ae840b6b2bb161861a724115fef4dedd57e72386e9d71af348b092`; its direct predecessor is
-  0.13.0, it preserves all 33 routes, adds the hosted attachment-authority mint route, and declares
-  exact key/channel binding plus four authority refusals. The latest separately signed OCI
+- **Session HTTP routes are now `/v1/sessions`, with no legacy alias.** The daemon and Rust SDK
+  claim development contract `substrate-wire/0.15.0` and inner `bundle.json` digest
+  `c0a6f82601debdca988f6c3cf93b89ebb7d086b8c9f74b4b7c9fb17d664357b3` together. Its direct
+  predecessor is 0.14.0; it replaces exactly eight `/v1/pipe-sessions` route addresses, preserves
+  all 26 non-session addresses and every operation id, and retains the hosted attachment-authority
+  semantics added in 0.14.0. This is a deliberate pre-1.0 break. The latest separately signed OCI
   distribution remains 0.12.0 at
   `sha256:dd901e848c821aca7d55f7b8cf5ee893e1d99a1428b348e32e7ed1045a375319`. The clean-room shipped-
   binary lane checks the pair on every HTTP response and WebSocket route probe, while SDK fixtures

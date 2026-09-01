@@ -48,12 +48,6 @@ pub(crate) fn hosted_router(app: Arc<App>, exporter: [u8; 32]) -> Router {
 }
 
 fn router_for(app: Arc<App>, transport: SessionTransport) -> Router {
-    let pipe_collection = match transport {
-        SessionTransport::DevelopmentTcp => get(pipe_session_capabilities),
-        SessionTransport::Unix | SessionTransport::HostedTls { .. } => {
-            get(pipe_session_capabilities).post(pipe_session_start)
-        }
-    };
     let router = Router::new()
         .route("/v1/machine", get(machine_get))
         .route("/v1/metrics", get(metrics_get))
@@ -93,33 +87,7 @@ fn router_for(app: Arc<App>, transport: SessionTransport) -> Router {
         .route("/v1/execs/{exec_id}", get(exec_get).delete(exec_retire))
         .route("/v1/execs/{exec_id}/output", get(exec_output_get))
         .route("/v1/execs/{exec_id}/signal", post(exec_signal))
-        .route("/v1/pipe-sessions", pipe_collection)
-        .route(
-            "/v1/pipe-sessions/{session_id}",
-            get(pipe_session_get).delete(pipe_session_retire),
-        )
-        .merge(match transport {
-            SessionTransport::Unix | SessionTransport::HostedTls { .. } => Router::new().route(
-                "/v1/pipe-sessions/{session_id}/attach",
-                get(pipe_session_attach),
-            ),
-            SessionTransport::DevelopmentTcp => Router::new(),
-        })
-        .merge(match transport {
-            SessionTransport::HostedTls { .. } => Router::new().route(
-                "/v1/pipe-sessions/{session_id}/attachment-authorities",
-                post(pipe_session_authority_mint),
-            ),
-            SessionTransport::Unix | SessionTransport::DevelopmentTcp => Router::new(),
-        })
-        .route(
-            "/v1/pipe-sessions/{session_id}/signal",
-            post(pipe_session_signal),
-        )
-        .route(
-            "/v1/pipe-sessions/{session_id}/lease/renew",
-            post(pipe_session_lease_renew),
-        )
+        .merge(session_routes(transport))
         .route(
             "/v1/workspaces/{workspace_id}/lease/renew",
             post(workspace_lease_renew),
@@ -145,6 +113,42 @@ fn router_for(app: Arc<App>, transport: SessionTransport) -> Router {
         router
     };
     router.with_state(app)
+}
+
+fn session_routes(transport: SessionTransport) -> Router<Arc<App>> {
+    let collection = match transport {
+        SessionTransport::DevelopmentTcp => get(pipe_session_capabilities),
+        SessionTransport::Unix | SessionTransport::HostedTls { .. } => {
+            get(pipe_session_capabilities).post(pipe_session_start)
+        }
+    };
+    let router = Router::new()
+        .route("/v1/sessions", collection)
+        .route(
+            "/v1/sessions/{session_id}",
+            get(pipe_session_get).delete(pipe_session_retire),
+        )
+        .route(
+            "/v1/sessions/{session_id}/signal",
+            post(pipe_session_signal),
+        )
+        .route(
+            "/v1/sessions/{session_id}/lease/renew",
+            post(pipe_session_lease_renew),
+        );
+    let router = match transport {
+        SessionTransport::Unix | SessionTransport::HostedTls { .. } => {
+            router.route("/v1/sessions/{session_id}/attach", get(pipe_session_attach))
+        }
+        SessionTransport::DevelopmentTcp => router,
+    };
+    match transport {
+        SessionTransport::HostedTls { .. } => router.route(
+            "/v1/sessions/{session_id}/attachment-authorities",
+            post(pipe_session_authority_mint),
+        ),
+        SessionTransport::Unix | SessionTransport::DevelopmentTcp => router,
+    }
 }
 
 /// V2 was added after the shared durable-operation machinery, whose stored answers intentionally

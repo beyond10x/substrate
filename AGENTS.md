@@ -41,8 +41,10 @@ Each is a claim that can be checked. Breaking one is a design change, not a refa
 5. **Operations are durable before driver dispatch**
    (`adr/0005-operations-are-durable-before-driver-dispatch.md`).
 6. **Every released contract bundle directory is immutable.** `contracts/substrate-wire/0.1.0`
-   through `0.14.0` exist; `0.14.0` is the current development bundle, adding proof-bound network
-   session attachment authority and its four named refusals (ADR 0027); `0.13.0` added the hosted
+   through `0.15.0` exist; `0.15.0` is the current development bundle, replacing exactly eight
+   `/v1/pipe-sessions` route addresses with `/v1/sessions` without an alias (ADR 0028 and Atlas
+   ADR 0022); `0.14.0` added proof-bound network session attachment authority and its four named
+   refusals (ADR 0027); `0.13.0` added the hosted
    Identity admission profile and its four named refusals (ADR 0026); `0.12.0` added exact read-only and
    scoped workspace access (ADR 0023); `0.11.0` added hard persistent and per-exec
    writable-storage quotas plus explicit exact resource observations and two metrics routes
@@ -53,12 +55,14 @@ Each is a claim that can be checked. Breaking one is a design change, not a refa
    context and grant attribution (ADR 0011); `0.6.0` added destination-bound egress
    apertures (ADR 0013), and **every earlier directory is frozen** (`STATUS.md:36`,
    `xtask/src/json.rs:152`, `contracts/substrate-wire/0.2.0/README.md:13`).
-   The daemon and Rust SDK advertise `substrate-wire/0.14.0` with the SHA-256 of that bundle's
-   inner `bundle.json` (`crates/substrate-wire/src/lib.rs`); ADR 0027 records this coordinated
-   session-authority promotion, and the gate retains the one additional 0.11.0-to-0.12.0 lineage bridge. Moving this
+   The daemon and Rust SDK advertise `substrate-wire/0.15.0` with the SHA-256 of that bundle's
+   inner `bundle.json` (`crates/substrate-wire/src/lib.rs`); ADR 0028 records this coordinated
+   route promotion, and the gate retains the one additional 0.11.0-to-0.12.0 lineage bridge. Moving this
    pair again is its own coordinated change with its own clients to notify. A wire change **adds a successor bundle**; it
    never rewrites bytes in a released one. The compatibility block of a successor states its
-   predecessor and its exact `adds_routes`/`preserves_routes` counts, and the checker pins them.
+   predecessor and its exact route counts, and the checker pins them. Successors are additive by
+   default; `0.15.0` is the one exact `breaking-development-v1` exception and records all eight
+   removed and replacement addresses.
    **One recorded exception, 2026-08-24:** the brand rename rewrote every frozen bundle in place,
    because the former brand name is in their bytes and no successor bundle can remove it from
    them. It was an identifier rename with no semantic wire change, and each bundle was
@@ -146,7 +150,7 @@ In order: `cargo test --workspace --release --locked`, `cargo fmt --all --check`
 `check-contract-bundle.py`, `check-contract-bundle-0.2.0.py`,
 `-0.3.0.py`, `-0.4.0.py`, `cargo xtask check-bundle 0.5.0`, `check-bundle 0.6.0`, `check-bundle 0.7.0`,
 `check-bundle 0.8.0`, `check-bundle 0.9.0`, `check-bundle 0.10.0`, `check-bundle 0.11.0`,
-`check-bundle 0.12.0`, `check-bundle 0.13.0`, `check-bundle 0.14.0`,
+`check-bundle 0.12.0`, `check-bundle 0.13.0`, `check-bundle 0.14.0`, `check-bundle 0.15.0`,
 `cargo xtask check-json` and `cargo xtask check-toolchain`.
 Green here is the bar for `main`.
 The former brand is fenced org-wide by `scripts/check-org-brand.sh` in the **atlas** repo, not here.
@@ -169,8 +173,8 @@ bundles' reproducibility proof (invariant 6), not as tooling.
 | `check-packages` | a registry package outside the five-name allowlist, a loose internal version edge, or a package without inherited SPDX metadata and its README | yes |
 | `package-bundle <version> --out <dir>` | produces a released bundle as a deterministic OCI image layout | no — under `cargo test` |
 | `render-bundle <version> --out <dir>` | produces a bundle tree from `substrate-wire` and `xtask/bundle-source/<version>/`; refuses to write anywhere under `contracts/` | no — under `cargo test` |
-| `check-bundle <version>` | a released bundle whose bytes are not the fixed point of `xtask/bundle-source/<version>/` | yes, `0.5.0` through `0.14.0` |
-| `check-json [<version>...]` | JSON beneath a released bundle that no bundled schema classifies, that its schema rejects, or that is not in deterministic source form | yes, all fourteen |
+| `check-bundle <version>` | a released bundle whose bytes are not the fixed point of `xtask/bundle-source/<version>/` | yes, `0.5.0` through `0.15.0` |
+| `check-json [<version>...]` | JSON beneath a released bundle that no bundled schema classifies, that its schema rejects, or that is not in deterministic source form | yes, all fifteen |
 
 **`cargo xtask package-bundle <version> --out <dir>`** packages a released bundle as a
 deterministic OCI image layout. It is not a gate step of its own: its cases run under
@@ -217,8 +221,8 @@ and an absent lane looks identical to a green one if you only read `cargo test`.
 
 **The gate verifies every released bundle, not just `0.1.0`.** `scripts/gate.sh:20-23` runs the
 four frozen Python checkers, and the lines after them run `cargo xtask check-bundle` for `0.5.0`
-through `0.14.0`, so
-a green gate *is* evidence that all fourteen still hold. Cutting a successor bundle therefore means
+through `0.15.0`, so
+a green gate *is* evidence that all fifteen still hold. Cutting a successor bundle therefore means
 **adding its check to `scripts/gate.sh`** — a bundle whose check is not in the gate is unverified
 from the next commit onward.
 
@@ -338,6 +342,12 @@ sibling-checkout links, `file://` URLs or editor URIs. `cargo xtask check-links`
 Keep changes reviewable and preserve the direction from composition and products *toward* substrate.
 A contract change must identify affected capabilities, refusal behaviour, observations, events and
 consumer compatibility **before implementation begins**.
+
+**Worktrees live under `../.worktrees/`, never beside the repository checkout.** Name a Substrate
+worktree `../.worktrees/substrate-<task>` and remove it when its branch is merged. Do not create
+`../substrate-<task>` siblings that clutter the `beyond10x` collection root. Existing worktrees and
+their changes belong to the operator; inspect and preserve them unless the operator explicitly
+authorises their cleanup.
 
 ## Bot identity
 

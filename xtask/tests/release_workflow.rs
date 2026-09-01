@@ -67,7 +67,7 @@ fn current_bundle() -> String {
 fn release_pins_the_current_development_bundle_explicitly() {
     let current = current_bundle();
     assert_eq!(
-        current, "0.14.0",
+        current, "0.15.0",
         "update this assertion with the successor"
     );
     assert!(

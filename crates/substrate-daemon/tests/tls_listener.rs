@@ -551,7 +551,7 @@ fn attachment_request(
     proof: &[u8],
 ) -> String {
     format!(
-        "GET /v1/pipe-sessions/{session_id}/attach HTTP/1.1\r\nHost: substrate.test\r\nAuthorization: Bearer {credential}\r\nX-Substrate-Session-Authority-Id: {authority_id}\r\nX-Substrate-Session-Authority: {authority}\r\nX-Substrate-Session-Timestamp: {timestamp_ms}\r\nX-Substrate-Session-Proof: {}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: AAAAAAAAAAAAAAAAAAAAAA==\r\n\r\n",
+        "GET /v1/sessions/{session_id}/attach HTTP/1.1\r\nHost: substrate.test\r\nAuthorization: Bearer {credential}\r\nX-Substrate-Session-Authority-Id: {authority_id}\r\nX-Substrate-Session-Authority: {authority}\r\nX-Substrate-Session-Timestamp: {timestamp_ms}\r\nX-Substrate-Session-Proof: {}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: AAAAAAAAAAAAAAAAAAAAAA==\r\n\r\n",
         URL_SAFE_NO_PAD.encode(proof)
     )
 }
@@ -661,7 +661,7 @@ async fn provision_confined_pipe_session(
         trusted,
         &authority.exec,
         "POST",
-        "/v1/pipe-sessions",
+        "/v1/sessions",
         Some(&session_body),
     )
     .await;
@@ -810,7 +810,7 @@ async fn production_tls_refuses_unverified_routes_and_rotates_atomically() {
     assert!(
         response
             .to_ascii_lowercase()
-            .contains("x-b10x-contract: substrate-wire/0.14.0"),
+            .contains("x-b10x-contract: substrate-wire/0.15.0"),
         "{response}"
     );
 
@@ -875,7 +875,7 @@ async fn production_tls_refuses_unverified_routes_and_rotates_atomically() {
         .await
         .expect("trusted WSS transport");
     let wss_request = format!(
-        "GET /v1/pipe-sessions/ses_test/attach HTTP/1.1\r\nHost: substrate.test\r\nAuthorization: Bearer {}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: AAAAAAAAAAAAAAAAAAAAAA==\r\n\r\n",
+        "GET /v1/sessions/ses_test/attach HTTP/1.1\r\nHost: substrate.test\r\nAuthorization: Bearer {}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: AAAAAAAAAAAAAAAAAAAAAA==\r\n\r\n",
         authority.exec
     );
     let response = request(&mut wss, wss_request.as_bytes()).await;
@@ -1027,7 +1027,7 @@ async fn hosted_wss_attachment_authority_is_one_use_and_channel_bound() {
     }))
     .expect("mint body");
     let mint_request = format!(
-        "POST /v1/pipe-sessions/{session_id}/attachment-authorities HTTP/1.1\r\nHost: substrate.test\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{mint_body}",
+        "POST /v1/sessions/{session_id}/attachment-authorities HTTP/1.1\r\nHost: substrate.test\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{mint_body}",
         authority_state.exec,
         mint_body.len()
     );

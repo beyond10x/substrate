@@ -827,14 +827,14 @@ fn successor_executable_manifest_is_the_exact_review_branch_set() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn successor_pipe_session_positive_and_adversarial_vectors_execute_exactly() {
-    let positive = bundle_vector("0.4.0", "http", "pipe-session-start");
+async fn current_session_positive_and_adversarial_vectors_execute_exactly() {
+    let positive = bundle_vector("0.15.0", "http", "pipe-session-start");
     let harness = Harness::open(false);
     seed_workspace(&harness.store);
     assert_exact_http(&harness.execute(&positive).await, &positive);
     assert_eq!(harness.driver.start_count.load(Ordering::SeqCst), 1);
 
-    let refusal = bundle_vector("0.4.0", "http", "pipe-session-missing-lease");
+    let refusal = bundle_vector("0.15.0", "http", "pipe-session-missing-lease");
     let harness = Harness::open(false);
     seed_workspace(&harness.store);
     assert_exact_http(&harness.execute(&refusal).await, &refusal);
@@ -852,7 +852,7 @@ async fn workspace_scoped_write_vector_executes_the_production_boundary() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pipe_session_clock_refusal_is_durable_when_the_clock_recovers() {
-    let start = bundle_vector("0.4.0", "http", "pipe-session-start");
+    let start = bundle_vector("0.15.0", "http", "pipe-session-start");
     let harness = Harness::open(false);
     seed_workspace(&harness.store);
     assert_exact_http(&harness.execute(&start).await, &start);
@@ -863,7 +863,7 @@ async fn pipe_session_clock_refusal_is_durable_when_the_clock_recovers() {
             "kind": "http",
             "request": {
                 "method": "POST",
-                "path": "/v1/pipe-sessions/ses_vector/lease/renew",
+                "path": "/v1/sessions/ses_vector/lease/renew",
                 "query": {},
                 "headers": {"x-request-id": "req_pipe_clock_unavailable"},
                 "body": {
@@ -888,7 +888,7 @@ async fn pipe_session_clock_refusal_is_durable_when_the_clock_recovers() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn pipe_output_backpressure_is_a_durable_named_terminal_observation() {
-    let start = bundle_vector("0.4.0", "http", "pipe-session-start");
+    let start = bundle_vector("0.15.0", "http", "pipe-session-start");
     let harness = Harness::open(false);
     seed_workspace(&harness.store);
     assert_exact_http(&harness.execute(&start).await, &start);
@@ -925,7 +925,7 @@ async fn pipe_output_backpressure_is_a_durable_named_terminal_observation() {
             "request": {
                 "headers": { "x-request-id": "req_pipe_backpressure_get" },
                 "method": "GET",
-                "path": "/v1/pipe-sessions/ses_vector",
+                "path": "/v1/sessions/ses_vector",
                 "query": {}
             }
         },

@@ -89,7 +89,7 @@ env:
   # Explicit, reviewable publication input. A successor bundle must move this pin in the same
   # change; deriving "largest directory" at release time would silently broaden what a tag ships.
   BUNDLE_IMAGE: ghcr.io/beyond10x/b10x-substrate-wire
-  BUNDLE_VERSION: 0.14.0
+  BUNDLE_VERSION: 0.15.0
   BUNDLE_LAYOUT: target/release-contract-bundle
   GATE_WORKFLOW: gate.yml
 

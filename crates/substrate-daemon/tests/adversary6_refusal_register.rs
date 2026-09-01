@@ -361,7 +361,7 @@ fn register_row(code: &str) -> Value {
 
 /// A session refusal a client receives says what the published register says it says.
 ///
-/// Both codes below are raised by `HostDriver` on a plain `POST /v1/pipe-sessions`: the first when
+/// Both codes below are raised by `HostDriver` on a plain `POST /v1/sessions`: the first when
 /// the body's declared `input_limit_bytes`/`frame_limit_bytes`/`queued_frames` are above the host
 /// profile (`crates/substrate-host/src/process.rs:328-342`), the second when `pty::open` fails
 /// because the host's pty count is full (`:448-461`). Both are `DriverError::exhausted`, which is
@@ -389,7 +389,7 @@ async fn a_session_refusal_carries_the_retriable_the_register_publishes_for_it()
         let (status, body) = harness
             .call(
                 Method::POST,
-                "/v1/pipe-sessions",
+                "/v1/sessions",
                 mutation(operation, pty_start(&workspace)),
             )
             .await;

@@ -1,0 +1,80 @@
+{
+  "$schema": "schemas/bundle.json",
+  "api_version": "v1",
+  "bundle_format": "b10x.contract-bundle.v1",
+  "compatibility": {
+    "adds_routes": 8,
+    "kind": "breaking-development-v1",
+    "predecessor": "0.14.0",
+    "preserves_routes": 26,
+    "removes_routes": 8,
+    "route_replacements": [
+      {
+        "added": "/v1/sessions",
+        "id": "session.capabilities",
+        "method": "GET",
+        "removed": "/v1/pipe-sessions"
+      },
+      {
+        "added": "/v1/sessions",
+        "id": "session.start",
+        "method": "POST",
+        "removed": "/v1/pipe-sessions"
+      },
+      {
+        "added": "/v1/sessions/{session_id}",
+        "id": "session.get",
+        "method": "GET",
+        "removed": "/v1/pipe-sessions/{session_id}"
+      },
+      {
+        "added": "/v1/sessions/{session_id}/attach",
+        "id": "session.attach",
+        "method": "GET",
+        "removed": "/v1/pipe-sessions/{session_id}/attach"
+      },
+      {
+        "added": "/v1/sessions/{session_id}/attachment-authorities",
+        "id": "session.authority.mint",
+        "method": "POST",
+        "removed": "/v1/pipe-sessions/{session_id}/attachment-authorities"
+      },
+      {
+        "added": "/v1/sessions/{session_id}/signal",
+        "id": "session.signal",
+        "method": "POST",
+        "removed": "/v1/pipe-sessions/{session_id}/signal"
+      },
+      {
+        "added": "/v1/sessions/{session_id}",
+        "id": "session.retire",
+        "method": "DELETE",
+        "removed": "/v1/pipe-sessions/{session_id}"
+      },
+      {
+        "added": "/v1/sessions/{session_id}/lease/renew",
+        "id": "session.lease.renew",
+        "method": "POST",
+        "removed": "/v1/pipe-sessions/{session_id}/lease/renew"
+      }
+    ]
+  },
+  "conformance": {
+    "$vectors": "conformance"
+  },
+  "files": {
+    "$files": "manifest"
+  },
+  "generator": {
+    "digest": {
+      "$generator": "digest"
+    },
+    "name": "xtask/src/render_v2.rs",
+    "version": "2"
+  },
+  "name": "substrate-wire",
+  "origin": "b10x",
+  "source_base_commit": null,
+  "status": "development",
+  "version": "0.15.0"
+}

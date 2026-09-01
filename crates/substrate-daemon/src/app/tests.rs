@@ -72,9 +72,9 @@ async fn development_router_serves_neither_session_mint_nor_attachment() {
         principal: None,
     };
     for (method, uri) in [
-        ("POST", "/v1/pipe-sessions"),
-        ("GET", "/v1/pipe-sessions/ses_test/attach"),
-        ("POST", "/v1/pipe-sessions/ses_test/attachment-authorities"),
+        ("POST", "/v1/sessions"),
+        ("GET", "/v1/sessions/ses_test/attach"),
+        ("POST", "/v1/sessions/ses_test/attachment-authorities"),
     ] {
         let response = super::development_router(Arc::clone(&app))
             .layer(Extension(identity.clone()))
@@ -91,6 +91,58 @@ async fn development_router_serves_neither_session_mint_nor_attachment() {
             response.status(),
             axum::http::StatusCode::NOT_FOUND,
             "{uri}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn legacy_session_route_family_is_not_registered() {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let store = Arc::new(Store::open(":memory:").expect("state store"));
+    let driver = HostDriver::open(HostConfig::minimum(directory.path().join("workspaces")))
+        .expect("host driver");
+    let app = super::App::new(store, driver, "dep_legacy_session_routes");
+    let identity = super::Identity {
+        subject: "local:1000".to_owned(),
+        actor: "route-test".to_owned(),
+        principal: None,
+    };
+
+    for (method, uri) in [
+        ("GET", "/v1/pipe-sessions"),
+        ("POST", "/v1/pipe-sessions"),
+        ("GET", "/v1/pipe-sessions/ses_test"),
+        ("GET", "/v1/pipe-sessions/ses_test/attach"),
+        ("POST", "/v1/pipe-sessions/ses_test/attachment-authorities"),
+        ("POST", "/v1/pipe-sessions/ses_test/signal"),
+        ("DELETE", "/v1/pipe-sessions/ses_test"),
+        ("POST", "/v1/pipe-sessions/ses_test/lease/renew"),
+    ] {
+        let response = super::router(Arc::clone(&app))
+            .layer(Extension(identity.clone()))
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .body(Body::empty())
+                    .expect("request"),
+            )
+            .await
+            .expect("router response");
+        assert_eq!(
+            response.status(),
+            axum::http::StatusCode::NOT_FOUND,
+            "{uri}"
+        );
+        let body: Value = serde_json::from_slice(
+            &to_bytes(response.into_body(), 2_097_152)
+                .await
+                .expect("response bytes"),
+        )
+        .expect("response JSON");
+        assert_eq!(
+            body["error"]["code"], "resource.not-found",
+            "{method} {uri}"
         );
     }
 }
