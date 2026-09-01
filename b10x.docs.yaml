@@ -22,4 +22,4 @@ surfaces:
       - {label: Source, url: https://github.com/beyond10x/substrate, kind: source}
     accent: "#72b7ff"
     mark: website/static/img/mark.svg
-    shell: {integration: docusaurus, revision: 6323bfdaf73609247e8dabcc9df410ab280a1960}
+    shell: {integration: docusaurus, revision: 0cbd1f1b6951fec95767332e3a1792f838feb62d}
