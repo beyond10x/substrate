@@ -2,7 +2,7 @@
 format: aep.planning-md/1
 id: story:verified-delivery-build-latency
 kind: story
-status: active
+status: implemented
 title: Compile and validate releases without duplicate build work
 summary: Reduce gate and release wall time while preserving exact shipped-binary, contract, signing, and branch-protection evidence.
 tags:
@@ -11,7 +11,7 @@ tags:
 - release
 relations:
 - derived_from: epic:release-hardening
-revision: 4
+revision: 6
 ---
 # Compile and validate releases without duplicate build work
 
@@ -34,3 +34,7 @@ A green full local gate, a green pull-request Full gate with step timings, and a
 ## Additional profile reuse
 
 Clippy now runs with `--release`, matching the immediately preceding release-profile test build. The repository has no `cfg(debug_assertions)` implementation branch, so this preserves the linted source and target set while avoiding a second dependency-profile graph. The first local release-profile Clippy run took 16.8s; the previous hosted development-profile step took 49.4s.
+
+## Hosted result
+
+The protected-main seed run `33502295385` was green in 12m02s and saved a 578,678,197-byte cache. Protected-main run `33503894885` restored that cache in about four seconds, reused `cargo-about`, and completed green in 7m09s. Against baseline main run `33497345920` at 9m27s, the steady-state wall time fell by 2m18s (24%). The remaining dominant step is the exact release-profile workspace test build at 4m07s; no test, refusal, contract, security, licence, or shipped-binary check was removed.
