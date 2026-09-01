@@ -14,7 +14,7 @@ tags:
 relations:
 - decomposes: epic:remote-serving
 - depends_on: story:promote-development-contract-frontier
-revision: 3
+revision: 4
 ---
 # Story: Production control traffic uses TLS
 
@@ -33,3 +33,8 @@ The daemon uses rustls and accepts no production plaintext listener. A non-loopb
 ## Out of Scope
 
 Public ingress controllers, ACME automation, service-mesh-specific configuration and hosted token verification.
+
+## Design closure — 2026-09-01
+
+- [ADR 0024](../../../adr/0024-production-network-control-uses-server-authenticated-tls.md) accepts the approved server-authenticated TLS posture: a distinct TLS 1.3 HTTPS/WSS listener, no mTLS principal mapping, explicit owner-safe key material, atomic SIGHUP rotation, no forwarded-address trust and named startup/reload refusals.
+- Implementation remains sequenced after `story:promote-development-contract-frontier`; no listener code starts while that dependency is proposed.

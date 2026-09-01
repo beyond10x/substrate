@@ -13,7 +13,7 @@ tags:
 relations:
 - decomposes: epic:rust-sdk
 - depends_on: story:promote-development-contract-frontier
-revision: 3
+revision: 4
 ---
 # Story: The Rust SDK covers the promoted contract
 
@@ -32,3 +32,9 @@ The SDK supports PTY sessions and resize, workspace and scratch quotas, exact me
 ## Out of Scope
 
 Remote HTTPS transport, product policy helpers and automatic limit selection.
+
+## Remote/MCP prerequisites — 2026-09-01
+
+Before this story can close, the public SDK must additionally expose caller-supplied operation ids for file write/delete, workspace destroy and lease renewal, exec signal/retire and lease renewal; bounded exec-output paging; metrics retrieval; serializable SDK-owned observations or an exact projector; capability facts that preserve absence instead of collapsing it to `false`; and SDK-owned public bounds for generated schemas.
+
+Managed-daemon shutdown must retain child and temporary-root ownership across kill/wait errors. A red test proves that unknown child absence never drops the temporary state, and startup cleanup observes the same rule. The daemon/adapter cleanup path must also prove no detached exec supervisor, workload process or cgroup survives orderly shutdown.
