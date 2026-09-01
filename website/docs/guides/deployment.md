@@ -22,8 +22,9 @@ This is the posture used in [getting started](../getting-started.md).
 ## Organization and hosted shapes
 
 Private-network and hosted compositions require deployment identity, scoped authority, encrypted
-transport, rotation, and operational controls around the same data-plane contract. Those shapes do
-not imply that every hosted trust feature is implemented today.
+transport, rotation, and operational controls around the same data-plane contract. Current source
+serves the control plane over TLS with online Identity admission; proof-bound network session
+authority and the remote SDK transport remain separate work.
 
 One daemon remains one trust domain. Do not multiplex mutually untrusted tenants through the same
 daemon merely because a higher layer can attach different account labels.
@@ -41,7 +42,9 @@ substrate-daemon \
   --deployment edge-01 \
   --tls-listen 0.0.0.0:8443 \
   --tls-certificate-chain /run/substrate-tls/chain.pem \
-  --tls-private-key /run/substrate-tls/key.pem
+  --tls-private-key /run/substrate-tls/key.pem \
+  --hosted-identity-origin https://identity.example.com \
+  --hosted-identity-ca-bundle /run/substrate-identity/ca.pem
 ```
 
 The certificate chain and key must be non-empty regular files rather than symlinks. The key must
@@ -54,10 +57,48 @@ under which they connected. If a replacement is invalid, new connections continu
 valid pair and the daemon emits the safe condition `tls.reload-invalid` without certificate or key
 bytes.
 
-The listener authenticates the daemon, not the caller. Hosted caller admission is not implemented
-yet, so application requests currently receive a pre-admission `503` and no remote subject is
-derived. There is no production plaintext fallback, mutual-TLS identity mapping, trusted forwarded
-address, or verification-disable switch.
+The listener authenticates the daemon with its server certificate, then authenticates each caller
+from a short-lived opaque Identity access credential. Configure Identity's deployment-owned
+audience registry with this exact relying-party profile:
+
+```json
+{
+  "version": "identity.audiences/2",
+  "session": [],
+  "access": [{
+    "audience": "urn:b10x:substrate",
+    "scopes": ["observe", "workspaces", "exec"],
+    "groupScopes": []
+  }]
+}
+```
+
+Clients send the resulting credential as a bearer. For example, after obtaining it through the
+deployment's Identity login flow:
+
+```console
+curl --cacert ./substrate-ca.pem \
+  --header "Authorization: Bearer $SUBSTRATE_ACCESS_TOKEN" \
+  https://substrate.example.com:8443/v1/machine
+```
+
+Substrate resolves the credential at Identity's `GET /v1/access-authority` endpoint on every
+request, over direct HTTPS rooted only in `--hosted-identity-ca-bundle`. It requires audience
+`urn:b10x:substrate`, accepts at most a five-minute authority, and checks the addressed route before
+the handler can write durable state:
+
+| Scope | Route families |
+|---|---|
+| `observe` | machine facts, metrics, events, reconciliation snapshots, operation observations |
+| `workspaces` | workspaces, files, workspace leases |
+| `exec` | execs, exec leases, raw-pipe and PTY sessions |
+
+Missing, invalid, under-scoped and temporarily unavailable authority returns
+`auth.credential-absent`, `auth.authority-invalid`, `auth.scope-denied` or
+`auth.authority-unavailable`. No stale authority is cached, so a completed Identity revocation
+applies to the next request. Caller-written subject, tenant, actor, UID and forwarded-address
+headers do not become identity. There is no production plaintext fallback, mutual-TLS identity
+mapping, trusted forwarded address, redirect, proxy, or verification-disable switch.
 
 ## Static-bearer TCP is development-only
 
@@ -69,8 +110,8 @@ The currently implemented TCP transport is deliberately restricted. It requires 
 - a bounded bearer file;
 - deployment-owned subject and actor bindings.
 
-It is not a production hosted trust envelope and cannot be bound to a non-loopback address. Use it
-only for local development.
+It is not production hosted admission and cannot be bound to a non-loopback address. Use it only
+for local development.
 
 ## Rules that do not change by posture
 

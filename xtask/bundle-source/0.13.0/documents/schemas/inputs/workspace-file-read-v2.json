@@ -1,0 +1,27 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.13.0:input:workspace-file-read-v2",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "limit_bytes": {
+      "maximum": 1048576,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "mode": {
+      "const": "file"
+    },
+    "offset": {
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "mode",
+    "offset",
+    "limit_bytes"
+  ],
+  "title": "workspace-file-read-v2 operation input",
+  "type": "object"
+}

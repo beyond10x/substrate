@@ -7,8 +7,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64URL;
 use clap::Parser;
 use substrate_daemon::{
-    DaemonConfig, DelegatedContextKey, EgressAperture, SecretSlot, TcpDaemonConfig,
-    TlsDaemonConfig, serve,
+    DaemonConfig, DelegatedContextKey, EgressAperture, HostedIdentityConfig, SecretSlot,
+    TcpDaemonConfig, TlsDaemonConfig, serve,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -308,7 +308,12 @@ struct Arguments {
     #[arg(
         long,
         env = "SUBSTRATE_TLS_LISTEN",
-        requires_all = ["tls_certificate_chain", "tls_private_key"],
+        requires_all = [
+            "tls_certificate_chain",
+            "tls_private_key",
+            "hosted_identity_origin",
+            "hosted_identity_ca_bundle"
+        ],
         conflicts_with = "tcp_listen"
     )]
     tls_listen: Option<SocketAddr>,
@@ -330,6 +335,23 @@ struct Arguments {
         requires = "tls_listen"
     )]
     tls_private_key: Option<PathBuf>,
+
+    /// Exact HTTPS origin of the Identity authority resolver (ADR 0026).
+    #[arg(
+        long,
+        env = "SUBSTRATE_HOSTED_IDENTITY_ORIGIN",
+        requires_all = ["tls_listen", "hosted_identity_ca_bundle"]
+    )]
+    hosted_identity_origin: Option<String>,
+
+    /// PEM trust roots used only for the hosted Identity origin.
+    #[arg(
+        long,
+        env = "SUBSTRATE_HOSTED_IDENTITY_CA_BUNDLE",
+        value_name = "PATH",
+        requires_all = ["tls_listen", "hosted_identity_origin"]
+    )]
+    hosted_identity_ca_bundle: Option<PathBuf>,
 }
 
 impl From<Arguments> for DaemonConfig {
@@ -358,6 +380,14 @@ impl From<Arguments> for DaemonConfig {
                 .tls_private_key
                 .expect("clap requires a private key with TLS"),
         });
+        let hosted_identity = arguments
+            .hosted_identity_origin
+            .map(|origin| HostedIdentityConfig {
+                origin,
+                ca_bundle: arguments
+                    .hosted_identity_ca_bundle
+                    .expect("clap requires Identity trust roots with its origin"),
+            });
         Self {
             socket: arguments.socket,
             state: arguments.state,
@@ -375,6 +405,7 @@ impl From<Arguments> for DaemonConfig {
             require_delegated_context: arguments.require_delegated_context,
             tcp,
             tls,
+            hosted_identity,
         }
     }
 }

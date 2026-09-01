@@ -1,0 +1,413 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.13.0:capability",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "config_generation": {
+      "maximum": 18446744073709551615,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "driver": {
+      "const": "host"
+    },
+    "driver_version": {
+      "minLength": 1,
+      "type": "string"
+    },
+    "facts": {
+      "additionalProperties": false,
+      "properties": {
+        "events.pull": {
+          "const": true
+        },
+        "events.retention-events": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "events.stream": {
+          "const": true
+        },
+        "exec.argv-only": {
+          "const": true
+        },
+        "exec.cgroup-kill": {
+          "const": true
+        },
+        "exec.cgroup-limits": {
+          "additionalProperties": false,
+          "properties": {
+            "cpu": {
+              "const": true
+            },
+            "memory": {
+              "const": true
+            },
+            "processes": {
+              "const": true
+            }
+          },
+          "required": [
+            "processes",
+            "memory",
+            "cpu"
+          ],
+          "type": "object"
+        },
+        "exec.egress-apertures": {
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "destination": {
+                "maxLength": 64,
+                "minLength": 3,
+                "type": "string"
+              },
+              "max_bytes": {
+                "description": "The declared byte ceiling for one run over this aperture, both directions summed. Absent means unbounded (ADR 0014).",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "name": {
+                "maxLength": 64,
+                "pattern": "^[a-z][a-z0-9_]{0,63}$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "name",
+              "destination"
+            ],
+            "type": "object"
+          },
+          "maxItems": 4,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true,
+          "x-b10x-order": "sorted-utf8-bytewise",
+          "x-b10x-published-only-from": "a-verified-mechanism-never-configuration"
+        },
+        "exec.inline-capsule": {
+          "additionalProperties": false,
+          "properties": {
+            "max_file_bytes": {
+              "const": {
+                "$wire": "MAX_EXECUTION_CAPSULE_FILE_BYTES"
+              }
+            },
+            "max_files": {
+              "const": {
+                "$wire": "MAX_EXECUTION_CAPSULE_FILES"
+              }
+            },
+            "max_total_bytes": {
+              "const": {
+                "$wire": "MAX_EXECUTION_CAPSULE_BYTES"
+              }
+            },
+            "mount": {
+              "const": {
+                "$wire": "EXECUTION_CAPSULE_MOUNT"
+              }
+            }
+          },
+          "required": [
+            "mount",
+            "max_files",
+            "max_file_bytes",
+            "max_total_bytes"
+          ],
+          "type": "object"
+        },
+        "exec.max-current": {
+          "const": {
+            "$wire": "MAX_CURRENT_EXECS"
+          }
+        },
+        "exec.namespaces": {
+          "additionalProperties": false,
+          "properties": {
+            "ipc": {
+              "const": true
+            },
+            "mount": {
+              "const": true
+            },
+            "network": {
+              "const": true
+            },
+            "pid": {
+              "const": true
+            },
+            "user": {
+              "const": true
+            },
+            "uts": {
+              "const": true
+            }
+          },
+          "required": [
+            "user",
+            "mount",
+            "pid",
+            "ipc",
+            "uts",
+            "network"
+          ],
+          "type": "object"
+        },
+        "exec.no-egress": {
+          "const": true
+        },
+        "exec.output-limit-bytes": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "exec.resource-usage": {
+          "additionalProperties": false,
+          "properties": {
+            "block_io": {
+              "const": true
+            },
+            "cpu_time": {
+              "const": true
+            },
+            "memory_current": {
+              "const": true
+            },
+            "memory_oom_kills": {
+              "const": true
+            },
+            "memory_peak": {
+              "const": true
+            },
+            "process_limit_hits": {
+              "const": true
+            },
+            "processes_current": {
+              "const": true
+            },
+            "processes_peak": {
+              "const": true
+            },
+            "wall_time": {
+              "const": true
+            }
+          },
+          "required": [
+            "wall_time",
+            "cpu_time",
+            "memory_current",
+            "memory_peak",
+            "processes_current",
+            "processes_peak",
+            "process_limit_hits",
+            "memory_oom_kills",
+            "block_io"
+          ],
+          "type": "object",
+          "x-b10x-published-only-after": "cgroup-v2-counter-probe"
+        },
+        "exec.scratch-quota": {
+          "additionalProperties": false,
+          "properties": {
+            "allocation_unit_bytes": {
+              "const": 1024
+            },
+            "max_bytes": {
+              "const": 1099511627776
+            },
+            "max_inodes": {
+              "const": 1048576
+            },
+            "mount": {
+              "const": "/scratch"
+            }
+          },
+          "required": [
+            "mount",
+            "allocation_unit_bytes",
+            "max_bytes",
+            "max_inodes"
+          ],
+          "type": "object",
+          "x-b10x-published-only-after": "project-quota-enforcement-probe"
+        },
+        "exec.signals": {
+          "items": {
+            "enum": [
+              "INT",
+              "TERM",
+              "KILL"
+            ]
+          },
+          "maxItems": 3,
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "leases.clock-tolerance-ms": {
+          "const": {
+            "$wire": "LEASE_CLOCK_TOLERANCE_MS"
+          }
+        },
+        "leases.explicit": {
+          "const": true
+        },
+        "metrics.stream": {
+          "additionalProperties": false,
+          "properties": {
+            "latest_wins": {
+              "const": true
+            },
+            "replay": {
+              "const": false
+            },
+            "sample_interval_ms": {
+              "const": 1000
+            }
+          },
+          "required": [
+            "sample_interval_ms",
+            "latest_wins",
+            "replay"
+          ],
+          "type": "object"
+        },
+        "operation.ledger-global-max-bytes": {
+          "const": {
+            "$wire": "OPERATION_LEDGER_GLOBAL_MAX_BYTES"
+          }
+        },
+        "operation.ledger-global-max-rows": {
+          "const": {
+            "$wire": "OPERATION_LEDGER_GLOBAL_MAX_ROWS"
+          }
+        },
+        "operation.ledger-subject-max-bytes": {
+          "const": {
+            "$wire": "OPERATION_LEDGER_SUBJECT_MAX_BYTES"
+          }
+        },
+        "operation.ledger-subject-max-rows": {
+          "const": {
+            "$wire": "OPERATION_LEDGER_SUBJECT_MAX_ROWS"
+          }
+        },
+        "secrets.slots": {
+          "items": {
+            "maxLength": 64,
+            "pattern": "^[a-z][a-z0-9_]{0,63}$",
+            "type": "string"
+          },
+          "maxItems": {
+            "$wire": "MAX_SECRET_SLOTS"
+          },
+          "minItems": 1,
+          "type": "array",
+          "uniqueItems": true,
+          "x-b10x-names-only": "no-path-no-length-no-digest",
+          "x-b10x-order": "sorted-utf8-bytewise"
+        },
+        "sessions.pty": {
+          "const": true,
+          "x-b10x-absent-means": "every-pty-request-is-unserved-by-name",
+          "x-b10x-published-only-after": "a-verified-allocation-in-a-throwaway-sandbox"
+        },
+        "snapshot.provenance-events": {
+          "const": {
+            "$wire": "MAX_SNAPSHOT_PROVENANCE_EVENTS"
+          }
+        },
+        "workspace.atomic-replace": {
+          "const": true
+        },
+        "workspace.guarded-io": {
+          "const": true
+        },
+        "workspace.list-limit-items": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "workspace.max-current": {
+          "const": {
+            "$wire": "MAX_CURRENT_WORKSPACES"
+          }
+        },
+        "workspace.max-file-bytes": {
+          "const": {
+            "$wire": "MAX_FILE_BYTES"
+          }
+        },
+        "workspace.openat2-beneath": {
+          "const": true
+        },
+        "workspace.read-limit-bytes": {
+          "maximum": 9223372036854775807,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "workspace.storage-quota": {
+          "additionalProperties": false,
+          "properties": {
+            "allocation_unit_bytes": {
+              "const": 1024
+            },
+            "max_bytes": {
+              "const": 1099511627776
+            },
+            "max_inodes": {
+              "const": 1048576
+            }
+          },
+          "required": [
+            "allocation_unit_bytes",
+            "max_bytes",
+            "max_inodes"
+          ],
+          "type": "object",
+          "x-b10x-published-only-after": "project-quota-enforcement-probe"
+        },
+        "exec.workspace-scoped-write": {
+          "const": true
+        }
+      },
+      "required": [
+        "events.pull",
+        "events.stream",
+        "events.retention-events",
+        "exec.max-current",
+        "operation.ledger-global-max-bytes",
+        "operation.ledger-global-max-rows",
+        "operation.ledger-subject-max-bytes",
+        "operation.ledger-subject-max-rows",
+        "workspace.max-current",
+        "snapshot.provenance-events"
+      ],
+      "type": "object"
+    },
+    "probed_at": {
+      "$ref": "common.json#/$defs/timestamp"
+    },
+    "snapshot": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "valid_until": {
+      "$ref": "common.json#/$defs/timestamp"
+    }
+  },
+  "required": [
+    "snapshot",
+    "driver",
+    "driver_version",
+    "config_generation",
+    "probed_at",
+    "facts"
+  ],
+  "title": "Phase-3 machine capability snapshot",
+  "type": "object"
+}

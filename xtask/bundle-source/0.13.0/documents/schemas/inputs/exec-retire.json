@@ -1,0 +1,9 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.13.0:input:exec-retire",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {},
+  "required": [],
+  "title": "exec-retire operation input",
+  "type": "object"
+}

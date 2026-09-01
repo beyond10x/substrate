@@ -47,7 +47,7 @@ edits, and patches.
 | `POST` | `/v2/workspaces/{workspace_id}/file-edits/{*path}` | apply one bounded positional edit |
 | `POST` | `/v2/workspaces/{workspace_id}/file-patches/{*path}` | apply one bounded patch |
 
-Current development source advertises `substrate-wire/0.12.0` in `x-b10x-contract` and its inner
+Current development source advertises `substrate-wire/0.13.0` in `x-b10x-contract` and its inner
 `bundle.json` SHA-256 in `x-b10x-contract-bundle-sha256`. The two headers are one claim. The signed
 outer OCI manifest has a different digest because it identifies the distribution package rather
 than the inner contract manifest.
@@ -68,6 +68,11 @@ and adds the two metrics routes. Before promotion, an additional gate proves tha
 33-route declarations match `0.11.0` and that the quota and metrics behavior from `0.11.0` remains
 present beside exact read-only or scoped workspace write authority. This one recorded lineage
 bridge does not make the bundle stable or make any earlier bundle mutable.
+
+Bundle `0.13.0` directly succeeds `0.12.0`, preserves all 33 routes and adds none. It declares the
+hosted production-admission profile: exact Identity audience, five-minute online authority
+resolution, the `observe`/`workspaces`/`exec` route mapping and the four `auth.*` refusals a remote
+client can receive. It remains a development contract.
 
 ### Metrics
 

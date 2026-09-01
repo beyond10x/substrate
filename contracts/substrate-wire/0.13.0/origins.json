@@ -1,0 +1,82 @@
+{
+  "$schema": "schemas/origins.json",
+  "bundle": "substrate-wire@0.13.0",
+  "inputs": [
+    {
+      "name": "B10x substrate contract",
+      "origin": "b10x",
+      "role": "wire semantics and conformance vectors",
+      "trust": "repo-authored",
+      "version": "0.13.0"
+    },
+    {
+      "name": "JSON Schema",
+      "origin": "standard",
+      "role": "schema vocabulary",
+      "trust": "public-standard-uri",
+      "uri": "https://json-schema.org/draft/2020-12/schema",
+      "version": "2020-12"
+    },
+    {
+      "name": "JSON Canonicalization Scheme",
+      "origin": "standard",
+      "role": "operation input canonicalization",
+      "trust": "public-standard-uri",
+      "uri": "https://www.rfc-editor.org/rfc/rfc8785.html",
+      "version": "RFC 8785"
+    },
+    {
+      "name": "JSON Pointer",
+      "origin": "standard",
+      "role": "clean-room runner postcondition addressing",
+      "trust": "public-standard-uri",
+      "uri": "https://www.rfc-editor.org/rfc/rfc6901.html",
+      "version": "RFC 6901"
+    },
+    {
+      "name": "Base Encodings",
+      "origin": "standard",
+      "role": "bounded binary content in JSON",
+      "trust": "public-standard-uri",
+      "uri": "https://www.rfc-editor.org/rfc/rfc4648.html",
+      "version": "RFC 4648"
+    },
+    {
+      "name": "HTTP Semantics",
+      "origin": "standard",
+      "role": "method and status semantics",
+      "trust": "public-standard-uri",
+      "uri": "https://www.rfc-editor.org/rfc/rfc9110.html",
+      "version": "RFC 9110"
+    },
+    {
+      "name": "WebSocket Protocol",
+      "origin": "standard",
+      "role": "bounded event-stream transport",
+      "trust": "public-standard-uri",
+      "uri": "https://www.rfc-editor.org/rfc/rfc6455.html",
+      "version": "RFC 6455"
+    },
+    {
+      "digest": null,
+      "name": "OAuth 2.0 Bearer Token Usage",
+      "origin": "standard",
+      "release_blocker": "pin-approved-source-bytes",
+      "role": "reachable TCP authorization header semantics",
+      "trust": "public-standard-unpinned",
+      "uri": "https://www.rfc-editor.org/rfc/rfc6750.html",
+      "version": "RFC 6750"
+    },
+    {
+      "digest": null,
+      "name": "OCI Image Specification",
+      "origin": "standard",
+      "release_blocker": "pin-exact-oci-1.1.1-source",
+      "role": "signed contract-bundle packaging",
+      "trust": "public-standard-unpinned",
+      "uri": "https://github.com/opencontainers/image-spec/tree/v1.1.1",
+      "version": "1.1.1"
+    }
+  ],
+  "origin": "b10x"
+}

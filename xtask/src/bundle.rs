@@ -577,6 +577,10 @@ fn check_classification(version: &str, released: &Tree, failures: &mut Vec<Strin
 /// A successor that rendered, verified and preserved everything while adding nothing is the failure
 /// this catches; the entries are the acceptance list of the story that cut the bundle.
 fn check_additions(version: &str, released: &Tree, failures: &mut Vec<String>) {
+    if version == "0.13.0" {
+        check_hosted_admission_additions(released, failures);
+        return;
+    }
     if version == "0.12.0" {
         check_workspace_access_additions(released, failures);
         return;
@@ -607,6 +611,67 @@ fn check_additions(version: &str, released: &Tree, failures: &mut Vec<String>) {
     }
     if version == "0.5.0" {
         check_secret_slot_additions(released, failures);
+    }
+}
+
+/// What `0.13.0` exists for: exact hosted Identity audience, route scopes and safe refusals.
+fn check_hosted_admission_additions(released: &Tree, failures: &mut Vec<String>) {
+    let Some(profile) = json_at(released, "hosted-admission.json", failures) else {
+        return;
+    };
+    if profile.get("audience").and_then(Value::as_str) != Some("urn:b10x:substrate") {
+        failures.push("hosted-admission.json: the exact Identity audience is absent".to_owned());
+    }
+    if profile
+        .pointer("/authority/maximum_lifetime_seconds")
+        .and_then(Value::as_u64)
+        != Some(300)
+        || profile
+            .pointer("/authority/resolution_method")
+            .and_then(Value::as_str)
+            != Some("GET")
+        || profile
+            .pointer("/authority/resolution_path")
+            .and_then(Value::as_str)
+            != Some("/v1/access-authority")
+        || profile
+            .pointer("/authority/resolution_transport")
+            .and_then(Value::as_str)
+            != Some("direct-https")
+        || profile
+            .pointer("/authority/stale_authority")
+            .and_then(Value::as_str)
+            != Some("never-used")
+    {
+        failures.push(
+            "hosted-admission.json: the bounded online authority-resolution profile is absent"
+                .to_owned(),
+        );
+    }
+    let codes = profile
+        .get("refusals")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|row| row.get("code").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    if codes != substrate_wire::HOSTED_AUTH_REFUSAL_CODES {
+        failures.push(format!(
+            "hosted-admission.json: refusal codes {codes:?} do not equal the wire's {:?}",
+            substrate_wire::HOSTED_AUTH_REFUSAL_CODES
+        ));
+    }
+    let scopes = profile
+        .get("scopes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|row| row.get("scope").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+    if scopes != ["exec", "observe", "workspaces"] {
+        failures.push(format!(
+            "hosted-admission.json: route scopes are not exactly exec, observe, workspaces: {scopes:?}"
+        ));
     }
 }
 
@@ -4572,7 +4637,7 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{}: {error}", bundle.display()));
             checked += 1;
         }
-        assert_eq!(checked, 12, "every released bundle must be checked");
+        assert_eq!(checked, 13, "every released bundle must be checked");
     }
 
     /// Class, the other half: if a parameter's name is not a discriminator, then renaming one is

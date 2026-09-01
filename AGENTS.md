@@ -41,7 +41,8 @@ Each is a claim that can be checked. Breaking one is a design change, not a refa
 5. **Operations are durable before driver dispatch**
    (`adr/0005-operations-are-durable-before-driver-dispatch.md`).
 6. **Every released contract bundle directory is immutable.** `contracts/substrate-wire/0.1.0`
-   through `0.12.0` exist; `0.12.0` is the current development bundle, adding exact read-only and
+   through `0.13.0` exist; `0.13.0` is the current development bundle, adding the hosted Identity
+   admission profile and its four named refusals (ADR 0026); `0.12.0` added exact read-only and
    scoped workspace access (ADR 0023); `0.11.0` added hard persistent and per-exec
    writable-storage quotas plus explicit exact resource observations and two metrics routes
    (ADRs 0020–0021); `0.10.0` added the `pty` session mode, the `resize` frame and the
@@ -51,9 +52,9 @@ Each is a claim that can be checked. Breaking one is a design change, not a refa
    context and grant attribution (ADR 0011); `0.6.0` added destination-bound egress
    apertures (ADR 0013), and **every earlier directory is frozen** (`STATUS.md:36`,
    `xtask/src/json.rs:152`, `contracts/substrate-wire/0.2.0/README.md:13`).
-   The daemon and Rust SDK advertise `substrate-wire/0.12.0` with the SHA-256 of that bundle's
-   inner `bundle.json` (`crates/substrate-wire/src/lib.rs`); Atlas ADR 0019 records the explicit
-   promotion and the one additional 0.11.0-to-0.12.0 lineage bridge the gate proves. Moving this
+   The daemon and Rust SDK advertise `substrate-wire/0.13.0` with the SHA-256 of that bundle's
+   inner `bundle.json` (`crates/substrate-wire/src/lib.rs`); ADR 0026 records this coordinated
+   hosted-admission promotion, and the gate retains the one additional 0.11.0-to-0.12.0 lineage bridge. Moving this
    pair again is its own coordinated change with its own clients to notify. A wire change **adds a successor bundle**; it
    never rewrites bytes in a released one. The compatibility block of a successor states its
    predecessor and its exact `adds_routes`/`preserves_routes` counts, and the checker pins them.
@@ -144,7 +145,7 @@ In order: `cargo test --workspace --release --locked`, `cargo fmt --all --check`
 `check-contract-bundle.py`, `check-contract-bundle-0.2.0.py`,
 `-0.3.0.py`, `-0.4.0.py`, `cargo xtask check-bundle 0.5.0`, `check-bundle 0.6.0`, `check-bundle 0.7.0`,
 `check-bundle 0.8.0`, `check-bundle 0.9.0`, `check-bundle 0.10.0`, `check-bundle 0.11.0`,
-`check-bundle 0.12.0`,
+`check-bundle 0.12.0`, `check-bundle 0.13.0`,
 `cargo xtask check-json` and `cargo xtask check-toolchain`.
 Green here is the bar for `main`.
 The former brand is fenced org-wide by `scripts/check-org-brand.sh` in the **atlas** repo, not here.
@@ -167,8 +168,8 @@ bundles' reproducibility proof (invariant 6), not as tooling.
 | `check-packages` | a registry package outside the five-name allowlist, a loose internal version edge, or a package without inherited SPDX metadata and its README | yes |
 | `package-bundle <version> --out <dir>` | produces a released bundle as a deterministic OCI image layout | no — under `cargo test` |
 | `render-bundle <version> --out <dir>` | produces a bundle tree from `substrate-wire` and `xtask/bundle-source/<version>/`; refuses to write anywhere under `contracts/` | no — under `cargo test` |
-| `check-bundle <version>` | a released bundle whose bytes are not the fixed point of `xtask/bundle-source/<version>/` | yes, `0.5.0` through `0.12.0` |
-| `check-json [<version>...]` | JSON beneath a released bundle that no bundled schema classifies, that its schema rejects, or that is not in deterministic source form | yes, all twelve |
+| `check-bundle <version>` | a released bundle whose bytes are not the fixed point of `xtask/bundle-source/<version>/` | yes, `0.5.0` through `0.13.0` |
+| `check-json [<version>...]` | JSON beneath a released bundle that no bundled schema classifies, that its schema rejects, or that is not in deterministic source form | yes, all thirteen |
 
 **`cargo xtask package-bundle <version> --out <dir>`** packages a released bundle as a
 deterministic OCI image layout. It is not a gate step of its own: its cases run under
@@ -215,8 +216,8 @@ and an absent lane looks identical to a green one if you only read `cargo test`.
 
 **The gate verifies every released bundle, not just `0.1.0`.** `scripts/gate.sh:20-23` runs the
 four frozen Python checkers, and the lines after them run `cargo xtask check-bundle` for `0.5.0`
-through `0.12.0`, so
-a green gate *is* evidence that all twelve still hold. Cutting a successor bundle therefore means
+through `0.13.0`, so
+a green gate *is* evidence that all thirteen still hold. Cutting a successor bundle therefore means
 **adding its check to `scripts/gate.sh`** — a bundle whose check is not in the gate is unverified
 from the next commit onward.
 

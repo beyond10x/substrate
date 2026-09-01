@@ -50,13 +50,13 @@ published contract.**
 | 0.2.0 bundle, runtime, portable lane, delegated Linux lane | green |
 | 0.4.0 successor development bundle | adds independently verified read-only execution capsules; the delegated model-free lane proves capsule/config/hook binding and correlated native hook evidence before model dispatch |
 | phase 4, [raw pipe sessions](adr/0007-protocol-processes-use-raw-pipe-sessions.md) | source-typed bounded raw-pipe primitive, distinct durable session identity, leased start, single-attachment Unix-WebSocket route ([plan 04](docs/plan/04-direct-byte-plane.md)) |
-| Rust SDK | `b10x-substrate-sdk` provides typed builders, resource handles, durable-operation recovery, event streams and separately supervised external or linked daemon children; current source verifies the explicitly promoted `substrate-wire/0.12.0` name and inner digest before serving an operation |
+| Rust SDK | `b10x-substrate-sdk` provides typed builders, resource handles, durable-operation recovery, event streams and separately supervised external or linked daemon children; current source verifies the explicitly promoted `substrate-wire/0.13.0` name and inner digest before serving an operation |
 | tagged artifact release | [`.github/workflows/release.yml`](.github/workflows/release.yml) publishes the daemon image and the explicitly pinned current development bundle on an annotated bare-version tag whose commit has a green gate run. It copies `cargo xtask package-bundle`'s exact OCI layout to `ghcr.io/beyond10x/b10x-substrate-wire:<bundle-version>`, keyless-signs and verifies both digests before the GitHub release, and refuses an existing canonical tag. It needs no repository secret. The exact changelog digest lines land by bot-authored pull request because `main` is protected |
-| stable publication | **not done.** The public, signed, digest-pinned `0.12.0` OCI artifact remains annotated `development`; distribution and explicit daemon advertisement do not make it stable |
+| stable publication | **not done.** The latest published OCI bundle is signed `0.12.0` and remains annotated `development`; current source's `0.13.0` successor is not yet published, and neither state makes a development contract stable |
 | phase 4, [pty sessions](adr/0019-pty-is-a-second-session-mode.md) | a terminal is a second session **mode** on the same route family, not a second resource: `mode: "pty"` with a required 1–1000-cell window, a `resize` frame, and the `sessions.pty` fact published only after a startup probe allocated a pair, made it controlling inside a throwaway sandbox and round-tripped a window through the child. Absent, the mode is refused `session.pty-unserved` (501) and **never** served as pipes |
 | network session authority, Git sources | **absent** |
-| production network transport | current source accepts TLS 1.3 HTTPS/WSS with explicit owner-safe identity files and atomic SIGHUP rotation; application routes remain fail-closed until hosted admission exists |
-| hosted trust envelope | accepted in design, **not implemented**; no production TLS request is assigned a placeholder subject, and static-bearer TCP is loopback-only development transport |
+| production network transport | current source accepts TLS 1.3 HTTPS/WSS with explicit owner-safe identity files, atomic SIGHUP rotation and per-request hosted Identity admission |
+| hosted trust envelope | current source resolves five-minute opaque Identity access credentials over direct HTTPS for exact audience `urn:b10x:substrate`, enforces `observe`/`workspaces`/`exec` per route before durable admission and never caches stale authority |
 
 Per-area state with the exact next proof each is waiting for is [`STATUS.md`](STATUS.md); ordered
 exit criteria are [`ROADMAP.md`](ROADMAP.md).
@@ -91,6 +91,7 @@ The table is the gate's own order (`scripts/gate.sh`).
 | contract bundle 0.10.0 | `cargo xtask check-bundle 0.10.0` — checks the PTY mode, closed frame vocabulary and refusal register |
 | contract bundle 0.11.0 | `cargo xtask check-bundle 0.11.0` — checks hard writable-storage quotas, exact opt-in resource observations and both metrics routes |
 | contract bundle 0.12.0 | `cargo xtask check-bundle 0.12.0` — checks exact read-only/scoped workspace access and its applied observation |
+| contract bundle 0.13.0 | `cargo xtask check-bundle 0.13.0` — checks the exact hosted Identity audience, route scopes and four safe authentication refusals |
 | contract JSON | `cargo xtask check-json` — every JSON under `contracts/` is classified by exactly one bundled schema, or it fails closed |
 | toolchain | `cargo xtask check-toolchain` |
 
@@ -139,7 +140,7 @@ The runner prints its current portable or delegated case inventory from each fre
 this document deliberately pins no counts that drift as adversarial coverage grows.
 
 `cargo xtask check-json` fails closed on unclassified or schema-invalid contract JSON and
-meta-validates every Draft 2020-12 schema offline, across all nine released bundles. Classification
+meta-validates every Draft 2020-12 schema offline, across all thirteen released bundles. Classification
 used to live in a Python module the four checkers imported — shared live machinery, not any one
 bundle's reproducibility proof — so it moved with the rest of the tooling, and the four checkers no
 longer do it. They verify everything else about the bundles they froze.
@@ -313,7 +314,9 @@ substrate-daemon \
   --deployment edge-01 \
   --tls-listen 0.0.0.0:8443 \
   --tls-certificate-chain /run/substrate-tls/chain.pem \
-  --tls-private-key /run/substrate-tls/key.pem
+  --tls-private-key /run/substrate-tls/key.pem \
+  --hosted-identity-origin https://identity.example.com \
+  --hosted-identity-ca-bundle /run/substrate-identity/ca.pem
 ```
 
 The certificate and key paths must be non-empty regular files rather than symlinks. The key must
@@ -325,10 +328,15 @@ Replace both files completely and send SIGHUP to rotate them. A complete valid p
 snapshot for new connections; existing connections retain their admitted snapshot. An invalid
 replacement is logged only as `tls.reload-invalid`, and the last valid identity keeps serving.
 
-This slice authenticates the daemon, not the caller. Until the separately scoped hosted trust
-envelope is implemented, the production listener deliberately answers application requests with a
-pre-admission `503` and derives no remote subject. There is no production plaintext fallback and no
-flag that disables client-side certificate or server-name verification.
+The production listener also authenticates every caller by resolving an opaque five-minute
+`identity_access_v1_…` bearer at Identity's `GET /v1/access-authority` endpoint. Resolution uses the
+exact `urn:b10x:substrate` audience, the explicit CA roots above, direct HTTPS with no redirects or
+proxy, a five-second deadline and a 64 KiB response bound. `observe`, `workspaces` and `exec` are
+checked against the addressed route before any handler can reserve a durable operation. Missing,
+invalid, under-scoped and temporarily unresolvable authority answers `auth.credential-absent`,
+`auth.authority-invalid`, `auth.scope-denied` or `auth.authority-unavailable`; there is no cached or
+caller-written fallback. There is no production plaintext fallback and no verification-disable
+flag.
 
 ## What is enforced
 

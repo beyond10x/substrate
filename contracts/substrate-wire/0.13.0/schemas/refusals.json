@@ -1,0 +1,83 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.13.0:refusals",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "const": "schemas/refusals.json"
+    },
+    "format": {
+      "const": "b10x.substrate-session-refusals.v1"
+    },
+    "refusals": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "arrives": {
+            "items": {
+              "enum": [
+                "exec-observation",
+                "internal",
+                "protocol-error-frame",
+                "http-response"
+              ]
+            },
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true,
+            "x-b10x-every-way-it-reaches-a-client": "a-code-may-arrive-more-than-one-way"
+          },
+          "class": {
+            "enum": [
+              "refused",
+              "conflict",
+              "unserved",
+              "exhausted",
+              "failed"
+            ]
+          },
+          "code": {
+            "pattern": "^session\\.[a-z0-9-]+$",
+            "type": "string"
+          },
+          "evidence": {
+            "maxLength": 256,
+            "minLength": 1,
+            "type": "string"
+          },
+          "message": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "type": "string"
+          },
+          "retriable": {
+            "type": "boolean"
+          },
+          "status": {
+            "maximum": 599,
+            "minimum": 200,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "code",
+          "class",
+          "arrives",
+          "retriable",
+          "message"
+        ],
+        "type": "object"
+      },
+      "minItems": 1,
+      "type": "array",
+      "x-b10x-order": "sorted-by-code"
+    }
+  },
+  "required": [
+    "$schema",
+    "format",
+    "refusals"
+  ],
+  "title": "Every refusal a session can raise, and what a client does with it",
+  "type": "object"
+}
