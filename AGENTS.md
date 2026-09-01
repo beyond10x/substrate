@@ -255,30 +255,41 @@ workflow. `cargo xtask check-packages` proves the closed allowlist and package c
 tag; crates.io is the authority for whether an already-published version can be uploaded.
 
 **Pushing that tag runs [`.github/workflows/release.yml`](.github/workflows/release.yml)**, which
-builds the `Dockerfile`, publishes `ghcr.io/beyond10x/b10x-substrate-daemon:<version>`, signs it
-keylessly, verifies the signature **before** it announces anything, and only then writes the digest
-to the GitHub release and to `CHANGELOG.md` under that version's heading. It refuses — publishing
-nothing — a tag that is not the bare version form (so `0.2.2-rc.0` produces nothing), a lightweight
-tag, a commit that is not an ancestor of `main`, a version that disagrees with
-`[workspace.package] version`, and a commit for which `gate.yml` has not concluded `success`: it
-reads that workflow's own recorded conclusion for the tagged SHA rather than re-running a lookalike.
-`packages: write` and `id-token: write` exist on its release job and nowhere else, and that job
-holds `contents: write` because it creates the release and pushes the changelog commit. Everything
-it does uses the run's own `GITHUB_TOKEN`; **the release needs no repository secret at all**
-(§ *Bot identity*). **`0.2.3` is published**: `ghcr.io/beyond10x/b10x-substrate-daemon:0.2.3` at
+builds the `Dockerfile` and packages the explicitly pinned current development bundle with
+`cargo xtask package-bundle`. It publishes
+`ghcr.io/beyond10x/b10x-substrate-daemon:<version>` and
+`ghcr.io/beyond10x/b10x-substrate-wire:<bundle-version>`, keyless-signs both digests and verifies
+both signatures **before** it announces anything. It refuses — publishing nothing — a tag that is
+not the bare version form (so `0.2.2-rc.0` produces nothing), a lightweight tag, a commit that is not
+an ancestor of `main`, a version that disagrees with `[workspace.package] version`, a commit for
+which `gate.yml` has not concluded `success`, an existing daemon version tag, or an existing bundle
+tag whose digest differs from the deterministic local package. A later daemon release may reuse a
+byte-identical bundle: the workflow verifies the digest, signs it again with that release's exact
+workflow identity, and never replaces the write-once tag. Release runs serialize globally because
+consecutive daemon releases can name that same bundle. The workflow reads the recorded gate
+conclusion for the tagged SHA rather than re-running a lookalike, and copies the packager's exact OCI
+layout with ORAS rather than constructing another manifest at publication time. It proves the
+bundle is anonymously retrievable before mutating the daemon-image tag, so correcting first-push
+package visibility leaves a safe retry path.
+
+`packages: write` and `id-token: write` exist on the release job and nowhere else; that job holds
+`contents: write` only to create the GitHub release. Everything it does uses the run's own
+`GITHUB_TOKEN`; **the release needs no repository secret at all** (§ *Bot identity*). The GitHub
+release records both digests and exact `cosign verify` commands. **`0.2.3` is published**:
+`ghcr.io/beyond10x/b10x-substrate-daemon:0.2.3` at
 `sha256:ab10158266b579d705ce8422c7d2a6e783cde950d30e100f61ca6befc4d0beda`, keyless-signed and
-`cosign verify`-ed in the run before anything announced.
+`cosign verify`-ed in the run before anything announced. No contract-bundle tag has been published
+yet; the bundle workflow landed after the latest release tag.
 
-**The last step cannot succeed and this is by design, not a bug to route around.** `main` is a
-protected branch requiring the `Full gate` status check, so the workflow's direct push of the
-changelog digest line is declined `GH006`. A direct push can never satisfy that check, because no
-gate run exists for a commit that was never pushed. The digest goes in through a pull request like
-any other change; the workflow now says exactly that instead of retrying three times and blaming a
-race.
+`main` is protected by the `Full gate` status check, so the workflow never pushes a changelog commit
+or creates a `GITHUB_TOKEN` pull request whose events GitHub would suppress. After both signatures
+verify and the GitHub release exists, its summary emits the exact daemon and contract-bundle digest
+lines for a workstation's bot-authored pull request. That PR receives the same gate as every other
+change.
 
-The bundle is **not** a published stable release: OCI packaging, signing and digest pinning of the
-contract bundle are separate release work, and a signed daemon image makes no bundle stable. Do not
-describe a development bundle as stable.
+A signed, digest-pinned OCI bundle is still **not a stable contract release**. The published
+artifact is annotated `dev.b10x.contract.status=development`; atlas ADR 0019 governs any later
+stability decision. Do not describe a development bundle as stable.
 
 ## Where work is tracked
 
@@ -325,19 +336,18 @@ at `scripts/bot-token.sh:8` — `org="${B10X_BOT_ORG:-beyond10x}"` — **is** th
 lives in (`git remote -v` shows `github.com/beyond10x/substrate`), so the default is right here. Set
 `B10X_BOT_ORG` only to mint against a different org.
 
-**One exception, and it is narrower rather than looser: CI releases commit as
-`github-actions[bot]`.** `.github/workflows/release.yml` uses the run's own `GITHUB_TOKEN` for the
-image push, the GitHub release and the changelog commit, and holds no App key. The App is installed
-org-wide with `administration:write` and `workflows:write` on every repository in `beyond10x`, and
-**this repository is public** (invariant 9): its private key as an Actions secret here would put an
-org-wide credential in the repository with the widest audience for proposing workflow changes.
-`GITHUB_TOKEN` cannot leave this repository, is minted per run and expires with it. The rule above
-exists to keep *human* identities out of automated commits; this keeps that and drops the reach.
+**One exception, and it is narrower rather than looser: CI releases use `GITHUB_TOKEN` for registry
+and GitHub-release API writes.** `.github/workflows/release.yml` uses the run's own token for both
+GHCR artifacts and the GitHub release, makes no git commit or push, and holds no App key. The App is
+installed org-wide with `administration:write` and `workflows:write` on every repository in
+`beyond10x`, and **this repository is public** (invariant 9): its private key as an Actions secret
+here would put an org-wide credential in the repository with the widest audience for proposing
+workflow changes. `GITHUB_TOKEN` cannot leave this repository, is minted per run and expires with
+it.
 
-The cost is the author line — a release commit reads `github-actions[bot]`, not `b10x-bot[bot]`.
-Do not "fix" it by adding `B10X_BOT_PRIVATE_KEY` to this repository's secrets. Anything that needs
-the App's identity or its cross-repository reach runs from a workstation through `as-bot.sh`, or
-from a private repository.
+Do not add `B10X_BOT_PRIVATE_KEY` to this repository's secrets. Recording the emitted release
+digests in `CHANGELOG.md`, or anything else that needs the App's identity or cross-repository reach,
+runs from a workstation through `as-bot.sh`, or from a private repository.
 
 ## Planning artifacts
 

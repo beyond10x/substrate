@@ -1,8 +1,11 @@
-# Publishes the daemon image for a release tag: an **annotated bare-version tag** on `main`
-# (AGENTS.md § "Releases" — "the bare version … annotated, at a fully gated `main` commit").
-# The result is `ghcr.io/beyond10x/b10x-substrate-daemon:<version>`, keyless-signed with cosign,
-# with the image digest written to the GitHub release and to `CHANGELOG.md` under that version's
-# heading. `b10x-substrate-*` is the published-package prefix fixed by README.md:31.
+# Publishes the daemon image and the explicitly pinned current development contract bundle for a
+# release tag: an **annotated bare-version tag** on `main` (AGENTS.md § "Releases" — "the bare
+# version … annotated, at a fully gated `main` commit"). The results are
+# `ghcr.io/beyond10x/b10x-substrate-daemon:<version>` and
+# `ghcr.io/beyond10x/b10x-substrate-wire:<bundle-version>`, both keyless-signed with cosign. Their
+# digests are written to the GitHub release and emitted as the exact `CHANGELOG.md` stanza that must
+# land through the protected-main pull-request path. `b10x-substrate-*` is the published-package
+# prefix fixed by README.md:31.
 #
 # What this workflow refuses, and why each refusal is a refusal rather than a warning:
 #
@@ -16,10 +19,13 @@
 #     bar for `main` (AGENTS.md § "The gate"); this workflow reads that workflow's own conclusion
 #     for the exact tagged SHA rather than re-running a lookalike, so "the gate was green for this
 #     commit" means the recorded run, not a second opinion.
-#   * a signature that does not verify. Signing and `cosign verify` both run **before** the GitHub
-#     release is created and before `CHANGELOG.md` is touched, so a Sigstore failure fails the job
-#     with nothing announced. The image bytes are in the registry at that point — untagged pushes
-#     cannot be undone from here — but no release, no changelog entry and no digest claim exist.
+#   * an existing daemon-image version tag, or a contract-bundle tag whose digest differs from the
+#     deterministic local package. Both canonical tags are write-once. A later daemon release may
+#     reuse the same byte-identical bundle, but it never replaces the bundle tag.
+#   * a signature that does not verify. Signing and `cosign verify` for **both** artifacts run before
+#     the GitHub release is created, so a Sigstore failure fails the job with nothing announced.
+#     Registry writes cannot be rolled back here, but no release, changelog stanza or digest claim
+#     is emitted on their strength.
 #
 # Permissions. `contents: read` at workflow level. `preflight` adds `actions: read`, which is the
 # only scope that can read another workflow's conclusion for a SHA; there is no way to ask "was
@@ -27,24 +33,20 @@
 # (push to GHCR) and `id-token: write` (the OIDC token keyless cosign signs with) and nothing else.
 # Neither write scope exists anywhere but that one job.
 #
-# Identity. Everything here — the image push, the GitHub release and the `CHANGELOG.md` commit —
-# uses the run's own `GITHUB_TOKEN`, so the release holds no credential that reaches beyond this
-# repository. It carries no secret to set, rotate or leak: GitHub mints it per run and expires it
-# when the run ends.
+# Identity. Both GHCR pushes and the GitHub release use the run's own `GITHUB_TOKEN`, so the release
+# holds no credential that reaches beyond this repository. It carries no secret to set, rotate or
+# leak: GitHub mints it per run and expires it when the run ends.
 #
 # This is a deliberate departure from AGENTS.md § "Bot identity", which requires the b10x-bot App
 # for automated commits and pushes. That App is installed org-wide with `administration:write` and
 # `workflows:write` on every repository in `beyond10x`, and this repository is **public**: its key
 # as an Actions secret here would put an org-wide credential in the repository with the widest
-# audience for proposing workflow changes. The rule exists to keep *human* identities out of
-# automated commits, and `GITHUB_TOKEN` does that with a fraction of the reach. The cost is the
-# author line: releases are committed by `github-actions[bot]`, not `b10x-bot[bot]`. AGENTS.md
-# § "Bot identity" records the exception.
+# audience for proposing workflow changes. No git commit or push happens here. A workstation opens
+# the digest-recording pull request through `scripts/as-bot.sh`, where the App key never enters this
+# public repository's Actions secrets. AGENTS.md § "Bot identity" records the exception.
 #
-# A `GITHUB_TOKEN` push does not trigger further workflow runs (GitHub's own loop protection), so
-# the changelog commit below cannot start a second gate run. If branch protection on `main` rejects
-# the push, the step refuses by name after three attempts and says the image is already published —
-# it never leaves the digest silently unrecorded.
+# Protected `main` requires `Full gate`. The workflow therefore emits both exact digest lines in its
+# summary after publication; a bot-authored pull request records them and receives the normal gate.
 #
 # Platform. `linux/amd64` only: the hosted runner is amd64 and a cross-built or emulated Rust
 # release build is not something this job can honestly claim to have exercised. An arm64 image is
@@ -65,13 +67,19 @@ permissions:
   contents: read
 
 concurrency:
-  # Never cancel a release in flight: a cancelled run can leave a pushed image with no signature
-  # and no release. One group per tag, so two different tags do not serialise behind each other.
-  group: release-${{ github.ref }}
+  # Never cancel a release in flight: a cancelled run can leave a pushed artifact with no
+  # signature and no release. Every release serialises here because two daemon releases may carry
+  # the same current bundle version; per-tag groups would let both race for its write-once tag.
+  group: release
   cancel-in-progress: false
 
 env:
   IMAGE: ghcr.io/beyond10x/b10x-substrate-daemon
+  # Explicit, reviewable publication input. A successor bundle must move this pin in the same
+  # change; deriving "largest directory" at release time would silently broaden what a tag ships.
+  BUNDLE_IMAGE: ghcr.io/beyond10x/b10x-substrate-wire
+  BUNDLE_VERSION: 0.12.0
+  BUNDLE_LAYOUT: target/release-contract-bundle
   GATE_WORKFLOW: gate.yml
 
 jobs:
@@ -237,7 +245,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   release:
-    name: Build, sign and publish
+    name: Build, sign and publish daemon and development bundle
     needs: preflight
     runs-on: ubuntu-latest
     # A release build is a cold `cargo build --release` of the whole workspace inside the image;
@@ -245,9 +253,9 @@ jobs:
     # more input to trust in the artifact an operator is asked to verify).
     timeout-minutes: 120
     permissions:
-      # `write`, not `read`: this job creates the GitHub release and pushes the changelog commit
-      # with `GITHUB_TOKEN`. Restated in full because a job-level block replaces the workflow-level
-      # one outright rather than merging with it.
+      # `write`, not `read`: this job creates the GitHub release with `GITHUB_TOKEN`. It does not
+      # write git refs. Restated in full because a job-level block replaces the workflow-level one
+      # outright rather than merging with it.
       contents: write
       packages: write
       id-token: write
@@ -279,8 +287,8 @@ jobs:
           docker buildx create --name b10x-release --driver docker-container --use
           docker buildx inspect --bootstrap
 
-      # `packages: write` on the GITHUB_TOKEN is what pushes the image. The bot App identity below
-      # is for git and API writes, which is what AGENTS.md, section "Bot identity", governs.
+      # `packages: write` on the GITHUB_TOKEN is what pushes both artifacts. No repository or
+      # organization credential is added to this public repository.
       - name: Log in to GHCR
         env:
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -290,7 +298,15 @@ jobs:
           printf '%s' "$GHCR_TOKEN" \
             | docker login ghcr.io --username "$GHCR_USER" --password-stdin
 
-      - name: Refuse an existing release or image version tag
+      # ORAS copies the packager's OCI Image Layout as-is; `oras push` would construct a second
+      # manifest and the digest tested locally would no longer be the digest published. The action
+      # and CLI versions are both exact, and setup-oras verifies the CLI release checksum.
+      - name: Install ORAS
+        uses: oras-project/setup-oras@1d808f7d7f6995cc68b7bf507bfe5c5446e1dc9d # v2.0.1
+        with:
+          version: 1.3.3
+
+      - name: Refuse an existing release or daemon-image version tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -303,6 +319,145 @@ jobs:
             echo "refused: ${IMAGE}:${VERSION} already exists; canonical image tags are write-once." >&2
             exit 1
           fi
+
+      # The packager reads the frozen directory and writes only under target/. Full checkout
+      # history makes its default SOURCE_DATE_EPOCH the author time of the last commit touching
+      # that bundle, so the same source commit yields the same manifest digest on another runner.
+      - name: Package and inspect the development contract bundle
+        id: bundle-package
+        run: |
+          set -euo pipefail
+          package_output=$(cargo xtask package-bundle "${BUNDLE_VERSION}" --out "${BUNDLE_LAYOUT}")
+          printf '%s\n' "$package_output"
+          package_digest=${package_output%% *}
+          case "$package_digest" in
+            sha256:*) ;;
+            *) echo "refused: package-bundle reported no manifest digest ('${package_digest}')." >&2; exit 1 ;;
+          esac
+
+          descriptor=$(oras manifest fetch --descriptor --oci-layout "${BUNDLE_LAYOUT}:${BUNDLE_VERSION}")
+          printf '%s\n' "$descriptor" \
+            | jq -e \
+                --arg digest "$package_digest" \
+                --arg version "$BUNDLE_VERSION" \
+                '.digest == $digest
+                 and .annotations["org.opencontainers.image.version"] == $version
+                 and .annotations["org.opencontainers.image.ref.name"] == $version
+                 and .annotations["dev.b10x.contract.status"] == "development"' >/dev/null
+          layout_digest=$(oras resolve --oci-layout "${BUNDLE_LAYOUT}:${BUNDLE_VERSION}")
+          if [ "$layout_digest" != "$package_digest" ]; then
+            echo "refused: package-bundle reported ${package_digest}, but its OCI layout resolves to ${layout_digest}." >&2
+            exit 1
+          fi
+          echo "packaged ${BUNDLE_IMAGE}:${BUNDLE_VERSION} -> ${package_digest} (development)"
+          echo "digest=${package_digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve the write-once contract-bundle tag
+        id: bundle-state
+        env:
+          PACKAGE_DIGEST: ${{ steps.bundle-package.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if remote_digest=$(oras resolve "${BUNDLE_IMAGE}:${BUNDLE_VERSION}" 2>&1); then
+            if [ "$remote_digest" != "$PACKAGE_DIGEST" ]; then
+              echo "refused: ${BUNDLE_IMAGE}:${BUNDLE_VERSION} already names ${remote_digest}, not deterministic package ${PACKAGE_DIGEST}; it will not be overwritten." >&2
+              exit 1
+            fi
+            echo "reusing byte-identical ${BUNDLE_IMAGE}:${BUNDLE_VERSION} at ${remote_digest}"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            case "$remote_digest" in
+              *"not found"*|*"manifest unknown"*) echo "exists=false" >> "$GITHUB_OUTPUT" ;;
+              *)
+                echo "refused: could not resolve ${BUNDLE_IMAGE}:${BUNDLE_VERSION} reliably:" >&2
+                printf '%s\n' "$remote_digest" >&2
+                exit 1
+                ;;
+            esac
+          fi
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      # Publish and prove the bundle before mutating the daemon-image tag. A newly created GHCR
+      # package may initially be private; failing its anonymous check here leaves the daemon tag
+      # untouched, and a retry can safely reuse the same deterministic bundle after visibility is
+      # corrected. A later daemon release can likewise reuse this exact write-once bundle.
+      - name: Publish or reuse the exact development contract-bundle layout
+        id: bundle
+        env:
+          EXISTS: ${{ steps.bundle-state.outputs.exists }}
+          PACKAGE_DIGEST: ${{ steps.bundle-package.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [ "$EXISTS" != true ]; then
+            if remote_digest=$(oras resolve "${BUNDLE_IMAGE}:${BUNDLE_VERSION}" 2>&1); then
+              if [ "$remote_digest" != "$PACKAGE_DIGEST" ]; then
+                echo "refused: ${BUNDLE_IMAGE}:${BUNDLE_VERSION} appeared at ${remote_digest}, not ${PACKAGE_DIGEST}; it will not be overwritten." >&2
+                exit 1
+              fi
+            else
+              case "$remote_digest" in
+                *"not found"*|*"manifest unknown"*)
+                  oras cp --from-oci-layout --no-tty \
+                    "${BUNDLE_LAYOUT}:${BUNDLE_VERSION}" \
+                    "${BUNDLE_IMAGE}:${BUNDLE_VERSION}"
+                  ;;
+                *)
+                  echo "refused: could not prove ${BUNDLE_IMAGE}:${BUNDLE_VERSION} absent immediately before push:" >&2
+                  printf '%s\n' "$remote_digest" >&2
+                  exit 1
+                  ;;
+              esac
+            fi
+          fi
+
+          remote_digest=$(oras resolve "${BUNDLE_IMAGE}:${BUNDLE_VERSION}")
+          if [ "$remote_digest" != "$PACKAGE_DIGEST" ]; then
+            echo "refused: published bundle resolves to ${remote_digest}, not packaged digest ${PACKAGE_DIGEST}." >&2
+            exit 1
+          fi
+          remote_descriptor=$(oras manifest fetch --descriptor "${BUNDLE_IMAGE}@${remote_digest}")
+          printf '%s\n' "$remote_descriptor" \
+            | jq -e \
+                --arg digest "$PACKAGE_DIGEST" \
+                --arg version "$BUNDLE_VERSION" \
+                '.digest == $digest
+                 and .annotations["org.opencontainers.image.version"] == $version
+                 and .annotations["dev.b10x.contract.status"] == "development"' >/dev/null
+          echo "resolved ${BUNDLE_IMAGE}:${BUNDLE_VERSION} -> ${remote_digest} (development)"
+          echo "digest=${remote_digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Sign the development contract bundle keylessly
+        env:
+          BUNDLE_DIGEST: ${{ steps.bundle.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cosign sign --yes "${BUNDLE_IMAGE}@${BUNDLE_DIGEST}"
+
+      - name: Verify the contract-bundle signature with this release identity
+        id: bundle-verify
+        env:
+          BUNDLE_DIGEST: ${{ steps.bundle.outputs.digest }}
+        run: |
+          set -euo pipefail
+          identity="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}"
+          echo "certificate identity: ${identity}"
+          cosign verify \
+            --certificate-identity "${identity}" \
+            --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+            "${BUNDLE_IMAGE}@${BUNDLE_DIGEST}" > bundle-cosign-verify.json
+          jq -e 'length > 0' bundle-cosign-verify.json >/dev/null
+          echo "identity=${identity}" >> "$GITHUB_OUTPUT"
+
+      - name: Prove the contract bundle is anonymously retrievable
+        env:
+          BUNDLE_DIGEST: ${{ steps.bundle.outputs.digest }}
+        run: |
+          set -euo pipefail
+          anonymous_config=$(mktemp -d)
+          DOCKER_CONFIG="$anonymous_config" \
+            oras manifest fetch --descriptor "${BUNDLE_IMAGE}@${BUNDLE_DIGEST}" >/dev/null
 
       # SOURCE_SHA becomes `org.opencontainers.image.revision` on the published image
       # (Dockerfile:13-14), so the image says which commit produced it.
@@ -354,9 +509,6 @@ jobs:
           echo "pushed ${IMAGE}:${VERSION} -> ${digest}"
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
-      - name: Install cosign
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
-
       # Keyless: the certificate is issued against this job's OIDC token (`id-token: write`), so
       # the identity bound into the signature is this workflow file at this ref, not a key anyone
       # holds. Signed by digest, never by tag — a tag is a mutable pointer and signing one signs
@@ -398,10 +550,10 @@ jobs:
 
       # Everything below announces. Nothing above it did.
 
-      # The release notes state what the artifact is and, as explicitly, what it is not. The wire
+      # The release notes state what each artifact is and, as explicitly, what it is not. The wire
       # contract bundles under `contracts/substrate-wire/` are **development** bundles: publishing
-      # a signed daemon image does not make any of them a stable contract, and a stable-contract
-      # decision is its own ADR under atlas ADR 0019
+      # and signing one does not make it a stable contract, and a stable-contract decision is its
+      # own ADR under atlas ADR 0019
       # (`architecture/adr/0019-contract-release-and-conformance.md`, cited by path because it
       # lives outside this repository — AGENTS.md, section "Links"). The image's `VOLUME` and
       # `EXPOSE 8080` (Dockerfile:16-17) describe the development-only TCP posture that
@@ -411,10 +563,12 @@ jobs:
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
           IDENTITY: ${{ steps.verify.outputs.identity }}
+          BUNDLE_DIGEST: ${{ steps.bundle.outputs.digest }}
+          BUNDLE_IDENTITY: ${{ steps.bundle-verify.outputs.identity }}
         run: |
           set -euo pipefail
           cat > release-notes.md <<NOTES
-          Built by b10x-bot from \`${SOURCE_SHA}\`, the commit this tag names, after
+          Built by this release workflow from \`${SOURCE_SHA}\`, the commit this tag names, after
           \`.github/workflows/gate.yml\` concluded \`success\` for it: ${GATE_RUN_URL}
 
           ## Image
@@ -432,24 +586,46 @@ jobs:
           docker pull ${IMAGE}@${DIGEST}
           \`\`\`
 
-          ## Verify the signature
+          ## Development contract bundle
 
-          The image is signed keylessly through Sigstore. The certificate identity is the workflow
-          that built it, so a signature from any other workflow, ref or repository fails:
+          | | |
+          | --- | --- |
+          | artifact | \`${BUNDLE_IMAGE}:${BUNDLE_VERSION}\` |
+          | digest | \`${BUNDLE_DIGEST}\` |
+          | contract status | \`development\` (\`dev.b10x.contract.status\`) |
+
+          Copy the exact OCI layout by digest, never by tag:
+
+          \`\`\`console
+          oras cp --to-oci-layout \\
+            ${BUNDLE_IMAGE}@${BUNDLE_DIGEST} \\
+            ./substrate-wire-${BUNDLE_VERSION}:${BUNDLE_VERSION}
+          \`\`\`
+
+          ## Verify the signatures
+
+          Both artifacts are signed keylessly through Sigstore. Each certificate identity is this
+          workflow at this tag, so a signature from any other workflow, ref or repository fails:
 
           \`\`\`console
           cosign verify \\
             --certificate-identity ${IDENTITY} \\
             --certificate-oidc-issuer https://token.actions.githubusercontent.com \\
             ${IMAGE}@${DIGEST}
+
+          cosign verify \\
+            --certificate-identity ${BUNDLE_IDENTITY} \\
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \\
+            ${BUNDLE_IMAGE}@${BUNDLE_DIGEST}
           \`\`\`
 
           ## What this release does not claim
 
-          - **The wire contract bundles remain development bundles.** Every bundle under
-            \`contracts/substrate-wire/\` is a development bundle; a signed daemon image makes none
-            of them a stable published contract. A stable-contract decision is its own ADR under
-            atlas ADR 0019 (\`architecture/adr/0019-contract-release-and-conformance.md\`).
+          - **The published wire contract remains a development bundle.**
+            \`${BUNDLE_IMAGE}:${BUNDLE_VERSION}\` remains a **development** bundle; OCI publication,
+            digest pinning and a verified signature do not make it a stable contract. A
+            stable-contract decision is its own ADR under atlas ADR 0019
+            (\`architecture/adr/0019-contract-release-and-conformance.md\`).
           - **The image's posture is development, not hosted.** Its \`EXPOSE 8080\` and \`VOLUME\`
             describe the static-bearer TCP posture that design 06, section 1, marks
             \`development_only\`. The hosted trust envelope is accepted in design and not
@@ -462,9 +638,8 @@ jobs:
           echo '--- release notes ---'
           cat release-notes.md
 
-      # `gh release create` under the bot App token, so the release is authored by the App and not
-      # by whoever pushed the tag. `--verify-tag` refuses if the tag vanished between preflight and
-      # here.
+      # `gh release create` uses this run's repository-scoped GITHUB_TOKEN. `--verify-tag` refuses
+      # if the tag vanished between preflight and here.
       - name: Publish the GitHub release
         id: publish
         env:
@@ -479,30 +654,28 @@ jobs:
             --verify-tag
           gh release edit "${VERSION}" --repo "${GITHUB_REPOSITORY}" --draft=false
 
-      # The digest also belongs in `CHANGELOG.md` under this version's heading, on `main`
-      # (AGENTS.md, section "Releases": the changelog is cut under a version heading at release).
-      # The commit is authored by `github-actions[bot]` and pushed through a credential helper, so
-      # the token never reaches argv or a remote URL. The user id is pinned rather than looked up:
-      # `gh api /users/github-actions%5Bbot%5D` is 41898282, and a release should not fail because
-      # an API call for a constant did not answer.
-      #
-      # Idempotent: re-running replaces this version's digest line rather than stacking a second
-      # one. Retried against a fresh `origin/main` because `main` can move while a release builds.
+      # Both digests also belong in `CHANGELOG.md` under this version's heading (AGENTS.md,
+      # section "Releases"). Protected `main` requires Full gate, so the release workflow neither
+      # pushes it directly nor creates a GITHUB_TOKEN-authored PR whose events GitHub would suppress.
+      # It emits the exact bot-PR body after both signatures verify and the GitHub release exists.
       - name: Describe the required changelog pull request
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
+          BUNDLE_DIGEST: ${{ steps.bundle.outputs.digest }}
         run: |
           {
             echo "CHANGELOG.md is protected by the Full gate and is not pushed directly."
             echo "Open a bot-authored pull request adding:"
             echo
             echo "Image: \`${IMAGE}:${VERSION}\` at \`${DIGEST}\`, keyless-signed; verify with \`cosign verify\`."
+            echo "Contract bundle: \`${BUNDLE_IMAGE}:${BUNDLE_VERSION}\` at \`${BUNDLE_DIGEST}\`, annotated \`development\`, keyless-signed; verify with \`cosign verify\`."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Release summary
         if: always()
         env:
           DIGEST: ${{ steps.build.outputs.digest }}
+          BUNDLE_DIGEST: ${{ steps.bundle.outputs.digest }}
         run: |
           {
             echo "### Release ${VERSION}"
@@ -511,11 +684,14 @@ jobs:
             echo "| --- | --- |"
             echo "| image | \`${IMAGE}:${VERSION}\` |"
             echo "| digest | \`${DIGEST:-<not built>}\` |"
+            echo "| development bundle | \`${BUNDLE_IMAGE}:${BUNDLE_VERSION}\` |"
+            echo "| bundle digest | \`${BUNDLE_DIGEST:-<not built>}\` |"
             echo "| SOURCE_SHA | \`${SOURCE_SHA}\` |"
             echo "| gate run | ${GATE_RUN_URL} |"
-            echo "| signature step | ${{ steps.verify.outcome }} |"
+            echo "| daemon signature step | ${{ steps.verify.outcome }} |"
+            echo "| bundle signature step | ${{ steps.bundle-verify.outcome }} |"
             echo "| anonymous pull step | ${{ steps.anonymous.outcome }} |"
             echo "| release publication step | ${{ steps.publish.outcome }} |"
             echo
-            echo "The wire contract bundles remain **development** bundles; this release makes none of them a stable contract."
+            echo "The published wire contract remains a **development** bundle; this release does not make it stable."
           } >> "$GITHUB_STEP_SUMMARY"

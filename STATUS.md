@@ -30,7 +30,7 @@ verified daemon image.
 |---|---|---|
 | Source | the standalone public repository `beyond10x/substrate` (`git remote -v`), public under atlas ADR 0003 ([CHANGELOG.md](CHANGELOG.md), 0.2.1); the latest published annotated tag is `0.4.0` | keep the portable-document and credential invariants enforced — `cargo xtask check-links` and `cargo xtask check-secrets` are full-gate steps |
 | CI | [`.github/workflows/gate.yml`](.github/workflows/gate.yml) runs `bash scripts/gate.sh` bare on push to `main`, on pull request and on dispatch, so the job's status is the gate's own; branch protection on `main` requires the `Full gate` check; the first green run is [33275398365](https://github.com/beyond10x/substrate/actions/runs/33275398365). The delegated lane is **absent** there, never reported as passed: a hosted runner has neither bubblewrap nor a delegated cgroup subtree | either give the delegated lane a runner that has both, or keep it the named local pre-release step it is today |
-| Release | [`Dockerfile`](Dockerfile) builds the daemon and `cargo xtask package-bundle <version> --out <dir>` emits a deterministic OCI image layout from a frozen bundle (0.4.0 → manifest `sha256:3758e80bc39f1eb03b15c69410608c9ef1d2ba8095c7e707c6988dbb5894ab00`); daemon image `0.3.1` is published, anonymously pullable, keyless-signed and verified at `sha256:48068ba167487fa84fe77e0acf7f8e3f556060f4d220a074d9b9f60f9af71ebf`; no workflow publishes or signs the bundle layout | publish and sign a contract bundle layout (`story:contract-bundle-oci-artifact`) |
+| Release | [`Dockerfile`](Dockerfile) builds the daemon and `cargo xtask package-bundle <version> --out <dir>` emits a deterministic OCI image layout from a frozen bundle (0.4.0 → manifest `sha256:3758e80bc39f1eb03b15c69410608c9ef1d2ba8095c7e707c6988dbb5894ab00`); daemon image `0.3.1` is published, anonymously pullable, keyless-signed and verified at `sha256:48068ba167487fa84fe77e0acf7f8e3f556060f4d220a074d9b9f60f9af71ebf`; [`.github/workflows/release.yml`](.github/workflows/release.yml) now pins development bundle 0.12.0, copies the exact layout to its write-once GHCR tag, verifies the remote digest and development annotation, then keyless-signs and verifies it before announcement. No contract-bundle tag has run yet | on the next eligible tag, observe the GHCR digest/signature and land the workflow-emitted changelog stanza through a fully gated bot pull request |
 | Boundary | accepted: standalone, generic execution data plane, Flux-free ([ADR 0001](adr/0001-substrate-is-standalone-and-flux-free.md)) | enforce ADRs 0001–0006 in dependency and conformance tests |
 | Wire contract | bundles 0.1.0–0.11.0 remain frozen and reproducible; 0.12.0 is the current development successor, preserves all 33 predecessor routes and adds exact read-only/scoped workspace access plus its capability and applied observation | package, sign and digest-pin a complete runtime closure and a stable release without changing development authority implicitly |
 | Drivers | Linux host driver implemented; absent delegation keeps exec, resource-accounting and project-quota facts absent and answers named `unserved` refusals rather than degrading; the delegated execution lane runs only when given `SUBSTRATE_VECTORS_CGROUP_ROOT`, and project quotas require a separately provisioned filesystem and exclusive ID range | retain the delegated lane as a pre-release step and add no optimistic facts |
@@ -56,7 +56,7 @@ trust this page.
   rather than a Python script; the four frozen pairs stay Python as the reproducibility proof of the bundles they
   froze. The one recorded exception to immutability is the 2026-08-24 brand rename, which
   re-rendered every bundle in place (AGENTS.md invariant 6). No development bundle becomes a stable
-  release without packaging and signing.
+  release merely through packaging, signing or OCI publication; atlas ADR 0019 governs stability.
 - **Egress is destination-bound and operator-declared.** Ordinary execution still has no egress;
   where an operator declares `--egress-aperture <name>=<host>:<port>/tcp` and the mechanism verifies
   in a throwaway sandbox at startup, a run may select it **by name** and reach that one pinned
@@ -156,9 +156,11 @@ cargo xtask package-bundle 0.4.0 --out <dir>         # the OCI manifest digest
 ```
 
 `cargo test --workspace --locked` is the first step of the gate and reports its own totals. The
-Release row's claim that no workflow publishes or signs a contract bundle is checked by reading
-[`.github/workflows`](.github/workflows): the release workflow publishes the daemon image but never
-invokes `package-bundle` or signs a contract-bundle layout.
+Release row's repository-controlled claims are checked by
+[`xtask/tests/release_workflow.rs`](xtask/tests/release_workflow.rs): the current bundle pin, exact
+OCI-layout copy, write-once tag checks, digest-signing and verification order, development status
+and protected-main changelog route all fail closed offline. Actual GHCR and Sigstore results remain
+release-time observations and are not claimed before an eligible tag runs.
 
 ## External dependencies
 

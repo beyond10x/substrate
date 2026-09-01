@@ -7,6 +7,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- **Write-once OCI publication for the current development contract bundle.** An eligible release
+  packages the explicitly pinned bundle with `cargo xtask package-bundle`, copies that exact
+  manifest to `ghcr.io/beyond10x/b10x-substrate-wire:<bundle-version>`, checks the remote digest and
+  `development` annotation, then keyless-signs and verifies it before the GitHub release is
+  announced. Existing canonical tags are refused before publication and again immediately before
+  upload. Protected `main` receives the observed digest through the workflow-emitted bot pull
+  request stanza; no bundle digest is claimed before a release actually runs.
+
 ## [0.4.0] — 2026-09-01
 
 ### Added

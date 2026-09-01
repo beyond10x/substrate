@@ -51,8 +51,8 @@ published contract.**
 | 0.4.0 successor development bundle | adds independently verified read-only execution capsules; the delegated model-free lane proves capsule/config/hook binding and correlated native hook evidence before model dispatch |
 | phase 4, [raw pipe sessions](adr/0007-protocol-processes-use-raw-pipe-sessions.md) | source-typed bounded raw-pipe primitive, distinct durable session identity, leased start, single-attachment Unix-WebSocket route ([plan 04](docs/plan/04-direct-byte-plane.md)) |
 | Rust SDK | `b10x-substrate-sdk` provides typed builders, resource handles, durable-operation recovery, event streams and separately supervised external or linked daemon children; it exposes only the daemon-advertised `substrate-wire/0.4.0` surface |
-| daemon image release | [`.github/workflows/release.yml`](.github/workflows/release.yml) publishes, keyless-signs and digest-pins `ghcr.io/beyond10x/b10x-substrate-daemon:<version>` on an annotated bare-version tag whose commit has a green gate run; a pre-release tag publishes nothing. `0.2.4` is published at `sha256:18b4bf9…`, keyless-signed. It needs no repository secret: the image push and signing use the run's own `GITHUB_TOKEN` and OIDC identity. The changelog digest line lands by pull request — `main` is protected and declines a direct push |
-| stable publication | **not done.** The contract bundles' OCI packaging, signing and digest pinning are separate release work; no bundle is a stable published contract |
+| tagged artifact release | [`.github/workflows/release.yml`](.github/workflows/release.yml) publishes the daemon image and the explicitly pinned current development bundle on an annotated bare-version tag whose commit has a green gate run. It copies `cargo xtask package-bundle`'s exact OCI layout to `ghcr.io/beyond10x/b10x-substrate-wire:<bundle-version>`, keyless-signs and verifies both digests before the GitHub release, and refuses an existing canonical tag. It needs no repository secret. The exact changelog digest lines land by bot-authored pull request because `main` is protected |
+| stable publication | **not done.** OCI publication keeps `dev.b10x.contract.status=development`; signing and digest pinning do not make a bundle stable. The `0.12.0` GHCR tag is not published yet because the bundle workflow landed after the latest release tag |
 | phase 4, [pty sessions](adr/0019-pty-is-a-second-session-mode.md) | a terminal is a second session **mode** on the same route family, not a second resource: `mode: "pty"` with a required 1–1000-cell window, a `resize` frame, and the `sessions.pty` fact published only after a startup probe allocated a pair, made it controlling inside a throwaway sandbox and round-tripped a window through the child. Absent, the mode is refused `session.pty-unserved` (501) and **never** served as pipes |
 | network session authority, Git sources | **absent** |
 | hosted trust envelope | accepted in design, **not implemented**; the TCP static bearer is explicitly development-only |
@@ -146,7 +146,10 @@ longer do it. They verify everything else about the bundles they froze.
 `cargo xtask package-bundle <version> --out <dir>` packages a released contract bundle as a
 deterministic OCI image layout — `0.4.0` reproduces manifest
 `sha256:3758e80bc39f1eb03b15c69410608c9ef1d2ba8095c7e707c6988dbb5894ab00`. It reads
-`contracts/` read-only and is not a gate step of its own: its cases run in `cargo test`.
+`contracts/` read-only and is not a gate step of its own: its cases run in `cargo test`. On an
+eligible release tag, the release workflow copies that exact layout to GHCR with ORAS, confirms the
+remote digest, and signs and verifies the digest before announcement. The workflow's offline
+write-once and ordering assertions run in `xtask/tests/release_workflow.rs`.
 
 ### Running the daemon
 
