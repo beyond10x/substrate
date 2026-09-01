@@ -13,7 +13,7 @@ tags:
 relations:
 - decomposes: epic:release-hardening
 - depends_on: story:signed-daemon-image
-revision: 11
+revision: 12
 ---
 # Story: The 0.4.0 contract bundle is a signed, digest-pinned OCI artifact
 
@@ -145,3 +145,9 @@ which before the job is written.
   cutting a tag. `ghcr.io/beyond10x/b10x-substrate-wire:0.12.0` was still not found on 2026-09-01.
   The story stays `active` until an eligible release observes the remote digest and verified
   signature and a fully gated bot pull request records that observed digest in `CHANGELOG.md`.
+
+## Live release evidence — 2026-09-01
+
+- Annotated tag `0.4.1` names fully gated protected-main merge `961be39`; release preflight passed against gate run `33457279192`.
+- The first publication attempt copied deterministic bundle `0.12.0` to public GHCR digest `sha256:dd901e848c821aca7d55f7b8cf5ee893e1d99a1428b348e32e7ed1045a375319`, then the authenticated immediate ORAS readback failed before signing. A failed-job rerun proved the tag exists at the identical digest but hit the same readback boundary; no daemon image or GitHub release was announced.
+- The follow-up changes GHCR login identity from the repository owner to `github.actor` and makes the post-publish proof explicitly anonymous with a bounded retry. Offline workflow tests pin both properties. Live signing, anonymous ORAS proof and the protected-main changelog pull request remain required before implementation status is earned.
