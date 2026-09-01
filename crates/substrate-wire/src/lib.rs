@@ -11,6 +11,13 @@ use sha2::{Digest as _, Sha256};
 use thiserror::Error;
 
 pub const API_VERSION: &str = "v1";
+/// The complete development contract the daemon and SDK claim together.
+///
+/// This is the SHA-256 of the inner immutable `bundle.json`, not the outer OCI manifest digest.
+/// Moving either member is an explicit coordinated promotion (Atlas ADR 0019).
+pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.12.0";
+pub const ADVERTISED_CONTRACT_BUNDLE_SHA256: &str =
+    "1c82595a186ef1fa830a10e45fc842a037bb6bb7c5aafdc74e417681790e6360";
 pub const MAX_FILE_BYTES: u64 = 1_048_576;
 pub const MAX_IO_BYTES: u64 = 1_048_576;
 pub const MAX_LIST_ITEMS: u32 = 1_000;
@@ -3228,10 +3235,11 @@ pub fn canonical_json(value: &Value) -> Result<String, WireValidationError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        APERTURE_CA_BUNDLE_PATH, APERTURE_HOSTS_PATH, EXEC_SCRATCH_MOUNT,
-        EXECUTION_CAPSULE_HASH_DOMAIN, EXECUTION_CAPSULE_MOUNT, MAX_PTY_WINDOW_COLUMNS,
-        MAX_PTY_WINDOW_ROWS, MAX_READ_ONLY_ROOTS, ReadOnlyRoot, WireValidationError,
-        WorkspaceAccess, validate_read_only_roots, validate_workspace_access,
+        ADVERTISED_CONTRACT_BUNDLE, ADVERTISED_CONTRACT_BUNDLE_SHA256, APERTURE_CA_BUNDLE_PATH,
+        APERTURE_HOSTS_PATH, EXEC_SCRATCH_MOUNT, EXECUTION_CAPSULE_HASH_DOMAIN,
+        EXECUTION_CAPSULE_MOUNT, MAX_PTY_WINDOW_COLUMNS, MAX_PTY_WINDOW_ROWS, MAX_READ_ONLY_ROOTS,
+        ReadOnlyRoot, WireValidationError, WorkspaceAccess, validate_read_only_roots,
+        validate_workspace_access,
     };
     use super::{
         Base64Content, Base64Encoding, ExecutionCapsuleFile, ExecutionCapsuleFileRole,
@@ -3821,6 +3829,19 @@ mod tests {
         assert_eq!(
             hex::encode(Sha256::digest(bytes)),
             "002337bd011a0b68f8680cc157ee4d0424d49392c36a0f85e5fa0449ea4ea0da"
+        );
+    }
+
+    #[test]
+    fn advertised_contract_pair_names_the_frozen_inner_manifest() {
+        let version = ADVERTISED_CONTRACT_BUNDLE
+            .strip_prefix("substrate-wire/")
+            .expect("advertised contract prefix");
+        assert_eq!(version, "0.12.0", "the reviewed promotion target moved");
+        let bytes = include_bytes!("../../../contracts/substrate-wire/0.12.0/bundle.json");
+        assert_eq!(
+            hex::encode(Sha256::digest(bytes)),
+            ADVERTISED_CONTRACT_BUNDLE_SHA256
         );
     }
 

@@ -5,9 +5,9 @@ description: What the current Substrate development release serves, and what rem
 
 # Development release, not a stable published contract
 
-Substrate has a tagged, keyless-signed daemon image and reproducible development contract bundles.
-The daemon distribution is published; stable contract publication still requires separate bundle
-signing and digest pinning.
+Substrate has a tagged, keyless-signed daemon image and a public, keyless-signed, digest-pinned
+development contract bundle. Distribution is proven; the bundle remains a development contract
+because stability is a separate compatibility decision.
 
 The current implementation is a Linux host slice. Treat every capability as deployment-specific and
 verify it through `GET /v1/machine`.
@@ -46,9 +46,10 @@ a specific refusal when requested.
 - A verified capsule identifies its provided bytes, not the entire host runtime closure.
 - Static-bearer TCP is development-only and is not suitable for public or shared ingress.
 - One daemon is one trust domain; it is not a multi-tenant isolation layer.
-- Development bundle `0.12.0` declares v1 and v2 routes, the PTY session mode, storage quotas,
-  exact workspace write access and metrics, while the daemon still advertises the
-  deliberately older `substrate-wire/0.4.0` contract header.
+- Current development source advertises `substrate-wire/0.12.0` and the SHA-256 of its inner
+  `bundle.json` as one claim. The tagged `0.4.2` daemon image predates that promotion and still
+  advertises `substrate-wire/0.4.0`; do not mix that image with a client built from the promoted
+  source.
 
 ## Reading status safely
 

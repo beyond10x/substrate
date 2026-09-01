@@ -273,3 +273,111 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .windows(needle.len())
         .position(|window| window == needle)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{CONTRACT, CONTRACT_SHA256, Transport, verify_contract_headers};
+    use crate::SdkError;
+    use std::collections::BTreeMap;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use tokio::net::UnixListener;
+
+    fn headers(contract: &str, digest: &str) -> BTreeMap<String, String> {
+        BTreeMap::from([
+            ("x-b10x-contract".to_owned(), contract.to_owned()),
+            (
+                "x-b10x-contract-bundle-sha256".to_owned(),
+                digest.to_owned(),
+            ),
+        ])
+    }
+
+    fn assert_mismatch(
+        headers: &BTreeMap<String, String>,
+        contract: Option<&str>,
+        digest: Option<&str>,
+    ) {
+        let error = verify_contract_headers(headers).expect_err("claim must be refused");
+        match error {
+            SdkError::ContractMismatch {
+                expected_contract,
+                expected_sha256,
+                observed_contract,
+                observed_sha256,
+            } => {
+                assert_eq!(expected_contract, CONTRACT);
+                assert_eq!(expected_sha256, CONTRACT_SHA256);
+                assert_eq!(observed_contract.as_deref(), contract);
+                assert_eq!(observed_sha256.as_deref(), digest);
+            }
+            other => panic!("contract claim produced another error: {other}"),
+        }
+    }
+
+    #[test]
+    fn the_promoted_contract_claim_is_accepted() {
+        verify_contract_headers(&headers(CONTRACT, CONTRACT_SHA256))
+            .expect("the exact promoted pair is accepted");
+    }
+
+    #[test]
+    fn missing_older_unknown_and_wrong_digest_claims_are_refused() {
+        assert_mismatch(&BTreeMap::new(), None, None);
+
+        let older_contract = "substrate-wire/0.4.0";
+        let older_digest = "002337bd011a0b68f8680cc157ee4d0424d49392c36a0f85e5fa0449ea4ea0da";
+        assert_mismatch(
+            &headers(older_contract, older_digest),
+            Some(older_contract),
+            Some(older_digest),
+        );
+
+        let unknown = "substrate-wire/99.0.0";
+        assert_mismatch(
+            &headers(unknown, CONTRACT_SHA256),
+            Some(unknown),
+            Some(CONTRACT_SHA256),
+        );
+
+        let wrong_digest = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+        assert_mismatch(
+            &headers(CONTRACT, wrong_digest),
+            Some(CONTRACT),
+            Some(wrong_digest),
+        );
+    }
+
+    #[tokio::test]
+    async fn an_older_claim_is_refused_before_an_operation_body_is_read() {
+        let temporary = tempfile::tempdir().expect("temporary socket directory");
+        let socket = temporary.path().join("daemon.sock");
+        let listener = UnixListener::bind(&socket).expect("bind fake daemon");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept SDK connection");
+            let mut request = vec![0_u8; 4096];
+            let read = stream.read(&mut request).await.expect("read SDK request");
+            assert!(read > 0, "SDK sent no request");
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\n\
+x-b10x-contract: substrate-wire/0.4.0\r\n\
+x-b10x-contract-bundle-sha256: 002337bd011a0b68f8680cc157ee4d0424d49392c36a0f85e5fa0449ea4ea0da\r\n\
+content-length: not-a-number\r\n\r\n",
+                )
+                .await
+                .expect("write mismatched response");
+        });
+
+        let Err(error) = Transport::new(socket)
+            .request("GET", "/v1/machine", None)
+            .await
+        else {
+            panic!("older claim was accepted");
+        };
+        assert!(
+            matches!(error, SdkError::ContractMismatch { .. }),
+            "{error}"
+        );
+        server.await.expect("fake daemon task");
+    }
+}

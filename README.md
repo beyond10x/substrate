@@ -41,7 +41,7 @@ The product and binary name are `substrate`. The approved registry packages use 
 
 ## Status
 
-**Tagged `0.2.4` (2026-08-31) — a keyless-signed daemon image. Development bundles, not a stable
+**Tagged `0.4.2` (2026-09-01) — a keyless-signed daemon image and signed development bundle. Not a stable
 published contract.**
 
 | area | state |
@@ -50,9 +50,9 @@ published contract.**
 | 0.2.0 bundle, runtime, portable lane, delegated Linux lane | green |
 | 0.4.0 successor development bundle | adds independently verified read-only execution capsules; the delegated model-free lane proves capsule/config/hook binding and correlated native hook evidence before model dispatch |
 | phase 4, [raw pipe sessions](adr/0007-protocol-processes-use-raw-pipe-sessions.md) | source-typed bounded raw-pipe primitive, distinct durable session identity, leased start, single-attachment Unix-WebSocket route ([plan 04](docs/plan/04-direct-byte-plane.md)) |
-| Rust SDK | `b10x-substrate-sdk` provides typed builders, resource handles, durable-operation recovery, event streams and separately supervised external or linked daemon children; it exposes only the daemon-advertised `substrate-wire/0.4.0` surface |
+| Rust SDK | `b10x-substrate-sdk` provides typed builders, resource handles, durable-operation recovery, event streams and separately supervised external or linked daemon children; current source verifies the explicitly promoted `substrate-wire/0.12.0` name and inner digest before serving an operation |
 | tagged artifact release | [`.github/workflows/release.yml`](.github/workflows/release.yml) publishes the daemon image and the explicitly pinned current development bundle on an annotated bare-version tag whose commit has a green gate run. It copies `cargo xtask package-bundle`'s exact OCI layout to `ghcr.io/beyond10x/b10x-substrate-wire:<bundle-version>`, keyless-signs and verifies both digests before the GitHub release, and refuses an existing canonical tag. It needs no repository secret. The exact changelog digest lines land by bot-authored pull request because `main` is protected |
-| stable publication | **not done.** OCI publication keeps `dev.b10x.contract.status=development`; signing and digest pinning do not make a bundle stable. The `0.12.0` GHCR tag is not published yet because the bundle workflow landed after the latest release tag |
+| stable publication | **not done.** The public, signed, digest-pinned `0.12.0` OCI artifact remains annotated `development`; distribution and explicit daemon advertisement do not make it stable |
 | phase 4, [pty sessions](adr/0019-pty-is-a-second-session-mode.md) | a terminal is a second session **mode** on the same route family, not a second resource: `mode: "pty"` with a required 1–1000-cell window, a `resize` frame, and the `sessions.pty` fact published only after a startup probe allocated a pair, made it controlling inside a throwaway sandbox and round-tripped a window through the child. Absent, the mode is refused `session.pty-unserved` (501) and **never** served as pipes |
 | network session authority, Git sources | **absent** |
 | hosted trust envelope | accepted in design, **not implemented**; the TCP static bearer is explicitly development-only |

@@ -16,7 +16,7 @@
 //! sealed-secret-slot cases. When the variable is unset the delegated cases are *absent*: they are
 //! not run and are not counted.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::io::ErrorKind;
 use std::os::unix::fs::PermissionsExt as _;
@@ -42,6 +42,10 @@ use tokio::task::JoinHandle;
 const DAEMON: &str = env!("CARGO_BIN_EXE_substrate-daemon");
 const CGROUP_EXEC: &str = env!("CARGO_BIN_EXE_substrate-cgroup-exec");
 const DAEMON_OVERRIDE_VARIABLE: &str = "SUBSTRATE_VECTORS_DAEMON";
+/// Pinned independently of the daemon implementation: the clean-room client verifies what ships.
+const ADVERTISED_CONTRACT: &str = "substrate-wire/0.12.0";
+const ADVERTISED_CONTRACT_SHA256: &str =
+    "1c82595a186ef1fa830a10e45fc842a037bb6bb7c5aafdc74e417681790e6360";
 
 fn daemon_binary() -> PathBuf {
     std::env::var_os(DAEMON_OVERRIDE_VARIABLE).map_or_else(|| PathBuf::from(DAEMON), PathBuf::from)
@@ -102,7 +106,7 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
-async fn read_response(stream: &mut UnixStream) -> (u16, Vec<u8>) {
+async fn read_response(stream: &mut UnixStream) -> (u16, BTreeMap<String, String>, Vec<u8>) {
     let mut buffer = Vec::new();
     let boundary = loop {
         if let Some(index) = find(&buffer, b"\r\n\r\n") {
@@ -120,7 +124,7 @@ async fn read_response(stream: &mut UnixStream) -> (u16, Vec<u8>) {
         .and_then(|line| line.split_whitespace().nth(1))
         .and_then(|value| value.parse::<u16>().ok())
         .expect("HTTP status line");
-    let mut length = None;
+    let mut headers = BTreeMap::new();
     for line in lines {
         let Some((name, value)) = line.split_once(':') else {
             continue;
@@ -130,18 +134,39 @@ async fn read_response(stream: &mut UnixStream) -> (u16, Vec<u8>) {
             name, "transfer-encoding",
             "the clean-room client reads content-length responses only"
         );
-        if name == "content-length" {
-            length = Some(value.trim().parse::<usize>().expect("content-length value"));
-        }
+        headers.insert(name, value.trim().to_owned());
     }
-    let length = length.expect("content-length response header");
+    let length = headers
+        .get("content-length")
+        .expect("content-length response header")
+        .parse::<usize>()
+        .expect("content-length value");
     while buffer.len() < boundary + length {
         let mut chunk = [0_u8; 8192];
         let read = stream.read(&mut chunk).await.expect("read response body");
         assert!(read > 0, "connection closed mid-body");
         buffer.extend_from_slice(&chunk[..read]);
     }
-    (status, buffer[boundary..boundary + length].to_vec())
+    (
+        status,
+        headers,
+        buffer[boundary..boundary + length].to_vec(),
+    )
+}
+
+fn assert_contract_headers(headers: &BTreeMap<String, String>) {
+    assert_eq!(
+        headers.get("x-b10x-contract").map(String::as_str),
+        Some(ADVERTISED_CONTRACT),
+        "response did not carry the promoted contract name"
+    );
+    assert_eq!(
+        headers
+            .get("x-b10x-contract-bundle-sha256")
+            .map(String::as_str),
+        Some(ADVERTISED_CONTRACT_SHA256),
+        "response did not carry the promoted inner bundle digest"
+    );
 }
 
 /// One request per connection, exactly as the predecessor's `http.client` harness did.
@@ -178,8 +203,29 @@ async fn request(
             "write {method} {path}: {error}"
         );
     }
-    let (status, body) = read_response(&mut stream).await;
+    let (status, headers, body) = read_response(&mut stream).await;
+    assert_contract_headers(&headers);
     let payload: Value = serde_json::from_slice(&body).expect("JSON response body");
+    let api_version = if path.starts_with("/v2/") { "v2" } else { "v1" };
+    assert_eq!(payload["api_version"], api_version, "{payload}");
+    assert_eq!(payload["request_id"], request_id, "{payload}");
+    (status, payload)
+}
+
+async fn upgrade_refusal(socket: &Path, path: &str, request_id: &str) -> (u16, Value) {
+    let mut stream = UnixStream::connect(socket)
+        .await
+        .unwrap_or_else(|error| panic!("connect {}: {error}", socket.display()));
+    let request = format!(
+        "GET {path} HTTP/1.1\r\nHost: localhost\r\nx-request-id: {request_id}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {HANDSHAKE_KEY}\r\n\r\n"
+    );
+    stream
+        .write_all(request.as_bytes())
+        .await
+        .expect("write websocket refusal probe");
+    let (status, headers, body) = read_response(&mut stream).await;
+    assert_contract_headers(&headers);
+    let payload: Value = serde_json::from_slice(&body).expect("JSON websocket refusal body");
     assert_eq!(payload["api_version"], "v1", "{payload}");
     assert_eq!(payload["request_id"], request_id, "{payload}");
     (status, payload)
@@ -213,14 +259,17 @@ impl EventStream {
         }
         let head = std::str::from_utf8(&head).expect("ASCII handshake response");
         assert!(head.starts_with("HTTP/1.1 101 "), "{head}");
-        let accept = head
+        let headers: BTreeMap<String, String> = head
             .split("\r\n")
             .skip(1)
             .filter_map(|line| line.split_once(':'))
-            .find(|(name, _)| name.trim().eq_ignore_ascii_case("sec-websocket-accept"))
-            .map(|(_, value)| value.trim().to_owned())
+            .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_owned()))
+            .collect();
+        let accept = headers
+            .get("sec-websocket-accept")
             .expect("sec-websocket-accept header");
         assert_eq!(accept, HANDSHAKE_ACCEPT);
+        assert_contract_headers(&headers);
         Self { stream }
     }
 
@@ -1861,6 +1910,314 @@ async fn check_exec_lease(daemon: &Daemon, workspace: &str, snapshot: &str, cgro
 // The HTTP journey
 // ---------------------------------------------------------------------------------------------
 
+/// One deliberately invalid request per promoted operation. The body/refusal is not a substitute
+/// for the positive journeys below; it is the route-inventory proof that the shipped binary
+/// reaches every address declared by the promoted bundle and carries the promoted identity on the
+/// HTTP response or WebSocket handshake path.
+#[allow(clippy::too_many_lines)] // Keeping the complete declarative inventory together makes drift reviewable.
+async fn check_promoted_route_inventory(daemon: &Daemon, workspace: &str) -> usize {
+    type Probe<'a> = (&'a str, &'a str, String, Option<&'a [u8]>, u16, &'a str);
+    let invalid_body = b"{}".as_slice();
+    let probes: Vec<Probe<'_>> = vec![
+        (
+            "machine.get",
+            "GET",
+            "/v1/machine?unexpected=1".to_owned(),
+            None,
+            422,
+            "request.schema-invalid",
+        ),
+        (
+            "workspace.create",
+            "POST",
+            "/v1/workspaces".to_owned(),
+            Some(invalid_body),
+            422,
+            "request.schema-invalid",
+        ),
+        (
+            "workspace.get",
+            "GET",
+            format!("/v1/workspaces/{workspace}?unexpected=1"),
+            None,
+            422,
+            "request.schema-invalid",
+        ),
+        (
+            "workspace.file.read",
+            "GET",
+            format!("/v1/workspaces/{workspace}/files/probe?mode=invalid"),
+            None,
+            422,
+            "request.schema-invalid",
+        ),
+        (
+            "workspace.file.write",
+            "PUT",
+            format!("/v1/workspaces/{workspace}/files/probe"),
+            Some(invalid_body),
+            422,
+            "request.schema-invalid",
+        ),
+        (
+            "workspace.file.delete",
+            "DELETE",
+            format!("/v1/workspaces/{workspace}/files/probe"),
+            Some(invalid_body),
+            422,
+            "request.schema-invalid",
+        ),
+        (
+            "workspace.destroy",
+            "DELETE",
+            format!("/v1/workspaces/{workspace}"),
+            Some(invalid_body),
+            422,
+            "request.schema-invalid",
+        ),
+        (
+            "exec.start",
+            "POST",
+            "/v1/execs".to_owned(),
+            Some(invalid_body),
+            422,
+            "request.schema-invalid",
+        ),
+        (
+            "exec.get",
+            "GET",
+            "/v1/execs/ex_missing?unexpected=1".to_owned(),
+            None,
+            422,
+            "request.schema-invalid",
+        ),
+        (
+            "exec.output.get",
+            "GET",
+            "/v1/execs/ex_missing/output?stream=invalid&offset=0&limit_bytes=1".to_owned(),
+            None,
+            422,
+            "request.schema-invalid",
+        ),
+        (
+            "exec.signal",
+            "POST",
+            "/v1/execs/ex_missing/signal".to_owned(),
+            Some(invalid_body),
+            422,
+            "request.schema-invalid",
+        ),
+        (
+            "exec.retire",
+            "DELETE",
+            "/v1/execs/ex_missing".to_owned(),
+            Some(invalid_body),
+            422,
+            "request.schema-invalid",
+        ),
+        (
+            "session.capabilities",
+            "GET",
+            "/v1/pipe-sessions?unexpected=1".to_owned(),
+            None,
+            422,
+            "request.schema-invalid",
+        ),
+        (
+            "session.start",
+            "POST",
+            "/v1/pipe-sessions".to_owned(),
+            Some(invalid_body),
+            422,
+            "request.schema-invalid",
+        ),
+        (
+            "session.get",
+            "GET",
+            "/v1/pipe-sessions/ses_missing?unexpected=1".to_owned(),
+            None,
+            422,
+            "request.schema-invalid",
+        ),
+        (
+            "session.signal",
+            "POST",
+            "/v1/pipe-sessions/ses_missing/signal".to_owned(),
+            Some(invalid_body),
+            422,
+            "request.schema-invalid",
+        ),
+        (
+            "session.retire",
+            "DELETE",
+            "/v1/pipe-sessions/ses_missing".to_owned(),
+            Some(invalid_body),
+            422,
+            "request.schema-invalid",
+        ),
+        (
+            "session.lease.renew",
+            "POST",
+            "/v1/pipe-sessions/ses_missing/lease/renew".to_owned(),
+            Some(invalid_body),
+            422,
+            "request.schema-invalid",
+        ),
+        (
+            "operation.get",
+            "GET",
+            "/v1/ops/01JROUTEPROBE000000000001?unexpected=1".to_owned(),
+            None,
+            422,
+            "request.schema-invalid",
+        ),
+        (
+            "event.list",
+            "GET",
+            "/v1/events?unexpected=1".to_owned(),
+            None,
+            422,
+            "request.schema-invalid",
+        ),
+        (
+            "reconciliation.snapshot.create",
+            "POST",
+            "/v1/reconciliation-snapshots?unexpected=1".to_owned(),
+            Some(invalid_body),
+            422,
+            "request.schema-invalid",
+        ),
+        (
+            "reconciliation.snapshot.get",
+            "GET",
+            "/v1/reconciliation-snapshots/snap_missing?unexpected=1".to_owned(),
+            None,
+            422,
+            "request.schema-invalid",
+        ),
+        (
+            "workspace.lease.renew",
+            "POST",
+            format!("/v1/workspaces/{workspace}/lease/renew"),
+            Some(invalid_body),
+            422,
+            "request.schema-invalid",
+        ),
+        (
+            "exec.lease.renew",
+            "POST",
+            "/v1/execs/ex_missing/lease/renew".to_owned(),
+            Some(invalid_body),
+            422,
+            "request.schema-invalid",
+        ),
+        (
+            "workspace.file.read-v2",
+            "GET",
+            format!("/v2/workspaces/{workspace}/files/probe?mode=invalid"),
+            None,
+            422,
+            "request.schema-invalid",
+        ),
+        (
+            "workspace.tree.read-v2",
+            "GET",
+            format!("/v2/workspaces/{workspace}/tree?unexpected=1"),
+            None,
+            422,
+            "request.schema-invalid",
+        ),
+        (
+            "workspace.file.replace-v2",
+            "PUT",
+            format!("/v2/workspaces/{workspace}/files/probe"),
+            Some(invalid_body),
+            422,
+            "request.schema-invalid",
+        ),
+        (
+            "workspace.file.edit-v2",
+            "POST",
+            format!("/v2/workspaces/{workspace}/file-edits/probe"),
+            Some(invalid_body),
+            422,
+            "request.schema-invalid",
+        ),
+        (
+            "workspace.file.patch-v2",
+            "POST",
+            format!("/v2/workspaces/{workspace}/file-patches/probe"),
+            Some(invalid_body),
+            422,
+            "request.schema-invalid",
+        ),
+        (
+            "metrics.get",
+            "GET",
+            "/v1/metrics?unexpected=1".to_owned(),
+            None,
+            422,
+            "request.schema-invalid",
+        ),
+    ];
+    let upgrade_probes = [
+        (
+            "session.attach",
+            "/v1/pipe-sessions/ses_missing/attach",
+            404,
+            "resource.not-found",
+        ),
+        (
+            "event.stream",
+            "/v1/events/stream?unexpected=1",
+            422,
+            "request.schema-invalid",
+        ),
+        (
+            "metrics.stream",
+            "/v1/metrics/stream?unexpected=1",
+            422,
+            "request.schema-invalid",
+        ),
+    ];
+
+    let expected: BTreeSet<String> = {
+        let registry = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join("contracts/substrate-wire/0.12.0/operations.json");
+        let document: Value = serde_json::from_slice(
+            &std::fs::read(&registry).expect("promoted operation registry bytes"),
+        )
+        .expect("promoted operation registry JSON");
+        document["operations"]
+            .as_array()
+            .expect("promoted operations array")
+            .iter()
+            .map(|operation| text(&operation["id"]))
+            .collect()
+    };
+    let covered: BTreeSet<String> = probes
+        .iter()
+        .map(|(id, ..)| (*id).to_owned())
+        .chain(upgrade_probes.iter().map(|(id, ..)| (*id).to_owned()))
+        .collect();
+    assert_eq!(covered, expected, "shipped-binary route probes drifted");
+
+    for (index, (id, method, path, body, status, code)) in probes.iter().enumerate() {
+        let request_id = format!("req_promoted_route_{index:02}");
+        let observed = daemon.call(method, path, &request_id, *body).await;
+        expect_error(&observed, *status, code);
+        assert_eq!(observed.1["error"]["code"], *code, "{id}: {}", observed.1);
+    }
+    for (index, (id, path, status, code)) in upgrade_probes.iter().enumerate() {
+        let request_id = format!("req_promoted_upgrade_{index:02}");
+        let observed = upgrade_refusal(&daemon.socket, path, &request_id).await;
+        expect_error(&observed, *status, code);
+        assert!(observed.1["error"].is_object(), "{id}: {}", observed.1);
+    }
+    covered.len()
+}
+
 #[allow(clippy::too_many_lines)] // One sequential journey; splitting it would lose the ordering.
 async fn check_http_journey(
     daemon: &Daemon,
@@ -1893,6 +2250,8 @@ async fn check_http_journey(
     let workspace = text(&created["result"]["id"]);
     assert!(workspace.starts_with("ws_"));
     passed += 1;
+
+    passed += check_promoted_route_inventory(daemon, &workspace).await;
 
     let (status, replay) = daemon
         .call(
@@ -3451,8 +3810,8 @@ async fn delegated_context_bound_to_another_subject_is_refused() {
 // ---------------------------------------------------------------------------------------------
 
 /// The predecessor printed its case count; the port asserts it, so a case cannot vanish quietly.
-const PORTABLE_CASES: usize = 35;
-const DELEGATED_CASES: usize = 62;
+const PORTABLE_CASES: usize = 68;
+const DELEGATED_CASES: usize = 95;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {

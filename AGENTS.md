@@ -51,9 +51,10 @@ Each is a claim that can be checked. Breaking one is a design change, not a refa
    context and grant attribution (ADR 0011); `0.6.0` added destination-bound egress
    apertures (ADR 0013), and **every earlier directory is frozen** (`STATUS.md:36`,
    `xtask/src/json.rs:152`, `contracts/substrate-wire/0.2.0/README.md:13`).
-   The daemon still advertises `substrate-wire/0.4.0` in `x-b10x-contract`
-   (`crates/substrate-daemon/src/app.rs:3`): a bundle exists to be pinned by a consumer before the
-   server claims it, and moving the header is its own change with its own clients to notify. A wire change **adds a successor bundle**; it
+   The daemon and Rust SDK advertise `substrate-wire/0.12.0` with the SHA-256 of that bundle's
+   inner `bundle.json` (`crates/substrate-wire/src/lib.rs`); Atlas ADR 0019 records the explicit
+   promotion and the one additional 0.11.0-to-0.12.0 lineage bridge the gate proves. Moving this
+   pair again is its own coordinated change with its own clients to notify. A wire change **adds a successor bundle**; it
    never rewrites bytes in a released one. The compatibility block of a successor states its
    predecessor and its exact `adds_routes`/`preserves_routes` counts, and the checker pins them.
    **One recorded exception, 2026-08-24:** the brand rename rewrote every frozen bundle in place,
@@ -198,8 +199,9 @@ reason.** `crates/substrate-daemon/tests/runtime_vectors.rs` spawns the *shipped
 hand-written HTTP/1.1 and WebSocket client, so it links no implementation and asserts only on
 the wire; `cargo test --workspace --locked` runs it. Its portable lane asserts three named
 refusals — `exec.sandbox-unavailable` (501), `exec.secret-slots-unserved` (501) and
-`exec.secret-slot-descriptor-invalid` (422) — plus `session.pty-unserved` (501) — across 35 cases,
-and its delegated lane 62, which include an interactive shell driven through a `pty` session
+`exec.secret-slot-descriptor-invalid` (422) — plus `session.pty-unserved` (501) — across 68 cases,
+and its delegated lane 95. Both totals include one route/refusal probe for every operation in the
+promoted registry; the delegated cases also include an interactive shell driven through a `pty` session
 (`crates/substrate-daemon/tests/runtime_vectors.rs`, `PORTABLE_CASES` and `DELEGATED_CASES`). Its delegated lane runs only when
 `SUBSTRATE_VECTORS_CGROUP_ROOT` names a delegated cgroup v2 subtree the test process is inside;
 unset, those cases are **absent, never reported as passed** (invariant 3). **`bash scripts/delegated-lane.sh`

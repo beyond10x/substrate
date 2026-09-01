@@ -8,10 +8,9 @@ use serde::Serialize;
 use serde_json::Value;
 
 /// The daemon contract this SDK release understands.
-pub const CONTRACT: &str = "substrate-wire/0.4.0";
+pub const CONTRACT: &str = substrate_wire::ADVERTISED_CONTRACT_BUNDLE;
 /// Digest of the immutable contract bundle this SDK release understands.
-pub const CONTRACT_SHA256: &str =
-    "002337bd011a0b68f8680cc157ee4d0424d49392c36a0f85e5fa0449ea4ea0da";
+pub const CONTRACT_SHA256: &str = substrate_wire::ADVERTISED_CONTRACT_BUNDLE_SHA256;
 
 /// Verified facts needed by the high-level SDK.
 #[derive(Debug, Clone, PartialEq)]
