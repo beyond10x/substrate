@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Full component gate for the standalone Substrate repository.
-# Mirrors the monorepo gate for foundation/substrate (cargo test in --release,
-# fmt + clippy in --all) plus this component's documented script checks.
+# Runs tests and Clippy in one release-profile artifact graph, then formatting and
+# this component's documented script checks.
 set -euo pipefail
 
 root=$(git rev-parse --show-toplevel)
@@ -14,7 +14,7 @@ run() {
 
 run cargo test --workspace --release --locked
 run cargo fmt --all --check
-run cargo clippy --workspace --all-targets --locked -- -D warnings
+run cargo clippy --workspace --all-targets --release --locked -- -D warnings
 run cargo xtask check-links
 run cargo xtask check-adrs
 run cargo xtask check-secrets

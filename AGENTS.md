@@ -144,7 +144,7 @@ bash scripts/gate.sh
 ```
 
 In order: `cargo test --workspace --release --locked`, `cargo fmt --all --check`,
-`cargo clippy --workspace --all-targets --locked -- -D warnings`, then `cargo xtask check-links`,
+`cargo clippy --workspace --all-targets --release --locked -- -D warnings`, then `cargo xtask check-links`,
 `cargo xtask check-adrs`, `cargo xtask check-secrets`, `cargo xtask check-advisories`,
 `cargo xtask check-licenses`, `cargo xtask check-packages`,
 `check-contract-bundle.py`, `check-contract-bundle-0.2.0.py`,

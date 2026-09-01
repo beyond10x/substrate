@@ -74,7 +74,7 @@ The table is the gate's own order (`scripts/gate.sh`).
 |---|---|
 | tests | `cargo test --workspace --release --locked` |
 | format | `cargo fmt --all --check` |
-| lint | `cargo clippy --workspace --all-targets --locked -- -D warnings` |
+| lint | `cargo clippy --workspace --all-targets --release --locked -- -D warnings` |
 | links | `cargo xtask check-links` — rejects machine-local and broken repository-relative links |
 | ADRs | `cargo xtask check-adrs` |
 | secrets | `cargo xtask check-secrets` — scans every reachable commit, including root trees |

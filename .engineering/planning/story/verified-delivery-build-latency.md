@@ -11,7 +11,7 @@ tags:
 - release
 relations:
 - derived_from: epic:release-hardening
-revision: 3
+revision: 4
 ---
 # Compile and validate releases without duplicate build work
 
@@ -30,3 +30,7 @@ Release run `33498193209` took 12m15s in its publication job. Its daemon image s
 ## Evidence to close
 
 A green full local gate, a green pull-request Full gate with step timings, and a green protected-main Full gate. The first run establishes correctness; later runs establish cache effectiveness.
+
+## Additional profile reuse
+
+Clippy now runs with `--release`, matching the immediately preceding release-profile test build. The repository has no `cfg(debug_assertions)` implementation branch, so this preserves the linted source and target set while avoiding a second dependency-profile graph. The first local release-profile Clippy run took 16.8s; the previous hosted development-profile step took 49.4s.
