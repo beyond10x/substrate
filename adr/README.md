@@ -29,3 +29,5 @@ with YAML frontmatter containing `date` and `status`. Draft design questions rem
 | [0021](0021-execution-metrics-are-explicit-exact-observations.md) | Execution metrics are explicit exact observations | accepted |
 | [0022](0022-the-rust-sdk-remains-a-wire-client.md) | The Rust SDK remains a wire client | accepted |
 | [0023](0023-workspace-write-access-is-explicit.md) | Workspace write access is explicit | accepted |
+| [0024](0024-production-network-control-uses-server-authenticated-tls.md) | Production network control uses server-authenticated TLS | accepted |
+| [0025](0025-the-mcp-adapter-is-a-disposable-test-surface.md) | The MCP adapter is a disposable test surface | accepted |
