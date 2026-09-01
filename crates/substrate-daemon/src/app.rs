@@ -1,8 +1,7 @@
 #![allow(clippy::result_large_err)] // Axum responses are the natural typed rejection at this seam.
 
-pub const CONTRACT_BUNDLE: &str = "substrate-wire/0.4.0";
-pub const CONTRACT_BUNDLE_SHA256: &str =
-    "002337bd011a0b68f8680cc157ee4d0424d49392c36a0f85e5fa0449ea4ea0da";
+pub const CONTRACT_BUNDLE: &str = substrate_wire::ADVERTISED_CONTRACT_BUNDLE;
+pub const CONTRACT_BUNDLE_SHA256: &str = substrate_wire::ADVERTISED_CONTRACT_BUNDLE_SHA256;
 
 const BODY_LIMIT: usize = 2_097_152;
 const WORKSPACE_LOCK_STRIPES: usize = 256;

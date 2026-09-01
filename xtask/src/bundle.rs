@@ -116,6 +116,7 @@ pub fn check(inputs: &Inputs) -> Result<Report> {
     check_fixed_point(&released, &rendered, &mut failures);
     check_manifest(&released, &mut failures);
     check_compatibility(inputs, &released, &mut failures);
+    check_lineage_bridge(inputs, &released, &mut failures);
     check_classification(&inputs.version, &released, &mut failures);
     check_additions(&inputs.version, &released, &mut failures);
 
@@ -308,6 +309,74 @@ fn check_compatibility(inputs: &Inputs, released: &Tree, failures: &mut Vec<Stri
         ));
     }
     check_route_paths(&previous, &current, released, inputs, predecessor, failures);
+}
+
+/// The one recorded bridge around `0.12.0`'s already-frozen non-adjacent compatibility block.
+///
+/// Atlas ADR 0019 permits promotion only when an additional gate proves that the complete
+/// `0.11.0` route inventory survives unchanged and that the accounting/quota behavior introduced
+/// there is still present beside `0.12.0`'s scoped-workspace additions. This is deliberately keyed
+/// to one exact version: it is evidence for immutable bytes, not permission for a future bundle to
+/// name a non-adjacent predecessor.
+fn check_lineage_bridge(inputs: &Inputs, released: &Tree, failures: &mut Vec<String>) {
+    const BRIDGED_VERSION: &str = "0.11.0";
+
+    if inputs.version != "0.12.0" {
+        return;
+    }
+
+    let bridged_root = inputs.contracts_root.join(BRIDGED_VERSION);
+    let bridged = match tree_of(&bridged_root) {
+        Ok(tree) => tree,
+        Err(error) => {
+            failures.push(format!(
+                "0.12.0 lineage bridge: {BRIDGED_VERSION} cannot be read: {error:#}"
+            ));
+            return;
+        }
+    };
+    let previous = match routes_of(&bridged) {
+        Ok(routes) => routes,
+        Err(error) => {
+            failures.push(format!(
+                "0.12.0 lineage bridge: {BRIDGED_VERSION}/operations.json: {error}"
+            ));
+            return;
+        }
+    };
+    let current = match routes_of(released) {
+        Ok(routes) => routes,
+        Err(error) => {
+            failures.push(format!("0.12.0 lineage bridge: operations.json: {error}"));
+            return;
+        }
+    };
+
+    let previous_ids = previous.ids();
+    let current_ids = current.ids();
+    for missing in previous_ids.difference(&current_ids) {
+        failures.push(format!(
+            "0.12.0 lineage bridge: route {missing} served by {BRIDGED_VERSION} is absent"
+        ));
+    }
+    for added in current_ids.difference(&previous_ids) {
+        failures.push(format!(
+            "0.12.0 lineage bridge: route {added} is absent from {BRIDGED_VERSION}; scoped workspace access adds no route"
+        ));
+    }
+    for id in previous_ids.intersection(&current_ids) {
+        let was = &previous.served[*id];
+        let now = &current.served[*id];
+        if was.entry != now.entry {
+            failures.push(format!(
+                "0.12.0 lineage bridge: route {id} differs from the complete {BRIDGED_VERSION} declaration"
+            ));
+        }
+    }
+
+    // `0.11.0`'s acceptance inventory is re-run against the offered tree. A route-identical
+    // successor that dropped its quota or metrics behavior therefore cannot satisfy the bridge.
+    check_resource_accounting_additions(released, failures);
 }
 
 /// No operation both bundles serve answers at a different path, unless the move is declared.
@@ -3108,6 +3177,78 @@ mod tests {
             repository_root: root,
             wire: wire_constants(),
         }
+    }
+
+    fn bridge_inputs() -> crate::render::Inputs {
+        crate::render::Inputs {
+            version: "0.12.0".to_owned(),
+            ..inputs()
+        }
+    }
+
+    #[test]
+    fn the_frozen_0_12_lineage_bridge_holds() {
+        let inputs = bridge_inputs();
+        let released = super::tree_of(&inputs.contracts_root.join("0.12.0"))
+            .expect("the current frontier reads");
+        let mut failures = Vec::new();
+        super::check_lineage_bridge(&inputs, &released, &mut failures);
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn the_0_12_bridge_refuses_a_changed_0_11_route_declaration() {
+        let inputs = bridge_inputs();
+        let mut released = super::tree_of(&inputs.contracts_root.join("0.12.0"))
+            .expect("the current frontier reads");
+        let operations = released
+            .get_mut("operations.json")
+            .expect("operations registry");
+        let mut registry: Value = serde_json::from_slice(operations).expect("registry parses");
+        let route = registry["operations"]
+            .as_array_mut()
+            .expect("operations array")
+            .iter_mut()
+            .find(|route| route["id"] == "metrics.get")
+            .expect("metrics.get route");
+        route["required_scope"] = json!("admin");
+        *operations = serde_json::to_vec(&registry).expect("registry serializes");
+
+        let mut failures = Vec::new();
+        super::check_lineage_bridge(&inputs, &released, &mut failures);
+        assert!(
+            failures.iter().any(|failure| {
+                failure.contains("route metrics.get differs")
+                    && failure.contains("complete 0.11.0 declaration")
+            }),
+            "the changed route declaration was not refused: {failures:?}"
+        );
+    }
+
+    #[test]
+    fn the_0_12_bridge_refuses_losing_0_11_behavior() {
+        let inputs = bridge_inputs();
+        let mut released = super::tree_of(&inputs.contracts_root.join("0.12.0"))
+            .expect("the current frontier reads");
+        let capability = released
+            .get_mut("schemas/capability.json")
+            .expect("capability schema");
+        let mut schema: Value = serde_json::from_slice(capability).expect("schema parses");
+        schema["properties"]["facts"]["properties"]
+            .as_object_mut()
+            .expect("facts properties")
+            .remove("metrics.stream");
+        *capability = serde_json::to_vec(&schema).expect("schema serializes");
+
+        let mut failures = Vec::new();
+        super::check_lineage_bridge(&inputs, &released, &mut failures);
+        assert!(
+            failures.iter().any(|failure| {
+                failure.contains("schemas/capability.json")
+                    && failure.contains("latest-wins stream fact")
+            }),
+            "the lost 0.11.0 behavior was not refused: {failures:?}"
+        );
     }
 
     /// The gate's own claim: the released successor holds, whole.

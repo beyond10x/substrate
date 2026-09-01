@@ -7,6 +7,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- **The daemon and Rust SDK now claim development contract `substrate-wire/0.12.0` together.**
+  Both use the inner `bundle.json` digest
+  `1c82595a186ef1fa830a10e45fc842a037bb6bb7c5aafdc74e417681790e6360`; the separately signed
+  OCI distribution remains at
+  `sha256:dd901e848c821aca7d55f7b8cf5ee893e1d99a1428b348e32e7ed1045a375319`. The clean-room shipped-
+  binary lane checks the pair on every HTTP response and WebSocket route probe, while SDK fixtures
+  reject missing, older, unknown and wrong-digest claims before serving an operation. The bundle
+  remains development, not stable.
+
 ### Fixed
 
 - **Release recovery inspects the remote OCI manifest, not its descriptor.** Registry descriptors
@@ -14,9 +25,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   manifest content. A failed eligible tag can be resumed explicitly from the protected-main
   workflow without moving the tag or publishing from an unreviewed workflow ref.
 - Corrected the `0.4.0` entry's frozen `0.12.0` lineage: its compatibility block names `0.10.0`,
-  preserves 31 routes and adds two. Proving that it also preserves the complete `0.11.0` inventory
-  remains a separate gate before the daemon advertises it (atlas ADR 0019,
-  `architecture/adr/0019-substrate-contract-release-and-conformance.md`).
+  preserves 31 routes and adds two. The gate now additionally proves that it preserves the complete
+  `0.11.0` route declarations and retains that bundle's quota and metrics behavior before the
+  daemon advertises it (`atlas/architecture/adr/0019-substrate-contract-release-and-conformance.md`).
 
 ## [0.4.2] — 2026-09-01
 
@@ -70,8 +81,10 @@ publication or GitHub release announcement. The tag and the uploaded write-once 
   policy together with apertures, scratch, read-only roots, secret slots, capsules and exact
   resource measurements.
 - **Contract bundle [`contracts/substrate-wire/0.12.0`](contracts/substrate-wire/0.12.0)**, an
-  additive successor to `0.10.0`, preserving 31 routes and adding two workspace-access routes plus
-  the request, capability and applied-confinement shapes and an executable scoped-write vector.
+  encoded successor to `0.10.0`, preserving 31 routes and carrying the two metrics routes already
+  introduced by `0.11.0`, plus the request, capability and applied-confinement workspace-access
+  shapes and an executable scoped-write vector. A separate promotion gate proves the complete
+  `0.11.0` inventory and behavior survive the frozen non-adjacent compatibility block.
 
 ## [0.3.1] — 2026-09-01
 
