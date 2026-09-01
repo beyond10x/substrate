@@ -57,6 +57,13 @@ cargo build -p b10x-substrate-daemon --bin substrate-daemon --locked
 SUBSTRATE_TEST_DAEMON="${PWD}/target/debug/substrate-daemon" \
   cargo test -p b10x-substrate-sdk --test managed --locked -- --nocapture --test-threads=1
 
+# The remote SDK journey reuses the shipped daemon only after the managed instance has stopped. It
+# proves that the same typed session path crosses TLS 1.3 and WSS with a channel-bound, one-use
+# authority, then attempts a reconnect and observes the fresh-mint refusal rather than replaying
+# the redeemed authority.
+SUBSTRATE_TEST_DAEMON="${PWD}/target/debug/substrate-daemon" \
+  cargo test -p b10x-substrate-sdk --test remote --locked -- --nocapture --test-threads=1
+
 # The MCP adapter owns the same kind of exclusive delegated root, but runs after the SDK daemon has
 # fully stopped. Its shipped-binary journey executes sha256sum, reads exact output and metrics, then
 # leaves an active workload for EOF cleanup and proves both its pid and exact cgroup absent.

@@ -10,7 +10,9 @@ mod model;
 mod transport;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::future::Future;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
@@ -23,6 +25,7 @@ use thiserror::Error;
 use tokio::time::Instant;
 use tokio_tungstenite::tungstenite::Message;
 use ulid::Ulid;
+use zeroize::Zeroizing;
 
 pub use managed::{ManagedDaemon, ManagedDaemonBuilder, run_daemon_child_if_requested};
 pub use model::{
@@ -78,6 +81,8 @@ pub enum SdkError {
     Protocol(String),
     #[error("builder field `{field}` is required")]
     Builder { field: &'static str },
+    #[error("the remote access-token provider is unavailable")]
+    TokenUnavailable,
     #[error("operation {operation_id} has no answered outcome")]
     UnknownOperation { operation_id: String },
     #[error("event history has a gap ({code})")]
@@ -96,6 +101,61 @@ pub enum SdkError {
     Startup(String),
     #[error("managed daemon shutdown failed: {0}")]
     Shutdown(String),
+}
+
+/// Why a remote request needs a hosted Identity access credential.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AccessTokenReason {
+    /// A credential for a new HTTP or WebSocket request.
+    Request,
+    /// One replacement credential after a named hosted-authentication refusal.
+    RefreshAfterAuthorizationFailure,
+}
+
+/// One opaque hosted Identity access credential.
+///
+/// Its allocation is zeroed on drop and neither `Debug` nor `Display` exposes its bytes.
+pub struct AccessToken(Zeroizing<String>);
+
+impl AccessToken {
+    pub fn new(value: impl Into<String>) -> Result<Self, SdkError> {
+        let value = value.into();
+        let valid = value
+            .strip_prefix("identity_access_v1_")
+            .is_some_and(|token| {
+                token.len() == 43
+                    && token
+                        .bytes()
+                        .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+            });
+        if !valid {
+            return Err(SdkError::TokenUnavailable);
+        }
+        Ok(Self(Zeroizing::new(value)))
+    }
+
+    pub(crate) fn expose(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+/// Boxed future returned by an [`AccessTokenProvider`].
+pub type AccessTokenFuture<'a> =
+    Pin<Box<dyn Future<Output = Result<AccessToken, SdkError>> + Send + 'a>>;
+
+/// Supplies short-lived hosted Identity authority without giving the SDK credential storage.
+pub trait AccessTokenProvider: Send + Sync {
+    fn access_token(&self, reason: AccessTokenReason) -> AccessTokenFuture<'_>;
+}
+
+impl<F, Fut> AccessTokenProvider for F
+where
+    F: Fn(AccessTokenReason) -> Fut + Send + Sync,
+    Fut: Future<Output = Result<AccessToken, SdkError>> + Send + 'static,
+{
+    fn access_token(&self, reason: AccessTokenReason) -> AccessTokenFuture<'_> {
+        Box::pin(self(reason))
+    }
 }
 
 #[derive(Clone)]
@@ -347,6 +407,10 @@ fn outcome<O: DeserializeOwned>(
 #[must_use]
 pub struct ClientBuilder {
     socket: Option<PathBuf>,
+    https_endpoint: Option<String>,
+    trust_roots: Option<PathBuf>,
+    server_identity: Option<String>,
+    token_provider: Option<Arc<dyn AccessTokenProvider>>,
 }
 
 impl ClientBuilder {
@@ -355,9 +419,62 @@ impl ClientBuilder {
         self
     }
 
+    /// Select a production remote endpoint. The value must be one exact HTTPS origin.
+    pub fn https_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.https_endpoint = Some(endpoint.into());
+        self
+    }
+
+    /// Supply the bounded PEM roots used only for this Substrate endpoint.
+    pub fn trust_roots(mut self, path: impl Into<PathBuf>) -> Self {
+        self.trust_roots = Some(path.into());
+        self
+    }
+
+    /// Set the DNS identity rustls must verify in the endpoint certificate.
+    pub fn server_identity(mut self, identity: impl Into<String>) -> Self {
+        self.server_identity = Some(identity.into());
+        self
+    }
+
+    /// Supply short-lived hosted Identity credentials asynchronously, once per request.
+    pub fn token_provider(mut self, provider: impl AccessTokenProvider + 'static) -> Self {
+        self.token_provider = Some(Arc::new(provider));
+        self
+    }
+
     pub async fn connect(self) -> Result<Client, SdkError> {
-        let socket = self.socket.ok_or(SdkError::Builder { field: "socket" })?;
-        let transport = Transport::new(socket);
+        let remote_field_is_set = self.https_endpoint.is_some()
+            || self.trust_roots.is_some()
+            || self.server_identity.is_some()
+            || self.token_provider.is_some();
+        let transport = match (self.socket, remote_field_is_set) {
+            (Some(socket), false) => Transport::new(socket),
+            (None, true) => {
+                let endpoint = self.https_endpoint.ok_or(SdkError::Builder {
+                    field: "https_endpoint",
+                })?;
+                let trust_roots = self.trust_roots.ok_or(SdkError::Builder {
+                    field: "trust_roots",
+                })?;
+                Transport::remote(
+                    &endpoint,
+                    &trust_roots,
+                    self.server_identity.ok_or(SdkError::Builder {
+                        field: "server_identity",
+                    })?,
+                    self.token_provider.ok_or(SdkError::Builder {
+                        field: "token_provider",
+                    })?,
+                )?
+            }
+            (Some(_), true) => {
+                return Err(SdkError::Protocol(
+                    "unix_socket and https_endpoint are mutually exclusive".to_owned(),
+                ));
+            }
+            (None, false) => return Err(SdkError::Builder { field: "socket" }),
+        };
         let response = transport.request("GET", "/v1/machine", None).await?;
         let snapshot: substrate_wire::CapabilitySnapshot = decode_result(&response)?;
         Ok(Client {
@@ -1085,8 +1202,12 @@ impl PipeSession {
     }
 
     pub async fn attach(&self) -> Result<PipeChannel, SdkError> {
-        let target = format!("/v1/sessions/{}/attach", encode_path(&self.observed.id));
-        let socket = self.client.inner.transport.websocket(&target).await?;
+        let socket = self
+            .client
+            .inner
+            .transport
+            .session_websocket(&self.observed.id)
+            .await?;
         Ok(PipeChannel {
             socket,
             next_sequence: 1,
@@ -1173,7 +1294,7 @@ impl PipeSession {
 }
 
 pub struct PipeChannel {
-    socket: tokio_tungstenite::WebSocketStream<tokio::net::UnixStream>,
+    socket: transport::WebSocket,
     next_sequence: u64,
     mode: SessionMode,
 }
@@ -1712,6 +1833,59 @@ fn validate_execution_storage(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use tokio::net::{UnixListener, UnixStream};
+
+    async fn read_request(stream: &mut UnixStream) -> Vec<u8> {
+        let mut bytes = Vec::new();
+        let boundary = loop {
+            if let Some(index) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                break index + 4;
+            }
+            let mut block = [0_u8; 1024];
+            let count = stream.read(&mut block).await.expect("read SDK request");
+            assert!(count > 0, "SDK closed before its request head");
+            bytes.extend_from_slice(&block[..count]);
+        };
+        let head = std::str::from_utf8(&bytes[..boundary]).expect("ASCII request head");
+        let content_length = head
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().expect("content length"))
+            })
+            .unwrap_or(0);
+        while bytes.len() < boundary + content_length {
+            let mut block = [0_u8; 1024];
+            let count = stream.read(&mut block).await.expect("read SDK body");
+            assert!(count > 0, "SDK closed during its request body");
+            bytes.extend_from_slice(&block[..count]);
+        }
+        bytes
+    }
+
+    fn response(status: &str, body: &[u8]) -> Vec<u8> {
+        format!(
+            "HTTP/1.1 {status}\r\nx-b10x-contract: {}\r\nx-b10x-contract-bundle-sha256: {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            CONTRACT,
+            CONTRACT_SHA256,
+            body.len()
+        )
+        .into_bytes()
+        .into_iter()
+        .chain(body.iter().copied())
+        .collect()
+    }
+
+    fn request_body(request: &[u8]) -> &[u8] {
+        let boundary = request
+            .windows(4)
+            .position(|window| window == b"\r\n\r\n")
+            .expect("request boundary")
+            + 4;
+        &request[boundary..]
+    }
 
     #[test]
     fn execution_policy_requires_every_bound() {
@@ -1777,5 +1951,99 @@ mod tests {
                 .unwrap()
                 .contains_key("aperture")
         );
+    }
+
+    #[tokio::test]
+    async fn a_lost_mutation_response_reconciles_and_replays_the_same_operation() {
+        const OPERATION: &str = "01ARZ3NDEKTSV4RRFFQ69G5FAV";
+        let temporary = tempfile::tempdir().expect("temporary socket directory");
+        let socket = temporary.path().join("daemon.sock");
+        let listener = UnixListener::bind(&socket).expect("bind fake daemon");
+        let vector: Value = serde_json::from_str(include_str!(
+            "../../../contracts/substrate-wire/0.15.0/vectors/http/machine-probe.json"
+        ))
+        .expect("machine vector");
+        let machine = serde_json::to_vec(
+            vector
+                .pointer("/expected/response/body")
+                .expect("machine response body"),
+        )
+        .expect("machine response JSON");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept machine request");
+            let request = read_request(&mut stream).await;
+            assert!(request.starts_with(b"GET /v1/machine HTTP/1.1\r\n"));
+            stream
+                .write_all(&response("200 OK", &machine))
+                .await
+                .expect("write machine response");
+
+            let (mut stream, _) = listener.accept().await.expect("accept mutation");
+            let first = read_request(&mut stream).await;
+            assert!(first.starts_with(b"POST /v1/workspaces HTTP/1.1\r\n"));
+            assert_eq!(
+                serde_json::from_slice::<Value>(request_body(&first)).expect("mutation JSON")["op"],
+                OPERATION
+            );
+            drop(stream);
+
+            let (mut stream, _) = listener.accept().await.expect("accept reconciliation");
+            let request = read_request(&mut stream).await;
+            assert!(
+                request.starts_with(format!("GET /v1/ops/{OPERATION} HTTP/1.1\r\n").as_bytes())
+            );
+            let missing = serde_json::to_vec(&serde_json::json!({
+                "api_version": "v1",
+                "request_id": "req_recovery",
+                "error": {
+                    "class": "refused",
+                    "code": "resource.not-found",
+                    "message": "The operation does not exist.",
+                    "retriable": false
+                }
+            }))
+            .expect("missing operation JSON");
+            stream
+                .write_all(&response("404 Not Found", &missing))
+                .await
+                .expect("write missing operation response");
+
+            let (mut stream, _) = listener.accept().await.expect("accept replay");
+            let replay = read_request(&mut stream).await;
+            assert!(replay.starts_with(b"POST /v1/workspaces HTTP/1.1\r\n"));
+            assert_eq!(request_body(&replay), request_body(&first));
+            let workspace = serde_json::to_vec(&serde_json::json!({
+                "api_version": "v1",
+                "request_id": "req_replay",
+                "operation": OPERATION,
+                "result": {
+                    "id": "ws_recovered",
+                    "kind": "workspace",
+                    "labels": {},
+                    "observed_at": "2026-09-01T00:00:00Z",
+                    "state": "ready"
+                }
+            }))
+            .expect("workspace response JSON");
+            stream
+                .write_all(&response("201 Created", &workspace))
+                .await
+                .expect("write replay response");
+        });
+
+        let client = Client::builder()
+            .unix_socket(&socket)
+            .connect()
+            .await
+            .expect("connect fake daemon");
+        let workspace = client
+            .workspace()
+            .empty()
+            .operation_id(OPERATION)
+            .create()
+            .await
+            .expect("recover lost mutation response");
+        assert_eq!(workspace.id(), "ws_recovered");
+        server.await.expect("fake daemon task");
     }
 }

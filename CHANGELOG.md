@@ -31,6 +31,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   resize, metrics pull and stream, complete session observations, exact optional capability facts,
   serializable observations, public request bounds and caller-supplied operation ids for every
   mutation.
+- **The Rust SDK connects to production HTTPS/WSS without ambient trust.** Remote mode requires an
+  exact HTTPS origin, a bounded PEM root bundle, an expected DNS identity and an asynchronous
+  short-lived Identity token provider. HTTP, event and metrics streams, and proof-bound session
+  attachments share TLS 1.3 and exact contract verification. One named authentication failure can
+  refresh authority without replacing an operation id; ambiguous mutation recovery retains the
+  original request bytes, and every session reconnect mints a fresh one-use channel authority.
 
 ### Changed
 

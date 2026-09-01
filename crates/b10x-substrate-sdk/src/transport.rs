@@ -1,25 +1,61 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::fs::File;
+use std::io::BufReader;
 use std::path::PathBuf;
+use std::str::FromStr as _;
+use std::sync::Arc;
 
+use base64::Engine as _;
+use ed25519_dalek::{Signer as _, SigningKey};
 use futures_util::StreamExt as _;
+use http::Uri;
+use rustls::pki_types::{DnsName, ServerName};
+use rustls::{ClientConfig, RootCertStore};
 use serde::de::DeserializeOwned;
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-use tokio::net::UnixStream;
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
+use tokio::net::{TcpStream, UnixStream};
+use tokio_rustls::TlsConnector;
 use tokio_tungstenite::WebSocketStream;
 use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
+use tokio_tungstenite::tungstenite::http::{HeaderName, HeaderValue};
 use ulid::Ulid;
 
 use crate::model::{CONTRACT, CONTRACT_SHA256, EventStreamFrame};
-use crate::{EventPage, MetricsSample, SdkError};
+use crate::{
+    AccessToken, AccessTokenProvider, AccessTokenReason, EventPage, MetricsSample, SdkError,
+};
 
 const MAX_RESPONSE_HEAD: usize = 16 * 1024;
 const MAX_RESPONSE_BODY: usize = 4 * 1024 * 1024;
+const MAX_CA_BUNDLE_BYTES: u64 = 1024 * 1024;
+const SESSION_EXPORTER_BYTES: usize = 32;
+
+pub(crate) trait IoStream: AsyncRead + AsyncWrite + Unpin + Send {}
+impl<T> IoStream for T where T: AsyncRead + AsyncWrite + Unpin + Send {}
+pub(crate) type BoxedIo = Box<dyn IoStream>;
+pub(crate) type WebSocket = WebSocketStream<BoxedIo>;
 
 #[derive(Clone)]
 pub(crate) struct Transport {
-    socket: PathBuf,
+    kind: TransportKind,
+}
+
+#[derive(Clone)]
+enum TransportKind {
+    Unix(PathBuf),
+    Remote(RemoteTransport),
+}
+
+#[derive(Clone)]
+struct RemoteTransport {
+    authority: String,
+    connect_host: String,
+    port: u16,
+    server_name: ServerName<'static>,
+    connector: TlsConnector,
+    token_provider: Arc<dyn AccessTokenProvider>,
 }
 
 pub(crate) struct HttpResponse {
@@ -30,8 +66,58 @@ pub(crate) struct HttpResponse {
 impl Transport {
     pub fn new(socket: impl Into<PathBuf>) -> Self {
         Self {
-            socket: socket.into(),
+            kind: TransportKind::Unix(socket.into()),
         }
+    }
+
+    pub fn remote(
+        endpoint: &str,
+        trust_roots: &std::path::Path,
+        server_identity: String,
+        token_provider: Arc<dyn AccessTokenProvider>,
+    ) -> Result<Self, SdkError> {
+        let uri = Uri::from_str(endpoint)
+            .map_err(|_| SdkError::Protocol("remote endpoint is invalid".to_owned()))?;
+        if uri.scheme_str() != Some("https")
+            || uri.authority().is_none()
+            || uri
+                .authority()
+                .is_some_and(|authority| authority.as_str().contains('@'))
+            || uri.query().is_some()
+            || uri.path() != "/"
+        {
+            return Err(SdkError::Protocol(
+                "remote endpoint must be one exact HTTPS origin".to_owned(),
+            ));
+        }
+        let authority = uri
+            .authority()
+            .expect("checked authority")
+            .as_str()
+            .to_owned();
+        let connect_host = uri
+            .host()
+            .ok_or_else(|| SdkError::Protocol("remote endpoint has no host".to_owned()))?
+            .to_owned();
+        let port = uri.port_u16().unwrap_or(443);
+        if port == 0 {
+            return Err(SdkError::Protocol(
+                "remote endpoint has no usable port".to_owned(),
+            ));
+        }
+        let dns_name = DnsName::try_from(server_identity)
+            .map_err(|_| SdkError::Protocol("server identity is not a DNS name".to_owned()))?;
+        let connector = load_connector(trust_roots)?;
+        Ok(Self {
+            kind: TransportKind::Remote(RemoteTransport {
+                authority,
+                connect_host,
+                port,
+                server_name: ServerName::DnsName(dns_name),
+                connector,
+                token_provider,
+            }),
+        })
     }
 
     pub async fn request(
@@ -40,33 +126,15 @@ impl Transport {
         path: &str,
         body: Option<&[u8]>,
     ) -> Result<HttpResponse, SdkError> {
-        let mut stream = UnixStream::connect(&self.socket)
-            .await
-            .map_err(|error| SdkError::Transport(error.to_string()))?;
-        let request_id = format!("sdk_{}", Ulid::generate());
-        let mut head = format!(
-            "{method} {path} HTTP/1.1\r\nHost: localhost\r\nx-request-id: {request_id}\r\nConnection: close\r\n"
-        );
-        if let Some(body) = body {
-            write!(
-                head,
-                "content-type: application/json\r\ncontent-length: {}\r\n",
-                body.len()
-            )
-            .map_err(|error| SdkError::Protocol(error.to_string()))?;
+        match &self.kind {
+            TransportKind::Unix(socket) => {
+                let stream = UnixStream::connect(socket)
+                    .await
+                    .map_err(|error| SdkError::Transport(error.to_string()))?;
+                request_on(stream, "localhost", None, method, path, body).await
+            }
+            TransportKind::Remote(remote) => remote.request(method, path, body).await,
         }
-        head.push_str("\r\n");
-        stream
-            .write_all(head.as_bytes())
-            .await
-            .map_err(|error| SdkError::Transport(error.to_string()))?;
-        if let Some(body) = body {
-            stream
-                .write_all(body)
-                .await
-                .map_err(|error| SdkError::Transport(error.to_string()))?;
-        }
-        read_response(&mut stream).await
     }
 
     pub async fn event_stream(
@@ -90,64 +158,252 @@ impl Transport {
         Ok(MetricsStream { socket })
     }
 
-    pub(crate) async fn websocket(
+    pub(crate) async fn websocket(&self, path: &str) -> Result<WebSocket, SdkError> {
+        match &self.kind {
+            TransportKind::Unix(socket) => {
+                let stream = UnixStream::connect(socket)
+                    .await
+                    .map_err(|error| SdkError::Transport(error.to_string()))?;
+                websocket_on(Box::new(stream), &format!("ws://localhost{path}"), &[])
+                    .await
+                    .map_err(WebSocketAttemptError::into_sdk)
+            }
+            TransportKind::Remote(remote) => remote.websocket(path, &[]).await,
+        }
+    }
+
+    pub(crate) async fn session_websocket(&self, session_id: &str) -> Result<WebSocket, SdkError> {
+        let path = format!("/v1/sessions/{}/attach", encode_path(session_id));
+        match &self.kind {
+            TransportKind::Unix(_) => self.websocket(&path).await,
+            TransportKind::Remote(remote) => remote.session_websocket(session_id, &path).await,
+        }
+    }
+}
+
+impl RemoteTransport {
+    async fn request(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&[u8]>,
+    ) -> Result<HttpResponse, SdkError> {
+        let token = self.token(AccessTokenReason::Request).await?;
+        let response = self.request_with_token(method, path, body, &token).await?;
+        if !is_refreshable_auth_refusal(&response) {
+            return Ok(response);
+        }
+        let token = self
+            .token(AccessTokenReason::RefreshAfterAuthorizationFailure)
+            .await?;
+        self.request_with_token(method, path, body, &token).await
+    }
+
+    async fn request_with_token(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&[u8]>,
+        token: &AccessToken,
+    ) -> Result<HttpResponse, SdkError> {
+        let stream = self.connect().await?;
+        request_on(
+            stream,
+            &self.authority,
+            Some(token.expose()),
+            method,
+            path,
+            body,
+        )
+        .await
+    }
+
+    async fn websocket(
         &self,
         path: &str,
-    ) -> Result<WebSocketStream<UnixStream>, SdkError> {
-        let stream = UnixStream::connect(&self.socket)
+        extra_headers: &[(HeaderName, HeaderValue)],
+    ) -> Result<WebSocket, SdkError> {
+        let token = self.token(AccessTokenReason::Request).await?;
+        match self.websocket_with_token(path, extra_headers, &token).await {
+            Err(WebSocketAttemptError::Refusal(response))
+                if is_refreshable_auth_refusal(&response) =>
+            {
+                let token = self
+                    .token(AccessTokenReason::RefreshAfterAuthorizationFailure)
+                    .await?;
+                self.websocket_with_token(path, extra_headers, &token)
+                    .await
+                    .map_err(WebSocketAttemptError::into_sdk)
+            }
+            result => result.map_err(WebSocketAttemptError::into_sdk),
+        }
+    }
+
+    async fn session_websocket(&self, session_id: &str, path: &str) -> Result<WebSocket, SdkError> {
+        let mut seed = zeroize::Zeroizing::new([0_u8; 32]);
+        getrandom::fill(seed.as_mut())
+            .map_err(|_| SdkError::Transport("secure randomness is unavailable".to_owned()))?;
+        let signing_key = SigningKey::from_bytes(&seed);
+        let public_key = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(signing_key.verifying_key().to_bytes());
+        let mint_path = format!(
+            "/v1/sessions/{}/attachment-authorities",
+            encode_path(session_id)
+        );
+        let body = serde_json::to_vec(&substrate_wire::SessionAuthorityMintInput { public_key })
+            .map_err(|error| SdkError::Protocol(error.to_string()))?;
+        let response = self.request("POST", &mint_path, Some(&body)).await?;
+        let authority: substrate_wire::SessionAttachmentAuthority = decode_result(&response)?;
+        self.session_websocket_with_authority(path, &authority, &signing_key)
+            .await
+    }
+
+    async fn session_websocket_with_authority(
+        &self,
+        path: &str,
+        authority: &substrate_wire::SessionAttachmentAuthority,
+        signing_key: &SigningKey,
+    ) -> Result<WebSocket, SdkError> {
+        let token = self.token(AccessTokenReason::Request).await?;
+        match self
+            .session_websocket_attempt(path, authority, signing_key, &token)
+            .await
+        {
+            Err(WebSocketAttemptError::Refusal(response))
+                if is_refreshable_auth_refusal(&response) =>
+            {
+                let token = self
+                    .token(AccessTokenReason::RefreshAfterAuthorizationFailure)
+                    .await?;
+                self.session_websocket_attempt(path, authority, signing_key, &token)
+                    .await
+                    .map_err(WebSocketAttemptError::into_sdk)
+            }
+            result => result.map_err(WebSocketAttemptError::into_sdk),
+        }
+    }
+
+    async fn session_websocket_attempt(
+        &self,
+        path: &str,
+        authority: &substrate_wire::SessionAttachmentAuthority,
+        signing_key: &SigningKey,
+        token: &AccessToken,
+    ) -> Result<WebSocket, WebSocketAttemptError> {
+        let (stream, exporter) = self
+            .connect_with_exporter()
+            .await
+            .map_err(WebSocketAttemptError::Sdk)?;
+        let timestamp = chrono::Utc::now().timestamp_millis();
+        let proof = signing_key.sign(&substrate_wire::session_authority_transcript(
+            &authority.authority_id,
+            &exporter,
+            timestamp,
+        ));
+        let proof = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(proof.to_bytes());
+        let headers = [
+            bounded_header(
+                substrate_wire::SESSION_AUTHORITY_ID_HEADER,
+                &authority.authority_id,
+            )?,
+            bounded_header(
+                substrate_wire::SESSION_AUTHORITY_BEARER_HEADER,
+                &authority.authority,
+            )?,
+            bounded_header(
+                substrate_wire::SESSION_AUTHORITY_TIMESTAMP_HEADER,
+                &timestamp.to_string(),
+            )?,
+            bounded_header(substrate_wire::SESSION_AUTHORITY_PROOF_HEADER, &proof)?,
+        ];
+        websocket_on(
+            stream,
+            &format!("wss://{}{path}", self.authority),
+            &with_authorization(&headers, token)?,
+        )
+        .await
+    }
+
+    async fn websocket_with_token(
+        &self,
+        path: &str,
+        extra_headers: &[(HeaderName, HeaderValue)],
+        token: &AccessToken,
+    ) -> Result<WebSocket, WebSocketAttemptError> {
+        let stream = self.connect().await.map_err(WebSocketAttemptError::Sdk)?;
+        websocket_on(
+            stream,
+            &format!("wss://{}{path}", self.authority),
+            &with_authorization(extra_headers, token)?,
+        )
+        .await
+    }
+
+    async fn token(&self, reason: AccessTokenReason) -> Result<AccessToken, SdkError> {
+        self.token_provider
+            .access_token(reason)
+            .await
+            .map_err(|_| SdkError::TokenUnavailable)
+    }
+
+    async fn connect(&self) -> Result<BoxedIo, SdkError> {
+        let (stream, _) = self.connect_with_exporter().await?;
+        Ok(stream)
+    }
+
+    async fn connect_with_exporter(&self) -> Result<(BoxedIo, [u8; 32]), SdkError> {
+        let tcp = TcpStream::connect((self.connect_host.as_str(), self.port))
             .await
             .map_err(|error| SdkError::Transport(error.to_string()))?;
-        let request = format!("ws://localhost{path}")
-            .into_client_request()
-            .map_err(|error| SdkError::Protocol(error.to_string()))?;
-        let (socket, response) = match tokio_tungstenite::client_async(request, stream).await {
-            Ok(upgraded) => upgraded,
-            Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
-                let headers = response
-                    .headers()
-                    .iter()
-                    .filter_map(|(name, value)| {
-                        Some((
-                            name.as_str().to_ascii_lowercase(),
-                            value.to_str().ok()?.to_owned(),
-                        ))
-                    })
-                    .collect();
-                verify_contract_headers(&headers)?;
-                let response = HttpResponse {
-                    status: response.status().as_u16(),
-                    body: response.body().clone().unwrap_or_default(),
-                };
-                return match decode_result::<serde_json::Value>(&response) {
-                    Err(error) => Err(error),
-                    Ok(_) => Err(SdkError::Protocol(
-                        "WebSocket refusal carried a success envelope".to_owned(),
-                    )),
-                };
-            }
-            Err(error) => return Err(SdkError::Transport(error.to_string())),
-        };
-        let headers = response
-            .headers()
-            .iter()
-            .filter_map(|(name, value)| {
-                Some((
-                    name.as_str().to_ascii_lowercase(),
-                    value.to_str().ok()?.to_owned(),
-                ))
-            })
-            .collect();
-        verify_contract_headers(&headers)?;
-        Ok(socket)
+        let tls = self
+            .connector
+            .connect(self.server_name.clone(), tcp)
+            .await
+            .map_err(|error| SdkError::Transport(error.to_string()))?;
+        let mut exporter = [0_u8; SESSION_EXPORTER_BYTES];
+        tls.get_ref()
+            .1
+            .export_keying_material(
+                &mut exporter,
+                substrate_wire::SESSION_AUTHORITY_EXPORTER_LABEL,
+                None,
+            )
+            .map_err(|_| SdkError::Transport("TLS exporter is unavailable".to_owned()))?;
+        Ok((Box::new(tls), exporter))
+    }
+}
+
+enum WebSocketAttemptError {
+    Refusal(HttpResponse),
+    Sdk(SdkError),
+}
+
+impl WebSocketAttemptError {
+    fn into_sdk(self) -> SdkError {
+        match self {
+            Self::Refusal(response) => match decode_result::<serde_json::Value>(&response) {
+                Err(error) => error,
+                Ok(_) => {
+                    SdkError::Protocol("WebSocket refusal carried a success envelope".to_owned())
+                }
+            },
+            Self::Sdk(error) => error,
+        }
+    }
+}
+
+impl From<SdkError> for WebSocketAttemptError {
+    fn from(error: SdkError) -> Self {
+        Self::Sdk(error)
     }
 }
 
 pub struct EventStream {
-    socket: WebSocketStream<UnixStream>,
+    socket: WebSocket,
 }
 
 pub struct MetricsStream {
-    socket: WebSocketStream<UnixStream>,
+    socket: WebSocket,
 }
 
 impl MetricsStream {
@@ -212,7 +468,175 @@ impl EventStream {
     }
 }
 
-async fn read_response(stream: &mut UnixStream) -> Result<HttpResponse, SdkError> {
+async fn request_on<S>(
+    mut stream: S,
+    authority: &str,
+    token: Option<&str>,
+    method: &str,
+    path: &str,
+    body: Option<&[u8]>,
+) -> Result<HttpResponse, SdkError>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    let request_id = format!("sdk_{}", Ulid::generate());
+    let mut head = format!(
+        "{method} {path} HTTP/1.1\r\nHost: {authority}\r\nx-request-id: {request_id}\r\nConnection: close\r\n"
+    );
+    if let Some(token) = token {
+        write!(head, "authorization: Bearer {token}\r\n")
+            .map_err(|error| SdkError::Protocol(error.to_string()))?;
+    }
+    if let Some(body) = body {
+        write!(
+            head,
+            "content-type: application/json\r\ncontent-length: {}\r\n",
+            body.len()
+        )
+        .map_err(|error| SdkError::Protocol(error.to_string()))?;
+    }
+    head.push_str("\r\n");
+    stream
+        .write_all(head.as_bytes())
+        .await
+        .map_err(|error| SdkError::Transport(error.to_string()))?;
+    if let Some(body) = body {
+        stream
+            .write_all(body)
+            .await
+            .map_err(|error| SdkError::Transport(error.to_string()))?;
+    }
+    read_response(&mut stream).await
+}
+
+async fn websocket_on(
+    stream: BoxedIo,
+    url: &str,
+    headers: &[(HeaderName, HeaderValue)],
+) -> Result<WebSocket, WebSocketAttemptError> {
+    let mut request = url
+        .into_client_request()
+        .map_err(|error| WebSocketAttemptError::Sdk(SdkError::Protocol(error.to_string())))?;
+    for (name, value) in headers {
+        request.headers_mut().insert(name, value.clone());
+    }
+    let (socket, response) = match tokio_tungstenite::client_async(request, stream).await {
+        Ok(upgraded) => upgraded,
+        Err(tokio_tungstenite::tungstenite::Error::Http(response)) => {
+            let headers = response_headers(response.headers());
+            verify_contract_headers(&headers).map_err(WebSocketAttemptError::Sdk)?;
+            return Err(WebSocketAttemptError::Refusal(HttpResponse {
+                status: response.status().as_u16(),
+                body: response.body().clone().unwrap_or_default(),
+            }));
+        }
+        Err(error) => {
+            return Err(WebSocketAttemptError::Sdk(SdkError::Transport(
+                error.to_string(),
+            )));
+        }
+    };
+    verify_contract_headers(&response_headers(response.headers()))
+        .map_err(WebSocketAttemptError::Sdk)?;
+    Ok(socket)
+}
+
+fn response_headers(headers: &http::HeaderMap) -> BTreeMap<String, String> {
+    headers
+        .iter()
+        .filter_map(|(name, value)| {
+            Some((
+                name.as_str().to_ascii_lowercase(),
+                value.to_str().ok()?.to_owned(),
+            ))
+        })
+        .collect()
+}
+
+fn with_authorization(
+    headers: &[(HeaderName, HeaderValue)],
+    token: &AccessToken,
+) -> Result<Vec<(HeaderName, HeaderValue)>, WebSocketAttemptError> {
+    let mut result = headers.to_vec();
+    let mut value = HeaderValue::from_str(&format!("Bearer {}", token.expose()))
+        .map_err(|_| WebSocketAttemptError::Sdk(SdkError::TokenUnavailable))?;
+    value.set_sensitive(true);
+    result.push((http::header::AUTHORIZATION, value));
+    Ok(result)
+}
+
+fn bounded_header(name: &'static str, value: &str) -> Result<(HeaderName, HeaderValue), SdkError> {
+    let name = HeaderName::from_static(name);
+    let mut value = HeaderValue::from_str(value)
+        .map_err(|_| SdkError::Protocol("session authority header is invalid".to_owned()))?;
+    value.set_sensitive(true);
+    Ok((name, value))
+}
+
+fn is_refreshable_auth_refusal(response: &HttpResponse) -> bool {
+    if response.status != 401 {
+        return false;
+    }
+    serde_json::from_slice::<substrate_wire::Failure>(&response.body)
+        .ok()
+        .is_some_and(|failure| {
+            matches!(
+                failure.error.code.as_str(),
+                substrate_wire::AUTH_CREDENTIAL_ABSENT | substrate_wire::AUTH_AUTHORITY_INVALID
+            )
+        })
+}
+
+fn load_connector(path: &std::path::Path) -> Result<TlsConnector, SdkError> {
+    let file = File::open(path)
+        .map_err(|_| SdkError::Protocol("remote trust roots cannot be opened".to_owned()))?;
+    let metadata = file
+        .metadata()
+        .map_err(|_| SdkError::Protocol("remote trust roots cannot be inspected".to_owned()))?;
+    if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_CA_BUNDLE_BYTES {
+        return Err(SdkError::Protocol(
+            "remote trust roots must be one bounded regular file".to_owned(),
+        ));
+    }
+    let mut roots = RootCertStore::empty();
+    let mut reader = BufReader::new(file);
+    let mut count = 0_usize;
+    loop {
+        match rustls_pemfile::read_one(&mut reader)
+            .map_err(|_| SdkError::Protocol("remote trust roots are invalid".to_owned()))?
+        {
+            Some(rustls_pemfile::Item::X509Certificate(certificate)) => {
+                roots.add(certificate).map_err(|_| {
+                    SdkError::Protocol(
+                        "remote trust roots contain an invalid certificate".to_owned(),
+                    )
+                })?;
+                count += 1;
+            }
+            Some(_) => {
+                return Err(SdkError::Protocol(
+                    "remote trust roots contain non-certificate material".to_owned(),
+                ));
+            }
+            None => break,
+        }
+    }
+    if count == 0 {
+        return Err(SdkError::Protocol(
+            "remote trust roots contain no certificate".to_owned(),
+        ));
+    }
+    let mut config = ClientConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Ok(TlsConnector::from(Arc::new(config)))
+}
+
+async fn read_response<S>(stream: &mut S) -> Result<HttpResponse, SdkError>
+where
+    S: AsyncRead + Unpin,
+{
     let mut bytes = Vec::new();
     let boundary = loop {
         if let Some(index) = find(&bytes, b"\r\n\r\n") {
@@ -343,6 +767,7 @@ fn find(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 mod tests {
     use super::{CONTRACT, CONTRACT_SHA256, Transport, verify_contract_headers};
     use crate::SdkError;
+    use futures_util::SinkExt as _;
     use std::collections::BTreeMap;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::UnixListener;
@@ -355,6 +780,29 @@ mod tests {
                 digest.to_owned(),
             ),
         ])
+    }
+
+    #[allow(
+        clippy::result_large_err,
+        clippy::unnecessary_wraps,
+        reason = "tungstenite's handshake callback requires this exact result type"
+    )]
+    fn add_contract_headers(
+        _: &tokio_tungstenite::tungstenite::handshake::server::Request,
+        mut response: tokio_tungstenite::tungstenite::handshake::server::Response,
+    ) -> Result<
+        tokio_tungstenite::tungstenite::handshake::server::Response,
+        tokio_tungstenite::tungstenite::handshake::server::ErrorResponse,
+    > {
+        response.headers_mut().insert(
+            "x-b10x-contract",
+            CONTRACT.parse().expect("contract header"),
+        );
+        response.headers_mut().insert(
+            "x-b10x-contract-bundle-sha256",
+            CONTRACT_SHA256.parse().expect("digest header"),
+        );
+        Ok(response)
     }
 
     fn assert_mismatch(
@@ -443,6 +891,46 @@ content-length: not-a-number\r\n\r\n",
             matches!(error, SdkError::ContractMismatch { .. }),
             "{error}"
         );
+        server.await.expect("fake daemon task");
+    }
+
+    #[tokio::test]
+    async fn an_event_stream_gap_preserves_its_code_and_cursor() {
+        let temporary = tempfile::tempdir().expect("temporary socket directory");
+        let socket = temporary.path().join("daemon.sock");
+        let listener = UnixListener::bind(&socket).expect("bind fake daemon");
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.expect("accept SDK connection");
+            let mut websocket = tokio_tungstenite::accept_hdr_async(stream, add_contract_headers)
+                .await
+                .expect("upgrade event stream");
+            websocket
+                .send(tokio_tungstenite::tungstenite::Message::Text(
+                    serde_json::json!({
+                        "kind": "gap",
+                        "page": null,
+                        "code": "event.retention-gap",
+                        "cursor": "ev2.scope_test.41.1"
+                    })
+                    .to_string()
+                    .into(),
+                ))
+                .await
+                .expect("send gap frame");
+        });
+
+        let mut events = Transport::new(socket)
+            .event_stream(None, 10)
+            .await
+            .expect("open event stream");
+        let error = events.next_page().await.expect_err("gap must be surfaced");
+        match error {
+            SdkError::EventGap { code, cursor } => {
+                assert_eq!(code, "event.retention-gap");
+                assert_eq!(cursor.as_deref(), Some("ev2.scope_test.41.1"));
+            }
+            other => panic!("gap produced another error: {other}"),
+        }
         server.await.expect("fake daemon task");
     }
 }
