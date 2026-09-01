@@ -17,6 +17,7 @@ use substrate_wire::{
     ErrorClass, ErrorDetail, Exec, ExecState, LeaseState, OperationOutcome, PipeSession,
     SessionAbsence, SessionAttachmentState, SessionKind, SessionState, Workspace, WorkspaceState,
 };
+use subtle::ConstantTimeEq as _;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SessionRetireReservation {
@@ -31,10 +32,143 @@ pub enum SessionAttachmentClaim {
     Claimed,
     AlreadyClaimed,
     NotAttachable,
+    AuthorityExpired,
+    AuthorityRedeemed,
+    AuthorityUnbound,
+    Missing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NewSessionAuthority {
+    pub authority_id: String,
+    pub bearer_sha256: [u8; 32],
+    pub public_key: [u8; 32],
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionAuthorityMint {
+    Minted,
+    Capacity,
+    NotAttachable,
+    Missing,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionAuthorityLookup {
+    Available { public_key: [u8; 32] },
+    Expired,
+    Redeemed,
+    Unbound,
     Missing,
 }
 
 impl Store {
+    /// Stores only the verifier and bound public key for one short-lived network authority.
+    pub fn mint_session_authority(
+        &self,
+        scope: &Scope,
+        session_id: &str,
+        authority: &NewSessionAuthority,
+        now: DateTime<Utc>,
+    ) -> Result<SessionAuthorityMint, StoreError> {
+        let mut connection = self.connection.lock();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(session) = load_session(&transaction, scope, session_id)? else {
+            transaction.commit()?;
+            return Ok(SessionAuthorityMint::Missing);
+        };
+        if session.state != SessionState::Ready
+            || session.attachment != SessionAttachmentState::Available
+            || session.lease.state != LeaseState::Active
+        {
+            transaction.commit()?;
+            return Ok(SessionAuthorityMint::NotAttachable);
+        }
+        let now_ms = now.timestamp_millis();
+        transaction.execute(
+            "DELETE FROM session_authorities
+             WHERE deployment = ?1 AND subject = ?2 AND session_id = ?3
+               AND expires_at_ms <= ?4",
+            params![scope.deployment, scope.subject, session_id, now_ms],
+        )?;
+        let live: i64 = transaction.query_row(
+            "SELECT COUNT(*) FROM session_authorities
+             WHERE deployment = ?1 AND subject = ?2 AND session_id = ?3
+               AND redeemed_at_ms IS NULL",
+            params![scope.deployment, scope.subject, session_id],
+            |row| row.get(0),
+        )?;
+        if live >= i64::from(substrate_wire::MAX_LIVE_SESSION_AUTHORITIES) {
+            transaction.commit()?;
+            return Ok(SessionAuthorityMint::Capacity);
+        }
+        transaction.execute(
+            "INSERT INTO session_authorities (
+                deployment, subject, session_id, authority_id, bearer_sha256, public_key,
+                expires_at_ms, redeemed_at_ms
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL)",
+            params![
+                scope.deployment,
+                scope.subject,
+                session_id,
+                authority.authority_id,
+                authority.bearer_sha256.as_slice(),
+                authority.public_key.as_slice(),
+                authority.expires_at.timestamp_millis(),
+            ],
+        )?;
+        transaction.commit()?;
+        Ok(SessionAuthorityMint::Minted)
+    }
+
+    /// Reads the public verification key only after the bearer verifier and lifetime match.
+    pub fn session_authority(
+        &self,
+        scope: &Scope,
+        session_id: &str,
+        authority_id: &str,
+        bearer_sha256: &[u8; 32],
+        now: DateTime<Utc>,
+    ) -> Result<SessionAuthorityLookup, StoreError> {
+        let connection = self.connection.lock();
+        let row = connection
+            .query_row(
+                "SELECT bearer_sha256, public_key, expires_at_ms, redeemed_at_ms
+                 FROM session_authorities
+                 WHERE deployment = ?1 AND subject = ?2 AND session_id = ?3
+                   AND authority_id = ?4",
+                params![scope.deployment, scope.subject, session_id, authority_id],
+                |row| {
+                    Ok((
+                        row.get::<_, Vec<u8>>(0)?,
+                        row.get::<_, Vec<u8>>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, Option<i64>>(3)?,
+                    ))
+                },
+            )
+            .optional()?;
+        let Some((stored_bearer, public_key, expires_at_ms, redeemed_at_ms)) = row else {
+            return Ok(SessionAuthorityLookup::Missing);
+        };
+        if stored_bearer.len() != bearer_sha256.len()
+            || !bool::from(stored_bearer.as_slice().ct_eq(bearer_sha256))
+        {
+            return Ok(SessionAuthorityLookup::Unbound);
+        }
+        if redeemed_at_ms.is_some() {
+            return Ok(SessionAuthorityLookup::Redeemed);
+        }
+        if expires_at_ms <= now.timestamp_millis() {
+            return Ok(SessionAuthorityLookup::Expired);
+        }
+        let public_key = public_key
+            .try_into()
+            .map_err(|_| StoreError::InvalidSessionAuthority)?;
+        Ok(SessionAuthorityLookup::Available { public_key })
+    }
+
     /// Atomically reserves a durable pipe session, its private exec, and the exec lease which is
     /// the sole physical cleanup authority for both resources.
     pub fn reserve_pipe_session_start(
@@ -528,12 +662,75 @@ impl Store {
         id: &str,
         observed_at: DateTime<Utc>,
     ) -> Result<SessionAttachmentClaim, StoreError> {
+        self.claim_pipe_session_attachment_inner(scope, id, observed_at, None)
+    }
+
+    /// Atomically consumes a network authority with the one durable attachment right.
+    pub fn claim_pipe_session_attachment_with_authority(
+        &self,
+        scope: &Scope,
+        id: &str,
+        authority_id: &str,
+        bearer_sha256: &[u8; 32],
+        observed_at: DateTime<Utc>,
+    ) -> Result<SessionAttachmentClaim, StoreError> {
+        self.claim_pipe_session_attachment_inner(
+            scope,
+            id,
+            observed_at,
+            Some((authority_id, bearer_sha256)),
+        )
+    }
+
+    fn claim_pipe_session_attachment_inner(
+        &self,
+        scope: &Scope,
+        id: &str,
+        observed_at: DateTime<Utc>,
+        authority: Option<(&str, &[u8; 32])>,
+    ) -> Result<SessionAttachmentClaim, StoreError> {
         let mut connection = self.connection.lock();
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let Some(mut session) = load_session(&transaction, scope, id)? else {
             transaction.commit()?;
             return Ok(SessionAttachmentClaim::Missing);
         };
+        if let Some((authority_id, bearer_sha256)) = authority {
+            let row = transaction
+                .query_row(
+                    "SELECT bearer_sha256, expires_at_ms, redeemed_at_ms
+                     FROM session_authorities
+                     WHERE deployment = ?1 AND subject = ?2 AND session_id = ?3
+                       AND authority_id = ?4",
+                    params![scope.deployment, scope.subject, id, authority_id],
+                    |row| {
+                        Ok((
+                            row.get::<_, Vec<u8>>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, Option<i64>>(2)?,
+                        ))
+                    },
+                )
+                .optional()?;
+            let Some((stored_bearer, expires_at_ms, redeemed_at_ms)) = row else {
+                transaction.commit()?;
+                return Ok(SessionAttachmentClaim::AuthorityUnbound);
+            };
+            if stored_bearer.len() != bearer_sha256.len()
+                || !bool::from(stored_bearer.as_slice().ct_eq(bearer_sha256))
+            {
+                transaction.commit()?;
+                return Ok(SessionAttachmentClaim::AuthorityUnbound);
+            }
+            if redeemed_at_ms.is_some() {
+                transaction.commit()?;
+                return Ok(SessionAttachmentClaim::AuthorityRedeemed);
+            }
+            if expires_at_ms <= observed_at.timestamp_millis() {
+                transaction.commit()?;
+                return Ok(SessionAttachmentClaim::AuthorityExpired);
+            }
+        }
         if matches!(
             session.attachment,
             SessionAttachmentState::Attached
@@ -549,6 +746,24 @@ impl Store {
         {
             transaction.commit()?;
             return Ok(SessionAttachmentClaim::NotAttachable);
+        }
+        if let Some((authority_id, _)) = authority {
+            let changed = transaction.execute(
+                "UPDATE session_authorities SET redeemed_at_ms = ?5
+                 WHERE deployment = ?1 AND subject = ?2 AND session_id = ?3
+                   AND authority_id = ?4 AND redeemed_at_ms IS NULL",
+                params![
+                    scope.deployment,
+                    scope.subject,
+                    id,
+                    authority_id,
+                    observed_at.timestamp_millis(),
+                ],
+            )?;
+            if changed != 1 {
+                transaction.commit()?;
+                return Ok(SessionAttachmentClaim::AuthorityRedeemed);
+            }
         }
         session.state = SessionState::Attached;
         session.attachment = SessionAttachmentState::Attached;
@@ -629,6 +844,19 @@ pub(crate) fn upsert_session(
             serde_json::to_string(session)?,
         ],
     )?;
+    if matches!(
+        session.state,
+        SessionState::Exited
+            | SessionState::Cancelled
+            | SessionState::Expired
+            | SessionState::Unknown
+    ) {
+        connection.execute(
+            "DELETE FROM session_authorities
+             WHERE deployment = ?1 AND subject = ?2 AND session_id = ?3",
+            params![scope.deployment, scope.subject, session.id],
+        )?;
+    }
     Ok(())
 }
 

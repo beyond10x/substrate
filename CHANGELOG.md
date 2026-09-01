@@ -9,6 +9,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- **Hosted raw-pipe attachment authority is one-use and TLS-channel-bound.** A scoped hosted client
+  mints at most four 60-second authorities for a ready session, binds each to an Ed25519 public key,
+  and proves the accepting TLS 1.3 exporter in the WebSocket upgrade. Substrate stores only the
+  bearer verifier and atomically redeems it with the single attachment claim; absent, expired,
+  replayed and unbound attempts are named refusals. Unix attachments retain kernel-credential
+  authority, while development TCP serves neither start, mint nor attach.
 - **Production HTTPS/WSS requests use current Identity authority.** The TLS listener resolves one
   five-minute opaque access credential over direct, explicitly rooted HTTPS for exact audience
   `urn:b10x:substrate`, validates the closed authority document, derives a tenant-bound subject and
@@ -28,11 +34,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
-- **The daemon and Rust SDK now claim development contract `substrate-wire/0.13.0` together.**
+- **The daemon and Rust SDK now claim development contract `substrate-wire/0.14.0` together.**
   Both use the inner `bundle.json` digest
-  `7ab665c0a50cd8521a28b2b4c2302b7d460a1978b105d956711dbe6702a843bf`; its direct predecessor is
-  0.12.0, it preserves all 33 routes, adds none, and declares the hosted Identity audience,
-  route-scope mapping and four authentication refusals. The latest separately signed OCI
+  `eea07e6894ae840b6b2bb161861a724115fef4dedd57e72386e9d71af348b092`; its direct predecessor is
+  0.13.0, it preserves all 33 routes, adds the hosted attachment-authority mint route, and declares
+  exact key/channel binding plus four authority refusals. The latest separately signed OCI
   distribution remains 0.12.0 at
   `sha256:dd901e848c821aca7d55f7b8cf5ee893e1d99a1428b348e32e7ed1045a375319`. The clean-room shipped-
   binary lane checks the pair on every HTTP response and WebSocket route probe, while SDK fixtures

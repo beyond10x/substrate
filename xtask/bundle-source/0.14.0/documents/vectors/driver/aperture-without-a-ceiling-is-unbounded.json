@@ -1,0 +1,73 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "command": {
+      "aperture": "model",
+      "argv": [
+        "/fixture/drain-aperture"
+      ],
+      "network": "aperture",
+      "operation": "exec.start"
+    },
+    "kind": "driver",
+    "port": "exec"
+  },
+  "context": {
+    "authority": "driver-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000"
+  },
+  "covers": [
+    "security.egress-aperture-ceiling-absent"
+  ],
+  "expected": {
+    "kind": "driver-outcome",
+    "outcome": {
+      "reached": [
+        "aperture"
+      ],
+      "refused": [],
+      "state": "exited"
+    }
+  },
+  "id": "an-aperture-declared-without-a-ceiling-is-unbounded",
+  "layer": "driver",
+  "phase": 2,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/applied_aperture_max_bytes",
+      "expected": null,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/aperture_bytes_total",
+      "expected": 1048576,
+      "operator": "equals"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "egress-aperture",
+      "name": "model",
+      "state": {
+        "declared_by": "operator",
+        "destination": "203.0.113.7:443",
+        "protocol": "tcp"
+      }
+    },
+    {
+      "kind": "network",
+      "name": "all-address-classes",
+      "state": {
+        "control_socket": true,
+        "dns": true
+      }
+    }
+  ]
+}

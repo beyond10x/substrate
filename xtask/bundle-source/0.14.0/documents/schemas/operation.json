@@ -1,0 +1,370 @@
+{
+  "$defs": {
+    "base-properties": {
+      "accepted_at": {
+        "oneOf": [
+          {
+            "$ref": "common.json#/$defs/timestamp"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "actor": {
+        "minLength": 1,
+        "type": "string"
+      },
+      "capability_snapshot": {
+        "oneOf": [
+          {
+            "pattern": "^sha256:[0-9a-f]{64}$",
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "grant_ref": {
+        "description": "The declared grant this operation ran under, verbatim from a verified delegated context. Null when none was presented.",
+        "maxLength": 512,
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "operation": {
+        "$ref": "common.json#/$defs/operation-id"
+      },
+      "operation_kind": {
+        "$routes": "keyed-operation-kinds"
+      },
+      "outcome": {},
+      "platform_principal": {
+        "description": "The initiating platform principal, verbatim from a verified delegated context. Separate from principal, which keeps its process-id meaning.",
+        "maxLength": 512,
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "principal": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "request_hash": {
+        "pattern": "^[0-9a-f]{64}$",
+        "type": "string"
+      },
+      "resource": {
+        "type": [
+          "string",
+          "null"
+        ]
+      },
+      "state": {
+        "enum": [
+          "refused",
+          "accepted",
+          "unknown",
+          "terminal"
+        ]
+      },
+      "terminal_at": {
+        "oneOf": [
+          {
+            "$ref": "common.json#/$defs/timestamp"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      }
+    },
+    "error-outcome": {
+      "additionalProperties": false,
+      "properties": {
+        "error": {
+          "$ref": "error.json#/$defs/detail"
+        },
+        "kind": {
+          "const": "error"
+        }
+      },
+      "required": [
+        "kind",
+        "error"
+      ],
+      "type": "object"
+    },
+    "success-outcome": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "success"
+        },
+        "result": {
+          "anyOf": {
+            "$routes": "keyed-result-refs"
+          }
+        }
+      },
+      "required": [
+        "kind",
+        "result"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "urn:b10x:substrate-wire:0.14.0:operation",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "allOf": {
+    "$routes": "keyed-result-branches"
+  },
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "accepted_at": {
+          "type": "null"
+        },
+        "actor": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "capability_snapshot": {
+          "type": "null"
+        },
+        "grant_ref": {
+          "description": "The declared grant this operation ran under, verbatim from a verified delegated context. Null when none was presented.",
+          "maxLength": 512,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "operation_kind": {
+          "$routes": "keyed-operation-kinds"
+        },
+        "outcome": {
+          "$ref": "#/$defs/error-outcome"
+        },
+        "platform_principal": {
+          "description": "The initiating platform principal, verbatim from a verified delegated context. Separate from principal, which keeps its process-id meaning.",
+          "maxLength": 512,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "principal": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "request_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "resource": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "const": "refused"
+        },
+        "terminal_at": {
+          "$ref": "common.json#/$defs/timestamp"
+        }
+      },
+      "required": [
+        "operation",
+        "operation_kind",
+        "request_hash",
+        "state",
+        "accepted_at",
+        "terminal_at",
+        "capability_snapshot",
+        "actor",
+        "principal",
+        "resource",
+        "outcome"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "accepted_at": {
+          "$ref": "common.json#/$defs/timestamp"
+        },
+        "actor": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "capability_snapshot": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "grant_ref": {
+          "description": "The declared grant this operation ran under, verbatim from a verified delegated context. Null when none was presented.",
+          "maxLength": 512,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "operation_kind": {
+          "$routes": "keyed-operation-kinds"
+        },
+        "outcome": {
+          "type": "null"
+        },
+        "platform_principal": {
+          "description": "The initiating platform principal, verbatim from a verified delegated context. Separate from principal, which keeps its process-id meaning.",
+          "maxLength": 512,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "principal": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "request_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "resource": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "enum": [
+            "accepted",
+            "unknown"
+          ]
+        },
+        "terminal_at": {
+          "type": "null"
+        }
+      },
+      "required": [
+        "operation",
+        "operation_kind",
+        "request_hash",
+        "state",
+        "accepted_at",
+        "terminal_at",
+        "capability_snapshot",
+        "actor",
+        "principal",
+        "resource",
+        "outcome"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "accepted_at": {
+          "$ref": "common.json#/$defs/timestamp"
+        },
+        "actor": {
+          "minLength": 1,
+          "type": "string"
+        },
+        "capability_snapshot": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "grant_ref": {
+          "description": "The declared grant this operation ran under, verbatim from a verified delegated context. Null when none was presented.",
+          "maxLength": 512,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "operation_kind": {
+          "$routes": "keyed-operation-kinds"
+        },
+        "outcome": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/success-outcome"
+            },
+            {
+              "$ref": "#/$defs/error-outcome"
+            }
+          ]
+        },
+        "platform_principal": {
+          "description": "The initiating platform principal, verbatim from a verified delegated context. Separate from principal, which keeps its process-id meaning.",
+          "maxLength": 512,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "principal": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "request_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "resource": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "state": {
+          "const": "terminal"
+        },
+        "terminal_at": {
+          "$ref": "common.json#/$defs/timestamp"
+        }
+      },
+      "required": [
+        "operation",
+        "operation_kind",
+        "request_hash",
+        "state",
+        "accepted_at",
+        "terminal_at",
+        "capability_snapshot",
+        "actor",
+        "principal",
+        "resource",
+        "outcome"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "Subject-scoped operation record with structural lifecycle invariants"
+}

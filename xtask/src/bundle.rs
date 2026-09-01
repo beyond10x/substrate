@@ -577,6 +577,10 @@ fn check_classification(version: &str, released: &Tree, failures: &mut Vec<Strin
 /// A successor that rendered, verified and preserved everything while adding nothing is the failure
 /// this catches; the entries are the acceptance list of the story that cut the bundle.
 fn check_additions(version: &str, released: &Tree, failures: &mut Vec<String>) {
+    if version == "0.14.0" {
+        check_session_authority_additions(released, failures);
+        return;
+    }
     if version == "0.13.0" {
         check_hosted_admission_additions(released, failures);
         return;
@@ -611,6 +615,72 @@ fn check_additions(version: &str, released: &Tree, failures: &mut Vec<String>) {
     }
     if version == "0.5.0" {
         check_secret_slot_additions(released, failures);
+    }
+}
+
+/// What `0.14.0` exists for: bounded, one-use attachment authority bound to an Ed25519 key and
+/// the accepting TLS channel.
+fn check_session_authority_additions(released: &Tree, failures: &mut Vec<String>) {
+    let Some(profile) = json_at(released, "session-authority.json", failures) else {
+        return;
+    };
+    for (pointer, expected) in [
+        (
+            "/binding/exporter_label",
+            Value::from("EXPORTER-Substrate-Session-Authority-v1"),
+        ),
+        (
+            "/binding/transcript_domain",
+            Value::from(substrate_wire::SESSION_AUTHORITY_TRANSCRIPT_DOMAIN),
+        ),
+        ("/binding/exporter_bytes", Value::from(32)),
+        (
+            "/authority/maximum_lifetime_seconds",
+            Value::from(substrate_wire::SESSION_AUTHORITY_LIFETIME_SECONDS),
+        ),
+        (
+            "/authority/maximum_live_per_session",
+            Value::from(substrate_wire::MAX_LIVE_SESSION_AUTHORITIES),
+        ),
+        (
+            "/binding/proof_timestamp_skew_seconds",
+            Value::from(substrate_wire::SESSION_AUTHORITY_PROOF_SKEW_SECONDS),
+        ),
+    ] {
+        if profile.pointer(pointer) != Some(&expected) {
+            failures.push(format!(
+                "session-authority.json: {pointer} does not equal {expected}"
+            ));
+        }
+    }
+    if profile.pointer("/mint/path").and_then(Value::as_str)
+        != Some("/v1/pipe-sessions/{session_id}/attachment-authorities")
+        || profile.pointer("/mint/transport").and_then(Value::as_str) != Some("hosted-tls-only")
+        || profile.get("redemption").and_then(Value::as_str)
+            != Some("same-transaction-as-attachment-claim")
+    {
+        failures.push(
+            "session-authority.json: the hosted-only mint and atomic redemption profile is absent"
+                .to_owned(),
+        );
+    }
+
+    let Some(refusals) = json_at(released, "refusals.json", failures) else {
+        return;
+    };
+    let codes = refusals
+        .get("refusals")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|row| row.get("code").and_then(Value::as_str))
+        .filter(|code| code.starts_with("session.authority-"))
+        .collect::<Vec<_>>();
+    if codes != substrate_wire::SESSION_AUTHORITY_REFUSAL_CODES {
+        failures.push(format!(
+            "refusals.json: session authority codes {codes:?} do not equal the wire's {:?}",
+            substrate_wire::SESSION_AUTHORITY_REFUSAL_CODES
+        ));
     }
 }
 
@@ -1045,14 +1115,18 @@ fn check_pty_refusal_class(released: &Tree, failures: &mut Vec<String>) {
         })
         .collect();
 
-    // The domain is every session refusal code, not the two narrower views of it. Ranging over
+    // The domain is every session refusal code that existed at this historical `0.10.0` frontier,
+    // not the two narrower views of it. Ranging over
     // `SESSION_PTY_REFUSAL_CODES ∪ SESSION_PROTOCOL_ERROR_CODES` let three attach refusals hide —
     // `session.not-attachable`, `session.already-attached`, `session.attachment-capacity` were
     // written as literals in the daemon, so neither direction of this check saw them, and the
     // register that says it lists every refusal a session can raise had a row for none of them.
+    // Later successor refusal classes cannot be demanded from frozen 0.10 bytes. Their own
+    // version-specific addition checker pins them; 0.14 does that for attachment authority.
     let required: BTreeSet<&str> = substrate_wire::SESSION_REFUSAL_CODES
         .iter()
         .copied()
+        .filter(|code| !substrate_wire::SESSION_AUTHORITY_REFUSAL_CODES.contains(code))
         .collect();
     for code in &required {
         let Some(row) = rows.get(*code) else {
@@ -4637,7 +4711,7 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{}: {error}", bundle.display()));
             checked += 1;
         }
-        assert_eq!(checked, 13, "every released bundle must be checked");
+        assert_eq!(checked, 14, "every released bundle must be checked");
     }
 
     /// Class, the other half: if a parameter's name is not a discriminator, then renaming one is

@@ -249,6 +249,7 @@ dependencies = [
  "clap",
  "ed25519-dalek",
  "futures-util",
+ "getrandom 0.4.3",
  "hex",
  "http",
  "http-body-util",
@@ -347,6 +348,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
+ "subtle",
  "tempfile",
  "thiserror",
 ]

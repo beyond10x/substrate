@@ -29,4 +29,6 @@ mod workspaces;
 mod tests;
 
 pub use self::routes::router;
+pub(crate) use self::routes::{development_router, hosted_router};
+pub(crate) use self::service::SessionTransport;
 pub use self::service::{App, Authority, Identity, SystemAuthority};

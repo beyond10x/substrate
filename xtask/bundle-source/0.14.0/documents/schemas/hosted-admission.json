@@ -1,0 +1,170 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.14.0:hosted-admission",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "const": "schemas/hosted-admission.json"
+    },
+    "audience": {
+      "const": "urn:b10x:substrate"
+    },
+    "authority": {
+      "additionalProperties": false,
+      "properties": {
+        "claims": {
+          "items": {
+            "enum": [
+              "act.sub",
+              "aud",
+              "exp",
+              "iat",
+              "iss",
+              "jti",
+              "nbf",
+              "principal_kind",
+              "scope",
+              "sub",
+              "tenant_id"
+            ]
+          },
+          "maxItems": 11,
+          "minItems": 11,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "credential_format": {
+          "const": "identity_access_v1_<43-base64url-characters>"
+        },
+        "maximum_lifetime_seconds": {
+          "const": 300
+        },
+        "resolution_method": {
+          "const": "GET"
+        },
+        "resolution_path": {
+          "const": "/v1/access-authority"
+        },
+        "resolution_transport": {
+          "const": "direct-https"
+        },
+        "stale_authority": {
+          "const": "never-used"
+        }
+      },
+      "required": [
+        "claims",
+        "credential_format",
+        "maximum_lifetime_seconds",
+        "resolution_method",
+        "resolution_path",
+        "resolution_transport",
+        "stale_authority"
+      ],
+      "type": "object"
+    },
+    "format": {
+      "const": "b10x.substrate-hosted-admission.v1"
+    },
+    "refusals": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "class": {
+            "enum": [
+              "refused",
+              "unserved"
+            ]
+          },
+          "code": {
+            "enum": [
+              "auth.authority-invalid",
+              "auth.authority-unavailable",
+              "auth.credential-absent",
+              "auth.scope-denied"
+            ]
+          },
+          "message": {
+            "maxLength": 1024,
+            "minLength": 1,
+            "type": "string"
+          },
+          "retriable": {
+            "type": "boolean"
+          },
+          "status": {
+            "enum": [
+              401,
+              403,
+              503
+            ]
+          }
+        },
+        "required": [
+          "class",
+          "code",
+          "message",
+          "retriable",
+          "status"
+        ],
+        "type": "object"
+      },
+      "maxItems": 4,
+      "minItems": 4,
+      "type": "array",
+      "uniqueItems": true,
+      "x-b10x-order": "sorted-by-code"
+    },
+    "scopes": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "route_families": {
+            "items": {
+              "enum": [
+                "events",
+                "execs",
+                "machine",
+                "metrics",
+                "operations",
+                "pipe-sessions",
+                "reconciliation-snapshots",
+                "workspaces"
+              ]
+            },
+            "minItems": 1,
+            "type": "array",
+            "uniqueItems": true
+          },
+          "scope": {
+            "enum": [
+              "exec",
+              "observe",
+              "workspaces"
+            ]
+          }
+        },
+        "required": [
+          "route_families",
+          "scope"
+        ],
+        "type": "object"
+      },
+      "maxItems": 3,
+      "minItems": 3,
+      "type": "array",
+      "uniqueItems": true,
+      "x-b10x-order": "sorted-by-scope"
+    }
+  },
+  "required": [
+    "$schema",
+    "audience",
+    "authority",
+    "format",
+    "refusals",
+    "scopes"
+  ],
+  "title": "Hosted production admission profile",
+  "type": "object"
+}

@@ -1,0 +1,78 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.14.0:result:pipe-session-capabilities",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "capability_snapshot": {
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "contract": {
+      "const": "substrate-wire/0.10.0"
+    },
+    "control_window_ms": {
+      "const": 60000
+    },
+    "lease_required": {
+      "const": true
+    },
+    "max_controls_per_window": {
+      "const": 120
+    },
+    "max_frame_bytes": {
+      "const": 65536
+    },
+    "max_input_bytes": {
+      "const": 16777216
+    },
+    "max_queued_frames": {
+      "const": 16
+    },
+    "max_window_columns": {
+      "const": 1000
+    },
+    "max_window_rows": {
+      "const": 1000
+    },
+    "modes": {
+      "items": {
+        "enum": [
+          "pipes",
+          "pty"
+        ]
+      },
+      "maxItems": 2,
+      "minItems": 1,
+      "type": "array",
+      "uniqueItems": true,
+      "x-b10x-derived-from": "sessions.pty"
+    },
+    "network": {
+      "const": "none"
+    },
+    "single_attachment": {
+      "const": true
+    },
+    "transport": {
+      "const": "unix-websocket-json"
+    }
+  },
+  "required": [
+    "capability_snapshot",
+    "contract",
+    "control_window_ms",
+    "lease_required",
+    "max_controls_per_window",
+    "max_frame_bytes",
+    "max_input_bytes",
+    "max_queued_frames",
+    "max_window_columns",
+    "max_window_rows",
+    "modes",
+    "network",
+    "single_attachment",
+    "transport"
+  ],
+  "title": "pipe-session-capabilities operation result",
+  "type": "object"
+}

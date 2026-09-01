@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::app::{development_router, hosted_router};
 use crate::delegation::{DelegatedContextPolicy, TrustedKey};
 use crate::hosted::{HostedAdmission, HostedIdentityConfig, require_hosted_authority};
 use crate::tls::{TlsDaemonConfig, load_server_config};
@@ -876,7 +877,7 @@ async fn serve_tcp(app: Arc<App>, config: &TcpDaemonConfig) -> anyhow::Result<()
         actor: config.actor.clone(),
         principal: None,
     };
-    let service = router(Arc::clone(&app))
+    let service = development_router(Arc::clone(&app))
         .layer(Extension(identity))
         .layer(middleware::from_fn_with_state(auth, require_tcp_bearer));
     let service = if config.path_prefix == "/" {
@@ -964,10 +965,7 @@ async fn serve_tls(
     }
     let mut reload = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
         .context("tls.listener-config-invalid: install SIGHUP reload signal")?;
-    let service = router(Arc::clone(&app)).layer(middleware::from_fn_with_state(
-        Arc::new(hosted_admission),
-        require_hosted_authority,
-    ));
+    let hosted_admission = Arc::new(hosted_admission);
     let listener = TcpListener::bind(config.listen)
         .await
         .context("tls.listener-config-invalid: bind production TLS listener")?;
@@ -990,9 +988,14 @@ async fn serve_tls(
                     continue;
                 };
                 let acceptor = TlsAcceptor::from(Arc::clone(&identity));
-                let service = service.clone();
                 connections.spawn(serve_tls_connection(
-                    stream, address, permit, acceptor, service, policy,
+                    stream,
+                    address,
+                    permit,
+                    acceptor,
+                    Arc::clone(&app),
+                    Arc::clone(&hosted_admission),
+                    policy,
                 ));
             }
             joined = connections.join_next(), if !connections.is_empty() => {
@@ -1039,7 +1042,8 @@ async fn serve_tls_connection(
     address: SocketAddr,
     permit: TcpConnectionPermit,
     acceptor: TlsAcceptor,
-    service: Router,
+    app: Arc<App>,
+    hosted_admission: Arc<HostedAdmission>,
     policy: UnixTransportPolicy,
 ) {
     let handshake = tokio::time::timeout(policy.header_read_timeout, acceptor.accept(stream)).await;
@@ -1054,6 +1058,24 @@ async fn serve_tls_connection(
             return;
         }
     };
+    let mut exporter = [0_u8; 32];
+    if tls
+        .get_ref()
+        .1
+        .export_keying_material(
+            &mut exporter,
+            substrate_wire::SESSION_AUTHORITY_EXPORTER_LABEL,
+            None,
+        )
+        .is_err()
+    {
+        warn!(source = %address.ip(), "TLS session exporter unavailable");
+        return;
+    }
+    let service = hosted_router(app, exporter).layer(middleware::from_fn_with_state(
+        hosted_admission,
+        require_hosted_authority,
+    ));
     let io = TokioIo::new(tls);
     let builder = http1_builder(policy);
     let connection = builder

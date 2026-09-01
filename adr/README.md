@@ -32,3 +32,4 @@ with YAML frontmatter containing `date` and `status`. Draft design questions rem
 | [0024](0024-production-network-control-uses-server-authenticated-tls.md) | Production network control uses server-authenticated TLS | accepted |
 | [0025](0025-the-mcp-adapter-is-a-disposable-test-surface.md) | The MCP adapter is a disposable test surface | accepted |
 | [0026](0026-hosted-admission-resolves-opaque-identity-authority.md) | Hosted admission resolves opaque Identity authority | accepted |
+| [0027](0027-network-session-authority-is-key-and-channel-bound.md) | Network session authority is key- and channel-bound | accepted |
