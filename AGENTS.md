@@ -410,3 +410,11 @@ A story that changes a contract or a capability still owes its ADR or design doc
 code** (invariant 8); the story body names which. `ROADMAP.md` keeps the phase order and
 `STATUS.md` the observed state; the store holds the work items and their status, and nothing else
 restates it.
+
+<!-- b10x-docs-operations:start -->
+## Public documentation operations
+
+This repository owns the public source and presentation allowlist in `b10x.docs.yaml`; the unified [beyond10x Website](https://beyond10x.github.io/docs/substrate/) passively collects those declared files from the exact commit in `website/sources.lock.json`. Atlas owns discovery grouping/order; Website and Docs System own rendering, shared components, search, and feeds. Do not add a standalone docs deployer or put App credentials in this public repository. If Atlas catalogs a former Pages workflow, that file remains repository-owned validation: preserve its bespoke checks while keeping exact read-only permissions, an unconditional pull-request trigger, and no deployment primitives. Project Pages at `/substrate/` is only the generated redirect façade in `.github/workflows/b10x-docs-pages.yml`.
+
+From a complete organization workspace, run `cargo run --manifest-path atlas/Cargo.toml -- docs reconcile --workspace . --check` to verify the contract. Keep internal plans, stories, ADRs, decisions, worklogs, security material, and research out of the public allowlist unless a repository authority explicitly declares them public.
+<!-- b10x-docs-operations:end -->

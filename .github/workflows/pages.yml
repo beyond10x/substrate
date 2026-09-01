@@ -1,6 +1,6 @@
-# Build the self-contained public site under website/. Internal repository material is not part of
-# the artifact. Configure GitHub Pages to use "GitHub Actions" as its source.
-name: Publish documentation
+# Atlas-classified former Pages workflow: repository-owned validation only; deployment authority is forbidden.
+# Builds and audits the self-contained public Docusaurus source; Website owns public delivery.
+name: Documentation validation
 
 on:
   push:
@@ -8,8 +8,7 @@ on:
     paths:
       - .github/workflows/pages.yml
       - website/**
-  # This job is a required check, so every pull request must create its context. The locked build is
-  # cheap enough to prefer one unconditional check over a path-filtered check that can stay pending.
+  # This job is a required check, so every pull request must create its context.
   pull_request:
   workflow_dispatch:
 
@@ -27,7 +26,6 @@ jobs:
     timeout-minutes: 20
     permissions:
       contents: read
-      pages: read
 
     steps:
       - name: Check out source
@@ -41,9 +39,6 @@ jobs:
           node-version: 24
           cache: npm
           cache-dependency-path: website/package-lock.json
-
-      - name: Configure Pages
-        uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6
 
       - name: Install locked dependencies
         working-directory: website
@@ -60,26 +55,3 @@ jobs:
       - name: Build website
         working-directory: website
         run: npm run build
-
-      - name: Upload Pages artifact
-        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5
-        with:
-          path: website/build
-
-  deploy:
-    name: Deploy GitHub Pages
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-    needs: build
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-
-    steps:
-      - name: Deploy GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5

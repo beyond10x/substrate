@@ -392,3 +392,9 @@ Start here, in order:
 
 Also: [`glossary.md`](glossary.md), [`STATUS.md`](STATUS.md), [`CHANGELOG.md`](CHANGELOG.md), and
 [`AGENTS.md`](AGENTS.md) for the working agreements and invariants.
+
+<!-- b10x-docs:start -->
+## Documentation
+
+[Substrate documentation](https://beyond10x.github.io/docs/substrate/) · [Start](https://beyond10x.github.io/) · [Ecosystem](https://beyond10x.github.io/ecosystem/) · [Impact](https://beyond10x.github.io/changes/) · [Releases](https://beyond10x.github.io/releases/)
+<!-- b10x-docs:end -->
