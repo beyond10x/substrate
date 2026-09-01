@@ -14,7 +14,7 @@
     "@docusaurus/core": "3.10.2",
     "@docusaurus/faster": "3.10.2",
     "@docusaurus/preset-classic": "3.10.2",
-    "@beyond10x/docs-system": "git+https://github.com/beyond10x/docs-system.git#0cbd1f1b6951fec95767332e3a1792f838feb62d",
+    "@beyond10x/docs-system": "git+https://github.com/beyond10x/docs-system.git#73aefe1ca268cc853ed38fb23478454496462a03",
     "@mdx-js/react": "^3.0.0",
     "clsx": "^2.0.0",
     "prism-react-renderer": "^2.3.0",
