@@ -19,8 +19,9 @@
 #     bar for `main` (AGENTS.md § "The gate"); this workflow reads that workflow's own conclusion
 #     for the exact tagged SHA rather than re-running a lookalike, so "the gate was green for this
 #     commit" means the recorded run, not a second opinion.
-#   * an existing daemon-image or contract-bundle version tag. Both canonical tags are write-once,
-#     checked before any publication and again immediately before their respective push.
+#   * an existing daemon-image version tag, or a contract-bundle tag whose digest differs from the
+#     deterministic local package. Both canonical tags are write-once. A later daemon release may
+#     reuse the same byte-identical bundle, but it never replaces the bundle tag.
 #   * a signature that does not verify. Signing and `cosign verify` for **both** artifacts run before
 #     the GitHub release is created, so a Sigstore failure fails the job with nothing announced.
 #     Registry writes cannot be rolled back here, but no release, changelog stanza or digest claim
@@ -305,7 +306,7 @@ jobs:
         with:
           version: 1.3.3
 
-      - name: Refuse an existing release, image or bundle version tag
+      - name: Refuse an existing release or daemon-image version tag
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -318,21 +319,6 @@ jobs:
             echo "refused: ${IMAGE}:${VERSION} already exists; canonical image tags are write-once." >&2
             exit 1
           fi
-
-          # A registry failure is not proof that the tag is absent. Only GHCR's named not-found
-          # response permits publication; authentication, transport and server failures refuse.
-          if resolve_output=$(oras resolve "${BUNDLE_IMAGE}:${BUNDLE_VERSION}" 2>&1); then
-            echo "refused: ${BUNDLE_IMAGE}:${BUNDLE_VERSION} already exists at ${resolve_output}; canonical contract-bundle tags are write-once." >&2
-            exit 1
-          fi
-          case "$resolve_output" in
-            *"not found"*|*"manifest unknown"*) ;;
-            *)
-              echo "refused: could not prove ${BUNDLE_IMAGE}:${BUNDLE_VERSION} absent:" >&2
-              printf '%s\n' "$resolve_output" >&2
-              exit 1
-              ;;
-          esac
 
       # The packager reads the frozen directory and writes only under target/. Full checkout
       # history makes its default SOURCE_DATE_EPOCH the author time of the last commit touching
@@ -365,6 +351,113 @@ jobs:
           fi
           echo "packaged ${BUNDLE_IMAGE}:${BUNDLE_VERSION} -> ${package_digest} (development)"
           echo "digest=${package_digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve the write-once contract-bundle tag
+        id: bundle-state
+        env:
+          PACKAGE_DIGEST: ${{ steps.bundle-package.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if remote_digest=$(oras resolve "${BUNDLE_IMAGE}:${BUNDLE_VERSION}" 2>&1); then
+            if [ "$remote_digest" != "$PACKAGE_DIGEST" ]; then
+              echo "refused: ${BUNDLE_IMAGE}:${BUNDLE_VERSION} already names ${remote_digest}, not deterministic package ${PACKAGE_DIGEST}; it will not be overwritten." >&2
+              exit 1
+            fi
+            echo "reusing byte-identical ${BUNDLE_IMAGE}:${BUNDLE_VERSION} at ${remote_digest}"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            case "$remote_digest" in
+              *"not found"*|*"manifest unknown"*) echo "exists=false" >> "$GITHUB_OUTPUT" ;;
+              *)
+                echo "refused: could not resolve ${BUNDLE_IMAGE}:${BUNDLE_VERSION} reliably:" >&2
+                printf '%s\n' "$remote_digest" >&2
+                exit 1
+                ;;
+            esac
+          fi
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      # Publish and prove the bundle before mutating the daemon-image tag. A newly created GHCR
+      # package may initially be private; failing its anonymous check here leaves the daemon tag
+      # untouched, and a retry can safely reuse the same deterministic bundle after visibility is
+      # corrected. A later daemon release can likewise reuse this exact write-once bundle.
+      - name: Publish or reuse the exact development contract-bundle layout
+        id: bundle
+        env:
+          EXISTS: ${{ steps.bundle-state.outputs.exists }}
+          PACKAGE_DIGEST: ${{ steps.bundle-package.outputs.digest }}
+        run: |
+          set -euo pipefail
+          if [ "$EXISTS" != true ]; then
+            if remote_digest=$(oras resolve "${BUNDLE_IMAGE}:${BUNDLE_VERSION}" 2>&1); then
+              if [ "$remote_digest" != "$PACKAGE_DIGEST" ]; then
+                echo "refused: ${BUNDLE_IMAGE}:${BUNDLE_VERSION} appeared at ${remote_digest}, not ${PACKAGE_DIGEST}; it will not be overwritten." >&2
+                exit 1
+              fi
+            else
+              case "$remote_digest" in
+                *"not found"*|*"manifest unknown"*)
+                  oras cp --from-oci-layout --no-tty \
+                    "${BUNDLE_LAYOUT}:${BUNDLE_VERSION}" \
+                    "${BUNDLE_IMAGE}:${BUNDLE_VERSION}"
+                  ;;
+                *)
+                  echo "refused: could not prove ${BUNDLE_IMAGE}:${BUNDLE_VERSION} absent immediately before push:" >&2
+                  printf '%s\n' "$remote_digest" >&2
+                  exit 1
+                  ;;
+              esac
+            fi
+          fi
+
+          remote_digest=$(oras resolve "${BUNDLE_IMAGE}:${BUNDLE_VERSION}")
+          if [ "$remote_digest" != "$PACKAGE_DIGEST" ]; then
+            echo "refused: published bundle resolves to ${remote_digest}, not packaged digest ${PACKAGE_DIGEST}." >&2
+            exit 1
+          fi
+          remote_descriptor=$(oras manifest fetch --descriptor "${BUNDLE_IMAGE}@${remote_digest}")
+          printf '%s\n' "$remote_descriptor" \
+            | jq -e \
+                --arg digest "$PACKAGE_DIGEST" \
+                --arg version "$BUNDLE_VERSION" \
+                '.digest == $digest
+                 and .annotations["org.opencontainers.image.version"] == $version
+                 and .annotations["dev.b10x.contract.status"] == "development"' >/dev/null
+          echo "resolved ${BUNDLE_IMAGE}:${BUNDLE_VERSION} -> ${remote_digest} (development)"
+          echo "digest=${remote_digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Sign the development contract bundle keylessly
+        env:
+          BUNDLE_DIGEST: ${{ steps.bundle.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cosign sign --yes "${BUNDLE_IMAGE}@${BUNDLE_DIGEST}"
+
+      - name: Verify the contract-bundle signature with this release identity
+        id: bundle-verify
+        env:
+          BUNDLE_DIGEST: ${{ steps.bundle.outputs.digest }}
+        run: |
+          set -euo pipefail
+          identity="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}"
+          echo "certificate identity: ${identity}"
+          cosign verify \
+            --certificate-identity "${identity}" \
+            --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+            "${BUNDLE_IMAGE}@${BUNDLE_DIGEST}" > bundle-cosign-verify.json
+          jq -e 'length > 0' bundle-cosign-verify.json >/dev/null
+          echo "identity=${identity}" >> "$GITHUB_OUTPUT"
+
+      - name: Prove the contract bundle is anonymously retrievable
+        env:
+          BUNDLE_DIGEST: ${{ steps.bundle.outputs.digest }}
+        run: |
+          set -euo pipefail
+          anonymous_config=$(mktemp -d)
+          DOCKER_CONFIG="$anonymous_config" \
+            oras manifest fetch --descriptor "${BUNDLE_IMAGE}@${BUNDLE_DIGEST}" >/dev/null
 
       # SOURCE_SHA becomes `org.opencontainers.image.revision` on the published image
       # (Dockerfile:13-14), so the image says which commit produced it.
@@ -416,9 +509,6 @@ jobs:
           echo "pushed ${IMAGE}:${VERSION} -> ${digest}"
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
 
-      - name: Install cosign
-        uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
-
       # Keyless: the certificate is issued against this job's OIDC token (`id-token: write`), so
       # the identity bound into the signature is this workflow file at this ref, not a key anyone
       # holds. Signed by digest, never by tag — a tag is a mutable pointer and signing one signs
@@ -457,69 +547,6 @@ jobs:
           set -euo pipefail
           anonymous_config=$(mktemp -d)
           DOCKER_CONFIG="$anonymous_config" docker pull "${IMAGE}@${DIGEST}"
-
-      # `oras cp --from-oci-layout` uploads the exact config, layers and manifest that
-      # `package-bundle` produced. A second absence check closes the build/test window; global
-      # release concurrency prevents another release from racing this one for the same bundle tag.
-      - name: Push the exact development contract-bundle layout once
-        id: bundle
-        env:
-          PACKAGE_DIGEST: ${{ steps.bundle-package.outputs.digest }}
-        run: |
-          set -euo pipefail
-          if resolve_output=$(oras resolve "${BUNDLE_IMAGE}:${BUNDLE_VERSION}" 2>&1); then
-            echo "refused: ${BUNDLE_IMAGE}:${BUNDLE_VERSION} appeared before push at ${resolve_output}; it will not be overwritten." >&2
-            exit 1
-          fi
-          case "$resolve_output" in
-            *"not found"*|*"manifest unknown"*) ;;
-            *)
-              echo "refused: could not prove ${BUNDLE_IMAGE}:${BUNDLE_VERSION} absent immediately before push:" >&2
-              printf '%s\n' "$resolve_output" >&2
-              exit 1
-              ;;
-          esac
-
-          oras cp --from-oci-layout --no-tty \
-            "${BUNDLE_LAYOUT}:${BUNDLE_VERSION}" \
-            "${BUNDLE_IMAGE}:${BUNDLE_VERSION}"
-          remote_digest=$(oras resolve "${BUNDLE_IMAGE}:${BUNDLE_VERSION}")
-          if [ "$remote_digest" != "$PACKAGE_DIGEST" ]; then
-            echo "refused: published bundle resolves to ${remote_digest}, not packaged digest ${PACKAGE_DIGEST}." >&2
-            exit 1
-          fi
-          remote_descriptor=$(oras manifest fetch --descriptor "${BUNDLE_IMAGE}@${remote_digest}")
-          printf '%s\n' "$remote_descriptor" \
-            | jq -e \
-                --arg digest "$PACKAGE_DIGEST" \
-                --arg version "$BUNDLE_VERSION" \
-                '.digest == $digest
-                 and .annotations["org.opencontainers.image.version"] == $version
-                 and .annotations["dev.b10x.contract.status"] == "development"' >/dev/null
-          echo "pushed ${BUNDLE_IMAGE}:${BUNDLE_VERSION} -> ${remote_digest} (development)"
-          echo "digest=${remote_digest}" >> "$GITHUB_OUTPUT"
-
-      - name: Sign the development contract bundle keylessly
-        env:
-          BUNDLE_DIGEST: ${{ steps.bundle.outputs.digest }}
-        run: |
-          set -euo pipefail
-          cosign sign --yes "${BUNDLE_IMAGE}@${BUNDLE_DIGEST}"
-
-      - name: Verify the contract-bundle signature with the workflow identity
-        id: bundle-verify
-        env:
-          BUNDLE_DIGEST: ${{ steps.bundle.outputs.digest }}
-        run: |
-          set -euo pipefail
-          identity="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}"
-          echo "certificate identity: ${identity}"
-          cosign verify \
-            --certificate-identity "${identity}" \
-            --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
-            "${BUNDLE_IMAGE}@${BUNDLE_DIGEST}" > bundle-cosign-verify.json
-          jq -e 'length > 0' bundle-cosign-verify.json >/dev/null
-          echo "identity=${identity}" >> "$GITHUB_OUTPUT"
 
       # Everything below announces. Nothing above it did.
 

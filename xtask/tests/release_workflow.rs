@@ -4,7 +4,8 @@
 //! tests keep the repository-controlled half fail-closed: the current bundle is explicit, its
 //! deterministic OCI layout is the thing copied, canonical tags are checked before publication,
 //! both artifacts are signed and verified by digest before the GitHub release is announced, and
-//! protected `main` is never pushed around.
+//! protected `main` is never pushed around. A byte-identical write-once bundle may be reused by a
+//! later daemon release, while a digest mismatch is always refused.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -85,21 +86,22 @@ fn release_copies_the_packagers_exact_manifest() {
 }
 
 #[test]
-fn canonical_tags_are_refused_before_any_publication() {
-    let refusal = position("Refuse an existing release, image or bundle version tag");
+fn canonical_tags_are_never_overwritten() {
+    let refusal = position("Refuse an existing release or daemon-image version tag");
     let daemon_push = position("docker push \"${IMAGE}:${VERSION}\"");
     let bundle_push = position("oras cp --from-oci-layout");
     assert!(refusal < daemon_push);
     assert!(refusal < bundle_push);
-    assert!(occurrences("oras resolve \"${BUNDLE_IMAGE}:${BUNDLE_VERSION}\"") >= 3);
-    position("canonical contract-bundle tags are write-once");
-    position("appeared before push; it will not be overwritten");
+    assert!(occurrences("oras resolve \"${BUNDLE_IMAGE}:${BUNDLE_VERSION}\"") >= 2);
+    position("reusing byte-identical ${BUNDLE_IMAGE}:${BUNDLE_VERSION}");
+    position("not deterministic package ${PACKAGE_DIGEST}; it will not be overwritten");
+    position("appeared at ${remote_digest}, not ${PACKAGE_DIGEST}; it will not be overwritten");
 }
 
 #[test]
 fn both_artifacts_are_signed_and_verified_before_announcement() {
     let daemon_sign = position("cosign sign --yes \"${IMAGE}@${DIGEST}\"");
-    let daemon_verify = position("cosign verify \\");
+    let daemon_verify = position("\"${IMAGE}@${DIGEST}\" > cosign-verify.json");
     let bundle_sign = position("cosign sign --yes \"${BUNDLE_IMAGE}@${BUNDLE_DIGEST}\"");
     let bundle_verify =
         position("\"${BUNDLE_IMAGE}@${BUNDLE_DIGEST}\" > bundle-cosign-verify.json");
@@ -108,6 +110,15 @@ fn both_artifacts_are_signed_and_verified_before_announcement() {
     assert!(bundle_sign < bundle_verify && bundle_verify < announce);
     assert!(occurrences("https://token.actions.githubusercontent.com") >= 2);
     assert!(occurrences(".github/workflows/release.yml@${GITHUB_REF}") >= 2);
+}
+
+#[test]
+fn bundle_visibility_is_proven_before_the_daemon_tag_is_mutated() {
+    let anonymous_bundle = position("Prove the contract bundle is anonymously retrievable");
+    let daemon_push = position("docker push \"${IMAGE}:${VERSION}\"");
+    assert!(anonymous_bundle < daemon_push);
+    position("DOCKER_CONFIG=\"$anonymous_config\"");
+    position("oras manifest fetch --descriptor \"${BUNDLE_IMAGE}@${BUNDLE_DIGEST}\"");
 }
 
 #[test]

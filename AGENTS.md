@@ -262,11 +262,15 @@ builds the `Dockerfile` and packages the explicitly pinned current development b
 both signatures **before** it announces anything. It refuses — publishing nothing — a tag that is
 not the bare version form (so `0.2.2-rc.0` produces nothing), a lightweight tag, a commit that is not
 an ancestor of `main`, a version that disagrees with `[workspace.package] version`, a commit for
-which `gate.yml` has not concluded `success`, or an existing daemon or bundle version tag. Release
-runs serialize globally because consecutive daemon releases can name the same write-once bundle
-tag. The workflow reads the recorded gate conclusion for the tagged SHA rather than re-running a
-lookalike, and copies the packager's exact OCI layout with ORAS rather than constructing another
-manifest at publication time.
+which `gate.yml` has not concluded `success`, an existing daemon version tag, or an existing bundle
+tag whose digest differs from the deterministic local package. A later daemon release may reuse a
+byte-identical bundle: the workflow verifies the digest, signs it again with that release's exact
+workflow identity, and never replaces the write-once tag. Release runs serialize globally because
+consecutive daemon releases can name that same bundle. The workflow reads the recorded gate
+conclusion for the tagged SHA rather than re-running a lookalike, and copies the packager's exact OCI
+layout with ORAS rather than constructing another manifest at publication time. It proves the
+bundle is anonymously retrievable before mutating the daemon-image tag, so correcting first-push
+package visibility leaves a safe retry path.
 
 `packages: write` and `id-token: write` exist on the release job and nowhere else; that job holds
 `contents: write` only to create the GitHub release. Everything it does uses the run's own

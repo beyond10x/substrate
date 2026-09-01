@@ -12,7 +12,7 @@ tags:
 relations:
 - decomposes: epic:release-hardening
 - depends_on: story:signed-daemon-image
-revision: 9
+revision: 10
 ---
 # Story: The 0.4.0 contract bundle is a signed, digest-pinned OCI artifact
 
@@ -119,14 +119,16 @@ which before the job is written.
 
 - `.github/workflows/release.yml` explicitly pins current development bundle `0.12.0`; a successor
   must move that reviewable pin rather than being selected by directory order at release time.
-- One globally serialized release job refuses an existing GitHub release, daemon image tag or
-  contract-bundle tag before publication. The bundle absence check fails closed on authentication,
-  transport and registry errors and repeats immediately before upload; a canonical tag is never an
-  overwrite target.
+- One globally serialized release job refuses an existing GitHub release or daemon image tag. A
+  contract-bundle tag is reused only when it already resolves to the deterministic local digest; a
+  mismatched digest, authentication failure, transport failure or ambiguous registry answer refuses.
+  The canonical bundle tag is never an overwrite target.
 - The job runs `cargo xtask package-bundle`, checks the manifest digest and
   `dev.b10x.contract.status=development` annotation locally, and uses pinned ORAS 1.3.3 to copy the
-  exact OCI Image Layout to `ghcr.io/beyond10x/b10x-substrate-wire:<bundle-version>`. It then
-  resolves the remote tag back to the packaged digest and checks the remote development annotation.
+  exact OCI Image Layout to `ghcr.io/beyond10x/b10x-substrate-wire:<bundle-version>` when absent.
+  It resolves the remote tag back to the packaged digest, checks the development annotation, and
+  proves anonymous retrieval before mutating the daemon-image tag; a visibility failure is retryable
+  without overwriting either artifact.
 - Cosign signs the bundle by digest with the tag-triggered workflow's OIDC identity and verifies the
   exact certificate identity and GitHub Actions issuer before `gh release create`. Release notes
   carry both immutable digests, both verification commands and the explicit non-stability statement.
@@ -134,7 +136,7 @@ which before the job is written.
   exact daemon and bundle digest lines for a workstation's `b10x-bot` pull request, which receives
   the required `Full gate` check.
 - `xtask/tests/release_workflow.rs` fails closed offline on the current-bundle pin, exact-layout copy,
-  two write-once checks, digest signing/verification order, development wording, protected-main
+  two write-once-or-identical-reuse checks, anonymous-access ordering, digest signing/verification order, development wording, protected-main
   route and commit-pinned actions. A local ORAS layout-to-layout round trip reproduced manifest
   `sha256:dd901e848c821aca7d55f7b8cf5ee893e1d99a1428b348e32e7ed1045a375319`; `contracts/` stayed
   clean.
