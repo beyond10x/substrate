@@ -2,7 +2,7 @@
 format: aep.planning-md/1
 id: epic:remote-serving
 kind: epic
-status: proposed
+status: active
 title: Remote serving and hosted trust
 summary: Production HTTPS/WSS, scoped Identity admission, remote SDK transport and black-box conformance make Substrate safely addressable by agent-platform and other services.
 owner: substrate
@@ -12,7 +12,7 @@ tags:
 - security
 relations:
 - depends_on: epic:release-hardening
-revision: 2
+revision: 3
 ---
 # Epic: Remote serving and hosted trust
 

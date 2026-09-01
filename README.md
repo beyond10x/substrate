@@ -55,7 +55,8 @@ published contract.**
 | stable publication | **not done.** The public, signed, digest-pinned `0.12.0` OCI artifact remains annotated `development`; distribution and explicit daemon advertisement do not make it stable |
 | phase 4, [pty sessions](adr/0019-pty-is-a-second-session-mode.md) | a terminal is a second session **mode** on the same route family, not a second resource: `mode: "pty"` with a required 1–1000-cell window, a `resize` frame, and the `sessions.pty` fact published only after a startup probe allocated a pair, made it controlling inside a throwaway sandbox and round-tripped a window through the child. Absent, the mode is refused `session.pty-unserved` (501) and **never** served as pipes |
 | network session authority, Git sources | **absent** |
-| hosted trust envelope | accepted in design, **not implemented**; the TCP static bearer is explicitly development-only |
+| production network transport | current source accepts TLS 1.3 HTTPS/WSS with explicit owner-safe identity files and atomic SIGHUP rotation; application routes remain fail-closed until hosted admission exists |
+| hosted trust envelope | accepted in design, **not implemented**; no production TLS request is assigned a placeholder subject, and static-bearer TCP is loopback-only development transport |
 
 Per-area state with the exact next proof each is waiting for is [`STATUS.md`](STATUS.md); ordered
 exit criteria are [`ROADMAP.md`](ROADMAP.md).
@@ -289,16 +290,45 @@ swap-inclusive memory bound **before** it advertises exec.
 
 ### The TCP transport is development-only
 
-The current TCP transport is enabled only as an explicitly acknowledged development profile on a
-private overlay (`--tcp-development-only --tcp-private-overlay`), and requires a bounded bearer file
-plus deployment-owned `--tcp-subject` and `--tcp-actor` bindings. The daemon opens that file once,
-bounds it to 512 bytes, and admits either an owner-private workload file or a root-owned,
-group-readable projected Secret with no group write/execute and no world access.
+The static-bearer TCP transport is enabled only as an explicitly acknowledged development profile
+(`--tcp-development-only --tcp-private-overlay`) and now refuses every non-loopback bind. It requires
+a bounded bearer file plus deployment-owned `--tcp-subject` and `--tcp-actor` bindings. The daemon
+opens that file once, bounds it to 512 bytes, and admits either an owner-private workload file or a
+root-owned, group-readable projected Secret with no group write/execute and no world access.
 
 **This static bearer does not satisfy the accepted scoped, expiring, rotating hosted trust-envelope
 profile, and must not be published through external or shared ingress.** A hosted container without
 a delegated cgroup or bubblewrap environment continues to report execution sandbox unavailability
 rather than weakening confinement.
+
+### Production TLS transport
+
+Current source can bind a distinct TLS 1.3 HTTPS/WSS listener:
+
+```console
+substrate-daemon \
+  --socket /run/substrate/local.sock \
+  --state /var/lib/substrate/state.sqlite \
+  --workspaces /var/lib/substrate/workspaces \
+  --deployment edge-01 \
+  --tls-listen 0.0.0.0:8443 \
+  --tls-certificate-chain /run/substrate-tls/chain.pem \
+  --tls-private-key /run/substrate-tls/key.pem
+```
+
+The certificate and key paths must be non-empty regular files rather than symlinks. The key must
+belong to the daemon's effective user and have no group or other permission bits. The daemon checks
+certificate validity and certificate/key agreement before binding, negotiates only TLS 1.3 and
+HTTP/1.1, and never trusts `Forwarded`, `X-Forwarded-*`, or caller-written identity headers.
+
+Replace both files completely and send SIGHUP to rotate them. A complete valid pair becomes the
+snapshot for new connections; existing connections retain their admitted snapshot. An invalid
+replacement is logged only as `tls.reload-invalid`, and the last valid identity keeps serving.
+
+This slice authenticates the daemon, not the caller. Until the separately scoped hosted trust
+envelope is implemented, the production listener deliberately answers application requests with a
+pre-admission `503` and derives no remote subject. There is no production plaintext fallback and no
+flag that disables client-side certificate or server-name verification.
 
 ## What is enforced
 

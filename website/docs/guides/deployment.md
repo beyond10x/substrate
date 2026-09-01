@@ -28,17 +28,49 @@ not imply that every hosted trust feature is implemented today.
 One daemon remains one trust domain. Do not multiplex mutually untrusted tenants through the same
 daemon merely because a higher layer can attach different account labels.
 
-## TCP is development-only
+## Production TLS transport
+
+Current source can terminate TLS 1.3 for HTTP and WebSocket control traffic with an explicit server
+identity:
+
+```console
+substrate-daemon \
+  --socket /run/substrate/local.sock \
+  --state /var/lib/substrate/state.sqlite \
+  --workspaces /var/lib/substrate/workspaces \
+  --deployment edge-01 \
+  --tls-listen 0.0.0.0:8443 \
+  --tls-certificate-chain /run/substrate-tls/chain.pem \
+  --tls-private-key /run/substrate-tls/key.pem
+```
+
+The certificate chain and key must be non-empty regular files rather than symlinks. The key must
+belong to the daemon's effective user and carry no group or other permission bits. Startup validates
+the leaf certificate's time window and its agreement with the key before binding.
+
+To rotate the identity, replace both files completely and send the daemon SIGHUP. New connections
+use the replacement only after the complete pair validates; existing connections keep the snapshot
+under which they connected. If a replacement is invalid, new connections continue to use the last
+valid pair and the daemon emits the safe condition `tls.reload-invalid` without certificate or key
+bytes.
+
+The listener authenticates the daemon, not the caller. Hosted caller admission is not implemented
+yet, so application requests currently receive a pre-admission `503` and no remote subject is
+derived. There is no production plaintext fallback, mutual-TLS identity mapping, trusted forwarded
+address, or verification-disable switch.
+
+## Static-bearer TCP is development-only
 
 The currently implemented TCP transport is deliberately restricted. It requires all of:
 
 - an explicit development-only acknowledgement;
 - an explicit private-overlay acknowledgement;
+- a loopback listen address;
 - a bounded bearer file;
 - deployment-owned subject and actor bindings.
 
-It is not a production hosted trust envelope and must not be published through external or shared
-ingress.
+It is not a production hosted trust envelope and cannot be bound to a non-loopback address. Use it
+only for local development.
 
 ## Rules that do not change by posture
 

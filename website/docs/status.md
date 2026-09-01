@@ -17,6 +17,7 @@ verify it through `GET /v1/machine`.
 | Area | Current state |
 |---|---|
 | personal transport | owner-permissioned Unix socket with kernel-derived local identity |
+| production network transport | TLS 1.3 HTTPS/WSS with explicit identity files, atomic SIGHUP rotation and fail-closed pre-admission until hosted caller verification exists |
 | workspaces | empty source, guarded file access, atomic replacement, destruction, leases |
 | exec | available only with the complete probed Linux confinement floor |
 | durability | operation reservation before dispatch, persisted terminal observations and output |
@@ -46,7 +47,9 @@ a specific refusal when requested.
 
 - The minimum host boundary does not claim protection from kernel compromise.
 - A verified capsule identifies its provided bytes, not the entire host runtime closure.
-- Static-bearer TCP is development-only and is not suitable for public or shared ingress.
+- Static-bearer TCP is loopback-only, development-only, and unsuitable for public or shared ingress.
+- Production TLS authenticates the daemon but currently admits no application request because the
+  hosted caller verifier remains absent.
 - One daemon is one trust domain; it is not a multi-tenant isolation layer.
 - Current development source advertises `substrate-wire/0.12.0` and the SHA-256 of its inner
   `bundle.json` as one claim. The tagged `0.4.2` daemon image predates that promotion and still
