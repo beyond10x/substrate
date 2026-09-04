@@ -18,7 +18,7 @@ surfaces:
     prerequisites:
     - Linux
     - Rust toolchain
-    url: https://beyond10x.github.io/docs/substrate/getting-started
+    url: https://beyond10x.github.io/docs/substrate/getting-started/
   audiences:
   - adopter
   - developer
@@ -44,16 +44,16 @@ surfaces:
   sections:
   - kind: quickstart
     label: Getting started
-    url: https://beyond10x.github.io/docs/substrate/getting-started
+    url: https://beyond10x.github.io/docs/substrate/getting-started/
   - kind: docs
     label: Boundary
-    url: https://beyond10x.github.io/docs/substrate/concepts/boundary
+    url: https://beyond10x.github.io/docs/substrate/concepts/boundary/
   - kind: reference
     label: Contract
-    url: https://beyond10x.github.io/docs/substrate/reference/contract
+    url: https://beyond10x.github.io/docs/substrate/reference/contract/
   - kind: status
     label: Status
-    url: https://beyond10x.github.io/docs/substrate/status
+    url: https://beyond10x.github.io/docs/substrate/status/
   - kind: source
     label: Source
     url: https://github.com/beyond10x/substrate
