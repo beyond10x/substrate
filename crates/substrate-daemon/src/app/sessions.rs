@@ -28,6 +28,8 @@ use substrate_wire::{
 };
 use tokio::sync::Semaphore;
 
+use crate::runtime::TransportPermit;
+
 use super::events::{ControlRate, enforce_stream_send_deadline};
 use super::operations::{
     begin, decode_mutation, finish_driver_error, finish_lease_store_error,
@@ -1099,11 +1101,16 @@ fn authority_failure(
     )
 }
 
+// An axum handler's parameters are its extractors, and this route reads six things off the request
+// before it answers: the app, the caller, the listener's transport admission, the headers, the
+// session it names and its query. Bundling any of them would hide what the route depends on.
+#[allow(clippy::too_many_arguments)]
 #[allow(clippy::too_many_lines)] // Attachment preflight keeps scope, lease, and capacity adjacent.
 pub(super) async fn pipe_session_attach(
     State(app): State<Arc<App>>,
     Extension(identity): Extension<Identity>,
     Extension(transport): Extension<SessionTransport>,
+    transport_permit: Option<Extension<TransportPermit>>,
     headers: HeaderMap,
     Path(session_id): Path<String>,
     RawQuery(raw_query): RawQuery,
@@ -1272,6 +1279,13 @@ pub(super) async fn pipe_session_attach(
     let exec_id = session.exec;
     let mode = session.mode;
     let policy = app.pipe_session_policy;
+    // The transport admission this connection was accepted under, moved into the upgraded task
+    // below. hyper resolves an upgradeable connection future when it hands the socket over, so an
+    // admission left with the connection stops counting an attachment that is still serving.
+    // Absent when no listener published one — the crate's own tests drive this route without a
+    // transport.
+    let transport_admission = transport_permit.map(|Extension(permit)| permit);
+
     // The claim above is already consumed and the session is no longer attachable, so an upgrade
     // that never completes would leave the process running unattached until its lease or timeout
     // ended it. Both hand-offs out of this handler therefore end the session; exactly one runs.
@@ -1312,6 +1326,8 @@ pub(super) async fn pipe_session_attach(
             });
         })
         .on_upgrade(move |socket| async move {
+            // Held for as long as this attachment serves, so the transport budget counts it.
+            let _transport_admission = transport_admission;
             let completed = tokio::time::timeout(
                 policy.lifetime,
                 run_pipe_attachment(

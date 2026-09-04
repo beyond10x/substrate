@@ -15,6 +15,8 @@ use substrate_wire::{
     MetricsStreamFrame, MetricsStreamQuery, Success,
 };
 
+use crate::runtime::TransportPermit;
+
 use super::events::{
     ClientFrame, ControlRate, EventStreamPermit, classify_client_frame,
     enforce_event_stream_lifetime, enforce_stream_send_deadline, send_protocol_close,
@@ -130,6 +132,7 @@ pub(super) async fn metrics_get(
 pub(super) async fn metrics_stream(
     State(app): State<Arc<App>>,
     Extension(identity): Extension<Identity>,
+    transport: Option<Extension<TransportPermit>>,
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
     ws: WebSocketUpgrade,
@@ -158,6 +161,12 @@ pub(super) async fn metrics_stream(
     match load_exec_usage(&app, &scope, &query.exec_id).await {
         Ok(_) => {
             let policy = app.metrics_stream_policy;
+            // The transport admission this connection was accepted under, moved into the upgraded
+            // task below. hyper resolves an upgradeable connection future when it hands the socket
+            // over, so an admission left with the connection stops counting a socket that is still
+            // serving. Absent when no listener published one — the crate's own tests drive this
+            // route without a transport.
+            let transport_admission = transport.map(|Extension(permit)| permit);
             ws.read_buffer_size(policy.max_input_bytes)
                 .write_buffer_size(policy.write_buffer_bytes)
                 .max_frame_size(policy.max_input_bytes)
@@ -168,6 +177,8 @@ pub(super) async fn metrics_stream(
                         .saturating_add(policy.write_buffer_bytes),
                 )
                 .on_upgrade(move |socket| async move {
+                    // Held for as long as this socket serves, so the transport budget counts it.
+                    let _transport_admission = transport_admission;
                     let session =
                         run_stream(app, scope, query.exec_id, policy, stream_permit, socket);
                     let _completed = enforce_event_stream_lifetime(policy.lifetime, session).await;
@@ -431,6 +442,7 @@ mod tests {
         METRICS_STREAM_CAPACITY, METRICS_STREAM_CONTROL_RATE_CLOSE, METRICS_STREAM_DATA_CLOSE,
         MetricsStreamPolicy,
     };
+    use crate::runtime::{TcpConnectionLimits, admitted_service};
     use crate::{App, Identity, router};
 
     const SUBJECT: &str = "local:1000";
@@ -597,17 +609,26 @@ mod tests {
                 .await
                 .expect("bind metrics stream test server");
             let address = listener.local_addr().expect("test server address");
+            // Admitted like the production TCP listener, because a fixture that serves an
+            // upgradeable connection outside a transport budget does not resemble the thing it
+            // stands in for: the route under test reads its admission off the request, and a
+            // harness that published none would exercise the absent half of that and call it the
+            // served one.
+            let limits = TcpConnectionLimits::production();
             let server = tokio::spawn(async move {
                 loop {
-                    let Ok((stream, _peer)) = listener.accept().await else {
+                    let Ok((stream, peer)) = listener.accept().await else {
                         return;
+                    };
+                    let Some(permit) = limits.acquire(peer.ip()) else {
+                        continue;
                     };
                     let service = router(Arc::clone(&app)).layer(Extension(identity()));
                     tokio::spawn(async move {
                         let connection = http1::Builder::new()
                             .serve_connection(
                                 TokioIo::new(stream),
-                                TowerToHyperService::new(service),
+                                TowerToHyperService::new(admitted_service(&permit, service)),
                             )
                             .with_upgrades();
                         let _result = connection.await;
@@ -1256,6 +1277,126 @@ mod tests {
         assert!(
             checked >= 3,
             "the events, sessions and metrics upgrades must all be read, saw {checked}"
+        );
+    }
+
+    /// The identifier every upgraded task binds the connection's transport admission to.
+    ///
+    /// One name for one thing, so the class check below is a whole-crate rule rather than a list
+    /// of routes somebody has to remember to extend.
+    const TRANSPORT_ADMISSION: &str = concat!("transport", "_admission");
+
+    /// Finding 4's class, not its instance: an upgraded socket that serves outside the transport
+    /// budget that let its connection in.
+    ///
+    /// hyper resolves an upgradeable connection future when it hands the socket to the upgrade
+    /// (`crates/substrate-daemon/src/runtime.rs`, the three `.with_upgrades()` listeners), so an
+    /// admission left with the connection is released at the handshake and the socket that is
+    /// still serving stops being counted — 128 global and 32 per uid on unix, 128 and 16 per
+    /// source over TCP and TLS. The remedy is one line in every upgraded task: move the
+    /// connection's `TransportPermit` in, so the slot returns when the socket ends rather than
+    /// when the handshake succeeds.
+    ///
+    /// The instance was the per-uid budget, observed through the unix listener by
+    /// `runtime::tests::an_upgraded_websocket_keeps_its_per_uid_connection_permit`. This reads
+    /// every upgrade the crate serves, on the same recursive walk of `src/` and the same masked
+    /// source as its sibling above, so a fourth route cannot be added without one.
+    ///
+    /// **Two limits, as rules.** It proves the admission is *moved into* the upgraded task, never
+    /// that the value moved is a live permit — the case named above is what observes one holding
+    /// a slot end to end, and a route added without that partner case is counted on paper only.
+    /// And it reads the argument list of `.on_upgrade(`, so an admission a route drops before it
+    /// awaits would satisfy it; nothing in this crate does that, and doing it would take writing
+    /// the drop on purpose.
+    #[test]
+    fn every_websocket_upgrade_keeps_its_transport_admission() {
+        let mut checked = 0_usize;
+        for path in crate_sources() {
+            let file = path.display().to_string();
+            let source = std::fs::read_to_string(&path).expect("crate source");
+            let code = masked(&source, &file);
+            let mut from = 0;
+            while let Some(offset) = code[from..].find(UPGRADE) {
+                let index = from + offset;
+                let open = index + UPGRADE.len() - 1;
+                let close = closing_bracket(code.as_bytes(), open).unwrap_or_else(|| {
+                    panic!("{file}: the upgrade at byte {index} has no argument list")
+                });
+                assert!(
+                    code[open..=close].contains(TRANSPORT_ADMISSION),
+                    "{file}: the upgraded task at byte {index} does not take the connection's \
+                     transport admission with it, so the transport budget stops counting the \
+                     socket at the handshake"
+                );
+                checked += 1;
+                from = index + UPGRADE.len();
+            }
+        }
+        assert!(
+            checked >= 3,
+            "the events, sessions and metrics upgrades must all be read, saw {checked}"
+        );
+    }
+
+    /// The other half of finding 4's class: a listener that serves an upgradeable connection
+    /// without publishing the admission that connection was accepted under.
+    ///
+    /// The sibling above reads every upgraded task and asserts it keeps the admission. It cannot
+    /// see whether one was ever handed over, and an absent one is silent: the route extracts
+    /// `Option<Extension<TransportPermit>>`, because the crate's own tests drive these routes
+    /// without a transport, so a listener that dropped the layer would go on serving and simply
+    /// stop counting. Invariant 3 does not allow a guarantee to go missing quietly, and this is
+    /// what makes it loud — at `cargo test`, for the two listeners no case drives end to end.
+    ///
+    /// It reads each `.with_upgrades()` in `src/`, walks back to the `.serve_connection(` it is
+    /// chained onto, and asserts that call serves `admitted_service(…)`
+    /// (`crates/substrate-daemon/src/runtime.rs`) rather than a bare service. The behavioural
+    /// partner is `runtime::tests::an_upgraded_websocket_keeps_its_per_uid_connection_permit`,
+    /// which observes one admission held across an upgrade on the unix listener; TCP and TLS have
+    /// no such case, and this is the whole of what holds them.
+    ///
+    /// **One limit, as a rule.** It requires the two calls to be adjacent on the chain, so a step
+    /// inserted between them fails it. That is the sibling's lesson taken deliberately the other
+    /// way: this check reports what it read, and a chain it cannot follow is a chain a reader
+    /// cannot follow either.
+    #[test]
+    fn every_upgradeable_connection_publishes_its_transport_admission() {
+        const UPGRADES: &str = concat!(".with_", "upgrades()");
+        const SERVE: &str = concat!(".serve_", "connection(");
+        const ADMITTED: &str = concat!("admitted_", "service(");
+        let mut checked = 0_usize;
+        for path in crate_sources() {
+            let file = path.display().to_string();
+            let source = std::fs::read_to_string(&path).expect("crate source");
+            let code = masked(&source, &file);
+            let mut from = 0;
+            while let Some(offset) = code[from..].find(UPGRADES) {
+                let index = from + offset;
+                let served = code[..index]
+                    .rfind(SERVE)
+                    .unwrap_or_else(|| panic!("{file}: the upgradeable connection at byte {index} is not served by this crate"));
+                let open = served + SERVE.len() - 1;
+                let close = closing_bracket(code.as_bytes(), open).unwrap_or_else(|| {
+                    panic!("{file}: the connection served at byte {served} has no argument list")
+                });
+                assert!(
+                    close < index && code[close + 1..index].trim().is_empty(),
+                    "{file}: the upgradeable connection at byte {index} is not chained onto the \
+                     connection served at byte {served}; this check reads the two as one chain"
+                );
+                assert!(
+                    code[open..=close].contains(ADMITTED),
+                    "{file}: the listener at byte {served} serves an upgradeable connection \
+                     without publishing the transport admission it was accepted under, so nothing \
+                     an upgrade produces can keep it and the budget stops counting at the handshake"
+                );
+                checked += 1;
+                from = index + UPGRADES.len();
+            }
+        }
+        assert!(
+            checked >= 3,
+            "the unix, TCP and TLS listeners must all be read, saw {checked}"
         );
     }
 

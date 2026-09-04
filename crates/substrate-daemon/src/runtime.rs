@@ -30,6 +30,7 @@ use subtle::ConstantTimeEq as _;
 use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio_rustls::TlsAcceptor;
+use tower::Layer as _;
 use tracing::{info, warn};
 use zeroize::Zeroizing;
 
@@ -64,9 +65,38 @@ impl UnixTransportPolicy {
     }
 }
 
-struct ConnectionPermit {
+/// The transport admission one connection was accepted under, shared with everything that
+/// connection is still serving.
+///
+/// hyper resolves an upgradeable connection future when it hands the socket to the upgrade, so an
+/// admission owned only by `enforce_connection_lifetime` is released the moment a WebSocket
+/// handshake succeeds and the upgraded socket runs in a task the transport budget no longer
+/// counts. Every listener therefore publishes a clone of this handle in the request extensions,
+/// and every upgraded task in this crate moves one in: the slot returns when the connection and
+/// every socket it produced are gone, not when the handshake succeeds.
+/// `app::metrics::tests::every_websocket_upgrade_keeps_its_transport_admission` is the check that
+/// a route added later cannot leave it behind.
+#[derive(Clone)]
+pub(crate) struct TransportPermit {
+    _slot: Arc<TransportSlot>,
+}
+
+/// The two admissions one connection holds together: the listener's global bound, and its scope's
+/// — per uid on unix, per source address over TCP and TLS.
+struct TransportSlot {
     _global: OwnedSemaphorePermit,
-    _subject: OwnedSemaphorePermit,
+    _scope: OwnedSemaphorePermit,
+}
+
+impl TransportPermit {
+    fn new(global: OwnedSemaphorePermit, scope: OwnedSemaphorePermit) -> Self {
+        Self {
+            _slot: Arc::new(TransportSlot {
+                _global: global,
+                _scope: scope,
+            }),
+        }
+    }
 }
 
 struct ConnectionLimits {
@@ -95,14 +125,11 @@ impl ConnectionLimits {
         }
     }
 
-    fn acquire(&self, uid: u32) -> Option<ConnectionPermit> {
+    fn acquire(&self, uid: u32) -> Option<TransportPermit> {
         let subject_limit = Arc::clone(self.by_uid.get(&uid)?);
         let global = Arc::clone(&self.global).try_acquire_owned().ok()?;
         let subject = subject_limit.try_acquire_owned().ok()?;
-        Some(ConnectionPermit {
-            _global: global,
-            _subject: subject,
-        })
+        Some(TransportPermit::new(global, subject))
     }
 }
 
@@ -145,7 +172,7 @@ impl ConnectionSource for UnixListener {
 struct AcceptedConnection<S> {
     stream: S,
     peer: PeerIdentity,
-    permit: ConnectionPermit,
+    permit: TransportPermit,
 }
 
 async fn accept_authorized<S: ConnectionSource>(
@@ -197,6 +224,24 @@ fn http1_builder(policy: UnixTransportPolicy) -> http1::Builder {
     builder
 }
 
+/// One connection's service, carrying the transport admission that connection was accepted under.
+///
+/// Every request the connection makes arrives with a clone of the admission, which is how the task
+/// an upgrade hands the socket to gets one to hold. hyper resolves an upgradeable connection future
+/// when it hands that socket over, so an admission owned only by `enforce_connection_lifetime` is
+/// released at the handshake and the socket that is still serving stops being counted — 128 global
+/// and 32 per uid on unix, 128 and 16 per source address over TCP and TLS.
+///
+/// Every `.serve_connection(` that goes on to `.with_upgrades()` in this crate is served through
+/// here, and `app::metrics::tests::every_upgradeable_connection_publishes_its_transport_admission`
+/// is the check that a listener added later cannot skip it.
+pub(crate) fn admitted_service<S>(
+    permit: &TransportPermit,
+    service: S,
+) -> middleware::AddExtension<S, TransportPermit> {
+    Extension(permit.clone()).layer(service)
+}
+
 async fn enforce_connection_lifetime<P, F, T, E>(
     permit: P,
     lifetime: std::time::Duration,
@@ -209,12 +254,7 @@ where
     tokio::time::timeout(lifetime, connection).await
 }
 
-struct TcpConnectionPermit {
-    _global: OwnedSemaphorePermit,
-    _source: OwnedSemaphorePermit,
-}
-
-struct TcpConnectionLimits {
+pub(crate) struct TcpConnectionLimits {
     global: Arc<Semaphore>,
     by_source: Mutex<BTreeMap<IpAddr, TcpSourceLimit>>,
     per_source: usize,
@@ -228,7 +268,7 @@ struct TcpSourceLimit {
 }
 
 impl TcpConnectionLimits {
-    fn production() -> Self {
+    pub(crate) fn production() -> Self {
         Self {
             global: Arc::new(Semaphore::new(128)),
             by_source: Mutex::new(BTreeMap::new()),
@@ -238,7 +278,7 @@ impl TcpConnectionLimits {
         }
     }
 
-    fn acquire(&self, source: IpAddr) -> Option<TcpConnectionPermit> {
+    pub(crate) fn acquire(&self, source: IpAddr) -> Option<TransportPermit> {
         let source_limit = {
             let mut sources = self.by_source.lock();
             let sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
@@ -270,10 +310,7 @@ impl TcpConnectionLimits {
         };
         let global = Arc::clone(&self.global).try_acquire_owned().ok()?;
         let source = source_limit.try_acquire_owned().ok()?;
-        Some(TcpConnectionPermit {
-            _global: global,
-            _source: source,
-        })
+        Some(TransportPermit::new(global, source))
     }
 }
 
@@ -591,7 +628,10 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
                     let io = TokioIo::new(stream);
                     let builder = http1_builder(transport_policy);
                     let connection = builder
-                        .serve_connection(io, TowerToHyperService::new(service))
+                        .serve_connection(
+                            io,
+                            TowerToHyperService::new(admitted_service(&permit, service)),
+                        )
                         .with_upgrades();
                     match enforce_connection_lifetime(
                         permit,
@@ -914,7 +954,10 @@ async fn serve_tcp(app: Arc<App>, config: &TcpDaemonConfig) -> anyhow::Result<()
                     let io = TokioIo::new(stream);
                     let builder = http1_builder(policy);
                     let connection = builder
-                        .serve_connection(io, TowerToHyperService::new(service))
+                        .serve_connection(
+                            io,
+                            TowerToHyperService::new(admitted_service(&permit, service)),
+                        )
                         .with_upgrades();
                     match enforce_connection_lifetime(
                         permit,
@@ -1040,7 +1083,7 @@ async fn serve_tls(
 async fn serve_tls_connection(
     stream: tokio::net::TcpStream,
     address: SocketAddr,
-    permit: TcpConnectionPermit,
+    permit: TransportPermit,
     acceptor: TlsAcceptor,
     app: Arc<App>,
     hosted_admission: Arc<HostedAdmission>,
@@ -1079,7 +1122,10 @@ async fn serve_tls_connection(
     let io = TokioIo::new(tls);
     let builder = http1_builder(policy);
     let connection = builder
-        .serve_connection(io, TowerToHyperService::new(service))
+        .serve_connection(
+            io,
+            TowerToHyperService::new(admitted_service(&permit, service)),
+        )
         .with_upgrades();
     match enforce_connection_lifetime(permit, policy.connection_lifetime, connection).await {
         Ok(Ok(())) => {}
@@ -1604,40 +1650,56 @@ mod tests {
                 accept_authorized(&listener, &allowed, &limits, policy.accept_retry_delay).await;
             let service = Router::new().route(
                 "/attach",
-                axum::routing::get(|upgrade: axum::extract::ws::WebSocketUpgrade| async move {
-                    // Bounded like every served upgrade, so the crate-wide check in
-                    // `app::metrics::tests::every_websocket_upgrade_declares_its_frame_message_and_lifetime_bounds`
-                    // holds for fixtures too. It reads `src/` recursively and does not know a test
-                    // harness from a route, which is the strict reading and the right one: a
-                    // fixture that may run unbounded is a fixture that does not resemble the thing
-                    // it stands in for.
-                    upgrade
-                        .max_frame_size(1_024)
-                        .max_message_size(1_024)
-                        .on_upgrade(|mut socket| async move {
-                            // A fixture carries a lifetime for the same reason a route does: the
-                            // crate-wide check reads `src/` recursively and cannot tell a harness
-                            // from a served route. A fixture allowed to run unbounded does not
-                            // resemble the thing it stands in for.
-                            struct FixturePolicy {
-                                lifetime: std::time::Duration,
-                            }
-                            let policy = FixturePolicy {
-                                lifetime: std::time::Duration::from_secs(30),
-                            };
-                            let _ = tokio::time::timeout(policy.lifetime, async move {
-                                // One frame proves the upgraded socket is live; it then stays open.
-                                let _ = socket.send(axum::extract::ws::Message::from("live")).await;
-                                while socket.recv().await.is_some() {}
+                axum::routing::get(
+                    |transport: Option<Extension<TransportPermit>>,
+                     upgrade: axum::extract::ws::WebSocketUpgrade| async move {
+                        // The hand-off the three production listeners make, made here too: the
+                        // admission this connection was accepted under is taken out of the request
+                        // and moved into the upgraded task, so what this fixture measures is the
+                        // production mechanism rather than one written for the test.
+                        let transport_admission = transport.map(|Extension(permit)| permit);
+                        // Bounded like every served upgrade, so the crate-wide check in
+                        // `app::metrics::tests::every_websocket_upgrade_declares_its_frame_message_and_lifetime_bounds`
+                        // holds for fixtures too. It reads `src/` recursively and does not know a
+                        // test harness from a route, which is the strict reading and the right
+                        // one: a fixture that may run unbounded is a fixture that does not
+                        // resemble the thing it stands in for.
+                        upgrade
+                            .max_frame_size(1_024)
+                            .max_message_size(1_024)
+                            .on_upgrade(move |mut socket| async move {
+                                // A fixture carries a lifetime for the same reason a route does:
+                                // the crate-wide check reads `src/` recursively and cannot tell a
+                                // harness from a served route. A fixture allowed to run unbounded
+                                // does not resemble the thing it stands in for.
+                                struct FixturePolicy {
+                                    lifetime: std::time::Duration,
+                                }
+                                // Held for as long as this socket serves. hyper has already
+                                // resolved the connection future by the time this task runs.
+                                let _transport_admission = transport_admission;
+                                let policy = FixturePolicy {
+                                    lifetime: std::time::Duration::from_secs(30),
+                                };
+                                let _ = tokio::time::timeout(policy.lifetime, async move {
+                                    // One frame proves the upgraded socket is live; it then stays
+                                    // open.
+                                    let _ =
+                                        socket.send(axum::extract::ws::Message::from("live")).await;
+                                    while socket.recv().await.is_some() {}
+                                })
+                                .await;
                             })
-                            .await;
-                        })
-                }),
+                    },
+                ),
             );
             tokio::spawn(async move {
                 let io = TokioIo::new(stream);
                 let connection = http1_builder(policy)
-                    .serve_connection(io, TowerToHyperService::new(service))
+                    .serve_connection(
+                        io,
+                        TowerToHyperService::new(admitted_service(&permit, service)),
+                    )
                     .with_upgrades();
                 let _ = enforce_connection_lifetime(permit, policy.connection_lifetime, connection)
                     .await;
@@ -1660,18 +1722,50 @@ mod tests {
         String::from_utf8(head).expect("utf-8 response head")
     }
 
-    /// **This case pins a defect, not a guarantee.** hyper resolves an upgradeable connection
-    /// future when it hands the socket to the upgrade, so the per-uid transport permit is released
-    /// the moment a WebSocket upgrade succeeds and the upgraded socket runs in a task the budget no
-    /// longer counts. Measured here rather than inferred: with the per-uid budget set to one and an
-    /// upgraded socket provably still serving, the daemon admits and serves a second connection
-    /// from the same uid.
+    /// What one plain HTTP request on a brand new connection is answered with, or `None` when the
+    /// daemon served nothing at all.
     ///
-    /// `story:upgraded-connections-keep-their-permit` is the work that closes it. **When this case
-    /// goes red, that story landed — invert it back to the guarantee, never relax it.** The fix
-    /// needs `runtime.rs` and all three `app/` upgrade sites at once, which is why it is not here.
+    /// A connection refused at capacity is dropped by `accept_authorized` before anything reads
+    /// it, which the kernel reports to the client as an orderly end of file or as a reset,
+    /// depending on whether the client's request bytes were still queued. Both are the same
+    /// observation — nothing was served — and neither is confusable with the bytes of a response.
+    async fn ask_over_a_new_connection(
+        socket_path: &Path,
+        deadline: std::time::Duration,
+    ) -> Option<String> {
+        let mut stream = UnixStream::connect(socket_path)
+            .await
+            .expect("connect a client");
+        stream
+            .write_all(b"GET /attach HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .expect("send a plain request");
+        let mut served = [0_u8; 128];
+        match tokio::time::timeout(deadline, stream.read(&mut served))
+            .await
+            .expect("the connection is refused or served within the deadline")
+        {
+            Ok(0) => None,
+            Ok(read) => Some(String::from_utf8_lossy(&served[..read]).into_owned()),
+            Err(error) if error.kind() == io::ErrorKind::ConnectionReset => None,
+            Err(error) => panic!("read the connection: {error}"),
+        }
+    }
+
+    /// **The transport budget counts an upgraded connection for as long as it serves.** hyper
+    /// resolves an upgradeable connection future when it hands the socket to the upgrade, so an
+    /// admission owned only by `enforce_connection_lifetime` is released the moment a WebSocket
+    /// handshake succeeds and the upgraded socket runs in a task the budget no longer counts.
+    ///
+    /// Measured here rather than inferred, and in both directions: with the per-uid budget set to
+    /// one and an upgraded socket provably still serving, the next connection from that uid is
+    /// refused at accept — and once the upgraded socket ends, the same uid is admitted again, so
+    /// the admission is held for the socket's life rather than leaked for the process's.
+    ///
+    /// This case was `an_upgraded_websocket_releases_its_per_uid_connection_permit` and pinned the
+    /// defect `story:upgraded-connections-keep-their-permit` closes. It asserts the guarantee now.
     #[tokio::test]
-    async fn an_upgraded_websocket_releases_its_per_uid_connection_permit() {
+    async fn an_upgraded_websocket_keeps_its_per_uid_connection_permit() {
         const DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
 
         let directory = tempfile::tempdir().expect("temporary directory");
@@ -1728,37 +1822,33 @@ mod tests {
             "the upgraded socket is serving after the handshake"
         );
 
-        // Today's behaviour, pinned: with that upgraded socket still live and the per-uid budget
-        // set to one, the next plain HTTP connection from the same uid is *not* refused at accept.
-        // The daemon serves it, because the first connection's permit was released at the upgrade.
-        let mut plain = UnixStream::connect(&socket_path)
-            .await
-            .expect("connect a second client");
-        plain
-            .write_all(b"GET /attach HTTP/1.1\r\nHost: localhost\r\n\r\n")
-            .await
-            .expect("send a plain request");
-        let mut served = [0_u8; 128];
-        let read = tokio::time::timeout(DEADLINE, plain.read(&mut served))
-            .await
-            .expect("the second connection is answered or closed within the deadline")
-            .expect("read the second connection");
-        assert!(
-            read > 0,
-            "the permit is released at upgrade, so the daemon serves a second connection from the \
-             same uid while the upgraded socket lives; it served nothing, which means \
-             story:upgraded-connections-keep-their-permit has landed — invert this case back to \
-             asserting the guarantee rather than relaxing it"
+        // The guarantee: that upgraded socket still holds the only per-uid slot, so the next plain
+        // HTTP connection from the same uid is refused at accept and answers nothing at all.
+        let served = ask_over_a_new_connection(&socket_path, DEADLINE).await;
+        assert_eq!(
+            served, None,
+            "the upgraded socket is still serving and holds the only per-uid slot, so a second \
+             connection from that uid must be refused at accept; it was served: {served:?}"
         );
-        // And it was *served*, not merely accepted and dropped: the bytes are an HTTP response.
-        // That is what makes the first assertion evidence about the permit rather than about
-        // accept timing.
-        let answer = String::from_utf8_lossy(&served[..read]);
+
+        // Held for the socket's life, not leaked for the process's: when the upgraded socket ends,
+        // the same uid is admitted again. Polled, because the upgraded task returns its admission
+        // when it observes the closed peer rather than when the peer closes.
+        drop(upgrading);
+        let mut answer = None;
+        for _ in 0..100 {
+            answer = ask_over_a_new_connection(&socket_path, DEADLINE).await;
+            if answer.is_some() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
         assert!(
-            answer.starts_with("HTTP/1.1 "),
-            "the second connection was served an HTTP response while the upgraded socket held the \
-             only per-uid slot, which is the released permit observed end to end; it answered: \
-             {answer}"
+            answer
+                .as_deref()
+                .is_some_and(|answer| answer.starts_with("HTTP/1.1 ")),
+            "the ended upgraded socket returns its admission, so the same uid is served again; it \
+             answered: {answer:?}"
         );
     }
 }

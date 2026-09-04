@@ -20,6 +20,8 @@ use substrate_wire::{
 };
 use tokio::sync::{Semaphore, watch};
 
+use crate::runtime::TransportPermit;
+
 use super::operations::read_bounded_body;
 use super::responses::{
     failure, not_found, query_is_empty, request_id, schema_invalid, store_failure, success,
@@ -238,6 +240,7 @@ pub(super) async fn event_list(
 pub(super) async fn event_stream(
     State(app): State<Arc<App>>,
     Extension(identity): Extension<Identity>,
+    transport: Option<Extension<TransportPermit>>,
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
     ws: WebSocketUpgrade,
@@ -274,6 +277,11 @@ pub(super) async fn event_stream(
         Err(error) => return store_failure(&request_id, None, &error),
     }
     let policy = app.event_stream_policy;
+    // The transport admission this connection was accepted under, moved into the upgraded task
+    // below. hyper resolves an upgradeable connection future when it hands the socket over, so an
+    // admission left with the connection stops counting a socket that is still serving. Absent
+    // when no listener published one — the crate's own tests drive this route without a transport.
+    let transport_admission = transport.map(|Extension(permit)| permit);
     ws.read_buffer_size(policy.max_input_bytes)
         .write_buffer_size(policy.write_buffer_bytes)
         .max_frame_size(policy.max_input_bytes)
@@ -284,6 +292,8 @@ pub(super) async fn event_stream(
                 .saturating_add(policy.write_buffer_bytes),
         )
         .on_upgrade(move |socket| async move {
+            // Held for as long as this socket serves, so the transport budget counts it.
+            let _transport_admission = transport_admission;
             let session = run_event_stream(
                 app,
                 scope,
