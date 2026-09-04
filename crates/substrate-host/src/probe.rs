@@ -194,8 +194,8 @@ fn probe_workspace_scoped_write(config: &HostConfig) -> bool {
     }
     let status = Command::new(&config.bubblewrap)
         .env_clear()
+        .args(crate::process::USER_NAMESPACE_ARGV)
         .args([
-            "--unshare-user",
             "--unshare-ipc",
             "--unshare-pid",
             "--unshare-net",
@@ -333,8 +333,8 @@ fn probe_bubblewrap(config: &HostConfig) -> bool {
     let mut command = Command::new(&config.bubblewrap);
     command
         .env_clear()
+        .args(crate::process::USER_NAMESPACE_ARGV)
         .args([
-            "--unshare-user",
             "--unshare-ipc",
             "--unshare-pid",
             "--unshare-net",
@@ -361,6 +361,16 @@ fn probe_bubblewrap(config: &HostConfig) -> bool {
             "--tmpfs",
             "/tmp",
         ])
+        // `--disable-userns` is a request; this is the observation. Bubblewrap checks, inside the
+        // sandbox it has just built, that a further user namespace is actually refused, and fails
+        // the whole spawn when it is not. So a backend too old for either option — or a kernel
+        // that would not honour the first — makes this probe answer false, `namespaces` false and
+        // `exec` with it, leaving every exec fact **absent**: each request is refused by name
+        // rather than served in a sandbox quietly missing the option (invariant 3).
+        //
+        // Only here. In the exec argv the same failure would be a spawn error no contract
+        // declares, which is a worse answer than the named refusal a withheld fact already gives.
+        .arg("--assert-userns-disabled")
         .args(["--dir", "/runtime", "--ro-bind"])
         .arg(sentinel.path())
         .arg("/runtime/sentinel")
@@ -501,8 +511,8 @@ fn descriptor_passthrough_holds(
     let mut command = Command::new(&config.bubblewrap);
     command
         .env_clear()
+        .args(crate::process::USER_NAMESPACE_ARGV)
         .args([
-            "--unshare-user",
             "--unshare-ipc",
             "--unshare-pid",
             "--unshare-net",
@@ -849,5 +859,65 @@ mod tests {
             Some(vec!["vendor_api_key".to_owned()]),
             "a daemon with no declared slot published the fact"
         );
+    }
+
+    /// Invariant 3: a backend that cannot disable nested user namespaces withholds the exec floor.
+    ///
+    /// `--unshare-user` gives a confined child a fresh user namespace and full capabilities inside
+    /// it, so without `--disable-userns` the child can create another one — the entry point of
+    /// most unprivileged kernel privilege escalations. `--assert-userns-disabled` is what turns
+    /// the option from a request into an observation: bubblewrap checks, inside the sandbox it
+    /// just built, that nesting is actually refused.
+    ///
+    /// The stub answers exactly as a bubblewrap too old for those options does: it names the
+    /// option it does not know and exits non-zero. Every other argv it answers with the seccomp
+    /// denial this probe measures, which is what the probe took for proof before the options were
+    /// in its argv — so this stub is the case the change had to turn. Such a backend leaves
+    /// `exec_namespaces` and every other exec fact **absent**, which refuses each exec by name; it
+    /// never runs one in a sandbox quietly missing the option.
+    #[test]
+    fn a_backend_that_cannot_disable_nested_user_namespaces_withholds_the_exec_floor() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        /// A bubblewrap without the two options, and otherwise indistinguishable from a pass.
+        const OLD_BUBBLEWRAP: &str = r#"#!/bin/sh
+for argument in "$@"; do
+  case $argument in
+    --disable-userns|--assert-userns-disabled)
+      echo "bwrap: Unknown option $argument" >&2
+      exit 1
+      ;;
+  esac
+done
+echo 'socket(1, 1, 0): Permission denied' >&2
+exit 1
+"#;
+
+        // The probe answers false when socat is absent, for its own reason, and would prove
+        // nothing either way. Absent, never reported as passed.
+        if !Path::new("/usr/bin/socat").is_file() {
+            return;
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let stub = directory.path().join("bwrap");
+        std::fs::write(&stub, OLD_BUBBLEWRAP).unwrap();
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut old = HostConfig::minimum(directory.path());
+        old.bubblewrap = stub;
+        assert!(
+            !probe_bubblewrap(&old),
+            "a backend that refused --disable-userns still proved the namespace floor"
+        );
+
+        // The other half of the same claim, and the reason the assertion above is not satisfied by
+        // a probe that answers false everywhere: this host's real backend still proves the floor
+        // with both options in the argv.
+        let real = HostConfig::minimum(directory.path());
+        if real.bubblewrap.is_file() {
+            assert!(
+                probe_bubblewrap(&real),
+                "the configured backend no longer proves the confinement floor"
+            );
+        }
     }
 }

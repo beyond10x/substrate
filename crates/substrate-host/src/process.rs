@@ -32,6 +32,28 @@ const TRUNCATION_MARKER: &[u8] = b"\n[substrate: output truncated]\n";
 const PIPE_FRAME_BYTES: usize = 64 * 1024;
 const PIPE_QUEUED_FRAMES: usize = 16;
 
+/// The user-namespace posture of every sandbox this crate opens, in one place.
+///
+/// `--unshare-user` puts a confined child in a fresh user namespace, where it holds a full
+/// capability set — including `CAP_SYS_ADMIN` over any *further* user namespace it creates. The
+/// first option alone therefore leaves nesting open, and nesting a user namespace is the entry
+/// point of most unprivileged kernel privilege escalations. `--disable-userns` closes it by
+/// setting that namespace's `max_user_namespaces` to 1, so the two belong together and never
+/// apart.
+///
+/// Spliced into every argv rather than written out at each: this crate builds seven bubblewrap
+/// command lines — the exec below, three probes in `probe.rs`, the pty probe, the egress probe and
+/// the egress cases' throwaway sandbox — and each used to state the posture on its own, which is
+/// how the exec argv came to say less than it was meant to.
+/// `the_user_namespace_posture_is_written_in_exactly_one_place` fails on that literal anywhere
+/// else in these sources, so an eighth sandbox gets the posture or gets a red case.
+///
+/// The matching `--assert-userns-disabled` is deliberately *not* here. It belongs to
+/// `probe::probe_bubblewrap`, where a backend that cannot honour the option becomes a withheld
+/// capability fact and a named refusal, rather than a spawn error no contract declares
+/// (invariant 3).
+pub(crate) const USER_NAMESPACE_ARGV: [&str; 2] = ["--unshare-user", "--disable-userns"];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipeStream {
     Stdout,
@@ -1809,8 +1831,8 @@ impl ProcessRuntime {
                 terminal = true;
             }
         }
+        command.args(USER_NAMESPACE_ARGV);
         command.args([
-            "--unshare-user",
             "--unshare-ipc",
             "--unshare-pid",
             "--unshare-net",
@@ -4054,5 +4076,198 @@ mod tests {
             panic!("unproven cgroup cleanup must remain outcome unknown");
         };
         assert_eq!(error.code, "exec.post-spawn-failed");
+    }
+    /// One admitted exec, run to its terminal observation, or a panic naming the refusal.
+    ///
+    /// Never a silent skip: the caller has already proved the delegated root, so a refusal here is
+    /// a broken harness rather than an absent capability, and swallowing it is how a case passes
+    /// without running.
+    async fn waited_exec(
+        runtime: &ProcessRuntime,
+        workspace: &std::path::Path,
+        snapshot: &str,
+        id: &str,
+        argv: &[&str],
+    ) -> ExecObservation {
+        let mut input = pty_exec_input(snapshot);
+        input.argv = argv.iter().map(|part| (*part).to_owned()).collect();
+        input.wait = true;
+        match runtime.start(id, workspace, &input).await {
+            DispatchOutcome::Observed(observed) => observed,
+            DispatchOutcome::NotDispatched(error)
+            | DispatchOutcome::ContainedAbsent(error)
+            | DispatchOutcome::OutcomeUnknown(error) => panic!(
+                "the delegated lane must dispatch {id}: {} {}",
+                error.code, error.message
+            ),
+        }
+    }
+
+    /// The acceptance of `story:confined-processes-cannot-nest-user-namespaces`: inside an
+    /// admitted exec on this host, `unshare -U` fails.
+    ///
+    /// Nesting a user namespace is the entry point of most unprivileged kernel privilege
+    /// escalations, and `--unshare-user` alone does not close it: the child gets a fresh user
+    /// namespace and full capabilities inside it, including `CAP_SYS_ADMIN` over another one it
+    /// creates itself.
+    ///
+    /// Two execs and not one, because "the command failed" is also what an absent binary and a
+    /// broken harness look like. The first proves `/usr/bin/unshare` is present inside the sandbox
+    /// and runs there; the second differs from it in one argument. Only the `-U` form may fail,
+    /// and it must fail with util-linux's own report of a refused `unshare(2)` rather than with
+    /// bubblewrap's `execvp` failure, which is 127 and says nothing about namespaces.
+    ///
+    /// Delegated only. Without `SUBSTRATE_VECTORS_CGROUP_ROOT` naming a cgroup v2 subtree this
+    /// process is inside, the case is **absent, never reported as passed** (invariant 3).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_confined_process_cannot_nest_a_user_namespace() {
+        let Some(delegated) = delegated_cgroup_root("nested-userns") else {
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("ws_test");
+        std::fs::create_dir(&workspace).unwrap();
+        let snapshot = format!("sha256:{}", "7".repeat(64));
+        let mut config = HostConfig::minimum(root.path());
+        config.cgroup_root = Some(delegated);
+        let capability = CapabilitySnapshot {
+            snapshot: snapshot.clone(),
+            driver: HostDriverKind::Host,
+            driver_version: "test".to_owned(),
+            config_generation: 7,
+            probed_at: chrono::Utc::now(),
+            valid_until: None,
+            facts: CapabilityFacts {
+                exec_argv_only: Some(true),
+                exec_namespaces: Some(NamespaceFacts {
+                    user: true,
+                    mount: true,
+                    pid: true,
+                    ipc: true,
+                    uts: true,
+                    network: true,
+                }),
+                exec_no_egress: Some(true),
+                exec_cgroup_limits: Some(CgroupLimitFacts {
+                    processes: true,
+                    memory: true,
+                    cpu: true,
+                }),
+                exec_cgroup_kill: Some(true),
+                exec_output_limit_bytes: Some(65_536),
+                ..CapabilityFacts::default()
+            },
+        };
+        let runtime = ProcessRuntime::new(config, capability).expect("runtime");
+
+        let present = waited_exec(
+            &runtime,
+            &workspace,
+            &snapshot,
+            "ex_userns_present",
+            &["/usr/bin/unshare", "--version"],
+        )
+        .await;
+        assert_eq!(
+            present
+                .resource
+                .exit
+                .expect("a waited exec reports its exit")
+                .code,
+            Some(0),
+            "the case needs /usr/bin/unshare runnable inside the sandbox: {}",
+            String::from_utf8_lossy(&present.stderr)
+        );
+
+        let nested = waited_exec(
+            &runtime,
+            &workspace,
+            &snapshot,
+            "ex_userns_nested",
+            &["/usr/bin/unshare", "-U", "/bin/true"],
+        )
+        .await;
+        assert_eq!(nested.resource.state, ExecState::Exited);
+        assert_eq!(
+            nested
+                .resource
+                .exit
+                .expect("a waited exec reports its exit")
+                .code,
+            Some(1),
+            "a confined process nested a user namespace; stderr: {}",
+            String::from_utf8_lossy(&nested.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&nested.stderr).contains("unshare failed"),
+            "the refusal must come from unshare(2) itself, not from a failed exec: {}",
+            String::from_utf8_lossy(&nested.stderr)
+        );
+    }
+
+    /// The class the acceptance is one instance of: **every bubblewrap argv this crate builds for
+    /// a confined child carries the same user-namespace posture.**
+    ///
+    /// The finding named the exec argv. Six other argv lists in this crate stated the posture
+    /// independently — three probes in `probe.rs`, the pty probe's `SANDBOX_ARGV`, the egress
+    /// probe and the egress cases' throwaway sandbox — so fixing the named one would have left the
+    /// class open and the next sandbox would have joined it. The list is checked here instead of
+    /// being kept by hand: this fails on a `--unshare-user` string literal anywhere in the crate's
+    /// own sources except the one constant that declares the posture, so a seventh sandbox gets
+    /// `--disable-userns` or gets a red case.
+    ///
+    /// The two needles are assembled with `concat!` so that this case is not itself a site.
+    #[test]
+    fn the_user_namespace_posture_is_written_in_exactly_one_place() {
+        const UNSHARE_USER: &str = concat!("\"--unshare-", "user\"");
+        const DISABLE_USERNS: &str = concat!("\"--disable-", "userns\"");
+        /// How far below the `--unshare-user` literal the posture's other half may sit.
+        const WINDOW: usize = 3;
+
+        let sources = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&sources)
+            .expect("the host crate's own sources")
+            .map(|entry| entry.expect("a source directory entry").path())
+            .filter(|path| path.extension().is_some_and(|kind| kind == "rs"))
+            .collect();
+        files.sort();
+        let mut sites = Vec::new();
+        for file in files {
+            let text = std::fs::read_to_string(&file).expect("read a host source");
+            let name = file
+                .file_name()
+                .expect("a source file has a name")
+                .to_string_lossy()
+                .into_owned();
+            let lines: Vec<&str> = text.lines().collect();
+            for (offset, line) in lines.iter().enumerate() {
+                if line.contains(UNSHARE_USER) {
+                    let paired = lines[offset..lines.len().min(offset + WINDOW)]
+                        .iter()
+                        .any(|near| near.contains(DISABLE_USERNS));
+                    sites.push((format!("{name}:{}", offset + 1), paired));
+                }
+            }
+        }
+
+        let labels: Vec<&str> = sites.iter().map(|(label, _)| label.as_str()).collect();
+        assert_eq!(
+            sites.len(),
+            1,
+            "the user-namespace posture is written out at {} sites; one constant spliced into \
+             every argv is what keeps a sandbox from being added without it: {labels:?}",
+            sites.len()
+        );
+        assert!(
+            sites[0].0.starts_with("process.rs:"),
+            "the posture belongs beside the exec argv it governs, not at {}",
+            sites[0].0
+        );
+        assert!(
+            sites[0].1,
+            "the one declaration at {} does not pair --unshare-user with --disable-userns, so \
+             every sandbox in this crate lets a confined process nest a user namespace",
+            sites[0].0
+        );
     }
 }

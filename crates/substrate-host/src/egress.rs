@@ -1048,8 +1048,8 @@ fn probe_through_sandbox(bubblewrap: &Path, destination: SocketAddr) -> bool {
     let mut command = std::process::Command::new(bubblewrap);
     command
         .env_clear()
+        .args(crate::process::USER_NAMESPACE_ARGV)
         .args([
-            "--unshare-user",
             "--unshare-ipc",
             "--unshare-pid",
             "--unshare-net",
@@ -1464,8 +1464,8 @@ mod tests {
             let mut command = Command::new(BUBBLEWRAP);
             command
                 .env_clear()
+                .args(crate::process::USER_NAMESPACE_ARGV)
                 .args([
-                    "--unshare-user",
                     "--unshare-ipc",
                     "--unshare-pid",
                     "--unshare-net",
