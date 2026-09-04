@@ -2262,6 +2262,11 @@ async fn run_child(
         Ok::<_, DriverError>(usage)
     });
     let metrics_failed = terminal_usage.as_ref().is_some_and(Result::is_err);
+    // The same kernel counter for the run that asked for no measurements, read here because
+    // `reconcile_cgroup` below removes the directory it lives in. An unreadable counter is left
+    // at zero rather than raised into `exec.metrics-unavailable`: this run requested no counters,
+    // so their absence is not a broken promise, and the measured path above still reports its own.
+    let unmeasured_oom_kills = u64::from(!measured) * cgroup.memory_oom_kills().unwrap_or(0);
     // Quiesce the whole run tree after the terminal counter sample. The shared mapping remains
     // owned by `aperture`, so killing and reaping the relay cannot invalidate it and no relay can
     // increment a counter after the observation is built.
@@ -2308,13 +2313,16 @@ async fn run_child(
     record_aperture(&mut observation, applied_aperture, aperture_exhausted);
     record_pipe_backpressure(&mut observation, &execution);
     record_terminal_output_bound(&mut observation, output_exhausted);
-    let memory_exhausted = matches!(
-        observation.resource.usage,
-        Some(substrate_wire::ExecUsage::Observed(ResourceUsage {
-            memory_oom_kills: 1..,
-            ..
-        }))
-    );
+    // Either source, because the client's measurement set decides what is *published*, never
+    // whether the execution's own ending is named (review finding 8).
+    let memory_exhausted = unmeasured_oom_kills > 0
+        || matches!(
+            observation.resource.usage,
+            Some(substrate_wire::ExecUsage::Observed(ResourceUsage {
+                memory_oom_kills: 1..,
+                ..
+            }))
+        );
     record_resource_bound(
         &mut observation,
         timed_out,
@@ -2947,7 +2955,26 @@ impl Cgroup {
             write_control(&path, "pids.max", &input.limits.processes.to_string())?;
             write_control(&path, "memory.max", &input.limits.memory_bytes.to_string())?;
             write_control(&path, "memory.swap.max", "0")?;
+            // The bound ends the **tree**, not the one process the kernel picked as its victim.
+            // Without this the other processes in the cgroup run on past their own memory
+            // ceiling in a partly-killed state, which is the silent degradation invariant 3
+            // forbids and not the whole-tree semantics the safety envelope names (`AGENTS.md`
+            // § Safety envelope). A kernel or a delegation root that cannot take this write
+            // fails the whole `create` into a named `exec.cgroup-*` refusal, and `probe_cgroup`
+            // withholds every exec fact ahead of it, so an exec is never served in a cgroup
+            // quietly missing it.
+            write_control(&path, "memory.oom.group", "1")?;
             let period = 100_000_u64;
+            // The quota never exceeds one period, so an exec is clamped to one CPU however many
+            // `cpu_millis` it declared over however short a `timeout_ms`.
+            //
+            // **Deliberately not stated on the capability fact**, and this is the third round
+            // that has asked. `exec.cgroup-limits` is `{processes, memory, cpu}` with
+            // `additionalProperties: false` in every released bundle through
+            // `contracts/substrate-wire/0.15.0/schemas/capability.json:38-56`; a client-visible
+            // clamp would be a new property there, so publishing it is a successor bundle plus
+            // the ADR invariant 8 requires, never an edit to a frozen one (invariant 6). It is
+            // its own story, and the clamp itself is unchanged here.
             let quota = input
                 .limits
                 .cpu_millis
@@ -3037,6 +3064,15 @@ impl Cgroup {
             })
     }
 
+    /// The kernel's own count of OOM kills in this cgroup, read on its own.
+    ///
+    /// `resource_usage` reads the same counter, but only for a run that asked for
+    /// `measurements`. An OOM is a termination fact and not a measurement, so the refusal it
+    /// earns cannot depend on what the client asked to observe (invariant 3).
+    fn memory_oom_kills(&self) -> Result<u64, DriverError> {
+        read_named_counter(&self.path.join("memory.events"), "oom_kill")
+    }
+
     fn resource_usage(
         &self,
         complete: bool,
@@ -3047,7 +3083,7 @@ impl Cgroup {
         let processes_current = read_decimal_counter(&self.path.join("pids.current"))?;
         let processes_peak = read_decimal_counter(&self.path.join("pids.peak"))?;
         let process_limit_hits = read_named_counter(&self.path.join("pids.events"), "max")?;
-        let memory_oom_kills = read_named_counter(&self.path.join("memory.events"), "oom_kill")?;
+        let memory_oom_kills = self.memory_oom_kills()?;
         let (io_read_bytes, io_write_bytes) = read_io_counters(&self.path.join("io.stat"))?;
         Ok(ResourceUsage {
             complete,
@@ -4282,6 +4318,154 @@ mod tests {
             "the refusal must come from unshare(2) itself, not from a failed exec: {}",
             String::from_utf8_lossy(&nested.stderr)
         );
+    }
+
+    /// The marker the memory-bound cases below look for: printed by the leader only if it
+    /// outlived the kernel's kill of its child.
+    const OOM_SURVIVOR: &str = "the-tree-survived";
+
+    /// One exec whose child crosses the declared memory ceiling, run to its terminal observation.
+    ///
+    /// The child is a subshell doubling a shell variable, so the kernel's OOM victim is the child
+    /// and never the small leader waiting on it — which is the shape review finding 8 names: one
+    /// process killed and the rest of the tree carrying on. The leader prints `OOM_SURVIVOR`
+    /// after its `wait` returns, so a tree that continued says so in its own transcript rather
+    /// than being inferred from a counter.
+    ///
+    /// No measurements are requested, which is deliberate and asserted: both cases below speak
+    /// for the client that asked for none.
+    ///
+    /// Delegated only. Without `SUBSTRATE_VECTORS_CGROUP_ROOT` naming a cgroup v2 subtree this
+    /// process is inside, the caller is **absent, never reported as passed** (invariant 3).
+    async fn memory_bound_exec(lane: &str, id: &str) -> Option<ExecObservation> {
+        let delegated = delegated_cgroup_root(lane)?;
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("ws_test");
+        std::fs::create_dir(&workspace).unwrap();
+        let snapshot = format!("sha256:{}", "7".repeat(64));
+        let mut config = HostConfig::minimum(root.path());
+        config.cgroup_root = Some(delegated);
+        let capability = CapabilitySnapshot {
+            snapshot: snapshot.clone(),
+            driver: HostDriverKind::Host,
+            driver_version: "test".to_owned(),
+            config_generation: 7,
+            probed_at: chrono::Utc::now(),
+            valid_until: None,
+            facts: CapabilityFacts {
+                exec_argv_only: Some(true),
+                exec_namespaces: Some(NamespaceFacts {
+                    user: true,
+                    mount: true,
+                    pid: true,
+                    ipc: true,
+                    uts: true,
+                    network: true,
+                }),
+                exec_no_egress: Some(true),
+                exec_cgroup_limits: Some(CgroupLimitFacts {
+                    processes: true,
+                    memory: true,
+                    cpu: true,
+                }),
+                exec_cgroup_kill: Some(true),
+                exec_output_limit_bytes: Some(65_536),
+                ..CapabilityFacts::default()
+            },
+        };
+        let runtime = ProcessRuntime::new(config, capability).expect("runtime");
+        let mut input = pty_exec_input(&snapshot);
+        input.argv = vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            format!(
+                "( grow=x; while : ; do grow=\"$grow$grow\"; done ) & wait; printf '{OOM_SURVIVOR}\\n'"
+            ),
+        ];
+        // Long enough that a tree which is never killed reaches its `printf`, and generous enough
+        // on CPU that neither bound ends this run instead: a wall-clock or CPU end would earn a
+        // different refusal and prove nothing about memory.
+        input.limits.timeout_ms = 30_000;
+        input.limits.cpu_millis = 10_000;
+        input.wait = true;
+        assert!(
+            input.measurements.is_empty(),
+            "both memory-bound cases speak for a client that asked for no measurements"
+        );
+        match runtime.start(id, &workspace, &input).await {
+            DispatchOutcome::Observed(observed) => Some(observed),
+            DispatchOutcome::NotDispatched(error)
+            | DispatchOutcome::ContainedAbsent(error)
+            | DispatchOutcome::OutcomeUnknown(error) => panic!(
+                "the delegated lane must dispatch {id}: {} {}",
+                error.code, error.message
+            ),
+        }
+    }
+
+    /// The acceptance of `story:exec-oom-kills-the-whole-tree`: an exec whose child exceeds
+    /// `memory.max` ends with **no process left in its cgroup**.
+    ///
+    /// Without `memory.oom.group=1` the kernel kills the one process it picked and every other
+    /// process in the cgroup runs on, so a confined workload survives its own memory bound in a
+    /// partly-killed state — the silent degradation invariant 3 forbids (`AGENTS.md` § Safety
+    /// envelope). Measured on this host before the fix: `oom_kill 1`, `oom_group_kill 0`, the
+    /// leader exits 0 and prints its marker.
+    ///
+    /// The leader is itself inside the exec cgroup (`Cgroup::attach_tree`), so "no process left"
+    /// is observable as the leader's own death by `SIGKILL` and not only as a missing marker.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_exec_that_crosses_its_memory_bound_leaves_no_process_in_its_cgroup() {
+        let Some(observed) = memory_bound_exec("oom-group", "ex_oom_group").await else {
+            return;
+        };
+        let transcript = String::from_utf8_lossy(&observed.stdout).into_owned();
+        assert!(
+            !transcript.contains(OOM_SURVIVOR),
+            "a process outlived the OOM that ended its sibling, so the memory bound killed one \
+             process and left the rest of the tree running: {transcript:?}"
+        );
+        let exit = observed
+            .resource
+            .exit
+            .expect("a waited exec reports its exit");
+        assert_eq!(
+            exit.signal,
+            Some(substrate_wire::Signal::Kill),
+            "the cgroup's own leader outlived the OOM, so the tree was not killed as a whole: \
+             {exit:?}"
+        );
+        assert_eq!(
+            exit.code, None,
+            "a leader killed with the tree reports no exit code of its own: {exit:?}"
+        );
+    }
+
+    /// The second clause of review finding 8: an OOM is named `exec.memory-limit` on the
+    /// observation **whether or not the client asked for `measurements`**.
+    ///
+    /// `memory_exhausted` was read out of the terminal `ResourceUsage`, which `finish` samples
+    /// only for a run that requested measurements, so the identical kernel kill reached every
+    /// other client as an ordinary exit. An OOM is a termination fact and not a measurement, and
+    /// what a client asked to observe cannot decide whether its execution's ending is named.
+    ///
+    /// Delegated only; absent without the lane, never reported as passed (invariant 3).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_oom_is_named_on_the_observation_without_measurements() {
+        let Some(observed) = memory_bound_exec("oom-unmeasured", "ex_oom_unmeasured").await else {
+            return;
+        };
+        assert!(
+            observed.resource.usage.is_none(),
+            "this case only says something if the run really asked for no measurements: {:?}",
+            observed.resource.usage
+        );
+        let refusal = observed
+            .resource
+            .refusal
+            .expect("an OOM is named on the observation with no measurements requested");
+        assert_eq!(refusal.code, "exec.memory-limit");
+        assert_eq!(refusal.class, substrate_wire::ErrorClass::Exhausted);
     }
 
     /// **The exec argv carries the posture** — asserted on the argv the driver builds.

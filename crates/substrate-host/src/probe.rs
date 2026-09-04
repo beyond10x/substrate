@@ -653,6 +653,12 @@ fn probe_cgroup(config: &HostConfig) -> bool {
         && std::fs::write(probe.join("pids.max"), "4").is_ok()
         && std::fs::write(probe.join("memory.max"), "16777216").is_ok()
         && std::fs::write(probe.join("memory.swap.max"), "0").is_ok()
+        // Probed, not assumed: `Cgroup::create` writes this on every exec so an OOM ends the
+        // whole tree, and a kernel or delegation root that will not take it leaves `exec` false
+        // and every fact gated on it **absent** — each exec then refused by name rather than run
+        // in a cgroup whose memory bound kills one process and lets the rest carry on
+        // (invariant 3).
+        && std::fs::write(probe.join("memory.oom.group"), "1").is_ok()
         && std::fs::write(probe.join("cpu.max"), "10000 100000").is_ok();
     let _ = std::fs::remove_dir(&probe);
     usable
