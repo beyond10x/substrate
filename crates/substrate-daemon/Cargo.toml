@@ -45,9 +45,9 @@ serde_json.workspace = true
 serde_urlencoded.workspace = true
 sha2.workspace = true
 subtle.workspace = true
-substrate-host = { package = "b10x-substrate-host", path = "../substrate-host", version = "=0.5.1" }
-substrate-store = { package = "b10x-substrate-store", path = "../substrate-store", version = "=0.5.1" }
-substrate-wire = { package = "b10x-substrate-wire", path = "../substrate-wire", version = "=0.5.1" }
+substrate-host = { package = "b10x-substrate-host", path = "../substrate-host", version = "=0.6.0" }
+substrate-store = { package = "b10x-substrate-store", path = "../substrate-store", version = "=0.6.0" }
+substrate-wire = { package = "b10x-substrate-wire", path = "../substrate-wire", version = "=0.6.0" }
 thiserror.workspace = true
 tokio.workspace = true
 tokio-rustls.workspace = true

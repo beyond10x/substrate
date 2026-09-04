@@ -7,6 +7,46 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-09-04
+
+Security wave over the 2026-09-03 whole-repository review. Three review findings closed, and three
+pre-existing defects on the same routes that no story had named.
+
+`0.5.1` was prepared and never tagged; its change is listed below and ships inside this release.
+
+### Security
+
+- Confined processes can no longer nest user namespaces. Every bubblewrap argv the host builds
+  carries `--disable-userns`, spliced from one constant and asserted on the argv as built rather
+  than on the source text. The probe additionally passes `--assert-userns-disabled`, so a
+  bubblewrap that cannot prove a non-nestable user namespace leaves the exec facts **absent**
+  rather than serving a quieter sandbox.
+- `GET /v1/metrics/stream` carries a permit, a lifetime and frame bounds. It was previously
+  unbounded: one authenticated uid could open as many streams as the kernel allowed, each writing
+  to SQLite once a second for up to the 24 h exec timeout.
+- A claimed session whose WebSocket upgrade never completes is terminated rather than left running
+  unattached until its lease expires. An abortive client close reaches this path; an ordinary close
+  was already handled.
+- An attachment permit that cannot prove its containment kill no longer forgets a global slot for
+  the life of the process. Thirty-two such disconnects previously left the daemon serving no
+  attachments at all while reporting a retriable `exhausted` capacity.
+
+### Changed
+
+- Metrics streams are capped at 4 per subject and 64 per deployment; one more is refused `429` with
+  `metrics.stream-capacity`. A client control-frame flood is closed `1008` and a data frame `1003`,
+  matching the event stream. Two bounds still end the connection without naming themselves — the
+  1 h lifetime and an oversized client frame — and the deployment guide now says so.
+- The metrics stream samples once per second, as its released capability predicate
+  `sample_interval_ms: 1000` and both guides have always advertised. It previously delivered a
+  sample every two seconds when the client was silent, and every second when it was not.
+
+### Fixed
+
+- Atomic workspace file replacements preserve whether an existing regular file is executable,
+  preventing editor saves and guarded patches from silently stripping executable mode. *(prepared
+  as 0.5.1)*
+
 ## [0.5.1] — 2026-09-03
 
 ### Changed
