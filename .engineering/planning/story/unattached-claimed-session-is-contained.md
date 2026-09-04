@@ -2,7 +2,7 @@
 format: aep.planning-md/1
 id: story:unattached-claimed-session-is-contained
 kind: story
-status: active
+status: implemented
 title: A session whose attachment claim never upgraded is terminated rather than left running
 summary: The claim is consumed before the WebSocket upgrade; a dropped client leaves the process running until lease or timeout (sessions.rs attach).
 tags:
@@ -13,7 +13,9 @@ relations:
 scope:
 - confidence: cited
   path: crates/substrate-daemon/src/app/sessions.rs
-revision: 5
+- confidence: cited
+  path: crates/substrate-daemon/tests/pipe_session.rs
+revision: 7
 ---
 # Story: A claimed but unattached session is contained
 

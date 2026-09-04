@@ -11,8 +11,14 @@ relations:
 - decomposes: epic:review-2026-09-03-findings
 scope:
 - confidence: cited
+  path: crates/substrate-daemon/src/app/events.rs
+- confidence: cited
+  path: crates/substrate-daemon/src/app/metrics.rs
+- confidence: cited
+  path: crates/substrate-daemon/src/app/sessions.rs
+- confidence: cited
   path: crates/substrate-daemon/src/runtime.rs
-revision: 5
+revision: 8
 ---
 # Story: Upgraded connections keep their permit
 

@@ -2,7 +2,7 @@
 format: aep.planning-md/1
 id: story:confined-processes-cannot-nest-user-namespaces
 kind: story
-status: active
+status: implemented
 title: The sandbox passes --disable-userns and the probe asserts it
 summary: bwrap argv lacks --disable-userns although bwrap 0.11.2 supports it (process.rs:1813-1838).
 tags:
@@ -11,6 +11,10 @@ relations:
 - decomposes: epic:review-2026-09-03-findings
 scope:
 - confidence: cited
+  path: AGENTS.md
+- confidence: cited
+  path: README.md
+- confidence: cited
   path: crates/substrate-host/src/egress.rs
 - confidence: cited
   path: crates/substrate-host/src/probe.rs
@@ -18,19 +22,31 @@ scope:
   path: crates/substrate-host/src/process.rs
 - confidence: cited
   path: crates/substrate-host/src/pty.rs
-revision: 7
+- confidence: cited
+  path: crates/substrate-host/tests/user_namespace_floor_documents.rs
+- confidence: cited
+  path: docs/design/04-security-and-isolation.md
+- confidence: cited
+  path: docs/design/15-docker-driver-entry-gate.md
+revision: 15
 ---
 # Story: Confined processes cannot nest user namespaces
 
 ## Context
 
 The exec argv passes `--unshare-user` and not `--disable-userns`
-(`crates/substrate-host/src/process.rs:1813-1838`); the three probe argv lists in `probe.rs`,
-`pty.rs` and `egress.rs` match it. The installed bubblewrap 0.11.2 lists `--disable-userns` and
+(`crates/substrate-host/src/process.rs`); the probe argv lists in `probe.rs`, `pty.rs` and
+`egress.rs` match it. The installed bubblewrap 0.11.2 lists `--disable-userns` and
 `--assert-userns-disabled` (`bwrap --help`). A confined process can therefore create nested user
 namespaces, which is the entry point of most unprivileged kernel privilege escalations. The
 current seccomp profile does not block `unshare` or `clone` with `CLONE_NEWUSER`
-(`crates/substrate-host/src/seccomp.rs:70-99`).
+(`crates/substrate-host/src/seccomp.rs`).
+
+**Correction, 2026-09-04:** this section previously said "the three probe argv lists". There are
+**seven** bubblewrap argv sites in the crate, not three — `probe.rs` builds three, `pty.rs` one,
+`egress.rs` two, and `process.rs` the exec one. An eighth exists in `egress.rs`'s own test module.
+The implementor found this while taking the story and the count is now spliced from a single
+constant, so the number cannot drift again without a red case.
 
 ## Acceptance
 
@@ -42,4 +58,8 @@ Invariant 3: a bubblewrap too old for `--disable-userns` is a named refusal, nev
 
 ## Parallel work
 
-This story shares `crates/substrate-host/src/probe.rs` with story:backend-recheck-hashes-only-on-change, story:confined-processes-cannot-nest-user-namespaces, story:daemon-image-serves-exec-or-says-it-cannot, story:exec-oom-kills-the-whole-tree and story:seccomp-denies-af-vsock; three of them also share `crates/substrate-host/src/process.rs`. Work them one at a time, or in one wave by one implementor; `aep artifact waves` sequences them.
+This story shares `crates/substrate-host/src/probe.rs` with
+story:backend-recheck-hashes-only-on-change, story:daemon-image-serves-exec-or-says-it-cannot,
+story:exec-oom-kills-the-whole-tree and story:seccomp-denies-af-vsock; three of them also share
+`crates/substrate-host/src/process.rs`. Work them one at a time, or in one wave by one implementor;
+`aep artifact waves` sequences them.
