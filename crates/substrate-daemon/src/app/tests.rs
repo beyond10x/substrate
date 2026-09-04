@@ -624,7 +624,7 @@ mod upgraded_transport_slot {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::{TcpListener, TcpStream};
 
-    use crate::runtime::{TcpConnectionLimits, admitted_service};
+    use crate::runtime::{TcpConnectionLimits, admitted_service, enforce_connection_lifetime};
     use crate::{App, Identity, router};
 
     const HANDSHAKE_KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
@@ -735,12 +735,14 @@ mod upgraded_transport_slot {
                             TowerToHyperService::new(admitted_service(&permit, service)),
                         )
                         .with_upgrades();
-                    // The two lines `runtime::enforce_connection_lifetime` is, spelled here
-                    // because that function is private to `runtime`: the connection's admission
-                    // held for the connection's life, and the transport's connection lifetime
-                    // around the connection future.
-                    let _permit = permit;
-                    let _ = tokio::time::timeout(CONNECTION_LIFETIME, connection).await;
+                    // The production hand-off itself rather than a copy of its two lines. A fix
+                    // to `story:transport-admission-and-stream-lifetime-disagree` is most
+                    // naturally applied inside `enforce_connection_lifetime`, where the transport
+                    // deadline lives; the cases below are pinned to today's answer and tell their
+                    // reader to invert them when it moves, which only works if such a fix reaches
+                    // them.
+                    let _ =
+                        enforce_connection_lifetime(permit, CONNECTION_LIFETIME, connection).await;
                 });
             }
         });
@@ -921,5 +923,249 @@ mod upgraded_transport_slot {
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         drop(streams);
+    }
+
+    /// **The other direction: a transport slot an upgraded stream holds is a slot it gives back.**
+    ///
+    /// The two cases above pin how long occupancy lasts, and neither of them would notice an
+    /// admission that is never released at all: a listener that leaked one per connection would
+    /// satisfy both, because both only ever observe a slot *not* coming back. That is the failure
+    /// the transport cannot survive — a leaked slot is one the source address never gets back,
+    /// and sixteen of them retire the address for the life of the process, with
+    /// `TcpConnectionLimits` unable to evict the entry because eviction requires every permit to
+    /// be free.
+    ///
+    /// So this is the guarantee, not a pin: the admission is held for exactly as long as the
+    /// upgraded socket serves. The stream is ended the way a client ends one — the socket is
+    /// dropped — and the slot returns without anything else happening.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_ended_upgraded_stream_returns_its_transport_slot() {
+        let (address, limits) = admitted_listener("dep_returned_transport_slot", 1).await;
+
+        let upgraded = Handshake::open(address, "/v1/events/stream?limit=1").await;
+        assert_eq!(
+            upgraded.status, 101,
+            "the event stream must upgrade before its admission can be measured"
+        );
+
+        // Held while it serves: fifteen of the source's sixteen slots are free and the sixteenth
+        // is refused, which is one slot occupied by that connection.
+        let held = (0..PER_SOURCE - 1)
+            .map(|index| {
+                limits
+                    .acquire(CLIENT)
+                    .unwrap_or_else(|| panic!("slot {index} of the source's free capacity"))
+            })
+            .collect::<Vec<_>>();
+        assert!(
+            limits.acquire(CLIENT).is_none(),
+            "the upgraded socket must hold the connection's admission while it serves"
+        );
+
+        // And returned when it stops serving. Polled rather than slept exactly once, so a correct
+        // implementation is not held to the scheduler.
+        drop(upgraded);
+        let window = Instant::now() + OBSERVATION;
+        let mut returned = None;
+        while Instant::now() < window {
+            returned = limits.acquire(CLIENT);
+            if returned.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            returned.is_some(),
+            "the upgraded socket ended and did not return the connection's transport slot within \
+             {OBSERVATION:?}; a leaked admission takes a slot out of the source's budget for the \
+             life of the process, and sixteen of them retire the address"
+        );
+        drop(held);
+    }
+}
+
+/// Adversary pass 2 against `story:upgraded-connections-keep-their-permit`.
+///
+/// The unit's correction round rewrote what the crate says about the transport admission, and
+/// both cases here compare one of those statements against the thing it describes. The shape is
+/// the crate's own: `the_published_cap_and_refusal_are_the_ones_the_public_guide_states`
+/// (`app/metrics.rs`) already ties a public guide's prose to the policy it states, and
+/// `the_advertised_sample_interval_is_the_one_every_released_bundle_requires` ties a constant to
+/// five frozen bundles. A document nothing compares against the code is a document that drifts,
+/// and the two swept in this round drifted in the same commit that swept them.
+mod transport_documents_and_the_transport {
+    /// Every upgradeable listener under the crate's `src/`, as `path:line`.
+    ///
+    /// The same set
+    /// `app::metrics::tests::every_upgradeable_connection_publishes_its_transport_admission`
+    /// walks, counted independently of it so that its docstring's claim about the set's size is
+    /// compared against the set rather than against itself.
+    ///
+    /// Line-based, and a line whose first non-space bytes are `//` is prose: every mention of the
+    /// call in a doc comment is one of those, and no line in this crate carries the call after
+    /// code on the same line. The needle is assembled with `concat!` so this file cannot count
+    /// itself, exactly as the checks it is measuring do.
+    fn upgradeable_listeners() -> Vec<String> {
+        const UPGRADES: &str = concat!(".with_", "upgrades()");
+        let mut found = Vec::new();
+        let mut pending = vec![std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src")];
+        while let Some(directory) = pending.pop() {
+            let Ok(entries) = std::fs::read_dir(&directory) else {
+                continue;
+            };
+            for entry in entries.filter_map(Result::ok) {
+                let path = entry.path();
+                if path.is_dir() {
+                    pending.push(path);
+                    continue;
+                }
+                if path.extension().is_some_and(|value| value == "rs") {
+                    let source = std::fs::read_to_string(&path).expect("crate source");
+                    for (offset, line) in source.lines().enumerate() {
+                        if !line.trim_start().starts_with("//") && line.contains(UPGRADES) {
+                            found.push(format!("{}:{}", path.display(), offset + 1));
+                        }
+                    }
+                }
+            }
+        }
+        found.sort();
+        found
+    }
+
+    /// The English number word `prose` states after `phrase`, as a count.
+    fn stated_count(prose: &str, phrase: &str) -> usize {
+        let word = prose
+            .split(phrase)
+            .nth(1)
+            .unwrap_or_else(|| panic!("no document states \"{phrase}\""))
+            .chars()
+            .take_while(char::is_ascii_alphabetic)
+            .collect::<String>();
+        match word.as_str() {
+            "one" => 1,
+            "two" => 2,
+            "three" => 3,
+            "four" => 4,
+            "five" => 5,
+            "six" => 6,
+            "seven" => 7,
+            "eight" => 8,
+            "nine" => 9,
+            "ten" => 10,
+            other => panic!("\"{phrase}{other}\" is not a number this case can read"),
+        }
+    }
+
+    /// `source` with its `///` doc comments joined into one whitespace-normalised paragraph, so a
+    /// re-wrapped sentence is not a failure and a changed one is.
+    fn doc_prose(source: &str) -> String {
+        source
+            .lines()
+            .filter_map(|line| line.trim_start().strip_prefix("///"))
+            .collect::<Vec<_>>()
+            .join(" ")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    /// **The check's docstring enumerates the listeners it covers, and the commit that wrote the
+    /// enumeration added one it does not name.**
+    ///
+    /// `every_upgradeable_connection_publishes_its_transport_admission` is the only thing holding
+    /// the TLS listener — its own docstring says so — so what a reader needs from that docstring
+    /// is an accurate account of the set it walks. The correction round gave it one: "Today that
+    /// set is five: the unix, TCP and TLS listeners, the metrics harness below and the unix
+    /// fixture in `runtime.rs`" (`app/metrics.rs`), and `admitted_service`'s own doc says the same
+    /// in words — "the three production listeners and the two in-crate harnesses"
+    /// (`runtime.rs`). Five was right at the wave's base commit. The same commit that wrote both
+    /// sentences added a sixth, `app::tests::upgraded_transport_slot::admitted_listener` in this
+    /// file, so both sentences were false the moment they were committed.
+    ///
+    /// It is not a spelling matter: the assertion those docstrings stand behind is
+    /// `checked >= 3`, whose message reads "the unix, TCP and TLS listeners must all be read". A
+    /// floor of three over a set of six no longer means what that message says — three of the six
+    /// are harnesses, so a walk that read only the harnesses satisfies the floor and reports
+    /// itself green while reading no production listener at all. The floor was two thirds of the
+    /// set when it was written and is half of it now.
+    ///
+    /// The fix is not this case's to make. Either sentence may be corrected, and the floor may be
+    /// raised with it; this compares the number the document states against the number of
+    /// listeners there are, so any of those turns it green.
+    #[test]
+    fn the_upgradeable_listener_set_the_check_documents_is_the_set_that_exists() {
+        const PHRASE: &str = "Today that set is ";
+        let metrics = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app/metrics.rs");
+        let prose = doc_prose(&std::fs::read_to_string(&metrics).expect("metrics source"));
+        let stated = stated_count(&prose, PHRASE);
+        let listeners = upgradeable_listeners();
+        assert_eq!(
+            listeners.len(),
+            stated,
+            "{} states \"{PHRASE}{stated}\", and the crate's src/ holds {} upgradeable \
+             listeners; the check's own docstring is what tells a reader which listeners the TLS \
+             listener's only guard covers:\n{}",
+            metrics.display(),
+            listeners.len(),
+            listeners.join("\n")
+        );
+    }
+
+    /// **The design document that publishes this transport's invariants states a keep-alive
+    /// setting the transport does not have.**
+    ///
+    /// The correction round rewrote `UnixTransportPolicy::production`'s justification for
+    /// `keep_alive: true` because the old one implied the connection lifetime bounds every
+    /// connection, and reported that a grep of `crates/`, `website/docs/`, `docs/design/` and
+    /// `adr/` found nothing else stating the transport's bounds.
+    /// `docs/design/08-phase-3-closure-invariants.md` states one: "The local HTTP transport
+    /// disables keep-alive so an idle connection has no unbounded between-request state", in the
+    /// bullet that also states the connection limits and lifetimes, in a document whose own
+    /// header says each invariant it records has deterministic capacity evidence.
+    ///
+    /// `UnixTransportPolicy::production` sets `keep_alive: true` and `http1_builder` passes it to
+    /// hyper, on all three listeners. `keep-alive is disabled` is therefore false, and has been
+    /// since `a9f234b`; no ADR, no `CHANGELOG.md` entry and no other design document records the
+    /// change, so the sentence is the only standing statement of the property and it is wrong.
+    /// `docs/design/` is not the immutable category — `AGENTS.md` names only
+    /// `docs/reviews/archived/` there — so correcting it is a line, not a record falsified.
+    ///
+    /// Read from source rather than from the type, because `UnixTransportPolicy` is private to
+    /// `runtime`. Either side may move to make this green: the sentence, or the setting.
+    #[test]
+    fn the_keep_alive_the_closure_invariants_publish_is_the_one_the_transport_sets() {
+        const CLAIM: &str = "The local HTTP transport disables keep-alive";
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let runtime =
+            std::fs::read_to_string(manifest.join("src/runtime.rs")).expect("runtime source");
+        let policy = runtime
+            .split_once("impl UnixTransportPolicy {")
+            .expect("the transport policy is declared")
+            .1;
+        let setting = policy
+            .split_once("keep_alive:")
+            .expect("the production transport policy sets keep-alive")
+            .1
+            .trim_start();
+        let enabled = setting.starts_with("true");
+        assert!(
+            enabled || setting.starts_with("false"),
+            "the production transport policy sets keep-alive to a value this case cannot read"
+        );
+        let design = manifest.join("../../docs/design/08-phase-3-closure-invariants.md");
+        let prose = std::fs::read_to_string(&design)
+            .expect("phase 3 closure invariants")
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            !(enabled && prose.contains(CLAIM)),
+            "{} states \"{CLAIM}\" while UnixTransportPolicy::production sets keep_alive: true \
+             and http1_builder passes it to hyper on the unix, TCP and TLS listeners; an \
+             invariant a design document publishes and the transport contradicts is the class \
+             this unit's correction round set out to close",
+            design.display()
+        );
     }
 }

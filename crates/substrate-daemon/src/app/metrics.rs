@@ -1285,11 +1285,15 @@ mod tests {
         );
     }
 
-    /// The identifier every upgraded task binds the connection's transport admission to.
+    /// The statement every upgraded task holds the connection's transport admission with.
     ///
-    /// One name for one thing, so the class check below is a whole-crate rule rather than a list
-    /// of routes somebody has to remember to extend.
-    const TRANSPORT_ADMISSION: &str = concat!("transport", "_admission");
+    /// One spelling for one thing, so the class check below is a whole-crate rule rather than a
+    /// list of routes somebody has to remember to extend — and the whole binding rather than the
+    /// identifier, because matching the identifier alone passed `drop(transport_admission);`,
+    /// which releases the slot at the handshake and is exactly the defect. Matched against the
+    /// argument list with its whitespace normalised, so a wrapped line is not a failure.
+    const TRANSPORT_ADMISSION: &str =
+        concat!("let _transport", "_admission = transport", "_admission;");
 
     /// Finding 4's class, not its instance: an upgraded socket that serves outside the transport
     /// budget that let its connection in.
@@ -1307,22 +1311,23 @@ mod tests {
     /// every upgrade the crate serves, on the same recursive walk of `src/` and the same masked
     /// source as its sibling above, so a fourth route cannot be added without one.
     ///
-    /// **What it checks is a naming convention, and that cuts both ways.** It requires the
-    /// identifier `transport_admission` inside the `.on_upgrade(` argument list, and it is worth
-    /// being exact about what that does and does not establish:
+    /// **What it checks is a spelling convention, and that cuts both ways.** It requires the
+    /// statement `let _transport_admission = transport_admission;` inside the `.on_upgrade(`
+    /// argument list, and it is worth being exact about what that does and does not establish:
     ///
-    /// 1. It proves the admission is *named* in the upgraded task, never that the value named is a
-    ///    live permit. What observes one holding a slot end to end is
-    ///    `runtime::tests::an_upgraded_websocket_keeps_its_per_uid_connection_permit`, and a route
-    ///    added without that partner case is counted on paper only.
-    /// 2. It passes `drop(transport_admission);` inside the task, which releases the slot at the
-    ///    handshake and is exactly the defect. Nothing in this crate does that; it would take
-    ///    writing the drop on purpose.
-    /// 3. It **fails correct code** that holds the admission without naming it there — a closure
-    ///    that captures it under another name, or one that carries it inside a tuple or a struct
-    ///    built above the chain. The convention is the check: one name for the thing, spelled
-    ///    inside the task that holds it. A route that has a reason to hold it differently has a
-    ///    reason to change this check with it, and that is the conversation this failure buys.
+    /// 1. It proves the admission is *bound for the task's life* — a binding, not a mention, so
+    ///    `drop(transport_admission);` fails it. That matters most where no case can catch the
+    ///    difference: `app/sessions.rs`'s attach route holds the admission on a path no in-crate
+    ///    admitted listener drives, so this check is the whole of what stands behind that line.
+    /// 2. It does not prove the value bound is a live permit. What observes one holding a slot end
+    ///    to end is `runtime::tests::an_upgraded_websocket_keeps_its_per_uid_connection_permit` on
+    ///    the unix listener and `app::tests::upgraded_transport_slot` on a TCP one, both over the
+    ///    event stream; a route added without a partner case is counted on paper only.
+    /// 3. It **fails correct code** that holds the admission some other way — under another name,
+    ///    or inside a tuple or struct built above the chain. The convention is the check: one
+    ///    statement for the thing, spelled inside the task that holds it. A route with a reason to
+    ///    hold it differently has a reason to change this check with it, and that is the
+    ///    conversation this failure buys.
     ///
     /// A structural check — the value's *type* traced into the task — needs a parser this crate
     /// does not have and would not gain for one rule.
@@ -1340,8 +1345,12 @@ mod tests {
                 let close = closing_bracket(code.as_bytes(), open).unwrap_or_else(|| {
                     panic!("{file}: the upgrade at byte {index} has no argument list")
                 });
+                let held = code[open..=close]
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 assert!(
-                    code[open..=close].contains(TRANSPORT_ADMISSION),
+                    held.contains(TRANSPORT_ADMISSION),
                     "{file}: the upgraded task at byte {index} does not take the connection's \
                      transport admission with it, so the transport budget stops counting the \
                      socket at the handshake"
@@ -1369,12 +1378,21 @@ mod tests {
     /// It reads each `.with_upgrades()` in `src/`, walks back to the `.serve_connection(` it is
     /// chained onto, and asserts that call serves `admitted_service(…)`
     /// (`crates/substrate-daemon/src/runtime.rs`) rather than a bare service. Today that set is
-    /// five: the unix, TCP and TLS listeners, the metrics harness below and the unix fixture in
-    /// `runtime.rs`; the count assertion below is a floor of three, so a walk that silently
-    /// matched nothing cannot pass as a green check. The behavioural partners are
+    /// six, and the check asserts the whole of it *by file* rather than as a floor on the total:
+    /// four in `runtime.rs` — the unix, TCP and TLS listeners and the unix fixture in its own
+    /// tests — one in `app/metrics.rs`, the metrics stream harness below, and one in
+    /// `app/tests.rs`, the admitted TCP listener in `upgraded_transport_slot`. A floor is what
+    /// this had, and a floor of three over a set of six is satisfied by reading the three fixtures
+    /// and no production listener at all.
+    ///
+    /// The behavioural partners are
     /// `runtime::tests::an_upgraded_websocket_keeps_its_per_uid_connection_permit` on the unix
-    /// listener and `app::tests::upgraded_transport_slot` on a production-shaped TCP listener over
-    /// the real router; TLS has neither, and this check is the whole of what holds it.
+    /// listener and `app::tests::upgraded_transport_slot` on a production-shaped TCP one, and both
+    /// drive the event stream. **The TLS listener has neither, and neither does any route but the
+    /// event stream**: the harness below upgrades the metrics stream through an admitted listener
+    /// but observes no slot, and `app/sessions.rs`'s attach route is driven through an admitted
+    /// listener by nothing at all. What stands behind those is this check and the sibling above —
+    /// which is why the sibling matches the whole hold statement rather than a mention of it.
     ///
     /// **`src/` is the whole of its reach, and three listeners live outside it.**
     /// `tests/websocket.rs:110-111`, `tests/metrics_stream_adversary.rs:94-95` and
@@ -1384,10 +1402,13 @@ mod tests {
     /// for word — but that `TransportPermit`, `TcpConnectionLimits` and `admitted_service` are
     /// `pub(crate)`, so an integration test cannot reach them: including those three means making
     /// the transport's admission surface public API for the benefit of tests, on a crate whose
-    /// library deliberately exposes configuration and nothing else. What closes the resemblance
-    /// gap instead is `app::tests::upgraded_transport_slot`, which is inside the crate and drives
-    /// an admitted listener over the same router those three drive bare. Widen this walk on the
-    /// day that surface is public for a reason of its own, and not before.
+    /// library deliberately exposes configuration and nothing else. `upgraded_transport_slot`
+    /// narrows that gap rather than closing it: it drives an admitted listener over the same
+    /// router, but over one route of the three those files drive bare — the event stream —
+    /// and `tests/pipe_session.rs`'s attach route has no in-crate admitted listener at all.
+    /// Closing it means either that public surface, or a pipe-session driver double inside the
+    /// crate. Widen this walk on the day one of those exists for a reason of its own, and not
+    /// before.
     ///
     /// **One limit, as a rule.** It requires the two calls to be adjacent on the chain, so a step
     /// inserted between them fails it. That is the sibling's lesson taken deliberately the other
@@ -1398,10 +1419,30 @@ mod tests {
         const UPGRADES: &str = concat!(".with_", "upgrades()");
         const SERVE: &str = concat!(".serve_", "connection(");
         const ADMITTED: &str = concat!("admitted_", "service(");
-        let mut checked = 0_usize;
-        for path in crate_sources() {
+        // The enumeration this docstring gives, as the set the walk must read — by file, because
+        // a floor on the total is satisfied by the three fixtures alone, and it is the three
+        // production listeners in `runtime.rs` that nothing else holds. A legitimate change to
+        // the set changes this map and the sentence above together.
+        let expected = std::collections::BTreeMap::from([
+            ("app/metrics.rs", 1_usize),
+            ("app/tests.rs", 1),
+            ("runtime.rs", 4),
+        ]);
+        let source_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut read = std::collections::BTreeMap::<&str, usize>::new();
+        let sources = crate_sources();
+        let relative = sources
+            .iter()
+            .map(|path| {
+                path.strip_prefix(&source_root)
+                    .expect("every crate source is under src/")
+                    .to_str()
+                    .expect("UTF-8 crate source path")
+            })
+            .collect::<Vec<_>>();
+        for (path, name) in sources.iter().zip(relative) {
             let file = path.display().to_string();
-            let source = std::fs::read_to_string(&path).expect("crate source");
+            let source = std::fs::read_to_string(path).expect("crate source");
             let code = masked(&source, &file);
             let mut from = 0;
             while let Some(offset) = code[from..].find(UPGRADES) {
@@ -1424,13 +1465,16 @@ mod tests {
                      without publishing the transport admission it was accepted under, so nothing \
                      an upgrade produces can keep it and the budget stops counting at the handshake"
                 );
-                checked += 1;
+                *read.entry(name).or_default() += 1;
                 from = index + UPGRADES.len();
             }
         }
-        assert!(
-            checked >= 3,
-            "the unix, TCP and TLS listeners must all be read, saw {checked}"
+        assert_eq!(
+            read, expected,
+            "the upgradeable listeners under src/ are not the ones this check documents; a walk \
+             that read only the fixtures would satisfy a floor on the total while reading no \
+             production listener at all, so the set is asserted by file. If the change is \
+             deliberate, move the enumeration in this docstring with it"
         );
     }
 

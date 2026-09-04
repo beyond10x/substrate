@@ -250,7 +250,9 @@ fn http1_builder(policy: UnixTransportPolicy) -> http1::Builder {
 /// and 32 per uid on unix, 128 and 16 per source address over TCP and TLS.
 ///
 /// Every `.serve_connection(` under `src/` that goes on to `.with_upgrades()` is served through
-/// here — the three production listeners and the two in-crate harnesses — and
+/// here — the three production listeners, and the three in-crate fixtures that stand in for one:
+/// the unix fixture in this file's tests, the metrics stream harness, and the admitted TCP
+/// listener in `app::tests::upgraded_transport_slot` — and
 /// `app::metrics::tests::every_upgradeable_connection_publishes_its_transport_admission` reads
 /// exactly that set. It is not every listener in the crate's test suite: three under `tests/`
 /// serve the same production router with no transport budget at all, which that check names and
@@ -264,12 +266,18 @@ pub(crate) fn admitted_service<S>(
 
 /// Holds one connection's admission and bounds the connection future, and neither outlives it.
 ///
+/// `pub(crate)` so the fixtures that stand in for a listener drive this rather than a copy of it:
+/// a change to how the deadline and the admission meet — which is what
+/// `story:transport-admission-and-stream-lifetime-disagree` would change, and this is where the
+/// deadline lives — must reach `app::tests::upgraded_transport_slot`, whose cases are pinned to
+/// today's answer and instruct their reader to invert them when it moves.
+///
 /// The deadline is on the future passed in. hyper resolves an upgradeable connection future when
 /// it hands the socket to the upgrade, so a connection that upgrades leaves this bound behind at
 /// the handshake and is bounded by its stream's own lifetime from there. The admission does not
 /// leave with it — every request carries a clone (`admitted_service`) and the upgraded task keeps
 /// one — which is deliberate and is what `UnixTransportPolicy::production` records.
-async fn enforce_connection_lifetime<P, F, T, E>(
+pub(crate) async fn enforce_connection_lifetime<P, F, T, E>(
     permit: P,
     lifetime: std::time::Duration,
     connection: F,
@@ -1445,6 +1453,12 @@ mod tests {
         ));
         tokio::task::yield_now().await;
 
+        // Held for as long as the connection runs, which is the half a recovery assertion alone
+        // cannot see: a permit released early would recover capacity too, and sooner.
+        assert!(
+            limits.acquire(1000).is_none(),
+            "the connection holds its admission while it is being served"
+        );
         tokio::time::advance(policy.connection_lifetime).await;
         assert!(task.await.expect("lifetime task").is_err());
         assert!(limits.acquire(1000).is_some());
