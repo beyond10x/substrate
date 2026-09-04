@@ -1288,11 +1288,10 @@ pub(super) async fn pipe_session_attach(
                 .saturating_add(policy.write_buffer_bytes),
         )
         .on_failed_upgrade(move |error: axum::Error| {
-            // No tombstone here, deliberately. This session's durable attachment claim is already
-            // `Consumed`, so the state gate above refuses every further attach for it before
-            // `acquire` is ever reached; a tombstone would bar nothing and would spend one of the
-            // fixed global attachment slots until restart. The permit is dropped with the
-            // callback that owns it, which returns the slot.
+            // The permit is not carried in here. It is dropped with the callback that owns it,
+            // which returns its slot to the global bound and clears its key — and nothing here
+            // needs it, because this session's durable attachment claim is already spent and the
+            // state gate above refuses every further attach for it before `acquire` is reached.
             tokio::spawn(async move {
                 if terminate_pipe_session(&stranded_app, &stranded_scope, &stranded_exec).await {
                     tracing::info!(

@@ -55,9 +55,9 @@ struct PipeFixtureDriver {
     /// When set, `signal` refuses.
     ///
     /// That is exactly the state `terminate_pipe_session` reports as `false` -- a cancellation it
-    /// could not prove -- which is the only way to reach the tombstone branch of
-    /// `PipeAttachmentPermit::drop`. Off by default, so no case written before this field changes
-    /// behaviour.
+    /// could not prove -- which is the only way to reach the failure branch of either containment
+    /// hand-off out of the attach handler. Off by default, so no case written before this field
+    /// changes behaviour.
     refuse_signal: std::sync::atomic::AtomicBool,
 }
 
@@ -2466,8 +2466,8 @@ async fn adversary_a_stranded_attach_with_an_unproven_kill_keeps_the_bounded_cap
     );
     drop(handshake);
 
-    // The containment task runs, cannot prove the kill, retains the tombstone, and drops the
-    // permit. One second is far longer than a refused fixture signal takes.
+    // The containment task runs, cannot prove the kill, and drops the permit. One second is far
+    // longer than a refused fixture signal takes.
     tokio::time::sleep(Duration::from_secs(1)).await;
     harness
         .driver
@@ -2490,10 +2490,10 @@ async fn adversary_a_stranded_attach_with_an_unproven_kill_keeps_the_bounded_cap
             assert!(
                 tokio::time::Instant::now() < deadline,
                 "attachment {index} of the bounded 32 is still answered {} twenty seconds after \
-                 one stranded attach whose kill could not be proven: the failed-upgrade \
-                 containment retained the tombstone, and PipeAttachmentPermit::drop then ran \
-                 global.forget(), so one of this daemon's 32 attachment slots is gone until \
-                 restart. On 617bbed the same disconnect always returned the slot.",
+                 one stranded attach whose kill could not be proven: a permit failed to return \
+                 its slot on drop, so one of this daemon's 32 attachment slots is gone until \
+                 restart. session.attachment-capacity is published as exhausted and retriable; \
+                 destroyed capacity is neither.",
                 handshake.status
             );
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2761,8 +2761,8 @@ async fn adversary_a_served_attachment_with_an_unproven_kill_keeps_the_bounded_c
         .refuse_signal
         .store(true, std::sync::atomic::Ordering::Relaxed);
     // The client goes away. `run_pipe_attachment` reads EOF and reports a non-terminal
-    // attachment, the single containment kill is refused, and the permit is dropped with its
-    // tombstone retained.
+    // attachment, and the single containment kill is refused. Whatever the handler does about
+    // that, the permit it holds must still return its slot when it drops.
     drop(client);
     tokio::time::sleep(Duration::from_secs(1)).await;
     harness
