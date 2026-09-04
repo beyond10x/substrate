@@ -144,11 +144,12 @@ schema typo — the shape ADR 0014 gave `exec.aperture-ceiling-in-request`
 
 ### 4. The floor, clause by clause, with the refusal where it cannot be met
 
-The floor is `AGENTS.md:78-84` and design 04 § 7 (`:85-100`). Nothing below weakens it; the column
+The floor is `AGENTS.md:91-99` and design 04 § 7 (`:85-100`). Nothing below weakens it; the column
 that matters is the last one.
 
 | floor clause | host mechanism | container driver | if unproven |
 |---|---|---|---|
+| no nested user namespace | the child's own user namespace with `--disable-userns` (`process.rs:1905`), proved on every snapshot by `--assert-userns-disabled` (`probe.rs:381`); no separate fact — it is a clause of `exec.namespaces` | **unproven.** Whether a container runtime can be made to refuse a nested user namespace, and whether substrate can *observe* that refusal rather than request it, is a question nobody here has put to a runtime; the host proof is bubblewrap's own in-sandbox assertion and has no container equivalent on record | `exec.namespaces` absent → `exec.sandbox-unavailable`, 501 |
 | no egress | `--unshare-net` (`process.rs:1111`), fact at `probe.rs:102` | **meetable**, but only by § 1's connect attempt from inside; a network-less container still has loopback, exactly as the sandbox netns does | fact absent → `exec.sandbox-unavailable`, 501 |
 | system read-only, workspace the only writable mount | `--ro-bind` never `--bind` (`process.rs:1141`, `:1147`), workspace at `:1160`; `AppliedFilesystem::WorkspaceReadWriteSystemReadOnly` (`lib.rs:714-716`) | **meetable** as read-only mounts plus one writable bind | as above |
 | declared host roots read-only (ADR 0010) | read-only binds, recorded applied (`lib.rs:701-704`) | **meetable**; the applied record already states the narrow guarantee it can make | as above |

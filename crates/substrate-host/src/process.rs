@@ -41,18 +41,89 @@ const PIPE_QUEUED_FRAMES: usize = 16;
 /// setting that namespace's `max_user_namespaces` to 1, so the two belong together and never
 /// apart.
 ///
-/// Spliced into every argv rather than written out at each: this crate builds seven bubblewrap
-/// command lines — the exec below, three probes in `probe.rs`, the pty probe, the egress probe and
-/// the egress cases' throwaway sandbox — and each used to state the posture on its own, which is
-/// how the exec argv came to say less than it was meant to.
-/// `the_user_namespace_posture_is_written_in_exactly_one_place` fails on that literal anywhere
-/// else in these sources, so an eighth sandbox gets the posture or gets a red case.
+/// Spliced into every argv rather than written out at each: this crate builds eight bubblewrap
+/// command lines — the exec below, three probes in `probe.rs`, two in `pty.rs`, the egress probe
+/// and the egress cases' throwaway sandbox — and each used to state the posture on its own, which
+/// is how the exec argv came to say less than it was meant to.
+///
+/// **What guards that is an observation of the argv, not a reading of this file.** A constant
+/// declared here and spliced nowhere would leave every sandbox exactly as the finding found it,
+/// so `the_exec_argv_carries_the_user_namespace_posture` and
+/// `every_probe_sandbox_carries_the_user_namespace_posture` — here and in `probe.rs` — assert on
+/// the argv each site actually builds, seven of the eight through a recording backend or through
+/// the builder itself. `the_user_namespace_posture_is_written_in_exactly_one_place` is the
+/// secondary guard and covers only what those cannot reach: a *new* site, and the three other
+/// spellings of a user namespace bubblewrap accepts.
 ///
 /// The matching `--assert-userns-disabled` is deliberately *not* here. It belongs to
 /// `probe::probe_bubblewrap`, where a backend that cannot honour the option becomes a withheld
 /// capability fact and a named refusal, rather than a spawn error no contract declares
 /// (invariant 3).
 pub(crate) const USER_NAMESPACE_ARGV: [&str; 2] = ["--unshare-user", "--disable-userns"];
+
+/// A `bwrap` that records the argv it was handed and refuses to be a sandbox, for the cases that
+/// assert on what each site of this crate actually builds.
+///
+/// Recording rather than running is the point: the claim under test is what the argv *said*, and a
+/// probe driven through this answers false, which every caller already handles. The log path is
+/// baked into the script because every call site passes `env_clear`, so no variable survives to
+/// carry it. Each invocation ends with a `.` line, so two of them cannot be read as one.
+#[cfg(test)]
+pub(crate) fn recording_backend(directory: &Path) -> (PathBuf, PathBuf) {
+    let backend = directory.join("bwrap");
+    let log = directory.join("argv.log");
+    std::fs::write(
+        &backend,
+        format!(
+            "#!/bin/sh\n{{ for argument in \"$@\"; do printf '%s\\n' \"$argument\"; done; \
+             printf '.\\n'; }} >>'{}'\nexit 1\n",
+            log.display()
+        ),
+    )
+    .expect("write the recording backend");
+    std::fs::set_permissions(&backend, std::fs::Permissions::from_mode(0o755))
+        .expect("make the recording backend executable");
+    (backend, log)
+}
+
+/// Every sandbox the recording backend was asked to open, oldest first.
+#[cfg(test)]
+pub(crate) fn recorded_sandboxes(log: &Path) -> Vec<Vec<String>> {
+    let mut sandboxes = Vec::new();
+    let mut argv = Vec::new();
+    for line in std::fs::read_to_string(log).unwrap_or_default().lines() {
+        if line == "." {
+            sandboxes.push(std::mem::take(&mut argv));
+        } else {
+            argv.push(line.to_owned());
+        }
+    }
+    sandboxes
+}
+
+/// Fails unless every recorded sandbox carried the whole posture — and unless one was recorded.
+///
+/// The empty check is not decoration: a site that stopped spawning, or a log written somewhere
+/// else, would otherwise satisfy "every recorded sandbox" by recording none.
+#[cfg(test)]
+pub(crate) fn assert_recorded_posture(site: &str, sandboxes: &[Vec<String>], expected: usize) {
+    assert_eq!(
+        sandboxes.len(),
+        expected,
+        "{site} opened {} sandboxes and this case pins {expected}; an unobserved site proves \
+         nothing about its argv",
+        sandboxes.len()
+    );
+    for argv in sandboxes {
+        for option in USER_NAMESPACE_ARGV {
+            assert!(
+                argv.iter().any(|part| part == option),
+                "{site} built a sandbox without {option}, so a confined child there can nest a \
+                 user namespace: {argv:?}"
+            );
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipeStream {
@@ -3187,6 +3258,7 @@ fn process_tree(leader: u32) -> Result<Vec<u32>, DriverError> {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::os::fd::AsRawFd as _;
     use std::os::unix::fs::symlink;
     use std::sync::atomic::AtomicU64;
     use std::time::Duration;
@@ -3201,9 +3273,10 @@ mod tests {
     };
 
     use super::{
-        Cgroup, ExecObservation, Execution, PipeState, PipeStream, ProcessRuntime,
-        close_live_output, contain_spawned_with_reconciliation, drain_capped, is_secretish_name,
-        is_terminal, wait_terminal_with_hook,
+        Cgroup, ChildChannel, ExecObservation, Execution, PipeState, PipeStream, ProcessRuntime,
+        USER_NAMESPACE_ARGV, assert_recorded_posture, close_live_output,
+        contain_spawned_with_reconciliation, drain_capped, is_secretish_name, is_terminal,
+        recorded_sandboxes, recording_backend, wait_terminal_with_hook,
     };
     use crate::{DispatchOutcome, HostConfig};
 
@@ -4205,38 +4278,156 @@ mod tests {
         );
     }
 
-    /// The class the acceptance is one instance of: **every bubblewrap argv this crate builds for
-    /// a confined child carries the same user-namespace posture.**
+    /// **The exec argv carries the posture** — asserted on the argv the driver builds.
     ///
-    /// The finding named the exec argv. Six other argv lists in this crate stated the posture
-    /// independently — three probes in `probe.rs`, the pty probe's `SANDBOX_ARGV`, the egress
-    /// probe and the egress cases' throwaway sandbox — so fixing the named one would have left the
-    /// class open and the next sandbox would have joined it. The list is checked here instead of
-    /// being kept by hand: this fails on a `--unshare-user` string literal anywhere in the crate's
-    /// own sources except the one constant that declares the posture, so a seventh sandbox gets
-    /// `--disable-userns` or gets a red case.
+    /// This is the case review finding 6 needed and the one the first round did not have. The
+    /// check that stood here read the crate's sources, proved the constant was written once with
+    /// both halves, and never read whether any argv *used* it: deleting the single splice in
+    /// `ProcessRuntime::command` put the tree back in the finding's exact shape — every other
+    /// sandbox right, the exec one wrong — and left that check green. This reads
+    /// `Command::get_args`, so the same deletion is red here.
     ///
-    /// The two needles are assembled with `concat!` so that this case is not itself a site.
+    /// Portable. `ProcessRuntime::command` builds an argv and spawns nothing, so no delegated
+    /// cgroup and no backend on disk are needed to observe what it built.
+    #[test]
+    fn the_exec_argv_carries_the_user_namespace_posture() {
+        let root = tempfile::tempdir().expect("root");
+        let workspace = root.path().join("ws_test");
+        std::fs::create_dir(&workspace).expect("workspace");
+        let cgroup_root = root.path().join("cgroups");
+        std::fs::create_dir(&cgroup_root).expect("cgroup root");
+        let snapshot = format!("sha256:{}", "7".repeat(64));
+        let mut config = HostConfig::minimum(root.path());
+        config.cgroup_root = Some(cgroup_root);
+        let capability = CapabilitySnapshot {
+            snapshot: snapshot.clone(),
+            driver: HostDriverKind::Host,
+            driver_version: "test".to_owned(),
+            config_generation: 1,
+            probed_at: chrono::Utc::now(),
+            valid_until: None,
+            facts: CapabilityFacts::default(),
+        };
+        let runtime = ProcessRuntime::new(config, capability).expect("runtime");
+        let slots = crate::secrets::SecretSlotSet::acquire(&[], &[]).expect("no slots");
+        let sync = std::fs::File::open("/dev/null").expect("a barrier descriptor");
+        let (command, _seccomp) = runtime
+            .command(
+                &workspace,
+                &pty_exec_input(&snapshot),
+                sync.as_raw_fd(),
+                ChildChannel::Quiet,
+                None,
+                &slots,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("the exec argv builds");
+        let argv: Vec<String> = command
+            .as_std()
+            .get_args()
+            .map(|part| part.to_string_lossy().into_owned())
+            .collect();
+        for option in USER_NAMESPACE_ARGV {
+            assert!(
+                argv.iter().any(|part| part == option),
+                "the exec argv does not carry {option}, so a confined process can nest a user \
+                 namespace: {argv:?}"
+            );
+        }
+    }
+
+    /// The same claim for the three sandboxes this module's neighbours open: both pty probes and
+    /// the egress probe, each observed through the recording backend.
+    ///
+    /// `probe.rs` owns the other three; its own case asserts them, because those functions are
+    /// private to that module. Between the two cases and
+    /// `the_exec_argv_carries_the_user_namespace_posture`, seven of the crate's eight bubblewrap
+    /// argv lists are asserted as built. The eighth is the throwaway sandbox in `egress.rs`'s own
+    /// test module, which hardcodes its backend path and so cannot be pointed at a recorder; the
+    /// source scan below is what covers it.
+    #[test]
+    fn every_probe_sandbox_carries_the_user_namespace_posture() {
+        let directory = tempfile::tempdir().expect("a scratch root");
+        let (backend, log) = recording_backend(directory.path());
+        assert!(
+            !crate::pty::mechanism_is_provable(&backend),
+            "a backend that records and refuses cannot prove a terminal"
+        );
+        assert_eq!(
+            crate::pty::observe_sandboxed_hangup(&backend),
+            None,
+            "a backend that records and refuses cannot prove a hangup"
+        );
+        assert!(
+            !crate::egress::mechanism_is_provable(&backend),
+            "a backend that records and refuses cannot prove an aperture"
+        );
+        assert_recorded_posture(
+            "the two pty probes and the egress probe",
+            &recorded_sandboxes(&log),
+            3,
+        );
+    }
+
+    /// The secondary guard, and the only one that can see a site no case drives: **no source file
+    /// of this crate spells a user namespace except the one constant.**
+    ///
+    /// It is secondary because it cannot see whether an argv uses the constant — that is what the
+    /// two cases above are for. What it can see is a *new* sandbox, and the three other spellings
+    /// bubblewrap 0.11.2 accepts for one: `--unshare-all` ("unshare every namespace we support by
+    /// default", which includes the user namespace), `--unshare-user-try`, and `--userns FD`. None
+    /// of them contains `--unshare-user` followed by a quote, so a check that looked only for that
+    /// needle would let an eighth sandbox in under any of the three. They are refused outright
+    /// here rather than paired, because none of them is used in this crate and adopting one is a
+    /// change to the confinement floor, not a spelling choice.
+    ///
+    /// `src/` is walked recursively: `read_dir` alone stops at the top level, so a future
+    /// `src/sandbox/mod.rs` would never be read.
+    ///
+    /// Every needle is assembled with `concat!` so that this case is not itself a site.
     #[test]
     fn the_user_namespace_posture_is_written_in_exactly_one_place() {
         const UNSHARE_USER: &str = concat!("\"--unshare-", "user\"");
         const DISABLE_USERNS: &str = concat!("\"--disable-", "userns\"");
+        /// The spellings that also put a child in a user namespace, and are used nowhere here.
+        const OTHER_SPELLINGS: [&str; 3] = [
+            concat!("\"--unshare-", "all\""),
+            concat!("\"--unshare-", "user-try\""),
+            concat!("\"--", "userns\""),
+        ];
         /// How far below the `--unshare-user` literal the posture's other half may sit.
         const WINDOW: usize = 3;
 
-        let sources = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-        let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&sources)
-            .expect("the host crate's own sources")
-            .map(|entry| entry.expect("a source directory entry").path())
-            .filter(|path| path.extension().is_some_and(|kind| kind == "rs"))
-            .collect();
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        let mut pending = vec![root.clone()];
+        while let Some(directory) = pending.pop() {
+            for entry in std::fs::read_dir(&directory).expect("the host crate's own sources") {
+                let path = entry.expect("a source directory entry").path();
+                if path.is_dir() {
+                    pending.push(path);
+                } else if path.extension().is_some_and(|kind| kind == "rs") {
+                    files.push(path);
+                }
+            }
+        }
         files.sort();
+        assert!(
+            files.len() >= 8,
+            "the walk found {} sources; the crate has more than that, so it read the wrong tree",
+            files.len()
+        );
+
         let mut sites = Vec::new();
+        let mut strays = Vec::new();
         for file in files {
             let text = std::fs::read_to_string(&file).expect("read a host source");
             let name = file
-                .file_name()
-                .expect("a source file has a name")
+                .strip_prefix(&root)
+                .unwrap_or(&file)
                 .to_string_lossy()
                 .into_owned();
             let lines: Vec<&str> = text.lines().collect();
@@ -4247,9 +4438,21 @@ mod tests {
                         .any(|near| near.contains(DISABLE_USERNS));
                     sites.push((format!("{name}:{}", offset + 1), paired));
                 }
+                for spelling in OTHER_SPELLINGS {
+                    if line.contains(spelling) {
+                        strays.push(format!("{name}:{} {spelling}", offset + 1));
+                    }
+                }
             }
         }
 
+        assert_eq!(
+            strays,
+            Vec::<String>::new(),
+            "a sandbox spelled a user namespace some other way; every one of these creates one \
+             and none of them is closed by --disable-userns on its own, so adopting one is a \
+             change to the confinement floor and needs this case changed with it"
+        );
         let labels: Vec<&str> = sites.iter().map(|(label, _)| label.as_str()).collect();
         assert_eq!(
             sites.len(),

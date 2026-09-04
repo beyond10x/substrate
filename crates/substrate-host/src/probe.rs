@@ -365,11 +365,19 @@ fn probe_bubblewrap(config: &HostConfig) -> bool {
         // sandbox it has just built, that a further user namespace is actually refused, and fails
         // the whole spawn when it is not. So a backend too old for either option — or a kernel
         // that would not honour the first — makes this probe answer false, `namespaces` false and
-        // `exec` with it, leaving every exec fact **absent**: each request is refused by name
-        // rather than served in a sandbox quietly missing the option (invariant 3).
+        // `exec` with it, so every fact gated on `exec` is **absent** and each request is refused
+        // by name rather than served in a sandbox quietly missing the option (invariant 3).
         //
-        // Only here. In the exec argv the same failure would be a spawn error no contract
-        // declares, which is a worse answer than the named refusal a withheld fact already gives.
+        // **Not every `exec.*` fact**, and the difference is a client-visible one. Two are
+        // published unconditionally above and survive this: `exec_output_limit_bytes`, for the
+        // stated reason at `:125` that persisted bounded output stays observable when admission is
+        // not, and `exec_max_current`, for which no reason is recorded here. Both are declared
+        // configuration bounds rather than proved capabilities, so neither says a sandbox was
+        // proved — but a reader who took "the exec facts are withheld" literally would be wrong
+        // about them. That they are ungated predates this option and is not changed here.
+        //
+        // The assertion is only here. In the exec argv the same failure would be a spawn error no
+        // contract declares, which is a worse answer than the named refusal a withheld fact gives.
         .arg("--assert-userns-disabled")
         .args(["--dir", "/runtime", "--ro-bind"])
         .arg(sentinel.path())
@@ -869,29 +877,41 @@ mod tests {
     /// the option from a request into an observation: bubblewrap checks, inside the sandbox it
     /// just built, that nesting is actually refused.
     ///
-    /// The stub answers exactly as a bubblewrap too old for those options does: it names the
-    /// option it does not know and exits non-zero. Every other argv it answers with the seccomp
-    /// denial this probe measures, which is what the probe took for proof before the options were
-    /// in its argv — so this stub is the case the change had to turn. Such a backend leaves
-    /// `exec_namespaces` and every other exec fact **absent**, which refuses each exec by name; it
-    /// never runs one in a sandbox quietly missing the option.
+    /// **One stub per option, because one stub refusing both pins neither.** A stub that refuses
+    /// the pair stays red if either argument is deleted, so it cannot say which one is load
+    /// bearing; delete `--assert-userns-disabled` alone and it is still green. These two each
+    /// refuse exactly one option and are otherwise a pass, so each argument is pinned by a case
+    /// that fails when only that argument goes.
+    ///
+    /// Both stubs answer every other argv with the seccomp denial this probe measures, which is
+    /// what the probe took for proof before either option was in its argv.
+    ///
+    /// Such a backend leaves every fact gated on `exec` absent — `exec_argv_only`,
+    /// `exec_namespaces`, `exec_no_egress`, the cgroup facts, `exec_signals`, the capsule and
+    /// scratch facts, `exec_resource_usage`, `sessions_pty` — which refuses each exec by name
+    /// rather than running one in a sandbox quietly missing the option. It does **not** withhold
+    /// `exec_output_limit_bytes` or `exec_max_current`, which `probe` publishes unconditionally
+    /// as declared configuration bounds rather than as proved capabilities (`:124-127`); that is
+    /// older than this option and is not this case's claim either way.
     #[test]
     fn a_backend_that_cannot_disable_nested_user_namespaces_withholds_the_exec_floor() {
         use std::os::unix::fs::PermissionsExt as _;
 
-        /// A bubblewrap without the two options, and otherwise indistinguishable from a pass.
-        const OLD_BUBBLEWRAP: &str = r#"#!/bin/sh
+        /// A bubblewrap that knows every option but the named one, and is otherwise a pass.
+        fn old_bubblewrap(refused: &str) -> String {
+            format!(
+                r#"#!/bin/sh
 for argument in "$@"; do
-  case $argument in
-    --disable-userns|--assert-userns-disabled)
-      echo "bwrap: Unknown option $argument" >&2
-      exit 1
-      ;;
-  esac
+  if [ "$argument" = "{refused}" ]; then
+    echo "bwrap: Unknown option $argument" >&2
+    exit 1
+  fi
 done
 echo 'socket(1, 1, 0): Permission denied' >&2
 exit 1
-"#;
+"#
+            )
+        }
 
         // The probe answers false when socat is absent, for its own reason, and would prove
         // nothing either way. Absent, never reported as passed.
@@ -899,19 +919,22 @@ exit 1
             return;
         }
         let directory = tempfile::tempdir().unwrap();
-        let stub = directory.path().join("bwrap");
-        std::fs::write(&stub, OLD_BUBBLEWRAP).unwrap();
-        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let mut old = HostConfig::minimum(directory.path());
-        old.bubblewrap = stub;
-        assert!(
-            !probe_bubblewrap(&old),
-            "a backend that refused --disable-userns still proved the namespace floor"
-        );
+        for refused in ["--disable-userns", "--assert-userns-disabled"] {
+            let stub = directory.path().join("bwrap");
+            std::fs::write(&stub, old_bubblewrap(refused)).unwrap();
+            std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let mut old = HostConfig::minimum(directory.path());
+            old.bubblewrap = stub;
+            assert!(
+                !probe_bubblewrap(&old),
+                "a backend that refused {refused} still proved the namespace floor, so that \
+                 argument is not in the probe's argv"
+            );
+        }
 
-        // The other half of the same claim, and the reason the assertion above is not satisfied by
-        // a probe that answers false everywhere: this host's real backend still proves the floor
-        // with both options in the argv.
+        // The other half of the same claim, and the reason the assertions above are not satisfied
+        // by a probe that answers false everywhere: this host's real backend still proves the
+        // floor with both options in the argv.
         let real = HostConfig::minimum(directory.path());
         if real.bubblewrap.is_file() {
             assert!(
@@ -919,5 +942,48 @@ exit 1
                 "the configured backend no longer proves the confinement floor"
             );
         }
+    }
+
+    /// **Every sandbox this module opens carries the posture** — asserted on the argv each one
+    /// builds, through a backend that records what it was handed and refuses to be a sandbox.
+    ///
+    /// These three functions are private to this module, so `process.rs`'s companion case cannot
+    /// reach them; between the two, and the exec argv's own case, seven of the crate's eight
+    /// bubblewrap argv lists are asserted as built rather than as written.
+    ///
+    /// Portable: nothing here spawns a real sandbox, so no delegated cgroup is needed.
+    #[test]
+    fn every_probe_sandbox_carries_the_user_namespace_posture() {
+        let directory = tempfile::tempdir().expect("a scratch root");
+        let (backend, log) = crate::process::recording_backend(directory.path());
+        let mut config = HostConfig::minimum(directory.path());
+        config.bubblewrap = backend;
+
+        assert!(
+            !probe_workspace_scoped_write(&config),
+            "a backend that records and refuses cannot prove scoped writes"
+        );
+        // `probe_bubblewrap` returns before it spawns when socat is absent, so it is counted only
+        // where it can be observed. Counting it regardless would make this case green on a host
+        // where that argv was never built.
+        let socat = Path::new("/usr/bin/socat").is_file();
+        if socat {
+            assert!(
+                !probe_bubblewrap(&config),
+                "a backend that records and refuses cannot prove the confinement floor"
+            );
+        }
+        let slot =
+            crate::secrets::probe_slot(PASSTHROUGH_SENTINEL).expect("stage a sealed probe slot");
+        assert!(
+            !descriptor_passthrough_holds(&config, &slot, ""),
+            "a backend that records and refuses cannot prove descriptor pass-through"
+        );
+
+        crate::process::assert_recorded_posture(
+            "the probes in probe.rs",
+            &crate::process::recorded_sandboxes(&log),
+            2 + usize::from(socat),
+        );
     }
 }
