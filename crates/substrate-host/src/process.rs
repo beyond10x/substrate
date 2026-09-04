@@ -4320,33 +4320,14 @@ mod tests {
         );
     }
 
-    /// The marker the memory-bound cases below look for: printed by the leader only if it
-    /// outlived the kernel's kill of its child.
-    const OOM_SURVIVOR: &str = "the-tree-survived";
-
-    /// One exec whose child crosses the declared memory ceiling, run to its terminal observation.
+    /// The published capability an admitted exec stands on, for the delegated cases below.
     ///
-    /// The child is a subshell doubling a shell variable, so the kernel's OOM victim is the child
-    /// and never the small leader waiting on it — which is the shape review finding 8 names: one
-    /// process killed and the rest of the tree carrying on. The leader prints `OOM_SURVIVOR`
-    /// after its `wait` returns, so a tree that continued says so in its own transcript rather
-    /// than being inferred from a counter.
-    ///
-    /// No measurements are requested, which is deliberate and asserted: both cases below speak
-    /// for the client that asked for none.
-    ///
-    /// Delegated only. Without `SUBSTRATE_VECTORS_CGROUP_ROOT` naming a cgroup v2 subtree this
-    /// process is inside, the caller is **absent, never reported as passed** (invariant 3).
-    async fn memory_bound_exec(lane: &str, id: &str) -> Option<ExecObservation> {
-        let delegated = delegated_cgroup_root(lane)?;
-        let root = tempfile::tempdir().unwrap();
-        let workspace = root.path().join("ws_test");
-        std::fs::create_dir(&workspace).unwrap();
-        let snapshot = format!("sha256:{}", "7".repeat(64));
-        let mut config = HostConfig::minimum(root.path());
-        config.cgroup_root = Some(delegated);
-        let capability = CapabilitySnapshot {
-            snapshot: snapshot.clone(),
+    /// One builder rather than a copy per case: every field here is a floor the driver checks
+    /// before it dispatches, so a case that quietly published a different set would be admitting
+    /// a different sandbox than the one under test.
+    fn confined_exec_capability(snapshot: &str) -> CapabilitySnapshot {
+        CapabilitySnapshot {
+            snapshot: snapshot.to_owned(),
             driver: HostDriverKind::Host,
             driver_version: "test".to_owned(),
             config_generation: 7,
@@ -4372,8 +4353,111 @@ mod tests {
                 exec_output_limit_bytes: Some(65_536),
                 ..CapabilityFacts::default()
             },
+        }
+    }
+
+    /// The acceptance of `story:seccomp-denies-af-vsock`: `socket(AF_VSOCK, SOCK_STREAM, 0)`
+    /// inside an admitted exec fails with `EACCES`.
+    ///
+    /// Review finding 7 was marked *inferred; not tested*, so this case is the measurement and
+    /// not an illustration of one. `--unshare-net` gives the child an empty network namespace and
+    /// confines every family that lives in one; vsock does not live in one. On a virtual-machine
+    /// host — which the observed development nodes are (`STATUS.md` § Current state) — a CID
+    /// therefore reaches the hypervisor side from inside a sandbox whose network namespace is
+    /// empty. Measured on this host before the change: `socket(AF_VSOCK, SOCK_STREAM, 0)` in an
+    /// admitted exec **succeeded**, and socat went on to report a `connect(2)` failure.
+    ///
+    /// Two execs and not one, for the reason the nested-user-namespace case above gives: "the
+    /// command failed" is also what an absent binary and a broken harness look like. The first
+    /// proves `/usr/bin/socat` runs inside this sandbox at all; the second differs from it only
+    /// in what it is asked to open, and must fail in `socket(2)` itself — socat names the family,
+    /// the type and the errno there, so a `connect(2)` line in its place is a socket this profile
+    /// let through.
+    ///
+    /// Delegated only. Without `SUBSTRATE_VECTORS_CGROUP_ROOT` naming a cgroup v2 subtree this
+    /// process is inside, the case is **absent, never reported as passed** (invariant 3).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_confined_process_cannot_open_an_af_vsock_socket() {
+        let Some(delegated) = delegated_cgroup_root("vsock") else {
+            return;
         };
-        let runtime = ProcessRuntime::new(config, capability).expect("runtime");
+        // Socat and not netcat, for `probe_bubblewrap`'s own recorded reason: its address form
+        // names the socket family, so a command-line refusal cannot be mistaken for the seccomp
+        // refusal this case measures. Absent where it is not installed.
+        if !std::path::Path::new("/usr/bin/socat").is_file() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("ws_test");
+        std::fs::create_dir(&workspace).unwrap();
+        let snapshot = format!("sha256:{}", "7".repeat(64));
+        let mut config = HostConfig::minimum(root.path());
+        config.cgroup_root = Some(delegated);
+        let runtime =
+            ProcessRuntime::new(config, confined_exec_capability(&snapshot)).expect("runtime");
+
+        let present = waited_exec(
+            &runtime,
+            &workspace,
+            &snapshot,
+            "ex_vsock_present",
+            &["/usr/bin/socat", "-V"],
+        )
+        .await;
+        assert_eq!(
+            present
+                .resource
+                .exit
+                .expect("a waited exec reports its exit")
+                .code,
+            Some(0),
+            "the case needs /usr/bin/socat runnable inside the sandbox: {}",
+            String::from_utf8_lossy(&present.stderr)
+        );
+
+        let vsock = waited_exec(
+            &runtime,
+            &workspace,
+            &snapshot,
+            "ex_vsock_denied",
+            &["/usr/bin/socat", "-u", "/dev/null", "VSOCK-CONNECT:2:1234"],
+        )
+        .await;
+        let stderr = String::from_utf8_lossy(&vsock.stderr).into_owned();
+        assert!(
+            stderr.contains("socket(40, 1, 0): Permission denied"),
+            "a confined process opened an AF_VSOCK socket; no network namespace confines vsock, \
+             so on a virtual-machine host that socket reaches the hypervisor side: {stderr}"
+        );
+    }
+
+    /// The marker the memory-bound cases below look for: printed by the leader only if it
+    /// outlived the kernel's kill of its child.
+    const OOM_SURVIVOR: &str = "the-tree-survived";
+
+    /// One exec whose child crosses the declared memory ceiling, run to its terminal observation.
+    ///
+    /// The child is a subshell doubling a shell variable, so the kernel's OOM victim is the child
+    /// and never the small leader waiting on it — which is the shape review finding 8 names: one
+    /// process killed and the rest of the tree carrying on. The leader prints `OOM_SURVIVOR`
+    /// after its `wait` returns, so a tree that continued says so in its own transcript rather
+    /// than being inferred from a counter.
+    ///
+    /// No measurements are requested, which is deliberate and asserted: both cases below speak
+    /// for the client that asked for none.
+    ///
+    /// Delegated only. Without `SUBSTRATE_VECTORS_CGROUP_ROOT` naming a cgroup v2 subtree this
+    /// process is inside, the caller is **absent, never reported as passed** (invariant 3).
+    async fn memory_bound_exec(lane: &str, id: &str) -> Option<ExecObservation> {
+        let delegated = delegated_cgroup_root(lane)?;
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("ws_test");
+        std::fs::create_dir(&workspace).unwrap();
+        let snapshot = format!("sha256:{}", "7".repeat(64));
+        let mut config = HostConfig::minimum(root.path());
+        config.cgroup_root = Some(delegated);
+        let runtime =
+            ProcessRuntime::new(config, confined_exec_capability(&snapshot)).expect("runtime");
         let mut input = pty_exec_input(&snapshot);
         input.argv = vec![
             "/bin/sh".to_owned(),

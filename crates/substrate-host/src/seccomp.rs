@@ -73,9 +73,21 @@ fn filters(deny: u32) -> Vec<libc::sock_filter> {
             1,
         ),
         statement(RET_K, deny),
-        jump(u32::try_from(libc::SYS_socket).unwrap_or(u32::MAX), 0, 3),
+        jump(u32::try_from(libc::SYS_socket).unwrap_or(u32::MAX), 0, 4),
         statement(LD_W_ABS, 16),
-        jump(u32::try_from(libc::AF_UNIX).unwrap_or(1), 0, 1),
+        jump(u32::try_from(libc::AF_UNIX).unwrap_or(1), 1, 0),
+        // `--unshare-net` gives the child an empty network namespace, and that is what confines
+        // every family which lives in one. **Vsock does not live in one**: mainline has no vsock
+        // namespace, so a confined process on a virtual-machine host — which the observed
+        // development nodes are (`STATUS.md` § Current state) — can open a CID straight to the
+        // hypervisor side while the empty netns holds. Measured before this jump existed: an
+        // admitted exec created the socket and reached `connect(2)`.
+        //
+        // `AF_NETLINK` and `AF_PACKET` are deliberately *not* here, and `seccomp::tests`'
+        // `FAMILY_POLICY` carries the reason for each beside this one: both belong to a network
+        // namespace, so the child's own empty one already confines them and a second refusal here
+        // would state a confinement this profile is not the source of.
+        jump(u32::try_from(libc::AF_VSOCK).unwrap_or(40), 0, 1),
         statement(RET_K, deny),
         statement(LD_W_ABS, 0),
     ]);
@@ -148,7 +160,132 @@ mod tests {
         assert_profile_result(x32_unix_socket_is_denied);
     }
 
+    /// The same claim for the x32 ABI, over **every** family the table denies rather than the one
+    /// that happened to have a case.
+    ///
+    /// Driven off `FAMILY_POLICY` because that is what makes it a check on the class instead of
+    /// on an instance: a family added to the table cannot arrive with a native refusal and an x32
+    /// hole, and nobody has to remember to write a second case beside the first.
+    /// `x32_socket_syscall_cannot_bypass_the_unix_socket_refusal` above states the same thing for
+    /// `AF_UNIX` in the plainest form and is kept for the message it fails with.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn no_denied_family_can_be_reached_through_the_x32_socket_syscall() {
+        for (name, family, denied, reason) in FAMILY_POLICY {
+            if !denied {
+                continue;
+            }
+            assert!(
+                profile_child_passes(&|| {
+                    // SAFETY: the child issues one raw syscall and closes nothing.
+                    unsafe { x32_family_is_denied(family) }
+                }),
+                "{name} is refused natively and still reachable through the x32 socket syscall; \
+                 it is recorded denied because {reason}"
+            );
+        }
+    }
+
+    /// Whether the ABI-tagged `socket` number is refused for `family`.
+    ///
+    /// The raw syscall and not `libc::socket`, for `x32_unix_socket_is_denied`'s reason: seccomp
+    /// answers before a kernel without x32 dispatch needs to understand the number.
+    #[cfg(target_arch = "x86_64")]
+    unsafe fn x32_family_is_denied(family: libc::c_int) -> bool {
+        // SAFETY: the raw syscall receives the documented socket arguments.
+        let result = unsafe {
+            libc::syscall(
+                libc::SYS_socket | X32_SYSCALL_BIT,
+                family,
+                libc::SOCK_STREAM | libc::SOCK_CLOEXEC,
+                0,
+            )
+        };
+        result == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EACCES)
+    }
+
+    /// Every socket family this profile has decided about, the decision, and the reason for it.
+    ///
+    /// A table rather than one case per family, because the defect review finding 7 named is a
+    /// family nobody had decided about at all: `AF_VSOCK` was neither refused nor recorded as
+    /// deliberately allowed, and the profile's silence read to every later reader as a decision.
+    /// Here a family cannot be present without a reason, and one whose behaviour drifts from its
+    /// recorded decision is a red case rather than a comment nobody re-checked.
+    ///
+    /// **Bounded, and it does not claim to be the whole family list.** These four are the ones
+    /// review finding 7 and `story:seccomp-denies-af-vsock` name. Linux has some forty address
+    /// families and this profile takes no position on the rest; saying so is better than an
+    /// enumeration that looks complete and is not.
+    const FAMILY_POLICY: [(&str, libc::c_int, bool, &str); 4] = [
+        (
+            "AF_UNIX",
+            libc::AF_UNIX,
+            true,
+            "connect(2) can retarget a Unix socket at a host socket mounted into the sandbox, and \
+             no namespace confines the filesystem the child was given",
+        ),
+        (
+            "AF_VSOCK",
+            libc::AF_VSOCK,
+            true,
+            "vsock is not confined by a network namespace, so on a virtual-machine host a CID \
+             reaches the hypervisor side from inside --unshare-net (review finding 7)",
+        ),
+        (
+            "AF_NETLINK",
+            libc::AF_NETLINK,
+            false,
+            "netlink sockets belong to a network namespace; --unshare-net already gives the child \
+             an empty one of its own, so this profile is not what confines them",
+        ),
+        (
+            "AF_PACKET",
+            libc::AF_PACKET,
+            false,
+            "packet sockets belong to a network namespace too, and the child's carries no \
+             interface to capture from, so this profile is not what confines them either",
+        ),
+    ];
+
+    /// The acceptance of `story:seccomp-denies-af-vsock` at the profile, and the record for the
+    /// two families its Notes asked about.
+    ///
+    /// One forked child per family so a failure names the family and quotes the reason it was
+    /// recorded under, rather than reporting that some socket call somewhere answered wrongly.
+    #[test]
+    fn every_decided_socket_family_answers_the_way_the_profile_decided() {
+        for (name, family, denied, reason) in FAMILY_POLICY {
+            assert!(
+                profile_child_passes(&|| {
+                    // SAFETY: the child calls socket and close on its own return value only.
+                    unsafe { family_answer_matches(family, denied) }
+                }),
+                "{name} did not answer the way this profile records it: it is {} because {reason}",
+                if denied {
+                    "recorded denied"
+                } else {
+                    "recorded allowed"
+                }
+            );
+        }
+    }
+
     fn assert_profile_result(probe: unsafe fn() -> bool) {
+        assert!(
+            profile_child_passes(&|| {
+                // SAFETY: the caller's probe is one of this module's own post-fork-safe probes.
+                unsafe { probe() }
+            }),
+            "the probe reported a failure under the installed profile"
+        );
+    }
+
+    /// Installs the profile in a forked child, runs `probe` under it, and reports whether the
+    /// child both installed the filter and answered true.
+    ///
+    /// The closure is called after the fork, so it must allocate nothing and take no lock; every
+    /// probe below is a bare libc call over inherited stack storage.
+    fn profile_child_passes(probe: &dyn Fn() -> bool) -> bool {
         let deny = ERRNO | u32::try_from(libc::EACCES).unwrap_or(13);
         let mut instructions = filters(deny);
         let program = libc::sock_fprog {
@@ -168,15 +305,31 @@ mod tests {
                         &raw const program,
                     ) == 0
             };
-            let passed = installed && unsafe { probe() };
+            let passed = installed && probe();
             // SAFETY: this is the post-fork child and no Rust destructor may run here.
             unsafe { libc::_exit(i32::from(!passed)) };
         }
         let mut status = 0;
         // SAFETY: `child` is the live pid returned by fork and `status` is writable.
         assert_eq!(unsafe { libc::waitpid(child, &raw mut status, 0) }, child);
-        assert!(libc::WIFEXITED(status));
-        assert_eq!(libc::WEXITSTATUS(status), 0);
+        assert!(libc::WIFEXITED(status), "the probe child did not exit");
+        libc::WEXITSTATUS(status) == 0
+    }
+
+    /// Whether `family` answers `EACCES` exactly when the table says this profile denies it.
+    ///
+    /// An allowed family is asserted **not to be refused by this profile**, never asserted to
+    /// succeed: `AF_PACKET` needs `CAP_NET_RAW` and a family whose module is absent answers
+    /// `EAFNOSUPPORT`, and neither of those is this profile speaking.
+    unsafe fn family_answer_matches(family: libc::c_int, denied: bool) -> bool {
+        // SAFETY: socket takes three integers and returns an owned descriptor or -1.
+        let result = unsafe { libc::socket(family, libc::SOCK_STREAM | libc::SOCK_CLOEXEC, 0) };
+        if result >= 0 {
+            // SAFETY: the descriptor was returned by the successful call above.
+            unsafe { libc::close(result) };
+            return !denied;
+        }
+        (std::io::Error::last_os_error().raw_os_error() == Some(libc::EACCES)) == denied
     }
 
     unsafe fn unix_stream_socketpair_succeeds() -> bool {

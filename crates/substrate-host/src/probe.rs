@@ -320,9 +320,6 @@ fn probe_bubblewrap(config: &HostConfig) -> bool {
     if !config.bubblewrap.is_file() || !socat.is_file() {
         return false;
     }
-    let Ok(seccomp) = crate::seccomp::profile() else {
-        return false;
-    };
     let Ok(sentinel) = tempfile::tempdir() else {
         return false;
     };
@@ -330,14 +327,50 @@ fn probe_bubblewrap(config: &HostConfig) -> bool {
     let Ok(_listener) = std::os::unix::net::UnixListener::bind(&socket) else {
         return false;
     };
-    let Ok(output) =
-        bubblewrap_probe_command(&config.bubblewrap, sentinel.path(), seccomp.as_raw_fd()).output()
-    else {
-        return false;
-    };
-    !output.status.success()
-        && String::from_utf8_lossy(&output.stderr).contains("socket(1, 1, 0): Permission denied")
+    // One sandbox per family the profile refuses, and the floor needs **both**. The Unix one is
+    // what this probe has always measured; the vsock one is review finding 7's, and it is here
+    // rather than only in `seccomp::tests` because this is the probe that gates every exec fact:
+    // a backend or a kernel that lets a confined child open a CID to the hypervisor side leaves
+    // `exec` false and every fact hanging off it absent, refusing each exec by name instead of
+    // serving one from a sandbox whose network namespace confines nothing (invariant 3).
+    //
+    // Short-circuiting on the first family is deliberate: a floor already lost is not measured
+    // further, and a second spawn would report nothing the first has not.
+    //
+    // A fresh profile per spawn, never one file reused. The descriptor is inherited, so the two
+    // children would share one file offset and the second would read a program of zero bytes.
+    [
+        ("UNIX-CONNECT:/runtime/sentinel/host.sock", libc::AF_UNIX),
+        (VSOCK_SENTINEL, libc::AF_VSOCK),
+    ]
+    .into_iter()
+    .all(|(target, family)| {
+        let Ok(seccomp) = crate::seccomp::profile() else {
+            return false;
+        };
+        let Ok(output) = bubblewrap_probe_command(
+            &config.bubblewrap,
+            sentinel.path(),
+            seccomp.as_raw_fd(),
+            target,
+        )
+        .output() else {
+            return false;
+        };
+        // Socat names the family, the type and the protocol of the call that failed, so this
+        // cannot be satisfied by a `connect(2)` refusal from a socket the profile let through.
+        !output.status.success()
+            && String::from_utf8_lossy(&output.stderr)
+                .contains(&format!("socket({family}, 1, 0): Permission denied"))
+    })
 }
+
+/// The vsock address the confinement-floor probe asks for.
+///
+/// CID 2 is the host side of a vsock transport and the port is arbitrary: the probe measures
+/// whether `socket(2)` is refused, so no address it could reach or fail to reach changes what it
+/// observes.
+const VSOCK_SENTINEL: &str = "VSOCK-CONNECT:2:1234";
 
 /// The argv `probe_bubblewrap` measures the confinement floor with, built and returned rather than
 /// built and spawned.
@@ -351,6 +384,7 @@ fn bubblewrap_probe_command(
     bubblewrap: &Path,
     sentinel: &Path,
     seccomp_fd: std::os::fd::RawFd,
+    target: &str,
 ) -> Command {
     let mut command = Command::new(bubblewrap);
     command
@@ -406,12 +440,8 @@ fn bubblewrap_probe_command(
         .arg("/runtime/sentinel")
         .arg("--seccomp")
         .arg(seccomp_fd.to_string())
-        .args([
-            "--",
-            "/usr/bin/socat",
-            "-",
-            "UNIX-CONNECT:/runtime/sentinel/host.sock",
-        ])
+        .args(["--", "/usr/bin/socat", "-"])
+        .arg(target)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
@@ -1035,6 +1065,7 @@ exit 1
             Path::new("/does/not/exist"),
             sentinel.path(),
             seccomp.as_raw_fd(),
+            VSOCK_SENTINEL,
         );
         let argv: Vec<String> = command
             .get_args()
