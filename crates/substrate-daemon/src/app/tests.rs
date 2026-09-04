@@ -511,16 +511,10 @@ async fn workspace_lock_domains_isolate_subjects_but_serialize_one_scope() {
     assert!(domain_a.stripes[0].try_lock().is_ok());
 }
 
-/// The metrics stream restates five of `EventStreamPolicy`'s bounds rather than holding them,
-/// because only `global_streams` and `streams_per_subject` are readable outside `app::events`.
-/// Every published value is pinned here so the restatement cannot drift unremarked, and the two
-/// that *can* be compared are compared.
-///
-/// **The limit, as a rule:** this pins the metrics policy against literals, not against the event
-/// policy. Moving `EventStreamPolicy`'s `max_input_bytes`, `max_output_bytes`,
-/// `write_buffer_bytes`, `send_timeout` or `lifetime` still opens the seam silently, and closing
-/// that needs those five fields widened to `pub(super)` in `app/events.rs` — a file outside this
-/// unit's scope. The patch is prepared and handed back rather than applied.
+/// The metrics stream restates seven of `EventStreamPolicy`'s bounds rather than holding them.
+/// Every one is compared against its original here, so the restatement cannot drift unremarked,
+/// and every published value is also pinned against its literal, so moving both together is a
+/// change somebody makes on purpose.
 #[test]
 fn metrics_stream_policy_publishes_the_event_stream_bounds() {
     let metrics = MetricsStreamPolicy::production();
@@ -528,6 +522,11 @@ fn metrics_stream_policy_publishes_the_event_stream_bounds() {
 
     assert_eq!(metrics.global_streams, events.global_streams);
     assert_eq!(metrics.streams_per_subject, events.streams_per_subject);
+    assert_eq!(metrics.max_input_bytes, events.max_input_bytes);
+    assert_eq!(metrics.max_output_bytes, events.max_output_bytes);
+    assert_eq!(metrics.write_buffer_bytes, events.write_buffer_bytes);
+    assert_eq!(metrics.send_timeout, events.send_timeout);
+    assert_eq!(metrics.lifetime, events.lifetime);
 
     assert_eq!(metrics.global_streams, 64);
     assert_eq!(metrics.streams_per_subject, 4);
