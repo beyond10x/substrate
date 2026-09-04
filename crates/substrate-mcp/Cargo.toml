@@ -13,7 +13,7 @@ path = "src/main.rs"
 
 [dependencies]
 base64.workspace = true
-b10x-substrate-sdk = { path = "../b10x-substrate-sdk", version = "=0.6.0", features = ["linked-daemon"] }
+b10x-substrate-sdk = { path = "../b10x-substrate-sdk", version = "=0.7.0", features = ["linked-daemon"] }
 hex.workspace = true
 nix.workspace = true
 rmcp.workspace = true

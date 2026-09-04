@@ -7,6 +7,50 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-09-04
+
+Second security wave over the 2026-09-03 whole-repository review. Every remaining severity D and H
+finding is closed, and two live sandbox escapes were found and closed along the way.
+
+### Security
+
+- **A confined process can no longer reach another sandbox or the host through an unconfined socket
+  family.** The four-family shortlist is replaced by a survey of all 46 families across seven socket
+  types, measured from inside a real admitted exec, asking two questions of each: can data cross to
+  a mutually-isolated sibling, and does opening it mutate host-global state. The denied set is
+  three to ten — `AF_UNIX`, `AF_VSOCK`, `AF_QIPCRTR`, `AF_ALG`, `AF_RDS`, `AF_PPPOX`, `AF_KCM`,
+  `AF_SMC`, `AF_MCTP`, `AF_PACKET`.
+  - `AF_VSOCK` was review finding 7, filed *inferred, not tested*. It was measured: a socket opened
+    inside a confined exec with the network namespace holding, and reached `connect()`.
+  - `AF_QIPCRTR` carried a datagram between two mutually-isolated sandboxes, each with a fresh
+    network and user namespace, while `AF_UNIX`, `AF_INET` and `AF_INET6` all failed across the same
+    boundary.
+  - `AF_ALG` let a confined process name an algorithm and have the host load the implementation into
+    its single global module table, where it persists after the sandbox exits and a sibling sandbox
+    observes it through the non-namespaced `/proc/modules`.
+  - `AF_INET`, `AF_INET6` and `AF_NETLINK` autoload too and are recorded as accepted residuals:
+    refusing them removes the egress aperture and name resolution.
+- **An exec that crosses its memory bound leaves no process in its cgroup.** The exec cgroup set
+  `pids.max`, `memory.max`, `memory.swap.max` and `cpu.max` but not `memory.oom.group`, so an OOM
+  killed one process and the rest of the tree continued (review finding 8).
+- **An upgraded WebSocket stays inside the transport connection budget.** The per-uid and global
+  permit was released the moment an upgrade succeeded, so the socket ran in a task the budget no
+  longer counted, at all three listeners (review finding 4).
+
+### Changed
+
+- Workspace lease cleanup reads exec ids and states without their output blobs. It previously loaded
+  every exec row of the workspace including `stdout` and `stderr` — 2048 execs at 2 MiB each is
+  4 GiB in one sweep (review finding 5).
+- A transport slot is now held for an upgraded stream's lifetime — one hour — rather than the
+  transport's five minutes. This is the intent of finding 4's fix and it is recorded rather than
+  hidden; `story:transport-admission-and-stream-lifetime-disagree` carries the design question it
+  opens.
+- The seccomp jump chain is generated from the family table rather than hand-written, because an
+  off-by-one in hand-counted BPF offsets does not fail closed.
+- `docs/design/08-phase-3-closure-invariants.md` no longer states that the local HTTP transport
+  disables keep-alive. It has set it true since `a9f234b`, with no record of the change.
+
 ## [0.6.0] — 2026-09-04
 
 Daemon image: `ghcr.io/beyond10x/b10x-substrate-daemon:0.6.0` at
