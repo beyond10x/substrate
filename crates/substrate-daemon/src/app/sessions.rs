@@ -1,6 +1,5 @@
 use std::collections::HashSet;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 use axum::Extension;
 use axum::body::Body;
@@ -90,9 +89,7 @@ struct PipeAttachmentPermit {
     limits: Arc<PipeAttachmentLimits>,
     scope: Scope,
     exec_id: String,
-    /// Shared, because one permit is held by both hand-offs out of the attach handler: the
-    /// upgraded attachment and the failed-upgrade containment below. Exactly one of them runs.
-    remove_key_on_drop: AtomicBool,
+    remove_key_on_drop: bool,
     global: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
@@ -124,23 +121,28 @@ impl PipeAttachmentLimits {
             limits: Arc::clone(self),
             scope: scope.clone(),
             exec_id: exec_id.to_owned(),
-            remove_key_on_drop: AtomicBool::new(true),
+            remove_key_on_drop: true,
             global: Some(global),
         })
     }
 }
 
 impl PipeAttachmentPermit {
-    /// Keeps a process-local tombstone when cancellation could not be proven. Capacity is still
-    /// recovered, but the uncertain exec cannot be attached again before restart reconciliation.
-    fn retain_attachment_tombstone(&self) {
-        self.remove_key_on_drop.store(false, Ordering::Relaxed);
+    /// Keeps a process-local tombstone when cancellation could not be proven: the uncertain exec
+    /// cannot be attached again before restart reconciliation.
+    ///
+    /// It is not free. `Drop` below answers the tombstone by spending this permit's global
+    /// attachment slot for the life of the process, so this belongs only where an attachment was
+    /// really served and its cancellation really is unproven — never on a path the durable claim
+    /// already bars, which would pay a permanent slot for a bar that is already in place.
+    fn retain_attachment_tombstone(&mut self) {
+        self.remove_key_on_drop = false;
     }
 }
 
 impl Drop for PipeAttachmentPermit {
     fn drop(&mut self) {
-        if *self.remove_key_on_drop.get_mut() {
+        if self.remove_key_on_drop {
             self.limits
                 .attached
                 .lock()
@@ -1277,14 +1279,11 @@ pub(super) async fn pipe_session_attach(
     let mode = session.mode;
     let policy = app.pipe_session_policy;
     // The claim above is already consumed and the session is no longer attachable, so an upgrade
-    // that never completes — a client that drops between the `101` and the hand-off — would leave
-    // the process running unattached until its lease or timeout ended it. Both hand-offs out of
-    // this handler therefore end the session; exactly one of them runs, and both hold the permit.
-    let permit = Arc::new(permit);
+    // that never completes would leave the process running unattached until its lease or timeout
+    // ended it. Both hand-offs out of this handler therefore end the session; exactly one runs.
     let stranded_app = Arc::clone(&app);
     let stranded_scope = scope.clone();
     let stranded_exec = exec_id.clone();
-    let stranded_permit = Arc::clone(&permit);
     ws.read_buffer_size(policy.max_message_bytes)
         .write_buffer_size(policy.write_buffer_bytes)
         .max_frame_size(policy.max_message_bytes)
@@ -1294,14 +1293,33 @@ pub(super) async fn pipe_session_attach(
                 .max_message_bytes
                 .saturating_add(policy.write_buffer_bytes),
         )
-        .on_failed_upgrade(move |_error: axum::Error| {
+        .on_failed_upgrade(move |error: axum::Error| {
+            // No tombstone here, deliberately. This session's durable attachment claim is already
+            // `Consumed`, so the state gate above refuses every further attach for it before
+            // `acquire` is ever reached; a tombstone would bar nothing and would spend one of the
+            // fixed global attachment slots until restart. The permit is dropped with the
+            // callback that owns it, which returns the slot.
             tokio::spawn(async move {
-                if !terminate_pipe_session(&stranded_app, &stranded_scope, &stranded_exec).await {
-                    stranded_permit.retain_attachment_tombstone();
+                if terminate_pipe_session(&stranded_app, &stranded_scope, &stranded_exec).await {
+                    tracing::info!(
+                        exec = %stranded_exec,
+                        %error,
+                        "terminated a claimed session whose attachment never upgraded"
+                    );
+                } else {
+                    // Invariant 3: an unproven containment is said out loud, never assumed. The
+                    // process outlives this attempt and nothing here retries it; only lease
+                    // expiry ends it (`app/service.rs`, `cleanup_expired`).
+                    tracing::warn!(
+                        exec = %stranded_exec,
+                        %error,
+                        "could not terminate a claimed session whose attachment never upgraded"
+                    );
                 }
             });
         })
         .on_upgrade(move |socket| async move {
+            let mut permit = permit;
             let completed = tokio::time::timeout(
                 policy.lifetime,
                 run_pipe_attachment(

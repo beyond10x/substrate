@@ -52,6 +52,13 @@ struct PipeFixtureDriver {
     terminals: bool,
     /// Every window that reached the driver, in order. A refused resize leaves nothing here.
     resizes: Mutex<HashMap<String, Vec<substrate_wire::PtyWindow>>>,
+    /// When set, `signal` refuses.
+    ///
+    /// That is exactly the state `terminate_pipe_session` reports as `false` -- a cancellation it
+    /// could not prove -- which is the only way to reach the tombstone branch of
+    /// `PipeAttachmentPermit::drop`. Off by default, so no case written before this field changes
+    /// behaviour.
+    refuse_signal: std::sync::atomic::AtomicBool,
 }
 
 impl PipeFixtureDriver {
@@ -61,6 +68,7 @@ impl PipeFixtureDriver {
             pipes: Mutex::new(HashMap::new()),
             terminals,
             resizes: Mutex::new(HashMap::new()),
+            refuse_signal: std::sync::atomic::AtomicBool::new(false),
         })
     }
 
@@ -344,6 +352,15 @@ impl Driver for PipeFixtureDriver {
         id: &str,
         input: &ExecSignalInput,
     ) -> Result<ExecObservation, DriverError> {
+        if self
+            .refuse_signal
+            .load(std::sync::atomic::Ordering::Relaxed)
+        {
+            return Err(DriverError::failed(
+                "session.signal-refused",
+                "fixture driver cannot prove this cancellation",
+            ));
+        }
         if !self
             .pipes
             .lock()
@@ -2332,4 +2349,368 @@ async fn the_attachment_capacity_refusal_carries_the_retriable_the_register_publ
     assert_eq!(body["error"]["class"], row["class"]);
     assert_eq!(json!(status), row["status"]);
     assert_eq!(body["error"]["retriable"], row["retriable"]);
+}
+
+/// The acceptance sentence of `story:unattached-claimed-session-is-contained`, on the server shape
+/// production actually runs.
+///
+/// The story asks that "a client that drops after the attachment claim and before the upgrade
+/// leaves no running process within one maintenance tick, and the session reads as terminal with a
+/// named refusal". The case this unit shipped builds that state from the *server* side, with a
+/// `serve_connection` that never calls `with_upgrades()`; all three production listeners
+/// (`crates/substrate-daemon/src/runtime.rs:595`, `:918`, `:1083`) do call it, so hyper reaches
+/// `pending.manual()` there and never in the daemon. This is the same sentence with the client
+/// doing the dropping and the server built the way production builds it.
+#[tokio::test(flavor = "multi_thread")]
+async fn adversary_a_client_that_drops_after_the_switch_leaves_no_running_process() {
+    let harness = Harness::open().await;
+    let (session_id, exec_id) = harness.start_pipe().await;
+    let handshake = Handshake::open(
+        harness.server.address,
+        &format!("/v1/sessions/{session_id}/attach"),
+    )
+    .await;
+    assert_eq!(
+        handshake.status, 101,
+        "the attach handshake is answered before the client can drop"
+    );
+    drop(handshake);
+
+    let observed = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let (status, observed) = harness
+                .call(Method::GET, &format!("/v1/execs/{exec_id}"), Body::empty())
+                .await;
+            assert_eq!(status, StatusCode::OK);
+            if observed["result"]["state"] == "cancelled" {
+                return observed;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect(
+        "a client that drops straight after the 101 on a with_upgrades() listener must leave no \
+         running process",
+    );
+    assert_eq!(observed["result"]["exit"]["signal"], "KILL");
+
+    let (status, session) = harness
+        .call(
+            Method::GET,
+            &format!("/v1/sessions/{session_id}"),
+            Body::empty(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{session}");
+    assert_eq!(session["result"]["state"], "cancelled", "{session}");
+
+    let (status, refusal) = refused_upgrade(
+        harness.server.address,
+        &format!("/v1/sessions/{session_id}/attach"),
+    )
+    .await;
+    assert_eq!(status, 409, "{refusal}");
+    assert_eq!(
+        refusal["error"]["code"].as_str(),
+        Some(substrate_wire::SESSION_NOT_ATTACHABLE),
+        "{refusal}"
+    );
+    let row = published_refusal_row(substrate_wire::SESSION_NOT_ATTACHABLE);
+    assert_eq!(refusal["error"]["class"], row["class"], "{refusal}");
+    assert_eq!(json!(status), row["status"], "{refusal}");
+    assert_eq!(refusal["error"]["retriable"], row["retriable"], "{refusal}");
+}
+
+/// One stranded attach whose kill could not be proven must not cost the daemon an attachment slot
+/// for the rest of its life.
+///
+/// The failed-upgrade containment this unit added (`crates/substrate-daemon/src/app/sessions.rs`,
+/// the `on_failed_upgrade` closure) calls `retain_attachment_tombstone()` whenever
+/// `terminate_pipe_session` returns `false`, and `PipeAttachmentPermit::drop` answers that flag by
+/// running `global.forget()` -- which removes one permit from the fixed 32-permit global semaphore
+/// permanently, not until the next attach.
+///
+/// On the base commit `617bbed` this path did not exist: a failed upgrade dropped the permit with
+/// `remove_key_on_drop` still `true`, so the slot always came back. Here one client disconnect plus
+/// one driver that cannot prove its kill spends a slot that never returns, and nothing names the
+/// loss: the daemon simply serves 31 attachments from then on and answers the 32nd with
+/// `session.attachment-capacity`, a refusal whose published row says the capacity is "exhausted",
+/// not destroyed.
+///
+/// `the_attachment_capacity_refusal_carries_the_retriable_the_register_publishes` above pins that a
+/// healthy daemon serves all 32 at once, so 32 is the number this case is entitled to.
+#[tokio::test(flavor = "multi_thread")]
+async fn adversary_a_stranded_attach_with_an_unproven_kill_keeps_the_bounded_capacity() {
+    let harness = Harness::with_terminals().await;
+    let workspace = harness.create_workspace("01JADVU3WORKSPACE0000001").await;
+    let stranded = harness
+        .start_pty_as(&workspace, "01JADVU3STRANDEDSESSION1")
+        .await;
+    harness
+        .driver
+        .refuse_signal
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+
+    let stranding = TestServer::spawn_without_upgrades(Arc::clone(&harness.app)).await;
+    let handshake = Handshake::open(
+        stranding.address,
+        &format!("/v1/sessions/{stranded}/attach"),
+    )
+    .await;
+    assert_eq!(
+        handshake.status, 101,
+        "the attach handshake is answered before the upgrade can fail"
+    );
+    drop(handshake);
+
+    // The containment task runs, cannot prove the kill, retains the tombstone, and drops the
+    // permit. One second is far longer than a refused fixture signal takes.
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    harness
+        .driver
+        .refuse_signal
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+    let mut held = Vec::new();
+    for index in 0..32_u32 {
+        let session = harness
+            .start_pty_as(&workspace, &format!("01JADVU3CAPACITYSLOT{index:04}"))
+            .await;
+        let path = format!("/v1/sessions/{session}/attach");
+        loop {
+            let handshake = Handshake::open(harness.server.address, &path).await;
+            if handshake.status == 101 {
+                held.push(handshake.upgraded());
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "attachment {index} of the bounded 32 is still answered {} twenty seconds after \
+                 one stranded attach whose kill could not be proven: the failed-upgrade \
+                 containment retained the tombstone, and PipeAttachmentPermit::drop then ran \
+                 global.forget(), so one of this daemon's 32 attachment slots is gone until \
+                 restart. On 617bbed the same disconnect always returned the slot.",
+                handshake.status
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    assert_eq!(
+        held.len(),
+        32,
+        "all 32 bounded attachment slots are servable"
+    );
+    drop(stranding);
+}
+
+/// Pinned current state: an unproven kill is never retried, and only lease expiry ends the process.
+///
+/// **This case asserts what the daemon does today, not what it should do.** The failed-upgrade
+/// containment is one `terminate_pipe_session` call. When the driver cannot prove that kill the
+/// process outlives the attempt, and nothing — not the containment, not `sweep_expired` — tries
+/// again; the only thing that ends it is `cleanup_expired` acting on the expired lease
+/// (`crates/substrate-daemon/src/app/service.rs`, the `LeaseResource::Exec` arm), which is the
+/// very "until its lease or timeout ended it" the story's Context calls the defect.
+///
+/// Closing that gap needs a retry or a maintenance backstop, which is a design change beyond
+/// `story:unattached-claimed-session-is-contained`. It is tracked as
+/// `story:session-containment-retries-an-unproven-kill`.
+///
+/// **When this case goes red, the backstop landed.** The right answer then is to *invert* it — the
+/// exec should reach a terminal state inside the maintenance window below, with no lease renewal
+/// needed — never to relax the assertion or widen the window.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_stranded_attach_whose_kill_is_unproven_is_only_ended_by_lease_expiry() {
+    let harness = Harness::open().await;
+    let (session_id, exec_id) = harness.start_pipe().await;
+    harness
+        .driver
+        .refuse_signal
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+
+    let stranding = TestServer::spawn_without_upgrades(Arc::clone(&harness.app)).await;
+    let handshake = Handshake::open(
+        stranding.address,
+        &format!("/v1/sessions/{session_id}/attach"),
+    )
+    .await;
+    assert_eq!(
+        handshake.status, 101,
+        "the attach handshake is answered before the upgrade can fail"
+    );
+    drop(handshake);
+
+    // The refusal is transient: the driver is healthy again long before the window below. Nothing
+    // this case pins depends on the driver staying broken.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    harness
+        .driver
+        .refuse_signal
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+
+    // Many maintenance ticks under a lease that is nowhere near expiry, and the process is still
+    // running: the single containment attempt was refused and nothing retries it.
+    for tick in 0..20_u32 {
+        harness.app.sweep_expired().await;
+        let (status, observed) = harness
+            .call(Method::GET, &format!("/v1/execs/{exec_id}"), Body::empty())
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            observed["result"]["state"], "running",
+            "maintenance tick {tick} ended a stranded exec whose containment kill was refused. \
+             That is story:session-containment-retries-an-unproven-kill landing: invert this case \
+             to assert containment inside the maintenance window, do not relax it. {observed}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+
+    // The lease is the only thing that ends it. Renewing to the published minimum is what makes
+    // that observable in a test rather than in sixty seconds.
+    let (status, renewed) = harness
+        .call(
+            Method::POST,
+            &format!("/v1/sessions/{session_id}/lease/renew"),
+            mutation(
+                "01JU3STRANDEDLEASERENEW1",
+                json!({"ttl_ms": substrate_wire::MIN_LEASE_TTL_MS}),
+            ),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{renewed}");
+
+    let observed = tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            harness.app.sweep_expired().await;
+            let (status, observed) = harness
+                .call(Method::GET, &format!("/v1/execs/{exec_id}"), Body::empty())
+                .await;
+            assert_eq!(status, StatusCode::OK);
+            if observed["result"]["state"] != "running" {
+                return observed;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("lease expiry is the one backstop this daemon has for an unproven containment kill");
+    assert_eq!(observed["result"]["state"], "expired", "{observed}");
+    drop(stranding);
+}
+
+/// The story's own sentence, reached the way production reaches it: a real client aborting a real
+/// connection on a listener that calls `with_upgrades()`.
+///
+/// `an_attachment_whose_upgrade_never_completes_is_terminated_and_reads_terminal` above builds the
+/// failed upgrade from the server side, through hyper's `Pending::manual()` — the branch taken only
+/// when `with_upgrades()` was *not* called, which no daemon listener does
+/// (`crates/substrate-daemon/src/runtime.rs:595`, `:918`, `:1083`). This case never touches that
+/// branch. It sends the handshake, lets the handler consume the durable claim, then sends a **RST**
+/// (`set_linger(0)`, not a FIN) while the upgrade hand-off is still in flight. Hyper's connection
+/// future then errors with the pending upgrade still unfulfilled, and `axum::Error` reads
+/// `operation was canceled`.
+///
+/// Two hand-offs can catch that client, and which one catches a given round is a race this case
+/// deliberately does not pin: an abort late enough that the upgrade already completed is caught by
+/// `run_pipe_attachment` seeing EOF, and an abort inside the hand-off window is caught by
+/// `on_failed_upgrade`. The assertion is therefore on the outcome the story states, for every
+/// round whose claim the handler really did consume, and it holds whichever hand-off ran.
+///
+/// It is the containment that makes it hold. On `617bbed`, with this file unchanged and only
+/// `app/sessions.rs` reverted, 18 of these 24 rounds were left `attached` and running and the case
+/// failed on the first of them; the other 6 aborted late enough for the EOF path to catch them.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_client_that_aborts_the_connection_around_the_switch_leaves_no_running_process() {
+    let harness = Harness::with_terminals().await;
+    let workspace = harness.create_workspace("01JU3ABORTWORKSPACE00001").await;
+    let address = harness.server.address;
+    let mut claimed = Vec::new();
+    for round in 0..24_u32 {
+        let session = harness
+            .start_pty_as(&workspace, &format!("01JU3ABORTSESSION{round:07}"))
+            .await;
+        let mut stream = TcpStream::connect(address)
+            .await
+            .expect("connect aborting attach client");
+        // An **abortive** close. A plain FIN does not reach the branch this case is about: with
+        // one, all 24 rounds are caught by `run_pipe_attachment` seeing EOF, on base and here
+        // alike (measured). `set_linger(0)` is deprecated in tokio because `SO_LINGER` can block
+        // the closing thread — with a zero timeout it cannot, which is the whole point: the
+        // kernel emits RST and returns immediately.
+        #[allow(deprecated)]
+        stream
+            .set_linger(Some(Duration::ZERO))
+            .expect("an abortive close, so the peer sees RST rather than FIN");
+        let path = format!("/v1/sessions/{session}/attach");
+        let request = format!(
+            "GET {path} HTTP/1.1\r\nHost: {address}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {HANDSHAKE_KEY}\r\n\r\n"
+        );
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .expect("write attach handshake");
+        // Walk the abort across the hand-off window rather than guessing one instant in it.
+        tokio::time::sleep(Duration::from_micros(u64::from(round + 1) * 200)).await;
+        drop(stream);
+        let (status, document) = harness
+            .call(
+                Method::GET,
+                &format!("/v1/sessions/{session}"),
+                Body::empty(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{document}");
+        if matches!(
+            document["result"]["attachment"].as_str(),
+            Some("attached" | "consumed" | "uncertain")
+        ) {
+            claimed.push((
+                session,
+                document["result"]["exec"]
+                    .as_str()
+                    .expect("session exec id")
+                    .to_owned(),
+            ));
+        }
+    }
+    assert!(
+        !claimed.is_empty(),
+        "every round aborted before the handler consumed its attachment claim, so this case \
+         proved nothing about containment; the abort must land after the claim"
+    );
+
+    for (session, exec) in &claimed {
+        let observed = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                let (status, observed) = harness
+                    .call(Method::GET, &format!("/v1/execs/{exec}"), Body::empty())
+                    .await;
+                assert_eq!(status, StatusCode::OK);
+                if observed["result"]["state"] == "cancelled" {
+                    return observed;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "session {session} spent its attachment claim to an aborted connection and is \
+                 still running: neither hand-off out of the attach handler contained it, so the \
+                 process runs unattached until its lease or timeout ends it"
+            )
+        });
+        assert_eq!(observed["result"]["exit"]["signal"], "KILL", "{observed}");
+        let (status, document) = harness
+            .call(
+                Method::GET,
+                &format!("/v1/sessions/{session}"),
+                Body::empty(),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{document}");
+        assert_eq!(document["result"]["state"], "cancelled", "{document}");
+    }
 }
