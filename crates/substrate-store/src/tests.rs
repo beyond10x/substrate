@@ -19,7 +19,7 @@ use crate::{
     ExpiredLease, LeaseClock, LeaseResource, NewLease, NewOperation, NewSessionAuthority,
     OperationCapacity, Reservation, Scope, SessionAttachmentClaim, SessionAuthorityLookup,
     SessionAuthorityMint, SnapshotReadError, Store, StoreConfig, StoreError, StoredExec,
-    WorkspaceAdmission, WorkspaceDestroyReservation, WorkspaceObservationWrite,
+    WorkspaceAdmission, WorkspaceDestroyReservation, WorkspaceExecState, WorkspaceObservationWrite,
 };
 
 #[derive(Default)]
@@ -3819,4 +3819,93 @@ fn put_exec_reports_lease_inheritance_as_a_transformation() {
     };
     assert_eq!(authoritative.resource.state, ExecState::Running);
     assert_eq!(authoritative.resource.lease, accepted.resource.lease);
+}
+
+/// The story's acceptance is a lease expiry **over the maximum exec count** whose load is bounded
+/// by exec metadata, "proven by a store query that returns `(id, state)` and a test asserting no
+/// output column is read on that path".
+///
+/// The unit's two guards assert that at 3 rows (the column-poison case) and at 64 rows (the
+/// resident-growth case). `substrate_wire::MAX_CURRENT_EXECS` is 2048, and it is a per-subject row
+/// cap on the `execs` table (`operations.rs::resource_partition_at_capacity`), so 2048 rows in one
+/// workspace is the count the acceptance names. This case asserts the acceptance at that count by
+/// the deterministic half of the proof — a value in every output column that the blob decoder
+/// refuses — and pins the scope predicates of the rewritten query at the same time: a
+/// physically-absent row, another workspace and another subject are all outside the sweep.
+#[test]
+fn workspace_lease_cleanup_reads_no_output_column_at_the_maximum_exec_count() {
+    let workspace_execs = usize::try_from(substrate_wire::MAX_CURRENT_EXECS).expect("exec cap");
+    let store = Store::open(":memory:").expect("state store");
+    let scope = scope("local:1000");
+    let mut expected = Vec::with_capacity(workspace_execs);
+    for index in 0..workspace_execs {
+        let id = format!("exec_{index:04}");
+        let state = if index % 2 == 0 {
+            ExecState::Running
+        } else {
+            ExecState::Exited
+        };
+        let mut resource = exec(&id, "ws_expiring", state);
+        resource.stdout = b"out".to_vec();
+        resource.stderr = b"err".to_vec();
+        seed_exec(&store, &scope, &resource);
+        expected.push(WorkspaceExecState { id, state });
+    }
+    // Outside the sweep, and each for a different predicate of the query.
+    seed_exec(
+        &store,
+        &scope,
+        &exec("exec_absent", "ws_expiring", ExecState::Running),
+    );
+    seed_exec(
+        &store,
+        &scope,
+        &exec("exec_other_workspace", "ws_other", ExecState::Running),
+    );
+    seed_exec(
+        &store,
+        &Scope {
+            deployment: "dep_test".to_owned(),
+            subject: "local:1001".to_owned(),
+        },
+        &exec("exec_other_subject", "ws_expiring", ExecState::Running),
+    );
+    seed_exec(
+        &store,
+        &Scope {
+            deployment: "dep_other".to_owned(),
+            subject: "local:1000".to_owned(),
+        },
+        &exec("exec_other_deployment", "ws_expiring", ExecState::Running),
+    );
+    store
+        .connection
+        .lock()
+        .execute(
+            "UPDATE execs SET physically_absent = 1 WHERE id = ?1",
+            params!["exec_absent"],
+        )
+        .expect("prove one row physically absent");
+
+    // Every output column now holds a value the blob decoder rejects, so any read of one on this
+    // path is an observable failure rather than a silent success.
+    store
+        .connection
+        .lock()
+        .execute(
+            "UPDATE execs SET stdout = ?1, stderr = ?1",
+            params!["not-a-blob"],
+        )
+        .expect("poison the output columns");
+    assert!(
+        store.exec(&scope, "exec_0000").is_err(),
+        "the poison must be live: a whole-exec read of the same row has to fail"
+    );
+
+    let states = store
+        .execs_for_workspace(&scope, "ws_expiring")
+        .expect("workspace lease cleanup reads no output column at the maximum exec count");
+
+    assert_eq!(states.len(), workspace_execs);
+    assert_eq!(states, expected);
 }
