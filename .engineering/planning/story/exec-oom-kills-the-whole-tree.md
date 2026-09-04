@@ -2,7 +2,7 @@
 format: aep.planning-md/1
 id: story:exec-oom-kills-the-whole-tree
 kind: story
-status: draft
+status: implemented
 title: An exec OOM kills the whole cgroup and is named on the observation regardless of measurements
 summary: No memory.oom.group=1; exec.memory-limit recorded only when measurements requested (process.rs:2848-2860).
 tags:
@@ -14,7 +14,9 @@ scope:
   path: crates/substrate-host/src/probe.rs
 - confidence: cited
   path: crates/substrate-host/src/process.rs
-revision: 6
+- confidence: cited
+  path: crates/substrate-host/src/seccomp.rs
+revision: 10
 ---
 # Story: An exec OOM kills the whole tree
 

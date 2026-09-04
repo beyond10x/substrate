@@ -15,6 +15,8 @@ use substrate_wire::{
     MetricsStreamFrame, MetricsStreamQuery, Success,
 };
 
+use crate::runtime::TransportPermit;
+
 use super::events::{
     ClientFrame, ControlRate, EventStreamPermit, classify_client_frame,
     enforce_event_stream_lifetime, enforce_stream_send_deadline, send_protocol_close,
@@ -130,6 +132,7 @@ pub(super) async fn metrics_get(
 pub(super) async fn metrics_stream(
     State(app): State<Arc<App>>,
     Extension(identity): Extension<Identity>,
+    transport: Option<Extension<TransportPermit>>,
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
     ws: WebSocketUpgrade,
@@ -158,6 +161,12 @@ pub(super) async fn metrics_stream(
     match load_exec_usage(&app, &scope, &query.exec_id).await {
         Ok(_) => {
             let policy = app.metrics_stream_policy;
+            // The transport admission this connection was accepted under, moved into the upgraded
+            // task below. hyper resolves an upgradeable connection future when it hands the socket
+            // over, so an admission left with the connection stops counting a socket that is still
+            // serving. Absent when no listener published one — the crate's own tests drive this
+            // route without a transport.
+            let transport_admission = transport.map(|Extension(permit)| permit);
             ws.read_buffer_size(policy.max_input_bytes)
                 .write_buffer_size(policy.write_buffer_bytes)
                 .max_frame_size(policy.max_input_bytes)
@@ -168,6 +177,8 @@ pub(super) async fn metrics_stream(
                         .saturating_add(policy.write_buffer_bytes),
                 )
                 .on_upgrade(move |socket| async move {
+                    // Held for as long as this socket serves, so the transport budget counts it.
+                    let _transport_admission = transport_admission;
                     let session =
                         run_stream(app, scope, query.exec_id, policy, stream_permit, socket);
                     let _completed = enforce_event_stream_lifetime(policy.lifetime, session).await;
@@ -431,6 +442,7 @@ mod tests {
         METRICS_STREAM_CAPACITY, METRICS_STREAM_CONTROL_RATE_CLOSE, METRICS_STREAM_DATA_CLOSE,
         MetricsStreamPolicy,
     };
+    use crate::runtime::{TcpConnectionLimits, admitted_service};
     use crate::{App, Identity, router};
 
     const SUBJECT: &str = "local:1000";
@@ -597,17 +609,31 @@ mod tests {
                 .await
                 .expect("bind metrics stream test server");
             let address = listener.local_addr().expect("test server address");
+            // Admitted like the production TCP listener, because a fixture that serves an
+            // upgradeable connection outside a transport budget does not resemble the thing it
+            // stands in for: the route under test reads its admission off the request, and a
+            // harness that published none would exercise the absent half of that and call it the
+            // served one.
+            let limits = TcpConnectionLimits::production();
             let server = tokio::spawn(async move {
                 loop {
-                    let Ok((stream, _peer)) = listener.accept().await else {
+                    let Ok((stream, peer)) = listener.accept().await else {
                         return;
+                    };
+                    let Some(permit) = limits.acquire(peer.ip()) else {
+                        // The production refusal, in the shape `accept_authorized` gives it: the
+                        // stream is dropped unserved and the loop continues. It is unreached here
+                        // — the suite's widest case holds five of this source's sixteen slots —
+                        // and a harness that made it louder would be inventing a vocabulary no
+                        // production reader shares.
+                        continue;
                     };
                     let service = router(Arc::clone(&app)).layer(Extension(identity()));
                     tokio::spawn(async move {
                         let connection = http1::Builder::new()
                             .serve_connection(
                                 TokioIo::new(stream),
-                                TowerToHyperService::new(service),
+                                TowerToHyperService::new(admitted_service(&permit, service)),
                             )
                             .with_upgrades();
                         let _result = connection.await;
@@ -1256,6 +1282,199 @@ mod tests {
         assert!(
             checked >= 3,
             "the events, sessions and metrics upgrades must all be read, saw {checked}"
+        );
+    }
+
+    /// The statement every upgraded task holds the connection's transport admission with.
+    ///
+    /// One spelling for one thing, so the class check below is a whole-crate rule rather than a
+    /// list of routes somebody has to remember to extend — and the whole binding rather than the
+    /// identifier, because matching the identifier alone passed `drop(transport_admission);`,
+    /// which releases the slot at the handshake and is exactly the defect. Matched against the
+    /// argument list with its whitespace normalised, so a wrapped line is not a failure.
+    const TRANSPORT_ADMISSION: &str =
+        concat!("let _transport", "_admission = transport", "_admission;");
+
+    /// Finding 4's class, not its instance: an upgraded socket that serves outside the transport
+    /// budget that let its connection in.
+    ///
+    /// hyper resolves an upgradeable connection future when it hands the socket to the upgrade
+    /// (`crates/substrate-daemon/src/runtime.rs`, the three `.with_upgrades()` listeners), so an
+    /// admission left with the connection is released at the handshake and the socket that is
+    /// still serving stops being counted — 128 global and 32 per uid on unix, 128 and 16 per
+    /// source over TCP and TLS. The remedy is one line in every upgraded task: move the
+    /// connection's `TransportPermit` in, so the slot returns when the socket ends rather than
+    /// when the handshake succeeds.
+    ///
+    /// The instance was the per-uid budget, observed through the unix listener by
+    /// `runtime::tests::an_upgraded_websocket_keeps_its_per_uid_connection_permit`. This reads
+    /// every upgrade the crate serves, on the same recursive walk of `src/` and the same masked
+    /// source as its sibling above, so a fourth route cannot be added without one.
+    ///
+    /// **What it checks is a spelling convention, and that cuts both ways.** It requires the
+    /// statement `let _transport_admission = transport_admission;` inside the `.on_upgrade(`
+    /// argument list, and it is worth being exact about what that does and does not establish:
+    ///
+    /// 1. It proves the admission is *bound for the task's life* — a binding, not a mention, so
+    ///    `drop(transport_admission);` fails it. That matters most where no case can catch the
+    ///    difference: `app/sessions.rs`'s attach route holds the admission on a path no in-crate
+    ///    admitted listener drives, so this check is the whole of what stands behind that line.
+    /// 2. It does not prove the value bound is a live permit. What observes one holding a slot end
+    ///    to end is `runtime::tests::an_upgraded_websocket_keeps_its_per_uid_connection_permit` on
+    ///    the unix listener and `app::tests::upgraded_transport_slot` on a TCP one, both over the
+    ///    event stream; a route added without a partner case is counted on paper only.
+    /// 3. It **fails correct code** that holds the admission some other way — under another name,
+    ///    or inside a tuple or struct built above the chain. The convention is the check: one
+    ///    statement for the thing, spelled inside the task that holds it. A route with a reason to
+    ///    hold it differently has a reason to change this check with it, and that is the
+    ///    conversation this failure buys.
+    ///
+    /// A structural check — the value's *type* traced into the task — needs a parser this crate
+    /// does not have and would not gain for one rule.
+    #[test]
+    fn every_websocket_upgrade_keeps_its_transport_admission() {
+        let mut checked = 0_usize;
+        for path in crate_sources() {
+            let file = path.display().to_string();
+            let source = std::fs::read_to_string(&path).expect("crate source");
+            let code = masked(&source, &file);
+            let mut from = 0;
+            while let Some(offset) = code[from..].find(UPGRADE) {
+                let index = from + offset;
+                let open = index + UPGRADE.len() - 1;
+                let close = closing_bracket(code.as_bytes(), open).unwrap_or_else(|| {
+                    panic!("{file}: the upgrade at byte {index} has no argument list")
+                });
+                let held = code[open..=close]
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                assert!(
+                    held.contains(TRANSPORT_ADMISSION),
+                    "{file}: the upgraded task at byte {index} does not take the connection's \
+                     transport admission with it, so the transport budget stops counting the \
+                     socket at the handshake"
+                );
+                checked += 1;
+                from = index + UPGRADE.len();
+            }
+        }
+        assert!(
+            checked >= 3,
+            "the events, sessions and metrics upgrades must all be read, saw {checked}"
+        );
+    }
+
+    /// The other half of finding 4's class: a listener that serves an upgradeable connection
+    /// without publishing the admission that connection was accepted under.
+    ///
+    /// The sibling above reads every upgraded task and asserts it keeps the admission. It cannot
+    /// see whether one was ever handed over, and an absent one is silent: the route extracts
+    /// `Option<Extension<TransportPermit>>`, because the crate's own tests drive these routes
+    /// without a transport, so a listener that dropped the layer would go on serving and simply
+    /// stop counting. Invariant 3 does not allow a guarantee to go missing quietly, and this is
+    /// what makes it loud — at `cargo test`, for the two listeners no case drives end to end.
+    ///
+    /// It reads each `.with_upgrades()` in `src/`, walks back to the `.serve_connection(` it is
+    /// chained onto, and asserts that call serves `admitted_service(…)`
+    /// (`crates/substrate-daemon/src/runtime.rs`) rather than a bare service. Today that set is
+    /// six, and the check asserts the whole of it *by file* rather than as a floor on the total:
+    /// four in `runtime.rs` — the unix, TCP and TLS listeners and the unix fixture in its own
+    /// tests — one in `app/metrics.rs`, the metrics stream harness below, and one in
+    /// `app/tests.rs`, the admitted TCP listener in `upgraded_transport_slot`. A floor is what
+    /// this had, and a floor of three over a set of six is satisfied by reading the three fixtures
+    /// and no production listener at all.
+    ///
+    /// The behavioural partners are
+    /// `runtime::tests::an_upgraded_websocket_keeps_its_per_uid_connection_permit` on the unix
+    /// listener and `app::tests::upgraded_transport_slot` on a production-shaped TCP one, and both
+    /// drive the event stream. **The TLS listener has neither, and neither does any route but the
+    /// event stream**: the harness below upgrades the metrics stream through an admitted listener
+    /// but observes no slot, and `app/sessions.rs`'s attach route is driven through an admitted
+    /// listener by nothing at all. What stands behind those is this check and the sibling above —
+    /// which is why the sibling matches the whole hold statement rather than a mention of it.
+    ///
+    /// **`src/` is the whole of its reach, and three listeners live outside it.**
+    /// `tests/websocket.rs:110-111`, `tests/metrics_stream_adversary.rs:94-95` and
+    /// `tests/pipe_session.rs:662-664` each serve the same production `router` with
+    /// `.with_upgrades()` and publish no admission, and nothing here reads them. The reason is not
+    /// that they matter less — the argument for admitting the harness below applies to them word
+    /// for word — but that `TransportPermit`, `TcpConnectionLimits` and `admitted_service` are
+    /// `pub(crate)`, so an integration test cannot reach them: including those three means making
+    /// the transport's admission surface public API for the benefit of tests, on a crate whose
+    /// library deliberately exposes configuration and nothing else. `upgraded_transport_slot`
+    /// narrows that gap rather than closing it: it drives an admitted listener over the same
+    /// router, but over one route of the three those files drive bare — the event stream —
+    /// and `tests/pipe_session.rs`'s attach route has no in-crate admitted listener at all.
+    /// Closing it means either that public surface, or a pipe-session driver double inside the
+    /// crate. Widen this walk on the day one of those exists for a reason of its own, and not
+    /// before.
+    ///
+    /// **One limit, as a rule.** It requires the two calls to be adjacent on the chain, so a step
+    /// inserted between them fails it. That is the sibling's lesson taken deliberately the other
+    /// way: this check reports what it read, and a chain it cannot follow is a chain a reader
+    /// cannot follow either.
+    #[test]
+    fn every_upgradeable_connection_publishes_its_transport_admission() {
+        const UPGRADES: &str = concat!(".with_", "upgrades()");
+        const SERVE: &str = concat!(".serve_", "connection(");
+        const ADMITTED: &str = concat!("admitted_", "service(");
+        // The enumeration this docstring gives, as the set the walk must read — by file, because
+        // a floor on the total is satisfied by the three fixtures alone, and it is the three
+        // production listeners in `runtime.rs` that nothing else holds. A legitimate change to
+        // the set changes this map and the sentence above together.
+        let expected = std::collections::BTreeMap::from([
+            ("app/metrics.rs", 1_usize),
+            ("app/tests.rs", 1),
+            ("runtime.rs", 4),
+        ]);
+        let source_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut read = std::collections::BTreeMap::<&str, usize>::new();
+        let sources = crate_sources();
+        let relative = sources
+            .iter()
+            .map(|path| {
+                path.strip_prefix(&source_root)
+                    .expect("every crate source is under src/")
+                    .to_str()
+                    .expect("UTF-8 crate source path")
+            })
+            .collect::<Vec<_>>();
+        for (path, name) in sources.iter().zip(relative) {
+            let file = path.display().to_string();
+            let source = std::fs::read_to_string(path).expect("crate source");
+            let code = masked(&source, &file);
+            let mut from = 0;
+            while let Some(offset) = code[from..].find(UPGRADES) {
+                let index = from + offset;
+                let served = code[..index]
+                    .rfind(SERVE)
+                    .unwrap_or_else(|| panic!("{file}: the upgradeable connection at byte {index} is not served by this crate"));
+                let open = served + SERVE.len() - 1;
+                let close = closing_bracket(code.as_bytes(), open).unwrap_or_else(|| {
+                    panic!("{file}: the connection served at byte {served} has no argument list")
+                });
+                assert!(
+                    close < index && code[close + 1..index].trim().is_empty(),
+                    "{file}: the upgradeable connection at byte {index} is not chained onto the \
+                     connection served at byte {served}; this check reads the two as one chain"
+                );
+                assert!(
+                    code[open..=close].contains(ADMITTED),
+                    "{file}: the listener at byte {served} serves an upgradeable connection \
+                     without publishing the transport admission it was accepted under, so nothing \
+                     an upgrade produces can keep it and the budget stops counting at the handshake"
+                );
+                *read.entry(name).or_default() += 1;
+                from = index + UPGRADES.len();
+            }
+        }
+        assert_eq!(
+            read, expected,
+            "the upgradeable listeners under src/ are not the ones this check documents; a walk \
+             that read only the fixtures would satisfy a floor on the total while reading no \
+             production listener at all, so the set is asserted by file. If the change is \
+             deliberate, move the enumeration in this docstring with it"
         );
     }
 

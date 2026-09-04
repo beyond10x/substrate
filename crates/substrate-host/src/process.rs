@@ -2262,6 +2262,11 @@ async fn run_child(
         Ok::<_, DriverError>(usage)
     });
     let metrics_failed = terminal_usage.as_ref().is_some_and(Result::is_err);
+    // The same kernel counter for the run that asked for no measurements, read here because
+    // `reconcile_cgroup` below removes the directory it lives in. An unreadable counter is left
+    // at zero rather than raised into `exec.metrics-unavailable`: this run requested no counters,
+    // so their absence is not a broken promise, and the measured path above still reports its own.
+    let unmeasured_oom_kills = u64::from(!measured) * cgroup.memory_oom_kills().unwrap_or(0);
     // Quiesce the whole run tree after the terminal counter sample. The shared mapping remains
     // owned by `aperture`, so killing and reaping the relay cannot invalidate it and no relay can
     // increment a counter after the observation is built.
@@ -2308,13 +2313,16 @@ async fn run_child(
     record_aperture(&mut observation, applied_aperture, aperture_exhausted);
     record_pipe_backpressure(&mut observation, &execution);
     record_terminal_output_bound(&mut observation, output_exhausted);
-    let memory_exhausted = matches!(
-        observation.resource.usage,
-        Some(substrate_wire::ExecUsage::Observed(ResourceUsage {
-            memory_oom_kills: 1..,
-            ..
-        }))
-    );
+    // Either source, because the client's measurement set decides what is *published*, never
+    // whether the execution's own ending is named (review finding 8).
+    let memory_exhausted = unmeasured_oom_kills > 0
+        || matches!(
+            observation.resource.usage,
+            Some(substrate_wire::ExecUsage::Observed(ResourceUsage {
+                memory_oom_kills: 1..,
+                ..
+            }))
+        );
     record_resource_bound(
         &mut observation,
         timed_out,
@@ -2947,7 +2955,26 @@ impl Cgroup {
             write_control(&path, "pids.max", &input.limits.processes.to_string())?;
             write_control(&path, "memory.max", &input.limits.memory_bytes.to_string())?;
             write_control(&path, "memory.swap.max", "0")?;
+            // The bound ends the **tree**, not the one process the kernel picked as its victim.
+            // Without this the other processes in the cgroup run on past their own memory
+            // ceiling in a partly-killed state, which is the silent degradation invariant 3
+            // forbids and not the whole-tree semantics the safety envelope names (`AGENTS.md`
+            // § Safety envelope). A kernel or a delegation root that cannot take this write
+            // fails the whole `create` into a named `exec.cgroup-*` refusal, and `probe_cgroup`
+            // withholds every exec fact ahead of it, so an exec is never served in a cgroup
+            // quietly missing it.
+            write_control(&path, "memory.oom.group", "1")?;
             let period = 100_000_u64;
+            // The quota never exceeds one period, so an exec is clamped to one CPU however many
+            // `cpu_millis` it declared over however short a `timeout_ms`.
+            //
+            // **Deliberately not stated on the capability fact**, and this is the third round
+            // that has asked. `exec.cgroup-limits` is `{processes, memory, cpu}` with
+            // `additionalProperties: false` in every released bundle through
+            // `contracts/substrate-wire/0.15.0/schemas/capability.json:38-56`; a client-visible
+            // clamp would be a new property there, so publishing it is a successor bundle plus
+            // the ADR invariant 8 requires, never an edit to a frozen one (invariant 6). It is
+            // its own story, and the clamp itself is unchanged here.
             let quota = input
                 .limits
                 .cpu_millis
@@ -3037,6 +3064,15 @@ impl Cgroup {
             })
     }
 
+    /// The kernel's own count of OOM kills in this cgroup, read on its own.
+    ///
+    /// `resource_usage` reads the same counter, but only for a run that asked for
+    /// `measurements`. An OOM is a termination fact and not a measurement, so the refusal it
+    /// earns cannot depend on what the client asked to observe (invariant 3).
+    fn memory_oom_kills(&self) -> Result<u64, DriverError> {
+        read_named_counter(&self.path.join("memory.events"), "oom_kill")
+    }
+
     fn resource_usage(
         &self,
         complete: bool,
@@ -3047,7 +3083,7 @@ impl Cgroup {
         let processes_current = read_decimal_counter(&self.path.join("pids.current"))?;
         let processes_peak = read_decimal_counter(&self.path.join("pids.peak"))?;
         let process_limit_hits = read_named_counter(&self.path.join("pids.events"), "max")?;
-        let memory_oom_kills = read_named_counter(&self.path.join("memory.events"), "oom_kill")?;
+        let memory_oom_kills = self.memory_oom_kills()?;
         let (io_read_bytes, io_write_bytes) = read_io_counters(&self.path.join("io.stat"))?;
         Ok(ResourceUsage {
             complete,
@@ -4282,6 +4318,462 @@ mod tests {
             "the refusal must come from unshare(2) itself, not from a failed exec: {}",
             String::from_utf8_lossy(&nested.stderr)
         );
+    }
+
+    /// The published capability an admitted exec stands on, for the delegated cases below.
+    ///
+    /// One builder rather than a copy per case: every field here is a floor the driver checks
+    /// before it dispatches, so a case that quietly published a different set would be admitting
+    /// a different sandbox than the one under test.
+    fn confined_exec_capability(snapshot: &str) -> CapabilitySnapshot {
+        CapabilitySnapshot {
+            snapshot: snapshot.to_owned(),
+            driver: HostDriverKind::Host,
+            driver_version: "test".to_owned(),
+            config_generation: 7,
+            probed_at: chrono::Utc::now(),
+            valid_until: None,
+            facts: CapabilityFacts {
+                exec_argv_only: Some(true),
+                exec_namespaces: Some(NamespaceFacts {
+                    user: true,
+                    mount: true,
+                    pid: true,
+                    ipc: true,
+                    uts: true,
+                    network: true,
+                }),
+                exec_no_egress: Some(true),
+                exec_cgroup_limits: Some(CgroupLimitFacts {
+                    processes: true,
+                    memory: true,
+                    cpu: true,
+                }),
+                exec_cgroup_kill: Some(true),
+                exec_output_limit_bytes: Some(65_536),
+                ..CapabilityFacts::default()
+            },
+        }
+    }
+
+    /// The acceptance of `story:seccomp-denies-af-vsock`: `socket(AF_VSOCK, SOCK_STREAM, 0)`
+    /// inside an admitted exec fails with `EACCES`.
+    ///
+    /// Review finding 7 was marked *inferred; not tested*, so this case is the measurement and
+    /// not an illustration of one. `--unshare-net` gives the child an empty network namespace and
+    /// confines every family that lives in one; vsock does not live in one. On a virtual-machine
+    /// host — which the observed development nodes are (`STATUS.md` § Current state) — a CID
+    /// therefore reaches the hypervisor side from inside a sandbox whose network namespace is
+    /// empty. Measured on this host before the change: `socket(AF_VSOCK, SOCK_STREAM, 0)` in an
+    /// admitted exec **succeeded**, and socat went on to report a `connect(2)` failure.
+    ///
+    /// Two execs and not one, for the reason the nested-user-namespace case above gives: "the
+    /// command failed" is also what an absent binary and a broken harness look like. The first
+    /// proves `/usr/bin/socat` runs inside this sandbox at all; the second differs from it only
+    /// in what it is asked to open, and must fail in `socket(2)` itself — socat names the family,
+    /// the type and the errno there, so a `connect(2)` line in its place is a socket this profile
+    /// let through.
+    ///
+    /// Delegated only. Without `SUBSTRATE_VECTORS_CGROUP_ROOT` naming a cgroup v2 subtree this
+    /// process is inside, the case is **absent, never reported as passed** (invariant 3).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_confined_process_cannot_open_an_af_vsock_socket() {
+        let Some(delegated) = delegated_cgroup_root("vsock") else {
+            return;
+        };
+        // Socat and not netcat, for `probe_bubblewrap`'s own recorded reason: its address form
+        // names the socket family, so a command-line refusal cannot be mistaken for the seccomp
+        // refusal this case measures. Absent where it is not installed.
+        if !std::path::Path::new("/usr/bin/socat").is_file() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("ws_test");
+        std::fs::create_dir(&workspace).unwrap();
+        let snapshot = format!("sha256:{}", "7".repeat(64));
+        let mut config = HostConfig::minimum(root.path());
+        config.cgroup_root = Some(delegated);
+        let runtime =
+            ProcessRuntime::new(config, confined_exec_capability(&snapshot)).expect("runtime");
+
+        let present = waited_exec(
+            &runtime,
+            &workspace,
+            &snapshot,
+            "ex_vsock_present",
+            &["/usr/bin/socat", "-V"],
+        )
+        .await;
+        assert_eq!(
+            present
+                .resource
+                .exit
+                .expect("a waited exec reports its exit")
+                .code,
+            Some(0),
+            "the case needs /usr/bin/socat runnable inside the sandbox: {}",
+            String::from_utf8_lossy(&present.stderr)
+        );
+
+        let vsock = waited_exec(
+            &runtime,
+            &workspace,
+            &snapshot,
+            "ex_vsock_denied",
+            &["/usr/bin/socat", "-u", "/dev/null", "VSOCK-CONNECT:2:1234"],
+        )
+        .await;
+        let stderr = String::from_utf8_lossy(&vsock.stderr).into_owned();
+        assert!(
+            stderr.contains("socket(40, 1, 0): Permission denied"),
+            "a confined process opened an AF_VSOCK socket; no network namespace confines vsock, \
+             so on a virtual-machine host that socket reaches the hypervisor side: {stderr}"
+        );
+    }
+
+    /// **A confined exec cannot reach the host's kernel module table through `AF_ALG`** —
+    /// asserted on the refusal itself, not on a clean `/proc/modules` diff.
+    ///
+    /// The adversary's case for this finding measures the host module table before and after. That
+    /// is the right instrument to *discover* the channel and the wrong one to *hold it closed*:
+    /// `request_module` is idempotent per boot, so once anything has loaded the candidate modules
+    /// the diff is empty and the case passes with the family still permitted. It did exactly that
+    /// here — it ran green against the unfixed profile on this host, because the demonstration
+    /// that found the defect had already loaded every module it looks for, and an unprivileged
+    /// process cannot unload them to reset it. A case that can only fail once is not a check.
+    ///
+    /// So the standing assertion is the named refusal: `socket(AF_ALG, SOCK_SEQPACKET)` inside an
+    /// admitted exec answers `EACCES`, on any host, whatever is already resident. The module diff
+    /// is kept as a second assertion because it costs one file read and is real evidence on a host
+    /// where the candidates are still absent.
+    ///
+    /// What the channel was, measured before the family was denied: a confined child bound
+    /// `AF_ALG` algorithms and the kernel loaded `aegis128`, `aegis128_aesni`,
+    /// `chacha20poly1305`, `crypto_null`, `geniv`, `keywrap` and `seqiv` into the host's single
+    /// global module table with its own privilege — attacker-chosen kernel code, resident after
+    /// the sandbox exited, and read back by a mutually-isolated sibling sandbox from the shared,
+    /// un-namespaced `/proc/modules`.
+    ///
+    /// Delegated only, and gated on `/usr/bin/python3`. Absent otherwise, never reported as
+    /// passed (invariant 3).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_confined_exec_cannot_autoload_host_kernel_modules_through_af_alg() {
+        let Some(delegated) = delegated_cgroup_root("alg-modules") else {
+            return;
+        };
+        if !std::path::Path::new("/usr/bin/python3").is_file() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("ws_test");
+        std::fs::create_dir(&workspace).unwrap();
+        let snapshot = format!("sha256:{}", "7".repeat(64));
+        let mut config = HostConfig::minimum(root.path());
+        config.cgroup_root = Some(delegated);
+        let runtime =
+            ProcessRuntime::new(config, confined_exec_capability(&snapshot)).expect("runtime");
+
+        let before = host_modules();
+        // Opens the family and, if that succeeds, binds an algorithm — because opening alone is
+        // what the profile refuses, and binding is what would reach the module table.
+        let probe = concat!(
+            "import ctypes,socket\n",
+            "L=ctypes.CDLL('libc.so.6',use_errno=True)\n",
+            "ctypes.set_errno(0)\n",
+            "fd=L.socket(38,socket.SOCK_SEQPACKET,0)\n",
+            "e=ctypes.get_errno()\n",
+            "if fd<0: print('ALG-ERRNO',e)\n",
+            "else:\n",
+            " L.close(fd)\n",
+            " s=socket.socket(socket.AF_ALG,socket.SOCK_SEQPACKET,0)\n",
+            " ok=[]\n",
+            " for n in ('aegis128','rfc7539(chacha20,poly1305)','kw(aes)','digest_null'):\n",
+            "  try: s.bind(('aead' if '(' in n or n=='aegis128' else 'hash',n)); ok.append(n)\n",
+            "  except OSError: pass\n",
+            " print('ALG-OPENED',' '.join(ok))\n",
+        );
+        let observed = waited_exec(
+            &runtime,
+            &workspace,
+            &snapshot,
+            "ex_alg_modules",
+            &["/usr/bin/python3", "-c", probe],
+        )
+        .await;
+        let stdout = String::from_utf8_lossy(&observed.stdout).into_owned();
+        assert!(
+            !stdout.contains("ALG-OPENED"),
+            "a confined exec opened an AF_ALG socket, so it can name an algorithm and have the \
+             host kernel load the implementation into its global module table: {stdout:?}"
+        );
+        assert!(
+            stdout.contains(&format!("ALG-ERRNO {}", libc::EACCES)),
+            "AF_ALG must be refused by name with EACCES — the named refusal invariant 3 requires \
+             — and not by whatever else the kernel might answer: {stdout:?}"
+        );
+        let after = host_modules();
+        let appeared: Vec<&String> = after.difference(&before).collect();
+        assert!(
+            appeared.is_empty(),
+            "the exec left new host-global kernel modules {appeared:?} behind; /proc/modules is \
+             not namespaced, so every sibling sandbox observes them"
+        );
+    }
+
+    /// The host's loaded kernel module names, from the global, un-namespaced `/proc/modules`.
+    ///
+    /// The set a confined exec must not be able to grow. Read on the host side deliberately: the
+    /// claim is about what the sandbox left behind, so it is observed from outside the sandbox.
+    fn host_modules() -> std::collections::BTreeSet<String> {
+        std::fs::read_to_string("/proc/modules")
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| line.split_whitespace().next())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// **No socket family opens inside a real admitted exec without a recorded decision.**
+    ///
+    /// This is the check the round that shipped `FAMILY_POLICY` did not have, and the reason an
+    /// adversary rather than the gate found `AF_QIPCRTR`. That table was a shortlist written from
+    /// reading: it covered four families, said it took no position on the other forty, and named
+    /// the wrong one as the next to examine. A shortlist cannot be made trustworthy by being
+    /// longer — it has to be closed. This closes it: the enumeration runs *inside the sandbox*,
+    /// on every delegated run, and a family that opens there without a row is red.
+    ///
+    /// It is the class check and not the instance check, so it keeps working for a family nobody
+    /// has heard of yet: a kernel upgrade, a module loaded on a production node, a new
+    /// `AF_*` — any of them turns up here as a named failure rather than as the next finding.
+    ///
+    /// The denied half is asserted too, which is what makes the two halves one claim: every
+    /// family the survey refuses must be *absent* from what opened, measured through the exec
+    /// path a client actually reaches rather than in a forked child of the test process.
+    ///
+    /// Delegated only, and gated on `/usr/bin/python3` inside the sandbox. Without either the
+    /// case is **absent, never reported as passed** (invariant 3).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn no_socket_family_opens_inside_a_confined_exec_without_a_recorded_decision() {
+        let Some(delegated) = delegated_cgroup_root("family-survey") else {
+            return;
+        };
+        if !std::path::Path::new("/usr/bin/python3").is_file() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("ws_test");
+        std::fs::create_dir(&workspace).unwrap();
+        let snapshot = format!("sha256:{}", "7".repeat(64));
+        let mut config = HostConfig::minimum(root.path());
+        config.cgroup_root = Some(delegated);
+        let runtime =
+            ProcessRuntime::new(config, confined_exec_capability(&snapshot)).expect("runtime");
+
+        // Every family number the kernel has assigned, against **every** socket type, reported
+        // as `FAMILY <af> <type>` for each pair that opened. `ctypes` and not the `socket` module
+        // because this must report what the kernel answered and not what Python knows how to
+        // address. One-space indentation and explicit newlines: the body crosses an argv, so it
+        // carries no Rust line escape whose whitespace could survive or not survive.
+        //
+        // **All seven types**, not the four a socket is usually made with. `SOCK_RDM(4)`,
+        // `SOCK_DCCP(6)` and `SOCK_PACKET(10)` are here because a family reachable only through
+        // one of them would open inside a confined exec and never appear below — and a check
+        // whose whole value is catching a family nobody has heard of yet cannot be scoped to the
+        // types today's kernel happens to use. Nothing reaches them at present: 46 families were
+        // enumerated against all seven in-sandbox and none opens only via one of the three. This
+        // is the list literal being right rather than a repair.
+        let probe = concat!(
+            "import ctypes\n",
+            "L=ctypes.CDLL('libc.so.6',use_errno=True)\n",
+            "def o(a,t):\n",
+            " f=L.socket(a,t,0)\n",
+            " if f>=0: L.close(f)\n",
+            " return f>=0\n",
+            "print('\\n'.join('FAMILY %d %d'%(a,t) ",
+            "for a in range(0,46) for t in (1,2,3,4,5,6,10) if o(a,t)))\n",
+        );
+        let observed = waited_exec(
+            &runtime,
+            &workspace,
+            &snapshot,
+            "ex_family_survey",
+            &["/usr/bin/python3", "-c", probe],
+        )
+        .await;
+        assert_eq!(
+            observed
+                .resource
+                .exit
+                .expect("a waited exec reports its exit")
+                .code,
+            Some(0),
+            "the enumeration must run inside the sandbox: {}",
+            String::from_utf8_lossy(&observed.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&observed.stdout).into_owned();
+        let opened: std::collections::BTreeSet<libc::c_int> = stdout
+            .lines()
+            .filter_map(|line| line.strip_prefix("FAMILY "))
+            .filter_map(|rest| rest.split_whitespace().next())
+            .filter_map(|number| number.parse().ok())
+            .collect();
+        // A case that observed nothing would satisfy every claim below by measuring none of them.
+        assert!(
+            opened.contains(&libc::AF_INET),
+            "the enumeration reported no AF_INET, so it did not run: {stdout:?}"
+        );
+
+        for family in &opened {
+            let recorded = crate::seccomp::FAMILY_POLICY
+                .iter()
+                .find(|policy| policy.family == *family);
+            let Some(policy) = recorded else {
+                panic!(
+                    "socket family {family} opens inside an admitted exec and this profile has \
+                     no recorded decision about it; that silence is what let AF_QIPCRTR through. \
+                     Measure whether a network namespace confines it, then give it a row. The \
+                     whole set that opened: {opened:?}"
+                );
+            };
+            assert!(
+                !policy.denied,
+                "{} is recorded denied and still opened inside an admitted exec, so the profile \
+                 is not refusing what it says it refuses: {}",
+                policy.name, policy.reason
+            );
+        }
+        for policy in crate::seccomp::FAMILY_POLICY {
+            if !policy.denied {
+                continue;
+            }
+            assert!(
+                !opened.contains(&policy.family),
+                "{} opened inside an admitted exec; it is recorded denied because {}",
+                policy.name,
+                policy.reason
+            );
+        }
+    }
+
+    /// The marker the memory-bound cases below look for: printed by the leader only if it
+    /// outlived the kernel's kill of its child.
+    const OOM_SURVIVOR: &str = "the-tree-survived";
+
+    /// One exec whose child crosses the declared memory ceiling, run to its terminal observation.
+    ///
+    /// The child is a subshell doubling a shell variable, so the kernel's OOM victim is the child
+    /// and never the small leader waiting on it — which is the shape review finding 8 names: one
+    /// process killed and the rest of the tree carrying on. The leader prints `OOM_SURVIVOR`
+    /// after its `wait` returns, so a tree that continued says so in its own transcript rather
+    /// than being inferred from a counter.
+    ///
+    /// No measurements are requested, which is deliberate and asserted: both cases below speak
+    /// for the client that asked for none.
+    ///
+    /// Delegated only. Without `SUBSTRATE_VECTORS_CGROUP_ROOT` naming a cgroup v2 subtree this
+    /// process is inside, the caller is **absent, never reported as passed** (invariant 3).
+    async fn memory_bound_exec(lane: &str, id: &str) -> Option<ExecObservation> {
+        let delegated = delegated_cgroup_root(lane)?;
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("ws_test");
+        std::fs::create_dir(&workspace).unwrap();
+        let snapshot = format!("sha256:{}", "7".repeat(64));
+        let mut config = HostConfig::minimum(root.path());
+        config.cgroup_root = Some(delegated);
+        let runtime =
+            ProcessRuntime::new(config, confined_exec_capability(&snapshot)).expect("runtime");
+        let mut input = pty_exec_input(&snapshot);
+        input.argv = vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            format!(
+                "( grow=x; while : ; do grow=\"$grow$grow\"; done ) & wait; printf '{OOM_SURVIVOR}\\n'"
+            ),
+        ];
+        // Long enough that a tree which is never killed reaches its `printf`, and generous enough
+        // on CPU that neither bound ends this run instead: a wall-clock or CPU end would earn a
+        // different refusal and prove nothing about memory.
+        input.limits.timeout_ms = 30_000;
+        input.limits.cpu_millis = 10_000;
+        input.wait = true;
+        assert!(
+            input.measurements.is_empty(),
+            "both memory-bound cases speak for a client that asked for no measurements"
+        );
+        match runtime.start(id, &workspace, &input).await {
+            DispatchOutcome::Observed(observed) => Some(observed),
+            DispatchOutcome::NotDispatched(error)
+            | DispatchOutcome::ContainedAbsent(error)
+            | DispatchOutcome::OutcomeUnknown(error) => panic!(
+                "the delegated lane must dispatch {id}: {} {}",
+                error.code, error.message
+            ),
+        }
+    }
+
+    /// The acceptance of `story:exec-oom-kills-the-whole-tree`: an exec whose child exceeds
+    /// `memory.max` ends with **no process left in its cgroup**.
+    ///
+    /// Without `memory.oom.group=1` the kernel kills the one process it picked and every other
+    /// process in the cgroup runs on, so a confined workload survives its own memory bound in a
+    /// partly-killed state — the silent degradation invariant 3 forbids (`AGENTS.md` § Safety
+    /// envelope). Measured on this host before the fix: `oom_kill 1`, `oom_group_kill 0`, the
+    /// leader exits 0 and prints its marker.
+    ///
+    /// The leader is itself inside the exec cgroup (`Cgroup::attach_tree`), so "no process left"
+    /// is observable as the leader's own death by `SIGKILL` and not only as a missing marker.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_exec_that_crosses_its_memory_bound_leaves_no_process_in_its_cgroup() {
+        let Some(observed) = memory_bound_exec("oom-group", "ex_oom_group").await else {
+            return;
+        };
+        let transcript = String::from_utf8_lossy(&observed.stdout).into_owned();
+        assert!(
+            !transcript.contains(OOM_SURVIVOR),
+            "a process outlived the OOM that ended its sibling, so the memory bound killed one \
+             process and left the rest of the tree running: {transcript:?}"
+        );
+        let exit = observed
+            .resource
+            .exit
+            .expect("a waited exec reports its exit");
+        assert_eq!(
+            exit.signal,
+            Some(substrate_wire::Signal::Kill),
+            "the cgroup's own leader outlived the OOM, so the tree was not killed as a whole: \
+             {exit:?}"
+        );
+        assert_eq!(
+            exit.code, None,
+            "a leader killed with the tree reports no exit code of its own: {exit:?}"
+        );
+    }
+
+    /// The second clause of review finding 8: an OOM is named `exec.memory-limit` on the
+    /// observation **whether or not the client asked for `measurements`**.
+    ///
+    /// `memory_exhausted` was read out of the terminal `ResourceUsage`, which `finish` samples
+    /// only for a run that requested measurements, so the identical kernel kill reached every
+    /// other client as an ordinary exit. An OOM is a termination fact and not a measurement, and
+    /// what a client asked to observe cannot decide whether its execution's ending is named.
+    ///
+    /// Delegated only; absent without the lane, never reported as passed (invariant 3).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_oom_is_named_on_the_observation_without_measurements() {
+        let Some(observed) = memory_bound_exec("oom-unmeasured", "ex_oom_unmeasured").await else {
+            return;
+        };
+        assert!(
+            observed.resource.usage.is_none(),
+            "this case only says something if the run really asked for no measurements: {:?}",
+            observed.resource.usage
+        );
+        let refusal = observed
+            .resource
+            .refusal
+            .expect("an OOM is named on the observation with no measurements requested");
+        assert_eq!(refusal.code, "exec.memory-limit");
+        assert_eq!(refusal.class, substrate_wire::ErrorClass::Exhausted);
     }
 
     /// **The exec argv carries the posture** — asserted on the argv the driver builds.

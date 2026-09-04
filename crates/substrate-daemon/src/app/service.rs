@@ -701,11 +701,11 @@ impl App {
                 {
                     for exec in execs {
                         if matches!(
-                            exec.resource.state,
+                            exec.state,
                             ExecState::Accepted | ExecState::Running | ExecState::Unknown
                         ) {
                             match run_maintenance_driver(self.driver.signal(
-                                &exec.resource.id,
+                                &exec.id,
                                 &ExecSignalInput {
                                     signal: substrate_wire::Signal::Kill,
                                     grace_ms: 0,

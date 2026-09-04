@@ -2,7 +2,7 @@
 format: aep.planning-md/1
 id: story:upgraded-connections-keep-their-permit
 kind: story
-status: active
+status: implemented
 title: A WebSocket upgrade stays inside the transport connection budget
 summary: The connection permit lives in enforce_connection_lifetime, which hyper resolves at upgrade; upgraded sockets are uncounted (runtime.rs:596,919,1084).
 tags:
@@ -17,8 +17,12 @@ scope:
 - confidence: cited
   path: crates/substrate-daemon/src/app/sessions.rs
 - confidence: cited
+  path: crates/substrate-daemon/src/app/tests.rs
+- confidence: cited
   path: crates/substrate-daemon/src/runtime.rs
-revision: 9
+- confidence: cited
+  path: docs/design/08-phase-3-closure-invariants.md
+revision: 12
 ---
 # Story: Upgraded connections keep their permit
 
