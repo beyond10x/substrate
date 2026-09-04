@@ -1053,19 +1053,27 @@ exit 1
             2 + usize::from(socat),
         );
     }
-    /// Families the profile refuses that this probe has no instrument for, and why each is here.
+    /// Families the profile refuses that this probe has no instrument for, and why.
     ///
-    /// One entry, and it is a real gap rather than a hidden one: socat 1.8.1.3 carries address
-    /// forms for Unix and vsock and none for the Qualcomm IPC router, and the capability probe is
-    /// not the place to acquire a Python dependency. `AF_QIPCRTR` is pinned instead by
-    /// `seccomp::tests` — natively and over the x32 syscall number — and by
+    /// Real gaps, stated rather than hidden. socat 1.8.1.3 carries address forms for Unix and
+    /// vsock and for none of these eight, and the capability probe is not the place to acquire an
+    /// interpreter dependency — it runs on every snapshot and its own failure withholds every
+    /// exec fact. Each is pinned instead by `seccomp::tests`, natively and over the x32 syscall
+    /// number, and by
     /// `process.rs::no_socket_family_opens_inside_a_confined_exec_without_a_recorded_decision`,
-    /// which observes it in a real admitted exec, which is the stronger of the two vehicles.
+    /// which observes the whole denied set in a real admitted exec — the stronger of the two
+    /// vehicles, since it drives the path a client reaches.
     #[cfg(test)]
-    const FAMILIES_WITHOUT_A_PROBE_INSTRUMENT: [(libc::c_int, &str); 1] = [(
-        42,
-        "socat has no QRTR address form, and the capability probe takes no interpreter dependency",
-    )];
+    const FAMILIES_WITHOUT_A_PROBE_INSTRUMENT: [(libc::c_int, &str); 8] = [
+        (17, "AF_PACKET: no socat address form"),
+        (21, "AF_RDS: no socat address form"),
+        (24, "AF_PPPOX: no socat address form"),
+        (38, "AF_ALG: socat has no algorithm-socket address form"),
+        (41, "AF_KCM: no socat address form"),
+        (42, "AF_QIPCRTR: socat has no QRTR address form"),
+        (43, "AF_SMC: no socat address form"),
+        (45, "AF_MCTP: no socat address form"),
+    ];
 
     /// **Every family the profile refuses is either measured by this probe or recorded as one it
     /// has no instrument for.**

@@ -4431,6 +4431,108 @@ mod tests {
         );
     }
 
+    /// **A confined exec cannot reach the host's kernel module table through `AF_ALG`** —
+    /// asserted on the refusal itself, not on a clean `/proc/modules` diff.
+    ///
+    /// The adversary's case for this finding measures the host module table before and after. That
+    /// is the right instrument to *discover* the channel and the wrong one to *hold it closed*:
+    /// `request_module` is idempotent per boot, so once anything has loaded the candidate modules
+    /// the diff is empty and the case passes with the family still permitted. It did exactly that
+    /// here — it ran green against the unfixed profile on this host, because the demonstration
+    /// that found the defect had already loaded every module it looks for, and an unprivileged
+    /// process cannot unload them to reset it. A case that can only fail once is not a check.
+    ///
+    /// So the standing assertion is the named refusal: `socket(AF_ALG, SOCK_SEQPACKET)` inside an
+    /// admitted exec answers `EACCES`, on any host, whatever is already resident. The module diff
+    /// is kept as a second assertion because it costs one file read and is real evidence on a host
+    /// where the candidates are still absent.
+    ///
+    /// What the channel was, measured before the family was denied: a confined child bound
+    /// `AF_ALG` algorithms and the kernel loaded `aegis128`, `aegis128_aesni`,
+    /// `chacha20poly1305`, `crypto_null`, `geniv`, `keywrap` and `seqiv` into the host's single
+    /// global module table with its own privilege — attacker-chosen kernel code, resident after
+    /// the sandbox exited, and read back by a mutually-isolated sibling sandbox from the shared,
+    /// un-namespaced `/proc/modules`.
+    ///
+    /// Delegated only, and gated on `/usr/bin/python3`. Absent otherwise, never reported as
+    /// passed (invariant 3).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_confined_exec_cannot_autoload_host_kernel_modules_through_af_alg() {
+        let Some(delegated) = delegated_cgroup_root("alg-modules") else {
+            return;
+        };
+        if !std::path::Path::new("/usr/bin/python3").is_file() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("ws_test");
+        std::fs::create_dir(&workspace).unwrap();
+        let snapshot = format!("sha256:{}", "7".repeat(64));
+        let mut config = HostConfig::minimum(root.path());
+        config.cgroup_root = Some(delegated);
+        let runtime =
+            ProcessRuntime::new(config, confined_exec_capability(&snapshot)).expect("runtime");
+
+        let before = host_modules();
+        // Opens the family and, if that succeeds, binds an algorithm — because opening alone is
+        // what the profile refuses, and binding is what would reach the module table.
+        let probe = concat!(
+            "import ctypes,socket\n",
+            "L=ctypes.CDLL('libc.so.6',use_errno=True)\n",
+            "ctypes.set_errno(0)\n",
+            "fd=L.socket(38,socket.SOCK_SEQPACKET,0)\n",
+            "e=ctypes.get_errno()\n",
+            "if fd<0: print('ALG-ERRNO',e)\n",
+            "else:\n",
+            " L.close(fd)\n",
+            " s=socket.socket(socket.AF_ALG,socket.SOCK_SEQPACKET,0)\n",
+            " ok=[]\n",
+            " for n in ('aegis128','rfc7539(chacha20,poly1305)','kw(aes)','digest_null'):\n",
+            "  try: s.bind(('aead' if '(' in n or n=='aegis128' else 'hash',n)); ok.append(n)\n",
+            "  except OSError: pass\n",
+            " print('ALG-OPENED',' '.join(ok))\n",
+        );
+        let observed = waited_exec(
+            &runtime,
+            &workspace,
+            &snapshot,
+            "ex_alg_modules",
+            &["/usr/bin/python3", "-c", probe],
+        )
+        .await;
+        let stdout = String::from_utf8_lossy(&observed.stdout).into_owned();
+        assert!(
+            !stdout.contains("ALG-OPENED"),
+            "a confined exec opened an AF_ALG socket, so it can name an algorithm and have the \
+             host kernel load the implementation into its global module table: {stdout:?}"
+        );
+        assert!(
+            stdout.contains(&format!("ALG-ERRNO {}", libc::EACCES)),
+            "AF_ALG must be refused by name with EACCES — the named refusal invariant 3 requires \
+             — and not by whatever else the kernel might answer: {stdout:?}"
+        );
+        let after = host_modules();
+        let appeared: Vec<&String> = after.difference(&before).collect();
+        assert!(
+            appeared.is_empty(),
+            "the exec left new host-global kernel modules {appeared:?} behind; /proc/modules is \
+             not namespaced, so every sibling sandbox observes them"
+        );
+    }
+
+    /// The host's loaded kernel module names, from the global, un-namespaced `/proc/modules`.
+    ///
+    /// The set a confined exec must not be able to grow. Read on the host side deliberately: the
+    /// claim is about what the sandbox left behind, so it is observed from outside the sandbox.
+    fn host_modules() -> std::collections::BTreeSet<String> {
+        std::fs::read_to_string("/proc/modules")
+            .unwrap_or_default()
+            .lines()
+            .filter_map(|line| line.split_whitespace().next())
+            .map(str::to_owned)
+            .collect()
+    }
+
     /// **No socket family opens inside a real admitted exec without a recorded decision.**
     ///
     /// This is the check the round that shipped `FAMILY_POLICY` did not have, and the reason an
@@ -4467,11 +4569,19 @@ mod tests {
         let runtime =
             ProcessRuntime::new(config, confined_exec_capability(&snapshot)).expect("runtime");
 
-        // Every family number the kernel has assigned, against every socket type, reported as
-        // `FAMILY <af> <type>` for each pair that opened. `ctypes` and not the `socket` module
+        // Every family number the kernel has assigned, against **every** socket type, reported
+        // as `FAMILY <af> <type>` for each pair that opened. `ctypes` and not the `socket` module
         // because this must report what the kernel answered and not what Python knows how to
         // address. One-space indentation and explicit newlines: the body crosses an argv, so it
         // carries no Rust line escape whose whitespace could survive or not survive.
+        //
+        // **All seven types**, not the four a socket is usually made with. `SOCK_RDM(4)`,
+        // `SOCK_DCCP(6)` and `SOCK_PACKET(10)` are here because a family reachable only through
+        // one of them would open inside a confined exec and never appear below — and a check
+        // whose whole value is catching a family nobody has heard of yet cannot be scoped to the
+        // types today's kernel happens to use. Nothing reaches them at present: 46 families were
+        // enumerated against all seven in-sandbox and none opens only via one of the three. This
+        // is the list literal being right rather than a repair.
         let probe = concat!(
             "import ctypes\n",
             "L=ctypes.CDLL('libc.so.6',use_errno=True)\n",
@@ -4480,7 +4590,7 @@ mod tests {
             " if f>=0: L.close(f)\n",
             " return f>=0\n",
             "print('\\n'.join('FAMILY %d %d'%(a,t) ",
-            "for a in range(0,46) for t in (1,2,3,5) if o(a,t)))\n",
+            "for a in range(0,46) for t in (1,2,3,4,5,6,10) if o(a,t)))\n",
         );
         let observed = waited_exec(
             &runtime,
