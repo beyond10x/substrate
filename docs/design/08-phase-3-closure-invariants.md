@@ -113,9 +113,17 @@ It refines the earlier phase-3 plan without changing the immutable 0.1.0 bundle.
 - Raw Unix HTTP connections and WebSocket streams have fixed global and per-principal/subject
   limits, bounded idle/header/send lifetimes, and recover capacity on disconnect or timeout.
   Server-push WebSockets reject data frames and rate-bound control frames; inbound traffic never
-  drives journal catch-up. The local HTTP transport disables keep-alive so an idle connection has
-  no unbounded between-request state; its header deadline, maximum header count/buffer, total
-  lifetime, and body read deadline are centrally configured. WebSocket frame/message/write bounds,
+  drives journal catch-up. The local HTTP transport keeps connections alive, because a WebSocket
+  session attachment needs HTTP/1.1 upgrade semantics. What denies an idle connection unbounded
+  between-request state is therefore not the absence of keep-alive but its centrally configured
+  header deadline, maximum header count/buffer, body read deadline, and total connection lifetime,
+  which is what ends an idle peer. That lifetime bounds a connection which stays un-upgraded. An
+  upgraded one leaves it behind at the handshake — hyper resolves the connection future when it
+  hands the socket over — and is bounded by its own stream's lifetime instead, holding the
+  connection's transport slot until that stream ends, so that a connection which upgrades is still
+  counted against the transport's global and per-subject limits rather than dropping out of them
+  (`crates/substrate-daemon/src/runtime.rs`: `UnixTransportPolicy::production` and
+  `admitted_service`). WebSocket frame/message/write bounds,
   send deadline, total lifetime, catch-up page budget, and global/subject permits are likewise one
   injectable policy. Permit and registry ownership is RAII on every preflight and timeout path.
 - Every transaction that appends an event notifies its source scope after commit. Notification is
