@@ -89,8 +89,11 @@ struct PipeAttachmentPermit {
     limits: Arc<PipeAttachmentLimits>,
     scope: Scope,
     exec_id: String,
-    remove_key_on_drop: bool,
-    global: Option<tokio::sync::OwnedSemaphorePermit>,
+    /// Held for the attachment's lifetime and never read. Dropping it is what returns the slot to
+    /// the fixed global bound, and every path out of the attach handler must reach that drop:
+    /// `session.attachment-capacity` is published as *exhausted* and retriable, so capacity a
+    /// retry cannot recover is not a state this permit is allowed to produce (invariant 3).
+    _global: tokio::sync::OwnedSemaphorePermit,
 }
 
 impl PipeAttachmentLimits {
@@ -121,32 +124,28 @@ impl PipeAttachmentLimits {
             limits: Arc::clone(self),
             scope: scope.clone(),
             exec_id: exec_id.to_owned(),
-            remove_key_on_drop: true,
-            global: Some(global),
+            _global: global,
         })
     }
 }
 
-impl PipeAttachmentPermit {
-    /// Keeps a process-local tombstone when cancellation could not be proven. Capacity is still
-    /// recovered, but the uncertain exec cannot be attached again before restart reconciliation.
-    fn retain_attachment_tombstone(&mut self) {
-        self.remove_key_on_drop = false;
-    }
-}
-
+/// Every permit returns its slot and drops its key, on every path.
+///
+/// There used to be a second shape here: a permit whose cancellation could not be proven kept a
+/// process-local tombstone — the key stayed in `attached` and `Drop` answered that by *forgetting*
+/// the global permit, spending one of the fixed slots until restart. It bought nothing. The key is
+/// only ever tested by `acquire`, which the attach handler reaches only for a session whose
+/// durable attachment is `Available`; a claimed session is `Attached`, `Consumed` or `Uncertain`
+/// from then on, `substrate_store` answers `AlreadyClaimed` for all three, and only starting a
+/// session sets `Available` again. So the tombstone barred a session the durable claim had already
+/// barred, while the forgotten permit was real, permanent loss of capacity that the published
+/// `session.attachment-capacity` refusal calls exhausted and retriable.
 impl Drop for PipeAttachmentPermit {
     fn drop(&mut self) {
-        if self.remove_key_on_drop {
-            self.limits
-                .attached
-                .lock()
-                .remove(&(self.scope.clone(), self.exec_id.clone()));
-        } else if let Some(global) = self.global.take() {
-            // One uncertain cancellation consumes one of the fixed global attachment slots until
-            // daemon restart. This keeps both reattachment and process-local tombstones bounded.
-            global.forget();
-        }
+        self.limits
+            .attached
+            .lock()
+            .remove(&(self.scope.clone(), self.exec_id.clone()));
     }
 }
 
@@ -1273,6 +1272,12 @@ pub(super) async fn pipe_session_attach(
     let exec_id = session.exec;
     let mode = session.mode;
     let policy = app.pipe_session_policy;
+    // The claim above is already consumed and the session is no longer attachable, so an upgrade
+    // that never completes would leave the process running unattached until its lease or timeout
+    // ended it. Both hand-offs out of this handler therefore end the session; exactly one runs.
+    let stranded_app = Arc::clone(&app);
+    let stranded_scope = scope.clone();
+    let stranded_exec = exec_id.clone();
     ws.read_buffer_size(policy.max_message_bytes)
         .write_buffer_size(policy.write_buffer_bytes)
         .max_frame_size(policy.max_message_bytes)
@@ -1282,8 +1287,31 @@ pub(super) async fn pipe_session_attach(
                 .max_message_bytes
                 .saturating_add(policy.write_buffer_bytes),
         )
+        .on_failed_upgrade(move |error: axum::Error| {
+            // The permit is not carried in here. It is dropped with the callback that owns it,
+            // which returns its slot to the global bound and clears its key — and nothing here
+            // needs it, because this session's durable attachment claim is already spent and the
+            // state gate above refuses every further attach for it before `acquire` is reached.
+            tokio::spawn(async move {
+                if terminate_pipe_session(&stranded_app, &stranded_scope, &stranded_exec).await {
+                    tracing::info!(
+                        exec = %stranded_exec,
+                        %error,
+                        "terminated a claimed session whose attachment never upgraded"
+                    );
+                } else {
+                    // Invariant 3: an unproven containment is said out loud, never assumed. The
+                    // process outlives this attempt and nothing here retries it; only lease
+                    // expiry ends it (`app/service.rs`, `cleanup_expired`).
+                    tracing::warn!(
+                        exec = %stranded_exec,
+                        %error,
+                        "could not terminate a claimed session whose attachment never upgraded"
+                    );
+                }
+            });
+        })
         .on_upgrade(move |socket| async move {
-            let mut permit = permit;
             let completed = tokio::time::timeout(
                 policy.lifetime,
                 run_pipe_attachment(
@@ -1298,8 +1326,22 @@ pub(super) async fn pipe_session_attach(
             )
             .await
             .is_ok_and(|terminal| terminal);
-            if !completed && !terminate_pipe_session(&app, &scope, &exec_id).await {
-                permit.retain_attachment_tombstone();
+            if !completed {
+                if terminate_pipe_session(&app, &scope, &exec_id).await {
+                    tracing::info!(
+                        exec = %exec_id,
+                        "terminated a session whose attachment ended without a terminal observation"
+                    );
+                } else {
+                    // Invariant 3: an unproven containment is said out loud, never assumed. The
+                    // process outlives this attempt and nothing here retries it; only lease
+                    // expiry ends it (`app/service.rs`, `cleanup_expired`).
+                    tracing::warn!(
+                        exec = %exec_id,
+                        "could not terminate a session whose attachment ended without a terminal \
+                         observation"
+                    );
+                }
             }
         })
         .into_response()
