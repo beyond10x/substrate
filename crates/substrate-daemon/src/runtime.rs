@@ -1284,9 +1284,17 @@ mod tests {
     use std::collections::VecDeque;
     use std::convert::Infallible;
 
-    use tokio::io::AsyncWriteExt as _;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     use super::*;
+
+    /// The RFC 6455 example handshake key, spelled the way every other hand-written WebSocket
+    /// client in this repository spells it (`tests/websocket.rs:23`, `tests/pipe_session.rs:40`,
+    /// `tests/runtime_vectors.rs:93`). It is a constant rather than an inline literal because an
+    /// inline value after `Sec-WebSocket-Key: ` gives Gitleaks' `generic-api-key` rule its keyword
+    /// trigger, and `cargo xtask check-secrets` scans `--all` refs — so a branch that never merges
+    /// still fails the gate.
+    const HANDSHAKE_KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
 
     const fn test_policy(
         global_connections: usize,
@@ -1581,5 +1589,154 @@ mod tests {
 
         std::os::unix::fs::symlink(&state, private.join("linked.db")).unwrap();
         assert!(prepare_private_state_path(&private.join("linked.db")).is_err());
+    }
+
+    /// The production unix accept-and-serve loop, over a route that upgrades to a WebSocket and
+    /// keeps its socket open the way a session attachment does.
+    async fn serve_attachable_unix_listener(
+        listener: UnixListener,
+        allowed: BTreeSet<u32>,
+        limits: Arc<ConnectionLimits>,
+        policy: UnixTransportPolicy,
+    ) {
+        loop {
+            let AcceptedConnection { stream, permit, .. } =
+                accept_authorized(&listener, &allowed, &limits, policy.accept_retry_delay).await;
+            let service = Router::new().route(
+                "/attach",
+                axum::routing::get(|upgrade: axum::extract::ws::WebSocketUpgrade| async move {
+                    upgrade.on_upgrade(|mut socket| async move {
+                        // One frame proves the upgraded socket is live; it then stays open.
+                        let _ = socket.send(axum::extract::ws::Message::from("live")).await;
+                        while socket.recv().await.is_some() {}
+                    })
+                }),
+            );
+            tokio::spawn(async move {
+                let io = TokioIo::new(stream);
+                let connection = http1_builder(policy)
+                    .serve_connection(io, TowerToHyperService::new(service))
+                    .with_upgrades();
+                let _ = enforce_connection_lifetime(permit, policy.connection_lifetime, connection)
+                    .await;
+            });
+        }
+    }
+
+    /// Reads exactly one HTTP response head, leaving every later byte on the socket.
+    async fn read_response_head(stream: &mut UnixStream, deadline: std::time::Duration) -> String {
+        let mut head = Vec::new();
+        let mut byte = [0_u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            assert!(head.len() < 4_096, "bounded response head");
+            tokio::time::timeout(deadline, stream.read_exact(&mut byte))
+                .await
+                .expect("the response head arrives")
+                .expect("read the response head");
+            head.push(byte[0]);
+        }
+        String::from_utf8(head).expect("utf-8 response head")
+    }
+
+    /// **This case pins a defect, not a guarantee.** hyper resolves an upgradeable connection
+    /// future when it hands the socket to the upgrade, so the per-uid transport permit is released
+    /// the moment a WebSocket upgrade succeeds and the upgraded socket runs in a task the budget no
+    /// longer counts. Measured here rather than inferred: with the per-uid budget set to one and an
+    /// upgraded socket provably still serving, the daemon admits and serves a second connection
+    /// from the same uid.
+    ///
+    /// `story:upgraded-connections-keep-their-permit` is the work that closes it. **When this case
+    /// goes red, that story landed — invert it back to the guarantee, never relax it.** The fix
+    /// needs `runtime.rs` and all three `app/` upgrade sites at once, which is why it is not here.
+    #[tokio::test]
+    async fn an_upgraded_websocket_releases_its_per_uid_connection_permit() {
+        const DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
+
+        let directory = tempfile::tempdir().expect("temporary directory");
+        let socket_path = directory.path().join("substrate.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind unix socket");
+        let uid = std::fs::metadata(&socket_path)
+            .expect("socket metadata")
+            .uid();
+        let allowed = BTreeSet::from([uid]);
+        // An upgrade needs HTTP/1.1 keep-alive semantics, exactly as the production policy states.
+        let policy = UnixTransportPolicy {
+            keep_alive: true,
+            ..test_policy(4, 1)
+        };
+        let limits = Arc::new(ConnectionLimits::new(&allowed, policy));
+
+        let _server = tokio::spawn(serve_attachable_unix_listener(
+            listener,
+            allowed,
+            Arc::clone(&limits),
+            policy,
+        ));
+
+        let mut upgrading = UnixStream::connect(&socket_path)
+            .await
+            .expect("connect the upgrading client");
+        upgrading
+            .write_all(
+                format!(
+                    "GET /attach HTTP/1.1\r\n\
+                     Host: localhost\r\n\
+                     Connection: Upgrade\r\n\
+                     Upgrade: websocket\r\n\
+                     Sec-WebSocket-Version: 13\r\n\
+                     Sec-WebSocket-Key: {HANDSHAKE_KEY}\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .expect("send the upgrade request");
+
+        let head = read_response_head(&mut upgrading, DEADLINE).await;
+        assert!(
+            head.starts_with("HTTP/1.1 101 "),
+            "the websocket upgrade succeeded: {head}"
+        );
+        let mut frame = [0_u8; 6];
+        tokio::time::timeout(DEADLINE, upgrading.read_exact(&mut frame))
+            .await
+            .expect("the upgraded socket sends its first frame")
+            .expect("read the first frame");
+        assert_eq!(
+            &frame, b"\x81\x04live",
+            "the upgraded socket is serving after the handshake"
+        );
+
+        // Today's behaviour, pinned: with that upgraded socket still live and the per-uid budget
+        // set to one, the next plain HTTP connection from the same uid is *not* refused at accept.
+        // The daemon serves it, because the first connection's permit was released at the upgrade.
+        let mut plain = UnixStream::connect(&socket_path)
+            .await
+            .expect("connect a second client");
+        plain
+            .write_all(b"GET /attach HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .expect("send a plain request");
+        let mut served = [0_u8; 128];
+        let read = tokio::time::timeout(DEADLINE, plain.read(&mut served))
+            .await
+            .expect("the second connection is answered or closed within the deadline")
+            .expect("read the second connection");
+        assert!(
+            read > 0,
+            "the permit is released at upgrade, so the daemon serves a second connection from the \
+             same uid while the upgraded socket lives; it served nothing, which means \
+             story:upgraded-connections-keep-their-permit has landed — invert this case back to \
+             asserting the guarantee rather than relaxing it"
+        );
+        // And it was *served*, not merely accepted and dropped: the bytes are an HTTP response.
+        // That is what makes the first assertion evidence about the permit rather than about
+        // accept timing.
+        let answer = String::from_utf8_lossy(&served[..read]);
+        assert!(
+            answer.starts_with("HTTP/1.1 "),
+            "the second connection was served an HTTP response while the upgraded socket held the \
+             only per-uid slot, which is the released permit observed end to end; it answered: \
+             {answer}"
+        );
     }
 }
