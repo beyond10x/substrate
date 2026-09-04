@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use axum::Extension;
 use axum::body::Body;
@@ -89,7 +90,9 @@ struct PipeAttachmentPermit {
     limits: Arc<PipeAttachmentLimits>,
     scope: Scope,
     exec_id: String,
-    remove_key_on_drop: bool,
+    /// Shared, because one permit is held by both hand-offs out of the attach handler: the
+    /// upgraded attachment and the failed-upgrade containment below. Exactly one of them runs.
+    remove_key_on_drop: AtomicBool,
     global: Option<tokio::sync::OwnedSemaphorePermit>,
 }
 
@@ -121,7 +124,7 @@ impl PipeAttachmentLimits {
             limits: Arc::clone(self),
             scope: scope.clone(),
             exec_id: exec_id.to_owned(),
-            remove_key_on_drop: true,
+            remove_key_on_drop: AtomicBool::new(true),
             global: Some(global),
         })
     }
@@ -130,14 +133,14 @@ impl PipeAttachmentLimits {
 impl PipeAttachmentPermit {
     /// Keeps a process-local tombstone when cancellation could not be proven. Capacity is still
     /// recovered, but the uncertain exec cannot be attached again before restart reconciliation.
-    fn retain_attachment_tombstone(&mut self) {
-        self.remove_key_on_drop = false;
+    fn retain_attachment_tombstone(&self) {
+        self.remove_key_on_drop.store(false, Ordering::Relaxed);
     }
 }
 
 impl Drop for PipeAttachmentPermit {
     fn drop(&mut self) {
-        if self.remove_key_on_drop {
+        if *self.remove_key_on_drop.get_mut() {
             self.limits
                 .attached
                 .lock()
@@ -1273,6 +1276,15 @@ pub(super) async fn pipe_session_attach(
     let exec_id = session.exec;
     let mode = session.mode;
     let policy = app.pipe_session_policy;
+    // The claim above is already consumed and the session is no longer attachable, so an upgrade
+    // that never completes — a client that drops between the `101` and the hand-off — would leave
+    // the process running unattached until its lease or timeout ended it. Both hand-offs out of
+    // this handler therefore end the session; exactly one of them runs, and both hold the permit.
+    let permit = Arc::new(permit);
+    let stranded_app = Arc::clone(&app);
+    let stranded_scope = scope.clone();
+    let stranded_exec = exec_id.clone();
+    let stranded_permit = Arc::clone(&permit);
     ws.read_buffer_size(policy.max_message_bytes)
         .write_buffer_size(policy.write_buffer_bytes)
         .max_frame_size(policy.max_message_bytes)
@@ -1282,8 +1294,14 @@ pub(super) async fn pipe_session_attach(
                 .max_message_bytes
                 .saturating_add(policy.write_buffer_bytes),
         )
+        .on_failed_upgrade(move |_error: axum::Error| {
+            tokio::spawn(async move {
+                if !terminate_pipe_session(&stranded_app, &stranded_scope, &stranded_exec).await {
+                    stranded_permit.retain_attachment_tombstone();
+                }
+            });
+        })
         .on_upgrade(move |socket| async move {
-            let mut permit = permit;
             let completed = tokio::time::timeout(
                 policy.lifetime,
                 run_pipe_attachment(

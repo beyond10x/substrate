@@ -617,6 +617,19 @@ struct TestServer {
 
 impl TestServer {
     async fn spawn(app: Arc<App>) -> Self {
+        Self::serving(app, true).await
+    }
+
+    /// A server that answers the handshake and then never completes the upgrade.
+    ///
+    /// Without `with_upgrades()`, hyper flushes the `101` and then resolves the upgrade future
+    /// with an error instead of handing the socket over. That is the same seam a client reaches
+    /// by dropping between the switch and the hand-off, and it is reachable deterministically.
+    async fn spawn_without_upgrades(app: Arc<App>) -> Self {
+        Self::serving(app, false).await
+    }
+
+    async fn serving(app: Arc<App>, upgrades: bool) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind pipe websocket test server");
@@ -629,9 +642,12 @@ impl TestServer {
                 let service = router(Arc::clone(&app)).layer(Extension(identity()));
                 tokio::spawn(async move {
                     let connection = http1::Builder::new()
-                        .serve_connection(TokioIo::new(stream), TowerToHyperService::new(service))
-                        .with_upgrades();
-                    let _result = connection.await;
+                        .serve_connection(TokioIo::new(stream), TowerToHyperService::new(service));
+                    if upgrades {
+                        let _result = connection.with_upgrades().await;
+                    } else {
+                        let _result = connection.await;
+                    }
                 });
             }
         });
@@ -960,6 +976,69 @@ async fn invalid_sequence_fails_closed_and_disconnect_cancels_the_session() {
     .await
     .expect("disconnect cancellation must become durable");
     assert_eq!(observed["result"]["exit"]["signal"], "KILL");
+}
+
+/// A `101` whose upgrade never completes must not leave a claimed session running.
+///
+/// `pipe_session_attach` consumes the durable attachment claim *before* the upgrade, so a client
+/// that drops between the switch and the hand-off would otherwise leave the process running
+/// unattached until its lease or timeout ended it, with the claim already spent. The server below
+/// answers the handshake without `with_upgrades()`, which is that exact seam: hyper flushes the
+/// `101`, then resolves the upgrade future with an error and the attachment closure never runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_attachment_whose_upgrade_never_completes_is_terminated_and_reads_terminal() {
+    let harness = Harness::open().await;
+    let (session_id, exec_id) = harness.start_pipe().await;
+    let stranding = TestServer::spawn_without_upgrades(Arc::clone(&harness.app)).await;
+    let handshake = Handshake::open(
+        stranding.address,
+        &format!("/v1/sessions/{session_id}/attach"),
+    )
+    .await;
+    assert_eq!(
+        handshake.status, 101,
+        "the attach handshake is answered before the upgrade can fail"
+    );
+    drop(handshake);
+
+    let observed = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let (status, observed) = harness
+                .call(Method::GET, &format!("/v1/execs/{exec_id}"), Body::empty())
+                .await;
+            assert_eq!(status, StatusCode::OK);
+            if observed["result"]["state"] == "cancelled" {
+                return observed;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("a claimed attachment whose upgrade never completed must leave no running process");
+    assert_eq!(observed["result"]["exit"]["signal"], "KILL");
+
+    let (status, session) = harness
+        .call(
+            Method::GET,
+            &format!("/v1/sessions/{session_id}"),
+            Body::empty(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{session}");
+    assert_eq!(session["result"]["state"], "cancelled", "{session}");
+    assert_eq!(session["result"]["attachment"], "consumed", "{session}");
+
+    let (status, refusal) = refused_upgrade(
+        harness.server.address,
+        &format!("/v1/sessions/{session_id}/attach"),
+    )
+    .await;
+    assert_eq!(status, 409, "{refusal}");
+    assert_eq!(
+        refusal["error"]["code"].as_str(),
+        Some(substrate_wire::SESSION_NOT_ATTACHABLE),
+        "a contained session names its refusal rather than being quietly gone: {refusal}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
