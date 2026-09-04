@@ -50,6 +50,19 @@ pub struct StoredExec {
     pub leader_pid: Option<u32>,
 }
 
+/// Exactly what workspace lease cleanup reads: an exec's identity and its observed state.
+///
+/// A projection rather than [`StoredExec`], because the cleanup sweep is the one caller that walks
+/// every exec of a workspace at once. `substrate_wire::MAX_CURRENT_EXECS` is 2048 and
+/// `substrate_wire::MAX_IO_BYTES` is 1 MiB per stream, so handing whole execs to that sweep put
+/// 4 GiB of `stdout` and `stderr` within reach of one expiry. A row with no output field cannot
+/// carry them, so no later caller can drag them back in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceExecState {
+    pub id: String,
+    pub state: ExecState,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecWrite {
     PersistedExact(StoredExec),
@@ -542,29 +555,31 @@ impl Store {
             .collect()
     }
 
+    /// Reads the identity and state of every exec still physically present in a workspace.
+    ///
+    /// Two values per row, and no output column is named: see [`WorkspaceExecState`].
     pub fn execs_for_workspace(
         &self,
         scope: &Scope,
         workspace_id: &str,
-    ) -> Result<Vec<StoredExec>, StoreError> {
+    ) -> Result<Vec<WorkspaceExecState>, StoreError> {
         let connection = self.connection.lock();
         let mut statement = connection.prepare(
-            "SELECT id FROM execs
+            "SELECT id, json_extract(resource_json, '$.state') FROM execs
              WHERE deployment = ?1 AND subject = ?2 AND workspace_id = ?3
                AND physically_absent = 0 ORDER BY id",
         )?;
-        let ids = statement
+        statement
             .query_map(
                 params![scope.deployment, scope.subject, workspace_id],
-                |row| row.get::<_, String>(0),
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
             )?
-            .collect::<Result<Vec<_>, _>>()?;
-        drop(statement);
-        ids.into_iter()
-            .filter_map(|id| match load_exec(&connection, scope, &id) {
-                Ok(Some(value)) => Some(Ok(value)),
-                Ok(None) => None,
-                Err(error) => Some(Err(error)),
+            .map(|row| {
+                let (id, state) = row?;
+                Ok(WorkspaceExecState {
+                    id,
+                    state: serde_json::from_value(serde_json::Value::String(state))?,
+                })
             })
             .collect()
     }
@@ -746,4 +761,174 @@ pub(crate) fn upsert_exec(
         ],
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use rusqlite::params;
+    use substrate_wire::{
+        ConfinementRequest, Exec, ExecKind, ExecState, NetworkMode, SandboxProfile,
+    };
+    use tempfile::tempdir;
+
+    use super::{StoredExec, WorkspaceExecState, upsert_exec};
+    use crate::{Scope, Store};
+
+    /// One stream at the wire bound (`substrate_wire::MAX_IO_BYTES`).
+    const OUTPUT_BYTES: usize = 1_048_576;
+    const WORKSPACE_EXECS: usize = 64;
+    /// Exec metadata for `WORKSPACE_EXECS` rows is kilobytes; the output set is 128 MiB.
+    const RESIDENT_GROWTH_CEILING: u64 = 16 * 1_048_576;
+
+    fn scope() -> Scope {
+        Scope {
+            deployment: "dep_cleanup".to_owned(),
+            subject: "local:1000".to_owned(),
+        }
+    }
+
+    fn exec(id: &str, workspace: &str, state: ExecState, output_bytes: usize) -> StoredExec {
+        StoredExec {
+            resource: Exec {
+                id: id.to_owned(),
+                kind: ExecKind::Exec,
+                workspace: workspace.to_owned(),
+                state,
+                observed_at: "2026-08-13T12:00:01Z".parse().expect("time"),
+                requested: ConfinementRequest {
+                    capability_snapshot: format!("sha256:{}", "7".repeat(64)),
+                    network: NetworkMode::None,
+                    aperture: None,
+                    profile: SandboxProfile::Workspace,
+                    required: true,
+                },
+                applied: None,
+                exit: None,
+                usage: None,
+                lease: None,
+                refusal: None,
+            },
+            stdout: vec![b'o'; output_bytes],
+            stderr: vec![b'e'; output_bytes],
+            stdout_truncated: false,
+            stderr_truncated: false,
+            output_complete: true,
+            cgroup: None,
+            leader_pid: None,
+        }
+    }
+
+    /// Resident set size of this process, from the kernel's own accounting.
+    fn resident_bytes() -> u64 {
+        let statm = std::fs::read_to_string("/proc/self/statm").expect("resident page counts");
+        let pages: u64 = statm
+            .split_whitespace()
+            .nth(1)
+            .expect("resident set size field")
+            .parse()
+            .expect("resident page count");
+        pages * 4096
+    }
+
+    #[test]
+    fn workspace_lease_cleanup_never_reads_the_output_columns() {
+        let store = Store::open(":memory:").expect("state store");
+        let scope = scope();
+        for (id, workspace, state) in [
+            ("exec_running", "ws_expiring", ExecState::Running),
+            ("exec_exited", "ws_expiring", ExecState::Exited),
+            ("exec_elsewhere", "ws_other", ExecState::Running),
+        ] {
+            upsert_exec(
+                &store.connection.lock(),
+                &scope,
+                &exec(id, workspace, state, 16),
+            )
+            .expect("seed exec membership");
+        }
+        // Every output column now holds a value the blob decoder rejects, so reading one is an
+        // observable failure rather than a silent success.
+        store
+            .connection
+            .lock()
+            .execute(
+                "UPDATE execs SET stdout = ?1, stderr = ?1",
+                params!["not-a-blob"],
+            )
+            .expect("poison the output columns");
+        assert!(
+            store.exec(&scope, "exec_running").is_err(),
+            "the whole-exec read is the path that reads the output columns"
+        );
+
+        let states = store
+            .execs_for_workspace(&scope, "ws_expiring")
+            .expect("workspace lease cleanup reads no output column");
+
+        assert_eq!(
+            states,
+            vec![
+                WorkspaceExecState {
+                    id: "exec_exited".to_owned(),
+                    state: ExecState::Exited,
+                },
+                WorkspaceExecState {
+                    id: "exec_running".to_owned(),
+                    state: ExecState::Running,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn workspace_lease_cleanup_load_is_bounded_by_exec_metadata() {
+        let directory = tempdir().expect("temporary directory");
+        let store = Store::open(directory.path().join("state.sqlite3")).expect("state store");
+        let scope = scope();
+        for index in 0..WORKSPACE_EXECS {
+            upsert_exec(
+                &store.connection.lock(),
+                &scope,
+                &exec(
+                    &format!("exec_{index:04}"),
+                    "ws_expiring",
+                    ExecState::Exited,
+                    OUTPUT_BYTES,
+                ),
+            )
+            .expect("seed exec membership");
+        }
+        let stored_output_bytes: i64 = store
+            .connection
+            .lock()
+            .query_row(
+                "SELECT sum(length(stdout) + length(stderr)) FROM execs WHERE workspace_id = ?1",
+                params!["ws_expiring"],
+                |row| row.get(0),
+            )
+            .expect("stored output bytes");
+        assert_eq!(
+            stored_output_bytes,
+            i64::try_from(2 * OUTPUT_BYTES * WORKSPACE_EXECS).expect("output byte total")
+        );
+
+        let mut smallest_growth = u64::MAX;
+        for _ in 0..3 {
+            let before = resident_bytes();
+            let states = store
+                .execs_for_workspace(&scope, "ws_expiring")
+                .expect("workspace lease cleanup load");
+            let after = resident_bytes();
+            assert_eq!(states.len(), WORKSPACE_EXECS);
+            smallest_growth = smallest_growth.min(after.saturating_sub(before));
+            drop(states);
+        }
+
+        assert!(
+            smallest_growth < RESIDENT_GROWTH_CEILING,
+            "workspace lease cleanup grew resident memory by {smallest_growth} bytes over a \
+             {stored_output_bytes}-byte output set; exec metadata alone bounds it below \
+             {RESIDENT_GROWTH_CEILING} bytes"
+        );
+    }
 }
