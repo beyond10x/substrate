@@ -339,31 +339,39 @@ fn probe_bubblewrap(config: &HostConfig) -> bool {
     //
     // A fresh profile per spawn, never one file reused. The descriptor is inherited, so the two
     // children would share one file offset and the second would read a program of zero bytes.
-    [
-        ("UNIX-CONNECT:/runtime/sentinel/host.sock", libc::AF_UNIX),
-        (VSOCK_SENTINEL, libc::AF_VSOCK),
-    ]
-    .into_iter()
-    .all(|(target, family)| {
-        let Ok(seccomp) = crate::seccomp::profile() else {
-            return false;
-        };
-        let Ok(output) = bubblewrap_probe_command(
-            &config.bubblewrap,
-            sentinel.path(),
-            seccomp.as_raw_fd(),
-            target,
-        )
-        .output() else {
-            return false;
-        };
-        // Socat names the family, the type and the protocol of the call that failed, so this
-        // cannot be satisfied by a `connect(2)` refusal from a socket the profile let through.
-        !output.status.success()
-            && String::from_utf8_lossy(&output.stderr)
-                .contains(&format!("socket({family}, 1, 0): Permission denied"))
-    })
+    REFUSED_FAMILY_SENTINELS
+        .into_iter()
+        .all(|(family, target)| {
+            let Ok(seccomp) = crate::seccomp::profile() else {
+                return false;
+            };
+            let Ok(output) = bubblewrap_probe_command(
+                &config.bubblewrap,
+                sentinel.path(),
+                seccomp.as_raw_fd(),
+                target,
+            )
+            .output() else {
+                return false;
+            };
+            // Socat names the family, the type and the protocol of the call that failed, so this
+            // cannot be satisfied by a `connect(2)` refusal from a socket the profile let through.
+            !output.status.success()
+                && String::from_utf8_lossy(&output.stderr)
+                    .contains(&format!("socket({family}, 1, 0): Permission denied"))
+        })
 }
+
+/// The families this probe measures in a real sandbox, and the socat address that reaches each.
+///
+/// Not every family the profile refuses can be here — socat has no address form for the Qualcomm
+/// IPC router — so `every_refused_family_is_measured_here_or_recorded_as_instrument_less` below
+/// asserts that each one is either in this list or in the recorded exception beside it. That is
+/// the difference between a probe that covers two families and a probe that is *known* to.
+const REFUSED_FAMILY_SENTINELS: [(libc::c_int, &str); 2] = [
+    (libc::AF_UNIX, "UNIX-CONNECT:/runtime/sentinel/host.sock"),
+    (libc::AF_VSOCK, VSOCK_SENTINEL),
+];
 
 /// The vsock address the confinement-floor probe asks for.
 ///
@@ -1045,6 +1053,61 @@ exit 1
             2 + usize::from(socat),
         );
     }
+    /// Families the profile refuses that this probe has no instrument for, and why each is here.
+    ///
+    /// One entry, and it is a real gap rather than a hidden one: socat 1.8.1.3 carries address
+    /// forms for Unix and vsock and none for the Qualcomm IPC router, and the capability probe is
+    /// not the place to acquire a Python dependency. `AF_QIPCRTR` is pinned instead by
+    /// `seccomp::tests` — natively and over the x32 syscall number — and by
+    /// `process.rs::no_socket_family_opens_inside_a_confined_exec_without_a_recorded_decision`,
+    /// which observes it in a real admitted exec, which is the stronger of the two vehicles.
+    #[cfg(test)]
+    const FAMILIES_WITHOUT_A_PROBE_INSTRUMENT: [(libc::c_int, &str); 1] = [(
+        42,
+        "socat has no QRTR address form, and the capability probe takes no interpreter dependency",
+    )];
+
+    /// **Every family the profile refuses is either measured by this probe or recorded as one it
+    /// has no instrument for.**
+    ///
+    /// The gap this closes is the one that produced the finding above it: a family added to
+    /// `seccomp::FAMILY_POLICY` as denied could otherwise reach a release without anybody
+    /// noticing that the probe gating every exec fact never asks about it. Now it cannot be added
+    /// silently — it lands in the sentinel list or in the recorded exception, and either is a
+    /// decision somebody made.
+    #[test]
+    fn every_refused_family_is_measured_here_or_recorded_as_instrument_less() {
+        let mut refused = 0;
+        for policy in crate::seccomp::FAMILY_POLICY {
+            if !policy.denied {
+                continue;
+            }
+            refused += 1;
+            let measured = REFUSED_FAMILY_SENTINELS
+                .iter()
+                .any(|(family, _)| *family == policy.family);
+            let excepted = FAMILIES_WITHOUT_A_PROBE_INSTRUMENT
+                .iter()
+                .any(|(family, _)| *family == policy.family);
+            assert!(
+                measured != excepted,
+                "{} is refused by the profile but is {} by the confinement-floor probe; a denied \
+                 family belongs in exactly one of the sentinel list and the recorded exception",
+                policy.name,
+                if measured {
+                    "both measured and excepted"
+                } else {
+                    "neither measured nor recorded as instrument-less"
+                }
+            );
+        }
+        assert_eq!(
+            refused,
+            REFUSED_FAMILY_SENTINELS.len() + FAMILIES_WITHOUT_A_PROBE_INSTRUMENT.len(),
+            "the probe accounts for a different number of families than the profile refuses"
+        );
+    }
+
     /// **The confinement-floor probe asks for a non-nestable user namespace and asserts it** —
     /// on the argv it builds, with no `socat` and no backend on disk.
     ///

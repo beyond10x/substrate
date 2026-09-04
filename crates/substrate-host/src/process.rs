@@ -4431,6 +4431,120 @@ mod tests {
         );
     }
 
+    /// **No socket family opens inside a real admitted exec without a recorded decision.**
+    ///
+    /// This is the check the round that shipped `FAMILY_POLICY` did not have, and the reason an
+    /// adversary rather than the gate found `AF_QIPCRTR`. That table was a shortlist written from
+    /// reading: it covered four families, said it took no position on the other forty, and named
+    /// the wrong one as the next to examine. A shortlist cannot be made trustworthy by being
+    /// longer — it has to be closed. This closes it: the enumeration runs *inside the sandbox*,
+    /// on every delegated run, and a family that opens there without a row is red.
+    ///
+    /// It is the class check and not the instance check, so it keeps working for a family nobody
+    /// has heard of yet: a kernel upgrade, a module loaded on a production node, a new
+    /// `AF_*` — any of them turns up here as a named failure rather than as the next finding.
+    ///
+    /// The denied half is asserted too, which is what makes the two halves one claim: every
+    /// family the survey refuses must be *absent* from what opened, measured through the exec
+    /// path a client actually reaches rather than in a forked child of the test process.
+    ///
+    /// Delegated only, and gated on `/usr/bin/python3` inside the sandbox. Without either the
+    /// case is **absent, never reported as passed** (invariant 3).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn no_socket_family_opens_inside_a_confined_exec_without_a_recorded_decision() {
+        let Some(delegated) = delegated_cgroup_root("family-survey") else {
+            return;
+        };
+        if !std::path::Path::new("/usr/bin/python3").is_file() {
+            return;
+        }
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("ws_test");
+        std::fs::create_dir(&workspace).unwrap();
+        let snapshot = format!("sha256:{}", "7".repeat(64));
+        let mut config = HostConfig::minimum(root.path());
+        config.cgroup_root = Some(delegated);
+        let runtime =
+            ProcessRuntime::new(config, confined_exec_capability(&snapshot)).expect("runtime");
+
+        // Every family number the kernel has assigned, against every socket type, reported as
+        // `FAMILY <af> <type>` for each pair that opened. `ctypes` and not the `socket` module
+        // because this must report what the kernel answered and not what Python knows how to
+        // address. One-space indentation and explicit newlines: the body crosses an argv, so it
+        // carries no Rust line escape whose whitespace could survive or not survive.
+        let probe = concat!(
+            "import ctypes\n",
+            "L=ctypes.CDLL('libc.so.6',use_errno=True)\n",
+            "def o(a,t):\n",
+            " f=L.socket(a,t,0)\n",
+            " if f>=0: L.close(f)\n",
+            " return f>=0\n",
+            "print('\\n'.join('FAMILY %d %d'%(a,t) ",
+            "for a in range(0,46) for t in (1,2,3,5) if o(a,t)))\n",
+        );
+        let observed = waited_exec(
+            &runtime,
+            &workspace,
+            &snapshot,
+            "ex_family_survey",
+            &["/usr/bin/python3", "-c", probe],
+        )
+        .await;
+        assert_eq!(
+            observed
+                .resource
+                .exit
+                .expect("a waited exec reports its exit")
+                .code,
+            Some(0),
+            "the enumeration must run inside the sandbox: {}",
+            String::from_utf8_lossy(&observed.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&observed.stdout).into_owned();
+        let opened: std::collections::BTreeSet<libc::c_int> = stdout
+            .lines()
+            .filter_map(|line| line.strip_prefix("FAMILY "))
+            .filter_map(|rest| rest.split_whitespace().next())
+            .filter_map(|number| number.parse().ok())
+            .collect();
+        // A case that observed nothing would satisfy every claim below by measuring none of them.
+        assert!(
+            opened.contains(&libc::AF_INET),
+            "the enumeration reported no AF_INET, so it did not run: {stdout:?}"
+        );
+
+        for family in &opened {
+            let recorded = crate::seccomp::FAMILY_POLICY
+                .iter()
+                .find(|policy| policy.family == *family);
+            let Some(policy) = recorded else {
+                panic!(
+                    "socket family {family} opens inside an admitted exec and this profile has \
+                     no recorded decision about it; that silence is what let AF_QIPCRTR through. \
+                     Measure whether a network namespace confines it, then give it a row. The \
+                     whole set that opened: {opened:?}"
+                );
+            };
+            assert!(
+                !policy.denied,
+                "{} is recorded denied and still opened inside an admitted exec, so the profile \
+                 is not refusing what it says it refuses: {}",
+                policy.name, policy.reason
+            );
+        }
+        for policy in crate::seccomp::FAMILY_POLICY {
+            if !policy.denied {
+                continue;
+            }
+            assert!(
+                !opened.contains(&policy.family),
+                "{} opened inside an admitted exec; it is recorded denied because {}",
+                policy.name,
+                policy.reason
+            );
+        }
+    }
+
     /// The marker the memory-bound cases below look for: printed by the leader only if it
     /// outlived the kernel's kill of its child.
     const OOM_SURVIVOR: &str = "the-tree-survived";
