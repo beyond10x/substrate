@@ -403,8 +403,8 @@ reciting them. Before the first planning-store write of a session, run `protocol
 
 New artifacts start in the lifecycle's initial state. Lifecycle moves are claims about project
 state: propose them and wait for the operator unless the operator asked for the specific move.
-`protocol` must be on `PATH` (`cargo install --path crates/protocol-cli` in an
-`engineering-protocols` checkout); if it is absent, do not improvise machine-owned frontmatter.
+`protocol` must be on `PATH` (`cargo install --path crates/edge/aep-cli` in an
+`aep` checkout); if it is absent, do not improvise machine-owned frontmatter.
 
 A story that changes a contract or a capability still owes its ADR or design document **before
 code** (invariant 8); the story body names which. `ROADMAP.md` keeps the phase order and
