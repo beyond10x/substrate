@@ -58,8 +58,25 @@ impl UnixTransportPolicy {
             accept_retry_delay: std::time::Duration::from_millis(25),
             max_buffer_bytes: 64 * 1024,
             max_headers: 64,
-            // WebSocket session attachment requires HTTP/1.1 upgrade/keep-alive semantics. The
-            // outer connection lifetime remains the finite bound for idle and upgraded peers.
+            // WebSocket session attachment requires HTTP/1.1 upgrade/keep-alive semantics.
+            //
+            // This lifetime is the finite bound for a peer that stays un-upgraded, idle or not.
+            // It is not the bound on an upgraded one: hyper resolves the connection future when it
+            // hands the socket to the upgrade, so the timeout around that future is already over
+            // before the upgraded socket serves a byte. An upgraded peer is bounded by its own
+            // stream's lifetime instead — one hour for an event stream, a metrics stream and a
+            // pipe attachment — and it holds this connection's transport slot for that whole time,
+            // deliberately: an upgraded connection the budget does not count is review finding 4
+            // (`story:upgraded-connections-keep-their-permit`), and counting it is what the
+            // admission in `admitted_service` does.
+            //
+            // That the two bounds disagree by an order of magnitude is a design question and not
+            // an oversight: enforcing five minutes on a stream that publishes one hour would break
+            // a contract to fix a bound. The story that decides it is
+            // `story:transport-admission-and-stream-lifetime-disagree`, and
+            // `app::tests::upgraded_transport_slot` pins what today does — including that sixteen
+            // upgraded streams from one source address deny every co-located caller for the
+            // stream's hour rather than the transport's five minutes.
             keep_alive: true,
         }
     }
@@ -232,9 +249,12 @@ fn http1_builder(policy: UnixTransportPolicy) -> http1::Builder {
 /// released at the handshake and the socket that is still serving stops being counted — 128 global
 /// and 32 per uid on unix, 128 and 16 per source address over TCP and TLS.
 ///
-/// Every `.serve_connection(` that goes on to `.with_upgrades()` in this crate is served through
-/// here, and `app::metrics::tests::every_upgradeable_connection_publishes_its_transport_admission`
-/// is the check that a listener added later cannot skip it.
+/// Every `.serve_connection(` under `src/` that goes on to `.with_upgrades()` is served through
+/// here — the three production listeners and the two in-crate harnesses — and
+/// `app::metrics::tests::every_upgradeable_connection_publishes_its_transport_admission` reads
+/// exactly that set. It is not every listener in the crate's test suite: three under `tests/`
+/// serve the same production router with no transport budget at all, which that check names and
+/// does not cover.
 pub(crate) fn admitted_service<S>(
     permit: &TransportPermit,
     service: S,
@@ -242,6 +262,13 @@ pub(crate) fn admitted_service<S>(
     Extension(permit.clone()).layer(service)
 }
 
+/// Holds one connection's admission and bounds the connection future, and neither outlives it.
+///
+/// The deadline is on the future passed in. hyper resolves an upgradeable connection future when
+/// it hands the socket to the upgrade, so a connection that upgrades leaves this bound behind at
+/// the handshake and is bounded by its stream's own lifetime from there. The admission does not
+/// leave with it — every request carries a clone (`admitted_service`) and the upgraded task keeps
+/// one — which is deliberate and is what `UnixTransportPolicy::production` records.
 async fn enforce_connection_lifetime<P, F, T, E>(
     permit: P,
     lifetime: std::time::Duration,
@@ -1401,6 +1428,10 @@ mod tests {
         drop(uid_1001);
     }
 
+    /// For a connection that stays un-upgraded, which is the whole of what this bound covers:
+    /// the future here never resolves, so the deadline is what ends it. An upgraded connection
+    /// resolves its future at the handshake and is bounded by its stream instead —
+    /// `app::tests::upgraded_transport_slot` pins that.
     #[tokio::test(start_paused = true)]
     async fn connection_lifetime_is_hard_and_recovers_capacity() {
         let allowed = BTreeSet::from([1000]);

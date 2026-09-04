@@ -621,6 +621,11 @@ mod tests {
                         return;
                     };
                     let Some(permit) = limits.acquire(peer.ip()) else {
+                        // The production refusal, in the shape `accept_authorized` gives it: the
+                        // stream is dropped unserved and the loop continues. It is unreached here
+                        // — the suite's widest case holds five of this source's sixteen slots —
+                        // and a harness that made it louder would be inventing a vocabulary no
+                        // production reader shares.
                         continue;
                     };
                     let service = router(Arc::clone(&app)).layer(Extension(identity()));
@@ -1302,12 +1307,25 @@ mod tests {
     /// every upgrade the crate serves, on the same recursive walk of `src/` and the same masked
     /// source as its sibling above, so a fourth route cannot be added without one.
     ///
-    /// **Two limits, as rules.** It proves the admission is *moved into* the upgraded task, never
-    /// that the value moved is a live permit — the case named above is what observes one holding
-    /// a slot end to end, and a route added without that partner case is counted on paper only.
-    /// And it reads the argument list of `.on_upgrade(`, so an admission a route drops before it
-    /// awaits would satisfy it; nothing in this crate does that, and doing it would take writing
-    /// the drop on purpose.
+    /// **What it checks is a naming convention, and that cuts both ways.** It requires the
+    /// identifier `transport_admission` inside the `.on_upgrade(` argument list, and it is worth
+    /// being exact about what that does and does not establish:
+    ///
+    /// 1. It proves the admission is *named* in the upgraded task, never that the value named is a
+    ///    live permit. What observes one holding a slot end to end is
+    ///    `runtime::tests::an_upgraded_websocket_keeps_its_per_uid_connection_permit`, and a route
+    ///    added without that partner case is counted on paper only.
+    /// 2. It passes `drop(transport_admission);` inside the task, which releases the slot at the
+    ///    handshake and is exactly the defect. Nothing in this crate does that; it would take
+    ///    writing the drop on purpose.
+    /// 3. It **fails correct code** that holds the admission without naming it there — a closure
+    ///    that captures it under another name, or one that carries it inside a tuple or a struct
+    ///    built above the chain. The convention is the check: one name for the thing, spelled
+    ///    inside the task that holds it. A route that has a reason to hold it differently has a
+    ///    reason to change this check with it, and that is the conversation this failure buys.
+    ///
+    /// A structural check — the value's *type* traced into the task — needs a parser this crate
+    /// does not have and would not gain for one rule.
     #[test]
     fn every_websocket_upgrade_keeps_its_transport_admission() {
         let mut checked = 0_usize;
@@ -1350,10 +1368,26 @@ mod tests {
     ///
     /// It reads each `.with_upgrades()` in `src/`, walks back to the `.serve_connection(` it is
     /// chained onto, and asserts that call serves `admitted_service(…)`
-    /// (`crates/substrate-daemon/src/runtime.rs`) rather than a bare service. The behavioural
-    /// partner is `runtime::tests::an_upgraded_websocket_keeps_its_per_uid_connection_permit`,
-    /// which observes one admission held across an upgrade on the unix listener; TCP and TLS have
-    /// no such case, and this is the whole of what holds them.
+    /// (`crates/substrate-daemon/src/runtime.rs`) rather than a bare service. Today that set is
+    /// five: the unix, TCP and TLS listeners, the metrics harness below and the unix fixture in
+    /// `runtime.rs`; the count assertion below is a floor of three, so a walk that silently
+    /// matched nothing cannot pass as a green check. The behavioural partners are
+    /// `runtime::tests::an_upgraded_websocket_keeps_its_per_uid_connection_permit` on the unix
+    /// listener and `app::tests::upgraded_transport_slot` on a production-shaped TCP listener over
+    /// the real router; TLS has neither, and this check is the whole of what holds it.
+    ///
+    /// **`src/` is the whole of its reach, and three listeners live outside it.**
+    /// `tests/websocket.rs:110-111`, `tests/metrics_stream_adversary.rs:94-95` and
+    /// `tests/pipe_session.rs:662-664` each serve the same production `router` with
+    /// `.with_upgrades()` and publish no admission, and nothing here reads them. The reason is not
+    /// that they matter less — the argument for admitting the harness below applies to them word
+    /// for word — but that `TransportPermit`, `TcpConnectionLimits` and `admitted_service` are
+    /// `pub(crate)`, so an integration test cannot reach them: including those three means making
+    /// the transport's admission surface public API for the benefit of tests, on a crate whose
+    /// library deliberately exposes configuration and nothing else. What closes the resemblance
+    /// gap instead is `app::tests::upgraded_transport_slot`, which is inside the crate and drives
+    /// an admitted listener over the same router those three drive bare. Widen this walk on the
+    /// day that surface is public for a reason of its own, and not before.
     ///
     /// **One limit, as a rule.** It requires the two calls to be adjacent on the chain, so a step
     /// inserted between them fails it. That is the sibling's lesson taken deliberately the other
