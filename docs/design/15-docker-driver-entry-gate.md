@@ -144,7 +144,7 @@ schema typo — the shape ADR 0014 gave `exec.aperture-ceiling-in-request`
 
 ### 4. The floor, clause by clause, with the refusal where it cannot be met
 
-The floor is `AGENTS.md:91-99` and design 04 § 7 (`:85-100`). Nothing below weakens it; the column
+The floor is `AGENTS.md:91-99` and design 04 § 7 (`:85-106`). Nothing below weakens it; the column
 that matters is the last one.
 
 | floor clause | host mechanism | container driver | if unproven |

@@ -1343,7 +1343,7 @@ unsafe fn keep_only(retained: &[RawFd]) {
 mod tests {
     use std::io::Write as _;
     use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
-    use std::os::fd::AsRawFd as _;
+    use std::os::fd::{AsRawFd as _, RawFd};
     use std::path::{Path, PathBuf};
     use std::process::{Child, Command, Stdio};
     use std::sync::Arc;
@@ -1452,6 +1452,69 @@ mod tests {
         pid: u32,
     }
 
+    /// The throwaway sandbox's argv, built and returned rather than built and spawned.
+    ///
+    /// Split out so this argv — the eighth and last bubblewrap command line in the crate — is
+    /// asserted like the other seven. It is the one that cannot be pointed at the recording
+    /// backend, because `Sandbox::open` needs a real `--info-fd` child pid to install an aperture
+    /// into; reading what it built needs no child at all.
+    fn sandbox_command(info_fd: RawFd, block_fd: RawFd) -> Command {
+        let mut command = Command::new(BUBBLEWRAP);
+        command
+            .env_clear()
+            .args(crate::process::USER_NAMESPACE_ARGV)
+            .args([
+                "--unshare-ipc",
+                "--unshare-pid",
+                "--unshare-net",
+                "--unshare-uts",
+                "--new-session",
+                "--die-with-parent",
+                "--clearenv",
+                "--ro-bind",
+                "/usr",
+                "/usr",
+                "--ro-bind-try",
+                "/lib",
+                "/lib",
+                "--ro-bind-try",
+                "/lib64",
+                "/lib64",
+                "--proc",
+                "/proc",
+                "--info-fd",
+            ])
+            .arg(info_fd.to_string())
+            .arg("--block-fd")
+            .arg(block_fd.to_string())
+            .args(["--", "/bin/true"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        command
+    }
+
+    /// The eighth argv carries the posture too — asserted as built, like the other seven.
+    ///
+    /// A throwaway sandbox in a test is still a sandbox: these cases put a forwarder in its
+    /// namespaces and a process in its cgroup, so a child in it that could nest a user namespace
+    /// is the same defect one place further from production. Reading the argv needs no backend on
+    /// disk, so this holds on every host.
+    #[test]
+    fn the_throwaway_sandbox_these_cases_open_carries_the_user_namespace_posture() {
+        let command = sandbox_command(3, 4);
+        let argv: Vec<String> = command
+            .get_args()
+            .map(|part| part.to_string_lossy().into_owned())
+            .collect();
+        for option in crate::process::USER_NAMESPACE_ARGV {
+            assert!(
+                argv.iter().any(|part| part == option),
+                "the throwaway sandbox does not carry {option}: {argv:?}"
+            );
+        }
+    }
+
     impl Sandbox {
         fn open() -> Option<Self> {
             if !Path::new(BUBBLEWRAP).is_file() {
@@ -1459,40 +1522,7 @@ mod tests {
             }
             let (mut info_read, info_write) = super::inheritable_pipe().expect("info pipe");
             let (block_read, block_write) = super::inheritable_pipe().expect("block pipe");
-            let info_fd = info_write.as_raw_fd();
-            let block_fd = block_read.as_raw_fd();
-            let mut command = Command::new(BUBBLEWRAP);
-            command
-                .env_clear()
-                .args(crate::process::USER_NAMESPACE_ARGV)
-                .args([
-                    "--unshare-ipc",
-                    "--unshare-pid",
-                    "--unshare-net",
-                    "--unshare-uts",
-                    "--new-session",
-                    "--die-with-parent",
-                    "--clearenv",
-                    "--ro-bind",
-                    "/usr",
-                    "/usr",
-                    "--ro-bind-try",
-                    "/lib",
-                    "/lib",
-                    "--ro-bind-try",
-                    "/lib64",
-                    "/lib64",
-                    "--proc",
-                    "/proc",
-                    "--info-fd",
-                ])
-                .arg(info_fd.to_string())
-                .arg("--block-fd")
-                .arg(block_fd.to_string())
-                .args(["--", "/bin/true"])
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
+            let mut command = sandbox_command(info_write.as_raw_fd(), block_read.as_raw_fd());
             let child = command.spawn().expect("spawn the throwaway sandbox");
             drop(info_write);
             // Never `?`: a sandbox that reported no pid is a broken harness, not an absent one, and

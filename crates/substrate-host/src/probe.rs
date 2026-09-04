@@ -330,7 +330,29 @@ fn probe_bubblewrap(config: &HostConfig) -> bool {
     let Ok(_listener) = std::os::unix::net::UnixListener::bind(&socket) else {
         return false;
     };
-    let mut command = Command::new(&config.bubblewrap);
+    let Ok(output) =
+        bubblewrap_probe_command(&config.bubblewrap, sentinel.path(), seccomp.as_raw_fd()).output()
+    else {
+        return false;
+    };
+    !output.status.success()
+        && String::from_utf8_lossy(&output.stderr).contains("socket(1, 1, 0): Permission denied")
+}
+
+/// The argv `probe_bubblewrap` measures the confinement floor with, built and returned rather than
+/// built and spawned.
+///
+/// Split out so the two options this unit added are pinned by a case that needs neither `socat`
+/// nor a backend on disk. `probe_bubblewrap` returns before it spawns on a host without
+/// `/usr/bin/socat`, so every guard that drove it — the stubs below and the recording backend
+/// alike — was silently conditional on socat being installed, and deleting
+/// `--assert-userns-disabled` left a socat-less host's whole package gate green.
+fn bubblewrap_probe_command(
+    bubblewrap: &Path,
+    sentinel: &Path,
+    seccomp_fd: std::os::fd::RawFd,
+) -> Command {
+    let mut command = Command::new(bubblewrap);
     command
         .env_clear()
         .args(crate::process::USER_NAMESPACE_ARGV)
@@ -380,10 +402,10 @@ fn probe_bubblewrap(config: &HostConfig) -> bool {
         // contract declares, which is a worse answer than the named refusal a withheld fact gives.
         .arg("--assert-userns-disabled")
         .args(["--dir", "/runtime", "--ro-bind"])
-        .arg(sentinel.path())
+        .arg(sentinel)
         .arg("/runtime/sentinel")
         .arg("--seccomp")
-        .arg(seccomp.as_raw_fd().to_string())
+        .arg(seccomp_fd.to_string())
         .args([
             "--",
             "/usr/bin/socat",
@@ -393,11 +415,7 @@ fn probe_bubblewrap(config: &HostConfig) -> bool {
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped());
-    let Ok(output) = command.output() else {
-        return false;
-    };
-    !output.status.success()
-        && String::from_utf8_lossy(&output.stderr).contains("socket(1, 1, 0): Permission denied")
+    command
 }
 
 /// The fixed, non-secret string the pass-through probe puts in its sealed memory.
@@ -887,12 +905,17 @@ mod tests {
     /// what the probe took for proof before either option was in its argv.
     ///
     /// Such a backend leaves every fact gated on `exec` absent — `exec_argv_only`,
-    /// `exec_namespaces`, `exec_no_egress`, the cgroup facts, `exec_signals`, the capsule and
-    /// scratch facts, `exec_resource_usage`, `sessions_pty` — which refuses each exec by name
-    /// rather than running one in a sandbox quietly missing the option. It does **not** withhold
-    /// `exec_output_limit_bytes` or `exec_max_current`, which `probe` publishes unconditionally
-    /// as declared configuration bounds rather than as proved capabilities (`:124-127`); that is
-    /// older than this option and is not this case's claim either way.
+    /// `exec_namespaces`, `exec_no_egress`, `exec_workspace_scoped_write`, the two cgroup facts,
+    /// `exec_signals`, `exec_inline_capsule`, `exec_resource_usage`, `metrics_stream`,
+    /// `exec_egress_apertures`, `secrets_slots` and `sessions_pty` — which refuses each exec by
+    /// name rather than running one in a sandbox quietly missing the option.
+    ///
+    /// Three `exec.*` facts are **not** in that set, and naming them is the point of listing the
+    /// rest. `exec_output_limit_bytes` and `exec_max_current` are published unconditionally as
+    /// declared configuration bounds rather than proved capabilities — the first for the stated
+    /// reason above it, the second for none recorded. `exec_scratch_quota` is gated on `quota`
+    /// alone, which probes the workspace filesystem for project quotas and does not pass through
+    /// `exec`. All three predate this option and none is changed here.
     #[test]
     fn a_backend_that_cannot_disable_nested_user_namespaces_withholds_the_exec_floor() {
         use std::os::unix::fs::PermissionsExt as _;
@@ -985,5 +1008,42 @@ exit 1
             &crate::process::recorded_sandboxes(&log),
             2 + usize::from(socat),
         );
+    }
+    /// **The confinement-floor probe asks for a non-nestable user namespace and asserts it** —
+    /// on the argv it builds, with no `socat` and no backend on disk.
+    ///
+    /// This is the pin the round-1 correction thought it had. Both guards over that argv ran
+    /// `probe_bubblewrap`, which returns before it spawns when `/usr/bin/socat` is absent: the
+    /// stub case returns early and the recording case counts `2 + socat`, so on a socat-less host
+    /// deleting `--assert-userns-disabled` left the whole package gate green. The source scan does
+    /// not look for that option either. Reading the built argv depends on neither.
+    ///
+    /// `--assert-userns-disabled` is what makes the option an observation instead of a request:
+    /// without it a backend that accepted `--disable-userns` and did nothing would prove the
+    /// floor. The pair is asserted together for that reason.
+    #[test]
+    fn the_confinement_floor_probe_asks_for_and_asserts_a_non_nestable_user_namespace() {
+        let sentinel = tempfile::tempdir().expect("a sentinel root");
+        let seccomp = crate::seccomp::profile().expect("the seccomp profile builds");
+        let command = bubblewrap_probe_command(
+            Path::new("/does/not/exist"),
+            sentinel.path(),
+            seccomp.as_raw_fd(),
+        );
+        let argv: Vec<String> = command
+            .get_args()
+            .map(|part| part.to_string_lossy().into_owned())
+            .collect();
+        for option in crate::process::USER_NAMESPACE_ARGV
+            .into_iter()
+            .chain(["--assert-userns-disabled"])
+        {
+            assert!(
+                argv.iter().any(|part| part == option),
+                "the probe that gates every exec fact does not carry {option}, so a backend \
+                 which cannot give a confined child a non-nestable user namespace still proves \
+                 the confinement floor: {argv:?}"
+            );
+        }
     }
 }

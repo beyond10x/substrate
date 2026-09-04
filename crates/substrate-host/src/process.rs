@@ -104,9 +104,15 @@ pub(crate) fn recorded_sandboxes(log: &Path) -> Vec<Vec<String>> {
 /// Fails unless every recorded sandbox carried the whole posture — and unless one was recorded.
 ///
 /// The empty check is not decoration: a site that stopped spawning, or a log written somewhere
-/// else, would otherwise satisfy "every recorded sandbox" by recording none.
+/// else, would otherwise satisfy "every recorded sandbox" by recording none. It is a check on the
+/// *caller* as much as on the log, because `expected` of zero would let this function state that
+/// promise while asserting nothing at all.
 #[cfg(test)]
 pub(crate) fn assert_recorded_posture(site: &str, sandboxes: &[Vec<String>], expected: usize) {
+    assert!(
+        expected > 0,
+        "{site} pinned zero sandboxes; a case that observes none proves nothing about any argv"
+    );
     assert_eq!(
         sandboxes.len(),
         expected,
@@ -4343,11 +4349,19 @@ mod tests {
     /// the egress probe, each observed through the recording backend.
     ///
     /// `probe.rs` owns the other three; its own case asserts them, because those functions are
-    /// private to that module. Between the two cases and
-    /// `the_exec_argv_carries_the_user_namespace_posture`, seven of the crate's eight bubblewrap
-    /// argv lists are asserted as built. The eighth is the throwaway sandbox in `egress.rs`'s own
-    /// test module, which hardcodes its backend path and so cannot be pointed at a recorder; the
-    /// source scan below is what covers it.
+    /// private to that module. **All eight of the crate's bubblewrap argv lists are asserted as
+    /// built**, by five cases: this one, `probe.rs`'s twin,
+    /// `the_exec_argv_carries_the_user_namespace_posture`,
+    /// `probe.rs::the_confinement_floor_probe_asks_for_and_asserts_a_non_nestable_user_namespace`
+    /// and `egress.rs::the_throwaway_sandbox_these_cases_open_carries_the_user_namespace_posture`.
+    /// The last two read a builder's return value instead of driving a spawn, which is how the
+    /// two argv lists that cannot be pointed at a recorder are still observed.
+    ///
+    /// The source scan below is **not** a fallback for any of them, and an earlier revision of
+    /// this comment wrongly said it was. It asserts that one line carries the literal, and every
+    /// argv carries the constant instead — so deleting a splice changes neither its site count
+    /// nor its stray list. **It detects an added spelling and never a removed splice, at any
+    /// site.**
     #[test]
     fn every_probe_sandbox_carries_the_user_namespace_posture() {
         let directory = tempfile::tempdir().expect("a scratch root");
@@ -4376,13 +4390,17 @@ mod tests {
     /// of this crate spells a user namespace except the one constant.**
     ///
     /// It is secondary because it cannot see whether an argv uses the constant — that is what the
-    /// two cases above are for. What it can see is a *new* sandbox, and the three other spellings
+    /// cases above are for. What it can see is a *new* sandbox, and the four other spellings
     /// bubblewrap 0.11.2 accepts for one: `--unshare-all` ("unshare every namespace we support by
-    /// default", which includes the user namespace), `--unshare-user-try`, and `--userns FD`. None
-    /// of them contains `--unshare-user` followed by a quote, so a check that looked only for that
-    /// needle would let an eighth sandbox in under any of the three. They are refused outright
-    /// here rather than paired, because none of them is used in this crate and adopting one is a
-    /// change to the confinement floor, not a spelling choice.
+    /// default", which includes the user namespace), `--unshare-user-try`, `--userns FD` and
+    /// `--userns2 FD`. None of them contains `--unshare-user` followed by a quote, and the needle
+    /// for `--userns` does not match `--userns2` either, so a check that looked only for those
+    /// would let a ninth sandbox in under any of the four. `--userns2` is in the set although
+    /// nothing here reaches it: bubblewrap parses and *attempts* it beside
+    /// `--unshare-user --disable-userns` rather than refusing the combination, and design 10
+    /// (`:98-99`) already records it. They are refused outright rather than paired, because none
+    /// is used in this crate and adopting one is a change to the confinement floor, not a spelling
+    /// choice.
     ///
     /// `src/` is walked recursively: `read_dir` alone stops at the top level, so a future
     /// `src/sandbox/mod.rs` would never be read.
@@ -4393,10 +4411,11 @@ mod tests {
         const UNSHARE_USER: &str = concat!("\"--unshare-", "user\"");
         const DISABLE_USERNS: &str = concat!("\"--disable-", "userns\"");
         /// The spellings that also put a child in a user namespace, and are used nowhere here.
-        const OTHER_SPELLINGS: [&str; 3] = [
+        const OTHER_SPELLINGS: [&str; 4] = [
             concat!("\"--unshare-", "all\""),
             concat!("\"--unshare-", "user-try\""),
             concat!("\"--", "userns\""),
+            concat!("\"--", "userns2\""),
         ];
         /// How far below the `--unshare-user` literal the posture's other half may sit.
         const WINDOW: usize = 3;
