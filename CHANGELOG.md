@@ -9,6 +9,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [0.7.0] — 2026-09-04
 
+Daemon image: `ghcr.io/beyond10x/b10x-substrate-daemon:0.7.0` at
+`sha256:62ad44f814a4cae4f95b826aaad69f5205f1d16a46e98700b96efe1b3a8a5f51`, keyless-signed;
+verify with `cosign verify`.
+
+Disposable MCP image: `ghcr.io/beyond10x/b10x-substrate-mcp:0.7.0` at
+`sha256:56265329568f4f3eebb0559f35dc61b6fa6501d0facf626362fac6573989797a`, development-only and
+keyless-signed; verify with `cosign verify`.
+
+Contract bundle: `ghcr.io/beyond10x/b10x-substrate-wire:0.15.0` at
+`sha256:ba95171e3a05d7917e4083759107132ad6fb707003e791e15b47d9fb20424ac8`, annotated
+`development`, keyless-signed; verify with `cosign verify`. Publication, digest pinning and a
+verified signature do not make the development contract stable. **The digest is the one `0.5.0` and
+`0.6.0` published**: two waves of confinement work changed no byte of a released bundle, which is
+invariant 6 holding, and the workflow re-signed the identical layout with this release's own
+workflow identity rather than replacing the tag.
+
 Second security wave over the 2026-09-03 whole-repository review. Every remaining severity D and H
 finding is closed, and two live sandbox escapes were found and closed along the way.
 
