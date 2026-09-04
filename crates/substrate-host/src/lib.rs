@@ -3,6 +3,7 @@
 
 mod egress;
 mod fs;
+mod git;
 mod probe;
 mod process;
 mod pty;
@@ -22,14 +23,95 @@ use sha2::{Digest as _, Sha256};
 use substrate_wire::{
     CapabilitySnapshot, DigestedFileSlice, ExecOutputQuery, ExecSignalInput, ExecStartInput,
     FileAbsence, FileEditInput, FileMutationResult, FileObservation, FilePatchInput, FileReadQuery,
-    FileReadResult, FileReplaceInput, LeaseObservation, OutputSlice, Workspace, WorkspaceAbsence,
-    WorkspaceCreateInput, WorkspaceTree, WorkspaceTreeQuery,
+    FileReadResult, FileReplaceInput, GitBaselineFileResult, GitChangeSet, GitChangesQuery,
+    LeaseObservation, OutputSlice, Workspace, WorkspaceAbsence, WorkspaceCreateInput,
+    WorkspaceTree, WorkspaceTreeQuery,
 };
 use thiserror::Error;
 use tokio::sync::Semaphore;
+use zeroize::Zeroizing;
 
 pub use egress::EgressAperture;
 pub use process::{ExecObservation, PipeFrame, PipeStream};
+
+/// One deployment-owned Git source aperture. The URL is a non-secret HTTPS prefix; request
+/// authority arrives separately and is never retained in this configuration.
+#[derive(Debug, Clone)]
+pub struct GitSourceBinding {
+    pub name: String,
+    pub base_url: url::Url,
+    pub ca_bundle: Option<PathBuf>,
+}
+
+impl GitSourceBinding {
+    /// Build one structurally closed source aperture.
+    ///
+    /// # Errors
+    ///
+    /// Refuses a non-lowercase name, a non-HTTPS or credential-bearing URL, or a URL prefix which
+    /// is not terminated at an unencoded path-segment boundary.
+    pub fn new(
+        name: impl Into<String>,
+        base_url: impl AsRef<str>,
+        ca_bundle: Option<PathBuf>,
+    ) -> Result<Self, DriverError> {
+        let name = name.into();
+        let raw_base_url = base_url.as_ref();
+        let base_url = url::Url::parse(raw_base_url).map_err(|_| {
+            DriverError::refused(
+                "workspace.git-source-invalid",
+                "Git source URL is invalid.",
+                "workspace.git",
+            )
+        })?;
+        if name.is_empty()
+            || name.len() > 64
+            || !name
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+            || base_url.scheme() != "https"
+            || !base_url.username().is_empty()
+            || base_url.password().is_some()
+            || base_url.query().is_some()
+            || base_url.fragment().is_some()
+            || !base_url.path().ends_with('/')
+            || raw_base_url.contains('%')
+            || raw_base_url.contains('\\')
+            || base_url.path().contains("//")
+        {
+            return Err(DriverError::refused(
+                "workspace.git-source-invalid",
+                "Git source binding is invalid.",
+                "workspace.git",
+            ));
+        }
+        Ok(Self {
+            name,
+            base_url,
+            ca_bundle,
+        })
+    }
+
+    fn admits(&self, locator: &url::Url, raw_locator: &str) -> bool {
+        // Bindings are required to end in `/`, so a textual prefix is also a complete path
+        // segment boundary. Without that invariant `/broker/team/` could accidentally be
+        // widened to `/broker/team-elsewhere/...` by an ordinary starts-with check.
+        locator.scheme() == self.base_url.scheme()
+            && locator.host_str() == self.base_url.host_str()
+            && locator.port_or_known_default() == self.base_url.port_or_known_default()
+            && locator.path().starts_with(self.base_url.path())
+            // URL parsers normalize percent-encoded dot segments before exposing `path()`. Check
+            // the presented spelling too, otherwise `%2e%2e` can disappear before this aperture
+            // decision and a downstream proxy gets to interpret a different path.
+            && !raw_locator.contains('%')
+            && !locator.path().contains('\\')
+            && !locator.path().contains("//")
+            && locator.query().is_none()
+            && locator.fragment().is_none()
+            && locator.username().is_empty()
+            && locator.password().is_none()
+    }
+}
 
 /// One operator-declared secret slot: a name, and the bounded owner-private file behind it
 /// (ADR 0012).
@@ -75,6 +157,8 @@ pub struct HostConfig {
     /// An operator-reserved inclusive Linux project-id range. Absent means hard storage quotas are
     /// not served; the driver never guesses that ids outside its state are free.
     pub project_quota_ids: Option<(u32, u32)>,
+    /// Closed set of HTTPS Git source apertures served by this host.
+    pub git_sources: Vec<GitSourceBinding>,
 }
 
 impl HostConfig {
@@ -113,6 +197,7 @@ impl HostConfig {
             egress_apertures: Vec::new(),
             ca_bundle: None,
             project_quota_ids: None,
+            git_sources: Vec::new(),
         }
     }
 
@@ -122,6 +207,10 @@ impl HostConfig {
 
     fn scratch_root(&self) -> PathBuf {
         self.workspace_root.join(".substrate-scratch")
+    }
+
+    fn git_baseline_root(&self) -> PathBuf {
+        self.workspace_root.join(".substrate-git-baselines")
     }
 }
 
@@ -233,6 +322,18 @@ pub trait Driver: Send + Sync {
         input: &WorkspaceCreateInput,
     ) -> DispatchOutcome<Workspace>;
 
+    /// Create a workspace while carrying a transient source authority directly to the driver.
+    /// Drivers which do not serve authenticated sources retain their existing behavior.
+    async fn create_workspace_authorized(
+        &self,
+        id: &str,
+        root_name: &str,
+        input: &WorkspaceCreateInput,
+        _source_authorization: Option<&str>,
+    ) -> DispatchOutcome<Workspace> {
+        self.create_workspace(id, root_name, input).await
+    }
+
     async fn observe_workspace(
         &self,
         id: &str,
@@ -287,6 +388,33 @@ pub trait Driver: Send + Sync {
             "workspace.tree-v2-unserved",
             "The active driver does not serve bounded recursive workspace trees.",
             "workspace.tree.list-v2",
+        ))
+    }
+
+    async fn read_workspace_git_baseline_file_v2(
+        &self,
+        _workspace_id: &str,
+        _root_name: &str,
+        _path: &str,
+        _max_bytes: u64,
+    ) -> Result<GitBaselineFileResult, DriverError> {
+        Err(DriverError::unserved(
+            "workspace.git-unserved",
+            "The active driver does not serve Git baseline reads.",
+            "workspace.git",
+        ))
+    }
+
+    async fn read_workspace_git_changes_v2(
+        &self,
+        _workspace_id: &str,
+        _root_name: &str,
+        _query: &GitChangesQuery,
+    ) -> Result<GitChangeSet, DriverError> {
+        Err(DriverError::unserved(
+            "workspace.git-unserved",
+            "The active driver does not serve Git change observations.",
+            "workspace.git",
         ))
     }
 
@@ -510,6 +638,21 @@ impl HostDriver {
                 )
             },
         )?;
+        let git_baseline_root = config.git_baseline_root();
+        std::fs::create_dir_all(&git_baseline_root).map_err(|error| {
+            DriverError::failed(
+                "workspace.git-baseline-root-failed",
+                format!("Git baseline root: {error}"),
+            )
+        })?;
+        std::fs::set_permissions(&git_baseline_root, std::fs::Permissions::from_mode(0o700))
+            .map_err(|error| {
+                DriverError::failed(
+                    "workspace.git-baseline-root-failed",
+                    format!("Git baseline root mode: {error}"),
+                )
+            })?;
+        git::reconcile(&config.workspace_root, &git_baseline_root)?;
         if config.project_quota_ids.is_some() {
             std::fs::create_dir_all(config.scratch_root()).map_err(|error| {
                 DriverError::failed("scratch.root-failed", format!("scratch root: {error}"))
@@ -746,6 +889,143 @@ impl Driver for HostDriver {
         }
     }
 
+    #[allow(clippy::too_many_lines)] // All source authority and atomic-install stages stay adjacent.
+    async fn create_workspace_authorized(
+        &self,
+        id: &str,
+        root_name: &str,
+        input: &WorkspaceCreateInput,
+        source_authorization: Option<&str>,
+    ) -> DispatchOutcome<Workspace> {
+        let substrate_wire::WorkspaceSource::Git(source) = &input.source else {
+            return self.create_workspace(id, root_name, input).await;
+        };
+        let Some(binding) = self
+            .config
+            .git_sources
+            .iter()
+            .find(|candidate| candidate.name == source.git.source)
+            .cloned()
+        else {
+            return DispatchOutcome::NotDispatched(DriverError::unserved(
+                "workspace.git-source-unserved",
+                "The requested Git source is not configured.",
+                "workspace.git",
+            ));
+        };
+        let locator = match url::Url::parse(&source.git.locator) {
+            Ok(locator) if binding.admits(&locator, &source.git.locator) => locator,
+            _ => {
+                return DispatchOutcome::NotDispatched(DriverError::refused(
+                    "workspace.git-locator-refused",
+                    "The Git locator is outside the configured source aperture.",
+                    "workspace.git",
+                ));
+            }
+        };
+        let Some(source_authorization) = source_authorization else {
+            return DispatchOutcome::NotDispatched(DriverError::refused(
+                "workspace.git-authority-absent",
+                "The Git source requires transient authorization.",
+                "workspace.git",
+            ));
+        };
+        let authority = Zeroizing::new(source_authorization.to_owned());
+        let id = id.to_owned();
+        let root_name = root_name.to_owned();
+        let labels = input.labels.clone();
+        let requested_storage = input.storage;
+        let workspace_root = self.config.workspace_root.clone();
+        let git_baseline_root = self.config.git_baseline_root();
+        let target = workspace_root.join(&root_name);
+        let install_target = target.clone();
+        let git_source = source.git.clone();
+        let result = self
+            .filesystem_io(move |_| {
+                if install_target.exists() {
+                    return Err(DriverError::refused(
+                        "workspace.git-target-exists",
+                        "The workspace target already exists.",
+                        "workspace.git",
+                    ));
+                }
+                let temporary = tempfile::Builder::new()
+                    .prefix(".substrate-git-")
+                    .tempdir_in(&workspace_root)
+                    .map_err(|_| {
+                        DriverError::failed(
+                            "workspace.git-temporary-failed",
+                            "Git workspace staging could not be created.",
+                        )
+                    })?;
+                let limit = requested_storage.unwrap_or(substrate_wire::StorageLimit {
+                    max_bytes: 2 * 1024 * 1024 * 1024,
+                    max_inodes: 200_000,
+                });
+                git::materialize(
+                    temporary.path(),
+                    &locator,
+                    &binding,
+                    &git_source,
+                    &authority,
+                    limit.max_bytes,
+                )?;
+                let usage = git::bounded_usage(temporary.path(), limit)?;
+                let temporary = temporary.keep();
+                if let Err(error) =
+                    git::write_baseline(&git_baseline_root, &root_name, &git_source.commit)
+                {
+                    let _ = std::fs::remove_dir_all(&temporary);
+                    return Err(error);
+                }
+                if let Err(error) = nix::fcntl::renameat2(
+                    nix::fcntl::AT_FDCWD,
+                    &temporary,
+                    nix::fcntl::AT_FDCWD,
+                    &install_target,
+                    nix::fcntl::RenameFlags::RENAME_NOREPLACE,
+                ) {
+                    let _ = std::fs::remove_dir_all(&temporary);
+                    let _ = git::remove_baseline(&git_baseline_root, &root_name);
+                    if matches!(
+                        error,
+                        nix::errno::Errno::EEXIST | nix::errno::Errno::ENOTEMPTY
+                    ) {
+                        return Err(DriverError::refused(
+                            "workspace.git-target-exists",
+                            "The workspace target already exists.",
+                            "workspace.git",
+                        ));
+                    }
+                    return Err(DriverError::failed(
+                        "workspace.git-install-failed",
+                        "Git workspace staging could not be installed.",
+                    ));
+                }
+                git::sync_workspace_root(&workspace_root)?;
+                Ok(Workspace {
+                    id,
+                    kind: substrate_wire::WorkspaceKind::Workspace,
+                    labels,
+                    observed_at: Utc::now(),
+                    state: substrate_wire::WorkspaceState::Ready,
+                    storage: requested_storage.map(|_| usage),
+                    lease: None,
+                })
+            })
+            .await;
+        match result {
+            Ok(workspace) => DispatchOutcome::Observed(workspace),
+            Err(error) => {
+                if target.exists() {
+                    DispatchOutcome::OutcomeUnknown(error)
+                } else {
+                    DispatchOutcome::ContainedAbsent(error)
+                }
+            }
+        }
+    }
+
     async fn observe_workspace(
         &self,
         id: &str,
@@ -858,6 +1138,48 @@ impl Driver for HostDriver {
         .await
     }
 
+    async fn read_workspace_git_baseline_file_v2(
+        &self,
+        workspace_id: &str,
+        root_name: &str,
+        path: &str,
+        max_bytes: u64,
+    ) -> Result<GitBaselineFileResult, DriverError> {
+        let workspace_id = workspace_id.to_owned();
+        let root_name = root_name.to_owned();
+        let path = path.to_owned();
+        let workspace = self.workspace_path(&root_name)?;
+        let baseline_root = self.config.git_baseline_root();
+        self.filesystem_io(move |_| {
+            git::baseline_file(
+                &workspace_id,
+                &workspace,
+                &baseline_root,
+                &root_name,
+                &path,
+                max_bytes,
+            )
+        })
+        .await
+    }
+
+    async fn read_workspace_git_changes_v2(
+        &self,
+        workspace_id: &str,
+        root_name: &str,
+        query: &GitChangesQuery,
+    ) -> Result<GitChangeSet, DriverError> {
+        let workspace_id = workspace_id.to_owned();
+        let root_name = root_name.to_owned();
+        let workspace = self.workspace_path(&root_name)?;
+        let baseline_root = self.config.git_baseline_root();
+        let query = *query;
+        self.filesystem_io(move |_| {
+            git::changes(&workspace_id, &workspace, &baseline_root, &root_name, query)
+        })
+        .await
+    }
+
     async fn replace_workspace_file_v2(
         &self,
         workspace_id: &str,
@@ -918,6 +1240,7 @@ impl Driver for HostDriver {
         let root_name = root_name.to_owned();
         let quota_path = self.config.workspace_root.join(&root_name);
         let quotas = self.quotas.clone();
+        let git_baseline_root = self.config.git_baseline_root();
         let workspace_destroy_namespace = self.workspace_destroy_namespace;
         self.filesystem_io(move |filesystem| {
             let _ownership =
@@ -927,6 +1250,7 @@ impl Driver for HostDriver {
                     Ok(WorkspaceDestroyProgress::Pending { removed_items })
                 }
                 fs::WorkspaceDestroyBatch::Absent => {
+                    git::remove_baseline(&git_baseline_root, &root_name)?;
                     if let Some(quotas) = quotas.as_ref() {
                         quotas.release(&quota_path)?;
                     }
@@ -1026,9 +1350,45 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        Driver as _, HostConfig, HostDriver, WorkspaceDestroyOwnership, WorkspaceDestroyProgress,
-        fs,
+        Driver as _, GitSourceBinding, HostConfig, HostDriver, WorkspaceDestroyOwnership,
+        WorkspaceDestroyProgress, fs,
     };
+
+    #[test]
+    fn git_source_binding_requires_and_preserves_a_path_segment_boundary() {
+        let binding =
+            GitSourceBinding::new("connector", "https://source.invalid/internal/git/", None)
+                .expect("source binding");
+        assert!(
+            binding.admits(
+                &url::Url::parse("https://source.invalid/internal/git/session/repository.git")
+                    .expect("admitted URL"),
+                "https://source.invalid/internal/git/session/repository.git",
+            )
+        );
+        assert!(
+            !binding.admits(
+                &url::Url::parse("https://source.invalid/internal/git-escape/repository.git")
+                    .expect("adjacent URL"),
+                "https://source.invalid/internal/git-escape/repository.git",
+            )
+        );
+        assert!(
+            !binding.admits(
+                &url::Url::parse(
+                    "https://source.invalid/internal/git/session/%2e%2e/repository.git"
+                )
+                .expect("encoded traversal URL"),
+                "https://source.invalid/internal/git/session/%2e%2e/repository.git",
+            ),
+            "encoded separators are not delegated to downstream URL normalization"
+        );
+        assert!(
+            GitSourceBinding::new("connector", "https://source.invalid/internal/git", None)
+                .is_err(),
+            "an ambiguous non-segment prefix must be refused"
+        );
+    }
 
     #[tokio::test]
     async fn destroy_driver_call_is_one_batch_then_eventually_absent() {

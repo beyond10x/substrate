@@ -235,7 +235,7 @@ dependencies = [
 
 [[package]]
 name = "b10x-substrate-daemon"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -281,12 +281,13 @@ dependencies = [
 
 [[package]]
 name = "b10x-substrate-host"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "async-trait",
  "b10x-substrate-wire",
  "base64 0.23.1",
  "chrono",
+ "git2",
  "hex",
  "libc",
  "nix",
@@ -298,12 +299,13 @@ dependencies = [
  "thiserror",
  "tokio",
  "ulid",
+ "url",
  "zeroize",
 ]
 
 [[package]]
 name = "b10x-substrate-mcp"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "b10x-substrate-sdk",
  "base64 0.23.1",
@@ -320,7 +322,7 @@ dependencies = [
 
 [[package]]
 name = "b10x-substrate-sdk"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "b10x-substrate-daemon",
  "b10x-substrate-wire",
@@ -348,7 +350,7 @@ dependencies = [
 
 [[package]]
 name = "b10x-substrate-store"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "b10x-substrate-wire",
  "chrono",
@@ -363,7 +365,7 @@ dependencies = [
 
 [[package]]
 name = "b10x-substrate-wire"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "base64 0.23.1",
  "chrono",
@@ -1043,6 +1045,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "git2"
+version = "0.20.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7b88256088d75a56f8ecfa070513a775dd9107f6530ef14919dac831af9cfe2b"
+dependencies = [
+ "bitflags 2.13.1",
+ "libc",
+ "libgit2-sys",
+ "log",
+ "openssl-probe",
+ "openssl-sys",
+ "url",
+]
+
+[[package]]
 name = "hashbrown"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1447,12 +1464,37 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
 
 [[package]]
+name = "libgit2-sys"
+version = "0.18.8+1.9.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f7c568b25d7489bc3fb2988ed69ab111d2944d2f5fec3d5c987fe545ea97b50"
+dependencies = [
+ "cc",
+ "libc",
+ "libz-sys",
+ "openssl-sys",
+ "pkg-config",
+]
+
+[[package]]
 name = "libsqlite3-sys"
 version = "0.38.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1d20bef17f513b9b3004532233187769cd072d790971f4e4da0e346eb6401e8"
 dependencies = [
  "cc",
+ "pkg-config",
+ "vcpkg",
+]
+
+[[package]]
+name = "libz-sys"
+version = "1.1.29"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85bc9657773828b90eeb625adff10eeac83cc21bbfd8e23a03eaa8a33c9e28d9"
+dependencies = [
+ "cc",
+ "libc",
  "pkg-config",
  "vcpkg",
 ]
@@ -1669,6 +1711,24 @@ name = "once_cell_polyfill"
 version = "1.70.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
+
+[[package]]
+name = "openssl-probe"
+version = "0.1.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d05e27ee213611ffe7d6348b942e8f942b37114c00cc03cec254295a4a17852e"
+
+[[package]]
+name = "openssl-sys"
+version = "0.9.117"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b47e7e6bb2c38cd930d25a23b40fa52e068c10e85f3e03a7f5ba5aaca5713695"
+dependencies = [
+ "cc",
+ "libc",
+ "pkg-config",
+ "vcpkg",
+]
 
 [[package]]
 name = "outref"
@@ -2345,7 +2405,7 @@ dependencies = [
 
 [[package]]
 name = "substrate-contract-check"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "jsonschema",
  "serde_json",
@@ -3087,7 +3147,7 @@ dependencies = [
 
 [[package]]
 name = "xtask"
-version = "0.7.0"
+version = "0.7.1"
 dependencies = [
  "anyhow",
  "b10x-substrate-wire",

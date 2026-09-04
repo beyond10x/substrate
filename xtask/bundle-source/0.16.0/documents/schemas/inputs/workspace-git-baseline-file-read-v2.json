@@ -1,0 +1,19 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.16.0:input:workspace-git-baseline-file-read-v2",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "max_bytes": {
+      "maximum": {
+        "$wire": "MAX_IO_BYTES"
+      },
+      "minimum": 1,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "max_bytes"
+  ],
+  "title": "workspace-git-baseline-file-read-v2 operation input",
+  "type": "object"
+}

@@ -7,8 +7,8 @@ use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64URL;
 use clap::Parser;
 use substrate_daemon::{
-    DaemonConfig, DelegatedContextKey, EgressAperture, HostedIdentityConfig, SecretSlot,
-    TcpDaemonConfig, TlsDaemonConfig, serve,
+    DaemonConfig, DelegatedContextKey, EgressAperture, GitSourceConfig, HostedIdentityConfig,
+    SecretSlot, TcpDaemonConfig, TlsDaemonConfig, serve,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -29,6 +29,29 @@ fn parse_secret_slot(value: &str) -> Result<SecretSlot, String> {
     Ok(SecretSlot {
         name: name.to_owned(),
         path: PathBuf::from(path),
+    })
+}
+
+fn parse_git_source(value: &str) -> Result<GitSourceConfig, String> {
+    let (name, base_url) = value
+        .split_once('=')
+        .ok_or_else(|| "a Git source is declared as name=https://origin/path-prefix".to_owned())?;
+    if name.is_empty()
+        || name.len() > 64
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+        || !base_url.starts_with("https://")
+        || !base_url.ends_with('/')
+    {
+        return Err(
+            "a Git source must have a lowercase name and segment-bounded HTTPS URL prefix ending in /"
+                .to_owned(),
+        );
+    }
+    Ok(GitSourceConfig {
+        name: name.to_owned(),
+        base_url: base_url.to_owned(),
     })
 }
 
@@ -206,6 +229,16 @@ struct Arguments {
         value_parser = parse_project_quota_ids
     )]
     project_quota_ids: Option<(u32, u32)>,
+
+    /// Declare a read-only Git source as `name=https://origin/path-prefix/` (repeatable).
+    #[arg(
+        long = "git-source",
+        env = "SUBSTRATE_GIT_SOURCE",
+        value_name = "NAME=HTTPS_URL_PREFIX",
+        value_delimiter = ',',
+        value_parser = parse_git_source
+    )]
+    git_sources: Vec<GitSourceConfig>,
 
     #[arg(long, default_value = "/usr/bin/bwrap")]
     bubblewrap: PathBuf,
@@ -396,6 +429,7 @@ impl From<Arguments> for DaemonConfig {
             allow_uids: arguments.allow_uids,
             cgroup_root: arguments.cgroup_root,
             project_quota_ids: arguments.project_quota_ids,
+            git_sources: arguments.git_sources,
             bubblewrap: arguments.bubblewrap,
             event_retention: arguments.event_retention,
             secret_slots: arguments.secret_slots,

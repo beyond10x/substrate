@@ -144,7 +144,7 @@ impl GuardedFilesystem {
         path: &str,
         query: &FileReadQuery,
     ) -> Result<FileReadResult, DriverError> {
-        validate_relative_path(path).map_err(|_| path_escape())?;
+        validate_api_path(path)?;
         query.validate_shape().map_err(|_| {
             DriverError::refused(
                 "request.schema-invalid",
@@ -253,7 +253,7 @@ impl GuardedFilesystem {
         path: &str,
         query: &FileReadQuery,
     ) -> Result<DigestedFileSlice, DriverError> {
-        validate_relative_path(path).map_err(|_| path_escape())?;
+        validate_api_path(path)?;
         query.validate_shape().map_err(|_| {
             DriverError::refused(
                 "request.schema-invalid",
@@ -441,7 +441,7 @@ impl GuardedFilesystem {
     }
 
     fn current_file(&self, root_name: &str, path: &str) -> Result<Option<Vec<u8>>, DriverError> {
-        validate_relative_path(path).map_err(|_| path_escape())?;
+        validate_api_path(path)?;
         let workspace = self.workspace_fd(root_name)?;
         match self.read_complete_from(workspace.as_raw_fd(), path) {
             Ok(bytes) => Ok(Some(bytes)),
@@ -473,7 +473,7 @@ impl GuardedFilesystem {
     }
 
     fn create_parent_directories(&self, root_name: &str, path: &str) -> Result<(), DriverError> {
-        validate_relative_path(path).map_err(|_| path_escape())?;
+        validate_api_path(path)?;
         let (parent, _) = split_parent(path)?;
         if parent == "." {
             return Ok(());
@@ -518,7 +518,7 @@ impl GuardedFilesystem {
         path: &str,
         content: &[u8],
     ) -> Result<FileObservation, DriverError> {
-        validate_relative_path(path).map_err(|_| path_escape())?;
+        validate_api_path(path)?;
         if u64::try_from(content.len()).expect("usize fits u64") > self.max_file_bytes {
             return Err(DriverError::exhausted(
                 "workspace.write-limit",
@@ -590,7 +590,7 @@ impl GuardedFilesystem {
         root_name: &str,
         path: &str,
     ) -> Result<FileAbsence, DriverError> {
-        validate_relative_path(path).map_err(|_| path_escape())?;
+        validate_api_path(path)?;
         let workspace = self.workspace_fd(root_name)?;
         let (parent, name) = split_parent(path)?;
         let parent_fd = if parent == "." {
@@ -766,6 +766,9 @@ fn list_directory(fd: RawFd) -> Result<Vec<DirectoryEntry>, DriverError> {
     let mut result = Vec::new();
     for (name, file_type, size) in entries {
         let name_text = String::from_utf8(name.to_bytes().to_vec()).map_err(|_| path_escape())?;
+        if name_text == ".git" {
+            continue;
+        }
         let (kind, size) = match file_type {
             libc::S_IFREG => (DirectoryEntryKind::File, size),
             libc::S_IFDIR => (DirectoryEntryKind::Directory, None),
@@ -793,6 +796,9 @@ fn walk_tree(
     entries.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
     for (name, file_type, size) in entries {
         let name_bytes = name.as_bytes();
+        if name_bytes == b".git" {
+            continue;
+        }
         if !include_hidden && name_bytes.first() == Some(&b'.') {
             continue;
         }
@@ -836,6 +842,14 @@ fn walk_tree(
                 return Ok(());
             }
         }
+    }
+    Ok(())
+}
+
+fn validate_api_path(path: &str) -> Result<(), DriverError> {
+    validate_relative_path(path).map_err(|_| path_escape())?;
+    if path.split('/').any(|component| component == ".git") {
+        return Err(DriverError::not_found());
     }
     Ok(())
 }
@@ -1481,7 +1495,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        DESTROY_BATCH_ITEMS, GuardedFilesystem, WorkspaceDestroyBatch, openat2,
+        DESTROY_BATCH_ITEMS, GuardedFilesystem, WorkspaceDestroyBatch, list_directory, openat2,
         read_bounded_complete, remove_children_batch, validate_root_name,
     };
 
@@ -1633,6 +1647,69 @@ mod tests {
             std::fs::read_to_string(outside.path().join("secret")).expect("outside unchanged"),
             "outside"
         );
+    }
+
+    #[test]
+    fn guarded_file_and_tree_apis_never_expose_git_control_data() {
+        let directory = tempdir().expect("tempdir");
+        let filesystem =
+            GuardedFilesystem::open(directory.path(), 1024, 1024, 100).expect("guarded filesystem");
+        if !filesystem.openat2_available() {
+            return;
+        }
+        filesystem.create_workspace("ws_git").expect("workspace");
+        let root = directory.path().join("ws_git");
+        std::fs::create_dir(root.join(".git")).expect("git directory");
+        std::fs::write(root.join(".git/config"), b"secret control data").expect("git config");
+        std::fs::write(root.join("visible.txt"), b"visible").expect("visible file");
+
+        let direct = filesystem
+            .read(
+                "ws_git",
+                "ws_git",
+                ".git/config",
+                &FileReadQuery {
+                    mode: FileMode::File,
+                    offset: Some(0),
+                    limit_bytes: Some(64),
+                    cursor: None,
+                    limit_items: None,
+                },
+            )
+            .expect_err("direct .git read must look absent");
+        assert_eq!(direct.code, "resource.not-found");
+        assert_eq!(
+            filesystem
+                .write_atomic("ws_git", "ws_git", ".git/config", b"replacement")
+                .expect_err("direct .git write must look absent")
+                .code,
+            "resource.not-found"
+        );
+        assert_eq!(
+            filesystem
+                .delete_file("ws_git", "ws_git", ".git/config")
+                .expect_err("direct .git delete must look absent")
+                .code,
+            "resource.not-found"
+        );
+
+        let root_fd = filesystem.workspace_fd("ws_git").expect("workspace fd");
+        let root_items = list_directory(root_fd.as_raw_fd()).expect("root listing");
+        assert_eq!(root_items.len(), 1);
+        assert_eq!(root_items[0].name, "visible.txt");
+
+        let tree = filesystem
+            .list_tree(
+                "ws_git",
+                "ws_git",
+                &substrate_wire::WorkspaceTreeQuery {
+                    limit_items: 100,
+                    include_hidden: true,
+                },
+            )
+            .expect("tree listing");
+        assert_eq!(tree.items.len(), 1);
+        assert_eq!(tree.items[0].path, "visible.txt");
     }
 
     #[test]

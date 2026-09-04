@@ -10,7 +10,7 @@ owner-private Unix socket, verifies the daemon's advertised contract, and return
 process, event, operation, and refusal observations.
 
 The SDK and wire contract are development releases below 1.0. Current development source verifies
-the explicitly promoted `substrate-wire/0.15.0` name and inner manifest digest before it serves an
+the explicitly promoted `substrate-wire/0.16.0` name and inner manifest digest before it serves an
 operation. Missing, older, unknown, and wrong-digest daemon claims are refused; a newer Rust type in
 the workspace does not by itself advance that pair.
 

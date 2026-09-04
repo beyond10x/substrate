@@ -1673,8 +1673,8 @@ mod tests {
         checked.sort();
         checked.dedup();
         assert!(
-            checked.len() >= 5,
-            "0.11.0 through 0.15.0 each gate metrics.stream on the sample interval; read {checked:?}"
+            checked.len() >= 6,
+            "0.11.0 through 0.16.0 each gate metrics.stream on the sample interval; read {checked:?}"
         );
     }
 }

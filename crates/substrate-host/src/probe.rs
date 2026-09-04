@@ -105,6 +105,9 @@ pub fn probe(config: &HostConfig, openat2: bool) -> CapabilitySnapshot {
         workspace_read_limit_bytes: workspace.then_some(config.read_limit_bytes),
         workspace_list_limit_items: workspace.then_some(config.list_limit_items),
         workspace_storage_quota: quota_facts,
+        workspace_git: (!config.git_sources.is_empty()
+            && crate::git::mechanism_is_provable(&config.workspace_root))
+        .then_some(true),
         exec_argv_only: exec.then_some(true),
         exec_namespaces: exec.then_some(NamespaceFacts {
             user: true,

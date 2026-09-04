@@ -1,0 +1,74 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.16.0:result:workspace-git-baseline-file-read-v2",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "commit": {
+      "pattern": "^[0-9a-f]{40}$",
+      "type": "string"
+    },
+    "file": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "content": {
+              "additionalProperties": false,
+              "properties": {
+                "data": {
+                  "$ref": "../common.json#/$defs/canonical-base64-file"
+                },
+                "encoding": {
+                  "const": "base64"
+                }
+              },
+              "required": [
+                "encoding",
+                "data"
+              ],
+              "type": "object"
+            },
+            "path": {
+              "$ref": "../common.json#/$defs/relative-path"
+            },
+            "sha256": {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "size": {
+              "maximum": {
+                "$wire": "MAX_IO_BYTES"
+              },
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "path",
+            "size",
+            "sha256",
+            "content"
+          ],
+          "type": "object"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "observed_at": {
+      "$ref": "../common.json#/$defs/timestamp"
+    },
+    "workspace": {
+      "$ref": "../common.json#/$defs/workspace-id"
+    }
+  },
+  "required": [
+    "workspace",
+    "commit",
+    "file",
+    "observed_at"
+  ],
+  "title": "workspace-git-baseline-file-read-v2 operation result",
+  "type": "object"
+}

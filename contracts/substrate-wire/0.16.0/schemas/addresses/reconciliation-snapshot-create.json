@@ -1,0 +1,9 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.16.0:address:reconciliation-snapshot-create",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {},
+  "required": [],
+  "title": "reconciliation-snapshot-create normalized route address",
+  "type": "object"
+}

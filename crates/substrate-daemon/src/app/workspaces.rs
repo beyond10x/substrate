@@ -12,9 +12,9 @@ use substrate_store::{
 };
 use substrate_wire::{
     EmptyInput, ErrorClass, FileEditInput, FilePatchInput, FileReadQuery, FileReplaceInput,
-    FileWriteInput, LeaseRenewInput, MAX_LEASE_TTL_MS, MIN_LEASE_TTL_MS, Success,
-    WorkspaceCreateInput, WorkspaceKind, WorkspaceState, WorkspaceTreeQuery,
-    validate_relative_path,
+    FileWriteInput, GitBaselineFileQuery, GitChangesQuery, LeaseRenewInput, MAX_LEASE_TTL_MS,
+    MIN_LEASE_TTL_MS, Success, WorkspaceCreateInput, WorkspaceKind, WorkspaceState,
+    WorkspaceTreeQuery, validate_relative_path,
 };
 
 use super::operations::{
@@ -68,23 +68,53 @@ pub(super) async fn workspace_create(
         )
         .await;
     }
-    if !mutation.input.source.is_empty() {
-        return refuse_before_dispatch(
-            &app,
-            &identity,
-            &request_id,
-            "workspace.create",
-            "POST",
-            "/v1/workspaces",
-            &mutation,
-            &DriverError::unserved(
-                "workspace.source-unserved",
-                "Workspace Git sources are not served by the minimum host slice.",
-                "workspace.git",
-            ),
-        )
-        .await;
-    }
+    let source_authorization = match headers
+        .get("x-b10x-workspace-source-authorization")
+        .map(|value| value.to_str().ok())
+    {
+        None => None,
+        Some(Some(value)) => {
+            if value.is_empty()
+                || value.len() > 512
+                || !value.bytes().all(|byte| (0x21..=0x7e).contains(&byte))
+            {
+                let error = DriverError::refused(
+                    "workspace.git-authority-invalid",
+                    "Workspace source authority is invalid.",
+                    "workspace.git",
+                );
+                return refuse_before_dispatch(
+                    &app,
+                    &identity,
+                    &request_id,
+                    "workspace.create",
+                    "POST",
+                    "/v1/workspaces",
+                    &mutation,
+                    &error,
+                )
+                .await;
+            }
+            Some(zeroize::Zeroizing::new(value.to_owned()))
+        }
+        Some(None) => {
+            return refuse_before_dispatch(
+                &app,
+                &identity,
+                &request_id,
+                "workspace.create",
+                "POST",
+                "/v1/workspaces",
+                &mutation,
+                &DriverError::refused(
+                    "workspace.git-authority-invalid",
+                    "Workspace source authority is invalid.",
+                    "workspace.git",
+                ),
+            )
+            .await;
+        }
+    };
     let operation = mutation.op.clone();
     let lease = match mutation.input.lease_ttl_ms {
         Some(ttl_ms) => match new_lease(&app, &identity, ttl_ms, &request_id, &operation) {
@@ -156,7 +186,12 @@ pub(super) async fn workspace_create(
     }
     match app
         .driver
-        .create_workspace(&id, &root_name, &mutation.input)
+        .create_workspace_authorized(
+            &id,
+            &root_name,
+            &mutation.input,
+            source_authorization.as_ref().map(|value| value.as_str()),
+        )
         .await
     {
         DispatchOutcome::Observed(mut workspace) => {
@@ -384,6 +419,95 @@ pub(super) async fn workspace_tree_read_v2(
     match app
         .driver
         .list_workspace_tree_v2(&workspace_id, &root_name, &query)
+        .await
+    {
+        Ok(result) => success(StatusCode::OK, Success::observed(request_id, result)),
+        Err(error) => driver_failure(&request_id, None, &error),
+    }
+}
+
+pub(super) async fn workspace_git_baseline_file_read_v2(
+    State(app): State<Arc<App>>,
+    Extension(identity): Extension<Identity>,
+    headers: HeaderMap,
+    Path((workspace_id, path)): Path<(String, String)>,
+    RawQuery(raw_query): RawQuery,
+) -> Response {
+    let request_id = request_id(&app, &headers);
+    let query: GitBaselineFileQuery = match serde_urlencoded::from_str::<GitBaselineFileQuery>(
+        raw_query.as_deref().unwrap_or(""),
+    ) {
+        Ok(value) if value.validate().is_ok() => value,
+        _ => return schema_invalid(&request_id, None, "query"),
+    };
+    let path = match validate_relative_path(&path) {
+        Ok(()) => path,
+        Err(error) => return path_refusal(&request_id, None, &error),
+    };
+    let scope = app.scope(&identity);
+    let _workspace_guard = app.lock_workspace(&scope, &workspace_id).await;
+    let root_name = match app.admit_workspace(&scope, &workspace_id).await {
+        Ok(WorkspaceAdmission::Missing) => return not_found(&request_id),
+        Ok(WorkspaceAdmission::Frozen { .. }) => {
+            return failure(
+                StatusCode::CONFLICT,
+                &request_id,
+                None,
+                ErrorClass::Conflict,
+                "workspace.not-ready",
+                "Workspace is not ready for filesystem access.",
+                Some("workspace"),
+                false,
+            );
+        }
+        Ok(WorkspaceAdmission::Admitted { root_name, .. }) => root_name,
+        Err(error) => return store_failure(&request_id, None, &error),
+    };
+    match app
+        .driver
+        .read_workspace_git_baseline_file_v2(&workspace_id, &root_name, &path, query.max_bytes)
+        .await
+    {
+        Ok(result) => success(StatusCode::OK, Success::observed(request_id, result)),
+        Err(error) => driver_failure(&request_id, None, &error),
+    }
+}
+
+pub(super) async fn workspace_git_changes_read_v2(
+    State(app): State<Arc<App>>,
+    Extension(identity): Extension<Identity>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<String>,
+    RawQuery(raw_query): RawQuery,
+) -> Response {
+    let request_id = request_id(&app, &headers);
+    let query: GitChangesQuery =
+        match serde_urlencoded::from_str::<GitChangesQuery>(raw_query.as_deref().unwrap_or("")) {
+            Ok(value) if value.validate().is_ok() => value,
+            _ => return schema_invalid(&request_id, None, "query"),
+        };
+    let scope = app.scope(&identity);
+    let _workspace_guard = app.lock_workspace(&scope, &workspace_id).await;
+    let root_name = match app.admit_workspace(&scope, &workspace_id).await {
+        Ok(WorkspaceAdmission::Missing) => return not_found(&request_id),
+        Ok(WorkspaceAdmission::Frozen { .. }) => {
+            return failure(
+                StatusCode::CONFLICT,
+                &request_id,
+                None,
+                ErrorClass::Conflict,
+                "workspace.not-ready",
+                "Workspace is not ready for filesystem access.",
+                Some("workspace"),
+                false,
+            );
+        }
+        Ok(WorkspaceAdmission::Admitted { root_name, .. }) => root_name,
+        Err(error) => return store_failure(&request_id, None, &error),
+    };
+    match app
+        .driver
+        .read_workspace_git_changes_v2(&workspace_id, &root_name, &query)
         .await
     {
         Ok(result) => success(StatusCode::OK, Success::observed(request_id, result)),

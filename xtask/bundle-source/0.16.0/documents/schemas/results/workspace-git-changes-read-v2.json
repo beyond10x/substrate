@@ -1,0 +1,146 @@
+{
+  "$defs": {
+    "change-side": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "maximum": 131071,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "oid": {
+          "oneOf": [
+            {
+              "pattern": "^[0-9a-f]{40}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "path": {
+          "$ref": "../common.json#/$defs/relative-path"
+        },
+        "size": {
+          "maximum": 9223372036854775807,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path",
+        "mode",
+        "size",
+        "oid"
+      ],
+      "type": "object"
+    },
+    "nullable-change-side": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/change-side"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "patch": {
+      "additionalProperties": false,
+      "properties": {
+        "binary": {
+          "type": "boolean"
+        },
+        "text": {
+          "maxLength": 1048576,
+          "type": "string"
+        },
+        "truncated": {
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "text",
+        "truncated",
+        "binary"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "urn:b10x:substrate-wire:0.16.0:result:workspace-git-changes-read-v2",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "commit": {
+      "pattern": "^[0-9a-f]{40}$",
+      "type": "string"
+    },
+    "items": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "baseline": {
+            "$ref": "#/$defs/nullable-change-side"
+          },
+          "current": {
+            "$ref": "#/$defs/nullable-change-side"
+          },
+          "patch": {
+            "$ref": "#/$defs/patch"
+          },
+          "status": {
+            "enum": [
+              "added",
+              "modified",
+              "deleted",
+              "renamed",
+              "copied",
+              "type_changed",
+              "untracked",
+              "conflicted"
+            ]
+          }
+        },
+        "required": [
+          "status",
+          "baseline",
+          "current",
+          "patch"
+        ],
+        "type": "object"
+      },
+      "maxItems": {
+        "$wire": "MAX_LIST_ITEMS"
+      },
+      "type": "array",
+      "x-b10x-order": "current-or-baseline-path-sorted-utf8-bytewise"
+    },
+    "observed_at": {
+      "$ref": "../common.json#/$defs/timestamp"
+    },
+    "returned_bytes": {
+      "maximum": {
+        "$wire": "MAX_IO_BYTES"
+      },
+      "minimum": 0,
+      "type": "integer"
+    },
+    "truncated": {
+      "type": "boolean"
+    },
+    "workspace": {
+      "$ref": "../common.json#/$defs/workspace-id"
+    }
+  },
+  "required": [
+    "workspace",
+    "commit",
+    "items",
+    "returned_bytes",
+    "truncated",
+    "observed_at"
+  ],
+  "title": "workspace-git-changes-read-v2 operation result",
+  "type": "object"
+}

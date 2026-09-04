@@ -32,7 +32,7 @@ capability fact or an unrecorded driver side effect.
 | Hosted composition | identity, placement and product services operate Substrate without moving their policy into it | remote conformance and an external adoption record are complete | production deployment evidence shows the execution data plane remains standalone and policy-free | pending |
 
 The tagged Substrate `0.4.0` release is a software release, not the similarly numbered historical
-contract bundle or a promise that the current `substrate-wire/0.15.0` development bundle is stable.
+contract bundle or a promise that the current `substrate-wire/0.16.0` development bundle is stable.
 Kubernetes, Docker and
 Firecracker requests expose property-based capability facts; clients never branch on which driver
 answered. Fleet scheduling, billing, product quotas, connector semantics and agent loops remain

@@ -1,0 +1,79 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.16.0:input:workspace-create",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "labels": {
+      "$ref": "../common.json#/$defs/labels"
+    },
+    "lease_ttl_ms": {
+      "maximum": 86400000,
+      "minimum": 1000,
+      "type": "integer"
+    },
+    "source": {
+      "oneOf": [
+        {
+          "const": "empty"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "git": {
+              "additionalProperties": false,
+              "properties": {
+                "commit": {
+                  "pattern": "^[0-9A-Fa-f]{40}$",
+                  "type": "string"
+                },
+                "depth": {
+                  "maximum": 50,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "locator": {
+                  "format": "uri",
+                  "maxLength": 2048,
+                  "pattern": "^https://",
+                  "type": "string"
+                },
+                "ref": {
+                  "maxLength": 512,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "source": {
+                  "maxLength": 64,
+                  "minLength": 1,
+                  "pattern": "^[a-z0-9_]+$",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "source",
+                "locator",
+                "ref",
+                "commit",
+                "depth"
+              ],
+              "type": "object"
+            }
+          },
+          "required": [
+            "git"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "storage": {
+      "$ref": "../common.json#/$defs/storage-limit"
+    }
+  },
+  "required": [
+    "source",
+    "labels"
+  ],
+  "title": "workspace-create operation input",
+  "type": "object"
+}

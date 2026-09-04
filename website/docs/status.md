@@ -49,8 +49,9 @@ a specific refusal when requested.
 - Production TLS admits callers only through online Identity resolution. Identity unavailability
   fails closed, and no cached authority or caller-written identity is used.
 - One daemon is one trust domain; it is not a multi-tenant isolation layer.
-- Tagged release `0.5.0` and current development source advertise `substrate-wire/0.15.0` and the
-  SHA-256 of its inner `bundle.json` as one claim. Version `0.15.0` deliberately replaces
+- Tagged release `0.5.0` advertises `substrate-wire/0.15.0`; current development source advertises
+  additive `substrate-wire/0.16.0` and the SHA-256 of its inner `bundle.json` as one claim. Version
+  `0.15.0` deliberately replaces
   `/v1/pipe-sessions` with `/v1/sessions` and serves no compatibility alias. The published bundle
   remains a development contract.
 

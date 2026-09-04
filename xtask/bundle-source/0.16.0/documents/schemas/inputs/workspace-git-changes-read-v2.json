@@ -1,0 +1,35 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.16.0:input:workspace-git-changes-read-v2",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "max_file_bytes": {
+      "maximum": {
+        "$wire": "MAX_IO_BYTES"
+      },
+      "minimum": 1,
+      "type": "integer"
+    },
+    "max_files": {
+      "maximum": {
+        "$wire": "MAX_LIST_ITEMS"
+      },
+      "minimum": 1,
+      "type": "integer"
+    },
+    "max_total_bytes": {
+      "maximum": {
+        "$wire": "MAX_IO_BYTES"
+      },
+      "minimum": 1,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "max_files",
+    "max_file_bytes",
+    "max_total_bytes"
+  ],
+  "title": "workspace-git-changes-read-v2 operation input",
+  "type": "object"
+}

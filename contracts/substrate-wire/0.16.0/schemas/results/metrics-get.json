@@ -1,0 +1,47 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.16.0:result:metrics-get",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "exec": {
+          "$ref": "../common.json#/$defs/exec-id"
+        },
+        "resource_kind": {
+          "const": "exec"
+        },
+        "usage": {
+          "$ref": "../resource.json#/$defs/exec-usage"
+        }
+      },
+      "required": [
+        "resource_kind",
+        "exec",
+        "usage"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "resource_kind": {
+          "const": "workspace"
+        },
+        "storage": {
+          "$ref": "../resource.json#/$defs/storage-usage"
+        },
+        "workspace": {
+          "$ref": "../common.json#/$defs/workspace-id"
+        }
+      },
+      "required": [
+        "resource_kind",
+        "workspace",
+        "storage"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "metrics-get operation result"
+}

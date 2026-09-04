@@ -1,0 +1,16 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.16.0:input:pipe-session-authority-mint",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "public_key": {
+      "pattern": "^[A-Za-z0-9_-]{43}$",
+      "type": "string"
+    }
+  },
+  "required": [
+    "public_key"
+  ],
+  "title": "pipe-session-authority-mint operation input",
+  "type": "object"
+}

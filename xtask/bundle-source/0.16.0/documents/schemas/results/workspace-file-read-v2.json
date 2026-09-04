@@ -1,0 +1,77 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.16.0:result:workspace-file-read-v2",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "content": {
+      "additionalProperties": false,
+      "properties": {
+        "data": {
+          "$ref": "../common.json#/$defs/canonical-base64-file"
+        },
+        "encoding": {
+          "const": "base64"
+        }
+      },
+      "required": [
+        "encoding",
+        "data"
+      ],
+      "type": "object"
+    },
+    "eof": {
+      "type": "boolean"
+    },
+    "kind": {
+      "const": "file"
+    },
+    "next_offset": {
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "observed_at": {
+      "$ref": "../common.json#/$defs/timestamp"
+    },
+    "offset": {
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "path": {
+      "$ref": "../common.json#/$defs/relative-path"
+    },
+    "returned_bytes": {
+      "maximum": 1048576,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "sha256": {
+      "pattern": "^[0-9a-f]{64}$",
+      "type": "string"
+    },
+    "size": {
+      "maximum": 1048576,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "workspace": {
+      "$ref": "../common.json#/$defs/workspace-id"
+    }
+  },
+  "required": [
+    "kind",
+    "workspace",
+    "path",
+    "size",
+    "sha256",
+    "offset",
+    "returned_bytes",
+    "next_offset",
+    "eof",
+    "content",
+    "observed_at"
+  ],
+  "title": "workspace-file-read-v2 operation result",
+  "type": "object"
+}

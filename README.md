@@ -51,12 +51,12 @@ images. Not a stable published contract.**
 | 0.2.0 bundle, runtime, portable lane, delegated Linux lane | green |
 | 0.4.0 successor development bundle | adds independently verified read-only execution capsules; the delegated model-free lane proves capsule/config/hook binding and correlated native hook evidence before model dispatch |
 | phase 4, [raw pipe sessions](adr/0007-protocol-processes-use-raw-pipe-sessions.md) | source-typed bounded raw-pipe primitive, distinct durable session identity, leased start, single-attachment Unix-WebSocket route ([plan 04](docs/plan/04-direct-byte-plane.md)) |
-| Rust SDK | `b10x-substrate-sdk` provides typed builders, resource handles, durable-operation recovery, event streams, explicit-root HTTPS/WSS and separately supervised external or linked daemon children; current source verifies the explicitly promoted `substrate-wire/0.15.0` name and inner digest before serving an operation |
+| Rust SDK | `b10x-substrate-sdk` provides typed builders, resource handles, durable-operation recovery, event streams, explicit-root HTTPS/WSS and separately supervised external or linked daemon children; current source verifies the explicitly promoted `substrate-wire/0.16.0` name and inner digest before serving an operation |
 | tagged artifact release | [`0.5.0`](https://github.com/beyond10x/substrate/releases/tag/0.5.0) publishes the daemon, disposable MCP adapter and explicitly pinned `0.15.0` development bundle. The workflow keyless-signs and verifies all three exact digests, proves anonymous retrieval, and refuses an existing canonical tag. It needs no repository secret |
 | stable publication | **not done.** The published, signed OCI bundle is `0.15.0` and remains annotated `development`; signed distribution does not make the contract stable |
 | phase 4, [pty sessions](adr/0019-pty-is-a-second-session-mode.md) | a terminal is a second session **mode** on the same route family, not a second resource: `mode: "pty"` with a required 1–1000-cell window, a `resize` frame, and the `sessions.pty` fact published only after a startup probe allocated a pair, made it controlling inside a throwaway sandbox and round-tripped a window through the child. Absent, the mode is refused `session.pty-unserved` (501) and **never** served as pipes |
 | network session authority | hosted-only 60-second, one-use bearer authority bound to an Ed25519 key and the accepting TLS 1.3 exporter; Unix retains kernel peer authority and development TCP serves no session mutation routes |
-| Git sources | **absent** |
+| Git sources | configured HTTPS source apertures create a normal detached-HEAD working tree at an exact provider commit; authority remains transient, file APIs hide `.git`, and the SDK exposes bounded baseline-file and change-set reads |
 | production network transport | current source accepts TLS 1.3 HTTPS/WSS with explicit owner-safe identity files, atomic SIGHUP rotation and per-request hosted Identity admission |
 | hosted trust envelope | current source resolves five-minute opaque Identity access credentials over direct HTTPS for exact audience `urn:b10x:substrate`, enforces `observe`/`workspaces`/`exec` per route before durable admission and never caches stale authority |
 
@@ -85,7 +85,7 @@ The table is the gate's own order (`scripts/gate.sh`).
 | contract bundle 0.2.0 | `python3 scripts/check-contract-bundle-0.2.0.py` |
 | contract bundle 0.3.0 | `python3 scripts/check-contract-bundle-0.3.0.py` |
 | contract bundle 0.4.0 | `python3 scripts/check-contract-bundle-0.4.0.py` |
-| contract bundles 0.5.0–0.15.0 | `cargo xtask check-bundles 0.5.0 … 0.15.0` — bounded parallel fixed-point, compatibility, classification and version-addition checks; `check-bundle <version>` remains the focused form |
+| contract bundles 0.5.0–0.16.0 | `cargo xtask check-bundles 0.5.0 … 0.16.0` — bounded parallel fixed-point, compatibility, classification and version-addition checks; `check-bundle <version>` remains the focused form |
 | contract JSON | `cargo xtask check-json` — every JSON under `contracts/` is classified by exactly one bundled schema, or it fails closed |
 | toolchain | `cargo xtask check-toolchain` |
 
@@ -135,7 +135,7 @@ The runner prints its current portable or delegated case inventory from each fre
 this document deliberately pins no counts that drift as adversarial coverage grows.
 
 `cargo xtask check-json` fails closed on unclassified or schema-invalid contract JSON and
-meta-validates every Draft 2020-12 schema offline, across all fifteen released bundles. Classification
+meta-validates every Draft 2020-12 schema offline, across all sixteen released bundles. Classification
 used to live in a Python module the four checkers imported — shared live machinery, not any one
 bundle's reproducibility proof — so it moved with the rest of the tooling, and the four checkers no
 longer do it. They verify everything else about the bundles they froze.
@@ -167,6 +167,20 @@ target/debug/substrate-daemon \
 
 Rust applications can instead follow the [public Rust SDK guide](https://beyond10x.github.io/substrate/docs/guides/rust-sdk)
 to connect to that socket or supervise the daemon as a separate child.
+
+### Git workspace sources
+
+`--git-source <name>=<https-prefix>/` (repeatable) declares a segment-bounded Connector byte-plane
+source. A Git workspace request names that source and a broker-issued locator below the prefix,
+plus the provider's branch, exact 40-character commit and a depth from 1 through 50. The source
+authority arrives only in `X-B10X-Workspace-Source-Authorization`; it is never JSON, ledger state,
+argv, environment or an error. The configured prefix must end in `/` so an adjacent path cannot be
+mistaken for a child path.
+
+The SDK's `Workspace::read_git_file` reads a complete baseline blob under a caller-declared byte
+bound, while `Workspace::git_changes` returns a path-sorted item/patch-byte-bounded comparison with
+the exact materialization commit. Current bytes still use `read_file_v2`; `.git` is deliberately
+absent from every file/tree API and remains available only inside the confined terminal.
 
 ### Secret slots
 

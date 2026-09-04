@@ -30,7 +30,7 @@ run python3 scripts/check-contract-bundle-0.4.0.py
 # reproducibility proof of the bundles they froze (AGENTS.md, "The gate's own checks are cargo
 # xtask verbs").
 run cargo xtask check-bundles \
-  0.5.0 0.6.0 0.7.0 0.8.0 0.9.0 0.10.0 0.11.0 0.12.0 0.13.0 0.14.0 0.15.0
+  0.5.0 0.6.0 0.7.0 0.8.0 0.9.0 0.10.0 0.11.0 0.12.0 0.13.0 0.14.0 0.15.0 0.16.0
 run cargo xtask check-json
 run cargo xtask check-toolchain
 

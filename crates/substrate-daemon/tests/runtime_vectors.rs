@@ -43,9 +43,9 @@ const DAEMON: &str = env!("CARGO_BIN_EXE_substrate-daemon");
 const CGROUP_EXEC: &str = env!("CARGO_BIN_EXE_substrate-cgroup-exec");
 const DAEMON_OVERRIDE_VARIABLE: &str = "SUBSTRATE_VECTORS_DAEMON";
 /// Pinned independently of the daemon implementation: the clean-room client verifies what ships.
-const ADVERTISED_CONTRACT: &str = "substrate-wire/0.15.0";
+const ADVERTISED_CONTRACT: &str = "substrate-wire/0.16.0";
 const ADVERTISED_CONTRACT_SHA256: &str =
-    "c0a6f82601debdca988f6c3cf93b89ebb7d086b8c9f74b4b7c9fb17d664357b3";
+    "cee5845cf425885bdae3be6f59cb9e39ce342df065a01ae65eaae24ad2f29b41";
 
 fn daemon_binary() -> PathBuf {
     std::env::var_os(DAEMON_OVERRIDE_VARIABLE).map_or_else(|| PathBuf::from(DAEMON), PathBuf::from)
@@ -2125,6 +2125,24 @@ async fn check_promoted_route_inventory(daemon: &Daemon, workspace: &str) -> usi
             "request.schema-invalid",
         ),
         (
+            "workspace.git.baseline-file.read-v2",
+            "GET",
+            format!("/v2/workspaces/{workspace}/git/baseline/probe?max_bytes=0"),
+            None,
+            422,
+            "request.schema-invalid",
+        ),
+        (
+            "workspace.git.changes.read-v2",
+            "GET",
+            format!(
+                "/v2/workspaces/{workspace}/git/changes?max_files=0&max_file_bytes=1&max_total_bytes=1"
+            ),
+            None,
+            422,
+            "request.schema-invalid",
+        ),
+        (
             "workspace.file.replace-v2",
             "PUT",
             format!("/v2/workspaces/{workspace}/files/probe"),
@@ -2181,7 +2199,7 @@ async fn check_promoted_route_inventory(daemon: &Daemon, workspace: &str) -> usi
     let expected: BTreeSet<String> = {
         let registry = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
-            .join("contracts/substrate-wire/0.15.0/operations.json");
+            .join("contracts/substrate-wire/0.16.0/operations.json");
         let document: Value = serde_json::from_slice(
             &std::fs::read(&registry).expect("promoted operation registry bytes"),
         )
@@ -3811,8 +3829,8 @@ async fn delegated_context_bound_to_another_subject_is_refused() {
 // ---------------------------------------------------------------------------------------------
 
 /// The predecessor printed its case count; the port asserts it, so a case cannot vanish quietly.
-const PORTABLE_CASES: usize = 68;
-const DELEGATED_CASES: usize = 95;
+const PORTABLE_CASES: usize = 70;
+const DELEGATED_CASES: usize = 97;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {

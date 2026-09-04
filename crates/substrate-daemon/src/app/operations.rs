@@ -375,10 +375,19 @@ pub(super) fn validate_workspace_input(
     if let WorkspaceSource::Git(source) = &mutation.input.source {
         let git = &source.git;
         if git.source.is_empty()
-            || git.source.len() > 128
+            || git.source.len() > 64
+            || !git
+                .source
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_')
+            || git.locator.is_empty()
+            || git.locator.len() > 2_048
+            || !git.locator.starts_with("https://")
             || git.reference.is_empty()
             || git.reference.len() > 512
-            || !(1..=1000).contains(&git.depth)
+            || git.commit.len() != 40
+            || !git.commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || !(1..=50).contains(&git.depth)
         {
             return Err(schema_invalid(request_id, Some(&mutation.op), "input"));
         }

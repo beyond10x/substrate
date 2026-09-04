@@ -1,0 +1,17 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.16.0:input:lease-renew",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "ttl_ms": {
+      "maximum": 86400000,
+      "minimum": 1000,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "ttl_ms"
+  ],
+  "title": "lease-renew operation input",
+  "type": "object"
+}

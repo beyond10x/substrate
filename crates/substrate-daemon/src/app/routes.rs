@@ -26,7 +26,8 @@ use super::sessions::{
 use super::workspaces::{
     workspace_create, workspace_destroy, workspace_file_delete, workspace_file_edit_v2,
     workspace_file_patch_v2, workspace_file_read, workspace_file_read_v2,
-    workspace_file_replace_v2, workspace_file_write, workspace_get, workspace_lease_renew,
+    workspace_file_replace_v2, workspace_file_write, workspace_get,
+    workspace_git_baseline_file_read_v2, workspace_git_changes_read_v2, workspace_lease_renew,
     workspace_tree_read_v2,
 };
 use super::{App, CONTRACT_BUNDLE, CONTRACT_BUNDLE_SHA256, Identity, SessionTransport};
@@ -72,6 +73,14 @@ fn router_for(app: Arc<App>, transport: SessionTransport) -> Router {
                 .route(
                     "/v2/workspaces/{workspace_id}/tree",
                     get(workspace_tree_read_v2),
+                )
+                .route(
+                    "/v2/workspaces/{workspace_id}/git/changes",
+                    get(workspace_git_changes_read_v2),
+                )
+                .route(
+                    "/v2/workspaces/{workspace_id}/git/baseline/{*path}",
+                    get(workspace_git_baseline_file_read_v2),
                 )
                 .route(
                     "/v2/workspaces/{workspace_id}/file-edits/{*path}",

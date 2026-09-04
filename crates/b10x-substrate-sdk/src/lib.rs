@@ -38,12 +38,13 @@ pub use model::{
 pub use substrate_wire::{
     AppliedConfinement, DigestedFileSlice, DirectoryEntry, DirectoryEntryKind, DirectoryPage,
     ExecMeasurement, ExecUsage, ExecutionCapsuleInput, ExpectedFileState, FileEditInput,
-    FileMutationResult, FilePatchInput, GitSource, GitSourceEnvelope, LinePatchEdit,
+    FileMutationResult, FilePatchInput, GitBaselineFile, GitChange, GitChangeSet, GitChangeSide,
+    GitChangeStatus, GitChangesQuery, GitSource, GitSourceEnvelope, LinePatchEdit,
     MAX_EVENT_PAGE_ITEMS, MAX_FILE_BYTES, MAX_IO_BYTES, MAX_LIST_ITEMS, MAX_PTY_WINDOW_COLUMNS,
     MAX_PTY_WINDOW_ROWS, MAX_SNAPSHOT_PAGE_ITEMS, MetricsResourceKind, PipeSessionCapabilities,
     PtyWindow, RESOURCE_USAGE_SAMPLE_INTERVAL_MS, ReadOnlyRoot, SecretSlotRequest,
     SessionAttachmentState, SessionMode, SnapshotMetadata, SnapshotPage, StorageLimit,
-    TextMatchPolicy, WorkspaceAccess, WorkspaceTree, WorkspaceTreeEntry,
+    TextMatchPolicy, UnifiedDiff, WorkspaceAccess, WorkspaceTree, WorkspaceTreeEntry,
 };
 pub use transport::{EventStream, MetricsStream};
 
@@ -199,6 +200,7 @@ impl Client {
             storage: None,
             lease_ttl: None,
             operation_id: None,
+            source_authorization: None,
         }
     }
 
@@ -362,6 +364,32 @@ impl Client {
         }
     }
 
+    async fn mutation_with_source_authority<I: Serialize, O: DeserializeOwned>(
+        &self,
+        method: &str,
+        path: &str,
+        input: &I,
+        operation_id: Option<String>,
+        source_authority: &str,
+    ) -> Result<(String, O), SdkError> {
+        let operation_id = operation_id.unwrap_or_else(|| Ulid::generate().to_string());
+        substrate_wire::validate_operation_id(&operation_id)
+            .map_err(|error| SdkError::Protocol(error.to_string()))?;
+        let envelope = substrate_wire::Mutation {
+            op: operation_id.clone(),
+            input,
+            delegated_context: None,
+        };
+        let body =
+            serde_json::to_vec(&envelope).map_err(|error| SdkError::Protocol(error.to_string()))?;
+        let response = self
+            .inner
+            .transport
+            .request_with_source_authority(method, path, Some(&body), source_authority)
+            .await?;
+        decode_result(&response).map(|result| (operation_id, result))
+    }
+
     async fn recover_mutation<O: DeserializeOwned>(
         &self,
         method: &str,
@@ -494,6 +522,7 @@ pub struct WorkspaceBuilder {
     storage: Option<StorageLimit>,
     lease_ttl: Option<Duration>,
     operation_id: Option<String>,
+    source_authorization: Option<Zeroizing<String>>,
 }
 
 impl WorkspaceBuilder {
@@ -504,16 +533,22 @@ impl WorkspaceBuilder {
     pub fn git(
         mut self,
         source: impl Into<String>,
+        locator: impl Into<String>,
         reference: impl Into<String>,
+        commit: impl Into<String>,
         depth: u16,
+        source_authorization: impl Into<String>,
     ) -> Self {
         self.source = substrate_wire::WorkspaceSource::Git(GitSourceEnvelope {
             git: GitSource {
                 source: source.into(),
+                locator: locator.into(),
                 reference: reference.into(),
+                commit: commit.into(),
                 depth,
             },
         });
+        self.source_authorization = Some(Zeroizing::new(source_authorization.into()));
         self
     }
 
@@ -552,10 +587,24 @@ impl WorkspaceBuilder {
             storage: self.storage,
             lease_ttl_ms: duration_millis(self.lease_ttl)?,
         };
-        let (_, observed): (_, substrate_wire::Workspace) = self
-            .client
-            .mutation("POST", "/v1/workspaces", &input, self.operation_id)
-            .await?;
+        let (_, observed): (_, substrate_wire::Workspace) = match self.source_authorization {
+            Some(authority) => {
+                self.client
+                    .mutation_with_source_authority(
+                        "POST",
+                        "/v1/workspaces",
+                        &input,
+                        self.operation_id,
+                        authority.as_str(),
+                    )
+                    .await?
+            }
+            None => {
+                self.client
+                    .mutation("POST", "/v1/workspaces", &input, self.operation_id)
+                    .await?
+            }
+        };
         Ok(Workspace {
             client: self.client,
             observed: observed.into(),
@@ -871,6 +920,54 @@ impl Workspace {
         self.client
             .get(&format!(
                 "/v2/workspaces/{}/tree?{query}",
+                encode_path(&self.observed.id)
+            ))
+            .await
+    }
+
+    /// Read one complete file from the immutable commit installed for this Git workspace.
+    ///
+    /// `Ok(None)` means the path is absent in that commit. It says nothing about the current
+    /// working tree, which remains available through [`Self::read_file_v2`].
+    pub async fn read_git_file(
+        &self,
+        path: impl AsRef<str>,
+        max_bytes: u64,
+    ) -> Result<Option<GitBaselineFile>, SdkError> {
+        validate_file_read(path.as_ref(), max_bytes)?;
+        let query = serde_urlencoded::to_string(substrate_wire::GitBaselineFileQuery { max_bytes })
+            .map_err(|error| SdkError::Protocol(error.to_string()))?;
+        let result: substrate_wire::GitBaselineFileResult = self
+            .client
+            .get(&format!(
+                "/v2/workspaces/{}/git/baseline/{}?{query}",
+                encode_path(&self.observed.id),
+                encode_path(path.as_ref())
+            ))
+            .await?;
+        Ok(result.file)
+    }
+
+    /// Compare the current index/worktree with the exact materialization commit.
+    pub async fn git_changes(
+        &self,
+        max_files: u32,
+        max_file_bytes: u64,
+        max_total_bytes: u64,
+    ) -> Result<GitChangeSet, SdkError> {
+        let query = GitChangesQuery {
+            max_files,
+            max_file_bytes,
+            max_total_bytes,
+        };
+        query
+            .validate()
+            .map_err(|error| SdkError::Protocol(error.to_string()))?;
+        let query = serde_urlencoded::to_string(query)
+            .map_err(|error| SdkError::Protocol(error.to_string()))?;
+        self.client
+            .get(&format!(
+                "/v2/workspaces/{}/git/changes?{query}",
                 encode_path(&self.observed.id)
             ))
             .await
@@ -1960,7 +2057,7 @@ mod tests {
         let socket = temporary.path().join("daemon.sock");
         let listener = UnixListener::bind(&socket).expect("bind fake daemon");
         let vector: Value = serde_json::from_str(include_str!(
-            "../../../contracts/substrate-wire/0.15.0/vectors/http/machine-probe.json"
+            "../../../contracts/substrate-wire/0.16.0/vectors/http/machine-probe.json"
         ))
         .expect("machine vector");
         let machine = serde_json::to_vec(

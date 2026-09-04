@@ -15,9 +15,9 @@ pub const API_VERSION: &str = "v1";
 ///
 /// This is the SHA-256 of the inner immutable `bundle.json`, not the outer OCI manifest digest.
 /// Moving either member is an explicit coordinated promotion (Atlas ADR 0019).
-pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.15.0";
+pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.16.0";
 pub const ADVERTISED_CONTRACT_BUNDLE_SHA256: &str =
-    "c0a6f82601debdca988f6c3cf93b89ebb7d086b8c9f74b4b7c9fb17d664357b3";
+    "cee5845cf425885bdae3be6f59cb9e39ce342df065a01ae65eaae24ad2f29b41";
 pub const MAX_FILE_BYTES: u64 = 1_048_576;
 pub const MAX_IO_BYTES: u64 = 1_048_576;
 pub const MAX_LIST_ITEMS: u32 = 1_000;
@@ -659,9 +659,15 @@ pub struct GitSourceEnvelope {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GitSource {
+    /// Deployment-configured source binding; never an arbitrary caller-selected credential slot.
     pub source: String,
+    /// Non-secret, capability-scoped HTTPS repository locator returned by the source broker.
+    pub locator: String,
+    /// Provider branch used to obtain the immutable commit. It is metadata, never an assumed name.
     #[serde(rename = "ref")]
     pub reference: String,
+    /// Exact provider commit which must become the materialized workspace HEAD.
+    pub commit: String,
     pub depth: u16,
 }
 
@@ -1017,6 +1023,124 @@ pub struct WorkspaceTreeEntry {
 pub struct WorkspaceTree {
     pub workspace: String,
     pub items: Vec<WorkspaceTreeEntry>,
+    pub truncated: bool,
+    pub observed_at: DateTime<Utc>,
+}
+
+/// Full-file Git baseline read bounded before any content is returned.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitBaselineFileQuery {
+    pub max_bytes: u64,
+}
+
+impl GitBaselineFileQuery {
+    /// Validates the non-zero protocol byte ceiling.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WireValidationError::InvalidQueryShape`] when the requested ceiling is zero or
+    /// larger than the public per-observation I/O bound.
+    pub fn validate(&self) -> Result<(), WireValidationError> {
+        if self.max_bytes == 0 || self.max_bytes > MAX_IO_BYTES {
+            return Err(WireValidationError::InvalidQueryShape);
+        }
+        Ok(())
+    }
+}
+
+/// One regular file read from the immutable commit recorded when the Git workspace was installed.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitBaselineFile {
+    pub path: String,
+    pub size: u64,
+    pub sha256: String,
+    pub content: Base64Content,
+}
+
+/// Baseline lookup result. `file: null` is a proved absence at `commit`, not a worktree lookup.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitBaselineFileResult {
+    pub workspace: String,
+    pub commit: String,
+    pub file: Option<GitBaselineFile>,
+    pub observed_at: DateTime<Utc>,
+}
+
+/// Bounds for one path-sorted comparison of the working tree against its materialized commit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitChangesQuery {
+    pub max_files: u32,
+    pub max_file_bytes: u64,
+    pub max_total_bytes: u64,
+}
+
+impl GitChangesQuery {
+    /// Validates all three non-zero public observation bounds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WireValidationError::InvalidQueryShape`] when an item or byte ceiling is zero or
+    /// exceeds the corresponding public protocol maximum.
+    pub fn validate(&self) -> Result<(), WireValidationError> {
+        if self.max_files == 0
+            || self.max_files > MAX_LIST_ITEMS
+            || self.max_file_bytes == 0
+            || self.max_file_bytes > MAX_IO_BYTES
+            || self.max_total_bytes == 0
+            || self.max_total_bytes > MAX_IO_BYTES
+        {
+            return Err(WireValidationError::InvalidQueryShape);
+        }
+        Ok(())
+    }
+}
+
+/// Git's observed relation between one path and the immutable materialization baseline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum GitChangeStatus {
+    Added,
+    Modified,
+    Deleted,
+    Renamed,
+    Copied,
+    TypeChanged,
+    Untracked,
+    Conflicted,
+}
+
+/// One Git-side path record. `oid` is absent when the side is an un-hashed worktree file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitChangeSide {
+    pub path: String,
+    pub mode: u32,
+    pub size: u64,
+    pub oid: Option<String>,
+}
+
+/// One bounded Git change with its baseline/current path records and optional textual patch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitChange {
+    pub status: GitChangeStatus,
+    pub baseline: Option<GitChangeSide>,
+    pub current: Option<GitChangeSide>,
+    pub patch: UnifiedDiff,
+}
+
+/// Deterministic bounded change set against the exact materialized commit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GitChangeSet {
+    pub workspace: String,
+    pub commit: String,
+    pub items: Vec<GitChange>,
+    pub returned_bytes: u64,
     pub truncated: bool,
     pub observed_at: DateTime<Utc>,
 }
@@ -2306,6 +2430,8 @@ pub struct CapabilityFacts {
         skip_serializing_if = "Option::is_none"
     )]
     pub workspace_storage_quota: Option<StorageQuotaFacts>,
+    #[serde(rename = "workspace.git", skip_serializing_if = "Option::is_none")]
+    pub workspace_git: Option<bool>,
     #[serde(rename = "exec.argv-only", skip_serializing_if = "Option::is_none")]
     pub exec_argv_only: Option<bool>,
     #[serde(rename = "exec.namespaces", skip_serializing_if = "Option::is_none")]
@@ -2399,6 +2525,7 @@ impl Default for CapabilityFacts {
             workspace_read_limit_bytes: None,
             workspace_list_limit_items: None,
             workspace_storage_quota: None,
+            workspace_git: None,
             exec_argv_only: None,
             exec_namespaces: None,
             exec_no_egress: None,
@@ -3956,11 +4083,39 @@ mod tests {
         let version = ADVERTISED_CONTRACT_BUNDLE
             .strip_prefix("substrate-wire/")
             .expect("advertised contract prefix");
-        assert_eq!(version, "0.15.0", "the reviewed promotion target moved");
-        let bytes = include_bytes!("../../../contracts/substrate-wire/0.15.0/bundle.json");
+        assert_eq!(version, "0.16.0", "the reviewed promotion target moved");
+        let bytes = include_bytes!("../../../contracts/substrate-wire/0.16.0/bundle.json");
         assert_eq!(
             hex::encode(Sha256::digest(bytes)),
             ADVERTISED_CONTRACT_BUNDLE_SHA256
+        );
+    }
+
+    #[test]
+    fn git_observation_queries_enforce_the_public_item_and_byte_bounds() {
+        let baseline = super::GitBaselineFileQuery {
+            max_bytes: super::MAX_IO_BYTES,
+        };
+        baseline.validate().expect("maximum baseline read");
+        assert!(
+            super::GitBaselineFileQuery { max_bytes: 0 }
+                .validate()
+                .is_err()
+        );
+
+        let changes = super::GitChangesQuery {
+            max_files: super::MAX_LIST_ITEMS,
+            max_file_bytes: super::MAX_IO_BYTES,
+            max_total_bytes: super::MAX_IO_BYTES,
+        };
+        changes.validate().expect("maximum Git change observation");
+        assert!(
+            super::GitChangesQuery {
+                max_files: super::MAX_LIST_ITEMS + 1,
+                ..changes
+            }
+            .validate()
+            .is_err()
         );
     }
 

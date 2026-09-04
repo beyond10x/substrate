@@ -381,6 +381,8 @@ pub struct DaemonConfig {
     pub allow_uids: Vec<u32>,
     pub cgroup_root: Option<PathBuf>,
     pub project_quota_ids: Option<(u32, u32)>,
+    /// Operator-declared Git source URL prefixes. Credentials are never configuration.
+    pub git_sources: Vec<GitSourceConfig>,
     pub bubblewrap: PathBuf,
     pub event_retention: u64,
     /// Operator-declared secret slots (ADR 0012), each a name and a bounded owner-private file.
@@ -449,6 +451,12 @@ pub struct EgressAperture {
     pub max_bytes: Option<u64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitSourceConfig {
+    pub name: String,
+    pub base_url: String,
+}
+
 /// One operator-declared secret slot: a name, and the file behind it (ADR 0012).
 ///
 /// The daemon's own configuration vocabulary, not the driver's. Invariant 4 is why it is declared
@@ -491,6 +499,7 @@ impl DaemonConfig {
             allow_uids,
             cgroup_root: None,
             project_quota_ids: None,
+            git_sources: Vec::new(),
             bubblewrap: PathBuf::from("/usr/bin/bwrap"),
             event_retention: 10_000,
             secret_slots: Vec::new(),
@@ -543,6 +552,18 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
         bail!("event retention must be nonzero");
     }
     check_secret_slots(&config.secret_slots)?;
+    let git_sources = config
+        .git_sources
+        .iter()
+        .map(|source| {
+            substrate_host::GitSourceBinding::new(
+                source.name.clone(),
+                &source.base_url,
+                config.ca_bundle.clone(),
+            )
+            .map_err(|_| anyhow!("workspace.git-source-invalid: Git source binding refused"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     // Resolved once, here, and pinned for the process's lifetime: the sandbox gets no resolver, so
     // a name that only resolves later resolves nowhere at all (ADR 0013).
     let egress_apertures = resolve_egress_apertures(&config.egress_apertures)?;
@@ -580,6 +601,7 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
     host_config.config_generation = configuration_generation(&config);
     host_config.cgroup_root = config.cgroup_root;
     host_config.project_quota_ids = config.project_quota_ids;
+    host_config.git_sources = git_sources;
     host_config.bubblewrap = config.bubblewrap;
     host_config.event_retention = config.event_retention;
     host_config.secret_slots = config
@@ -913,6 +935,16 @@ fn configuration_generation(config: &DaemonConfig) -> u64 {
     for aperture in apertures {
         material.extend_from_slice(&(aperture.len() as u64).to_be_bytes());
         material.extend_from_slice(aperture.as_bytes());
+    }
+    let mut git_sources = config
+        .git_sources
+        .iter()
+        .map(|source| format!("{}={}", source.name, source.base_url))
+        .collect::<Vec<_>>();
+    git_sources.sort_unstable();
+    for source in git_sources {
+        material.extend_from_slice(&(source.len() as u64).to_be_bytes());
+        material.extend_from_slice(source.as_bytes());
     }
     let digest = Sha256::digest(material);
     u64::from_be_bytes(

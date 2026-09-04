@@ -1,0 +1,208 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.16.0:hashing",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "const": "schemas/hashing.json"
+    },
+    "address_normalization": {
+      "additionalProperties": false,
+      "properties": {
+        "dot_segments": {
+          "const": "reject"
+        },
+        "encoded_separator": {
+          "const": "reject"
+        },
+        "path_parameters": {
+          "const": "validate-and-substitute-into-registry-template"
+        },
+        "percent_encoding": {
+          "const": "decode-once-as-utf8-then-encode-non-unreserved-with-uppercase-hex"
+        },
+        "query": {
+          "const": "canonical-form-query-v1"
+        },
+        "repeated_separator": {
+          "const": "reject"
+        },
+        "trailing_separator": {
+          "const": "reject-except-root"
+        }
+      },
+      "required": [
+        "dot_segments",
+        "encoded_separator",
+        "path_parameters",
+        "percent_encoding",
+        "query",
+        "repeated_separator",
+        "trailing_separator"
+      ],
+      "type": "object"
+    },
+    "algorithm": {
+      "const": "sha256"
+    },
+    "canonical_input": {
+      "additionalProperties": false,
+      "properties": {
+        "accepted": {
+          "const": "rfc8785-jcs-integer-domain"
+        },
+        "fallback_prefix": {
+          "const": "rejected-number-json:"
+        },
+        "fallback_structure": {
+          "const": "utf16-key-order-json-with-serde-json-number-text"
+        },
+        "fallback_use": {
+          "const": "schema-rejected-number-only"
+        },
+        "origin": {
+          "const": "b10x-repository-authored"
+        }
+      },
+      "required": [
+        "accepted",
+        "fallback_prefix",
+        "fallback_structure",
+        "fallback_use",
+        "origin"
+      ],
+      "type": "object"
+    },
+    "canonical_query": {
+      "additionalProperties": false,
+      "properties": {
+        "invalid": {
+          "const": "malformed-raw-nul-lowercase-hex"
+        },
+        "pair_order": {
+          "const": "utf8-bytewise-name-then-value"
+        },
+        "parser": {
+          "const": "strict-application-x-www-form-urlencoded-utf8"
+        },
+        "valid": {
+          "const": "pairs-nul-rfc8785-array-of-pairs"
+        }
+      },
+      "required": [
+        "parser",
+        "pair_order",
+        "valid",
+        "invalid"
+      ],
+      "type": "object"
+    },
+    "capsule_manifest": {
+      "additionalProperties": false,
+      "properties": {
+        "domain": {
+          "const": "b10x.execution-capsule.v1"
+        },
+        "encoding": {
+          "const": "concatenated-u32be-length-prefixed-fields"
+        },
+        "fields": {
+          "const": [
+            "domain",
+            "entrypoint",
+            "files"
+          ]
+        },
+        "file_fields": {
+          "const": [
+            "path",
+            "role",
+            "executable-as-ascii-bit",
+            "lowercase-content-sha256"
+          ]
+        },
+        "file_order": {
+          "const": "strict-utf8-bytewise-path"
+        },
+        "length_unit": {
+          "const": "octets"
+        }
+      },
+      "required": [
+        "domain",
+        "encoding",
+        "length_unit",
+        "fields",
+        "file_order",
+        "file_fields"
+      ],
+      "type": "object"
+    },
+    "excluded": {
+      "const": [
+        "operation",
+        "request_id",
+        "headers",
+        "authorization",
+        "bearer",
+        "subject",
+        "principal",
+        "deployment"
+      ]
+    },
+    "fixtures": {
+      "const": "fixtures/canonical-hash.json"
+    },
+    "format": {
+      "const": "b10x.substrate-request-hash.v2"
+    },
+    "ledger_key": {
+      "const": [
+        "deployment",
+        "subject",
+        "operation"
+      ]
+    },
+    "tuple": {
+      "additionalProperties": false,
+      "properties": {
+        "encoding": {
+          "const": "concatenated-u32be-length-prefixed-fields"
+        },
+        "fields": {
+          "const": [
+            "hash-version-as-ascii-decimal",
+            "uppercase-http-method",
+            "normalized-address",
+            "rfc8785-raw-input",
+            "canonical-query"
+          ]
+        },
+        "length_unit": {
+          "const": "octets"
+        }
+      },
+      "required": [
+        "encoding",
+        "length_unit",
+        "fields"
+      ],
+      "type": "object"
+    }
+  },
+  "required": [
+    "$schema",
+    "format",
+    "algorithm",
+    "canonical_input",
+    "canonical_query",
+    "capsule_manifest",
+    "address_normalization",
+    "tuple",
+    "excluded",
+    "ledger_key",
+    "fixtures"
+  ],
+  "title": "Canonical request hash authority",
+  "type": "object"
+}

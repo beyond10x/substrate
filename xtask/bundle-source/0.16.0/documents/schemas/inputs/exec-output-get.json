@@ -1,0 +1,30 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.16.0:input:exec-output-get",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "limit_bytes": {
+      "maximum": 1048576,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "offset": {
+      "maximum": 9223372036854775807,
+      "minimum": 0,
+      "type": "integer"
+    },
+    "stream": {
+      "enum": [
+        "stdout",
+        "stderr"
+      ]
+    }
+  },
+  "required": [
+    "stream",
+    "offset",
+    "limit_bytes"
+  ],
+  "title": "exec-output-get operation input",
+  "type": "object"
+}

@@ -131,9 +131,40 @@ impl Transport {
                 let stream = UnixStream::connect(socket)
                     .await
                     .map_err(|error| SdkError::Transport(error.to_string()))?;
-                request_on(stream, "localhost", None, method, path, body).await
+                request_on(stream, "localhost", None, None, method, path, body).await
             }
-            TransportKind::Remote(remote) => remote.request(method, path, body).await,
+            TransportKind::Remote(remote) => remote.request(method, path, body, None).await,
+        }
+    }
+
+    pub async fn request_with_source_authority(
+        &self,
+        method: &str,
+        path: &str,
+        body: Option<&[u8]>,
+        source_authority: &str,
+    ) -> Result<HttpResponse, SdkError> {
+        match &self.kind {
+            TransportKind::Unix(socket) => {
+                let stream = UnixStream::connect(socket)
+                    .await
+                    .map_err(|error| SdkError::Transport(error.to_string()))?;
+                request_on(
+                    stream,
+                    "localhost",
+                    None,
+                    Some(source_authority),
+                    method,
+                    path,
+                    body,
+                )
+                .await
+            }
+            TransportKind::Remote(remote) => {
+                remote
+                    .request(method, path, body, Some(source_authority))
+                    .await
+            }
         }
     }
 
@@ -187,16 +218,20 @@ impl RemoteTransport {
         method: &str,
         path: &str,
         body: Option<&[u8]>,
+        source_authority: Option<&str>,
     ) -> Result<HttpResponse, SdkError> {
         let token = self.token(AccessTokenReason::Request).await?;
-        let response = self.request_with_token(method, path, body, &token).await?;
+        let response = self
+            .request_with_token(method, path, body, source_authority, &token)
+            .await?;
         if !is_refreshable_auth_refusal(&response) {
             return Ok(response);
         }
         let token = self
             .token(AccessTokenReason::RefreshAfterAuthorizationFailure)
             .await?;
-        self.request_with_token(method, path, body, &token).await
+        self.request_with_token(method, path, body, source_authority, &token)
+            .await
     }
 
     async fn request_with_token(
@@ -204,6 +239,7 @@ impl RemoteTransport {
         method: &str,
         path: &str,
         body: Option<&[u8]>,
+        source_authority: Option<&str>,
         token: &AccessToken,
     ) -> Result<HttpResponse, SdkError> {
         let stream = self.connect().await?;
@@ -211,6 +247,7 @@ impl RemoteTransport {
             stream,
             &self.authority,
             Some(token.expose()),
+            source_authority,
             method,
             path,
             body,
@@ -252,7 +289,7 @@ impl RemoteTransport {
         );
         let body = serde_json::to_vec(&substrate_wire::SessionAuthorityMintInput { public_key })
             .map_err(|error| SdkError::Protocol(error.to_string()))?;
-        let response = self.request("POST", &mint_path, Some(&body)).await?;
+        let response = self.request("POST", &mint_path, Some(&body), None).await?;
         let authority: substrate_wire::SessionAttachmentAuthority = decode_result(&response)?;
         self.session_websocket_with_authority(path, &authority, &signing_key)
             .await
@@ -472,6 +509,7 @@ async fn request_on<S>(
     mut stream: S,
     authority: &str,
     token: Option<&str>,
+    source_authority: Option<&str>,
     method: &str,
     path: &str,
     body: Option<&[u8]>,
@@ -486,6 +524,23 @@ where
     if let Some(token) = token {
         write!(head, "authorization: Bearer {token}\r\n")
             .map_err(|error| SdkError::Protocol(error.to_string()))?;
+    }
+    if let Some(source_authority) = source_authority {
+        if source_authority.is_empty()
+            || source_authority.len() > 512
+            || !source_authority
+                .bytes()
+                .all(|byte| (0x21..=0x7e).contains(&byte))
+        {
+            return Err(SdkError::Protocol(
+                "workspace source authority is invalid".to_owned(),
+            ));
+        }
+        write!(
+            head,
+            "x-b10x-workspace-source-authorization: {source_authority}\r\n"
+        )
+        .map_err(|error| SdkError::Protocol(error.to_string()))?;
     }
     if let Some(body) = body {
         write!(

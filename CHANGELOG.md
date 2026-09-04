@@ -7,6 +7,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-09-05
+
+### Added
+
+- Configured, segment-bounded HTTPS Git sources now materialize one normal working tree at the
+  provider-selected branch's exact commit. Connector authority is transient and redacted; checkout
+  is bounded, fsynced and atomically installed; `.git` remains usable by confined terminals but is
+  hidden from file and tree APIs.
+- The Rust SDK now exposes bounded baseline-file and path-sorted change-set observations against a
+  host-private immutable materialization commit.
+- Development contract bundle `0.16.0` succeeds `0.15.0` additively with two Git observation routes,
+  the closed Git source request shape and conditional `workspace.git` capability, at inner
+  `bundle.json` SHA-256 `cee5845cf425885bdae3be6f59cb9e39ce342df065a01ae65eaae24ad2f29b41`.
+
 ## [0.7.0] — 2026-09-04
 
 Daemon image: `ghcr.io/beyond10x/b10x-substrate-daemon:0.7.0` at

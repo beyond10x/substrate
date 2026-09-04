@@ -1,0 +1,26 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.16.0:result:pipe-session-authority-mint",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {
+    "authority": {
+      "pattern": "^session_authority_v1_[A-Za-z0-9_-]{43}$",
+      "type": "string",
+      "x-substrate-non-loggable": true
+    },
+    "authority_id": {
+      "pattern": "^sa_[0-9A-HJKMNP-TV-Z]{26}$",
+      "type": "string"
+    },
+    "expires_at": {
+      "$ref": "../common.json#/$defs/timestamp"
+    }
+  },
+  "required": [
+    "authority_id",
+    "authority",
+    "expires_at"
+  ],
+  "title": "pipe-session-authority-mint operation result",
+  "type": "object"
+}

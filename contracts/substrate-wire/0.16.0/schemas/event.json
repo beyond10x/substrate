@@ -1,0 +1,837 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.16.0:event",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "Durable subject-scoped transition from the pull/push shared journal.",
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "actor": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "cause": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "operation"
+            },
+            "operation": {
+              "$ref": "common.json#/$defs/operation-id"
+            }
+          },
+          "required": [
+            "kind",
+            "operation"
+          ],
+          "type": "object"
+        },
+        "generation": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "observation": {
+          "$ref": "operation.json"
+        },
+        "observed_at": {
+          "$ref": "common.json#/$defs/timestamp"
+        },
+        "principal": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resource": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "resource_kind": {
+          "const": "operation"
+        },
+        "seq": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "transition": {
+          "enum": [
+            "operation.accepted",
+            "operation.refused",
+            "operation.failed",
+            "operation.unknown",
+            "operation.terminal"
+          ]
+        }
+      },
+      "required": [
+        "generation",
+        "seq",
+        "resource",
+        "resource_kind",
+        "transition",
+        "observed_at",
+        "actor",
+        "principal",
+        "cause",
+        "observation"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "actor": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "cause": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "operation"
+            },
+            "operation": {
+              "$ref": "common.json#/$defs/operation-id"
+            }
+          },
+          "required": [
+            "kind",
+            "operation"
+          ],
+          "type": "object"
+        },
+        "generation": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "observation": {
+          "$ref": "resource.json#/$defs/workspace"
+        },
+        "observed_at": {
+          "$ref": "common.json#/$defs/timestamp"
+        },
+        "principal": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resource": {
+          "$ref": "common.json#/$defs/workspace-id"
+        },
+        "resource_kind": {
+          "const": "workspace"
+        },
+        "seq": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "transition": {
+          "enum": [
+            "workspace.created",
+            "workspace.lease-renewed",
+            "workspace.lease-expiring",
+            "workspace.lease-expired"
+          ]
+        }
+      },
+      "required": [
+        "generation",
+        "seq",
+        "resource",
+        "resource_kind",
+        "transition",
+        "observed_at",
+        "actor",
+        "principal",
+        "cause",
+        "observation"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "actor": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "cause": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "operation"
+            },
+            "operation": {
+              "$ref": "common.json#/$defs/operation-id"
+            }
+          },
+          "required": [
+            "kind",
+            "operation"
+          ],
+          "type": "object"
+        },
+        "generation": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "observation": {
+          "$ref": "results/workspace-file-write.json"
+        },
+        "observed_at": {
+          "$ref": "common.json#/$defs/timestamp"
+        },
+        "principal": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resource": {
+          "$ref": "common.json#/$defs/workspace-id"
+        },
+        "resource_kind": {
+          "const": "workspace"
+        },
+        "seq": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "transition": {
+          "enum": [
+            "workspace.file-written"
+          ]
+        }
+      },
+      "required": [
+        "generation",
+        "seq",
+        "resource",
+        "resource_kind",
+        "transition",
+        "observed_at",
+        "actor",
+        "principal",
+        "cause",
+        "observation"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "actor": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "cause": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "operation"
+            },
+            "operation": {
+              "$ref": "common.json#/$defs/operation-id"
+            }
+          },
+          "required": [
+            "kind",
+            "operation"
+          ],
+          "type": "object"
+        },
+        "generation": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "observation": {
+          "$ref": "results/workspace-file-delete.json"
+        },
+        "observed_at": {
+          "$ref": "common.json#/$defs/timestamp"
+        },
+        "principal": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resource": {
+          "$ref": "common.json#/$defs/workspace-id"
+        },
+        "resource_kind": {
+          "const": "workspace"
+        },
+        "seq": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "transition": {
+          "enum": [
+            "workspace.file-deleted"
+          ]
+        }
+      },
+      "required": [
+        "generation",
+        "seq",
+        "resource",
+        "resource_kind",
+        "transition",
+        "observed_at",
+        "actor",
+        "principal",
+        "cause",
+        "observation"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "actor": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "cause": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "operation"
+            },
+            "operation": {
+              "$ref": "common.json#/$defs/operation-id"
+            }
+          },
+          "required": [
+            "kind",
+            "operation"
+          ],
+          "type": "object"
+        },
+        "generation": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "observation": {
+          "$ref": "results/workspace-destroy.json"
+        },
+        "observed_at": {
+          "$ref": "common.json#/$defs/timestamp"
+        },
+        "principal": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resource": {
+          "$ref": "common.json#/$defs/workspace-id"
+        },
+        "resource_kind": {
+          "const": "workspace"
+        },
+        "seq": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "transition": {
+          "enum": [
+            "workspace.destroyed"
+          ]
+        }
+      },
+      "required": [
+        "generation",
+        "seq",
+        "resource",
+        "resource_kind",
+        "transition",
+        "observed_at",
+        "actor",
+        "principal",
+        "cause",
+        "observation"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "actor": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "cause": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "operation"
+            },
+            "operation": {
+              "$ref": "common.json#/$defs/operation-id"
+            }
+          },
+          "required": [
+            "kind",
+            "operation"
+          ],
+          "type": "object"
+        },
+        "generation": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "observation": {
+          "$ref": "error.json#/$defs/detail"
+        },
+        "observed_at": {
+          "$ref": "common.json#/$defs/timestamp"
+        },
+        "principal": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resource": {
+          "$ref": "common.json#/$defs/workspace-id"
+        },
+        "resource_kind": {
+          "const": "workspace"
+        },
+        "seq": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "transition": {
+          "enum": [
+            "workspace.cleanup-failed"
+          ]
+        }
+      },
+      "required": [
+        "generation",
+        "seq",
+        "resource",
+        "resource_kind",
+        "transition",
+        "observed_at",
+        "actor",
+        "principal",
+        "cause",
+        "observation"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "actor": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "cause": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "operation"
+            },
+            "operation": {
+              "$ref": "common.json#/$defs/operation-id"
+            }
+          },
+          "required": [
+            "kind",
+            "operation"
+          ],
+          "type": "object"
+        },
+        "generation": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "observation": {
+          "$ref": "resource.json#/$defs/exec"
+        },
+        "observed_at": {
+          "$ref": "common.json#/$defs/timestamp"
+        },
+        "principal": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resource": {
+          "$ref": "common.json#/$defs/exec-id"
+        },
+        "resource_kind": {
+          "const": "exec"
+        },
+        "seq": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "transition": {
+          "enum": [
+            "exec.accepted",
+            "exec.running",
+            "exec.observed",
+            "exec.exited",
+            "exec.cancelled",
+            "exec.unknown",
+            "exec.lease-renewed",
+            "exec.lease-expiring",
+            "exec.lease-expired"
+          ]
+        }
+      },
+      "required": [
+        "generation",
+        "seq",
+        "resource",
+        "resource_kind",
+        "transition",
+        "observed_at",
+        "actor",
+        "principal",
+        "cause",
+        "observation"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "actor": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "cause": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "operation"
+            },
+            "operation": {
+              "$ref": "common.json#/$defs/operation-id"
+            }
+          },
+          "required": [
+            "kind",
+            "operation"
+          ],
+          "type": "object"
+        },
+        "generation": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "observation": {
+          "$ref": "error.json#/$defs/detail"
+        },
+        "observed_at": {
+          "$ref": "common.json#/$defs/timestamp"
+        },
+        "principal": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resource": {
+          "$ref": "common.json#/$defs/exec-id"
+        },
+        "resource_kind": {
+          "const": "exec"
+        },
+        "seq": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "transition": {
+          "enum": [
+            "exec.cleanup-failed"
+          ]
+        }
+      },
+      "required": [
+        "generation",
+        "seq",
+        "resource",
+        "resource_kind",
+        "transition",
+        "observed_at",
+        "actor",
+        "principal",
+        "cause",
+        "observation"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "actor": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "cause": {
+          "additionalProperties": false,
+          "properties": {
+            "kind": {
+              "const": "operation"
+            },
+            "operation": {
+              "$ref": "common.json#/$defs/operation-id"
+            }
+          },
+          "required": [
+            "kind",
+            "operation"
+          ],
+          "type": "object"
+        },
+        "generation": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "observation": {
+          "$ref": "results/exec-retire.json"
+        },
+        "observed_at": {
+          "$ref": "common.json#/$defs/timestamp"
+        },
+        "principal": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resource": {
+          "$ref": "common.json#/$defs/exec-id"
+        },
+        "resource_kind": {
+          "const": "exec"
+        },
+        "seq": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "transition": {
+          "enum": [
+            "exec.retired"
+          ]
+        }
+      },
+      "required": [
+        "generation",
+        "seq",
+        "resource",
+        "resource_kind",
+        "transition",
+        "observed_at",
+        "actor",
+        "principal",
+        "cause",
+        "observation"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "actor": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "cause": {
+          "additionalProperties": false,
+          "properties": {
+            "control": {
+              "const": "reconciliation.snapshot.create"
+            },
+            "kind": {
+              "const": "control"
+            }
+          },
+          "required": [
+            "kind",
+            "control"
+          ],
+          "type": "object"
+        },
+        "generation": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "observation": {
+          "$ref": "results/reconciliation-snapshot-create.json"
+        },
+        "observed_at": {
+          "$ref": "common.json#/$defs/timestamp"
+        },
+        "principal": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resource": {
+          "$ref": "common.json#/$defs/snapshot-id"
+        },
+        "resource_kind": {
+          "const": "snapshot"
+        },
+        "seq": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "transition": {
+          "enum": [
+            "snapshot.created"
+          ]
+        }
+      },
+      "required": [
+        "generation",
+        "seq",
+        "resource",
+        "resource_kind",
+        "transition",
+        "observed_at",
+        "actor",
+        "principal",
+        "cause",
+        "observation"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "actor": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "cause": {
+          "additionalProperties": false,
+          "properties": {
+            "control": {
+              "const": "reconciliation.snapshot.create"
+            },
+            "kind": {
+              "const": "control"
+            }
+          },
+          "required": [
+            "kind",
+            "control"
+          ],
+          "type": "object"
+        },
+        "generation": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "observation": {
+          "$ref": "error.json#/$defs/detail"
+        },
+        "observed_at": {
+          "$ref": "common.json#/$defs/timestamp"
+        },
+        "principal": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "resource": {
+          "const": "reconciliation.snapshot.create"
+        },
+        "resource_kind": {
+          "const": "snapshot"
+        },
+        "seq": {
+          "maximum": 18446744073709551615,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "transition": {
+          "enum": [
+            "snapshot.refused"
+          ]
+        }
+      },
+      "required": [
+        "generation",
+        "seq",
+        "resource",
+        "resource_kind",
+        "transition",
+        "observed_at",
+        "actor",
+        "principal",
+        "cause",
+        "observation"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "Closed phase-3 persisted state-transition union"
+}

@@ -43,11 +43,13 @@ edits, and patches.
 |---|---|---|
 | `GET` | `/v2/workspaces/{workspace_id}/files/{*path}` | read bounded file bytes |
 | `GET` | `/v2/workspaces/{workspace_id}/tree` | read a bounded directory tree |
+| `GET` | `/v2/workspaces/{workspace_id}/git/baseline/{*path}` | read one bounded file at the materialized commit |
+| `GET` | `/v2/workspaces/{workspace_id}/git/changes` | compare the index/worktree with the materialized commit under item and byte bounds |
 | `PUT` | `/v2/workspaces/{workspace_id}/files/{*path}` | atomically replace file bytes |
 | `POST` | `/v2/workspaces/{workspace_id}/file-edits/{*path}` | apply one bounded positional edit |
 | `POST` | `/v2/workspaces/{workspace_id}/file-patches/{*path}` | apply one bounded patch |
 
-Current development source advertises `substrate-wire/0.15.0` in `x-b10x-contract` and its inner
+Current development source advertises `substrate-wire/0.16.0` in `x-b10x-contract` and its inner
 `bundle.json` SHA-256 in `x-b10x-contract-bundle-sha256`. The two headers are one claim. The signed
 outer OCI manifest has a different digest because it identifies the distribution package rather
 than the inner contract manifest.
@@ -78,6 +80,11 @@ Bundle `0.14.0` adds the hosted-only attachment-authority mint route and binds e
 to an Ed25519 key and the accepting TLS 1.3 channel. Bundle `0.15.0` then performs one deliberate
 pre-1.0 break: its eight session addresses move from `/v1/pipe-sessions` to `/v1/sessions`, with no
 redirect or compatibility alias. Operation ids and request/result schemas stay the same.
+
+Bundle `0.16.0` succeeds `0.15.0` additively. It closes the Git workspace source shape around a
+deployment-configured HTTPS source, opaque locator, provider branch, exact commit and depth 1–50;
+adds the conditional `workspace.git` fact; and adds the two bounded Git observation routes above.
+The transient source authority is an HTTP header and is absent from every contract JSON document.
 
 ### Metrics
 
