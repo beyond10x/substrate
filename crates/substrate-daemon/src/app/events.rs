@@ -30,13 +30,13 @@ use super::{App, BODY_LIMIT, Identity};
 pub(super) struct EventStreamPolicy {
     pub(super) global_streams: usize,
     pub(super) streams_per_subject: usize,
-    max_input_bytes: usize,
-    max_output_bytes: usize,
-    write_buffer_bytes: usize,
+    pub(super) max_input_bytes: usize,
+    pub(super) max_output_bytes: usize,
+    pub(super) write_buffer_bytes: usize,
     pub(super) max_controls_per_window: u32,
     pub(super) control_window: std::time::Duration,
-    send_timeout: std::time::Duration,
-    lifetime: std::time::Duration,
+    pub(super) send_timeout: std::time::Duration,
+    pub(super) lifetime: std::time::Duration,
     max_catch_up_pages: usize,
     max_page_items: u32,
 }

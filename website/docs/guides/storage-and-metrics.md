@@ -136,6 +136,15 @@ do not have a meaningful terminal “current” value are absent, not replaced b
 then the latest sample approximately once per second. Slow readers skip intermediate samples. The
 stream has no replay history and closes after a terminal or unavailable observation.
 
+The stream is bounded, and the bounds a client can act on carry a code. A subject may hold 4 metrics
+streams at once and a deployment 64; one more is refused `429` with the code
+`metrics.stream-capacity`, an `exhausted` refusal worth retrying once a stream you hold has ended. A
+client may send 120 control frames a minute, and the one after that closes the stream `1008`. The
+stream carries samples one way and accepts control frames only, so a data frame closes it `1003`.
+Two bounds end the connection instead of naming themselves: a stream is cut after 1 hour, and a
+client frame larger than 1024 bytes is refused by the socket before the daemon sees it. Reconnect in
+each case; nothing is lost, because the stream carries no history to lose.
+
 Use the durable terminal exec observation when you need a record. Use the WebSocket when you need a
 live display or a local admission signal. Substrate does not turn sampled telemetry into billing or
 long-term monitoring data.

@@ -16,12 +16,13 @@ use super::events::{
     bounded_event_frame, classify_client_frame, enforce_event_stream_lifetime,
     enforce_stream_send_deadline, event_frame_or_backpressure,
 };
+use super::metrics::MetricsStreamPolicy;
 use super::operations::read_bounded_body;
 use super::service::{
     CompletedDriverAction, WorkspaceLockDomains, bounded_blocking, completed_driver_action,
     run_maintenance_driver,
 };
-use super::{MAINTENANCE_DRIVER_TIMEOUT, REQUEST_BODY_READ_TIMEOUT};
+use super::{BODY_LIMIT, MAINTENANCE_DRIVER_TIMEOUT, REQUEST_BODY_READ_TIMEOUT};
 
 async fn bound_refusal_response(app: Arc<super::App>, operation: &str) -> Value {
     let request = Request::builder()
@@ -508,4 +509,97 @@ async fn workspace_lock_domains_isolate_subjects_but_serialize_one_scope() {
     assert!(domain_b.stripes[0].try_lock().is_ok());
     drop(held);
     assert!(domain_a.stripes[0].try_lock().is_ok());
+}
+
+/// The metrics stream restates nine of `EventStreamPolicy`'s bounds rather than holding them.
+/// Every one is compared against its original here, so the restatement cannot drift unremarked,
+/// and every published value is also pinned against its own literal, so moving both together is a
+/// change somebody makes on purpose.
+///
+/// The literal half has to be a *literal*. `max_output_bytes` is `BODY_LIMIT` on both policies, so
+/// pinning it against `BODY_LIMIT` compared the constant with itself and would have followed the
+/// constant anywhere it moved; it is pinned against `2_097_152`, the value `BODY_LIMIT` has at
+/// `app.rs:6`, which is what the pin is for.
+#[test]
+fn metrics_stream_policy_publishes_the_event_stream_bounds() {
+    let metrics = MetricsStreamPolicy::production();
+    let events = EventStreamPolicy::production();
+
+    assert_eq!(metrics.global_streams, events.global_streams);
+    assert_eq!(metrics.streams_per_subject, events.streams_per_subject);
+    assert_eq!(metrics.max_input_bytes, events.max_input_bytes);
+    assert_eq!(metrics.max_output_bytes, events.max_output_bytes);
+    assert_eq!(metrics.write_buffer_bytes, events.write_buffer_bytes);
+    assert_eq!(
+        metrics.max_controls_per_window,
+        events.max_controls_per_window
+    );
+    assert_eq!(metrics.control_window, events.control_window);
+    assert_eq!(metrics.send_timeout, events.send_timeout);
+    assert_eq!(metrics.lifetime, events.lifetime);
+
+    assert_eq!(metrics.global_streams, 64);
+    assert_eq!(metrics.streams_per_subject, 4);
+    assert_eq!(metrics.max_input_bytes, 1_024);
+    assert_eq!(metrics.max_output_bytes, 2_097_152);
+    assert_eq!(BODY_LIMIT, 2_097_152);
+    assert_eq!(metrics.write_buffer_bytes, 16 * 1_024);
+    assert_eq!(metrics.max_controls_per_window, 120);
+    assert_eq!(metrics.control_window, Duration::from_mins(1));
+    assert_eq!(metrics.send_timeout, Duration::from_secs(5));
+    assert_eq!(metrics.lifetime, Duration::from_hours(1));
+}
+
+/// The metrics twin of `event_stream_lifetime_cancels_session_and_recovers_permits`: the
+/// composition the upgrade runs — `enforce_event_stream_lifetime(policy.lifetime, session)`,
+/// `app/metrics.rs` — cuts a session that would otherwise never end, and the subject's permit
+/// comes back when it does.
+///
+/// **The limit, as a rule:** this drives the composition, not the served route. Nothing here
+/// proves `metrics_stream` passes *its* policy's lifetime to it; what asserts that is
+/// `every_websocket_upgrade_declares_its_frame_message_and_lifetime_bounds`
+/// (`app/metrics.rs`), which fails an upgrade whose body does not name `policy.lifetime`.
+/// A one-hour bound cannot be observed end to end on a live socket: with the 5 s send deadline
+/// running, an auto-advancing clock fires the deadline long before the lifetime.
+#[tokio::test(start_paused = true)]
+async fn metrics_stream_lifetime_cancels_session_and_recovers_permits() {
+    let policy = MetricsStreamPolicy::production();
+    let limits = EventStreamLimits::new(policy.global_streams, policy.streams_per_subject);
+    let scope = effect("subject-metrics", 1).scope;
+
+    let mut held: Vec<_> = (1..policy.streams_per_subject)
+        .map(|index| {
+            limits
+                .acquire(&scope)
+                .unwrap_or_else(|| panic!("metrics stream capacity {index}"))
+        })
+        .collect();
+    let last = limits.acquire(&scope).expect("the cap's last permit");
+    assert!(
+        limits.acquire(&scope).is_none(),
+        "the published per-subject cap must bind at {}",
+        policy.streams_per_subject
+    );
+
+    let task = tokio::spawn(enforce_event_stream_lifetime(policy.lifetime, async move {
+        let _permit = last;
+        std::future::pending::<()>().await;
+    }));
+    tokio::task::yield_now().await;
+    assert!(
+        limits.acquire(&scope).is_none(),
+        "a live metrics stream keeps its permit"
+    );
+
+    tokio::time::advance(policy.lifetime).await;
+    assert!(
+        !task.await.expect("lifetime task"),
+        "the session must be cut at the published lifetime, not run past it"
+    );
+    assert!(
+        limits.acquire(&scope).is_some(),
+        "the cut metrics stream must return its subject permit"
+    );
+    held.clear();
+    assert!(limits.scopes.lock().is_empty());
 }
