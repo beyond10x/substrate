@@ -538,7 +538,7 @@ impl GuardedFilesystem {
                 0,
             )?
         };
-        refuse_unsafe_existing(parent_fd.as_raw_fd(), name)?;
+        let executable = existing_file_is_executable(parent_fd.as_raw_fd(), name)?;
         let temporary_name = format!(".substrate-{}.tmp", Ulid::generate());
         let temporary = CString::new(temporary_name.as_str()).expect("ULID has no NUL");
         // SAFETY: parent fd and temporary name are valid; O_EXCL prevents aliasing an existing path.
@@ -547,7 +547,7 @@ impl GuardedFilesystem {
                 parent_fd.as_raw_fd(),
                 temporary.as_ptr(),
                 libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-                0o600,
+                if executable { 0o700 } else { 0o600 },
             )
         };
         let temporary_fd = owned_fd(fd, "atomic temporary file")?;
@@ -1269,7 +1269,7 @@ fn text_lines(value: &str) -> Vec<String> {
         .collect()
 }
 
-fn refuse_unsafe_existing(parent: RawFd, name: &str) -> Result<(), DriverError> {
+fn existing_file_is_executable(parent: RawFd, name: &str) -> Result<bool, DriverError> {
     match openat2(
         parent,
         name,
@@ -1281,9 +1281,9 @@ fn refuse_unsafe_existing(parent: RawFd, name: &str) -> Result<(), DriverError> 
             if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
                 return Err(path_escape());
             }
-            Ok(())
+            Ok(stat.st_mode & 0o111 != 0)
         }
-        Err(error) if error.code == "resource.not-found" => Ok(()),
+        Err(error) if error.code == "resource.not-found" => Ok(false),
         Err(error) => Err(error),
     }
 }
@@ -1632,6 +1632,49 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(outside.path().join("secret")).expect("outside unchanged"),
             "outside"
+        );
+    }
+
+    #[test]
+    fn atomic_replacement_preserves_the_existing_executable_class() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let directory = tempdir().expect("tempdir");
+        let filesystem =
+            GuardedFilesystem::open(directory.path(), 1024, 1024, 100).expect("guarded filesystem");
+        if !filesystem.openat2_available() {
+            return;
+        }
+        filesystem.create_workspace("ws_test").expect("workspace");
+        let executable = directory.path().join("ws_test/tool");
+        let ordinary = directory.path().join("ws_test/notes");
+        std::fs::write(&executable, b"old tool").expect("seed executable");
+        std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o700))
+            .expect("mark executable");
+        std::fs::write(&ordinary, b"old notes").expect("seed ordinary file");
+
+        filesystem
+            .write_atomic("ws_test", "ws_test", "tool", b"new tool")
+            .expect("replace executable");
+        filesystem
+            .write_atomic("ws_test", "ws_test", "notes", b"new notes")
+            .expect("replace ordinary file");
+
+        assert_ne!(
+            std::fs::metadata(executable)
+                .expect("executable metadata")
+                .permissions()
+                .mode()
+                & 0o111,
+            0
+        );
+        assert_eq!(
+            std::fs::metadata(ordinary)
+                .expect("ordinary metadata")
+                .permissions()
+                .mode()
+                & 0o111,
+            0
         );
     }
 

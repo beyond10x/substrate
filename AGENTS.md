@@ -89,7 +89,9 @@ Substrate is confinement. Everything below is the reason it can be trusted with 
   requires at least one explicit `--allow-uid`; the subject is `local:<uid>`. Never accept a subject,
   a tenant or a uid from a request body or header.
 - **The enforced isolation set is a floor, not a menu**: `openat2` beneath/no-link/no-mount I/O,
-  atomic replacement, cleared and shaped environment, namespace no-egress, pids and memory+swap
+  atomic replacement, cleared and shaped environment, namespace no-egress, **no nested user
+  namespace** — the child's own user namespace with `--disable-userns`, so it cannot create
+  another one and hold `CAP_SYS_ADMIN` in it — pids and memory+swap
   bounds with cumulatively observed CPU, backend-identity-bound capability snapshots, output
   draining, timeout, whole-tree kill, exact capsule-byte verification, read-only `/runtime` beside a
   separate writable `/workspace`, owner-private durable state, and bounded normal/restart capsule
@@ -403,8 +405,8 @@ reciting them. Before the first planning-store write of a session, run `protocol
 
 New artifacts start in the lifecycle's initial state. Lifecycle moves are claims about project
 state: propose them and wait for the operator unless the operator asked for the specific move.
-`protocol` must be on `PATH` (`cargo install --path crates/protocol-cli` in an
-`engineering-protocols` checkout); if it is absent, do not improvise machine-owned frontmatter.
+`protocol` must be on `PATH` (`cargo install --path crates/edge/aep-cli` in an
+`aep` checkout); if it is absent, do not improvise machine-owned frontmatter.
 
 A story that changes a contract or a capability still owes its ADR or design document **before
 code** (invariant 8); the story body names which. `ROADMAP.md` keeps the phase order and
@@ -414,7 +416,7 @@ restates it.
 <!-- b10x-docs-operations:start -->
 ## Public documentation operations
 
-This repository owns the public source and presentation allowlist in `b10x.docs.yaml`; the unified [beyond10x Website](https://beyond10x.github.io/docs/substrate/) passively collects those declared files from the exact commit in `website/sources.lock.json`. Atlas owns discovery grouping/order; Website and Docs System own rendering, shared components, search, and feeds. Do not add a standalone docs deployer or put App credentials in this public repository. If Atlas catalogs a former Pages workflow, that file remains repository-owned validation: preserve its bespoke checks while keeping exact read-only permissions, an unconditional pull-request trigger, and no deployment primitives. Project Pages at `/substrate/` is only the generated redirect façade in `.github/workflows/b10x-docs-pages.yml`.
+This repository owns the public source and presentation allowlist in `b10x.docs.yaml`. The generated credential-free `.github/workflows/b10x-docs-bundle.yml` passively packages only those declared files for the exact successful `main` commit; it must never run repository code. Atlas selects the latest successful bundle with every other catalog source, and Website plus Docs System own rendering, shared components, search, and feeds. Do not add a standalone docs deployer or put App credentials in this public repository. If Atlas catalogs a former Pages workflow, that file remains repository-owned validation: preserve its bespoke checks while keeping exact read-only permissions, an unconditional pull-request trigger, and no deployment primitives. Project Pages at `/substrate/` is only the generated stable redirect façade in `.github/workflows/b10x-docs-pages.yml`; content-only publication never rebuilds it.
 
 From the complete organization workspace, verify the contract with a clean Atlas checkout at the current remote `main`. Set `B10X_ATLAS_CHECKOUT` to a managed Atlas worktree when the primary checkout is dirty or stale; never infer command availability from the primary alone.
 

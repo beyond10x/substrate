@@ -7,6 +7,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.5.1] — 2026-09-03
+
+### Changed
+
+- Atomic workspace file replacements preserve whether an existing regular file is executable,
+  preventing editor saves and guarded patches from silently stripping executable mode.
+
 ## [0.5.0] — 2026-09-01
 
 Daemon image: `ghcr.io/beyond10x/b10x-substrate-daemon:0.5.0` at

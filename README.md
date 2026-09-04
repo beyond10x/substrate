@@ -278,7 +278,13 @@ must:
 2. keep the delegation root itself **process-free** — for example systemd `Delegate=yes` plus
    `DelegateSubgroup=daemon`;
 3. provide the configured bubblewrap binary and `/usr/bin/socat`, which the runtime probe uses to
-   prove that the seccomp profile denies host Unix-socket access;
+   prove that the seccomp profile denies host Unix-socket access. **That bubblewrap must accept
+   `--disable-userns` and `--assert-userns-disabled`**, because the probe asks for a non-nestable
+   user namespace and then makes bubblewrap assert it rather than trusting the option took. A
+   backend without those options fails the probe, so exec confinement facts are absent and every
+   exec is refused `exec.sandbox-unavailable`, exactly as with a missing delegated cgroup. Check
+   with `bwrap --help`; 0.11.2 is the version this was measured against, and no lower bound has
+   been established here;
 4. pass that root through `--cgroup-root`.
 
 The runtime probe enables and tests the controllers, bubblewrap namespaces, cgroup kill and the

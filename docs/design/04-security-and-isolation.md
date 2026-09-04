@@ -89,15 +89,22 @@ The first host driver is Linux-only and requires all of the following before it 
   `RESOLVE_NO_MAGICLINKS`, and no-follow behavior for guarded file operations;
 - unprivileged user, mount, PID, IPC, UTS, and network namespaces through a probed bubblewrap
   backend; the workspace is the only writable bind and system inputs are explicit read-only binds;
+- a **non-nestable** user namespace: the backend accepts `--disable-userns`, and the probe proves it
+  with `--assert-userns-disabled` rather than trusting that the option took effect. A confined
+  process holds a full capability set inside its own user namespace, so without this it can create
+  a second one and hold `CAP_SYS_ADMIN` there — the entry point of most unprivileged kernel
+  privilege escalations. A backend that cannot honour either option leaves every fact gated on
+  `exec` absent and every exec refused `exec.sandbox-unavailable`, never a sandbox without it;
 - a delegated cgroup v2 subtree with process, memory, and CPU bounds plus whole-cgroup termination;
 - cleared environment, closed inherited descriptors, `no_new_privs`, a private temporary directory,
   and no ambient daemon/control credential;
 - a new network namespace with no usable interface for the minimum slice.
 
 The minimum slice does not claim protection from kernel compromise or syscall-level seccomp
-containment. If `openat2`, namespace isolation, bubblewrap, cgroup delegation/kill, or no-egress
-probing is unavailable, workspace file operations or exec are absent from capabilities as
-appropriate; execution never falls back to an unconfined process. Non-Linux hosts are unserved.
+containment. If `openat2`, namespace isolation, bubblewrap, a non-nestable user namespace, cgroup
+delegation/kill, or no-egress probing is unavailable, workspace file operations or exec are absent
+from capabilities as appropriate; execution never falls back to an unconfined process. Non-Linux
+hosts are unserved.
 
 Cancellation signals the cgroup, waits the configured grace interval, kills the entire cgroup, and
 observes emptiness. A process group alone is not accepted proof that descendants are gone.
