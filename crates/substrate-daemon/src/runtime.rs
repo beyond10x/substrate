@@ -1605,11 +1605,33 @@ mod tests {
             let service = Router::new().route(
                 "/attach",
                 axum::routing::get(|upgrade: axum::extract::ws::WebSocketUpgrade| async move {
-                    upgrade.on_upgrade(|mut socket| async move {
-                        // One frame proves the upgraded socket is live; it then stays open.
-                        let _ = socket.send(axum::extract::ws::Message::from("live")).await;
-                        while socket.recv().await.is_some() {}
-                    })
+                    // Bounded like every served upgrade, so the crate-wide check in
+                    // `app::metrics::tests::every_websocket_upgrade_declares_its_frame_message_and_lifetime_bounds`
+                    // holds for fixtures too. It reads `src/` recursively and does not know a test
+                    // harness from a route, which is the strict reading and the right one: a
+                    // fixture that may run unbounded is a fixture that does not resemble the thing
+                    // it stands in for.
+                    upgrade
+                        .max_frame_size(1_024)
+                        .max_message_size(1_024)
+                        .on_upgrade(|mut socket| async move {
+                            // A fixture carries a lifetime for the same reason a route does: the
+                            // crate-wide check reads `src/` recursively and cannot tell a harness
+                            // from a served route. A fixture allowed to run unbounded does not
+                            // resemble the thing it stands in for.
+                            struct FixturePolicy {
+                                lifetime: std::time::Duration,
+                            }
+                            let policy = FixturePolicy {
+                                lifetime: std::time::Duration::from_secs(30),
+                            };
+                            let _ = tokio::time::timeout(policy.lifetime, async move {
+                                // One frame proves the upgraded socket is live; it then stays open.
+                                let _ = socket.send(axum::extract::ws::Message::from("live")).await;
+                                while socket.recv().await.is_some() {}
+                            })
+                            .await;
+                        })
                 }),
             );
             tokio::spawn(async move {
