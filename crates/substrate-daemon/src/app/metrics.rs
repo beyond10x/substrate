@@ -15,7 +15,10 @@ use substrate_wire::{
     MetricsStreamFrame, MetricsStreamQuery, Success,
 };
 
-use super::events::{EventStreamPermit, enforce_event_stream_lifetime};
+use super::events::{
+    ClientFrame, ControlRate, EventStreamPermit, classify_client_frame,
+    enforce_event_stream_lifetime, enforce_stream_send_deadline, send_protocol_close,
+};
 use super::operations::{driver_failure, stored_exec};
 use super::responses::{failure, not_found, request_id, schema_invalid, store_failure, success};
 use super::{App, BODY_LIMIT, Identity};
@@ -24,10 +27,24 @@ use super::{App, BODY_LIMIT, Identity};
 /// `app/events.rs` already publishes for the same bound on the event stream.
 pub(super) const METRICS_STREAM_CAPACITY: &str = "metrics.stream-capacity";
 
+/// The close a client that sends a data frame earns — RFC 6455's "unacceptable data", the code
+/// `app/events.rs:505` gives on the sibling stream. Named rather than written twice, because
+/// `the_published_cap_and_refusal_are_the_ones_the_public_guide_states` derives the guide's
+/// sentence from it.
+pub(super) const METRICS_STREAM_DATA_CLOSE: u16 = 1003;
+
+/// The close a client that outruns the control-frame budget earns — RFC 6455's "policy
+/// violation", the code `app/events.rs:521` gives on the sibling stream.
+pub(super) const METRICS_STREAM_CONTROL_RATE_CLOSE: u16 = 1008;
+
 /// What a metrics stream may hold, in the shape `EventStreamPolicy` publishes: the same permit
-/// bounds, the same client-frame ceiling and the same lifetime. Metrics streams were the one
-/// upgrade with none of them, and each open stream costs one `observe_exec` plus one `put_exec`
-/// durable write per sample interval until the exec ends.
+/// bounds, the same client-frame ceiling, the same control-frame budget and the same lifetime.
+/// Metrics streams were the one upgrade with none of them, and each open stream costs one
+/// `observe_exec` plus one `put_exec` durable write per sample interval until the exec ends.
+///
+/// Every field is compared against its `EventStreamPolicy` original by
+/// `metrics_stream_policy_publishes_the_event_stream_bounds` (`app/tests.rs`), so this docstring's
+/// claim is a check rather than a promise.
 #[derive(Clone, Copy)]
 pub(super) struct MetricsStreamPolicy {
     pub(super) global_streams: usize,
@@ -35,6 +52,8 @@ pub(super) struct MetricsStreamPolicy {
     pub(super) max_input_bytes: usize,
     pub(super) max_output_bytes: usize,
     pub(super) write_buffer_bytes: usize,
+    pub(super) max_controls_per_window: u32,
+    pub(super) control_window: Duration,
     pub(super) send_timeout: Duration,
     pub(super) lifetime: Duration,
 }
@@ -47,6 +66,8 @@ impl MetricsStreamPolicy {
             max_input_bytes: 1_024,
             max_output_bytes: BODY_LIMIT,
             write_buffer_bytes: 16 * 1_024,
+            max_controls_per_window: 120,
+            control_window: Duration::from_mins(1),
             send_timeout: Duration::from_secs(5),
             lifetime: Duration::from_hours(1),
         }
@@ -177,6 +198,10 @@ async fn run_stream(
     // `website/docs/guides/storage-and-metrics.md`). Spending it here leaves exactly one tick
     // between every pair of frames the loop sends.
     interval.tick().await;
+    // The budget spans the stream, not one sample period: the inner loop below answers every
+    // control frame that arrives while it waits, so without a counter carried across iterations
+    // a client can spend the route's read-match-write for as long as it holds the permit.
+    let mut control_rate = ControlRate::new();
     loop {
         let Ok(usage) = load_exec_usage(&app, &scope, &exec_id).await else {
             let _ = socket.close().await;
@@ -210,17 +235,52 @@ async fn run_stream(
         // One tick per sample, and only here. `Interval::tick` is cancel-safe, so a control
         // frame that wins this race consumes no tick: the client's traffic is answered without
         // moving the cadence the route advertises, and the next sample still lands on the
-        // interval's own schedule.
+        // interval's own schedule. Every ending below is a named one, as `app/events.rs:499-527`
+        // gives on the sibling stream — a client that hits a bound is told which.
         loop {
             tokio::select! {
                 _ = interval.tick() => break,
                 incoming = socket.next() => {
                     match incoming {
-                        Some(Ok(Message::Ping(bytes))) => {
-                            let _ = socket.send(Message::Pong(bytes)).await;
-                        }
-                        Some(Ok(Message::Pong(_))) => {}
-                        _ => return,
+                        Some(Err(_)) | None => return,
+                        Some(Ok(message)) => match classify_client_frame(&message) {
+                            ClientFrame::Close => return,
+                            ClientFrame::Data => {
+                                let _ = send_protocol_close(
+                                    &mut socket,
+                                    METRICS_STREAM_DATA_CLOSE,
+                                    "metrics streams accept control frames only",
+                                    policy.send_timeout,
+                                )
+                                .await;
+                                return;
+                            }
+                            ClientFrame::Control => {
+                                if control_rate.exceeded(
+                                    policy.max_controls_per_window,
+                                    policy.control_window,
+                                ) {
+                                    let _ = send_protocol_close(
+                                        &mut socket,
+                                        METRICS_STREAM_CONTROL_RATE_CLOSE,
+                                        "metrics stream control-frame rate exceeded",
+                                        policy.send_timeout,
+                                    )
+                                    .await;
+                                    return;
+                                }
+                                if let Message::Ping(bytes) = message
+                                    && enforce_stream_send_deadline(
+                                        policy.send_timeout,
+                                        socket.send(Message::Pong(bytes)),
+                                    )
+                                    .await
+                                    .is_err()
+                                {
+                                    return;
+                                }
+                            }
+                        },
                     }
                 }
             }
@@ -367,7 +427,10 @@ mod tests {
     use tokio::net::{TcpListener, TcpStream};
     use tokio::task::JoinHandle;
 
-    use super::{METRICS_STREAM_CAPACITY, MetricsStreamPolicy};
+    use super::{
+        METRICS_STREAM_CAPACITY, METRICS_STREAM_CONTROL_RATE_CLOSE, METRICS_STREAM_DATA_CLOSE,
+        MetricsStreamPolicy,
+    };
     use crate::{App, Identity, router};
 
     const SUBJECT: &str = "local:1000";
@@ -922,6 +985,72 @@ mod tests {
         (bytes.get(start + 2) == Some(&APOSTROPHE)).then_some(start + 2)
     }
 
+    /// The field names declared by `struct <name>` in `source`, in order.
+    fn policy_fields(source: &str, name: &str) -> Vec<String> {
+        let head = source
+            .find(&format!("struct {name} {{"))
+            .unwrap_or_else(|| panic!("{name} is declared"));
+        let open = head + source[head..].find('{').expect("struct body");
+        let close = open + source[open..].find('}').expect("struct body ends");
+        source[open + 1..close]
+            .lines()
+            .filter_map(|line| line.split(':').next())
+            .map(|name| name.trim().trim_start_matches("pub(super) ").trim())
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .collect()
+    }
+
+    /// The class this round's blocker belongs to: a bound `EventStreamPolicy` declares and
+    /// `MetricsStreamPolicy` simply does not have.
+    ///
+    /// `max_controls_per_window` and `control_window` were on the event policy from the start and
+    /// absent from the metrics one, so the metrics stream answered client control frames with no
+    /// budget at all. Nothing saw it, because
+    /// `metrics_stream_policy_publishes_the_event_stream_bounds` (`app/tests.rs`) compares the
+    /// fields the two policies *share* — a field missing from one side is a comparison nobody
+    /// writes. This reads both declarations instead, so the next bound added to the event stream
+    /// forces an answer here: restate it, or name it and say why it does not apply.
+    #[test]
+    fn every_event_stream_bound_is_restated_or_named_as_inapplicable() {
+        /// Fields of `EventStreamPolicy` the metrics stream deliberately does not restate, each
+        /// with the reason it cannot apply.
+        const NOT_RESTATED: &[(&str, &str)] = &[
+            (
+                "max_catch_up_pages",
+                "the metrics stream has no cursor and no catch-up: it samples current usage and \
+                 publishes no history (website/docs/guides/storage-and-metrics.md)",
+            ),
+            (
+                "max_page_items",
+                "the metrics stream sends one usage frame per sample, never a page",
+            ),
+        ];
+        let app = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app");
+        let events = std::fs::read_to_string(app.join("events.rs")).expect("events module");
+        let metrics = std::fs::read_to_string(app.join("metrics.rs")).expect("metrics module");
+        let events = policy_fields(&masked(&events, "events.rs"), "EventStreamPolicy");
+        let metrics = policy_fields(&masked(&metrics, "metrics.rs"), "MetricsStreamPolicy");
+
+        assert!(events.len() >= 9, "read {events:?} from EventStreamPolicy");
+        for (field, reason) in NOT_RESTATED {
+            assert!(
+                events.contains(&(*field).to_owned()),
+                "EventStreamPolicy no longer declares {field}; drop it from NOT_RESTATED with \
+                 its reason ({reason})"
+            );
+        }
+        for field in &events {
+            assert!(
+                metrics.contains(field) || NOT_RESTATED.iter().any(|(named, _)| named == field),
+                "EventStreamPolicy bounds the event stream with {field} and MetricsStreamPolicy \
+                 does not restate it. Restate it and enforce it in run_stream, or add it to \
+                 NOT_RESTATED with the reason it cannot apply — an absent bound is the defect \
+                 that let the metrics stream answer control frames without a budget."
+            );
+        }
+    }
+
     /// Finding 3's class, not its instance: an upgrade that runs on the library's default frame
     /// and message bounds with no lifetime. The metrics stream was the one instance; this reads
     /// every upgrade the crate serves, so a fourth route cannot be added without its bounds.
@@ -1015,15 +1144,26 @@ mod tests {
         let text = std::fs::read_to_string(&guide).expect("public metrics guide");
         let prose = text.split_whitespace().collect::<Vec<_>>().join(" ");
         let policy = MetricsStreamPolicy::production();
+        assert_eq!(
+            policy.control_window,
+            Duration::from_mins(1),
+            "the guide states the control budget per minute; the policy must be a minute"
+        );
         for statement in [
             format!(
                 "hold {} metrics streams at once and a deployment {};",
                 policy.streams_per_subject, policy.global_streams
             ),
             format!("refused `429` with the code `{METRICS_STREAM_CAPACITY}`"),
+            format!(
+                "send {} control frames a minute, and the one after that closes the stream \
+                 `{METRICS_STREAM_CONTROL_RATE_CLOSE}`",
+                policy.max_controls_per_window
+            ),
+            format!("a data frame closes it `{METRICS_STREAM_DATA_CLOSE}`"),
             format!("cut after {} hour", policy.lifetime.as_secs() / 3_600),
             format!(
-                "client frame larger than {} bytes ends it",
+                "client frame larger than {} bytes is refused by the socket",
                 policy.max_input_bytes
             ),
         ] {

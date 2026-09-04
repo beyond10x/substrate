@@ -624,3 +624,185 @@ async fn the_metrics_sampling_cadence_does_not_depend_on_client_traffic() {
          client sends"
     );
 }
+
+// ---------------------------------------------------------------------------------------------
+// Adversary pass 2. Everything below this line is added; nothing above it is changed.
+//
+// Pass 1's fix for the doubled cadence moved the `tokio::select!` that reads client frames from
+// the foot of `run_stream`'s outer loop into an *inner* loop that spins until the next tick
+// (`crates/substrate-daemon/src/app/metrics.rs:210-227`). Before that change the outer
+// `interval.tick()` admitted at most one client control frame per sample period; now the route
+// answers every control frame that arrives while it waits. `EventStreamPolicy` bounds exactly
+// this with `max_controls_per_window` / `control_window` (`app/events.rs:36-37`), and
+// `MetricsStreamPolicy` — which `app/metrics.rs:27` says holds "the same permit bounds, the same
+// client-frame ceiling and the same lifetime" — restates neither.
+// ---------------------------------------------------------------------------------------------
+
+/// How the server ended the stream, from the client's side of the socket.
+#[derive(Debug, PartialEq, Eq)]
+enum StreamEnding {
+    /// A close frame carrying this code — the client is told which bound it hit.
+    Close(u16),
+    /// A close frame with no code.
+    ClosedWithoutCode,
+    /// The connection was dropped: the client is told nothing at all.
+    Eof,
+    /// Neither, inside the deadline.
+    StillOpen,
+}
+
+impl WebSocketClient {
+    /// Read until the server ends the stream, counting the pong frames it sends on the way.
+    async fn drain_until_end(&mut self, deadline: Duration) -> (StreamEnding, usize) {
+        let mut pongs = 0_usize;
+        let ending = tokio::time::timeout(deadline, async {
+            loop {
+                let Some(frame) = self.next_frame().await else {
+                    return StreamEnding::Eof;
+                };
+                match frame.opcode {
+                    0xa => pongs += 1,
+                    0x8 => {
+                        return frame
+                            .payload
+                            .get(..2)
+                            .map_or(StreamEnding::ClosedWithoutCode, |bytes| {
+                                StreamEnding::Close(u16::from_be_bytes([bytes[0], bytes[1]]))
+                            });
+                    }
+                    _ => {}
+                }
+            }
+        })
+        .await
+        .unwrap_or(StreamEnding::StillOpen);
+        (ending, pongs)
+    }
+}
+
+/// The control-frame budget a client gets on the sibling stream:
+/// `EventStreamPolicy::production().max_controls_per_window`
+/// (`crates/substrate-daemon/src/app/events.rs:52`) over its `control_window` of one minute,
+/// asserted on the served route by `control_frame_flood_closes_1008_and_releases_the_subject_
+/// permit` (`crates/substrate-daemon/tests/websocket.rs:354`), which sends exactly one frame more
+/// than the budget and requires close `1008`.
+const EVENT_STREAM_CONTROL_BUDGET: u32 = 120;
+
+/// The metrics stream answers client control frames without any budget, and after the cadence fix
+/// it answers them as fast as they arrive.
+///
+/// This is `control_frame_flood_closes_1008_and_releases_the_subject_permit`
+/// (`crates/substrate-daemon/tests/websocket.rs:354`) pointed at the other bounded stream: the
+/// same flood, the same length, the same expected close. `run_stream` matches `Message::Ping` and
+/// replies `Message::Pong` inside a loop with no `ControlRate`
+/// (`crates/substrate-daemon/src/app/metrics.rs:213-226`), so a client that spends nothing but
+/// bandwidth makes the daemon spend a read, a match and a write per frame, on a permit it holds
+/// for up to the one-hour lifetime.
+///
+/// A correct implementation makes this green the way the event stream already does: count control
+/// frames against `max_controls_per_window` over `control_window` and close `1008` when the budget
+/// is gone.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_metrics_control_frame_flood_earns_the_close_the_event_stream_gives() {
+    let harness = Harness::open().await;
+    let mut client = harness.connect(&metrics_path()).await.upgraded();
+
+    let flood = EVENT_STREAM_CONTROL_BUDGET + 1;
+    for _ in 0..flood {
+        client.send_frame(true, 0x9, &[]).await;
+    }
+    let started = Instant::now();
+    let (ending, pongs) = client.drain_until_end(Duration::from_secs(6)).await;
+    let elapsed = started.elapsed();
+
+    assert_eq!(
+        ending,
+        StreamEnding::Close(1008),
+        "the event stream spends a client's {EVENT_STREAM_CONTROL_BUDGET} control frames per \
+         window and then closes 1008 (tests/websocket.rs:354); the metrics stream answered \
+         {pongs} pongs to {flood} pings in {elapsed:?} and ended as {ending:?}"
+    );
+
+    drop(client);
+    assert_full_subject_capacity(&harness).await;
+}
+
+/// Half the declared client-frame ceiling — a frame no bound rejects.
+const IN_BOUNDS_DATA_FRAME: usize = 512;
+
+/// A data frame ends the metrics stream whatever its size, so "the stream ended" is not an
+/// observation of the frame ceiling.
+///
+/// `every_websocket_upgrade_declares_its_frame_message_and_lifetime_bounds`
+/// (`crates/substrate-daemon/src/app/metrics.rs:944-949`) names
+/// `an_oversized_client_frame_ends_the_metrics_stream_and_returns_its_permit` (line 527 of this
+/// file) as the case that "observes one firing" of the ceiling. That case sends 1 025 bytes and
+/// asserts the stream ends — but `run_stream`'s `_ => return`
+/// (`crates/substrate-daemon/src/app/metrics.rs:222`) ends the stream on *any* data frame, and
+/// ends it the same way: by dropping the socket. This case sends a frame at half the ceiling and
+/// asks the socket what it was told.
+///
+/// The sibling stream answers the identical frame with close `1003` and a reason
+/// (`crates/substrate-daemon/src/app/events.rs:505-511`, asserted by
+/// `data_frame_closes_1003_and_releases_the_subject_permit`,
+/// `crates/substrate-daemon/tests/websocket.rs:314`), which both tells the client what it did and
+/// makes the two endings distinguishable — so `1009`-or-EOF for the oversized frame then means
+/// something. `website/docs/guides/storage-and-metrics.md:139` promises "a client is told when it
+/// hits a bound".
+#[tokio::test(flavor = "multi_thread")]
+async fn a_metrics_data_frame_earns_the_named_close_the_event_stream_gives() {
+    let harness = Harness::open().await;
+    let mut client = harness.connect(&metrics_path()).await.upgraded();
+
+    client
+        .send_frame(true, 0x2, &[0_u8; IN_BOUNDS_DATA_FRAME])
+        .await;
+    let (ending, _pongs) = client.drain_until_end(Duration::from_secs(6)).await;
+
+    assert_eq!(
+        ending,
+        StreamEnding::Close(1003),
+        "a {IN_BOUNDS_DATA_FRAME} byte data frame is half the declared 1024 byte ceiling, and the \
+         metrics stream ended as {ending:?} — the same ending the 1 025 byte frame at line 527 \
+         gets, so that case does not observe the ceiling; the event stream answers this frame \
+         with close 1003 (tests/websocket.rs:314)"
+    );
+
+    drop(client);
+    assert_full_subject_capacity(&harness).await;
+}
+
+/// The first sample is immediate and the second is a whole interval later.
+///
+/// `website/docs/guides/storage-and-metrics.md:134` — the route "emits one immediate observation,
+/// then the latest sample approximately once per second". The cadence fix spends the interval's
+/// immediate first tick *before* the loop
+/// (`crates/substrate-daemon/src/app/metrics.rs:179`), which is the only placement that satisfies
+/// both halves: spending it inside the loop delays the immediate observation by a full period,
+/// and spending it nowhere sends the first two samples back to back.
+/// `a_metrics_stream_samples_at_the_interval_its_contract_advertises` measures gaps between
+/// samples 1, 2 and 3 and cannot see either mistake at the head of the stream.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_first_metrics_sample_is_immediate_and_the_second_is_one_interval_later() {
+    let harness = Harness::open().await;
+    let requested = Instant::now();
+    let mut client = harness.connect(&metrics_path()).await.upgraded();
+    let first = client.next_usage_sample().await;
+    let second = client.next_usage_sample().await;
+
+    let advertised = Duration::from_millis(substrate_wire::RESOURCE_USAGE_SAMPLE_INTERVAL_MS);
+    let half = advertised.mul_f64(0.5);
+    let to_first = first.saturating_duration_since(requested);
+    let gap = second.saturating_duration_since(first);
+
+    assert!(
+        to_first < half,
+        "the guide promises one immediate observation and the first sample arrived {to_first:?} \
+         after the upgrade was requested (ceiling {half:?})"
+    );
+    assert!(
+        gap >= half,
+        "the second sample arrived {gap:?} after the first; an immediate first observation must \
+         not be followed by a second one inside the advertised {advertised:?} interval"
+    );
+}

@@ -511,10 +511,15 @@ async fn workspace_lock_domains_isolate_subjects_but_serialize_one_scope() {
     assert!(domain_a.stripes[0].try_lock().is_ok());
 }
 
-/// The metrics stream restates seven of `EventStreamPolicy`'s bounds rather than holding them.
+/// The metrics stream restates nine of `EventStreamPolicy`'s bounds rather than holding them.
 /// Every one is compared against its original here, so the restatement cannot drift unremarked,
-/// and every published value is also pinned against its literal, so moving both together is a
+/// and every published value is also pinned against its own literal, so moving both together is a
 /// change somebody makes on purpose.
+///
+/// The literal half has to be a *literal*. `max_output_bytes` is `BODY_LIMIT` on both policies, so
+/// pinning it against `BODY_LIMIT` compared the constant with itself and would have followed the
+/// constant anywhere it moved; it is pinned against `2_097_152`, the value `BODY_LIMIT` has at
+/// `app.rs:6`, which is what the pin is for.
 #[test]
 fn metrics_stream_policy_publishes_the_event_stream_bounds() {
     let metrics = MetricsStreamPolicy::production();
@@ -525,14 +530,22 @@ fn metrics_stream_policy_publishes_the_event_stream_bounds() {
     assert_eq!(metrics.max_input_bytes, events.max_input_bytes);
     assert_eq!(metrics.max_output_bytes, events.max_output_bytes);
     assert_eq!(metrics.write_buffer_bytes, events.write_buffer_bytes);
+    assert_eq!(
+        metrics.max_controls_per_window,
+        events.max_controls_per_window
+    );
+    assert_eq!(metrics.control_window, events.control_window);
     assert_eq!(metrics.send_timeout, events.send_timeout);
     assert_eq!(metrics.lifetime, events.lifetime);
 
     assert_eq!(metrics.global_streams, 64);
     assert_eq!(metrics.streams_per_subject, 4);
     assert_eq!(metrics.max_input_bytes, 1_024);
-    assert_eq!(metrics.max_output_bytes, BODY_LIMIT);
+    assert_eq!(metrics.max_output_bytes, 2_097_152);
+    assert_eq!(BODY_LIMIT, 2_097_152);
     assert_eq!(metrics.write_buffer_bytes, 16 * 1_024);
+    assert_eq!(metrics.max_controls_per_window, 120);
+    assert_eq!(metrics.control_window, Duration::from_mins(1));
     assert_eq!(metrics.send_timeout, Duration::from_secs(5));
     assert_eq!(metrics.lifetime, Duration::from_hours(1));
 }
