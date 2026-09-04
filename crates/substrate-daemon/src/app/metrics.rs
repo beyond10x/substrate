@@ -907,14 +907,14 @@ mod tests {
         found
     }
 
-    /// `source` with `//` and `/* */` comments and `"…"` and character literals replaced by
-    /// spaces, so a mention of a bound in prose or in an assertion message cannot satisfy a check
-    /// that the bound is *set*. Byte-for-byte in length, so offsets still address the original
-    /// file.
+    /// `source` with `//` and `/* */` comments and `"…"`, `r#"…"#` and character literals
+    /// replaced by spaces, so a mention of a bound in prose, in an assertion message or in a test
+    /// fixture cannot satisfy a check that the bound is *set*. Byte-for-byte in length, so offsets
+    /// still address the original file, and newline-preserving, so line numbers survive.
     ///
-    /// A character literal is masked as well as a string, because this file itself compares
-    /// against the double-quote byte and an unmasked one would open a string that never closes.
-    /// The one form it does not parse is a raw string; it refuses rather than guesses, because a
+    /// A character literal is masked as well as a string, because this file compares against the
+    /// double-quote byte and an unmasked one would open a string that never closes. An
+    /// unterminated literal panics rather than silently swallowing the rest of the file: a
     /// desynced masker hides real code, and a structural check that reports a false *negative* is
     /// worse than one that stops.
     fn masked(source: &str, file: &str) -> String {
@@ -949,19 +949,44 @@ mod tests {
                         cursor += 1;
                     }
                 }
+            } else if let Some(hashes) = raw_string_hashes(bytes, cursor) {
+                cursor += hashes + 2;
+                loop {
+                    assert!(
+                        cursor < bytes.len(),
+                        "{file}: an unterminated raw string is outside this masker"
+                    );
+                    if bytes[cursor] == b'\n' {
+                        masked[cursor] = b'\n';
+                    } else if bytes[cursor] == QUOTE
+                        && bytes[cursor + 1..]
+                            .iter()
+                            .take(hashes)
+                            .filter(|byte| **byte == b'#')
+                            .count()
+                            == hashes
+                    {
+                        cursor += hashes + 1;
+                        break;
+                    }
+                    cursor += 1;
+                }
             } else if byte == QUOTE {
-                assert!(
-                    !matches!(bytes.get(cursor.wrapping_sub(1)), Some(b'r' | b'#')),
-                    "{file}: a raw string at byte {cursor} is outside this masker"
-                );
                 cursor += 1;
-                while cursor < bytes.len() && bytes[cursor] != QUOTE {
+                loop {
+                    assert!(
+                        cursor < bytes.len(),
+                        "{file}: an unterminated string is outside this masker"
+                    );
+                    if bytes[cursor] == QUOTE {
+                        cursor += 1;
+                        break;
+                    }
                     if bytes[cursor] == b'\n' {
                         masked[cursor] = b'\n';
                     }
                     cursor += usize::from(bytes[cursor] == b'\\') + 1;
                 }
-                cursor += 1;
             } else if byte == APOSTROPHE && character_literal_end(bytes, cursor).is_some() {
                 cursor = character_literal_end(bytes, cursor).expect("just measured") + 1;
             } else {
@@ -970,6 +995,22 @@ mod tests {
             }
         }
         String::from_utf8(masked).expect("masking replaces whole ASCII delimiters only")
+    }
+
+    /// The `#` count when `start` opens a raw string — `r"`, `r#"`, `r##"` — and `None` otherwise,
+    /// including for the raw *identifier* `r#type` and for the `r` at the end of a word.
+    fn raw_string_hashes(code: &[u8], start: usize) -> Option<usize> {
+        if code[start] != b'r' {
+            return None;
+        }
+        if start > 0 && (code[start - 1].is_ascii_alphanumeric() || code[start - 1] == b'_') {
+            return None;
+        }
+        let hashes = code[start + 1..]
+            .iter()
+            .take_while(|byte| **byte == b'#')
+            .count();
+        (code.get(start + 1 + hashes) == Some(&0x22)).then_some(hashes)
     }
 
     /// The index of the closing quote when `start` opens a character literal, and `None` when it
@@ -1051,33 +1092,146 @@ mod tests {
         }
     }
 
+    /// Spelled in pieces so the scan does not find its own needle; masking hides it too, and
+    /// neither is relied on alone.
+    const UPGRADE: &str = concat!(".on_", "upgrade", "(");
+
+    /// The index of the bracket matching the closer at `at`, scanning left. `code` must be masked,
+    /// so every bracket it sees is a real one.
+    fn opening_bracket(code: &[u8], at: usize) -> Option<usize> {
+        let mut depth = 0_usize;
+        let mut cursor = at;
+        loop {
+            match code[cursor] {
+                b')' | b']' | b'}' => depth += 1,
+                b'(' | b'[' | b'{' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(cursor);
+                    }
+                }
+                _ => {}
+            }
+            cursor = cursor.checked_sub(1)?;
+        }
+    }
+
+    /// The index of the bracket matching the opener at `at`, scanning right.
+    fn closing_bracket(code: &[u8], at: usize) -> Option<usize> {
+        let mut depth = 0_usize;
+        for (cursor, byte) in code.iter().enumerate().skip(at) {
+            match byte {
+                b'(' | b'[' | b'{' => depth += 1,
+                b')' | b']' | b'}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(cursor);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// The method names of the call chain whose last link starts at `index`, nearest first.
+    ///
+    /// Walks left over `receiver.method(args)` links, skipping each argument list as one balanced
+    /// bracket group, so an argument of any length — a 24-line closure, say — is one step rather
+    /// than a distance. This is what a byte or line window around the call cannot do, and what
+    /// made the check accuse a correctly bounded `sessions.rs` on the integration branch.
+    fn receiver_chain(code: &str, index: usize) -> Vec<String> {
+        let bytes = code.as_bytes();
+        let mut names = Vec::new();
+        let mut cursor = index;
+        loop {
+            while cursor > 0 && bytes[cursor - 1].is_ascii_whitespace() {
+                cursor -= 1;
+            }
+            if cursor == 0 || bytes[cursor - 1] != b')' {
+                return names;
+            }
+            let Some(open) = opening_bracket(bytes, cursor - 1) else {
+                return names;
+            };
+            cursor = open;
+            let name_end = cursor;
+            while cursor > 0
+                && (bytes[cursor - 1].is_ascii_alphanumeric() || bytes[cursor - 1] == b'_')
+            {
+                cursor -= 1;
+            }
+            if cursor == name_end {
+                return names;
+            }
+            names.push(code[cursor..name_end].to_owned());
+            while cursor > 0 && bytes[cursor - 1].is_ascii_whitespace() {
+                cursor -= 1;
+            }
+            if cursor == 0 || bytes[cursor - 1] != b'.' {
+                return names;
+            }
+            cursor -= 1;
+        }
+    }
+
+    /// What the upgrade whose `.on_upgrade(` begins at `index` declares, or the first bound it
+    /// does not. `code` must be masked.
+    fn upgrade_bounds(code: &str, index: usize) -> Result<(), String> {
+        let chain = receiver_chain(code, index);
+        for bound in ["max_frame_size", "max_message_size"] {
+            if !chain.iter().any(|method| method == bound) {
+                return Err(format!(
+                    "the upgrade at byte {index} runs on the library's default {bound}; its \
+                     builder chain is {chain:?}"
+                ));
+            }
+        }
+        let open = index + UPGRADE.len() - 1;
+        let Some(close) = closing_bracket(code.as_bytes(), open) else {
+            return Err(format!("the upgrade at byte {index} has no argument list"));
+        };
+        if !code[open..=close].contains("policy.lifetime") {
+            return Err(format!("the upgrade at byte {index} runs with no lifetime"));
+        }
+        Ok(())
+    }
+
     /// Finding 3's class, not its instance: an upgrade that runs on the library's default frame
     /// and message bounds with no lifetime. The metrics stream was the one instance; this reads
     /// every upgrade the crate serves, so a fourth route cannot be added without its bounds.
     ///
-    /// Three properties, each an answer to a way the round-1 version of this check could be
+    /// Three properties, each an answer to a way an earlier version of this check could be
     /// satisfied without the bound being set:
     ///
     /// 1. It walks `src/` **recursively**, not one `read_dir` of `src/app/`, so `src/runtime.rs`,
     ///    `src/hosted.rs` and `src/tls.rs` are inside it rather than beside it.
-    /// 2. It reads the **masked** source, and takes the builder chain as the statement the call
-    ///    terminates — back to the nearest `;`, `{` or `}` — rather than a fixed count of
-    ///    preceding bytes. A commented-out or narrated `.max_frame_size(`, and one belonging to
-    ///    the statement above, are both outside it now.
+    /// 2. It reads the **masked** source and scopes to the **receiver chain** — the method calls
+    ///    the upgrade is chained onto, each argument list skipped as one balanced group. A
+    ///    narrated `.max_frame_size(` is masked away, one belonging to the statement above is not
+    ///    on the chain, and an argument of any length between the bounds and the call is one step
+    ///    rather than a distance.
     /// 3. It fails a raw `hyper::upgrade::on`, which takes the upgrade past the builder that
     ///    carries the bounds entirely.
     ///
-    /// **The limit it still carries, as a rule:** it proves the bounds are *declared*, never that
-    /// they are the published values or that they fire. A chain saying `max_frame_size(usize::MAX)`
-    /// passes here. What observes one firing is
+    /// **This case reads files no other case in this unit touches**, including
+    /// `app/sessions.rs` and `app/events.rs`. That is deliberate — a class check that reads only
+    /// its own file checks nothing — but it is a coupling: a change to how *those* routes spell
+    /// their upgrade can fail a test declared in this one. It has happened once, on the
+    /// integration branch of the 2026-09-04 wave, when a `.on_failed_upgrade(…)` with a 24-line
+    /// closure was added between `sessions.rs`'s bounds and its `.on_upgrade(`. The answer was to
+    /// make the matcher exact, not to stop reading the file.
+    ///
+    /// **Two limits, as rules.** It proves the bounds are *declared*, never that they are the
+    /// published values — what observes one firing is
     /// `an_oversized_client_frame_ends_the_metrics_stream_and_returns_its_permit`
     /// (`crates/substrate-daemon/tests/metrics_stream_adversary.rs`), and a route added without
-    /// that partner case is bounded on paper only.
+    /// that partner case is bounded on paper only. And bracket matching assumes the brackets in
+    /// `src/` balance; a macro invocation carrying unbalanced token trees between a bound and an
+    /// upgrade would desync it. There is none in this crate, and one would have to be written on
+    /// purpose in exactly that place.
     #[test]
     fn every_websocket_upgrade_declares_its_frame_message_and_lifetime_bounds() {
-        // Spelled in pieces so the scan does not find its own needles; masking hides them too,
-        // and neither is relied on alone.
-        const UPGRADE: &str = concat!(".on_", "upgrade", "(");
         const RAW_UPGRADE: &str = concat!("upgrade", "::on(");
         let mut checked = 0_usize;
         for path in crate_sources() {
@@ -1092,28 +1246,9 @@ mod tests {
             let mut from = 0;
             while let Some(offset) = code[from..].find(UPGRADE) {
                 let index = from + offset;
-                let statement = code[..index]
-                    .rfind([';', '{', '}'])
-                    .map_or(0, |boundary| boundary + 1);
-                let chain = &code[statement..index];
-                let mut end = index.saturating_add(1_200).min(code.len());
-                while !code.is_char_boundary(end) {
-                    end -= 1;
+                if let Err(fault) = upgrade_bounds(&code, index) {
+                    panic!("{file}: {fault}");
                 }
-                let body = &code[index..end];
-                assert!(
-                    chain.contains(".max_frame_size("),
-                    "{file}: the upgrade at byte {index} runs on the library's default frame bound"
-                );
-                assert!(
-                    chain.contains(".max_message_size("),
-                    "{file}: the upgrade at byte {index} runs on the library's default message \
-                     bound"
-                );
-                assert!(
-                    body.contains("policy.lifetime"),
-                    "{file}: the upgrade at byte {index} runs with no lifetime"
-                );
                 checked += 1;
                 from = index + UPGRADE.len();
             }
@@ -1122,6 +1257,81 @@ mod tests {
             checked >= 3,
             "the events, sessions and metrics upgrades must all be read, saw {checked}"
         );
+    }
+
+    /// The shape that made the check accuse a correctly bounded file: bounds set, then a long
+    /// closure argument, then the upgrade. Reduced from `app/sessions.rs:1281-1314` as it stands
+    /// on the integration branch, and kept here so the false positive cannot come back by a
+    /// different route than the one it took.
+    const BOUNDED_THROUGH_A_LONG_ARGUMENT: &str = r#"
+    ws.read_buffer_size(policy.max_message_bytes)
+        .write_buffer_size(policy.write_buffer_bytes)
+        .max_frame_size(policy.max_message_bytes)
+        .max_message_size(policy.max_message_bytes)
+        .max_write_buffer_size(
+            policy
+                .max_message_bytes
+                .saturating_add(policy.write_buffer_bytes),
+        )
+        .on_failed_upgrade(move |error: axum::Error| {
+            tokio::spawn(async move {
+                if terminate_pipe_session(&app, &scope, &exec).await {
+                    tracing::info!(exec = %exec, %error, "terminated a claimed session");
+                } else {
+                    // A brace-heavy body, because braces are what a statement-scoped
+                    // matcher mistook for the start of the chain: } { } {
+                    tracing::warn!(exec = %exec, %error, "could not terminate");
+                }
+            });
+        })
+        .on_upgrade(move |socket| async move {
+            let completed = tokio::time::timeout(policy.lifetime, run(socket)).await;
+            let _ = completed;
+        })
+"#;
+
+    /// The same chain with its frame bound removed, and nothing else changed. Spelled `r"` where
+    /// its partner above is `r#"`, so the masker's zero-hash and hashed raw-string paths are both
+    /// walked by the case that depends on them.
+    const UNBOUNDED_THROUGH_A_LONG_ARGUMENT: &str = r"
+    ws.read_buffer_size(policy.max_message_bytes)
+        .write_buffer_size(policy.write_buffer_bytes)
+        .max_message_size(policy.max_message_bytes)
+        .on_failed_upgrade(move |error: axum::Error| {
+            tokio::spawn(async move { let _ = error; });
+        })
+        .on_upgrade(move |socket| async move {
+            let completed = tokio::time::timeout(policy.lifetime, run(socket)).await;
+            let _ = completed;
+        })
+";
+
+    /// A bound is on the chain or it is not; the distance from it to the call is not evidence
+    /// either way.
+    ///
+    /// The first fixture is the shape that failed `bash scripts/gate.sh` on
+    /// `wave/security-2026-09-04` while being correctly bounded. The second is the same chain
+    /// with the frame bound taken away, so a matcher that passed the first by giving up rather
+    /// than by reading the chain does not pass this case.
+    #[test]
+    fn a_long_argument_between_a_bound_and_its_upgrade_hides_neither() {
+        for (label, fixture, expected) in [
+            ("bounded", BOUNDED_THROUGH_A_LONG_ARGUMENT, true),
+            ("unbounded", UNBOUNDED_THROUGH_A_LONG_ARGUMENT, false),
+        ] {
+            let code = masked(fixture, label);
+            let index = code.find(UPGRADE).expect("the fixture upgrades");
+            assert_eq!(
+                upgrade_bounds(&code, index).is_ok(),
+                expected,
+                "{label}: {:?}",
+                upgrade_bounds(&code, index)
+            );
+            assert!(
+                receiver_chain(&code, index).contains(&"max_message_size".to_owned()),
+                "{label}: the chain must be read through the closure argument, not around it"
+            );
+        }
     }
 
     /// "One more than a **published** per-subject cap" — and the cap, the refusal code and the
