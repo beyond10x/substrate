@@ -23,7 +23,7 @@ mod workspaces;
 mod tests;
 
 pub use events::{CommitEffect, CommitEffectSink, EventCursorError};
-pub use execs::{ExecRetireReservation, ExecWrite, StoredExec};
+pub use execs::{ExecRetireReservation, ExecWrite, StoredExec, WorkspaceExecState};
 pub use leases::{ExpiredLease, LeaseClock, LeaseResource, NewLease};
 pub use operations::{
     NewOperation, OperationCapacity, Reservation, ResourceCapacity, StoredAnswer,
