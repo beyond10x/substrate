@@ -2,7 +2,7 @@
 format: aep.planning-md/1
 id: story:seccomp-denies-af-vsock
 kind: story
-status: draft
+status: active
 title: The seccomp profile refuses AF_VSOCK sockets and a probe proves it
 summary: AF_VSOCK is not netns-confined and the profile allows it (seccomp.rs:70-99); inferred, untested on a vsock host.
 tags:
@@ -14,7 +14,7 @@ scope:
   path: crates/substrate-host/src/probe.rs
 - confidence: cited
   path: crates/substrate-host/src/seccomp.rs
-revision: 3
+revision: 5
 ---
 # Story: seccomp denies AF_VSOCK
 

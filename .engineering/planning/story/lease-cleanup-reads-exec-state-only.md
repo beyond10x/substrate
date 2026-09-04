@@ -2,7 +2,7 @@
 format: aep.planning-md/1
 id: story:lease-cleanup-reads-exec-state-only
 kind: story
-status: draft
+status: active
 title: Workspace lease cleanup reads exec ids and states without output blobs
 summary: execs_for_workspace loads stdout/stderr blobs the caller never reads; worst case 4 GiB per sweep (store execs.rs:545, service.rs:688).
 tags:
@@ -14,7 +14,7 @@ scope:
   path: crates/substrate-daemon/src/app/service.rs
 - confidence: cited
   path: crates/substrate-store/src/execs.rs
-revision: 3
+revision: 5
 ---
 # Story: Lease cleanup reads exec state only
 
