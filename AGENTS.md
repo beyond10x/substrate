@@ -89,7 +89,9 @@ Substrate is confinement. Everything below is the reason it can be trusted with 
   requires at least one explicit `--allow-uid`; the subject is `local:<uid>`. Never accept a subject,
   a tenant or a uid from a request body or header.
 - **The enforced isolation set is a floor, not a menu**: `openat2` beneath/no-link/no-mount I/O,
-  atomic replacement, cleared and shaped environment, namespace no-egress, pids and memory+swap
+  atomic replacement, cleared and shaped environment, namespace no-egress, **no nested user
+  namespace** — the child's own user namespace with `--disable-userns`, so it cannot create
+  another one and hold `CAP_SYS_ADMIN` in it — pids and memory+swap
   bounds with cumulatively observed CPU, backend-identity-bound capability snapshots, output
   draining, timeout, whole-tree kill, exact capsule-byte verification, read-only `/runtime` beside a
   separate writable `/workspace`, owner-private durable state, and bounded normal/restart capsule

@@ -48,8 +48,11 @@ const PROBE_DEADLINE: Duration = Duration::from_secs(10);
 
 /// The throwaway sandbox the probe proves the mechanism in — the same confinement floor an
 /// admitted session gets, minus the cgroup and the workspace this probe has no use for.
-const SANDBOX_ARGV: [&str; 27] = [
-    "--unshare-user",
+///
+/// The user-namespace posture is not repeated here: every use site splices
+/// `crate::process::USER_NAMESPACE_ARGV` in front of this, so a probe cannot end up proving the
+/// mechanism in a weaker sandbox than the one an admitted session gets.
+const SANDBOX_ARGV: [&str; 26] = [
     "--unshare-ipc",
     "--unshare-pid",
     "--unshare-net",
@@ -328,6 +331,7 @@ pub(crate) fn observe_sandboxed_terminal(
         .stdin(Stdio::from(pair.slave.try_clone().ok()?))
         .stdout(Stdio::from(pair.slave.try_clone().ok()?))
         .stderr(Stdio::from(pair.slave.try_clone().ok()?))
+        .args(crate::process::USER_NAMESPACE_ARGV)
         .args(SANDBOX_ARGV)
         .args(CONTROLLING_TERMINAL_ARGV)
         .args([
@@ -500,6 +504,7 @@ pub(crate) fn observe_sandboxed_hangup(bubblewrap: &Path) -> Option<i32> {
         .stdin(Stdio::from(pair.slave.try_clone().ok()?))
         .stdout(Stdio::from(pair.slave.try_clone().ok()?))
         .stderr(Stdio::from(pair.slave.try_clone().ok()?))
+        .args(crate::process::USER_NAMESPACE_ARGV)
         .args(SANDBOX_ARGV)
         .args(CONTROLLING_TERMINAL_ARGV)
         .args(["/bin/sh", "-c", "printf 'READY\n'; exec /usr/bin/sleep 300"]);
