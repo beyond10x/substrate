@@ -2423,20 +2423,22 @@ async fn adversary_a_client_that_drops_after_the_switch_leaves_no_running_proces
 }
 
 /// One stranded attach whose kill could not be proven must not cost the daemon an attachment slot
-/// for the rest of its life.
+/// for the rest of its life -- the **failed-upgrade** half of that guarantee.
 ///
-/// The failed-upgrade containment this unit added (`crates/substrate-daemon/src/app/sessions.rs`,
-/// the `on_failed_upgrade` closure) calls `retain_attachment_tombstone()` whenever
-/// `terminate_pipe_session` returns `false`, and `PipeAttachmentPermit::drop` answers that flag by
-/// running `global.forget()` -- which removes one permit from the fixed 32-permit global semaphore
-/// permanently, not until the next attach.
+/// A driver that cannot prove its kill is not a fixture curiosity: `terminate_pipe_session`
+/// reports `false` whenever `driver.signal` errors, exceeds `MAINTENANCE_DRIVER_TIMEOUT`, or its
+/// observation cannot be written. What must not happen then is a permit that fails to return its
+/// slot, because `PipeAttachmentPermit::drop` is the only thing that returns one and the fixed
+/// global bound is 32. Thirty-two such events without it and the daemon serves no attachment at
+/// all, answering `session.attachment-capacity` -- published as *exhausted* and *retriable* -- for
+/// capacity that is destroyed and that no retry recovers.
 ///
-/// On the base commit `617bbed` this path did not exist: a failed upgrade dropped the permit with
-/// `remove_key_on_drop` still `true`, so the slot always came back. Here one client disconnect plus
-/// one driver that cannot prove its kill spends a slot that never returns, and nothing names the
-/// loss: the daemon simply serves 31 attachments from then on and answers the 32nd with
-/// `session.attachment-capacity`, a refusal whose published row says the capacity is "exhausted",
-/// not destroyed.
+/// This case is the reason `PipeAttachmentPermit` no longer has a `remove_key_on_drop` flag, a
+/// `retain_attachment_tombstone` method or a `global.forget()` arm: it went red against the first
+/// shape of the `on_failed_upgrade` containment, which retained a tombstone the durable claim had
+/// already made unreachable.
+/// `adversary_a_served_attachment_with_an_unproven_kill_keeps_the_bounded_capacity` below is the
+/// same property on the served-attachment path, which carried the same defect on `617bbed`.
 ///
 /// `the_attachment_capacity_refusal_carries_the_retriable_the_register_publishes` above pins that a
 /// healthy daemon serves all 32 at once, so 32 is the number this case is entitled to.
@@ -2713,4 +2715,89 @@ async fn a_client_that_aborts_the_connection_around_the_switch_leaves_no_running
         assert_eq!(status, StatusCode::OK, "{document}");
         assert_eq!(document["result"]["state"], "cancelled", "{document}");
     }
+}
+
+/// A **served** attachment whose containment kill cannot be proven permanently destroys one of
+/// this daemon's 32 global attachment slots.
+///
+/// This was true on `617bbed` and stayed true through this unit's first two commits: the
+/// `on_upgrade` path called `retain_attachment_tombstone()` whenever `terminate_pipe_session`
+/// reported `false`, and `PipeAttachmentPermit::drop` answered the retained flag with
+/// `global.forget()`, removing a permit from the fixed `Semaphore` for the life of the process
+/// rather than until the next attach.
+///
+/// The tombstone barred nothing the durable claim had not already barred. The claim is consumed
+/// before the upgrade and `attachment` never returns to `available` afterwards:
+/// `claim_pipe_session_attachment` answers `AlreadyClaimed` for `attached`, `consumed` and
+/// `uncertain` alike (`crates/substrate-store/src/sessions.rs:734-739`), the attach handler's own
+/// gate refuses anything but `available` before `acquire` is reached (`sessions.rs`), and only
+/// `finish_pipe_session_start` sets `available` (`crates/substrate-daemon/src/app/operations.rs`).
+/// So the flag was unreachable state and the forgotten permit was pure loss. Both are now gone,
+/// and `PipeAttachmentPermit::drop` returns the slot unconditionally.
+///
+/// One client disconnect plus one driver that cannot prove its kill, and the daemon serves 31
+/// attachments from then on. Nothing names the loss: the 32nd attach is answered with
+/// `session.attachment-capacity`, whose published row calls the capacity "exhausted" and
+/// retriable, when it is destroyed and no retry can ever recover it.
+///
+/// `the_attachment_capacity_refusal_carries_the_retriable_the_register_publishes` pins that a
+/// healthy daemon serves all 32 at once, so 32 is the number this case is entitled to, and
+/// `adversary_a_stranded_attach_with_an_unproven_kill_keeps_the_bounded_capacity` pins the same
+/// property for the sibling `on_failed_upgrade` path this unit corrected. This case is that case
+/// with the upgrade allowed to succeed.
+#[tokio::test(flavor = "multi_thread")]
+async fn adversary_a_served_attachment_with_an_unproven_kill_keeps_the_bounded_capacity() {
+    let harness = Harness::with_terminals().await;
+    let workspace = harness.create_workspace("01JADVP2WORKSPACE0000001").await;
+    let stranded = harness
+        .start_pty_as(&workspace, "01JADVP2STRANDEDSESSION1")
+        .await;
+    // A *served* attachment: the upgrade completes, so `on_upgrade` runs and owns the permit.
+    let client = harness
+        .attach(&format!("/v1/sessions/{stranded}/attach"))
+        .await;
+    harness
+        .driver
+        .refuse_signal
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    // The client goes away. `run_pipe_attachment` reads EOF and reports a non-terminal
+    // attachment, the single containment kill is refused, and the permit is dropped with its
+    // tombstone retained.
+    drop(client);
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    harness
+        .driver
+        .refuse_signal
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let mut held = Vec::new();
+    for index in 0..32_u32 {
+        let session = harness
+            .start_pty_as(&workspace, &format!("01JADVP2CAPACITYSLOT{index:04}"))
+            .await;
+        let path = format!("/v1/sessions/{session}/attach");
+        loop {
+            let handshake = Handshake::open(harness.server.address, &path).await;
+            if handshake.status == 101 {
+                held.push(handshake.upgraded());
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "attachment {index} of the bounded 32 is still answered {} ten seconds after one \
+                 served attachment whose containment kill could not be proven: a permit failed to \
+                 return its slot on drop, so one of this daemon's 32 attachment slots is gone \
+                 until restart. session.attachment-capacity is published as exhausted and \
+                 retriable; destroyed capacity is neither.",
+                handshake.status
+            );
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+    assert_eq!(
+        held.len(),
+        32,
+        "all 32 bounded attachment slots are servable"
+    );
 }
