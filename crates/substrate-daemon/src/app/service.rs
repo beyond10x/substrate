@@ -23,6 +23,7 @@ use ulid::Ulid;
 use crate::delegation::DelegatedContextPolicy;
 
 use super::events::{EventStreamLimits, EventStreamPolicy, EventWakeups};
+use super::metrics::MetricsStreamPolicy;
 use super::operations::{driver_detail, linux_lease_clock, stored_exec};
 use super::sessions::{PipeAttachmentLimits, PipeSessionPolicy};
 use super::{
@@ -162,6 +163,10 @@ pub struct App {
     pub(super) event_wakeups: Arc<EventWakeups>,
     pub(super) event_stream_limits: Arc<EventStreamLimits>,
     pub(super) event_stream_policy: EventStreamPolicy,
+    /// Metrics streams are capped by the same permit shape the event stream uses: one global
+    /// semaphore and one per subject, both released by RAII when the stream ends.
+    pub(super) metrics_stream_limits: Arc<EventStreamLimits>,
+    pub(super) metrics_stream_policy: MetricsStreamPolicy,
     pub(super) pipe_attachment_limits: Arc<PipeAttachmentLimits>,
     pub(super) pipe_session_policy: PipeSessionPolicy,
     lease_sweep: Mutex<()>,
@@ -214,6 +219,7 @@ impl App {
         let restart_cutoff = authority.now();
         let event_wakeups = Arc::new(EventWakeups::default());
         let event_stream_policy = EventStreamPolicy::production();
+        let metrics_stream_policy = MetricsStreamPolicy::production();
         let pipe_session_policy = PipeSessionPolicy::production();
         let effect_sink: Arc<dyn CommitEffectSink> = event_wakeups.clone();
         store.set_commit_effect_sink(effect_sink);
@@ -230,6 +236,11 @@ impl App {
                 event_stream_policy.streams_per_subject,
             ),
             event_stream_policy,
+            metrics_stream_limits: EventStreamLimits::new(
+                metrics_stream_policy.global_streams,
+                metrics_stream_policy.streams_per_subject,
+            ),
+            metrics_stream_policy,
             pipe_attachment_limits: PipeAttachmentLimits::new(
                 pipe_session_policy.global_attachments,
             ),
