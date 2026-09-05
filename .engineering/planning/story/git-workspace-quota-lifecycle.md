@@ -41,12 +41,16 @@ scope:
 - confidence: cited
   path: crates/substrate-store/Cargo.toml
 - confidence: cited
+  path: crates/substrate-store/src/tests.rs
+- confidence: cited
+  path: crates/substrate-store/src/workspaces.rs
+- confidence: cited
   path: xtask/Cargo.toml
 - confidence: inferred
   path: xtask/src/image_startup.rs
 - confidence: inferred
   path: xtask/src/main.rs
-revision: 11
+revision: 14
 ---
 ## Outcome
 
@@ -85,3 +89,7 @@ The exact-main hosted CI result, immutable release and live containerd/quota/app
 The hosted filesystem now mounts with enforced ext4 project quotas after the private operator supplied its missing vendor kernel modules. The final daemon process still has zero effective/permitted capabilities despite a SYS_ADMIN bounding set and non-root Kubernetes security context: ordinary non-root exec drops those sets without a file capability. The proof was obtained from the published image under containerd and its machine document correctly withholds quota facts.
 
 Provide a byte-identical, root-owned daemon-quota executable carrying only cap_sys_admin=ep in the existing daemon image. The ordinary executable and default entrypoint remain without file capabilities. The generic chart selects the quota path only for its existing explicit project-quota opt-in, with SYS_ADMIN in the bounding set and no_new_privs disabled as required by Kubernetes. This avoids a privileged root daemon, ambient/inheritable capabilities, SYS_RESOURCE, or a new Rust capability-activation/thread-startup path. Keep the existing child no_new_privs boundary. Prove final-image executable bytes/ownership/xattrs, default unprivileged startup, the quota process and worker-thread masks, and actual filesystem quotas under the hosted runtime before migration. Image and chart command are deployed and rolled back together. No new wire contract is introduced.
+
+## Hosted observation merge defect
+
+The released 0.7.4 image advertises enforced project quotas under the hosted runtime and real writes receive EDQUOT at the byte and inode limits. Its public workspace GET still reports creation-time usage: HostDriver returns fresh kernel accounting, but Store::merge_workspace_observation discards storage while merging the timestamp. Correct the ready, unfrozen observation merge to accept fresh usage only for the same admitted storage limit, preserving store-owned lifecycle, labels, lease and quota authority. Cover refreshed durable usage and stale/frozen observations in Rust tests and retain the full hosted usage assertion. Prepare an immutable 0.7.5 repair without changing the wire contract, confinement profile or quota lifecycle. The production file migration has not started.
