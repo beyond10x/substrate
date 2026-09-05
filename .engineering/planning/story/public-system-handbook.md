@@ -21,7 +21,7 @@ scope:
   path: website/docs
 - confidence: cited
   path: website/sidebars.ts
-revision: 8
+revision: 9
 ---
 ## Outcome
 
@@ -76,4 +76,3 @@ Successful delegated execution is not claimed by the portable smoke checks: the 
 The primary-workspace docs reconcile check remains independently refused by its outdated collector on agentide's v4 manifest. The exact Website collector, artifact gate and live delivery checks passed; this story did not modify unrelated sibling repositories to repair primary-workspace drift. Existing planning warnings for older unscoped stories and prose-only review records were preserved.
 
 This was one interactive documentation story under the operator's request, with no parallel agent panel or broad local compiler rebuild.
-
