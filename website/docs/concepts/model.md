@@ -27,11 +27,9 @@ flowchart TB
   Caller --> SDK
   Caller -->|HTTP or WebSocket| Daemon
   SDK -->|Authenticated service contract| Daemon
-  Daemon -->|Reserve before dispatch| Store
-  Daemon -->|Bounded action| Host
+  Daemon -->|Reserve / record| Store
+  Daemon <-->|Dispatch / observe| Host
   Host --> OS
-  Host -->|Observed state| Daemon
-  Daemon -->|Persist outcome| Store
 ```
 
 The SDK calls the daemon. The disposable MCP adapter translates tools and resources through that
