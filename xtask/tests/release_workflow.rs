@@ -180,6 +180,18 @@ fn mcp_image_is_stdio_only_and_its_exact_binary_is_smoke_tested() {
         .expect("default daemon alias after MCP runtime stage")
         .0;
     assert!(DOCKERFILE.contains("gcr.io/distroless/cc-debian12:nonroot@sha256:"));
+    assert!(
+        DOCKERFILE.contains("install -D /usr/lib/x86_64-linux-gnu/libz.so.1 /out/lib/libz.so.1")
+    );
+    assert_eq!(
+        DOCKERFILE
+            .match_indices(
+                "COPY --from=builder /out/lib/libz.so.1 /usr/lib/x86_64-linux-gnu/libz.so.1",
+            )
+            .count(),
+        2,
+        "both runtime targets must carry the zlib required by the shipped binaries"
+    );
     assert!(mcp.contains("ENTRYPOINT [\"/usr/local/bin/substrate-mcp\"]"));
     assert!(!mcp.contains("EXPOSE"));
     assert!(!mcp.contains("VOLUME"));

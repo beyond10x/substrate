@@ -7,6 +7,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.7.2] — 2026-09-05
+
+### Fixed
+
+- Ship the zlib runtime library required by the exact daemon and disposable-MCP binaries in both
+  distroless image targets. The release image now starts instead of failing at the dynamic loader
+  with a missing `libz.so.1`.
+
 ## [0.7.1] — 2026-09-05
 
 ### Added

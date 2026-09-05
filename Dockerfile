@@ -11,6 +11,7 @@ RUN --mount=type=cache,id=b10x-cargo-registry,target=/usr/local/cargo/registry,s
       -p b10x-substrate-mcp --bin substrate-mcp && \
     install -D /src/target/release/substrate-daemon /out/substrate-daemon && \
     install -D /src/target/release/substrate-mcp /out/substrate-mcp && \
+    install -D /usr/lib/x86_64-linux-gnu/libz.so.1 /out/lib/libz.so.1 && \
     install -d -m 0700 /out/state
 
 FROM gcr.io/distroless/cc-debian12:nonroot@sha256:adcd20c7b4c988b73cbfbddb26d2eee574571e6d7c9ffea29b3821e0690efb77 AS daemon
@@ -18,6 +19,7 @@ ARG SOURCE_SHA=unknown
 LABEL org.opencontainers.image.revision=$SOURCE_SHA \
       org.opencontainers.image.source="https://github.com/beyond10x/substrate"
 COPY --from=builder /out/substrate-daemon /usr/local/bin/substrate-daemon
+COPY --from=builder /out/lib/libz.so.1 /usr/lib/x86_64-linux-gnu/libz.so.1
 COPY LICENSE THIRD_PARTY_LICENSES.html /usr/share/licenses/substrate/
 COPY --from=builder --chown=65532:65532 --chmod=0700 /out/state /var/lib/b10x-substrate
 VOLUME ["/var/lib/b10x-substrate"]
@@ -30,6 +32,7 @@ LABEL org.opencontainers.image.revision=$SOURCE_SHA \
       org.opencontainers.image.source="https://github.com/beyond10x/substrate" \
       dev.b10x.substrate.surface="disposable-mcp-testing"
 COPY --from=builder /out/substrate-mcp /usr/local/bin/substrate-mcp
+COPY --from=builder /out/lib/libz.so.1 /usr/lib/x86_64-linux-gnu/libz.so.1
 COPY LICENSE THIRD_PARTY_LICENSES.html /usr/share/licenses/substrate/
 ENTRYPOINT ["/usr/local/bin/substrate-mcp"]
 
