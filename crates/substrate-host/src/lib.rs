@@ -609,6 +609,71 @@ fn workspace_destroy_roots() -> &'static Mutex<HashSet<WorkspaceDestroyKey>> {
     ROOTS.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
+/// An uninstalled Git tree owns its quota until cleanup proves physical absence and zero usage.
+/// A blocking materialization worker retains this guard after its async caller is cancelled.
+struct GitWorkspaceStaging {
+    directory: Option<tempfile::TempDir>,
+    quotas: Option<Arc<quota::ProjectQuotas>>,
+}
+
+impl GitWorkspaceStaging {
+    fn path(&self) -> &Path {
+        self.directory
+            .as_ref()
+            .expect("uninstalled Git staging")
+            .path()
+    }
+
+    fn install(&mut self, target: &Path) -> Result<(), nix::errno::Errno> {
+        if let Some(quotas) = self.quotas.as_ref() {
+            quotas.rename(self.path(), target)?;
+        } else {
+            nix::fcntl::renameat2(
+                nix::fcntl::AT_FDCWD,
+                self.path(),
+                nix::fcntl::AT_FDCWD,
+                target,
+                nix::fcntl::RenameFlags::RENAME_NOREPLACE,
+            )?;
+        }
+        // The installed directory and quota now belong to the durable workspace. TempDir still
+        // names the absent staging path, so discard that handle without attempting cleanup.
+        let _ = self.directory.take().expect("installed Git staging").keep();
+        Ok(())
+    }
+
+    fn cleanup(&mut self) -> Result<(), DriverError> {
+        let Some(directory) = self.directory.as_ref() else {
+            return Ok(());
+        };
+        match std::fs::remove_dir_all(directory.path()) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => {
+                return Err(DriverError::failed(
+                    "workspace.git-reconcile-failed",
+                    "Git workspace staging cleanup could not prove physical absence.",
+                ));
+            }
+        }
+        if let Some(quotas) = self.quotas.as_ref() {
+            quotas.release(directory.path())?;
+        }
+        let _ = self.directory.take().expect("removed Git staging").keep();
+        Ok(())
+    }
+}
+
+impl Drop for GitWorkspaceStaging {
+    fn drop(&mut self) {
+        if let Err(error) = self.cleanup() {
+            // A failed cleanup never frees the allocator identity. Startup reconciliation can
+            // retry retained private staging; do not turn unwinding into an unquotaed directory.
+            tracing::error!(code = error.code, "Git staging cleanup remains incomplete");
+        }
+    }
+}
+
 impl HostDriver {
     /// Opens the guarded filesystem, probes the host, and reconciles orphaned exec cgroups.
     ///
@@ -930,6 +995,18 @@ impl Driver for HostDriver {
                 "workspace.git",
             ));
         };
+        let quotas = if input.storage.is_some() {
+            let Some(quotas) = self.quotas.clone() else {
+                return DispatchOutcome::NotDispatched(DriverError::unserved(
+                    "workspace.storage-quota-unserved",
+                    "The active host has not proved hard workspace storage quotas.",
+                    "storage",
+                ));
+            };
+            Some(quotas)
+        } else {
+            None
+        };
         let authority = Zeroizing::new(source_authorization.to_owned());
         let id = id.to_owned();
         let root_name = root_name.to_owned();
@@ -960,60 +1037,71 @@ impl Driver for HostDriver {
                             "Git workspace staging could not be created.",
                         )
                     })?;
-                let limit = requested_storage.unwrap_or(substrate_wire::StorageLimit {
-                    max_bytes: 2 * 1024 * 1024 * 1024,
-                    max_inodes: 200_000,
-                });
-                let usage = git::materialize(
-                    temporary.path(),
-                    &locator,
-                    &binding,
-                    &git_source,
-                    &authority,
-                    limit,
-                    &interrupt,
-                )?;
-                let temporary = temporary.keep();
-                if let Err(error) =
-                    git::write_baseline(&git_baseline_root, &root_name, &git_source.commit)
-                {
-                    let _ = std::fs::remove_dir_all(&temporary);
-                    return Err(error);
-                }
-                if let Err(error) = nix::fcntl::renameat2(
-                    nix::fcntl::AT_FDCWD,
-                    &temporary,
-                    nix::fcntl::AT_FDCWD,
-                    &install_target,
-                    nix::fcntl::RenameFlags::RENAME_NOREPLACE,
-                ) {
-                    let _ = std::fs::remove_dir_all(&temporary);
-                    let _ = git::remove_baseline(&git_baseline_root, &root_name);
-                    if matches!(
-                        error,
-                        nix::errno::Errno::EEXIST | nix::errno::Errno::ENOTEMPTY
-                    ) {
-                        return Err(DriverError::refused(
-                            "workspace.git-target-exists",
-                            "The workspace target already exists.",
-                            "workspace.git",
+                let mut staging = GitWorkspaceStaging {
+                    directory: Some(temporary),
+                    quotas,
+                };
+                let result = (|| {
+                    let limit = requested_storage.unwrap_or(substrate_wire::StorageLimit {
+                        max_bytes: 2 * 1024 * 1024 * 1024,
+                        max_inodes: 200_000,
+                    });
+                    if let Some(quotas) = staging.quotas.as_ref() {
+                        quotas.apply(staging.path(), limit)?;
+                    }
+                    git::materialize(
+                        staging.path(),
+                        &locator,
+                        &binding,
+                        &git_source,
+                        &authority,
+                        limit,
+                        &interrupt,
+                    )?;
+                    git::write_baseline(&git_baseline_root, &root_name, &git_source.commit)?;
+                    if interrupt.load(std::sync::atomic::Ordering::Relaxed) {
+                        return Err(DriverError::failed(
+                            "workspace.git-fetch-cancelled",
+                            "Git workspace materialization was cancelled before installation.",
                         ));
                     }
-                    return Err(DriverError::failed(
-                        "workspace.git-install-failed",
-                        "Git workspace staging could not be installed.",
-                    ));
+                    if let Err(error) = staging.install(&install_target) {
+                        if matches!(
+                            error,
+                            nix::errno::Errno::EEXIST | nix::errno::Errno::ENOTEMPTY
+                        ) {
+                            return Err(DriverError::refused(
+                                "workspace.git-target-exists",
+                                "The workspace target already exists.",
+                                "workspace.git",
+                            ));
+                        }
+                        return Err(DriverError::failed(
+                            "workspace.git-install-failed",
+                            "Git workspace staging could not be installed.",
+                        ));
+                    }
+                    git::sync_workspace_root(&workspace_root)?;
+                    let storage = staging
+                        .quotas
+                        .as_ref()
+                        .map(|quotas| quotas.usage(&install_target, limit))
+                        .transpose()?;
+                    Ok(Workspace {
+                        id,
+                        kind: substrate_wire::WorkspaceKind::Workspace,
+                        labels,
+                        observed_at: Utc::now(),
+                        state: substrate_wire::WorkspaceState::Ready,
+                        storage,
+                        lease: None,
+                    })
+                })();
+                if result.is_err() && staging.directory.is_some() {
+                    staging.cleanup()?;
+                    git::remove_baseline(&git_baseline_root, &root_name)?;
                 }
-                git::sync_workspace_root(&workspace_root)?;
-                Ok(Workspace {
-                    id,
-                    kind: substrate_wire::WorkspaceKind::Workspace,
-                    labels,
-                    observed_at: Utc::now(),
-                    state: substrate_wire::WorkspaceState::Ready,
-                    storage: requested_storage.map(|_| usage),
-                    lease: None,
-                })
+                result
             })
             .await;
         match result {

@@ -7,6 +7,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.7.4] — 2026-09-05
+
+### Fixed
+
+- Attach hard byte and inode quotas before Git initialization or network materialization. Keep
+  quota identity and allocator ownership through atomic installation, report kernel storage usage,
+  and release allocations only after failed, cancelled or destroyed workspaces are absent with
+  zero accounted usage. Enforced-filesystem regressions cover quota exhaustion, concurrent
+  workspaces, restart recovery, installation conflicts and identity reuse.
+- Provide an explicit, byte-identical `substrate-daemon-quota` image executable with only
+  `cap_sys_admin=ep` so non-root quota startup retains the delegated permission. The ordinary
+  entrypoint remains unprivileged. Release validation checks final-image metadata and the actual
+  daemon and worker capability sets before publication or recovery reuse.
+
 ### Changed
 
 - Connect the public handbook around one workspace and bounded command, with subsystem diagrams,

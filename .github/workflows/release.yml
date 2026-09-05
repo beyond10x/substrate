@@ -537,6 +537,8 @@ jobs:
             .
           docker run --rm --entrypoint /usr/local/bin/substrate-daemon \
             "${IMAGE}:${VERSION}" --help >/dev/null
+          cargo run --release --locked -p xtask -- \
+            check-image-startup --image "${IMAGE}:${VERSION}"
 
           container=$(docker create "${IMAGE}:${VERSION}")
           mkdir -p target/image-under-test
@@ -565,6 +567,8 @@ jobs:
             fi
             docker run --rm --entrypoint /usr/local/bin/substrate-daemon \
               "${IMAGE}:${VERSION}" --help >/dev/null
+            cargo run --release --locked -p xtask -- \
+              check-image-startup --image "${IMAGE}:${VERSION}"
             container=$(docker create "${IMAGE}:${VERSION}")
             docker cp \
               "${container}:/usr/local/bin/substrate-daemon" \

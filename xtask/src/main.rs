@@ -10,6 +10,7 @@ mod adrs;
 mod advisories;
 mod bot_files;
 mod bundle;
+mod image_startup;
 mod json;
 mod licenses;
 mod links;
@@ -40,6 +41,9 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Verify final daemon image files and non-root startup capability masks on local Linux Docker.
+    #[command(name = "check-image-startup")]
+    ImageStartup(image_startup::Args),
     /// Reject dependencies affected by a current `RustSec` vulnerability.
     #[command(name = "check-advisories")]
     Advisories,
@@ -104,6 +108,7 @@ fn main() -> ExitCode {
 fn dispatch() -> Result<ExitCode> {
     let cli = Cli::parse();
     let report = match cli.command {
+        Command::ImageStartup(args) => return image_startup::run(&args),
         Command::Advisories => advisories::check(&repo::root()?)?,
         Command::Licenses => licenses::check(&repo::root()?)?,
         Command::Packages => packages::check(&repo::root()?)?,

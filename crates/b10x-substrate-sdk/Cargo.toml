@@ -34,8 +34,8 @@ rustls-pemfile.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_urlencoded.workspace = true
-substrate-daemon = { package = "b10x-substrate-daemon", path = "../substrate-daemon", version = "=0.7.3", optional = true }
-substrate-wire = { package = "b10x-substrate-wire", path = "../substrate-wire", version = "=0.7.3" }
+substrate-daemon = { package = "b10x-substrate-daemon", path = "../substrate-daemon", version = "=0.7.4", optional = true }
+substrate-wire = { package = "b10x-substrate-wire", path = "../substrate-wire", version = "=0.7.4" }
 tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

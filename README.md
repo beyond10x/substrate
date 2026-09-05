@@ -170,6 +170,23 @@ target/debug/substrate-daemon \
 Rust applications can instead follow the [public Rust SDK guide](https://beyond10x.github.io/docs/substrate/guides/rust-sdk/)
 to connect to that socket or supervise the daemon as a separate child.
 
+The daemon image also provides `/usr/local/bin/substrate-daemon-quota` for explicit project-quota
+deployments. It is a root-owned, byte-identical copy carrying only `cap_sys_admin=ep`; the default
+executable and entrypoint have no file capabilities. Select the quota executable together with
+`--project-quota-ids START-END`, a filesystem that passes the hard byte/inode quota probe, UID/GID
+65532, and only `SYS_ADMIN` in the container capability bounding set. Startup must allow file
+capability acquisition (`no_new_privs` disabled). Keep inheritable and ambient sets empty and never
+grant `SYS_RESOURCE`, which can bypass quotas. Deploy and roll back the image and selected
+executable together.
+
+Release checks inspect the final image's bytes, ownership and file capabilities, then verify the
+daemon and Tokio worker masks under both startup profiles. They do not prove a served terminal
+backend or filesystem quotas: the image still requires a separately verified execution profile,
+and quota facts remain absent until the host probe succeeds. The process launcher continues to
+set `PR_SET_NO_NEW_PRIVS` before executing its trusted backend; this prevents gaining capabilities
+at exec, while an ordinary non-root exec with empty inheritable/ambient sets clears existing
+permitted/effective capabilities. `PR_SET_NO_NEW_PRIVS` alone does not clear capabilities at fork.
+
 ### Git workspace sources
 
 `--git-source <name>=<https-prefix>/` (repeatable) declares a segment-bounded Connector byte-plane
