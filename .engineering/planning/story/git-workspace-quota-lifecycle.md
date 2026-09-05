@@ -2,7 +2,7 @@
 format: aep.planning-md/1
 id: story:git-workspace-quota-lifecycle
 kind: story
-status: active
+status: implemented
 title: Enforce hard quotas throughout Git workspace materialization
 relations:
 - informed_by: story:materialize-connector-git-sources
@@ -50,7 +50,7 @@ scope:
   path: xtask/src/image_startup.rs
 - confidence: inferred
   path: xtask/src/main.rs
-revision: 14
+revision: 17
 ---
 ## Outcome
 
@@ -82,7 +82,9 @@ The complete repository gate passes on the 0.7.4 source: 582 Cargo cases passed,
 
 The published predecessor image fails the new final-image check because the explicit quota executable is absent. The corrected local final image passes all four checks: root-owned 0755 byte-identical executables with only the quota copy carrying cap_sys_admin=ep, unprivileged default startup, inactive ordinary startup with only the SYS_ADMIN bounding bit, and explicit quota startup with the exact bit in every daemon/worker permitted, effective and bounding set. Inheritable and ambient sets remain empty. The tooling package passes 165 cases. Independent read-only image review found nothing and is recorded in review-result:git-workspace-quota-image-pass-1. These local Docker checks do not prove the hosted chart's complete security context, live filesystem quotas or terminal child confinement.
 
-The exact-main hosted CI result, immutable release and live containerd/quota/application validation remain pending. Deployment-specific disk, node bootstrap, data migration and browser evidence belong to the downstream deployment and coordination stores.
+Substrate 0.7.4 was published after its exact-main gate, and the subsequent storage-observation repair is published as 0.7.5 from main 64ae2ed5a888663b036cbe06515cbfd277369d58. Exact-main gate 33994311085 and release 33994751338 succeeded. The final local 0.7.5 gate passes 583 Cargo cases, with eight explicitly ignored delegated cases; the Git lifecycle implementation is unchanged from the seven explicitly executed real-filesystem cases above. CHANGELOG.md records all published digests and signature-verification provenance.
+
+The published 0.7.5 daemon was independently exercised on the hosted ext4 quota filesystem under containerd: the main process and all seven workers retained only the required permitted/effective/bounding capability with empty inheritable/ambient sets. Bounded writes returned EDQUOT at byte and inode limits. Public storage observations matched actual allocated blocks and inode counts both before freeing byte usage and after exhausting inodes. Two live workspaces used distinct allocations; destruction removed files and a new workspace reused the released project identifier. Normal cleanup finished with zero test workspaces. This hosted check proves quota and public observation behavior; authenticated consumer application validation remains in the downstream coordination story. Deployment-specific disk, node bootstrap, data migration and browser evidence stay outside this public store.
 
 ## Quota image startup profile
 
@@ -92,4 +94,4 @@ Provide a byte-identical, root-owned daemon-quota executable carrying only cap_s
 
 ## Hosted observation merge defect
 
-The released 0.7.4 image advertises enforced project quotas under the hosted runtime and real writes receive EDQUOT at the byte and inode limits. Its public workspace GET still reports creation-time usage: HostDriver returns fresh kernel accounting, but Store::merge_workspace_observation discards storage while merging the timestamp. Correct the ready, unfrozen observation merge to accept fresh usage only for the same admitted storage limit, preserving store-owned lifecycle, labels, lease and quota authority. Cover refreshed durable usage and stale/frozen observations in Rust tests and retain the full hosted usage assertion. Prepare an immutable 0.7.5 repair without changing the wire contract, confinement profile or quota lifecycle. The production file migration has not started.
+The released 0.7.4 image advertises enforced project quotas under the hosted runtime and real writes receive EDQUOT at the byte and inode limits. Its public workspace GET still reports creation-time usage: HostDriver returns fresh kernel accounting, but Store::merge_workspace_observation discards storage while merging the timestamp. The released 0.7.5 ready, unfrozen observation merge accepts fresh usage only for the same admitted storage limit, preserving store-owned lifecycle, labels, lease and quota authority. Rust regressions cover refreshed durable usage, stale or mismatched samples, unmetered resources, frozen lifecycle states and active lease conflicts. The full hosted usage assertion passes on the published image. The wire contract, confinement profile and quota lifecycle are unchanged.
