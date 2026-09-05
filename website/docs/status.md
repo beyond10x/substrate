@@ -43,7 +43,7 @@ verify it through `GET /v1/machine`.
 - stable signed contract-bundle publication
 
 Unsupported capabilities on existing routes produce `unserved` or a specific refusal. Future
-resource families have no implemented routes; unknown addresses return `not_found`. Their names
+resource families have no implemented routes; unknown addresses return HTTP 404 with `resource.not-found`. Their names
 in a broader architecture do not imply served endpoints.
 
 ## Trust limitations
