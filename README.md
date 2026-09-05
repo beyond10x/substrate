@@ -1,8 +1,8 @@
 # substrate
 
-The b10x execution data plane. It turns one machine — or one handed-over cluster scope — into a
-governed service for confined workspaces, bounded processes, workloads, images, volumes, endpoints,
-leases, and observed state.
+The b10x execution data plane. It turns one Linux host into a governed service for confined
+workspaces, bounded processes and sessions, durable operations, leases, and observed state.
+Workloads, images, volumes, endpoints and cluster drivers remain future resource families.
 
 The problem it removes: anything that wants to run a command on behalf of somebody else has to
 build confinement, quotas, durable lifecycle state and honest reporting for itself, and usually
@@ -12,7 +12,10 @@ the machine cannot confine, it says so — an exec on a host with no delegated c
 
 It does not decide product policy, run agent loops, or understand connector vendors.
 
-Public documentation: <https://beyond10x.github.io/substrate/>
+[Public handbook](https://beyond10x.github.io/docs/substrate/) ·
+[Run a local daemon](https://beyond10x.github.io/docs/substrate/getting-started/) ·
+[System model and derivation](https://beyond10x.github.io/docs/substrate/concepts/model/) ·
+[Run a bounded command](https://beyond10x.github.io/docs/substrate/guides/run-a-command/)
 
 Source: <https://github.com/beyond10x/substrate/> · Security reports:
 <https://github.com/beyond10x/substrate/security/advisories/new>
@@ -29,7 +32,6 @@ development wire contract stable.
 | may govern | [connectors](https://github.com/beyond10x/connectors) — as a first-party provider, and later to isolate an attested connector artifact |
 | may execute for | [autodev](https://github.com/beyond10x/autodev) — over its `Executor` port |
 | may adapt | [flux](https://github.com/codewandler/flux) — a remote execution adapter over the substrate API. The dependency never points back into Flux |
-| mapped in | [atlas](https://github.com/beyond10x/atlas) |
 
 There is **no sibling-component implementation dependency**. Cross-component consumers use the
 released native `substrate-daemon` artifact or `b10x-substrate-sdk`. The SDK's opt-in linked mode
@@ -42,23 +44,22 @@ non-publishable.
 
 ## Status
 
-**Tagged `0.5.0` (2026-09-01) — keyless-signed daemon, disposable MCP, and development-bundle
-images. Not a stable published contract.**
+**Release [0.7.3](https://github.com/beyond10x/substrate/releases/tag/0.7.3) (2026-09-05)**
+ships keyless-signed daemon and disposable MCP images plus the signed `0.16.0` development
+contract bundle. Signed distribution does not make the contract stable.
 
-| area | state |
+| Area | Current behavior |
 |---|---|
-| phase 3, lifecycle and recovery | **complete**, under the [archived closure disposition](docs/reviews/archived/2026-08-14-phase-3-closure-review-disposition.md); all 39 review findings carry deterministic or independently observed evidence |
-| 0.2.0 bundle, runtime, portable lane, delegated Linux lane | green |
-| 0.4.0 successor development bundle | adds independently verified read-only execution capsules; the delegated model-free lane proves capsule/config/hook binding and correlated native hook evidence before model dispatch |
-| phase 4, [raw pipe sessions](adr/0007-protocol-processes-use-raw-pipe-sessions.md) | source-typed bounded raw-pipe primitive, distinct durable session identity, leased start, single-attachment Unix-WebSocket route ([plan 04](docs/plan/04-direct-byte-plane.md)) |
-| Rust SDK | `b10x-substrate-sdk` provides typed builders, resource handles, durable-operation recovery, event streams, explicit-root HTTPS/WSS and separately supervised external or linked daemon children; current source verifies the explicitly promoted `substrate-wire/0.16.0` name and inner digest before serving an operation |
-| tagged artifact release | [`0.5.0`](https://github.com/beyond10x/substrate/releases/tag/0.5.0) publishes the daemon, disposable MCP adapter and explicitly pinned `0.15.0` development bundle. The workflow keyless-signs and verifies all three exact digests, proves anonymous retrieval, and refuses an existing canonical tag. It needs no repository secret |
-| stable publication | **not done.** The published, signed OCI bundle is `0.15.0` and remains annotated `development`; signed distribution does not make the contract stable |
-| phase 4, [pty sessions](adr/0019-pty-is-a-second-session-mode.md) | a terminal is a second session **mode** on the same route family, not a second resource: `mode: "pty"` with a required 1–1000-cell window, a `resize` frame, and the `sessions.pty` fact published only after a startup probe allocated a pair, made it controlling inside a throwaway sandbox and round-tripped a window through the child. Absent, the mode is refused `session.pty-unserved` (501) and **never** served as pipes |
-| network session authority | hosted-only 60-second, one-use bearer authority bound to an Ed25519 key and the accepting TLS 1.3 exporter; Unix retains kernel peer authority and development TCP serves no session mutation routes |
-| Git sources | configured HTTPS source apertures create a normal detached-HEAD working tree at an exact provider commit; authority remains transient, file APIs hide `.git`, and the SDK exposes bounded baseline-file and change-set reads |
-| production network transport | current source accepts TLS 1.3 HTTPS/WSS with explicit owner-safe identity files, atomic SIGHUP rotation and per-request hosted Identity admission |
-| hosted trust envelope | current source resolves five-minute opaque Identity access credentials over direct HTTPS for exact audience `urn:b10x:substrate`, enforces `observe`/`workspaces`/`exec` per route before durable admission and never caches stale authority |
+| Workspaces | Empty or authorized configured HTTPS Git source; guarded file operations, exact-commit baseline and bounded change reads |
+| Exec and sessions | Confined argv execution, raw pipes and probe-gated PTY; explicit bounds, leases, output and optional exact usage |
+| Recovery | Durable operation reservation before dispatch, stored answers, bounded events and reconciliation snapshots |
+| Transport | Personal Unix peer identity or explicit-root TLS 1.3 HTTPS/WSS with online hosted Identity admission |
+| Rust SDK and MCP | Typed clients and bounded tools over the daemon's authenticated service contract |
+| Capability limits | Execution, PTY, Git, storage quotas and metrics depend on the running daemon's verified facts |
+| Model and derivation | Explicit wire types and frozen contract bundles; authored CLI, handlers and transitions, with no whole-system ESS derivation |
+
+Read the [public status page](https://beyond10x.github.io/docs/substrate/status/) for availability
+and trust limits. Inspect `GET /v1/machine` for the facts of the daemon you will actually use.
 
 Per-area state with the exact next proof each is waiting for is [`STATUS.md`](STATUS.md); ordered
 exit criteria are [`ROADMAP.md`](ROADMAP.md).
@@ -156,16 +157,17 @@ never accepts a subject from HTTP data.
 
 ```console
 cargo build --workspace --locked
+install -d -m 700 ./run
 target/debug/substrate-daemon \
   --socket ./run/substrate.sock \
   --state ./run/state.db \
   --workspaces ./run/workspaces \
   --deployment personal \
   --event-retention 10000 \
-  --allow-uid 1000
+  --allow-uid "$(id -u)"
 ```
 
-Rust applications can instead follow the [public Rust SDK guide](https://beyond10x.github.io/substrate/docs/guides/rust-sdk)
+Rust applications can instead follow the [public Rust SDK guide](https://beyond10x.github.io/docs/substrate/guides/rust-sdk/)
 to connect to that socket or supervise the daemon as a separate child.
 
 ### Git workspace sources
@@ -197,7 +199,7 @@ target/debug/substrate-daemon \
   --state ./run/state.db \
   --workspaces ./run/workspaces \
   --deployment personal \
-  --allow-uid 1000 \
+  --allow-uid "$(id -u)" \
   --secret-slot model_key=/etc/substrate/model-key
 ```
 
@@ -223,7 +225,7 @@ target/debug/substrate-daemon \
   --state ./run/state.db \
   --workspaces ./run/workspaces \
   --deployment personal \
-  --allow-uid 1000 \
+  --allow-uid "$(id -u)" \
   --cgroup-root /sys/fs/cgroup/…/substrate \
   --egress-aperture model=api.example.com:443/tcp \
   --ca-bundle /etc/ssl/certs/ca-certificates.crt
@@ -357,7 +359,7 @@ The Rust SDK addresses this listener only when the caller supplies the exact HTT
 trust roots, expected DNS identity and an asynchronous Identity access-token provider. It uses the
 same TLS 1.3 configuration for HTTP and WSS, refreshes once only after a named authentication 401,
 and mints a fresh one-use attachment authority for every hosted session connection. See the
-[public Rust SDK guide](https://beyond10x.github.io/substrate/docs/guides/rust-sdk#connect-to-a-remote-daemon)
+[public Rust SDK guide](https://beyond10x.github.io/docs/substrate/guides/rust-sdk/#connect-to-a-remote-daemon)
 for a complete builder example.
 
 ## What is enforced
@@ -374,9 +376,9 @@ for a complete builder example.
 Substrate reports the applied capsule identity. It does **not** claim the host interpreter,
 libraries or base system as part of that closure.
 
-Git remains a future, policy-confined workspace materialization and snapshot transport — not a
-runtime dependency. The current daemon serves only `source: "empty"` and returns a typed
-`workspace.source-unserved` for a valid Git source request.
+Git materialization is conditional on a configured HTTPS source and transient Connector authority.
+It checks out the exact provider commit and exposes bounded baseline and change reads. General
+workspace backup/restore snapshots remain absent.
 
 ## Layout
 

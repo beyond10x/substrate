@@ -7,6 +7,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- Connect the public handbook around one workspace and bounded command, with subsystem diagrams,
+  explicit model/event coverage and contract derivation, corrected Git and release availability,
+  and runnable examples with checked responses, distinct operation IDs and bounded polling.
+
 ## [0.7.3] — 2026-09-05
 
 ### Changed

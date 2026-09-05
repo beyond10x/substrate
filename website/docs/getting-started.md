@@ -34,7 +34,7 @@ Create a private runtime directory and start the daemon with your numeric user I
 allowed:
 
 ```bash
-mkdir -p ./run
+install -d -m 700 ./run
 target/debug/substrate-daemon \
   --socket ./run/substrate.sock \
   --state ./run/state.db \
@@ -52,7 +52,7 @@ is no request header or JSON field that can choose a subject.
 In another terminal:
 
 ```bash
-curl --silent --show-error \
+curl --silent --show-error --fail-with-body --max-time 30 \
   --unix-socket ./run/substrate.sock \
   http://localhost/v1/machine | jq
 ```
@@ -66,6 +66,57 @@ does not fall back to an ordinary host process.
 The response describes the deployment, contract identity, driver generation, verified capabilities,
 and operational limits. These are observations about this running daemon, not promises inferred from
 its configuration.
+
+## Try a workspace without process execution
+
+This first round trip creates workspace W1, writes the input used by the command guide, reads it
+back, and destroys the workspace. It needs guarded workspace I/O; it does not request an exec or a
+hard disk quota. Run this as a Bash script from the checkout, with the daemon still running.
+
+The helper fails on transport, HTTP and response-envelope errors. A fresh run gets fresh operation
+IDs; keep the printed run ID and request bodies if a connection fails, so you can reconcile the
+same operations instead of repeating effects.
+
+```bash
+set -euo pipefail
+SOCKET=./run/substrate.sock
+BASE=http://localhost
+RUN_ID=$(cat /proc/sys/kernel/random/uuid)
+printf 'run: %s\n' "$RUN_ID"
+
+api() {
+  local response
+  response=$(curl --silent --show-error --fail-with-body --max-time 30 \
+    --unix-socket "$SOCKET" "$@") || { printf '%s\n' "$response" >&2; return 1; }
+  jq -e 'if .error == null and .result != null then . else error("API failure") end' \
+    <<<"$response"
+}
+
+CREATE_BODY=$(jq -nc --arg op "$RUN_ID-create" \
+  '{op: $op, input: {source: "empty", labels: {purpose: "handbook"}}}')
+CREATE=$(api --header 'content-type: application/json' \
+  --data "$CREATE_BODY" "$BASE/v1/workspaces")
+WS=$(jq -er '.result.id | select(type == "string" and length > 0)' <<<"$CREATE")
+printf 'workspace: %s\n' "$WS"
+
+CONTENT=$(printf '%s' 'substrate runs ordinary binaries' | base64 -w0)
+WRITE_BODY=$(jq -nc --arg op "$RUN_ID-write" --arg data "$CONTENT" \
+  '{op: $op, input: {content: {encoding: "base64", data: $data}}}')
+api --request PUT --header 'content-type: application/json' \
+  --data "$WRITE_BODY" "$BASE/v1/workspaces/$WS/files/input.txt"
+
+api "$BASE/v1/workspaces/$WS/files/input.txt?mode=file&offset=0&limit_bytes=4096" |
+  jq -er '.result.content.data | select(type == "string")' | base64 -d
+printf '\n'
+
+DESTROY_BODY=$(jq -nc --arg op "$RUN_ID-destroy" '{op: $op, input: {}}')
+api --request DELETE --header 'content-type: application/json' \
+  --data "$DESTROY_BODY" "$BASE/v1/workspaces/$WS"
+```
+
+If a mutation loses its response, inspect `GET /v1/ops/{operation_id}` before making another
+attempt. If the script stops after workspace creation, its printed workspace ID remains available
+for inspection and cleanup. See [retry identity](./concepts/operations.md#retry-identity).
 
 ## Serving process execution
 
