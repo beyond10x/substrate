@@ -204,6 +204,30 @@ impl ProjectQuotas {
         })
     }
 
+    /// Move a private quota directory and its allocator ownership at one installation boundary.
+    /// The lock prevents another allocation or release from observing a renamed but stale path.
+    pub(crate) fn rename(&self, source: &Path, target: &Path) -> Result<(), nix::errno::Errno> {
+        let mut state = self.state.lock();
+        let project = state
+            .paths
+            .get(source)
+            .copied()
+            .ok_or(nix::errno::Errno::EINVAL)?;
+        if state.paths.contains_key(target) {
+            return Err(nix::errno::Errno::EEXIST);
+        }
+        nix::fcntl::renameat2(
+            nix::fcntl::AT_FDCWD,
+            source,
+            nix::fcntl::AT_FDCWD,
+            target,
+            nix::fcntl::RenameFlags::RENAME_NOREPLACE,
+        )?;
+        state.paths.remove(source);
+        state.paths.insert(target.to_path_buf(), project);
+        Ok(())
+    }
+
     pub(crate) fn release(&self, path: &Path) -> Result<(), DriverError> {
         let mut state = self.state.lock();
         let Some(project) = state.paths.get(path).copied() else {

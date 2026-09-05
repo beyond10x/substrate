@@ -1,5 +1,8 @@
 //! A real TLS/upload-pack peer exercises the production gix path, including HTTP reuse.
 
+#[path = "quota_tests.rs"]
+mod quota_tests;
+
 use std::fmt::Write as _;
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::net::{TcpListener, TcpStream};
@@ -53,6 +56,14 @@ struct Server {
 
 impl Server {
     fn start(repository: &Path, mode: Mode) -> Self {
+        Self::start_observed(repository, mode, None)
+    }
+
+    fn start_observed(
+        repository: &Path,
+        mode: Mode,
+        on_request: Option<Arc<dyn Fn() + Send + Sync>>,
+    ) -> Self {
         let certificates = tempdir().expect("certificate directory");
         let identity = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_owned()])
             .expect("TLS fixture identity");
@@ -105,7 +116,15 @@ impl Server {
                 let tls = ServerConnection::new(Arc::clone(&config)).expect("server session");
                 let mut stream = BufReader::new(StreamOwned::new(tls, socket));
                 while !stopped.load(Ordering::Relaxed) {
-                    if serve_request(&mut stream, &repository, mode, &observed).is_err() {
+                    if serve_request(
+                        &mut stream,
+                        &repository,
+                        mode,
+                        &observed,
+                        on_request.as_deref(),
+                    )
+                    .is_err()
+                    {
                         break;
                     }
                 }
@@ -149,6 +168,7 @@ fn serve_request(
     repository: &Path,
     mode: Mode,
     observed: &Mutex<Vec<Request>>,
+    on_request: Option<&(dyn Fn() + Send + Sync)>,
 ) -> std::io::Result<()> {
     let mut line = String::new();
     if stream.read_line(&mut line)? == 0 {
@@ -177,6 +197,9 @@ fn serve_request(
     assert!(length < 64 * 1024);
     let mut body = vec![0; length];
     stream.read_exact(&mut body)?;
+    if let Some(on_request) = on_request {
+        on_request();
+    }
     let discovery = method == "GET";
     let mut response = upload_pack(repository, discovery, !matches!(mode, Mode::Legacy), &body);
     if matches!(mode, Mode::DuplicateRef)

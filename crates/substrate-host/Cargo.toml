@@ -31,7 +31,7 @@ parking_lot.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-substrate-wire = { package = "b10x-substrate-wire", path = "../substrate-wire", version = "=0.7.3" }
+substrate-wire = { package = "b10x-substrate-wire", path = "../substrate-wire", version = "=0.7.4" }
 tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
