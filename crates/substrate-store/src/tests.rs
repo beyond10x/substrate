@@ -2887,6 +2887,94 @@ fn exec_observation_preserves_lease_and_snapshot_projects_it() {
 }
 
 #[test]
+fn workspace_observation_merge_refreshes_usage_without_replacing_authority() {
+    let store = Store::open(":memory:").expect("open store");
+    let scope = scope("local:1000");
+    let mut durable = workspace("ws_usage");
+    durable.labels.insert("authority".into(), "store".into());
+    durable.lease = Some(LeaseObservation {
+        ttl_ms: 1_000,
+        renew_by: "2026-08-13T13:00:00Z".parse().expect("renew by"),
+        state: LeaseState::Active,
+        clock_tolerance_ms: substrate_wire::LEASE_CLOCK_TOLERANCE_MS,
+        authorizing_operation: "lease-authority-ws_usage".into(),
+        actor: "test".into(),
+        principal: None,
+    });
+    let initial = substrate_wire::StorageUsage {
+        limit: substrate_wire::StorageLimit {
+            max_bytes: 1_048_576,
+            max_inodes: 32,
+        },
+        used_bytes: 4096,
+        used_inodes: 1,
+        observed_at: durable.observed_at,
+    };
+    durable.storage = Some(initial);
+    store
+        .put_workspace(&scope, "ws_usage", &durable)
+        .expect("seed");
+    let mut observed = durable.clone();
+    observed.lease = None;
+    observed.labels.insert("authority".into(), "driver".into());
+    observed.observed_at = "2026-08-13T12:01:00Z".parse().expect("time");
+    let updated = substrate_wire::StorageUsage {
+        used_bytes: 8192,
+        used_inodes: 32,
+        observed_at: observed.observed_at,
+        ..initial
+    };
+    observed.storage = Some(updated);
+    let WorkspaceObservationWrite::Authoritative(merged) = store
+        .merge_workspace_observation(&scope, "ws_usage", &observed)
+        .expect("merge")
+    else {
+        panic!("workspace exists");
+    };
+    assert_eq!(merged.storage, Some(updated));
+    assert_eq!(merged.labels["authority"], "store");
+    assert_eq!(merged.lease, durable.lease);
+    assert_eq!(merged.state, WorkspaceState::Ready);
+    assert_eq!(
+        store
+            .workspace(&scope, "ws_usage")
+            .expect("read")
+            .expect("present")
+            .1
+            .storage,
+        Some(updated)
+    );
+
+    let mut mismatched = updated;
+    mismatched.limit.max_bytes *= 2;
+    for storage in [Some(initial), Some(mismatched), None] {
+        observed.storage = storage;
+        let WorkspaceObservationWrite::Authoritative(merged) = store
+            .merge_workspace_observation(&scope, "ws_usage", &observed)
+            .expect("merge stale or incompatible usage")
+        else {
+            panic!("workspace exists");
+        };
+        assert_eq!(merged.storage, Some(updated));
+    }
+
+    durable.id = "ws_unmetered".into();
+    durable.storage = None;
+    store
+        .put_workspace(&scope, "ws_unmetered", &durable)
+        .expect("seed unmetered");
+    observed.id.clone_from(&durable.id);
+    observed.storage = Some(updated);
+    let WorkspaceObservationWrite::Authoritative(merged) = store
+        .merge_workspace_observation(&scope, "ws_unmetered", &observed)
+        .expect("merge unmetered")
+    else {
+        panic!("workspace exists");
+    };
+    assert_eq!(merged.storage, None);
+}
+
+#[test]
 fn workspace_observation_merge_never_regresses_store_owned_lifecycle() {
     let store = Store::open(":memory:").expect("open store");
     let scope = scope("local:1000");
@@ -2898,6 +2986,15 @@ fn workspace_observation_merge_never_regresses_store_owned_lifecycle() {
         let id = format!("ws_{state:?}").to_ascii_lowercase();
         let mut durable = workspace(&id);
         durable.state = state;
+        durable.storage = Some(substrate_wire::StorageUsage {
+            limit: substrate_wire::StorageLimit {
+                max_bytes: 1_048_576,
+                max_inodes: 32,
+            },
+            used_bytes: 4096,
+            used_inodes: 1,
+            observed_at: durable.observed_at,
+        });
         durable
             .labels
             .insert("authority".to_owned(), "store".to_owned());
@@ -2906,6 +3003,11 @@ fn workspace_observation_merge_never_regresses_store_owned_lifecycle() {
             .expect("seed durable workspace");
         let mut observed = workspace(&id);
         observed.observed_at = "2026-08-13T12:01:00Z".parse().expect("time");
+        observed.storage = durable.storage.map(|storage| substrate_wire::StorageUsage {
+            used_bytes: 8192,
+            observed_at: observed.observed_at,
+            ..storage
+        });
         observed
             .labels
             .insert("authority".to_owned(), "driver".to_owned());
@@ -2918,6 +3020,7 @@ fn workspace_observation_merge_never_regresses_store_owned_lifecycle() {
         assert_eq!(authoritative.state, state);
         assert_eq!(authoritative.labels["authority"], "store");
         assert_eq!(authoritative.observed_at, durable.observed_at);
+        assert_eq!(authoritative.storage, durable.storage);
     }
 
     let mut frozen = workspace("ws_expiring");
@@ -2930,10 +3033,23 @@ fn workspace_observation_merge_never_regresses_store_owned_lifecycle() {
         actor: "test".to_owned(),
         principal: None,
     });
+    frozen.storage = Some(substrate_wire::StorageUsage {
+        limit: substrate_wire::StorageLimit {
+            max_bytes: 1_048_576,
+            max_inodes: 32,
+        },
+        used_bytes: 4096,
+        used_inodes: 1,
+        observed_at: frozen.observed_at,
+    });
     store
         .put_workspace(&scope, "ws_expiring", &frozen)
         .expect("seed frozen workspace");
-    let observed = workspace("ws_expiring");
+    let mut observed = frozen.clone();
+    observed.lease = None;
+    observed.storage.as_mut().expect("quota").used_bytes = 8192;
+    observed.storage.as_mut().expect("quota").observed_at =
+        "2026-08-13T12:01:00Z".parse().expect("time");
     let WorkspaceObservationWrite::Authoritative(authoritative) = store
         .merge_workspace_observation(&scope, "ws_expiring", &observed)
         .expect("merge frozen observation")
@@ -2941,6 +3057,7 @@ fn workspace_observation_merge_never_regresses_store_owned_lifecycle() {
         panic!("frozen workspace must remain authoritative");
     };
     assert_eq!(authoritative.lease, frozen.lease);
+    assert_eq!(authoritative.storage, frozen.storage);
 }
 
 #[test]

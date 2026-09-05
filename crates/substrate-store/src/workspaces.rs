@@ -365,10 +365,16 @@ impl Store {
             .as_ref()
             .is_some_and(|lease| lease.state != LeaseState::Active);
         if durable.state == WorkspaceState::Ready && !frozen_lease {
-            // The host observation proves only that the predeclared root is present. Lifecycle,
-            // labels, and lease authority remain store-owned and cannot be replaced by a stale
-            // observation captured before a concurrent freeze.
+            // The host proves root presence and current usage under the admitted quota. Lifecycle,
+            // labels, lease and quota limits remain store-owned across concurrent observations.
             durable.observed_at = observed.observed_at;
+            if let (Some(current), Some(usage)) =
+                (durable.storage.as_mut(), observed.storage.as_ref())
+                && current.limit == usage.limit
+                && usage.observed_at >= current.observed_at
+            {
+                *current = *usage;
+            }
             transaction.execute(
                 "UPDATE workspaces SET resource_json = ?4
                  WHERE deployment = ?1 AND subject = ?2 AND id = ?3",

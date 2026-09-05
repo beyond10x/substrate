@@ -7,7 +7,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.7.5] — 2026-09-05
+
+### Fixed
+
+- Return and persist fresh kernel storage usage from workspace observations. Preserve admitted
+  quota limits, lifecycle, labels and lease authority, and reject older usage observations.
+
 ## [0.7.4] — 2026-09-05
+
+Published by [release run 33991484686](https://github.com/beyond10x/substrate/actions/runs/33991484686).
+The workflow verified keyless signatures before announcement:
+
+- daemon: `sha256:7f3213a766f3b734a306e374cbcfb37b48a4b577348d9a3142c9c21bed76308f`
+- disposable MCP: `sha256:72d160135447d965b0abf6ee5632c8b85fb3a390168f2a1c9abb77d0d06b4a07`
+- development wire bundle 0.16.0: `sha256:4c4e57a1b2427cb004a05cb475c1193e979777c5c79d9a9505ba5facbe10daf7`
 
 ### Fixed
 
