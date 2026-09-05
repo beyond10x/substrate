@@ -20,21 +20,29 @@ name = "substrate_host"
 async-trait.workspace = true
 base64.workspace = true
 chrono.workspace = true
+# Pin and statically include gix's curl backend; runtime images need no system libcurl.
+curl.workspace = true
 hex.workspace = true
 git2.workspace = true
+gix.workspace = true
 libc.workspace = true
 nix.workspace = true
 parking_lot.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-substrate-wire = { package = "b10x-substrate-wire", path = "../substrate-wire", version = "=0.7.2" }
+substrate-wire = { package = "b10x-substrate-wire", path = "../substrate-wire", version = "=0.7.3" }
 tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 ulid.workspace = true
 url.workspace = true
 zeroize.workspace = true
+
+[dev-dependencies]
+rcgen = "0.14"
+rustls.workspace = true
 
 [lints]
 workspace = true

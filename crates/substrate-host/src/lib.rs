@@ -940,6 +940,8 @@ impl Driver for HostDriver {
         let target = workspace_root.join(&root_name);
         let install_target = target.clone();
         let git_source = source.git.clone();
+        let cancellation = git::Cancellation::new();
+        let interrupt = cancellation.flag();
         let result = self
             .filesystem_io(move |_| {
                 if install_target.exists() {
@@ -962,15 +964,15 @@ impl Driver for HostDriver {
                     max_bytes: 2 * 1024 * 1024 * 1024,
                     max_inodes: 200_000,
                 });
-                git::materialize(
+                let usage = git::materialize(
                     temporary.path(),
                     &locator,
                     &binding,
                     &git_source,
                     &authority,
-                    limit.max_bytes,
+                    limit,
+                    &interrupt,
                 )?;
-                let usage = git::bounded_usage(temporary.path(), limit)?;
                 let temporary = temporary.keep();
                 if let Err(error) =
                     git::write_baseline(&git_baseline_root, &root_name, &git_source.commit)

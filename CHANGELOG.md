@@ -7,6 +7,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.7.3] — 2026-09-05
+
+### Changed
+
+- Require Git Smart HTTP protocol v2 for Connector-authorized materialization, request only the
+  selected branch and exact commit, and retain the configured 50-commit shallow history. Discovery,
+  ref lookup and fetch reuse one HTTPS connection without persisting source credentials.
+- Combine durable file synchronization and storage accounting in one bounded traversal before
+  atomic workspace installation.
+- Reuse bounded HTTPS connections in the Rust SDK. The additive `RemoteEndpoint` factory shares
+  TLS configuration across callers while obtaining and verifying each request's current authority;
+  terminal exporter binding and the development wire bundle remain unchanged.
+
 ## [0.7.2] — 2026-09-05
 
 ### Fixed

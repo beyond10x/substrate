@@ -5,6 +5,7 @@
     reason = "all fallible public calls return the documented SdkError variants"
 )]
 
+mod http_pool;
 mod managed;
 mod model;
 mod transport;
@@ -46,7 +47,7 @@ pub use substrate_wire::{
     SessionAttachmentState, SessionMode, SnapshotMetadata, SnapshotPage, StorageLimit,
     TextMatchPolicy, UnifiedDiff, WorkspaceAccess, WorkspaceTree, WorkspaceTreeEntry,
 };
-pub use transport::{EventStream, MetricsStream};
+pub use transport::{EventStream, MetricsStream, RemoteEndpoint};
 
 use transport::{Transport, decode_result, encode_path};
 
@@ -413,6 +414,25 @@ impl Client {
                 operation_id: operation_id.to_owned(),
             }),
         }
+    }
+}
+
+impl RemoteEndpoint {
+    /// Bind an actor's current token provider to shared, credential-free transport resources.
+    /// The machine and contract are checked for this caller; no authority is cached.
+    pub async fn connect(
+        &self,
+        provider: impl AccessTokenProvider + 'static,
+    ) -> Result<Client, SdkError> {
+        let transport = self.bind(Arc::new(provider));
+        let response = transport.request("GET", "/v1/machine", None).await?;
+        let snapshot: substrate_wire::CapabilitySnapshot = decode_result(&response)?;
+        Ok(Client {
+            inner: Arc::new(ClientInner {
+                transport,
+                machine: RwLock::new(snapshot.into()),
+            }),
+        })
     }
 }
 

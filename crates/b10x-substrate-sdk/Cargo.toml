@@ -19,19 +19,23 @@ linked-daemon = ["dep:substrate-daemon"]
 
 [dependencies]
 base64.workspace = true
+bytes.workspace = true
 chrono.workspace = true
 ed25519-dalek.workspace = true
 futures-util.workspace = true
 getrandom.workspace = true
 http.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
 nix = { workspace = true, features = ["process", "signal", "user"] }
 rustls.workspace = true
 rustls-pemfile.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_urlencoded.workspace = true
-substrate-daemon = { package = "b10x-substrate-daemon", path = "../substrate-daemon", version = "=0.7.2", optional = true }
-substrate-wire = { package = "b10x-substrate-wire", path = "../substrate-wire", version = "=0.7.2" }
+substrate-daemon = { package = "b10x-substrate-daemon", path = "../substrate-daemon", version = "=0.7.3", optional = true }
+substrate-wire = { package = "b10x-substrate-wire", path = "../substrate-wire", version = "=0.7.3" }
 tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

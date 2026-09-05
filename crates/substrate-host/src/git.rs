@@ -2,13 +2,11 @@ use std::io::Write as _;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Instant;
 
 use base64::Engine as _;
 use chrono::Utc;
-use git2::{
-    AutotagOption, Delta, DiffFile, DiffOptions, FetchOptions, Oid, Patch, ProxyOptions,
-    RemoteCallbacks,
-};
+use git2::{Delta, DiffFile, DiffOptions, Oid, Patch};
 use sha2::{Digest as _, Sha256};
 use substrate_wire::{
     Base64Content, Base64Encoding, GitBaselineFile, GitBaselineFileResult, GitChange, GitChangeSet,
@@ -19,14 +17,38 @@ use zeroize::Zeroizing;
 
 use crate::{DriverError, GitSourceBinding};
 
+#[cfg(test)]
+mod materialization_tests;
+mod network;
+
+pub(super) struct Cancellation(Arc<AtomicBool>);
+
+impl Cancellation {
+    pub(super) fn new() -> Self {
+        Self(Arc::new(AtomicBool::new(false)))
+    }
+
+    pub(super) fn flag(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.0)
+    }
+}
+
+impl Drop for Cancellation {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+}
+
+#[allow(clippy::too_many_lines)] // Source validation, fetch, checkout and durable accounting are one ordered operation.
 pub(super) fn materialize(
     target: &Path,
     locator: &url::Url,
     binding: &GitSourceBinding,
     source: &GitSource,
     authority: &Zeroizing<String>,
-    max_transfer_bytes: u64,
-) -> Result<(), DriverError> {
+    limit: StorageLimit,
+    interrupt: &Arc<AtomicBool>,
+) -> Result<StorageUsage, DriverError> {
     let branch_ref = format!("refs/heads/{}", source.reference);
     if !git2::Reference::is_valid_name(&branch_ref)
         || source.commit.len() != 40
@@ -34,10 +56,26 @@ pub(super) fn materialize(
     {
         return Err(refused("workspace.git-reference-invalid"));
     }
+    if !(1..=50).contains(&source.depth) {
+        return Err(refused("workspace.git-depth-invalid"));
+    }
+    if !binding.admits(locator, locator.as_str()) {
+        return Err(refused("workspace.git-locator-refused"));
+    }
+    if authority.is_empty()
+        || authority.len() > 16 * 1024
+        || authority.bytes().any(|byte| byte.is_ascii_control())
+    {
+        return Err(refused("workspace.git-authority-invalid"));
+    }
     let expected =
         Oid::from_str(&source.commit).map_err(|_| refused("workspace.git-commit-invalid"))?;
-    let repository =
-        git2::Repository::init(target).map_err(|_| failed("workspace.git-init-failed"))?;
+    let mut init = git2::RepositoryInitOptions::new();
+    init.external_template(false)
+        .no_reinit(true)
+        .initial_head(&source.reference);
+    let repository = git2::Repository::init_opts(target, &init)
+        .map_err(|_| failed("workspace.git-init-failed"))?;
     let mut config = repository
         .config()
         .map_err(|_| failed("workspace.git-trust-failed"))?;
@@ -50,51 +88,103 @@ pub(super) fn materialize(
             .map_err(|_| failed("workspace.git-trust-failed"))?;
     }
     drop(config);
-    let transfer_exhausted = Arc::new(AtomicBool::new(false));
-    let transfer_exhausted_callback = transfer_exhausted.clone();
-    let mut callbacks = RemoteCallbacks::new();
-    callbacks.transfer_progress(move |progress| {
-        let admitted = u64::try_from(progress.received_bytes()).expect("received bytes fit u64")
-            <= max_transfer_bytes;
-        if !admitted {
-            transfer_exhausted_callback.store(true, Ordering::Relaxed);
-        }
-        admitted
-    });
-    let header = Zeroizing::new(format!(
-        "X-B10X-Git-Source-Authorization: {}",
-        authority.as_str()
-    ));
-    let proxy = ProxyOptions::new();
-    let mut options = FetchOptions::new();
-    options
-        .remote_callbacks(callbacks)
-        .proxy_options(proxy)
-        .download_tags(AutotagOption::None)
-        .depth(i32::from(source.depth))
-        .custom_headers(&[header.as_str()]);
-    let mut remote = repository
+    repository
         .remote("origin", locator.as_str())
         .map_err(|_| failed("workspace.git-remote-failed"))?;
     let destination = format!("refs/remotes/origin/{}", source.reference);
     let refspec = format!("+{branch_ref}:{destination}");
-    if remote
-        .fetch(&[refspec.as_str()], Some(&mut options), None)
-        .is_err()
+    let fetch_repository = gix::open::Options::isolated()
+        .strict_config(true)
+        .config_overrides([
+            "protocol.version=2",
+            "pack.threads=2",
+            "gitoxide.tracePacket=false",
+            "user.name=Substrate",
+            "user.email=substrate@example.invalid",
+        ])
+        .open(target)
+        .map_err(|_| failed("workspace.git-init-failed"))?
+        .to_thread_local();
+    let remote = fetch_repository
+        .remote_at_without_url_rewrite(locator.as_str())
+        .map_err(|_| failed("workspace.git-remote-failed"))?
+        .with_refspecs([refspec.as_str()], gix::remote::Direction::Fetch)
+        .map_err(|_| refused("workspace.git-reference-invalid"))?
+        .with_fetch_tags(gix::remote::fetch::Tags::None);
+    let control = network::Control::new(limit.max_bytes, Arc::clone(interrupt));
+    control.check()?;
+    let transport = network::V2Transport::new(locator, binding, authority, &control)?;
+    let discovery_started = Instant::now();
+    let fetch = remote
+        .to_connection_with_transport(transport)
+        .with_credentials(no_credentials)
+        .prepare_fetch(
+            gix::progress::Discard,
+            gix::remote::ref_map::Options::default(),
+        )
+        .map_err(|_| control.error())?;
+    let mut branch_refs = fetch.ref_map().remote_refs.iter().filter_map(|reference| {
+        let (name, target, _) = reference.unpack();
+        (name == branch_ref.as_bytes()).then_some(target)
+    });
+    let observed = branch_refs.next().flatten();
+    if observed.is_none_or(|oid| oid.as_bytes() != expected.as_bytes())
+        || branch_refs.next().is_some()
     {
-        if transfer_exhausted.load(Ordering::Relaxed) {
-            return Err(DriverError::exhausted(
-                "workspace.git-transfer-limit",
-                "The Git transfer exceeds the admitted byte limit.",
-                "storage",
-            ));
-        }
-        return Err(failed("workspace.git-fetch-failed"));
+        return Err(DriverError::refused(
+            "workspace.git-commit-moved",
+            "The provider branch no longer resolves to the admitted commit.",
+            "workspace.git",
+        ));
     }
-    drop(remote);
+    tracing::debug!(
+        stage = "git_discovery",
+        elapsed_ms = discovery_started.elapsed().as_millis(),
+        received_bytes = control.received_bytes(),
+        "Git materialization stage completed"
+    );
+    let fetch_started = Instant::now();
+    let outcome = fetch
+        .with_shallow(gix::remote::fetch::Shallow::DepthAtRemote(
+            u32::from(source.depth)
+                .try_into()
+                .expect("validated positive depth"),
+        ))
+        .receive(gix::progress::Discard, interrupt)
+        .map_err(|_| control.error())?;
+    if outcome.handshake.server_protocol_version != gix::protocol::transport::Protocol::V2 {
+        return Err(refused("workspace.git-protocol-refused"));
+    }
+    control.check()?;
+    tracing::debug!(
+        stage = "git_fetch",
+        elapsed_ms = fetch_started.elapsed().as_millis(),
+        received_bytes = control.received_bytes(),
+        "Git materialization stage completed"
+    );
+    let checkout_started = Instant::now();
     finish_materialization(&repository, &destination, expected)?;
-    sync_tree(target)?;
-    Ok(())
+    control.check()?;
+    tracing::debug!(
+        stage = "git_checkout",
+        elapsed_ms = checkout_started.elapsed().as_millis(),
+        "Git materialization stage completed"
+    );
+    let sync_started = Instant::now();
+    let usage = sync_and_bounded_usage(target, limit, interrupt)?;
+    tracing::debug!(
+        stage = "git_sync_accounting",
+        elapsed_ms = sync_started.elapsed().as_millis(),
+        used_bytes = usage.used_bytes,
+        used_inodes = usage.used_inodes,
+        "Git materialization stage completed"
+    );
+    Ok(usage)
+}
+
+#[allow(clippy::result_large_err, clippy::unnecessary_wraps)] // The callback's result type belongs to the pinned gix API.
+fn no_credentials(_: gix::credentials::helper::Action) -> gix::credentials::protocol::Result {
+    Ok(None)
 }
 
 pub(super) fn mechanism_is_provable(workspace_root: &Path) -> bool {
@@ -104,10 +194,16 @@ pub(super) fn mechanism_is_provable(workspace_root: &Path) -> bool {
     else {
         return false;
     };
-    git2::Repository::init(directory.path())
-        .and_then(|repository| repository.config())
-        .and_then(|mut config| config.set_bool("http.followRedirects", false))
-        .is_ok()
+    let mut init = git2::RepositoryInitOptions::new();
+    init.external_template(false).no_reinit(true);
+    curl::Version::get()
+        .protocols()
+        .any(|protocol| protocol == "https")
+        && git2::Repository::init_opts(directory.path(), &init).is_ok()
+        && gix::open::Options::isolated()
+            .strict_config(true)
+            .open(directory.path())
+            .is_ok()
 }
 
 pub(super) fn reconcile(workspace_root: &Path, baseline_root: &Path) -> Result<(), DriverError> {
@@ -332,7 +428,6 @@ pub(super) fn changes(
                 Some(mut value) => value
                     .to_buf()
                     .map_err(|_| failed("workspace.git-diff-failed"))?
-                    .as_ref()
                     .to_vec(),
                 None => Vec::new(),
             };
@@ -373,14 +468,23 @@ pub(super) fn changes(
     })
 }
 
-pub(super) fn bounded_usage(root: &Path, limit: StorageLimit) -> Result<StorageUsage, DriverError> {
+fn sync_and_bounded_usage(
+    root: &Path,
+    limit: StorageLimit,
+    interrupt: &AtomicBool,
+) -> Result<StorageUsage, DriverError> {
     let mut bytes = 0_u64;
     let mut inodes = 0_u64;
     let mut pending = vec![root.to_path_buf()];
+    let mut directories = Vec::new();
     while let Some(directory) = pending.pop() {
+        directories.push(directory.clone());
         for entry in
             std::fs::read_dir(&directory).map_err(|_| failed("workspace.git-measure-failed"))?
         {
+            if interrupt.load(Ordering::Relaxed) {
+                return Err(failed("workspace.git-fetch-cancelled"));
+            }
             let entry = entry.map_err(|_| failed("workspace.git-measure-failed"))?;
             let metadata = entry
                 .path()
@@ -397,8 +501,18 @@ pub(super) fn bounded_usage(root: &Path, limit: StorageLimit) -> Result<StorageU
             }
             if metadata.is_dir() {
                 pending.push(entry.path());
+            } else if metadata.is_file() {
+                std::fs::File::open(entry.path())
+                    .and_then(|file| file.sync_all())
+                    .map_err(|_| failed("workspace.git-sync-failed"))?;
             }
         }
+    }
+    for directory in directories.into_iter().rev() {
+        if interrupt.load(Ordering::Relaxed) {
+            return Err(failed("workspace.git-fetch-cancelled"));
+        }
+        sync_directory(&directory, "workspace.git-sync-failed")?;
     }
     Ok(StorageUsage {
         limit,
@@ -503,34 +617,6 @@ fn change_sort_path(change: &GitChange) -> &str {
         .expect("a diff delta has at least one side")
 }
 
-fn sync_tree(root: &Path) -> Result<(), DriverError> {
-    let mut pending = vec![root.to_path_buf()];
-    let mut directories = Vec::new();
-    while let Some(directory) = pending.pop() {
-        directories.push(directory.clone());
-        for entry in
-            std::fs::read_dir(&directory).map_err(|_| failed("workspace.git-sync-failed"))?
-        {
-            let entry = entry.map_err(|_| failed("workspace.git-sync-failed"))?;
-            let metadata = entry
-                .path()
-                .symlink_metadata()
-                .map_err(|_| failed("workspace.git-sync-failed"))?;
-            if metadata.is_dir() {
-                pending.push(entry.path());
-            } else if metadata.is_file() {
-                std::fs::File::open(entry.path())
-                    .and_then(|file| file.sync_all())
-                    .map_err(|_| failed("workspace.git-sync-failed"))?;
-            }
-        }
-    }
-    for directory in directories.into_iter().rev() {
-        sync_directory(&directory, "workspace.git-sync-failed")?;
-    }
-    Ok(())
-}
-
 pub(super) fn sync_workspace_root(root: &Path) -> Result<(), DriverError> {
     sync_directory(root, "workspace.git-install-failed")
 }
@@ -544,12 +630,15 @@ fn sync_directory(path: &Path, code: &'static str) -> Result<(), DriverError> {
 #[cfg(test)]
 mod tests {
     use git2::{Repository, Signature};
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicBool;
     use substrate_wire::{GitChangeStatus, GitChangesQuery, GitSource, StorageLimit};
     use tempfile::tempdir;
     use zeroize::Zeroizing;
 
     use super::{
-        baseline_file, bounded_usage, changes, finish_materialization, materialize, write_baseline,
+        baseline_file, changes, finish_materialization, materialize, sync_and_bounded_usage,
+        write_baseline,
     };
     use crate::GitSourceBinding;
 
@@ -613,8 +702,7 @@ mod tests {
     fn materialize_errors_do_not_disclose_transient_authority() {
         let target = tempdir().expect("target directory");
         let binding =
-            GitSourceBinding::new("connector", "https://source.invalid/internal/git/", None)
-                .expect("binding");
+            GitSourceBinding::new("connector", "https://127.0.0.1:1/", None).expect("binding");
         let source = GitSource {
             source: "connector".to_owned(),
             locator: "unused".to_owned(),
@@ -629,7 +717,11 @@ mod tests {
             &binding,
             &source,
             &Zeroizing::new(authority.to_owned()),
-            1024,
+            StorageLimit {
+                max_bytes: 1024,
+                max_inodes: 100,
+            },
+            &Arc::new(AtomicBool::new(false)),
         )
         .expect_err("unreachable repository");
         assert!(!error.to_string().contains(authority));
@@ -718,25 +810,87 @@ mod tests {
         std::fs::write(directory.path().join("one"), b"1234").expect("first file");
         std::fs::write(directory.path().join("two"), b"5678").expect("second file");
 
-        let byte_error = bounded_usage(
+        let byte_error = sync_and_bounded_usage(
             directory.path(),
             StorageLimit {
                 max_bytes: 3,
                 max_inodes: 10,
             },
+            &AtomicBool::new(false),
         )
         .expect_err("byte ceiling");
         assert_eq!(byte_error.code, "workspace.git-storage-limit");
 
-        let inode_error = bounded_usage(
+        let inode_error = sync_and_bounded_usage(
             directory.path(),
             StorageLimit {
                 max_bytes: 1024,
                 max_inodes: 1,
             },
+            &AtomicBool::new(false),
         )
         .expect_err("inode ceiling");
         assert_eq!(inode_error.code, "workspace.git-storage-limit");
+    }
+
+    #[test]
+    fn synchronization_accounts_nested_git_metadata_and_never_follows_symlinks() {
+        let directory = tempdir().expect("workspace");
+        let outside = tempdir().expect("outside directory");
+        let large = std::fs::File::create(outside.path().join("large")).expect("outside file");
+        large.set_len(10 * 1024 * 1024).expect("outside allocation");
+        std::fs::create_dir_all(directory.path().join(".git/objects")).expect("nested Git objects");
+        std::fs::write(directory.path().join(".git/objects/pack"), b"git").expect("Git bytes");
+        std::fs::write(directory.path().join("README.md"), b"file").expect("workspace bytes");
+        std::os::unix::fs::symlink(outside.path(), directory.path().join("external"))
+            .expect("symlink");
+        let paths = [
+            ".git",
+            ".git/objects",
+            ".git/objects/pack",
+            "README.md",
+            "external",
+        ];
+        let expected: u64 = paths
+            .iter()
+            .map(|path| {
+                directory
+                    .path()
+                    .join(path)
+                    .symlink_metadata()
+                    .expect("entry metadata")
+                    .len()
+            })
+            .sum();
+        let usage = sync_and_bounded_usage(
+            directory.path(),
+            StorageLimit {
+                max_bytes: 1024 * 1024,
+                max_inodes: 5,
+            },
+            &AtomicBool::new(false),
+        )
+        .expect("bounded synchronized tree");
+        assert_eq!(usage.used_bytes, expected);
+        assert_eq!(usage.used_inodes, 5);
+    }
+
+    #[test]
+    fn dropping_the_async_cancellation_guard_prevents_later_sync_install_stages() {
+        let guard = super::Cancellation::new();
+        let interrupt = guard.flag();
+        drop(guard);
+        let directory = tempdir().expect("workspace");
+        let error = sync_and_bounded_usage(
+            directory.path(),
+            StorageLimit {
+                max_bytes: 1024,
+                max_inodes: 1,
+            },
+            &interrupt,
+        )
+        .expect_err("cancelled synchronization");
+        assert_eq!(error.code, "workspace.git-fetch-cancelled");
     }
 
     #[test]

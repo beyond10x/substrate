@@ -67,6 +67,14 @@ let _machine = client.machine();
 # }
 ```
 
+Servers serving multiple callers can initialize `RemoteEndpoint::new(origin, trust_roots,
+server_identity)` once and call `endpoint.connect(token_provider).await` for each caller. Endpoint
+clones share TLS configuration and at most 16 active HTTP connections, with a 30-second idle
+timeout. Every connection-bound client still verifies the daemon contract and obtains authority
+from its own provider on each request. Tokens and source authority remain request headers; the
+endpoint stores neither. Lost mutation responses use the existing operation-ledger recovery.
+WebSocket attachments retain separate connections and their existing TLS exporter binding.
+
 There are no ambient system roots, redirects, proxies, plaintext fallback, credential store, or
 certificate-verification bypass. Each request obtains authority from the provider; a hosted
 session attachment additionally mints a fresh one-use authority bound to its TLS 1.3 channel.

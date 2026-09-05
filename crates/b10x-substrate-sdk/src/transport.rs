@@ -22,6 +22,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 use tokio_tungstenite::tungstenite::http::{HeaderName, HeaderValue};
 use ulid::Ulid;
 
+use crate::http_pool::HttpPool;
 use crate::model::{CONTRACT, CONTRACT_SHA256, EventStreamFrame};
 use crate::{
     AccessToken, AccessTokenProvider, AccessTokenReason, EventPage, MetricsSample, SdkError,
@@ -50,12 +51,23 @@ enum TransportKind {
 
 #[derive(Clone)]
 struct RemoteTransport {
+    endpoint: RemoteEndpoint,
+    token_provider: Arc<dyn AccessTokenProvider>,
+}
+
+/// Cloneable HTTPS configuration and bounded connections, containing no caller credentials.
+#[derive(Clone)]
+pub struct RemoteEndpoint {
+    inner: Arc<EndpointConfiguration>,
+}
+
+struct EndpointConfiguration {
     authority: String,
     connect_host: String,
     port: u16,
     server_name: ServerName<'static>,
     connector: TlsConnector,
-    token_provider: Arc<dyn AccessTokenProvider>,
+    pool: HttpPool,
 }
 
 pub(crate) struct HttpResponse {
@@ -76,48 +88,7 @@ impl Transport {
         server_identity: String,
         token_provider: Arc<dyn AccessTokenProvider>,
     ) -> Result<Self, SdkError> {
-        let uri = Uri::from_str(endpoint)
-            .map_err(|_| SdkError::Protocol("remote endpoint is invalid".to_owned()))?;
-        if uri.scheme_str() != Some("https")
-            || uri.authority().is_none()
-            || uri
-                .authority()
-                .is_some_and(|authority| authority.as_str().contains('@'))
-            || uri.query().is_some()
-            || uri.path() != "/"
-        {
-            return Err(SdkError::Protocol(
-                "remote endpoint must be one exact HTTPS origin".to_owned(),
-            ));
-        }
-        let authority = uri
-            .authority()
-            .expect("checked authority")
-            .as_str()
-            .to_owned();
-        let connect_host = uri
-            .host()
-            .ok_or_else(|| SdkError::Protocol("remote endpoint has no host".to_owned()))?
-            .to_owned();
-        let port = uri.port_u16().unwrap_or(443);
-        if port == 0 {
-            return Err(SdkError::Protocol(
-                "remote endpoint has no usable port".to_owned(),
-            ));
-        }
-        let dns_name = DnsName::try_from(server_identity)
-            .map_err(|_| SdkError::Protocol("server identity is not a DNS name".to_owned()))?;
-        let connector = load_connector(trust_roots)?;
-        Ok(Self {
-            kind: TransportKind::Remote(RemoteTransport {
-                authority,
-                connect_host,
-                port,
-                server_name: ServerName::DnsName(dns_name),
-                connector,
-                token_provider,
-            }),
-        })
+        Ok(RemoteEndpoint::new(endpoint, trust_roots, server_identity)?.bind(token_provider))
     }
 
     pub async fn request(
@@ -212,6 +183,67 @@ impl Transport {
     }
 }
 
+impl RemoteEndpoint {
+    /// Load one exact HTTPS origin and its bounded PEM trust roots.
+    pub fn new(
+        endpoint: &str,
+        trust_roots: &std::path::Path,
+        server_identity: impl Into<String>,
+    ) -> Result<Self, SdkError> {
+        let uri = Uri::from_str(endpoint)
+            .map_err(|_| SdkError::Protocol("remote endpoint is invalid".to_owned()))?;
+        if uri.scheme_str() != Some("https")
+            || uri.authority().is_none()
+            || uri
+                .authority()
+                .is_some_and(|authority| authority.as_str().contains('@'))
+            || uri.query().is_some()
+            || uri.path() != "/"
+        {
+            return Err(SdkError::Protocol(
+                "remote endpoint must be one exact HTTPS origin".to_owned(),
+            ));
+        }
+        let authority = uri
+            .authority()
+            .ok_or_else(|| SdkError::Protocol("remote endpoint has no authority".to_owned()))?
+            .as_str()
+            .to_owned();
+        let connect_host = uri
+            .host()
+            .ok_or_else(|| SdkError::Protocol("remote endpoint has no host".to_owned()))?
+            .to_owned();
+        let port = uri.port_u16().unwrap_or(443);
+        if port == 0 {
+            return Err(SdkError::Protocol(
+                "remote endpoint has no usable port".to_owned(),
+            ));
+        }
+        let dns_name = DnsName::try_from(server_identity.into())
+            .map_err(|_| SdkError::Protocol("server identity is not a DNS name".to_owned()))?;
+        let connector = load_connector(trust_roots)?;
+        Ok(Self {
+            inner: Arc::new(EndpointConfiguration {
+                authority,
+                connect_host,
+                port,
+                server_name: ServerName::DnsName(dns_name),
+                connector,
+                pool: HttpPool::new(),
+            }),
+        })
+    }
+
+    pub(crate) fn bind(&self, token_provider: Arc<dyn AccessTokenProvider>) -> Transport {
+        Transport {
+            kind: TransportKind::Remote(RemoteTransport {
+                endpoint: self.clone(),
+                token_provider,
+            }),
+        }
+    }
+}
+
 impl RemoteTransport {
     async fn request(
         &self,
@@ -242,17 +274,19 @@ impl RemoteTransport {
         source_authority: Option<&str>,
         token: &AccessToken,
     ) -> Result<HttpResponse, SdkError> {
-        let stream = self.connect().await?;
-        request_on(
-            stream,
-            &self.authority,
-            Some(token.expose()),
+        let request = crate::http_pool::request(
+            &self.endpoint.inner.authority,
+            token.expose(),
             source_authority,
             method,
             path,
             body,
-        )
-        .await
+        )?;
+        self.endpoint
+            .inner
+            .pool
+            .request(|| self.connect(), request)
+            .await
     }
 
     async fn websocket(
@@ -355,7 +389,7 @@ impl RemoteTransport {
         ];
         websocket_on(
             stream,
-            &format!("wss://{}{path}", self.authority),
+            &format!("wss://{}{path}", self.endpoint.inner.authority),
             &with_authorization(&headers, token)?,
         )
         .await
@@ -370,7 +404,7 @@ impl RemoteTransport {
         let stream = self.connect().await.map_err(WebSocketAttemptError::Sdk)?;
         websocket_on(
             stream,
-            &format!("wss://{}{path}", self.authority),
+            &format!("wss://{}{path}", self.endpoint.inner.authority),
             &with_authorization(extra_headers, token)?,
         )
         .await
@@ -389,12 +423,13 @@ impl RemoteTransport {
     }
 
     async fn connect_with_exporter(&self) -> Result<(BoxedIo, [u8; 32]), SdkError> {
-        let tcp = TcpStream::connect((self.connect_host.as_str(), self.port))
+        let endpoint = &self.endpoint.inner;
+        let tcp = TcpStream::connect((endpoint.connect_host.as_str(), endpoint.port))
             .await
             .map_err(|error| SdkError::Transport(error.to_string()))?;
-        let tls = self
+        let tls = endpoint
             .connector
-            .connect(self.server_name.clone(), tcp)
+            .connect(endpoint.server_name.clone(), tcp)
             .await
             .map_err(|error| SdkError::Transport(error.to_string()))?;
         let mut exporter = [0_u8; SESSION_EXPORTER_BYTES];
@@ -764,7 +799,7 @@ where
     })
 }
 
-fn verify_contract_headers(headers: &BTreeMap<String, String>) -> Result<(), SdkError> {
+pub(crate) fn verify_contract_headers(headers: &BTreeMap<String, String>) -> Result<(), SdkError> {
     let observed_contract = headers.get("x-b10x-contract").cloned();
     let observed_sha256 = headers.get("x-b10x-contract-bundle-sha256").cloned();
     if observed_contract.as_deref() != Some(CONTRACT)

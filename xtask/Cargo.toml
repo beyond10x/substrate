@@ -19,7 +19,7 @@ libc.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
-substrate-wire = { package = "b10x-substrate-wire", path = "../crates/substrate-wire", version = "=0.7.2" }
+substrate-wire = { package = "b10x-substrate-wire", path = "../crates/substrate-wire", version = "=0.7.3" }
 tempfile.workspace = true
 toml.workspace = true
 ulid.workspace = true

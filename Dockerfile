@@ -2,6 +2,8 @@
 FROM rust:1.97-bookworm@sha256:0e2bcaef56d041a486784e54104a81aebe0da44bd03019bd70bc0401e42e4a97 AS builder
 WORKDIR /src
 COPY . .
+# The host pins curl's static-curl feature. OpenSSL and zlib remain the same runtime dependencies
+# as libgit2; protocol v2 must not introduce an undeclared system libcurl dependency here.
 RUN --mount=type=cache,id=b10x-cargo-registry,target=/usr/local/cargo/registry,sharing=locked \
     --mount=type=cache,id=b10x-cargo-git,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,id=b10x-substrate-target,target=/src/target,sharing=locked \

@@ -16,7 +16,7 @@ edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/beyond10x/substrate"
 rust-version = "1.97"
-version = "0.7.2"
+version = "0.7.3"
 
 [workspace.dependencies]
 anyhow = "1.0"
@@ -26,12 +26,14 @@ base64 = "0.23"
 bytes = "1.10"
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde", "std"] }
 clap = { version = "4.5", features = ["derive", "env"] }
+curl = { version = "=0.4.50", default-features = false, features = ["ssl", "static-curl"] }
 ed25519-dalek = "3.0"
 fancy-regex = "0.19"
 hex = "0.4"
 futures-util = { version = "0.3", features = ["sink"] }
 getrandom = "0.4"
 git2 = { version = "0.20", default-features = false, features = ["https"] }
+gix = { version = "=0.87.1", default-features = false, features = ["blocking-http-transport-curl-openssl", "parallel", "pack-cache-lru-dynamic", "sha1"] }
 http = "1.3"
 http-body-util = "0.1"
 jsonschema = { version = "=0.52.1", default-features = false }

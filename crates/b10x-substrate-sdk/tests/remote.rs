@@ -295,6 +295,65 @@ impl Fixture {
 }
 
 #[tokio::test]
+async fn shared_endpoint_reuses_tls_but_revalidates_each_callers_authority() {
+    let fixture = Fixture::start().await;
+    let target = fixture
+        .endpoint
+        .trim_start_matches("https://")
+        .trim_end_matches('/')
+        .to_owned();
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("https://{}/", listener.local_addr().unwrap());
+    let connections = Arc::new(AtomicUsize::new(0));
+    let observed = connections.clone();
+    let relay = tokio::spawn(async move {
+        loop {
+            let (mut incoming, _) = listener.accept().await.unwrap();
+            observed.fetch_add(1, Ordering::SeqCst);
+            let target = target.clone();
+            tokio::spawn(async move {
+                let mut upstream = TcpStream::connect(target).await.unwrap();
+                let _ = tokio::io::copy_bidirectional(&mut incoming, &mut upstream).await;
+            });
+        }
+    });
+    let endpoint =
+        b10x_substrate_sdk::RemoteEndpoint::new(&origin, &fixture.daemon_ca, SERVER_NAME).unwrap();
+    for credential in [
+        &fixture.authority.valid,
+        &fixture.authority.invalid,
+        &fixture.authority.valid,
+    ] {
+        let supplied = credential.clone();
+        let result = endpoint
+            .clone()
+            .connect(move |_| {
+                let supplied = supplied.clone();
+                async move { AccessToken::new(supplied) }
+            })
+            .await;
+        if credential == &fixture.authority.invalid {
+            let Err(SdkError::Refusal(refusal)) = result else {
+                panic!("shared TLS transport must not share a previous caller's authority");
+            };
+            assert_eq!(refusal.code, "auth.authority-invalid");
+        } else {
+            let client = result.expect("valid caller connects");
+            client
+                .workspace()
+                .empty()
+                .create()
+                .await
+                .expect("authorized mutation");
+        }
+    }
+    assert_eq!(connections.load(Ordering::SeqCst), 1);
+    drop(endpoint);
+    relay.abort();
+    fixture.stop().await;
+}
+
+#[tokio::test]
 async fn remote_https_requires_exact_tls_and_refreshes_one_invalid_credential() {
     let fixture = Fixture::start().await;
     let calls = Arc::new(AtomicUsize::new(0));
