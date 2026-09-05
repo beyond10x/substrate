@@ -31,7 +31,14 @@ Query this first. Do not infer support from a version number or deployment label
 | `DELETE` | `/v1/workspaces/{workspace_id}/files/{*path}` | delete a guarded path |
 | `POST` | `/v1/workspaces/{workspace_id}/lease/renew` | renew workspace liveness |
 
-The current host slice serves empty workspace creation. Git source materialization is absent.
+The host serves empty workspaces and conditionally serves Git materialization. A Git request names
+a deployment-configured HTTPS source, an authorized opaque locator, the provider branch, an exact
+commit and a depth from 1 through 50. It requires the `workspace.git` fact and transient source
+authority. The resulting working tree has detached HEAD at that commit. Its `.git` directory is
+usable in confined terminals but hidden from file and tree APIs.
+
+The bounded Git routes below compare against the host-private immutable materialization baseline.
+They do not turn the workspace API into an arbitrary Git remote client.
 
 ### Development v2 byte plane
 
@@ -49,42 +56,21 @@ edits, and patches.
 | `POST` | `/v2/workspaces/{workspace_id}/file-edits/{*path}` | apply one bounded positional edit |
 | `POST` | `/v2/workspaces/{workspace_id}/file-patches/{*path}` | apply one bounded patch |
 
-Current development source advertises `substrate-wire/0.16.0` in `x-b10x-contract` and its inner
+Release `0.7.3` advertises `substrate-wire/0.16.0` in `x-b10x-contract` and its inner
 `bundle.json` SHA-256 in `x-b10x-contract-bundle-sha256`. The two headers are one claim. The signed
 outer OCI manifest has a different digest because it identifies the distribution package rather
 than the inner contract manifest.
 
-Bundle `0.10.0` succeeds `0.9.0` without adding a route. It adds a `pty` session mode with a
-required bounded terminal window, a closed resize-capable frame vocabulary, and a capability fact
-that is present only after the host proves terminal allocation and resize behavior. Without that
-fact, PTY start is refused and is never served as raw pipes.
+The current release is `0.7.3` with development bundle `0.16.0`. That bundle adds the
+closed Git source request and two Git observation routes. Earlier additions now served include
+PTY sessions, metrics, hard storage quotas, scoped workspace write authority and hosted admission.
+The session routes moved to `/v1/sessions` in bundle `0.15.0`; no `/v1/pipe-sessions`
+compatibility alias is served.
 
-Bundle `0.11.0` succeeds `0.10.0`, preserves its 31 routes, and adds `GET /v1/metrics` plus
-`GET /v1/metrics/stream`. It also declares hard `/workspace` and `/scratch` quota requests and the
-exact, explicitly requested resource-usage observation. Bundle `0.11.0` exists for development
-consumers to pin and verify before the server claims it; its existence is not a stability or
-compatibility promise.
-
-Bundle `0.12.0` has an already-frozen compatibility block that names `0.10.0`, preserves 31 routes,
-and adds the two metrics routes. Before promotion, an additional gate proves that its complete
-33-route declarations match `0.11.0` and that the quota and metrics behavior from `0.11.0` remains
-present beside exact read-only or scoped workspace write authority. This one recorded lineage
-bridge does not make the bundle stable or make any earlier bundle mutable.
-
-Bundle `0.13.0` directly succeeds `0.12.0`, preserves all 33 routes and adds none. It declares the
-hosted production-admission profile: exact Identity audience, five-minute online authority
-resolution, the `observe`/`workspaces`/`exec` route mapping and the four `auth.*` refusals a remote
-client can receive. It remains a development contract.
-
-Bundle `0.14.0` adds the hosted-only attachment-authority mint route and binds each one-use bearer
-to an Ed25519 key and the accepting TLS 1.3 channel. Bundle `0.15.0` then performs one deliberate
-pre-1.0 break: its eight session addresses move from `/v1/pipe-sessions` to `/v1/sessions`, with no
-redirect or compatibility alias. Operation ids and request/result schemas stay the same.
-
-Bundle `0.16.0` succeeds `0.15.0` additively. It closes the Git workspace source shape around a
-deployment-configured HTTPS source, opaque locator, provider branch, exact commit and depth 1–50;
-adds the conditional `workspace.git` fact; and adds the two bounded Git observation routes above.
-The transient source authority is an HTTP header and is absent from every contract JSON document.
+Frozen compatibility declarations and route/schema details are available in the
+[0.16.0 bundle](https://github.com/beyond10x/substrate/tree/0.7.3/contracts/substrate-wire/0.16.0).
+See [system model and derivation](../concepts/model.md) for which artifacts are generated and
+[status](../status.md) for release maturity.
 
 ### Metrics
 
@@ -134,7 +120,8 @@ one-use key-and-channel-bound authority; Unix attachment continues to use kernel
 | `GET` | `/v1/reconciliation-snapshots/{snapshot_id}` | read the barriered recovery view |
 
 Event replay is bounded by the retention advertised in machine facts. Consumers must reconcile from
-a snapshot after a history gap.
+a snapshot after a history gap. A reconciliation snapshot contains observed resource state, not a
+restorable copy of workspace files.
 
 ## Identity and operation IDs
 

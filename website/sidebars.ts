@@ -11,6 +11,7 @@ const sidebars: SidebarsConfig = {
       collapsed: false,
       items: [
         {type: 'doc', id: 'concepts/boundary', label: 'System boundary'},
+        {type: 'doc', id: 'concepts/model', label: 'System model and derivation'},
         {type: 'doc', id: 'concepts/confinement', label: 'Confinement and refusal'},
         {type: 'doc', id: 'concepts/operations', label: 'Operations and observations'},
       ],

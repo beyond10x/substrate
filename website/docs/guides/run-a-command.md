@@ -5,6 +5,9 @@ description: A copy-and-paste terminal walkthrough for executing an ordinary bin
 
 # Execute an ordinary binary inside a measured resource envelope
 
+This is the W1 → O1 → X1 journey from [operations and observations](../concepts/operations.md),
+using real server-issued resource IDs and caller-issued operation IDs.
+
 This walkthrough uses `curl` and `jq`; no agent runtime is involved. It creates a workspace, writes
 an input file, runs `sha256sum` directly, polls exact resource observations, and reads bounded
 output.
@@ -13,14 +16,29 @@ The daemon must first prove the complete Linux confinement floor. For resource m
 publish `exec.resource-usage`; for hard `/workspace` and `/scratch` ceilings it must publish the two
 quota facts described in [storage quotas and resource metrics](./storage-and-metrics.md).
 
+Run the Bash blocks in order in one script. `set -euo pipefail` stops on an error. Save the
+printed run ID and the request bodies if a response is lost; they identify the operations to
+reconcile. Starting the whole script again deliberately uses new IDs and can create new effects.
+
 ## 1. Point the shell at the daemon
 
 ```bash
+set -euo pipefail
 SOCKET=./run/substrate.sock
 BASE=http://localhost
+RUN_ID=$(cat /proc/sys/kernel/random/uuid)
+printf 'run: %s\n' "$RUN_ID"
 
-MACHINE=$(curl --silent --show-error --unix-socket "$SOCKET" "$BASE/v1/machine")
-SNAPSHOT=$(jq -r '.result.snapshot' <<<"$MACHINE")
+api() {
+  local response
+  response=$(curl --silent --show-error --fail-with-body --max-time 30 \
+    --unix-socket "$SOCKET" "$@") || { printf '%s\n' "$response" >&2; return 1; }
+  jq -e 'if .error == null and .result != null then . else error("API failure") end' \
+    <<<"$response"
+}
+
+MACHINE=$(api "$BASE/v1/machine")
+SNAPSHOT=$(jq -er '.result.snapshot | select(type == "string" and length > 0)' <<<"$MACHINE")
 
 jq '.result.facts | {
   namespaces: .["exec.namespaces"],
@@ -30,6 +48,15 @@ jq '.result.facts | {
   workspace_quota: .["workspace.storage-quota"],
   scratch_quota: .["exec.scratch-quota"]
 }' <<<"$MACHINE"
+
+jq -e '.result.facts |
+  .["exec.namespaces"] != null and .["exec.cgroup-limits"] != null and
+  .["exec.no-egress"] == true and .["exec.resource-usage"] != null and
+  .["workspace.storage-quota"] != null and .["exec.scratch-quota"] != null' \
+  >/dev/null <<<"$MACHINE" || {
+    printf '%s\n' 'This daemon does not advertise every fact required by this guide.' >&2
+    exit 1
+  }
 ```
 
 Do not manufacture a snapshot value or assume that a missing fact is supported. The snapshot binds
@@ -37,11 +64,14 @@ the request to the exact capability generation that was inspected.
 
 ## 2. Create a disk-bounded workspace
 
+The fact check above stops before creating anything if this host cannot serve the full example.
+To try file I/O alone, use [the workspace quickstart](../getting-started.md#try-a-workspace-without-process-execution).
+
 This request caps persistent data at 64 MiB and 2,048 inodes:
 
 ```bash
-CREATE_BODY=$(jq -nc '{
-  op: "01JDEMO_CREATE_WORKSPACE_01",
+CREATE_BODY=$(jq -nc --arg op "$RUN_ID-create" '{
+  op: $op,
   input: {
     source: "empty",
     labels: {purpose: "terminal-demo"},
@@ -49,12 +79,12 @@ CREATE_BODY=$(jq -nc '{
   }
 }')
 
-CREATE=$(curl --silent --show-error --unix-socket "$SOCKET" \
+CREATE=$(api \
   --header 'content-type: application/json' \
   --data "$CREATE_BODY" \
   "$BASE/v1/workspaces")
 
-WS=$(jq -r '.result.id' <<<"$CREATE")
+WS=$(jq -er '.result.id | select(type == "string" and length > 0)' <<<"$CREATE")
 printf 'workspace: %s\n' "$WS"
 ```
 
@@ -68,12 +98,12 @@ The file API takes standard base64. The process later sees this file at `/worksp
 
 ```bash
 CONTENT=$(printf '%s' 'substrate runs ordinary binaries' | base64 -w0)
-WRITE_BODY=$(jq -nc --arg content "$CONTENT" '{
-  op: "01JDEMO_WRITE_INPUT_000001",
+WRITE_BODY=$(jq -nc --arg op "$RUN_ID-write" --arg content "$CONTENT" '{
+  op: $op,
   input: {content: {encoding: "base64", data: $content}}
 }')
 
-curl --silent --show-error --unix-socket "$SOCKET" \
+api \
   --request PUT \
   --header 'content-type: application/json' \
   --data "$WRITE_BODY" \
@@ -94,8 +124,8 @@ The request below gives the process:
 - explicit exact resource accounting.
 
 ```bash
-EXEC_BODY=$(jq -nc --arg ws "$WS" --arg snapshot "$SNAPSHOT" '{
-  op: "01JDEMO_EXEC_SHA256SUM_001",
+EXEC_BODY=$(jq -nc --arg op "$RUN_ID-exec" --arg ws "$WS" --arg snapshot "$SNAPSHOT" '{
+  op: $op,
   input: {
     workspace: $ws,
     argv: ["/usr/bin/sha256sum", "/workspace/input.txt"],
@@ -119,12 +149,12 @@ EXEC_BODY=$(jq -nc --arg ws "$WS" --arg snapshot "$SNAPSHOT" '{
   }
 }')
 
-START=$(curl --silent --show-error --unix-socket "$SOCKET" \
+START=$(api \
   --header 'content-type: application/json' \
   --data "$EXEC_BODY" \
   "$BASE/v1/execs")
 
-EXEC=$(jq -r '.result.id' <<<"$START")
+EXEC=$(jq -er '.result.id | select(type == "string" and length > 0)' <<<"$START")
 printf 'exec: %s\n' "$EXEC"
 ```
 
@@ -138,8 +168,8 @@ your own security model. Direct argv is easier to reason about when values come 
 Poll the latest exact observation while the command is running:
 
 ```bash
-while :; do
-  SAMPLE=$(curl --silent --show-error --unix-socket "$SOCKET" \
+for attempt in {1..20}; do
+  SAMPLE=$(api \
     "$BASE/v1/metrics?resource_kind=exec&resource_id=$EXEC")
   jq '.result.usage | {
     status, complete, wall_time_us, cpu_time_us,
@@ -153,18 +183,26 @@ while :; do
 done
 ```
 
+Polling stops after at most 20 samples; this is a client observation bound, not proof that the exec
+finished. The next step reads process state. If a request times out, reconcile its existing ID.
+
 For a UI, the WebSocket route `/v1/metrics/stream?exec_id=$EXEC` sends an immediate latest sample
 and then samples at the advertised interval. It is latest-wins rather than a replay log.
 
 ## 6. Read the result and bounded output
 
 ```bash
-curl --silent --show-error --unix-socket "$SOCKET" \
-  "$BASE/v1/execs/$EXEC" | jq '.result | {state, exit, refusal, usage}'
+OBSERVED=$(api "$BASE/v1/execs/$EXEC")
+jq '.result | {state, exit, refusal, usage}' <<<"$OBSERVED"
+jq -e '.result.state | . == "exited" or . == "cancelled" or . == "expired"' \
+  >/dev/null <<<"$OBSERVED" || {
+    printf '%s\n' 'Exec is not proven terminal; reconcile before cleanup or another run.' >&2
+    exit 1
+  }
 
-curl --silent --show-error --unix-socket "$SOCKET" \
+api \
   "$BASE/v1/execs/$EXEC/output?stream=stdout&offset=0&limit_bytes=65536" |
-  jq -r '.result.content.data' | base64 -d
+  jq -er '.result.content.data | select(type == "string")' | base64 -d
 ```
 
 A non-zero child exit is still a successful observation of a process that ran. A resource ceiling
@@ -175,12 +213,14 @@ HTTP refusal.
 ## 7. Clean up
 
 ```bash
-curl --silent --show-error --unix-socket "$SOCKET" \
-  --request DELETE \
-  --header 'content-type: application/json' \
-  --data '{"op":"01JDEMO_DESTROY_WORKSPACE_1","input":{}}' \
-  "$BASE/v1/workspaces/$WS" | jq .result
+RETIRE_BODY=$(jq -nc --arg op "$RUN_ID-retire" '{op: $op, input: {}}')
+api --request DELETE --header 'content-type: application/json' \
+  --data "$RETIRE_BODY" "$BASE/v1/execs/$EXEC" | jq .result
+
+DESTROY_BODY=$(jq -nc --arg op "$RUN_ID-destroy" '{op: $op, input: {}}')
+api --request DELETE --header 'content-type: application/json' \
+  --data "$DESTROY_BODY" "$BASE/v1/workspaces/$WS" | jq .result
 ```
 
-`/scratch` is removed as part of terminal exec cleanup. The workspace remains until destroyed or
-expired by its lease.
+`/scratch` is removed as part of terminal exec cleanup. Exec retirement releases its retained resource
+record. The workspace remains until destroyed or expired by its lease.

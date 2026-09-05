@@ -21,9 +21,9 @@ From a source checkout:
 cargo build --release --locked -p b10x-substrate-mcp --bin substrate-mcp
 ```
 
-The crate is intentionally `publish = false`. Release `0.5.0` publishes the separately signed
+The crate is intentionally `publish = false`. Release [0.7.3](https://github.com/beyond10x/substrate/releases/tag/0.7.3) publishes the separately signed
 container at
-`ghcr.io/beyond10x/b10x-substrate-mcp@sha256:3fc28533df606b1db8d5583c3f4288551393ecf15c293c7815bfe8f599976316`.
+`ghcr.io/beyond10x/b10x-substrate-mcp@sha256:ac78c94823793094c7a6e46e7adfd0e4d0b83fda6c07c976893f4ff1a5fa2b8d`.
 Run it with no network, a read-only root and only an ephemeral private `/tmp`:
 
 ```bash
@@ -31,7 +31,7 @@ docker run --rm -i \
   --network=none \
   --read-only \
   --tmpfs /tmp:rw,nosuid,nodev,noexec,size=16m,mode=700 \
-  ghcr.io/beyond10x/b10x-substrate-mcp@sha256:3fc28533df606b1db8d5583c3f4288551393ecf15c293c7815bfe8f599976316
+  ghcr.io/beyond10x/b10x-substrate-mcp@sha256:ac78c94823793094c7a6e46e7adfd0e4d0b83fda6c07c976893f4ff1a5fa2b8d
 ```
 
 That container remains disposable test tooling, not production ingress.

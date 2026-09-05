@@ -1,62 +1,100 @@
 ---
 title: Operations and observations
-description: How durable operation identity, typed outcomes, events, and leases make execution recoverable.
+description: Follow one command through durable admission, process execution, retries, events and recovery.
 ---
 
-# An effect begins with a durable operation
+# Follow a command from intent to observation
 
-Every resource mutation carries a caller-minted operation ID. Substrate records the provisional
-operation before dispatching to a driver.
+Suppose workspace **W1** contains `input.txt`. The caller wants exec **X1** to run
+`/usr/bin/sha256sum /workspace/input.txt` and supplies operation **O1** for that start request.
+W1, X1 and O1 are explanatory labels, not literal valid IDs to send to the API.
 
-```text
-request
-  → validate
-  → reserve operation durably
-  → verify capability snapshot
-  → dispatch bounded action
-  → re-read observed state
-  → commit outcome and event
-  → answer
+## Three identities, two lifetimes
+
+| Identity | Answers | Lifetime |
+|---|---|---|
+| Workspace W1 | Where are the guarded input and output files? | Until destruction or lease expiry |
+| Operation O1 | Was this start request accepted, and what answer was recorded? | Retained in the bounded operation ledger |
+| Exec X1 | What is the process doing, and what did it produce? | Running, then terminal or unknown; later retired |
+
+An asynchronous start operation can finish successfully while its exec is still running.
+`operation.terminal` is not proof that the child process exited. Read X1 for process state and exit
+status; read O1 to reconcile acceptance and the recorded start answer.
+
+```mermaid
+sequenceDiagram
+  participant C as Caller
+  participant D as Daemon
+  participant S as Durable store
+  participant H as Host driver
+  C->>D: Start in W1, operation O1, bounds and snapshot
+  D->>D: Authenticate and validate
+  D->>S: Reserve O1 before dispatch
+  D->>H: Apply confinement and start X1
+  H-->>D: Observed start or named failure
+  D->>S: Record outcome and events
+  D-->>C: Stored start answer with X1 identity
+  H-->>D: Later process observation
+  D->>S: Persist X1 state and output
+  C->>D: Read X1 and output
+  D-->>C: Observed result
 ```
 
-The order closes a common failure gap: if the connection breaks after acceptance, the caller can ask
-about the same operation rather than creating a second effect.
+Reservation closes the gap between acceptance and an external effect. A malformed request or a
+request rejected before durable admission may have no ledger row; receiving any HTTP response is
+not, by itself, proof that an operation was reserved.
 
 ## Retry identity
 
-Reusing the same operation ID with the same body returns the same logical outcome. Reusing it with a
-different body is a conflict.
+Mint one operation ID for each intended mutation: 16–128 ASCII letters, digits, underscores or
+hyphens. Keep it with the exact request. Within the authenticated subject scope, the canonical
+identity includes the method, address, query and input. Reusing the ID for different request
+content is a conflict.
 
-Do not mint a new ID merely because a response was lost. Query the operation ledger first.
+After a lost response, query `GET /v1/ops/{operation_id}` or resend the same request with the same
+ID. A stored answer is replayed; a pending operation remains something to reconcile. Replaying
+still requires current authentication and valid delegated authority. A ledger record does not
+restore expired permission.
 
-## Observed answers
+Do not mint another ID merely because O1's response was lost or its outcome is `unknown`: a second
+ID can authorize a second effect. Conversely, a **recorded refusal or terminal error is replayed**,
+not re-executed. After fixing its cause and deciding to make a new attempt, use a new operation ID.
 
-A successful mutation returns the resource as observed after the action. It does not echo the
-request and call that success.
+## Read the outcome before deciding what to do
 
-- A non-zero process exit is an observed exec result, not a failed API operation.
-- Truncated output remains an explicit observation.
-- Missing facts remain absent; they do not become zero.
-- Restart can turn an in-flight outcome into `unknown` when the terminal effect cannot be proved.
-
-## Answered outcome classes
-
-| Class | Meaning | Typical next move |
+| Outcome | Meaning | Next decision |
 |---|---|---|
-| `refused` | a guard, authority, validation, or precondition said no | change the request or authority |
-| `conflict` | current state disagrees with the mutation | re-read and decide again |
-| `unserved` | this deployment does not implement the requested operation | choose another deployment or stop |
-| `exhausted` | the request is valid but capacity is unavailable | free capacity or retry the same operation |
-| `failed` | an admitted operation ended in a driver failure | repair, then reconcile the same operation |
+| `refused` | A guard, authority check, validation or precondition said no | Correct the cause; a recorded refusal needs a new ID for a new attempt |
+| `conflict` | Request identity or resource state disagrees | Re-read state and check whether the ID was reused incorrectly |
+| `unserved` | The requested capability cannot be served here | Stop or choose a deployment that advertises it |
+| `exhausted` | A bound or capacity prevents admission | Free capacity; use a new ID for a deliberate attempt after a recorded refusal |
+| `failed` | The admitted action failed | Inspect the recorded outcome and resource state before attempting another effect |
+| `unknown` | The terminal effect cannot be proved | Reconcile the existing operation and resource; do not assume success or absence |
 
-Transport silence is different: no answer means acceptance is unknown. The ledger, replayable events,
-and reconciliation snapshots exist for that case.
+A non-zero child exit is an observed exec result, not automatically a failed start operation.
+Truncated output remains explicit. Missing usage facts remain absent rather than becoming zero.
+After a restart, an unprovable in-flight effect can become `unknown`.
 
-## Leases turn disappearance into state
+## Events, metrics and recovery have different jobs
 
-Workspaces, execs, and sessions may carry a renewable lease. Expiry is a typed transition with an
-event and a reason. A vanished client therefore leaves an observable lifecycle outcome rather than
-an indefinitely assumed owner.
+Events carry a generation and sequence, a resource and transition, a cause, and an observation.
+They let a consumer follow durable changes such as `workspace.created`, `exec.exited` and
+`operation.terminal`. Replay is bounded by retention; it is not an unlimited audit archive.
+Sessions currently use operation-ledger events rather than a separate `session.*` vocabulary,
+as described in [model coverage](./model.md#model-coverage).
 
-See [the contract surface](../reference/contract.md) for resource routes and
-[deployment postures](../guides/deployment.md) for the trust boundary around them.
+If the consumer falls behind retained history, create a reconciliation snapshot, read its bounded
+pages, and resume from its cursor. This snapshot is a barriered view of resource state, **not a
+backup or restorable filesystem image**. Live metrics are separate latest-wins observations and
+do not offer durable event replay.
+
+## Leases and cleanup
+
+Workspaces, execs and sessions may carry renewable leases. Expiry causes lifecycle work and an
+observable result; it does not prove that cleanup succeeded. Inspect unknown or cleanup-failed
+outcomes instead of assuming the resource disappeared. After X1 is terminal, retire it and destroy
+W1 when its files are no longer needed.
+
+The [command walkthrough](../guides/run-a-command.md) implements this journey with real IDs,
+bounded polling and explicit cleanup. The [contract surface](../reference/contract.md) lists the
+operation, event and reconciliation routes.

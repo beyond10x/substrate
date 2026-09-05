@@ -8,21 +8,9 @@ description: Where caller intent stops and Substrate's execution data-plane resp
 Substrate owns execution mechanics and observed lifecycle state. It does not own the intent that led
 to a request.
 
-```text
-product / agent / automation
-          │  intent and policy
-          ▼
-placement or governance (optional)
-          │  bounded command
-          ▼
-Substrate service contract
-          │  admitted operation
-          ▼
-verified machine driver
-          │  re-read state
-          ▼
-observation + event + operation outcome
-```
+The [system model](./model.md) maps the actual daemon, store, host driver, SDK and MCP adapter.
+For a concrete request, the caller chooses to hash a file; Substrate owns whether the workspace
+and process can be confined and what the process actually did.
 
 This dependency direction stays one-way. Consumers integrate through the service contract; the data
 plane does not import product behavior.
@@ -54,7 +42,8 @@ or unbounded.”
 
 ## One contract, capability-gated behavior
 
-Drivers implement the same resource model. A caller should ask which capabilities this daemon
+The shipped driver is the Linux host driver. The contract separates its resource model from
+backend-specific enforcement. A caller should ask which capabilities this daemon
 verified, not which driver happens to be behind it. An absent capability produces `unserved` or a
 more specific refusal.
 
