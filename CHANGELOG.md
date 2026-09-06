@@ -7,6 +7,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.7.6] — 2026-09-06
+
+### Added
+
+- Opt-in container execution bootstrap with a private cgroup delegation, protected enclosing
+  limits, permanent non-root transition and an init process that reaps sandbox descendants.
+- Versioned AppArmor and seccomp profiles with a separate immutable node-profile installer.
+- Packaged non-setuid bubblewrap and shell tools for the existing confined host execution floor,
+  plus a public-SDK container check for file bytes, PTY input/resize, observed resource usage and
+  complete process-tree cleanup. Ordinary and quota daemon entrypoints remain available.
+
 ## [0.7.5] — 2026-09-05
 
 Published by [release run 33994751338](https://github.com/beyond10x/substrate/actions/runs/33994751338).

@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Substrate amd64 container host execution OCI seccomp profile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "$schema",
+    "defaultAction",
+    "defaultErrnoRet",
+    "architectures",
+    "syscalls"
+  ],
+  "properties": {
+    "$schema": {
+      "const": "schemas/host-execution.schema.json"
+    },
+    "defaultAction": {
+      "const": "SCMP_ACT_ERRNO"
+    },
+    "defaultErrnoRet": {
+      "const": 1
+    },
+    "architectures": {
+      "const": [
+        "SCMP_ARCH_X86_64"
+      ]
+    },
+    "syscalls": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "items": {
+        "$ref": "#/$defs/rule"
+      }
+    }
+  },
+  "$defs": {
+    "rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "names",
+        "action"
+      ],
+      "properties": {
+        "names": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 512,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z_][a-z0-9_]*$"
+          }
+        },
+        "action": {
+          "enum": [
+            "SCMP_ACT_ALLOW",
+            "SCMP_ACT_ERRNO"
+          ]
+        },
+        "errnoRet": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4095
+        },
+        "args": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 6,
+          "items": {
+            "$ref": "#/$defs/argument"
+          }
+        }
+      }
+    },
+    "argument": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "index",
+        "value",
+        "op"
+      ],
+      "properties": {
+        "index": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5
+        },
+        "value": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "valueTwo": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "op": {
+          "enum": [
+            "SCMP_CMP_EQ",
+            "SCMP_CMP_LT",
+            "SCMP_CMP_GT",
+            "SCMP_CMP_MASKED_EQ"
+          ]
+        }
+      }
+    }
+  }
+}

@@ -187,6 +187,37 @@ set `PR_SET_NO_NEW_PRIVS` before executing its trusted backend; this prevents ga
 at exec, while an ordinary non-root exec with empty inheritable/ambient sets clears existing
 permitted/effective capabilities. `PR_SET_NO_NEW_PRIVS` alone does not clear capabilities at fork.
 
+### Container execution
+
+The daemon image includes `/usr/local/bin/substrate-container-exec` for an explicit container
+execution profile. It requires Linux amd64, private PID/mount/cgroup namespaces, finite enclosing
+CPU and memory limits, the enforced `substrate-host-exec-v1` AppArmor profile and the matching
+versioned [seccomp profile](deploy/seccomp/README.md). The application receives no host paths or
+host namespaces. Start the bootstrap as container PID 1 and UID/GID 0 with exactly CHOWN, SETGID,
+SETUID, SETPCAP and SYS_ADMIN after dropping all other capabilities. Supply a writable temporary
+directory and the existing private state/workspace volumes.
+
+Pass ordinary daemon arguments after `--`; prepend `--project-quotas` when using the existing
+quota executable. The bootstrap verifies its enclosing resource controls, prepares only the
+container's private delegation, drops to UID/GID 65532 and starts the daemon beneath an init
+process that reaps orphaned children. Ordinary mode drops every capability; quota mode retains
+only the existing SYS_ADMIN file-capability path. The daemon's existing probes decide whether
+execution and PTY facts are present. Missing prerequisites remain startup or capability refusals.
+
+Provision node profiles separately with the image's `substrate-container-profiles` executable.
+The installer needs only MAC_ADMIN, securityfs and a dedicated root-owned kubelet seccomp
+directory mounted at `/node-profiles`. It installs fixed versioned bytes and refuses conflicting
+files or an already-loaded profile without its exact retained source. `--check` verifies without
+writing; `--hold` supports deployment readiness and normal termination. Application pods never
+receive these mounts or installation authority.
+
+The `container-checker` Docker build target contains a public-SDK example for final-image
+acceptance. Run its `container-pty-check SOCKET` executable as the admitted non-root UID inside
+the tested container's PID, mount and cgroup namespaces. It verifies file bytes, generated PTY
+input, resize, worker capability removal, live resource observations and whole-tree cleanup.
+Run both ordinary and quota variants, the existing delegated lane and image-startup checks before
+admitting terminals. The portable CI lane alone does not prove container execution.
+
 ### Git workspace sources
 
 `--git-source <name>=<https-prefix>/` (repeatable) declares a segment-bounded Connector byte-plane
