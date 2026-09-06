@@ -1,0 +1,50 @@
+# Explicit container-private host execution profile. Never replace the runtime default.
+# See design 25 for namespaces, capability drop and no_new_privs requirements.
+#include <tunables/global>
+
+profile substrate-host-exec-v1 flags=(attach_disconnected,mediate_deleted) {
+  #include <abstractions/base>
+  file,
+  network,
+  capability chown,
+  capability setgid,
+  capability setuid,
+  capability setpcap,
+  capability sys_admin,
+  # Bubblewrap configures loopback only after entering its private user/network namespaces.
+  capability net_admin,
+  capability sys_chroot,
+  # kernel/ucount.c requires this inside the nested user namespace to lower its ceiling.
+  capability sys_resource,
+  # One inherited label: no_new_privs forbids relaxing policy at exec.
+  userns,
+  remount options=(rw,bind,nosuid,nodev,noexec,relatime) /sys/fs/cgroup/,
+  mount fstype=tmpfs,
+  mount fstype=proc,
+  mount fstype=devpts,
+  mount options=(rw,bind),
+  mount options=(rw,bind,silent),
+  mount options=(rw,rbind),
+  mount options=(rw,rbind,silent),
+  mount options=(rw,rprivate),
+  mount options=(rw,rprivate,silent),
+  mount options=(rw,rslave),
+  mount options=(rw,rslave,silent),
+  remount options in (rw,ro,bind,nosuid,nodev,noexec,relatime,silent) /**,
+  umount,
+  pivot_root,
+  signal (receive) peer=unconfined,
+  signal (receive) peer=runc,
+  signal (receive) peer=crun,
+  signal (send,receive) peer=substrate-host-exec-v1,
+  ptrace (trace,tracedby,read,readby) peer=substrate-host-exec-v1,
+  deny /proc/{sysrq-trigger,mem,kmem,kcore,keys,timer_list,sched_debug} rwklx,
+  deny /proc/{acpi,scsi}/** rwklx,
+  deny /proc/{bus,fs,irq}/** w,
+  deny /proc/sys/{abi,debug,dev,fs,kernel,net,vm}/** w,
+  deny /sys/kernel/security/** rwklx,
+  deny /sys/firmware/** rwklx,
+  deny /sys/devices/virtual/powercap/** rwklx,
+  # Namespace-local userns ceilings support --disable-userns. New cgroup and block
+  # filesystem mounts have no allow rule. Sandboxes retain the existing seccomp floor.
+}

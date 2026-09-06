@@ -176,21 +176,28 @@ fn mcp_image_is_stdio_only_and_its_exact_binary_is_smoke_tested() {
         .split_once(" AS mcp\n")
         .expect("named MCP runtime stage")
         .1
-        .split_once("\nFROM daemon AS release")
-        .expect("default daemon alias after MCP runtime stage")
-        .0;
+        .split("\nFROM ")
+        .next()
+        .expect("MCP runtime stage body");
     assert!(DOCKERFILE.contains("gcr.io/distroless/cc-debian12:nonroot@sha256:"));
     assert!(
         DOCKERFILE.contains("install -D /usr/lib/x86_64-linux-gnu/libz.so.1 /out/lib/libz.so.1")
     );
-    assert_eq!(
-        DOCKERFILE
-            .match_indices(
-                "COPY --from=builder /out/lib/libz.so.1 /usr/lib/x86_64-linux-gnu/libz.so.1",
-            )
-            .count(),
-        2,
-        "both runtime targets must carry the zlib required by the shipped binaries"
+    assert!(
+        mcp.contains("COPY --from=builder /out/lib/libz.so.1 /usr/lib/x86_64-linux-gnu/libz.so.1"),
+        "the distroless MCP target must carry the shipped binary's zlib"
+    );
+    let prerequisites = DOCKERFILE
+        .split_once(" AS execution-prerequisites\n")
+        .expect("packaged daemon dependencies")
+        .1
+        .split_once("\nFROM execution-prerequisites AS daemon\n")
+        .expect("daemon inherits the packaged runtime libraries")
+        .0;
+    assert!(
+        prerequisites
+            .split_whitespace()
+            .any(|word| word == "zlib1g")
     );
     assert!(mcp.contains("ENTRYPOINT [\"/usr/local/bin/substrate-mcp\"]"));
     assert!(!mcp.contains("EXPOSE"));

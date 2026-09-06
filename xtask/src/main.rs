@@ -10,6 +10,7 @@ mod adrs;
 mod advisories;
 mod bot_files;
 mod bundle;
+mod container_profiles;
 mod image_startup;
 mod json;
 mod licenses;
