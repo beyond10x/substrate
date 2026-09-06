@@ -2,7 +2,7 @@
 format: aep.planning-md/1
 id: story:container-private-exec-bootstrap
 kind: story
-status: active
+status: implemented
 title: Serve confined execution beneath a private container delegation root
 relations:
 - decomposes: epic:kubernetes-deployment-and-driver
@@ -56,7 +56,7 @@ scope:
   path: xtask/src/image_startup.rs
 - confidence: cited
   path: xtask/tests/release_workflow.rs
-revision: 13
+revision: 15
 ---
 ## Outcome
 
@@ -89,3 +89,13 @@ The final-image startup checker passes all four cases: executable metadata/xattr
 The complete scripts/gate.sh passes for version 0.7.6, including all sixteen immutable bundle fixed points, 3633 classified JSON documents, formatting, Clippy with warnings denied, license fixed point, package boundaries, secret history and advisory checks. The complete scripts/delegated-lane.sh also passes host confinement, PTY, public SDK, remote WSS, disposable MCP, hosted attachment and the delegated wire inventory. The version bump changes only the eight workspace versions and exact internal edges; regenerated third-party notices change those eight version labels only.
 
 The pinned Docs System collector accepts this repository. The full organization documentation audit separately refuses existing aep/docs manifest drift; no unrelated manifest or catalog state was modified. Protected-main CI, immutable publication and exact published-image readback remain outstanding. The downstream deployment separately owes real-node profile verification, preserved-workspace checks and actual browser terminal acceptance before enabling the product profile.
+
+## Immutable release and published-image acceptance
+
+PR95 merged after exact-source Full gate34051053302 succeeded. Its reviewed source68b4e21115b4a57cd8c273287225e00a7f8efe97 is an ancestor of main and has the same tree as merge96e4117bfbc1da59332b72dc9bca827f7747317c; the main Full gate34051612003 also succeeded. The annotated0.7.6 tag names that exact reviewed source. Release34051681656 completed successfully, including all three keyless signatures, exact workflow-identity verification, final-image smoke tests and anonymous artifact retrieval.
+
+The published daemon digest is sha256:2ffe9021c9f498cda8d08e5b7438f0e3ca2bc371bdb1bf467e18ab7403073170, the disposable MCP digest is sha256:61b08d32b1c2e365c7466113c87334ae99b269716f3a469626134abf1ea580a2, and the unchanged development wire0.16.0 bundle is sha256:4c4e57a1b2427cb004a05cb475c1193e979777c5c79d9a9505ba5facbe10daf7. Release metadata and CHANGELOG.md retain all three.
+
+An independent anonymous pull confirms the daemon digest and exact source-revision label. Local verification with the same cosign3.0.6 used by the release verifies the claims, transparency-log inclusion and signing certificate under the exact release workflow identity. A previously installed cosign2.4.3 did not find the new signature format; its unsuccessful result is not counted as verification.
+
+Both ordinary and quota journeys pass against the published immutable image, using the public-SDK checker built from the exact released source: workspace bytes, generated PTY input, resize, all empty worker capability sets, no_new_privs, observed resource usage, acknowledged descendant identity, and complete process/cgroup cleanup. Both containers terminate normally with exit zero and are removed. This establishes the bounded runtime story's released behavior. Downstream node-profile installation, actual hosted browser terminal admission, preserved-user-workspace checks and Agent credential acceptance remain the downstream product's separate delivery obligations; this result does not claim them complete.
