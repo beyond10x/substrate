@@ -9,6 +9,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [0.7.6] — 2026-09-06
 
+Published by [release run 34051681656](https://github.com/beyond10x/substrate/actions/runs/34051681656).
+The workflow verified keyless signatures before announcement:
+
+- daemon: `sha256:2ffe9021c9f498cda8d08e5b7438f0e3ca2bc371bdb1bf467e18ab7403073170`
+- disposable MCP: `sha256:61b08d32b1c2e365c7466113c87334ae99b269716f3a469626134abf1ea580a2`
+- development wire bundle 0.16.0: `sha256:4c4e57a1b2427cb004a05cb475c1193e979777c5c79d9a9505ba5facbe10daf7`
+
 ### Added
 
 - Opt-in container execution bootstrap with a private cgroup delegation, protected enclosing
