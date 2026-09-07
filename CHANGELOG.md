@@ -7,6 +7,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- Leave Git metadata untouched during host startup, Git-only observations and workspace
+  destruction when no Git sources are configured.
+
 ## [0.7.6] — 2026-09-06
 
 Published by [release run 34051681656](https://github.com/beyond10x/substrate/actions/runs/34051681656).

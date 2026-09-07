@@ -703,21 +703,24 @@ impl HostDriver {
                 )
             },
         )?;
-        let git_baseline_root = config.git_baseline_root();
-        std::fs::create_dir_all(&git_baseline_root).map_err(|error| {
-            DriverError::failed(
-                "workspace.git-baseline-root-failed",
-                format!("Git baseline root: {error}"),
-            )
-        })?;
-        std::fs::set_permissions(&git_baseline_root, std::fs::Permissions::from_mode(0o700))
-            .map_err(|error| {
+        // A host without Git sources must not touch Git metadata in its workspace parent.
+        if !config.git_sources.is_empty() {
+            let git_baseline_root = config.git_baseline_root();
+            std::fs::create_dir_all(&git_baseline_root).map_err(|error| {
                 DriverError::failed(
                     "workspace.git-baseline-root-failed",
-                    format!("Git baseline root mode: {error}"),
+                    format!("Git baseline root: {error}"),
                 )
             })?;
-        git::reconcile(&config.workspace_root, &git_baseline_root)?;
+            std::fs::set_permissions(&git_baseline_root, std::fs::Permissions::from_mode(0o700))
+                .map_err(|error| {
+                    DriverError::failed(
+                        "workspace.git-baseline-root-failed",
+                        format!("Git baseline root mode: {error}"),
+                    )
+                })?;
+            git::reconcile(&config.workspace_root, &git_baseline_root)?;
+        }
         if config.project_quota_ids.is_some() {
             std::fs::create_dir_all(config.scratch_root()).map_err(|error| {
                 DriverError::failed("scratch.root-failed", format!("scratch root: {error}"))
@@ -1235,6 +1238,13 @@ impl Driver for HostDriver {
         path: &str,
         max_bytes: u64,
     ) -> Result<GitBaselineFileResult, DriverError> {
+        if self.config.git_sources.is_empty() {
+            return Err(DriverError::refused(
+                "workspace.git-workspace-required",
+                "The workspace has no Git materialization baseline.",
+                "workspace.git",
+            ));
+        }
         let workspace_id = workspace_id.to_owned();
         let root_name = root_name.to_owned();
         let path = path.to_owned();
@@ -1259,6 +1269,13 @@ impl Driver for HostDriver {
         root_name: &str,
         query: &GitChangesQuery,
     ) -> Result<GitChangeSet, DriverError> {
+        if self.config.git_sources.is_empty() {
+            return Err(DriverError::refused(
+                "workspace.git-workspace-required",
+                "The workspace has no Git materialization baseline.",
+                "workspace.git",
+            ));
+        }
         let workspace_id = workspace_id.to_owned();
         let root_name = root_name.to_owned();
         let workspace = self.workspace_path(&root_name)?;
@@ -1330,8 +1347,9 @@ impl Driver for HostDriver {
         let root_name = root_name.to_owned();
         let quota_path = self.config.workspace_root.join(&root_name);
         let quotas = self.quotas.clone();
-        let git_baseline_root = self.config.git_baseline_root();
         let workspace_destroy_namespace = self.workspace_destroy_namespace;
+        let git_baseline_root =
+            (!self.config.git_sources.is_empty()).then(|| self.config.git_baseline_root());
         self.filesystem_io(move |filesystem| {
             let _ownership =
                 WorkspaceDestroyOwnership::acquire(workspace_destroy_namespace, &root_name)?;
@@ -1340,7 +1358,9 @@ impl Driver for HostDriver {
                     Ok(WorkspaceDestroyProgress::Pending { removed_items })
                 }
                 fs::WorkspaceDestroyBatch::Absent => {
-                    git::remove_baseline(&git_baseline_root, &root_name)?;
+                    if let Some(baseline_root) = git_baseline_root.as_ref() {
+                        git::remove_baseline(baseline_root, &root_name)?;
+                    }
                     if let Some(quotas) = quotas.as_ref() {
                         quotas.release(&quota_path)?;
                     }
