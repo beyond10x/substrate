@@ -1,8 +1,15 @@
 # Repository status
 
-**Observed:** 2026-09-01
+**Observed:** 2026-09-07
 
 ## Current state
+
+The scoped Git startup correction leaves Git metadata untouched when no Git sources are
+configured; [Design23](docs/design/23-git-state-ownership.md) states the boundary. Its eight
+disposable regressions were observed failing against the previous implementation and passing on
+the correction. The complete workspace test suite also passes; the required full repository gate
+is the publication bar. Configured-Git recovery, quota allocation and storage formats retain their
+released behavior.
 
 Phase 3 **lifecycle and recovery** is complete under the
 [archived closure disposition](docs/reviews/archived/2026-08-14-phase-3-closure-review-disposition.md),
