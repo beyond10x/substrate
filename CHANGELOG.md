@@ -7,10 +7,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.7.7] — 2026-09-10
+
 ### Fixed
 
 - Leave Git metadata untouched during host startup, Git-only observations and workspace
   destruction when no Git sources are configured.
+
+### Changed
+
+- The documentation website consumes `@beyond10x/docs-system` at the exact revision
+  `86cd6c6efd02184c51a37e80012ffe9d3f77d40a`, release 0.7.0, in `website/package.json` and
+  `website/package-lock.json`. The published documentation bundle and Pages delivery workflows keep
+  their own catalog-owned pins and are unchanged.
 
 ## [0.7.6] — 2026-09-06
 
