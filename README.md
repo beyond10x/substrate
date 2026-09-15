@@ -33,10 +33,15 @@ development wire contract stable.
 | may execute for | [autodev](https://github.com/beyond10x/autodev) — over its `Executor` port |
 | may adapt | [flux](https://github.com/codewandler/flux) — a remote execution adapter over the substrate API. The dependency never points back into Flux |
 
-There is **no sibling-component implementation dependency**. Cross-component consumers use the
-released native `substrate-daemon` artifact or `b10x-substrate-sdk`. The SDK's opt-in linked mode
-may package the daemon solely to re-execute it as a separate child; resource operations still cross
-the authenticated Unix socket.
+There is **no sibling-component implementation dependency**: a consumer embeds Substrate, and
+Substrate embeds nothing of theirs (AGENTS.md invariant 2). Cross-component consumers use the
+released native `substrate-daemon` artifact or `b10x-substrate-sdk` over the authenticated socket.
+A consumer that wants no deployment at all instead embeds `b10x-substrate-host` and
+`b10x-substrate-wire` in-process from an exact Git revision — that is the seam
+[harness](https://github.com/beyond10x/harness) pins today in
+`crates/harness-substrate/Cargo.toml`, and it is a consumer surface of this repository like the
+other two. The SDK's opt-in linked mode may package the daemon solely to re-execute it as a
+separate child; resource operations still cross the authenticated Unix socket.
 
 The product and binary name are `substrate`. Rust source packages use the `b10x-substrate-*`
 prefix and are consumed from a local path or exact Git revision; every workspace package is
@@ -44,7 +49,7 @@ non-publishable.
 
 ## Status
 
-**Release [0.7.3](https://github.com/beyond10x/substrate/releases/tag/0.7.3) (2026-09-05)**
+**Release [0.7.7](https://github.com/beyond10x/substrate/releases/tag/0.7.7) (2026-09-10)**
 ships keyless-signed daemon and disposable MCP images plus the signed `0.16.0` development
 contract bundle. Signed distribution does not make the contract stable.
 
@@ -81,7 +86,8 @@ The table is the gate's own order (`scripts/gate.sh`).
 | secrets | `cargo xtask check-secrets` — scans every reachable commit, including root trees |
 | dependencies | `cargo xtask check-advisories` — rejects RustSec findings and HTTP/2 |
 | licences | `cargo xtask check-licenses` — verifies Apache-2.0 workspace metadata and deterministic third-party notices |
-| packages | `cargo xtask check-packages` — refuses every publishable workspace package and verifies the five runtime source packages' fixed names, exact internal versions, SPDX metadata, READMEs and public documentation targets |
+| packages | `cargo xtask check-packages` — refuses every publishable workspace package, verifies the five runtime source packages' fixed names, exact internal versions, SPDX metadata, READMEs and public documentation targets, and refuses a Flux dependency or a `beyond10x` Git dependency in any dependency table |
+| MCP boundary | `cargo xtask check-mcp-boundary` — refuses a publishable MCP crate, a Substrate implementation dependency, an unpinned or featured MCP stack, and a built-in unbounded or remote transport |
 | contract bundle 0.1.0 | `python3 scripts/check-contract-bundle.py` |
 | contract bundle 0.2.0 | `python3 scripts/check-contract-bundle-0.2.0.py` |
 | contract bundle 0.3.0 | `python3 scripts/check-contract-bundle-0.3.0.py` |
@@ -252,7 +258,7 @@ target/debug/substrate-daemon \
 ```
 
 A slot **name** is lowercase ASCII, digits and `_`, first character a letter, at most 64 bytes
-(`crates/substrate-wire/src/lib.rs:1766`) — a hyphen is refused. The **path** never leaves the
+(`valid_secret_slot_name` in `crates/substrate-wire/src/lib.rs`) — a hyphen is refused. The **path** never leaves the
 daemon process — it is not a capability fact, not an event field and
 not an error message. An error may name a slot; it never names a value. Rotating the file behind a
 declared name needs no restart and invalidates no admitted operation. The ledger request hash covers
@@ -437,6 +443,8 @@ workspace backup/restore snapshots remain absent.
 | `crates/substrate-host` | the Linux host driver |
 | `crates/substrate-daemon` | the standalone HTTP daemon: `DaemonConfig` plus the async `serve` entrypoint |
 | `crates/substrate-contract-check` | the offline contract checker |
+| `crates/b10x-substrate-sdk` | the typed Rust client over the daemon's authenticated service contract, with an opt-in linked-daemon mode |
+| `crates/substrate-mcp` | the private SDK-only stdio MCP adapter: bounded JSONL over a closed tool and resource vocabulary |
 
 | path | holds |
 |---|---|
@@ -447,6 +455,7 @@ workspace backup/restore snapshots remain absent.
 | [`.engineering/planning/`](.engineering/planning/) | the plan: epics and stories as governed artifacts, read with `protocol artifact list` / `board` |
 | [`adr/`](adr/) | accepted component decisions, with YAML frontmatter |
 | [`scripts/`](scripts/) | `gate.sh` and the checks it runs |
+| [`xtask/`](xtask/) | the workspace member holding the gate's own `cargo xtask` verbs and the bundle renderer |
 
 ## Read more
 

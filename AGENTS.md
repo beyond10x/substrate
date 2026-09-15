@@ -30,9 +30,11 @@ Each is a claim that can be checked. Breaking one is a design change, not a refa
 
 1. **Substrate is Flux-free.** No Flux crate and no Flux type may appear in any dependency kind or in
    any public or private implementation. Flux is prior art and a possible client
-   (`adr/0001-substrate-is-standalone-and-flux-free.md`).
+   (`adr/0001-substrate-is-standalone-and-flux-free.md`). `cargo xtask check-packages` asserts the
+   dependency half on every manifest in the workspace.
 2. **No sibling-component implementation dependency**, in either direction. A consumer embeds
-   substrate; substrate embeds nothing of theirs.
+   substrate; substrate embeds nothing of theirs — `cargo xtask check-packages` refuses a
+   `beyond10x` Git dependency in any dependency table.
 3. **A missing isolation or capability guarantee is a named refusal, never silent degradation.**
    Absent delegation keeps exec facts *absent*; it never manufactures an optimistic one.
 4. **Drivers implement one substrate contract and expose verified capability facts.** Clients do not
@@ -121,7 +123,7 @@ Substrate is confinement. Everything below is the reason it can be trusted with 
   definition — ADR 0011 fixes the document as a compact JWS, so a vector proving substrate verifies
   one has to contain one — and they carry no credential: each is signed by a key whose seed is the
   SHA-256 of a sentence published in this repository
-  (`crates/substrate-daemon/tests/runtime_vectors.rs:2405-2409`). The exception is scoped by rule
+  (`delegated_signing_key` in `crates/substrate-daemon/tests/runtime_vectors.rs`). The exception is scoped by rule
   **and** by path; a JWT anywhere else, including any other vector, is still a finding. Proven, not
   asserted: the same token in `contracts/substrate-wire/0.7.0/vectors/http/delegated-context-*.json`
   is allowed and in `crates/substrate-daemon/src/` is caught. **Widening this allowlist is a
@@ -151,7 +153,7 @@ bash scripts/gate.sh
 In order: `cargo test --workspace --release --locked`, `cargo fmt --all --check`,
 `cargo clippy --workspace --all-targets --release --locked -- -D warnings`, then `cargo xtask check-links`,
 `cargo xtask check-adrs`, `cargo xtask check-secrets`, `cargo xtask check-advisories`,
-`cargo xtask check-licenses`, `cargo xtask check-packages`,
+`cargo xtask check-licenses`, `cargo xtask check-packages`, `cargo xtask check-mcp-boundary`,
 `check-contract-bundle.py`, `check-contract-bundle-0.2.0.py`,
 `-0.3.0.py`, `-0.4.0.py`, one bounded
 `cargo xtask check-bundles 0.5.0 ... 0.16.0`,
@@ -174,7 +176,7 @@ bundles' reproducibility proof (invariant 6), not as tooling.
 | `check-secrets` | a reachable Git object carrying a credential, or an incomplete history scan | yes |
 | `check-advisories` | a RustSec vulnerability or forbidden HTTP/2 dependency | yes |
 | `check-licenses` | non-Apache workspace metadata, an unreviewed dependency licence or third-party notice drift | yes |
-| `check-packages` | a publishable workspace package, a loose internal version edge, or a source runtime package without inherited SPDX metadata, its README and a public documentation target | yes |
+| `check-packages` | a publishable workspace package, a loose internal version edge, a source runtime package without inherited SPDX metadata, its README and a public documentation target, or — invariants 1 and 2 — a Flux dependency or a `beyond10x` Git dependency in any dependency table, `[workspace.dependencies]` and `[patch.*]` included | yes |
 | `package-bundle <version> --out <dir>` | produces a released bundle as a deterministic OCI image layout | no — under `cargo test` |
 | `render-bundle <version> --out <dir>` | produces a bundle tree from `substrate-wire` and `xtask/bundle-source/<version>/`; refuses to write anywhere under `contracts/` | no — under `cargo test` |
 | `check-bundle <version>` | a released bundle whose bytes are not the fixed point of `xtask/bundle-source/<version>/` | no — focused form of the batched gate check |
@@ -198,12 +200,19 @@ reproduces the frozen tree byte for byte, so the renderer cannot drift away from
 
 **Not everything in a bundle is derivable, and the renderer says which parts are not.** No schema
 *shape* comes from the Rust types: `schemars` is not a workspace dependency, and the types are
-already ahead of `0.4.0` — `ExecStartInput::read_only_roots`
-(`crates/substrate-wire/src/lib.rs:761`) has no `0.4.0` schema — while the bounds the schemas state
-are literals in `crates/substrate-daemon/src/app/operations.rs:245-248` and
-`crates/substrate-host/src/process.rs:824-826`, not on the types. What the wire crate does own is
-taken from it: canonical hashing and 22 bounds constants. One derivation is recorded as **lost** at
-`xtask/src/render.rs:19-25` — the three unions in `schemas/vector.json` encode Python dict
+already ahead of `0.4.0` — `ExecStartInput::read_only_roots` (the `ExecStartInput` struct in
+`crates/substrate-wire/src/lib.rs`) has no `0.4.0` schema — and no bound sits *on* a type as a
+derive attribute. The bounds the schemas state are free constants: the wire crate's own
+`pub const MAX_…`/`MIN_…` items (`grep -c '^pub const \(MAX\|MIN\)_' crates/substrate-wire/src/lib.rs`
+= 31), which a schema binds with the `{"$wire": "CONSTANT"}` marker, plus the daemon- and
+host-local literals their enforcement sites hold — `PIPE_MAX_FRAME_BYTES`,
+`PIPE_MAX_INPUT_BYTES` and `PIPE_MAX_QUEUED_FRAMES` in `crates/substrate-daemon/src/app.rs`, and
+`PIPE_FRAME_BYTES` and `PIPE_QUEUED_FRAMES` in `crates/substrate-host/src/process.rs`.
+`crates/substrate-daemon/src/app/operations.rs` holds none of its own: it imports
+`MIN_LEASE_TTL_MS` and `MAX_LEASE_TTL_MS` from the wire crate and the pipe bounds from `app.rs`.
+What the wire crate does own is taken from it: canonical hashing and those bounds constants. One
+derivation is recorded as **lost** in the module documentation of
+`xtask/src/render.rs` — the three unions in `schemas/vector.json` encode Python dict
 insertion order, which a sorted-key bundle preserves nowhere.
 
 **The clean-room runtime-vector runner is a gate step of its own no longer, for the same
@@ -224,7 +233,8 @@ child group so the delegation root stays process-free, and sets the variable. Do
 delegated lane cannot run here: a user session's own scope is root-owned, so `mkdir` in it fails,
 and an absent lane looks identical to a green one if you only read `cargo test`.
 
-**The gate verifies every released bundle, not just `0.1.0`.** `scripts/gate.sh:20-23` runs the
+**The gate verifies every released bundle, not just `0.1.0`.** The four
+`run python3 scripts/check-contract-bundle*.py` lines in `scripts/gate.sh` run the
 four frozen Python checkers, and the line after them runs `cargo xtask check-bundles` for `0.5.0`
 through `0.16.0`, so
 a green gate *is* evidence that all sixteen still hold. Cutting a successor bundle therefore means
@@ -233,7 +243,8 @@ from the next commit onward.
 
 **Editing `xtask/src/render.rs` breaks every bundle it has already rendered.** A rendered
 `bundle.json` carries `generator.digest`, which is the sha256 of the file named at
-`generator.name` (`xtask/src/render.rs:308-312`) — so one byte changed there and `0.5.0` stops being
+`generator.name` (the `generator_digest` binding in `Source::load`, `xtask/src/render.rs`, which
+calls `digest_of` on that path) — so one byte changed there and `0.5.0` stops being
 a fixed point of its own source, with no way to fix it that does not rewrite a frozen directory.
 A successor that needs a new `{"$wire": …}` binding therefore **cannot have one**: bind the constant
 from `xtask/src/bundle.rs` instead, which no bundle hashes (`check_aperture_additions`, added for
@@ -306,7 +317,13 @@ by run `33498193209`: daemon `ghcr.io/beyond10x/b10x-substrate-daemon:0.5.0` at
 keyless-signed, `cosign verify`-ed with the exact tagged workflow identity, and anonymously read
 back before the GitHub release was announced.
 
-`main` is protected by the `Full gate` status check, so the workflow never pushes a changelog commit
+**No GitHub rule requires the `Full gate` check.** `main`'s rules are
+`creation`, `update`, `deletion`, `non_fast_forward` and the two bot email patterns
+(`gh api repos/beyond10x/substrate/rules/branches/main --jq '[.[].type]'`);
+`GET /repos/beyond10x/substrate/branches/main/protection/required_status_checks` answers 404
+`Branch not protected`. The gate is enforced at release time instead: `release.yml` reads
+`gate.yml`'s own recorded conclusion for the exact commit from the Actions API and refuses to
+release a tag without a `success`. The workflow still never pushes a changelog commit
 or creates a `GITHUB_TOKEN` pull request whose events GitHub would suppress. After every signature
 verifies and the GitHub release exists, its summary emits the exact daemon, disposable-MCP and
 contract-bundle digest lines for a workstation's bot-authored pull request. That PR receives the
@@ -367,12 +384,13 @@ at `scripts/bot-token.sh:8` — `org="${B10X_BOT_ORG:-beyond10x}"` — **is** th
 lives in (`git remote -v` shows `github.com/beyond10x/substrate`), so the default is right here. Set
 `B10X_BOT_ORG` only to mint against a different org.
 
-**Bot authentication does not bypass protected `main`.** A direct `scripts/as-bot.sh push origin
-main` is rejected with `GH006` because the required checks are only created after the commit is
-published on a branch. Push a bot-owned branch, open its pull request with `scripts/bot-gh.sh`, wait
-for the required checks on that exact head, and merge through the protected-branch path. Do not
-retry the direct push or weaken protection; this is the ordinary path for every workstation-authored
-change, including release preparation.
+**Bot authentication does not bypass `main`'s ruleset.** A direct `scripts/as-bot.sh push origin
+main` is rejected with `GH006`: the ruleset restricts `creation`, `update`, `deletion` and
+`non_fast_forward` on that ref. No rule requires a status check, so waiting for one is not what
+opens the path — pushing a bot-owned branch is. Push a bot-owned branch, open its pull request with
+`scripts/bot-gh.sh`, let `Full gate` run on that exact head, and merge through the pull request. Do
+not retry the direct push or loosen the ruleset; this is the ordinary path for every
+workstation-authored change, including release preparation.
 
 **One exception, and it is narrower rather than looser: CI releases use `GITHUB_TOKEN` for registry
 and GitHub-release API writes.** `.github/workflows/release.yml` uses the run's own token for both

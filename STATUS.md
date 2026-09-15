@@ -1,6 +1,6 @@
 # Repository status
 
-**Observed:** 2026-09-07
+**Observed:** 2026-09-15
 
 ## Current state
 
@@ -34,24 +34,24 @@ per-request authority and proof-bound WSS. A node-bound Kubernetes serving profi
 Docker/Kubernetes drivers and a direct
 Firecracker driver remain proposed. The observed development EKS nodes expose no KVM device or microVM RuntimeClass,
 so Firecracker live conformance needs a dedicated KVM-capable node pool and is absent on the
-current nodes. Substrate `0.5.0` is annotated at commit `fcb48e5`; release run
-[`33498193209`](https://github.com/beyond10x/substrate/actions/runs/33498193209) built the tagged
-source, signed and verified all three digests, proved anonymous retrieval and published the GitHub
-release only after the exact tagged commit's Full gate succeeded.
+current nodes. The latest annotated tag is `0.7.7` at commit `3fafeae`; release run
+[`34534655571`](https://github.com/beyond10x/substrate/actions/runs/34534655571) built that tagged
+source, keyless-signed all three artifacts and published the GitHub release only after
+`.github/workflows/gate.yml` had concluded `success` for the exact tagged commit.
 
 | Area | State | Next proof |
 |---|---|---|
-| Source | the standalone public repository `beyond10x/substrate` (`git remote -v`), public under atlas ADR 0003 ([CHANGELOG.md](CHANGELOG.md), 0.2.1); the latest annotated tag and verified GitHub release are `0.5.0` at `fcb48e5` | keep the portable-document and credential invariants enforced — `cargo xtask check-links` and `cargo xtask check-secrets` are full-gate steps |
-| CI | [`.github/workflows/gate.yml`](.github/workflows/gate.yml) runs `bash scripts/gate.sh` bare on push to `main`, on pull request and on dispatch, so the job's status is the gate's own; branch protection on `main` requires the `Full gate` check; the first green run is [33275398365](https://github.com/beyond10x/substrate/actions/runs/33275398365). The delegated lane is **absent** there, never reported as passed: a hosted runner has neither bubblewrap nor a delegated cgroup subtree | either give the delegated lane a runner that has both, or keep it the named local pre-release step it is today |
-| Release | run [`33498193209`](https://github.com/beyond10x/substrate/actions/runs/33498193209) published, keyless-signed, verified and anonymously read back daemon `ghcr.io/beyond10x/b10x-substrate-daemon:0.5.0` at `sha256:5dc8a1a6b61c9b652817c0ae54a4504c23bf781a6fed3cb7617e535bf7c9e786`, disposable MCP `ghcr.io/beyond10x/b10x-substrate-mcp:0.5.0` at `sha256:3fc28533df606b1db8d5583c3f4288551393ecf15c293c7815bfe8f599976316`, and development bundle `ghcr.io/beyond10x/b10x-substrate-wire:0.15.0` at `sha256:ba95171e3a05d7917e4083759107132ad6fb707003e791e15b47d9fb20424ac8`; the public release is [0.5.0](https://github.com/beyond10x/substrate/releases/tag/0.5.0), authored by `github-actions[bot]`; the bundle remains development, not stable | retain write-once tags, anonymous readback and signature verification in every later release |
-| Boundary | accepted: standalone, generic execution data plane, Flux-free ([ADR 0001](adr/0001-substrate-is-standalone-and-flux-free.md)) | enforce ADRs 0001–0006 in dependency and conformance tests |
+| Source | the standalone public repository `beyond10x/substrate` (`git remote -v`), public under atlas ADR 0003 ([CHANGELOG.md](CHANGELOG.md), 0.2.1); the latest annotated tag and published GitHub release are `0.7.7` at `3fafeae`, which is this page's HEAD (`git describe --tags --abbrev=0`) | keep the portable-document and credential invariants enforced — `cargo xtask check-links` and `cargo xtask check-secrets` are full-gate steps |
+| CI | [`.github/workflows/gate.yml`](.github/workflows/gate.yml) runs `bash scripts/gate.sh` bare on push to `main`, on pull request and on dispatch, so the job's status is the gate's own. **No rule requires that check.** `main` carries two repository rulesets (`gh api repos/beyond10x/substrate/rules/branches/main` → `creation`, `update`, `deletion`, `non_fast_forward`, `commit_author_email_pattern`, `committer_email_pattern`); `GET /repos/beyond10x/substrate/branches/main/protection/required_status_checks` answers 404 `Branch not protected`. What does enforce the gate is [`.github/workflows/release.yml`](.github/workflows/release.yml), which reads `gate.yml`'s own recorded conclusion for the exact commit from the Actions API and refuses to release a tag without a `success`. The first green run is [33275398365](https://github.com/beyond10x/substrate/actions/runs/33275398365). The delegated lane is **absent** there, never reported as passed: a hosted runner has neither bubblewrap nor a delegated cgroup subtree | either give the delegated lane a runner that has both, or keep it the named local pre-release step it is today |
+| Release | run [`34534655571`](https://github.com/beyond10x/substrate/actions/runs/34534655571) published and keyless-signed daemon `ghcr.io/beyond10x/b10x-substrate-daemon:0.7.7` at `sha256:5e20467bd03ad7e619ffcf8664dcc6d3323c62fb62eb1f0e25f001333092a409`, disposable MCP `ghcr.io/beyond10x/b10x-substrate-mcp:0.7.7` at `sha256:e40c16ae56fa06353e508e5245b8d78b336ecd1cebf3fde20b8dddaf18b42b7c`, and development bundle `ghcr.io/beyond10x/b10x-substrate-wire:0.16.0` at `sha256:4c4e57a1b2427cb004a05cb475c1193e979777c5c79d9a9505ba5facbe10daf7`, each verifiable against the certificate identity `release.yml@refs/tags/0.7.7`; the public release is [0.7.7](https://github.com/beyond10x/substrate/releases/tag/0.7.7), authored by `github-actions[bot]`; the bundle remains development, not stable | retain write-once tags, anonymous readback and signature verification in every later release |
+| Boundary | accepted: standalone, generic execution data plane, Flux-free ([ADR 0001](adr/0001-substrate-is-standalone-and-flux-free.md)) | ADR 0001's dependency half is now a gate step (`cargo xtask check-packages`); give ADRs 0002–0006 the same treatment in dependency and conformance tests |
 | Wire contract | bundles 0.1.0–0.16.0 remain frozen and reproducible; current source advertises additive 0.16.0 at inner `bundle.json` digest `cee5845cf425885bdae3be6f59cb9e39ce342df065a01ae65eaae24ad2f29b41`, preserving 0.15.0's 34 operations and adding two bounded Git observation routes; published 0.15.0 remains the preceding development artifact | notify consumers of the source promotion and do not describe either development bundle as stable |
 | Drivers | Linux host driver implemented; absent delegation keeps exec, resource-accounting and project-quota facts absent and answers named `unserved` refusals rather than degrading; the delegated execution lane runs only when given `SUBSTRATE_VECTORS_CGROUP_ROOT`, and project quotas require a separately provisioned filesystem and exclusive ID range | retain the delegated lane as a pre-release step and add no optimistic facts |
 | Security | `openat2` beneath/no-link/no-mount I/O, atomic replacement, cleared/shaped environment, namespace no-egress, pids/memory+swap plus cumulatively observed CPU cgroup bounds, backend-identity-bound capability snapshots, output draining, timeout, whole-tree kill, exact capsule-byte verification, read-only `/runtime`, separate writable `/workspace`, owner-private durable state, and bounded normal/restart capsule cleanup are enforced; static-bearer TCP is loopback-only and explicitly development-only; production network transport is TLS 1.3 with owner-safe identity material, atomic rotation, online exact-audience Identity admission and one-use key/channel-bound WSS attachment authority | retain negative hosted-auth and session-authority conformance without weakening the inline capsule proof |
 | Stack integration | trust, session, event, federation, and contract-release seams accepted in umbrella ADRs 0015–0019; the planning store now carries dependency-gated remote-serving, Kubernetes, Docker and Firecracker tracks | accept each track's design/ADR and environment gate before capability code; keep product policy outside Substrate |
 | Implementation | the phase-4 raw-pipe slice has distinct durable session identity, session-native lifecycle operations, one scoped Unix-WebSocket attachment, atomic terminal/restart projection and verified execution capsules, proven by [`crates/substrate-daemon/tests`](crates/substrate-daemon/tests) — `pipe_session.rs`, `websocket.rs`, `contract_vectors.rs`. A pty is a second **mode** on that same slice, with the controlling terminal acquired inside the sandbox after bubblewrap's `setsid`; the delegated lane of [`runtime_vectors.rs`](crates/substrate-daemon/tests/runtime_vectors.rs) drives an interactive shell through one — echo, a resize the child reads back with `TIOCGWINSZ`, and whole-tree cleanup on attachment loss — and the portable lane proves `session.pty-unserved`. The delegated model-free harness lane with correlated hook evidence is a recorded prior observation ([Plan 04](docs/plan/04-direct-byte-plane.md)), not something this repository re-runs in its own gate | retain the raw-pipe, capsule and terminal evidence while adding only separately gated authority and release work |
 | Rust SDK | current source verifies the promoted 0.16.0 name and inner digest before serving an operation; sends session requests only to `/v1/sessions`; exposes typed guarded-file, Git-baseline/change-set, PTY, metrics, snapshot, event and bounded-output APIs; preserves optional capability facts; accepts caller ids on every mutation; serializes SDK observations; supervises an external or linked daemon; and connects remotely over explicit-root TLS 1.3 HTTPS/WSS with per-request Identity authority and fresh proof-bound session authority | retain local/remote parity and distribute the SDK from source rather than crates.io |
-| MCP test surface | current source provides a private SDK-only `substrate-mcp` stdio binary with bounded JSONL, a closed tool/resource vocabulary, exact refusal projection, caller operation ids, per-instance authority tracking and ordered cleanup; portable and delegated shipped-binary lanes plus a manual real-Codex run prove the intended harness surface; release 0.5.0 publishes its separately signed image at `sha256:3fc28533df606b1db8d5583c3f4288551393ecf15c293c7815bfe8f599976316` | keep HTTP, OAuth and production ingress absent |
+| MCP test surface | current source provides a private SDK-only `substrate-mcp` stdio binary with bounded JSONL, a closed tool/resource vocabulary, exact refusal projection, caller operation ids, per-instance authority tracking and ordered cleanup; portable and delegated shipped-binary lanes plus a manual real-Codex run prove the intended harness surface; release 0.7.7 publishes its separately signed image at `sha256:e40c16ae56fa06353e508e5245b8d78b336ecd1cebf3fde20b8dddaf18b42b7c` | keep HTTP, OAuth and production ingress absent |
 
 ## Repository facts
 
@@ -63,7 +63,10 @@ trust this page.
   `b10x-substrate-sdk` — plus non-publishable MCP and tooling packages
   ([`Cargo.toml`](Cargo.toml), `[workspace] members`). Every member sets `publish = false`;
   `cargo xtask check-packages` checks that closed posture plus exact internal release versions,
-  package names, SPDX metadata, READMEs and public documentation targets. Consumers use a local
+  package names, SPDX metadata, READMEs and public documentation targets, and refuses a Flux
+  dependency (invariant 1) or a `beyond10x` Git dependency (invariant 2) in any dependency table of
+  any manifest — its `a_flux_dependency_is_refused` and `a_beyond10x_git_dependency_is_refused`
+  tests prove each refusal fires. Consumers use a local
   path or exact Git revision; tagged releases publish GitHub and GHCR artifacts, not crates.io.
   0.16.0 is the current development bundle and every earlier bundle
   directory is frozen; [`scripts/gate.sh`](scripts/gate.sh) runs the four Python bundle checkers
@@ -124,23 +127,30 @@ trust this page.
   negative tests proving unclassified JSON, invalid payloads, invalid schemas and invalid
   authority targets fail closed.
 - Runtime SQLite and guarded filesystem calls use separately bounded 16-slot blocking lanes
-  (`crates/substrate-host/src/lib.rs:453`, `crates/substrate-daemon/src/app/service.rs:204`);
+  (`blocking_slots` in `crates/substrate-host/src/lib.rs`, `blocking_store_slots` in
+  `crates/substrate-daemon/src/app/service.rs`, both `Semaphore::new(16)`);
   saturation tests prove unrelated async work remains schedulable. Snapshot GC bounds metadata,
   cascade-owned items and expiry markers while preserving expired-versus-never-found behaviour
-  (`crates/substrate-store/src/tests.rs:2315`).
+  (`snapshot_gc_bounds_materialized_rows_and_preserves_expired_posture` in
+  `crates/substrate-store/src/tests.rs`).
 - Workspace cleanup advances in descriptor-relative 4,096-item batches
-  (`crates/substrate-host/src/fs.rs:31`) without a total depth or item ceiling. Durable
+  (`DESTROY_BATCH_ITEMS` in `crates/substrate-host/src/fs.rs`) without a total depth or item
+  ceiling. Durable
   `destroying` blocks exec start and is automatically resumed after restart under fixed,
   subject-scoped lock stripes until the original destroy operation terminalizes
-  (`crates/substrate-daemon/tests/contract_vectors.rs:1739`).
+  (`destroying_workspace_refuses_exec_after_restart_and_replays_stably` and
+  `crash_after_destroying_resumes_cleanup_and_terminalizes_original_operation` in
+  `crates/substrate-daemon/tests/contract_vectors.rs`).
 - A workspace root may be a directory the operator already owns: `validate_root_name`
-  (`crates/substrate-host/src/fs.rs:1317`) requires a single non-escaping path component and no
+  (`crates/substrate-host/src/fs.rs`) requires a single non-escaping path component and no
   longer a `ws_` prefix, while `create_workspace` still mints `ws_…`. Adoption is half done —
-  `crates/substrate-daemon/src/app/operations.rs:241` still gates `exec.start` on the `ws_` prefix,
+  the `starts_with("ws_")` predicate in `crates/substrate-daemon/src/app/operations.rs` still gates
+  `exec.start` on the `ws_` prefix,
   so over the socket an adopted directory can be read and written but cannot run an exec. Widening
   that predicate is wire-contract-adjacent and is not done.
 - Outside its composition root the daemon names nothing from `substrate_host` except the `Driver`
-  trait (`crates/substrate-host/src/lib.rs:171`) and the types that trait's signature forces on a
+  trait (`pub trait Driver` in `crates/substrate-host/src/lib.rs`) and the types that trait's
+  signature forces on a
   caller, asserted by
   [`crates/substrate-daemon/tests/driver_port.rs`](crates/substrate-daemon/tests/driver_port.rs).
 - The toolchain is pinned, not floating: [`rust-toolchain.toml`](rust-toolchain.toml) declares the

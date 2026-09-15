@@ -2,14 +2,14 @@
 format: aep.planning-md/1
 id: epic:byte-plane-completion
 kind: epic
-status: active
+status: implemented
 title: Byte-plane completion
 summary: 'Phase 4''s remaining exit criteria whose design is already accepted: PTY sessions, sealed memfd secret slots, and network session transport with single-use proof-bound authority.'
 owner: substrate
 tags:
 - phase-4
 - wire
-revision: 7
+revision: 8
 ---
 # Epic: Byte-plane completion
 
