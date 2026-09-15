@@ -10,6 +10,11 @@
 #
 # Without it the lane is absent, not green: `cargo test` alone proves the portable refusal only.
 # It runs both delegated lanes: the host crate's own cases and the clean-room runner's.
+#
+# **It does not cover the real project-quota cases.** Those are `#[ignore]`d, this script passes no
+# `--ignored`, and nothing here provisions the filesystem they need — so a green run of this lane
+# says nothing about them. It closes by naming them, through `cargo xtask quota-lane --inventory`;
+# `cargo xtask quota-lane` is what runs them, and refuses by name when their fixture is absent.
 set -euo pipefail
 
 if [[ "${SUBSTRATE_DELEGATED_INNER:-}" != "1" ]]; then
@@ -95,4 +100,11 @@ SUBSTRATE_MCP_CGROUP_ROOT="${root}" \
 cargo test -p b10x-substrate-daemon --test tls_listener \
   hosted_wss_attachment_authority_is_one_use_and_channel_bound --locked -- --nocapture
 
-exec cargo test -p b10x-substrate-daemon --test runtime_vectors -- --nocapture "$@"
+cargo test -p b10x-substrate-daemon --test runtime_vectors -- --nocapture "$@"
+
+# What this lane did *not* run. A green run above covers the delegated cgroup cases and nothing
+# about project quotas: the real-quota cases need an ext4/XFS filesystem mounted with project
+# quotas and an exclusive identity range, which no step here provisions. Saying so is the same
+# discipline invariant 3 applies to the delegated cases themselves — an absent lane is not a green
+# one, and the only way to tell them apart is to name what was skipped.
+cargo xtask quota-lane --inventory

@@ -144,6 +144,22 @@ cargo test --workspace --release --locked -- --nocapture   # the runner prints i
 The runner prints its current portable or delegated case inventory from each fresh execution;
 this document deliberately pins no counts that drift as adversarial coverage grows.
 
+**Neither lane covers the real project-quota cases.** The seven `real_quota_*` cases in
+`crates/substrate-host/src/git/quota_tests.rs` are `#[ignore]`d on an explicitly delegated
+project-quota fixture, and no script passes `--ignored`. `cargo xtask quota-lane` runs them:
+
+```console
+SUBSTRATE_TEST_QUOTA_ROOT=/quota SUBSTRATE_TEST_PROJECT_QUOTA_IDS=200000-200511 \
+  cargo xtask quota-lane
+```
+
+The root must sit on a filesystem mounted with project quotas (`prjquota`, or XFS `pquota`) and the
+range must be an exclusive inclusive `START-END` of at least 128 identities. **Absent either, the
+verb refuses by name and exits 1**, listing each missing prerequisite and every case that did not
+run, rather than reporting nothing. `cargo xtask quota-lane --inventory` prints that statement
+without running anything, and `scripts/delegated-lane.sh` ends with it so a green delegated lane
+cannot be read as covering these cases.
+
 `cargo xtask check-json` fails closed on unclassified or schema-invalid contract JSON and
 meta-validates every Draft 2020-12 schema offline, across all sixteen released bundles. Classification
 used to live in a Python module the four checkers imported — shared live machinery, not any one

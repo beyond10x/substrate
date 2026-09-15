@@ -23,6 +23,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   run; it does not execute the lane in CI.
 - [ADR 0006](adr/0006-substrate-publishes-its-own-contract-bundle.md) records why Substrate
   publishes and keyless-signs its own development contract bundle.
+- `cargo xtask quota-lane` runs the seven `#[ignore]`d `real_quota_*` cases in
+  `crates/substrate-host/src/git/quota_tests.rs`, selecting each with `--ignored --exact` and
+  requiring the harness's own `1 passed` for it. With `SUBSTRATE_TEST_QUOTA_ROOT` or
+  `SUBSTRATE_TEST_PROJECT_QUOTA_IDS` missing, malformed, offering fewer than 128 identities, or
+  backed by a mount carrying neither `prjquota` nor `pquota`, it **refuses by name and exits 1**,
+  listing each missing prerequisite and every case that did not run. `--inventory` prints that
+  statement and runs nothing.
 - `cargo xtask check-packages` asserts the two dependency invariants — no Flux crate and no
   dependency resolved from a `beyond10x` Git repository — across every dependency table of every
   workspace manifest, with refusal tests.
@@ -38,6 +45,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Fixed
 
+- The real project-quota cases had no owner: neither `scripts/gate.sh` nor
+  `scripts/delegated-lane.sh` passed `--ignored`, no workflow or `xtask` verb did either, and they
+  are outside `DELEGATED_CASES`, so the release confinement-lane record never covered them.
+  Provisioning the filesystem would have changed nothing, because no script would have run them
+  even then — the only recorded execution is a hand-typed `docker exec` against a quota-lab image
+  on 2026-09-05. `cargo xtask quota-lane` is that invocation made repeatable, and
+  `scripts/delegated-lane.sh` now closes with `cargo xtask quota-lane --inventory`, which names the
+  cases it did not run so a green delegated lane cannot be read as covering them.
 - `scripts/delegated-lane.sh` resolves the shipped daemon under `CARGO_TARGET_DIR` rather than a
   hardcoded `${PWD}/target/debug/substrate-daemon`, and refuses by name when the build left no
   executable there. With an external build directory set — which a machine that shares one build

@@ -19,6 +19,7 @@ mod mcp;
 mod mcp_smoke;
 mod package;
 mod packages;
+mod quota_lane;
 mod render;
 mod render_v2;
 mod repo;
@@ -76,6 +77,9 @@ enum Command {
     /// Run the manual credentialed Codex smoke against a shipped MCP binary.
     #[command(name = "mcp-codex-smoke")]
     McpCodexSmoke(mcp_smoke::Args),
+    /// Run the ignored real project-quota cases, or refuse by name when their fixture is absent.
+    #[command(name = "quota-lane")]
+    QuotaLane(quota_lane::Args),
     /// Validate ADR identity, frontmatter, index agreement, and supersession links.
     #[command(name = "check-adrs")]
     Adrs,
@@ -125,6 +129,7 @@ fn dispatch() -> Result<ExitCode> {
         Command::Links => links::check(&repo::root()?)?,
         Command::McpBoundary => mcp::check(&repo::root()?)?,
         Command::McpCodexSmoke(args) => return mcp_smoke::run(&args),
+        Command::QuotaLane(args) => return quota_lane::run(&args),
         Command::Adrs => adrs::check(&repo::root()?)?,
         Command::CheckJson(args) => return json::run(&args),
         Command::PackageBundle(args) => return package::run(&args),

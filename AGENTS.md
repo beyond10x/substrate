@@ -233,6 +233,46 @@ child group so the delegation root stays process-free, and sets the variable. Do
 delegated lane cannot run here: a user session's own scope is root-owned, so `mkdir` in it fails,
 and an absent lane looks identical to a green one if you only read `cargo test`.
 
+### The real project-quota lane
+
+**`cargo xtask quota-lane` is the only thing that runs the seven `real_quota_*` cases, and nothing
+else ever did.** They live in
+[`crates/substrate-host/src/git/quota_tests.rs`](crates/substrate-host/src/git/quota_tests.rs),
+each `#[ignore]`d on the explicitly delegated project-quota fixture. `cargo test` does not select an
+ignored case, and neither `scripts/gate.sh` nor `scripts/delegated-lane.sh` passes `--ignored` — so
+provisioning the filesystem changed nothing on its own, because no script would have run them even
+then. The one recorded execution is a hand-typed `docker exec` against a quota-lab image on
+2026-09-05
+([`review-result/git-workspace-quota-lifecycle-pass-1.md`](.engineering/planning/review-result/git-workspace-quota-lifecycle-pass-1.md)).
+The verb is that invocation, repeatable:
+
+```console
+SUBSTRATE_TEST_QUOTA_ROOT=/quota SUBSTRATE_TEST_PROJECT_QUOTA_IDS=200000-200511 \
+  cargo xtask quota-lane
+```
+
+`SUBSTRATE_TEST_QUOTA_ROOT` must be a directory on a filesystem mounted with project quotas
+(`prjquota`, or XFS `pquota`), and `SUBSTRATE_TEST_PROJECT_QUOTA_IDS` an inclusive `START-END`
+range of at least 128 identities that nothing else on that filesystem uses. A `docker exec` shape
+also needs `SYS_ADMIN` in the inheritable and ambient sets for `quotactl`, as the recorded run's
+`setpriv --inh-caps=+sys_admin --ambient-caps=+sys_admin` shows.
+
+**With the fixture absent the verb refuses, naming each missing prerequisite and every case that
+therefore did not run, and exits 1** — it never reports nothing and lets that read as green. It
+selects each case with `--ignored --exact` and requires the harness's own `1 passed` for it, because
+a filter that matches nothing still exits 0; a rename that emptied the selection would otherwise
+make this lane green having executed no case, the same failure `scripts/delegated-lane.sh` refuses
+to allow for the delegated cases. `cargo xtask quota-lane --inventory` states the same inventory and
+runs nothing, and `scripts/delegated-lane.sh` closes with it so a green delegated lane cannot be
+read as covering these cases.
+
+**The release confinement-lane record does not cover them either.** `Confinement-lane:` names the
+`DELEGATED_CASES` of
+[`crates/substrate-daemon/tests/runtime_vectors.rs`](crates/substrate-daemon/tests/runtime_vectors.rs)
+(§ *The gate*), and the real-quota cases are in a different crate and outside that count. No release
+condition has ever asserted them; treat kernel project-quota enforcement as proven by the dated
+`quota-lane` run you can point at, and by nothing else.
+
 **The gate verifies every released bundle, not just `0.1.0`.** The four
 `run python3 scripts/check-contract-bundle*.py` lines in `scripts/gate.sh` run the
 four frozen Python checkers, and the line after them runs `cargo xtask check-bundles` for `0.5.0`
