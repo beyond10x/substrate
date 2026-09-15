@@ -7,6 +7,32 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Security
+
+- `rustls` is 0.23.45, taking the fix for
+  [RUSTSEC-2026-0285](https://rustsec.org/advisories/RUSTSEC-2026-0285.html); `THIRD_PARTY_LICENSES.html`
+  is regenerated for that revision.
+
+### Added
+
+- A release requires a **recorded delegated confinement-lane run for the tagged commit**.
+  `release.yml` reads a `Confinement-lane: <source-sha> <case-count> <RFC 3339 UTC>` line from the
+  annotated tag's own message, or from the `confinement_evidence` recovery-dispatch input, and
+  refuses a record that names another commit, a case count other than the `DELEGATED_CASES` the
+  tagged source declares, or a timestamp that is not an RFC 3339 UTC instant. It records a local
+  run; it does not execute the lane in CI.
+- [ADR 0006](adr/0006-substrate-publishes-its-own-contract-bundle.md) records why Substrate
+  publishes and keyless-signs its own development contract bundle.
+- `cargo xtask check-packages` asserts the two dependency invariants — no Flux crate and no
+  dependency resolved from a `beyond10x` Git repository — across every dependency table of every
+  workspace manifest, with refusal tests.
+
+### Changed
+
+- `AGENTS.md`, `README.md`, `ROADMAP.md` and `STATUS.md` describe 0.7.7, the repository rules that
+  exist — including ruleset `main-requires-the-full-gate` (id 23425552), which requires the `Full
+  gate` check on `main` — and the embedded seam.
+
 ## [0.7.7] — 2026-09-10
 
 ### Fixed

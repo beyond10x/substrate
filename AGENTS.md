@@ -304,6 +304,20 @@ layout with ORAS rather than constructing another manifest at publication time. 
 bundle is anonymously retrievable before mutating the daemon-image tag, so correcting first-push
 package visibility leaves a safe retry path.
 
+**Two of those three images ship for adopters outside this collection, and that is deliberate.** No
+repository in the `beyond10x` collection pulls `ghcr.io/beyond10x/b10x-substrate-wire` or
+`ghcr.io/beyond10x/b10x-substrate-mcp`: the only in-collection consumer of the wire contract,
+`harness/crates/harness-substrate`, pins the *crate* `b10x-substrate-wire` by Git revision, not the
+image, and nothing outside this repository names either image (`grep -rn
+'ghcr.io/beyond10x/b10x-substrate-wire'` over the collection on 2026-09-15 matched nothing outside `substrate/` and its two corrupt sibling copies, i.e. nothing outside
+`substrate/`). The bundle image exists so an external consumer can pin the wire contract by OCI
+digest instead of copying a directory tree (`story:contract-bundle-oci-artifact`), and the evidence
+that makes that pin worth more than the copy — keyless signature, digest pin, write-once tag — has to
+be collected while the bytes are development ([ADR 0006](adr/0006-substrate-publishes-its-own-contract-bundle.md),
+addendum). The disposable MCP image ships for local stdio development and conformance testing. Do not
+read either image's absence from the collection as an unused artifact, and do not add an in-collection
+consumer to justify it.
+
 **A release also requires a recorded delegated confinement-lane run for the tagged commit.** A green
 `gate.yml` is the portable lane only: the delegated lane needs bubblewrap and an exclusive delegated
 cgroup v2 subtree, which a hosted runner does not have, so that lane is reported **absent — not
@@ -330,15 +344,18 @@ required check, and is a separate decision.
 `packages: write` and `id-token: write` exist on the release job and nowhere else; that job holds
 `contents: write` only to create the GitHub release. Everything it does uses the run's own
 `GITHUB_TOKEN`; **the release needs no repository secret at all** (§ *Bot identity*). The GitHub
-release records all artifact digests and exact `cosign verify` commands. **`0.5.0` is published**
-by run `33498193209`: daemon `ghcr.io/beyond10x/b10x-substrate-daemon:0.5.0` at
-`sha256:5dc8a1a6b61c9b652817c0ae54a4504c23bf781a6fed3cb7617e535bf7c9e786`, disposable MCP
-`ghcr.io/beyond10x/b10x-substrate-mcp:0.5.0` at
-`sha256:3fc28533df606b1db8d5583c3f4288551393ecf15c293c7815bfe8f599976316`, and development bundle
-`ghcr.io/beyond10x/b10x-substrate-wire:0.15.0` at
-`sha256:ba95171e3a05d7917e4083759107132ad6fb707003e791e15b47d9fb20424ac8`. All three were
-keyless-signed, `cosign verify`-ed with the exact tagged workflow identity, and anonymously read
-back before the GitHub release was announced.
+release records all artifact digests and exact `cosign verify` commands. **`0.7.7` is the published
+release**: daemon `ghcr.io/beyond10x/b10x-substrate-daemon:0.7.7` at
+`sha256:5e20467bd03ad7e619ffcf8664dcc6d3323c62fb62eb1f0e25f001333092a409`, disposable MCP
+`ghcr.io/beyond10x/b10x-substrate-mcp:0.7.7` at
+`sha256:e40c16ae56fa06353e508e5245b8d78b336ecd1cebf3fde20b8dddaf18b42b7c`, and development bundle
+`ghcr.io/beyond10x/b10x-substrate-wire:0.16.0` at
+`sha256:4c4e57a1b2427cb004a05cb475c1193e979777c5c79d9a9505ba5facbe10daf7`. All three were
+keyless-signed, `cosign verify`-ed with the exact tagged workflow identity
+(`release.yml@refs/tags/0.7.7`), and anonymously read back before the GitHub release was announced.
+Do not maintain a second digest list here: the digests of every release are the GitHub release's own
+([0.7.7](https://github.com/beyond10x/substrate/releases/tag/0.7.7)) and
+[CHANGELOG.md](CHANGELOG.md)'s.
 
 **Ruleset `main-requires-the-full-gate` (id 23425552, no bypass actors) requires that check on `main` (`gh api repos/beyond10x/substrate/rules/branches/main` → `required_status_checks` beside `creation`, `update`, `deletion`, `non_fast_forward` and the two email patterns); the legacy `GET …/branches/main/protection` still answers 404 `Branch not protected`, because rulesets are not branch protection.** The gate is also enforced at release time: `release.yml` reads
 `gate.yml`'s own recorded conclusion for the exact commit from the Actions API and refuses to
@@ -395,6 +412,12 @@ worktree `../.worktrees/substrate-<task>` and remove it when its branch is merge
 their changes belong to the operator; inspect and preserve them unless the operator explicitly
 authorises their cleanup.
 
+Three such siblings predate this rule and are **not** admitted by it: `../substrate-wt/` (empty on
+2026-09-15), `../substrate-wt-corrupt-20260831-MNFXtyRu/` (holds `contract-gate` and `pty-sessions`)
+and `../substrate-corrupt-20260831-MNFXtyRu/` (a checkout of `wave/2026-08-30-byte-plane` with
+uncommitted changes). Removing them is the operator's call, not an agent's; until the operator
+removes them, they are the exception this paragraph records rather than a second admitted location.
+
 ## Bot identity
 
 Automated commits and pushes use the GitHub App via `scripts/as-bot.sh` and `scripts/bot-gh.sh`,
@@ -405,8 +428,11 @@ lives in (`git remote -v` shows `github.com/beyond10x/substrate`), so the defaul
 
 **Bot authentication does not bypass `main`'s ruleset.** A direct `scripts/as-bot.sh push origin
 main` is rejected with `GH006`: the ruleset restricts `creation`, `update`, `deletion` and
-`non_fast_forward` on that ref. No rule requires a status check, so waiting for one is not what
-opens the path — pushing a bot-owned branch is. Push a bot-owned branch, open its pull request with
+`non_fast_forward` on that ref (ruleset `b10x-bot-branch-authority`, id 22044994). A rule *does*
+require a status check — ruleset `main-requires-the-full-gate` (id 23425552) requires the `Full
+gate` context on `main` (§ *Releases*) — but that is not what rejects the direct push, so satisfying
+it is not what opens the path: pushing a bot-owned branch is. Push a bot-owned branch, open its pull
+request with
 `scripts/bot-gh.sh`, let `Full gate` run on that exact head, and merge through the pull request. Do
 not retry the direct push or loosen the ruleset; this is the ordinary path for every
 workstation-authored change, including release preparation.
@@ -428,9 +454,10 @@ runs from a workstation through `as-bot.sh`, or from a private repository.
 
 Plan items are markdown files under `.engineering/planning/<kind>/<slug>.md`: YAML frontmatter the
 `protocol` CLI owns, and a body the agent and operator own. `.engineering/project.yaml` pins the
-governing document tree to one `engineering-protocols` commit; advancing the pin is an explicit
-change to that file. The `engineering-protocols` Claude Code plugin (installed user-scope; skill
-`/engineering-protocols:planning`) carries the full model and store conventions.
+governing document tree to one commit of `beyond10x/aep` (the repository `engineering-protocols` was
+renamed to on 2026-09-01); advancing the pin is an explicit change to that file. The `aep-plan`
+Claude Code plugin (installed user-scope; skill `/aep-plan:planning`) carries the full model and
+store conventions.
 
 Kinds, relations, statuses and legal moves come from validated lifecycle documents. Ask the CLI —
 `protocol artifact kinds`, `relations`, `lifecycle <kind>`, `list`, `board`, `graph` — instead of
