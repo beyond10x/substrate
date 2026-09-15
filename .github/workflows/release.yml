@@ -18,6 +18,11 @@
 #     the glob dialect is the part this file cannot prove offline.
 #   * a lightweight tag, or a tag whose commit is not an ancestor of `origin/main`.
 #   * a tag whose version disagrees with `[workspace.package] version` in `Cargo.toml`.
+#   * a tag with no recorded delegated confinement-lane run for its own commit. `gate.yml` green is
+#     the portable lane; the delegated lane is absent on a hosted runner and never reported passed,
+#     so a release with no recorded local run would claim nothing about confinement at all. The
+#     record arrives in the annotated tag's `Confinement-lane:` trailer, or as the
+#     `confinement_evidence` input of a recovery dispatch, and goes into the release notes.
 #   * a commit for which `.github/workflows/gate.yml` has not concluded `success`. The gate is the
 #     bar for `main` (AGENTS.md § "The gate"); this workflow reads that workflow's own conclusion
 #     for the exact tagged SHA rather than re-running a lookalike, so "the gate was green for this
@@ -72,6 +77,18 @@ on:
         description: Existing annotated release tag to recover after a partial failure
         required: true
         type: string
+      confinement_evidence:
+        # Not `required: true`: a tag push cannot supply a workflow input at all, so the ordinary
+        # release path carries the same value in the annotated tag's own `Confinement-lane:`
+        # trailer. The preflight requires the *resolved* value to be non-empty and to name the
+        # tagged commit, whichever carrier supplied it. This input is how a recovery dispatch
+        # releases a tag annotated before that trailer existed.
+        description: >-
+          Recorded delegated confinement-lane run for the tagged commit, as
+          "<source-sha> <delegated-case-count> <RFC 3339 UTC>" from `bash scripts/delegated-lane.sh`;
+          empty uses the annotated tag's own Confinement-lane trailer
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -107,6 +124,7 @@ jobs:
       version: ${{ steps.tag.outputs.version }}
       source-sha: ${{ steps.tag.outputs.source-sha }}
       gate-run-url: ${{ steps.gate.outputs.run-url }}
+      confinement-evidence: ${{ steps.confinement.outputs.evidence }}
 
     steps:
       - name: Check out source
@@ -245,11 +263,99 @@ jobs:
             sleep 30
           done
 
+      # `gate.yml` green is the portable lane only. The delegated confinement lane needs bubblewrap
+      # and an exclusive delegated cgroup v2 subtree carrying `cpu`, `memory` and `pids`; a hosted
+      # runner has neither, so `gate.yml` reports that lane **absent — not executed, not passed**
+      # (gate.yml, "Report execution lanes"). Without this step a release would make no claim at all
+      # about the delegated cases, which are the ones that prove confinement rather than the typed
+      # refusal.
+      #
+      # This step does not run the lane. It requires a *recorded* run naming this exact commit, and
+      # carries that record into the release notes, so the claim is attributable and re-checkable
+      # instead of absent. Running the lane here is a self-hosted-runner decision, not this one.
+      #
+      # Two carriers, one value, because a tag push cannot supply a workflow input:
+      #   * the ordinary path records it in the annotated tag's own message, as a line
+      #     `Confinement-lane: <source-sha> <delegated-case-count> <RFC 3339 UTC>`. The tag object is
+      #     immutable and is written by the same workstation that ran the lane.
+      #   * a recovery dispatch may pass `confinement_evidence` instead, which is also the only way
+      #     to release a tag annotated before this condition existed.
+      #
+      # Three checks, each a refusal: the recorded commit is this commit (evidence from another
+      # commit proves nothing about these bytes), the recorded case count is the count the tagged
+      # source itself declares (a lane run against a smaller suite is not this suite), and the
+      # timestamp is a real UTC instant.
+      - name: Require a recorded confinement-lane run for this commit
+        id: confinement
+        env:
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+          INPUT_EVIDENCE: ${{ github.event_name == 'workflow_dispatch' && inputs.confinement_evidence || '' }}
+          SOURCE_SHA: ${{ steps.tag.outputs.source-sha }}
+        run: |
+          set -euo pipefail
+          evidence="${INPUT_EVIDENCE:-}"
+          carrier="the confinement_evidence workflow input"
+          if [ -z "${evidence//[[:space:]]/}" ]; then
+            evidence=$(git tag -l --format='%(contents)' "${TAG}" \
+              | sed -n 's/^Confinement-lane:[[:space:]]*//p' | head -n 1)
+            carrier="the annotated tag's Confinement-lane trailer"
+          fi
+
+          if [ -z "${evidence//[[:space:]]/}" ]; then
+            echo "refused: no recorded confinement lane run for ${SOURCE_SHA}." >&2
+            echo "The delegated lane is absent on hosted runners and is a release condition." >&2
+            echo "Run 'bash scripts/delegated-lane.sh' at ${SOURCE_SHA} on a host that has" >&2
+            echo "bubblewrap and a delegated cgroup v2 subtree, then record the run either as" >&2
+            echo "  Confinement-lane: ${SOURCE_SHA} <delegated-case-count> <RFC 3339 UTC>" >&2
+            echo "in the annotated tag's message, or as the confinement_evidence input of a" >&2
+            echo "protected-main recovery dispatch. AGENTS.md, section \"Releases\"." >&2
+            exit 1
+          fi
+
+          read -r claimed_sha claimed_cases claimed_at _rest <<<"${evidence}"
+
+          if [ "$claimed_sha" != "$SOURCE_SHA" ]; then
+            echo "refused: ${carrier} records commit '${claimed_sha}', not ${SOURCE_SHA}." >&2
+            echo "A lane run against other bytes is not evidence about the tagged source." >&2
+            exit 1
+          fi
+
+          if ! printf '%s' "$claimed_cases" | grep -Eq '^[0-9]+$'; then
+            echo "refused: ${carrier} records '${claimed_cases}' where a delegated case count belongs." >&2
+            exit 1
+          fi
+
+          # The count the tagged source itself declares, read from the tagged source rather than
+          # from this checkout, exactly as the manifest-version check above does.
+          declared_cases=$(git show "${SOURCE_SHA}:crates/substrate-daemon/tests/runtime_vectors.rs" \
+            | sed -n 's/^const DELEGATED_CASES: usize = \([0-9][0-9]*\);$/\1/p' | head -n 1)
+          if [ -z "$declared_cases" ]; then
+            echo "refused: DELEGATED_CASES is not declared in the expected form at ${SOURCE_SHA}." >&2
+            echo "crates/substrate-daemon/tests/runtime_vectors.rs must carry a line" >&2
+            echo "  const DELEGATED_CASES: usize = <n>;" >&2
+            echo "for this release condition to be checkable; fix the check with the constant." >&2
+            exit 1
+          fi
+          if [ "$claimed_cases" != "$declared_cases" ]; then
+            echo "refused: ${carrier} records ${claimed_cases} delegated cases; ${SOURCE_SHA} declares ${declared_cases}." >&2
+            exit 1
+          fi
+
+          if ! printf '%s' "$claimed_at" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'; then
+            echo "refused: ${carrier} records '${claimed_at}' where an RFC 3339 UTC instant belongs." >&2
+            echo "Use the form 2026-09-15T08:30:00Z." >&2
+            exit 1
+          fi
+
+          echo "confinement lane recorded for ${SOURCE_SHA} from ${carrier}: ${evidence}"
+          echo "evidence=${evidence}" >> "$GITHUB_OUTPUT"
+
       - name: Preflight summary
         env:
           VERSION: ${{ steps.tag.outputs.version }}
           SOURCE_SHA: ${{ steps.tag.outputs.source-sha }}
           GATE_RUN_URL: ${{ steps.gate.outputs.run-url }}
+          CONFINEMENT_EVIDENCE: ${{ steps.confinement.outputs.evidence }}
         run: |
           {
             echo "### Release preflight"
@@ -259,6 +365,7 @@ jobs:
             echo "| version | \`${VERSION}\` |"
             echo "| SOURCE_SHA | \`${SOURCE_SHA}\` |"
             echo "| gate run | ${GATE_RUN_URL} |"
+            echo "| confinement lane | \`${CONFINEMENT_EVIDENCE}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   release:
@@ -280,6 +387,7 @@ jobs:
       VERSION: ${{ needs.preflight.outputs.version }}
       SOURCE_SHA: ${{ needs.preflight.outputs.source-sha }}
       GATE_RUN_URL: ${{ needs.preflight.outputs.gate-run-url }}
+      CONFINEMENT_EVIDENCE: ${{ needs.preflight.outputs.confinement-evidence }}
 
     steps:
       - name: Check out the tagged source
@@ -812,6 +920,20 @@ jobs:
             ./substrate-wire-${BUNDLE_VERSION}:${BUNDLE_VERSION}
           \`\`\`
 
+          ## Confinement lane
+
+          | | |
+          | --- | --- |
+          | recorded run | \`${CONFINEMENT_EVIDENCE}\` |
+          | command | \`bash scripts/delegated-lane.sh\` |
+          | where | a workstation with bubblewrap and a delegated cgroup v2 subtree, not this runner |
+
+          The fields are the commit, the delegated case count and when the run finished. The
+          delegated lane needs an exclusive delegated cgroup subtree that a hosted runner does not
+          have, so \`gate.yml\` reports it **absent — not executed, not passed**. This workflow does
+          not run it either: it refuses to publish without the recorded line above, and that line
+          must name this exact commit and the delegated case count this source declares.
+
           ## Verify the signatures
 
           All three artifacts are signed keylessly through Sigstore. Each certificate identity is this
@@ -854,6 +976,9 @@ jobs:
             reproducing it from source independently is a later milestone.
           - **The delegated execution lane is not exercised by CI.** A host without a delegated
             cgroup v2 subtree answers \`exec.sandbox-unavailable\` rather than running unconfined.
+            This release records a local run of that lane (see *Confinement lane* above); recording
+            an operator's run is weaker evidence than a runner executing it, and is not described as
+            if CI had run it.
           NOTES
           echo '--- release notes ---'
           cat release-notes.md
@@ -913,6 +1038,7 @@ jobs:
             echo "| MCP digest | \`${MCP_DIGEST:-<not built>}\` |"
             echo "| SOURCE_SHA | \`${SOURCE_SHA}\` |"
             echo "| gate run | ${GATE_RUN_URL} |"
+            echo "| confinement lane | \`${CONFINEMENT_EVIDENCE:-<none recorded>}\` |"
             echo "| daemon signature step | ${{ steps.verify.outcome }} |"
             echo "| bundle signature step | ${{ steps.bundle-verify.outcome }} |"
             echo "| MCP signature step | ${{ steps.mcp-verify.outcome }} |"

@@ -234,6 +234,33 @@ fn gate_cache_excludes_workspace_build_outputs() {
 }
 
 #[test]
+fn a_release_refuses_without_a_recorded_confinement_lane_run() {
+    let require = position("Require a recorded confinement-lane run for this commit");
+    let announce = position("gh release create \"${VERSION}\"");
+    assert!(require < announce);
+    position("confinement_evidence:");
+    position("Confinement-lane:");
+    position("refused: no recorded confinement lane run for");
+    position("## Confinement lane");
+    assert!(WORKFLOW.contains("confinement-evidence: ${{ steps.confinement.outputs.evidence }}"));
+
+    // The step reads the declared delegated case count out of the *tagged* source with this exact
+    // pattern, so a rename or a reformatting of the constant would make every release refuse with
+    // a message about the check rather than about the release. Assert the pattern against the file
+    // it parses instead of trusting it.
+    let vectors = fs::read_to_string(
+        repository_root().join("crates/substrate-daemon/tests/runtime_vectors.rs"),
+    )
+    .expect("the clean-room runner is readable");
+    assert!(
+        vectors.lines().any(|line| {
+            line.starts_with("const DELEGATED_CASES: usize = ") && line.ends_with(';')
+        }),
+        "the confinement-evidence step's DELEGATED_CASES pattern no longer matches its source"
+    );
+}
+
+#[test]
 fn development_status_is_verified_and_never_described_as_stable() {
     position("dev.b10x.contract.status");
     position("== \"development\"");

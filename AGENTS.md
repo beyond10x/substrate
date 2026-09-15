@@ -304,6 +304,29 @@ layout with ORAS rather than constructing another manifest at publication time. 
 bundle is anonymously retrievable before mutating the daemon-image tag, so correcting first-push
 package visibility leaves a safe retry path.
 
+**A release also requires a recorded delegated confinement-lane run for the tagged commit.** A green
+`gate.yml` is the portable lane only: the delegated lane needs bubblewrap and an exclusive delegated
+cgroup v2 subtree, which a hosted runner does not have, so that lane is reported **absent — not
+executed, not passed** (§ *The gate*). Before tagging, run `bash scripts/delegated-lane.sh` at the
+commit you are about to tag and put one line in the **annotated tag's own message**:
+
+```
+Confinement-lane: <source-sha> <delegated-case-count> <RFC 3339 UTC>
+```
+
+for example `Confinement-lane: 3fafeae65fe6ee9f36c3ba17d49b36a1a0d1a3a3 97 2026-09-10T22:00:00Z`.
+[`release.yml`](.github/workflows/release.yml) refuses to publish without that record, refuses a
+record naming any other commit, refuses a case count other than the `DELEGATED_CASES` the tagged
+source itself declares in
+[`crates/substrate-daemon/tests/runtime_vectors.rs`](crates/substrate-daemon/tests/runtime_vectors.rs),
+and refuses a timestamp that is not an RFC 3339 UTC instant. The recorded line is written into the
+GitHub release under *Confinement lane* and into both job summaries. A protected-`main` recovery
+dispatch may pass the same value as the workflow's `confinement_evidence` input instead, which is
+the only way to release a tag that was annotated before this condition existed. This records a local
+run; it does not run the lane in CI, and neither the workflow nor the release notes describe it as if
+it had. Giving the lane a self-hosted runner with both prerequisites would replace this record with a
+required check, and is a separate decision.
+
 `packages: write` and `id-token: write` exist on the release job and nowhere else; that job holds
 `contents: write` only to create the GitHub release. Everything it does uses the run's own
 `GITHUB_TOKEN`; **the release needs no repository secret at all** (§ *Bot identity*). The GitHub
@@ -317,11 +340,7 @@ by run `33498193209`: daemon `ghcr.io/beyond10x/b10x-substrate-daemon:0.5.0` at
 keyless-signed, `cosign verify`-ed with the exact tagged workflow identity, and anonymously read
 back before the GitHub release was announced.
 
-**No GitHub rule requires the `Full gate` check.** `main`'s rules are
-`creation`, `update`, `deletion`, `non_fast_forward` and the two bot email patterns
-(`gh api repos/beyond10x/substrate/rules/branches/main --jq '[.[].type]'`);
-`GET /repos/beyond10x/substrate/branches/main/protection/required_status_checks` answers 404
-`Branch not protected`. The gate is enforced at release time instead: `release.yml` reads
+**Ruleset `main-requires-the-full-gate` (id 23425552, no bypass actors) requires that check on `main` (`gh api repos/beyond10x/substrate/rules/branches/main` → `required_status_checks` beside `creation`, `update`, `deletion`, `non_fast_forward` and the two email patterns); the legacy `GET …/branches/main/protection` still answers 404 `Branch not protected`, because rulesets are not branch protection.** The gate is also enforced at release time: `release.yml` reads
 `gate.yml`'s own recorded conclusion for the exact commit from the Actions API and refuses to
 release a tag without a `success`. The workflow still never pushes a changelog commit
 or creates a `GITHUB_TOKEN` pull request whose events GitHub would suppress. After every signature
