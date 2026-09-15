@@ -32,6 +32,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `AGENTS.md`, `README.md`, `ROADMAP.md` and `STATUS.md` describe 0.7.7, the repository rules that
   exist — including ruleset `main-requires-the-full-gate` (id 23425552), which requires the `Full
   gate` check on `main` — and the embedded seam.
+- `README.md` § *Status* points at
+  [ADR 0006](adr/0006-substrate-publishes-its-own-contract-bundle.md) § *Addendum* for why bytes
+  annotated `development` are signed, digest-pinned and write-once at all.
+
+### Fixed
+
+- `scripts/delegated-lane.sh` resolves the shipped daemon under `CARGO_TARGET_DIR` rather than a
+  hardcoded `${PWD}/target/debug/substrate-daemon`, and refuses by name when the build left no
+  executable there. With an external build directory set — which a machine that shares one build
+  directory across a repository's worktrees does — the two `b10x-substrate-sdk` delegated cases
+  failed with `Startup("No such file or directory (os error 2)")`, which reads as a daemon defect
+  rather than a missing build artefact.
 
 ## [0.7.7] — 2026-09-10
 

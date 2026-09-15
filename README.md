@@ -51,7 +51,10 @@ non-publishable.
 
 **Release [0.7.7](https://github.com/beyond10x/substrate/releases/tag/0.7.7) (2026-09-10)**
 ships keyless-signed daemon and disposable MCP images plus the signed `0.16.0` development
-contract bundle. Signed distribution does not make the contract stable.
+contract bundle. Signed distribution does not make the contract stable. Why bytes annotated
+`development` are signed, digest-pinned and published under a write-once tag at all is recorded in
+[ADR 0006](adr/0006-substrate-publishes-its-own-contract-bundle.md) § *Addendum*, which also records
+that no accepted text states the write-once-tag motive.
 
 | Area | Current behavior |
 |---|---|

@@ -53,15 +53,33 @@ cargo test -p b10x-substrate-host --locked -- --nocapture --test-threads=1
 # The public SDK owns a separate clean-room journey against the shipped daemon binary. It proves
 # PTY resize, live metrics and orderly whole-tree cleanup through SDK types only; without this
 # explicit command that test would be absent from the daemon-only lane below.
+#
+# The binary is wherever cargo put it. `CARGO_TARGET_DIR` moves the whole build directory, and a
+# machine that shares one build directory across a repository's worktrees sets it; `${PWD}/target`
+# was then a path nothing had ever written, so both SDK cases below failed with
+# `Startup("No such file or directory (os error 2)")` — which reads as a daemon defect rather than
+# a missing build artefact. Resolve the same directory cargo used, and refuse here, by name, if the
+# build did not leave the binary there. (Only the environment variable is honoured: nothing in this
+# repository sets `build.target-dir`, and `.cargo/config.toml` carries the `xtask` alias alone.)
+target_dir="${CARGO_TARGET_DIR:-${PWD}/target}"
+daemon_bin="${target_dir}/debug/substrate-daemon"
+
 cargo build -p b10x-substrate-daemon --bin substrate-daemon --locked
-SUBSTRATE_TEST_DAEMON="${PWD}/target/debug/substrate-daemon" \
+if [[ ! -x "${daemon_bin}" ]]; then
+  echo "delegated-lane: the build left no executable at ${daemon_bin}" >&2
+  echo "delegated-lane: CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-<unset>}, PWD=${PWD}" >&2
+  exit 1
+fi
+echo "delegated-lane: shipped daemon ${daemon_bin}"
+
+SUBSTRATE_TEST_DAEMON="${daemon_bin}" \
   cargo test -p b10x-substrate-sdk --test managed --locked -- --nocapture --test-threads=1
 
 # The remote SDK journey reuses the shipped daemon only after the managed instance has stopped. It
 # proves that the same typed session path crosses TLS 1.3 and WSS with a channel-bound, one-use
 # authority, then attempts a reconnect and observes the fresh-mint refusal rather than replaying
 # the redeemed authority.
-SUBSTRATE_TEST_DAEMON="${PWD}/target/debug/substrate-daemon" \
+SUBSTRATE_TEST_DAEMON="${daemon_bin}" \
   cargo test -p b10x-substrate-sdk --test remote --locked -- --nocapture --test-threads=1
 
 # The MCP adapter owns the same kind of exclusive delegated root, but runs after the SDK daemon has
