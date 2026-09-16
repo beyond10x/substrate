@@ -13,6 +13,6 @@ permissions:
 
 jobs:
   common:
-    uses: beyond10x/gates/.github/workflows/common.yml@21bba03026fed49e74ae73722db81c2377e3a638
+    uses: beyond10x/gates/.github/workflows/common.yml@d532e72dddf53efbf07fac4b0f86653926ab0102
     secrets:
       B10X_GATES_POLICY: ${{ secrets.B10X_GATES_POLICY }}
