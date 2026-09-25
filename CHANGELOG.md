@@ -7,6 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.7.8] — 2026-09-25
+
 ### Security
 
 - `rustls` is 0.23.45, taking the fix for
@@ -44,6 +46,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   annotated `development` are signed, digest-pinned and write-once at all.
 
 ### Fixed
+
+- `b10x-substrate-host` compiles for `aarch64-unknown-linux-gnu`
+  ([#109](https://github.com/beyond10x/substrate/issues/109)). The loopback readiness probe in
+  `crates/substrate-host/src/egress.rs` wrote the interface name into `ifreq::ifr_name` with
+  `u8::cast_signed`, which assumes `c_char` is `i8`; on aarch64 Linux it is `u8`. The bytes are now
+  converted with `c_char::from_ne_bytes`, which holds for either signedness.
 
 - The real project-quota cases had no owner: neither `scripts/gate.sh` nor
   `scripts/delegated-lane.sh` passed `--ignored`, no workflow or `xtask` verb did either, and they
