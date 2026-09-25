@@ -539,8 +539,8 @@ unsafe fn helper_body(
 unsafe fn bind_when_loopback_is_ready(socket: RawFd, address: &libc::sockaddr_in) -> bool {
     unsafe {
         let mut request: libc::ifreq = std::mem::zeroed();
-        request.ifr_name[0] = b'l'.cast_signed();
-        request.ifr_name[1] = b'o'.cast_signed();
+        request.ifr_name[0] = libc::c_char::from_ne_bytes(*b"l");
+        request.ifr_name[1] = libc::c_char::from_ne_bytes(*b"o");
         let up = libc::c_short::try_from(libc::IFF_UP).unwrap_or(1);
         for attempt in 0..LOOPBACK_READY_ATTEMPTS {
             if libc::ioctl(socket, libc::SIOCGIFFLAGS, &raw mut request) != 0 {
