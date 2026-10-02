@@ -2868,6 +2868,11 @@ async fn forward_frame(
 ) -> bool {
     match tokio::time::timeout(PIPE_OUTPUT_STALL_TIMEOUT, sender.reserve()).await {
         Ok(Ok(permit)) => {
+            // Stdout and stderr share the refusal. A sibling can time out while this
+            // reservation waits; newly freed capacity must not restart live forwarding.
+            if execution.is_some_and(|e| e.pipe_backpressure.load(Ordering::Acquire)) {
+                return false;
+            }
             if let Some(e) = execution
                 && let Some(stats) = e.observation.lock().resource.unrecorded_output.as_mut()
             {
@@ -4153,6 +4158,86 @@ mod tests {
         let (captured, truncated) = drain.await.unwrap();
         assert_eq!(captured, b"abcd");
         assert!(truncated);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn adversary_shared_stall_cannot_resume_sibling_stream() {
+        for unrecorded in [false, true] {
+            let mut observation = running_observation("ex_shared_stall");
+            if unrecorded {
+                observation.resource.unrecorded_output =
+                    Some(substrate_wire::UnrecordedOutput::default());
+            }
+            let execution = Arc::new(Execution::new(observation, None, Instant::now(), None));
+            let (sender, mut receiver) = mpsc::channel(1);
+            let stdout = tokio::spawn(drain_capped(
+                Some(&b"aa"[..]),
+                64,
+                Some(sender.clone()),
+                PipeStream::Stdout,
+                1,
+                Some(Arc::clone(&execution)),
+                None,
+                true,
+            ));
+            tokio::task::yield_now().await;
+            assert_eq!(receiver.len(), 1);
+            tokio::time::advance(Duration::from_millis(100)).await;
+            let stderr = tokio::spawn(drain_capped(
+                Some(&b"b"[..]),
+                64,
+                Some(sender),
+                PipeStream::Stderr,
+                1,
+                Some(Arc::clone(&execution)),
+                None,
+                true,
+            ));
+            tokio::task::yield_now().await;
+            assert!(
+                !stderr.is_finished(),
+                "sibling must be waiting on the same full queue"
+            );
+            tokio::time::advance(Duration::from_millis(901)).await;
+            let (captured, truncated) = stdout.await.unwrap();
+            assert!(!truncated);
+            assert_eq!(
+                captured,
+                if unrecorded {
+                    Vec::new()
+                } else {
+                    b"aa".to_vec()
+                }
+            );
+            assert!(execution.pipe_backpressure.load(Ordering::Acquire));
+            assert!(execution.cancellation_requested.load(Ordering::Acquire));
+            // An attached consumer can free capacity before the supervisor's next tick closes
+            // the queue. A producer already waiting must not resume after its sibling failed.
+            assert_eq!(receiver.recv().await.unwrap().bytes, b"a");
+            let (captured, truncated) = stderr.await.unwrap();
+            assert!(!truncated);
+            assert_eq!(
+                captured,
+                if unrecorded {
+                    Vec::new()
+                } else {
+                    b"b".to_vec()
+                }
+            );
+            assert!(
+                receiver.try_recv().is_err(),
+                "terminal backpressure admitted sibling payload"
+            );
+            if unrecorded {
+                let observation = execution.observation.lock();
+                let stats = observation.resource.unrecorded_output.as_ref().unwrap();
+                assert_eq!(stats.stdout_observed_bytes, 2);
+                assert_eq!(stats.stderr_observed_bytes, 1);
+                assert_eq!(stats.stdout_queued_bytes, 1);
+                assert_eq!(stats.stderr_queued_bytes, 0);
+                assert_eq!(stats.queue_high_water_frames, 1);
+            }
+        }
     }
 
     #[tokio::test]
