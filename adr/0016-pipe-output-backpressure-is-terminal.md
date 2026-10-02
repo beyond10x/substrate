@@ -1,9 +1,11 @@
 ---
-status: accepted
+status: superseded
 date: 2026-08-31
 ---
 
 # ADR 0016: pipe output backpressure is terminal
+Superseded by [ADR 0031](0031-live-output-backpressure-has-a-stall-deadline.md).
+
 
 ## Context
 
