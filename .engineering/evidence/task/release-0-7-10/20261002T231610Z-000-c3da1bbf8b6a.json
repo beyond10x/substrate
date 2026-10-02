@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-02T23:16:10Z",
+  "actor": "human:timo",
+  "artifact": "task:release-0-7-10",
+  "kind": "task",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "Full repository gate at 65304edf: exit 0; 619 passed, 8 ignored; generated notices and all immutable bundles verified",
+    "reference": "https://github.com/beyond10x/substrate/actions/runs/37075826048"
+  }
+}

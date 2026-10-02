@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-02T23:10:42Z",
+  "actor": "human:timo",
+  "artifact": "task:release-0-7-10",
+  "kind": "task",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "Exact-candidate delegated lane: 65304edf6ebdf4a95f9c2c6138b0c20ea47d157e; exit 0; DELEGATED_CASES=97; quota and unserved resource-counter fixtures absent",
+    "reference": "https://github.com/beyond10x/substrate/releases/tag/0.7.10"
+  }
+}
