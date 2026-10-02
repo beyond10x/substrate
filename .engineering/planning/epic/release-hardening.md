@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: epic:release-hardening
 kind: epic
 status: implemented
@@ -10,6 +10,10 @@ tags:
 - ci
 - release
 revision: 8
+transitions:
+- {from: "draft", to: "proposed", at: "2026-08-31T22:50:10Z", actor: "human:timo", revision: 4, imported: true}
+- {from: "proposed", to: "active", at: "2026-08-31T22:50:10Z", actor: "human:timo", revision: 5, imported: true}
+- {from: "active", to: "implemented", at: "2026-09-01T09:54:47Z", actor: "human:timo", revision: 8, decided_on: {"recorded":{"test_result":1}}, imported: true}
 ---
 # Epic: Release hardening
 

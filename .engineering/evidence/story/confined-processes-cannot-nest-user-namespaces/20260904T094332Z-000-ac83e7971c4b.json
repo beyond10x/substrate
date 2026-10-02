@@ -1,0 +1,13 @@
+{
+  "at": "2026-09-04T09:43:32Z",
+  "actor": "human:timo",
+  "artifact": "story:confined-processes-cannot-nest-user-namespaces",
+  "kind": "story",
+  "revision": 14,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "bash scripts/gate.sh, per step, on wave/security-2026-09-04",
+    "reference": "0e40524"
+  }
+}

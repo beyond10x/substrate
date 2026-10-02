@@ -1,0 +1,14 @@
+version: '3'
+tasks:
+  check:
+    desc: Full Substrate gate, including ESS and standalone documentation
+    cmds:
+      - bash scripts/gate.sh
+  docs:
+    desc: Validate standalone public documentation
+    cmds:
+      - cargo xtask check-docs
+  spec:
+    desc: Validate the pinned ESS specification and reject suite drift
+    cmds:
+      - cargo xtask check-ess

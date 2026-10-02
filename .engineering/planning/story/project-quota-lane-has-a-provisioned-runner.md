@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:project-quota-lane-has-a-provisioned-runner
 kind: story
 status: draft

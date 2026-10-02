@@ -1,0 +1,13 @@
+{
+  "at": "2026-09-01T11:07:31Z",
+  "actor": "human:timo",
+  "artifact": "story:aperture-install-failure-loses-its-errno",
+  "kind": "story",
+  "revision": 6,
+  "change": {
+    "change": "evidence",
+    "kind": "deployment_result",
+    "source": "Substrate 0.5.0 release run 33498193209",
+    "reference": "https://github.com/beyond10x/substrate/releases/tag/0.5.0"
+  }
+}

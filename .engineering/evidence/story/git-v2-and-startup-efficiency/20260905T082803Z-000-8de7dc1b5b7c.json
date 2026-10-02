@@ -1,0 +1,13 @@
+{
+  "at": "2026-09-05T08:28:03Z",
+  "actor": "human:timo",
+  "artifact": "story:git-v2-and-startup-efficiency",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "daemon readiness and MCP JSON-RPC initialization from final Docker images; exit 0",
+    "reference": "Dockerfile"
+  }
+}

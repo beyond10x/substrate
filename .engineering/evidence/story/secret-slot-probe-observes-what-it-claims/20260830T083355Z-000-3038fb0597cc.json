@@ -1,0 +1,13 @@
+{
+  "at": "2026-08-30T08:33:55Z",
+  "actor": "human:timo",
+  "artifact": "story:secret-slot-probe-observes-what-it-claims",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "orchestrator perturbation + delegated lane",
+    "reference": "both tests fail when their term is dropped; 50 HTTP cases, exit 0"
+  }
+}

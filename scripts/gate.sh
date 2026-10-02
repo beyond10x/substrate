@@ -12,6 +12,8 @@ run() {
   "$@"
 }
 
+run cargo xtask check-ess
+run cargo xtask check-docs
 run cargo test --workspace --release --locked
 run cargo fmt --all --check
 run cargo clippy --workspace --all-targets --release --locked -- -D warnings

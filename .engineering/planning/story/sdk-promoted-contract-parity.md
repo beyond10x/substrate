@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:sdk-promoted-contract-parity
 kind: story
 status: implemented
@@ -14,6 +14,10 @@ relations:
 - decomposes: epic:rust-sdk
 - depends_on: story:promote-development-contract-frontier
 revision: 6
+transitions:
+- {from: "draft", to: "proposed", at: "2026-08-31T22:54:31Z", actor: "human:timo", revision: 2, imported: true}
+- {from: "proposed", to: "active", at: "2026-09-01T03:55:49Z", actor: "human:timo", revision: 5, imported: true}
+- {from: "active", to: "implemented", at: "2026-09-01T04:22:02Z", actor: "human:timo", revision: 6, decided_on: {"recorded":{"test_result":2}}, imported: true}
 ---
 # Story: The Rust SDK covers the promoted contract
 

@@ -1,0 +1,13 @@
+{
+  "at": "2026-09-01T08:14:32Z",
+  "actor": "human:timo",
+  "artifact": "story:canonical-session-routes",
+  "kind": "story",
+  "revision": 1,
+  "change": {
+    "change": "evidence",
+    "kind": "specification",
+    "source": "operator acceptance of session naming",
+    "reference": "docs/design/16-sessions-are-not-pipe-sessions.md"
+  }
+}

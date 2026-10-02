@@ -1,0 +1,13 @@
+{
+  "at": "2026-09-01T09:47:53Z",
+  "actor": "human:timo",
+  "artifact": "story:rust-sdk-publication",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "specification",
+    "source": "ADR 0030: source-distributed and non-publishable",
+    "reference": "adr/0030-rust-crates-are-source-distributed-and-non-publishable.md"
+  }
+}

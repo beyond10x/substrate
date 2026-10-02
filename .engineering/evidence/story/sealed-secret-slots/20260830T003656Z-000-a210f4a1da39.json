@@ -1,0 +1,13 @@
+{
+  "at": "2026-08-30T00:36:56Z",
+  "actor": "human:timo",
+  "artifact": "story:sealed-secret-slots",
+  "kind": "story",
+  "revision": 6,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "bash scripts/gate.sh exit 0; cargo xtask check-bundle 0.5.0 verified 206 files as the fixed point of its authored source; 5 secrets::tests + 6 secret_slot_tests pass, all recorded failing first",
+    "reference": "crates/substrate-host/src/secrets.rs"
+  }
+}

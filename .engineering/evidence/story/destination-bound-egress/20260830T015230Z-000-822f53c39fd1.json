@@ -1,0 +1,13 @@
+{
+  "at": "2026-08-30T01:52:30Z",
+  "actor": "human:timo",
+  "artifact": "story:destination-bound-egress",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "delegated lane executed via scripts/delegated-lane.sh: \"runtime clean-room: 42 HTTP cases, startup refusal, and dual-daemon refusal passed (delegated lane)\" — includes check_confined_apertures with a listener inside and outside the aperture (runtime_vectors.rs:1656)",
+    "reference": "scripts/delegated-lane.sh"
+  }
+}

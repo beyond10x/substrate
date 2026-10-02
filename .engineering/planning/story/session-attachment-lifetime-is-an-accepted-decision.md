@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:session-attachment-lifetime-is-an-accepted-decision
 kind: story
 status: draft

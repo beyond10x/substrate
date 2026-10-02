@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:materialize-connector-git-sources
 kind: story
 status: implemented
@@ -34,6 +34,10 @@ scope:
 - confidence: inferred
   path: xtask/bundle-source
 revision: 8
+transitions:
+- {from: "draft", to: "proposed", at: "2026-09-04T21:04:35Z", actor: "human:timo", revision: 2, imported: true}
+- {from: "proposed", to: "active", at: "2026-09-04T21:04:36Z", actor: "human:timo", revision: 3, imported: true}
+- {from: "active", to: "implemented", at: "2026-09-04T23:07:56Z", actor: "human:timo", revision: 8, decided_on: {"recorded":{"test_result":3}}, imported: true}
 ---
 # Story: Materialize connector-authorized Git sources
 

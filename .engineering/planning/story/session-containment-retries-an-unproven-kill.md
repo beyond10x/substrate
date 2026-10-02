@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:session-containment-retries-an-unproven-kill
 kind: story
 status: draft

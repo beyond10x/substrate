@@ -1,0 +1,13 @@
+{
+  "at": "2026-08-30T11:13:17Z",
+  "actor": "human:timo",
+  "artifact": "story:aperture-byte-ceiling",
+  "kind": "story",
+  "revision": 8,
+  "change": {
+    "change": "evidence",
+    "kind": "review",
+    "source": "engineering-protocols:adversary",
+    "reference": "2 defects found, both verified and fixed: UTF-8 panic in reads_as_ceiling; ceiling refusal lost to a select! race"
+  }
+}

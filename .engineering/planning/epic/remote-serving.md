@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: epic:remote-serving
 kind: epic
 status: active
@@ -13,6 +13,9 @@ tags:
 relations:
 - depends_on: epic:release-hardening
 revision: 3
+transitions:
+- {from: "draft", to: "proposed", at: "2026-08-31T22:54:30Z", actor: "human:timo", revision: 2, imported: true}
+- {from: "proposed", to: "active", at: "2026-09-01T05:57:32Z", actor: "human:timo", revision: 3, imported: true}
 ---
 # Epic: Remote serving and hosted trust
 

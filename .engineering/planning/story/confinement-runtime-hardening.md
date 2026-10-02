@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:confinement-runtime-hardening
 kind: story
 status: implemented
@@ -8,6 +8,10 @@ summary: Close host-root, pipe, file, aperture, replay and delegated-cgroup defe
 relations:
 - decomposes: epic:byte-plane-completion
 revision: 10
+transitions:
+- {from: "draft", to: "proposed", at: "2026-08-31T08:37:44Z", actor: "human:timo", revision: 2, imported: true}
+- {from: "proposed", to: "active", at: "2026-08-31T08:37:44Z", actor: "human:timo", revision: 3, imported: true}
+- {from: "active", to: "implemented", at: "2026-08-31T23:52:36Z", actor: "human:timo", revision: 10, decided_on: {"recorded":{"test_result":1}}, imported: true}
 ---
 # Story: Confinement and runtime hardening
 

@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:file-routes-declare-a-template-the-daemon-does-not-serve
 kind: story
 status: implemented
@@ -8,6 +8,10 @@ summary: The daemon registers a wildcard file path and every bundle declares a s
 relations:
 - decomposes: epic:release-hardening
 revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-08-31T08:37:43Z", actor: "human:timo", revision: 2, imported: true}
+- {from: "proposed", to: "active", at: "2026-08-31T08:37:43Z", actor: "human:timo", revision: 3, imported: true}
+- {from: "active", to: "implemented", at: "2026-08-31T22:49:57Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":1}}, imported: true}
 ---
 # Story: The file routes are served at a template the contract cannot declare
 

@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:docker-workspace-and-exec-slice
 kind: story
 status: proposed
@@ -14,6 +14,8 @@ relations:
 - depends_on: story:docker-driver-entry-gate
 - depends_on: story:remote-clean-room-conformance
 revision: 2
+transitions:
+- {from: "draft", to: "proposed", at: "2026-08-31T22:54:33Z", actor: "human:timo", revision: 2, imported: true}
 ---
 # Story: The Docker driver serves workspace and exec
 

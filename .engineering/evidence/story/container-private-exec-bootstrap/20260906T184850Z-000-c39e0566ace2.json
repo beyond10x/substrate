@@ -1,0 +1,13 @@
+{
+  "at": "2026-09-06T18:48:50Z",
+  "actor": "human:timo",
+  "artifact": "story:container-private-exec-bootstrap",
+  "kind": "story",
+  "revision": 14,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "Published 0.7.6 ordinary and quota public-SDK PTY, metrics and process-tree cleanup; exact release signature verification",
+    "reference": "https://github.com/beyond10x/substrate/releases/tag/0.7.6"
+  }
+}

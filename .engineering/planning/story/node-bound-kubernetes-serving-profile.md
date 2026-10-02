@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:node-bound-kubernetes-serving-profile
 kind: story
 status: proposed
@@ -16,6 +16,8 @@ relations:
 - depends_on: story:hosted-trust-envelope-admission
 - depends_on: story:network-session-authority
 revision: 2
+transitions:
+- {from: "draft", to: "proposed", at: "2026-08-31T22:54:32Z", actor: "human:timo", revision: 2, imported: true}
 ---
 # Story: Kubernetes serves one stable address per node-bound daemon
 

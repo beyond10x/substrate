@@ -1,0 +1,13 @@
+{
+  "at": "2026-08-30T12:11:34Z",
+  "actor": "human:timo",
+  "artifact": "story:docker-driver-entry-gate",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "specification",
+    "source": "design 15, proposed",
+    "reference": "docs/design/15-docker-driver-entry-gate.md"
+  }
+}

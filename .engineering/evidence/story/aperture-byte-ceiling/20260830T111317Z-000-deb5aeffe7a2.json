@@ -1,0 +1,13 @@
+{
+  "at": "2026-08-30T11:13:17Z",
+  "actor": "human:timo",
+  "artifact": "story:aperture-byte-ceiling",
+  "kind": "story",
+  "revision": 8,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "bash scripts/gate.sh on wave/aperture-byte-ceiling, run by the orchestrator",
+    "reference": "gate: passed, exit 0; 54 HTTP cases (delegated lane); 1544 documents in 8 bundles"
+  }
+}

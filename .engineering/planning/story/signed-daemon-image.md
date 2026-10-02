@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:signed-daemon-image
 kind: story
 status: implemented
@@ -13,6 +13,10 @@ relations:
 - decomposes: epic:release-hardening
 - depends_on: story:ci-runs-the-full-gate
 revision: 7
+transitions:
+- {from: "draft", to: "proposed", at: "2026-08-30T06:40:36Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"artifact":1}}, imported: true}
+- {from: "proposed", to: "active", at: "2026-08-30T06:40:36Z", actor: "human:timo", revision: 5, decided_on: {"recorded":{"artifact":1}}, imported: true}
+- {from: "active", to: "implemented", at: "2026-08-30T11:23:32Z", actor: "human:timo", revision: 7, decided_on: {"recorded":{"test_result":1,"deployment_result":1,"artifact":1,"verification":1}}, imported: true}
 ---
 # Story: A tagged main publishes a signed, digest-pinned daemon image
 

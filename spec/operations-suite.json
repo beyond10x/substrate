@@ -1,0 +1,2432 @@
+{
+  "provenance": {
+    "suite_version": "ess-conformance/12",
+    "system": "substrate",
+    "specification_version": "v1",
+    "spec_digest": "1bc108a9ba2bbffdb24233059b4516346d5f27f565925d1245cab21e18950435",
+    "contract_digest": "929ac7abf381cd448e8aa215cbda175c37b0d082a33334f200afd15975b97390"
+  },
+  "scenarios": {
+    "substrate.operations.AcceptedOperation/state/Terminal/refuses/substrate.operations.CompleteError": {
+      "purpose": "`substrate.operations.CompleteError` does not move a `substrate.operations.AcceptedOperation` that is in `Terminal`, and reports `substrate.operations.NotAccepted`",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.operations.Reserve",
+          "input": {
+            "actor": {
+              "kind": "literal",
+              "value": "actor"
+            },
+            "operation_kind": {
+              "kind": "literal",
+              "value": "operation_kind"
+            },
+            "request_hash": {
+              "kind": "literal",
+              "value": "request_hash"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.operations.Reserve",
+            "outcome": "accepted"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "accepted-operation",
+          "entity": "substrate.operations.AcceptedOperation",
+          "event": "substrate.operations.Accepted",
+          "field": "operation"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.operations.CompleteError",
+          "input": {
+            "operation": {
+              "kind": "instance",
+              "instance": "accepted-operation"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.operations.CompleteError",
+            "outcome": "terminal"
+          }
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.operations.Operations"
+        },
+        {
+          "step": "snapshot_complete_subject",
+          "view": "substrate.operations.Operations",
+          "subject": {
+            "operation": {
+              "kind": "instance",
+              "instance": "accepted-operation"
+            }
+          },
+          "shape": {
+            "identity_field": "operation",
+            "fields": [
+              {
+                "name": "operation",
+                "type": "String"
+              },
+              {
+                "name": "state",
+                "type": "substrate.operations.AcceptedOperation.State"
+              },
+              {
+                "name": "operation_kind",
+                "type": "String"
+              },
+              {
+                "name": "request_hash",
+                "type": "String"
+              },
+              {
+                "name": "actor",
+                "type": "String"
+              }
+            ],
+            "declarations": {
+              "substrate.operations.AcceptedOperation.State": {
+                "kind": "enum",
+                "variants": [
+                  "Accepted",
+                  "Terminal",
+                  "Unknown"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.operations.CompleteError",
+          "input": {
+            "operation": {
+              "kind": "instance",
+              "instance": "accepted-operation"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.operations.CompleteError",
+            "outcome": "not-accepted"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.operations.NotAccepted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Accepted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Failed"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Terminal"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Unknown"
+        },
+        {
+          "step": "expect_no_events"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.operations.Operations"
+        },
+        {
+          "step": "expect_complete_subject_unchanged",
+          "view": "substrate.operations.Operations"
+        }
+      ],
+      "source": [
+        {
+          "kind": "entity",
+          "name": "substrate.operations.AcceptedOperation"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.operations.CompleteError"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.operations.Reserve"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.operations.CompleteError",
+            "outcome": "not-accepted"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.operations.CompleteError",
+            "outcome": "terminal"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.operations.Reserve",
+            "outcome": "accepted"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Accepted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Failed"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Terminal"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Unknown"
+        },
+        {
+          "kind": "error",
+          "name": "substrate.operations.NotAccepted"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.operations.Operations"
+        }
+      ]
+    },
+    "substrate.operations.AcceptedOperation/state/Terminal/refuses/substrate.operations.CompleteSuccess": {
+      "purpose": "`substrate.operations.CompleteSuccess` does not move a `substrate.operations.AcceptedOperation` that is in `Terminal`, and reports `substrate.operations.NotAccepted`",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.operations.Reserve",
+          "input": {
+            "actor": {
+              "kind": "literal",
+              "value": "actor"
+            },
+            "operation_kind": {
+              "kind": "literal",
+              "value": "operation_kind"
+            },
+            "request_hash": {
+              "kind": "literal",
+              "value": "request_hash"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.operations.Reserve",
+            "outcome": "accepted"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "accepted-operation",
+          "entity": "substrate.operations.AcceptedOperation",
+          "event": "substrate.operations.Accepted",
+          "field": "operation"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.operations.CompleteError",
+          "input": {
+            "operation": {
+              "kind": "instance",
+              "instance": "accepted-operation"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.operations.CompleteError",
+            "outcome": "terminal"
+          }
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.operations.Operations"
+        },
+        {
+          "step": "snapshot_complete_subject",
+          "view": "substrate.operations.Operations",
+          "subject": {
+            "operation": {
+              "kind": "instance",
+              "instance": "accepted-operation"
+            }
+          },
+          "shape": {
+            "identity_field": "operation",
+            "fields": [
+              {
+                "name": "operation",
+                "type": "String"
+              },
+              {
+                "name": "state",
+                "type": "substrate.operations.AcceptedOperation.State"
+              },
+              {
+                "name": "operation_kind",
+                "type": "String"
+              },
+              {
+                "name": "request_hash",
+                "type": "String"
+              },
+              {
+                "name": "actor",
+                "type": "String"
+              }
+            ],
+            "declarations": {
+              "substrate.operations.AcceptedOperation.State": {
+                "kind": "enum",
+                "variants": [
+                  "Accepted",
+                  "Terminal",
+                  "Unknown"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.operations.CompleteSuccess",
+          "input": {
+            "operation": {
+              "kind": "instance",
+              "instance": "accepted-operation"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.operations.CompleteSuccess",
+            "outcome": "not-accepted"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.operations.NotAccepted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Accepted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Failed"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Terminal"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Unknown"
+        },
+        {
+          "step": "expect_no_events"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.operations.Operations"
+        },
+        {
+          "step": "expect_complete_subject_unchanged",
+          "view": "substrate.operations.Operations"
+        }
+      ],
+      "source": [
+        {
+          "kind": "entity",
+          "name": "substrate.operations.AcceptedOperation"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.operations.CompleteError"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.operations.CompleteSuccess"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.operations.Reserve"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.operations.CompleteError",
+            "outcome": "terminal"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.operations.CompleteSuccess",
+            "outcome": "not-accepted"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.operations.CompleteSuccess",
+            "outcome": "terminal"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.operations.Reserve",
+            "outcome": "accepted"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Accepted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Failed"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Terminal"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Unknown"
+        },
+        {
+          "kind": "error",
+          "name": "substrate.operations.NotAccepted"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.operations.Operations"
+        }
+      ]
+    },
+    "substrate.operations.AcceptedOperation/state/Terminal/refuses/substrate.operations.MarkDispatchUnknown": {
+      "purpose": "`substrate.operations.MarkDispatchUnknown` does not move a `substrate.operations.AcceptedOperation` that is in `Terminal`, and reports `substrate.operations.NotAccepted`",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.operations.Reserve",
+          "input": {
+            "actor": {
+              "kind": "literal",
+              "value": "actor"
+            },
+            "operation_kind": {
+              "kind": "literal",
+              "value": "operation_kind"
+            },
+            "request_hash": {
+              "kind": "literal",
+              "value": "request_hash"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.operations.Reserve",
+            "outcome": "accepted"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "accepted-operation",
+          "entity": "substrate.operations.AcceptedOperation",
+          "event": "substrate.operations.Accepted",
+          "field": "operation"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.operations.CompleteError",
+          "input": {
+            "operation": {
+              "kind": "instance",
+              "instance": "accepted-operation"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.operations.CompleteError",
+            "outcome": "terminal"
+          }
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.operations.Operations"
+        },
+        {
+          "step": "snapshot_complete_subject",
+          "view": "substrate.operations.Operations",
+          "subject": {
+            "operation": {
+              "kind": "instance",
+              "instance": "accepted-operation"
+            }
+          },
+          "shape": {
+            "identity_field": "operation",
+            "fields": [
+              {
+                "name": "operation",
+                "type": "String"
+              },
+              {
+                "name": "state",
+                "type": "substrate.operations.AcceptedOperation.State"
+              },
+              {
+                "name": "operation_kind",
+                "type": "String"
+              },
+              {
+                "name": "request_hash",
+                "type": "String"
+              },
+              {
+                "name": "actor",
+                "type": "String"
+              }
+            ],
+            "declarations": {
+              "substrate.operations.AcceptedOperation.State": {
+                "kind": "enum",
+                "variants": [
+                  "Accepted",
+                  "Terminal",
+                  "Unknown"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.operations.MarkDispatchUnknown",
+          "input": {
+            "operation": {
+              "kind": "instance",
+              "instance": "accepted-operation"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.operations.MarkDispatchUnknown",
+            "outcome": "not-accepted"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.operations.NotAccepted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Accepted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Failed"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Terminal"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Unknown"
+        },
+        {
+          "step": "expect_no_events"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.operations.Operations"
+        },
+        {
+          "step": "expect_complete_subject_unchanged",
+          "view": "substrate.operations.Operations"
+        }
+      ],
+      "source": [
+        {
+          "kind": "entity",
+          "name": "substrate.operations.AcceptedOperation"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.operations.CompleteError"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.operations.MarkDispatchUnknown"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.operations.Reserve"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.operations.CompleteError",
+            "outcome": "terminal"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.operations.MarkDispatchUnknown",
+            "outcome": "not-accepted"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.operations.MarkDispatchUnknown",
+            "outcome": "unknown"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.operations.Reserve",
+            "outcome": "accepted"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Accepted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Failed"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Terminal"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Unknown"
+        },
+        {
+          "kind": "error",
+          "name": "substrate.operations.NotAccepted"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.operations.Operations"
+        }
+      ]
+    },
+    "substrate.operations.AcceptedOperation/state/Unknown/refuses/substrate.operations.MarkDispatchUnknown": {
+      "purpose": "`substrate.operations.MarkDispatchUnknown` does not move a `substrate.operations.AcceptedOperation` that is in `Unknown`, and reports `substrate.operations.NotAccepted`",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.operations.Reserve",
+          "input": {
+            "actor": {
+              "kind": "literal",
+              "value": "actor"
+            },
+            "operation_kind": {
+              "kind": "literal",
+              "value": "operation_kind"
+            },
+            "request_hash": {
+              "kind": "literal",
+              "value": "request_hash"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.operations.Reserve",
+            "outcome": "accepted"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "accepted-operation",
+          "entity": "substrate.operations.AcceptedOperation",
+          "event": "substrate.operations.Accepted",
+          "field": "operation"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.operations.MarkDispatchUnknown",
+          "input": {
+            "operation": {
+              "kind": "instance",
+              "instance": "accepted-operation"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.operations.MarkDispatchUnknown",
+            "outcome": "unknown"
+          }
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.operations.Operations"
+        },
+        {
+          "step": "snapshot_complete_subject",
+          "view": "substrate.operations.Operations",
+          "subject": {
+            "operation": {
+              "kind": "instance",
+              "instance": "accepted-operation"
+            }
+          },
+          "shape": {
+            "identity_field": "operation",
+            "fields": [
+              {
+                "name": "operation",
+                "type": "String"
+              },
+              {
+                "name": "state",
+                "type": "substrate.operations.AcceptedOperation.State"
+              },
+              {
+                "name": "operation_kind",
+                "type": "String"
+              },
+              {
+                "name": "request_hash",
+                "type": "String"
+              },
+              {
+                "name": "actor",
+                "type": "String"
+              }
+            ],
+            "declarations": {
+              "substrate.operations.AcceptedOperation.State": {
+                "kind": "enum",
+                "variants": [
+                  "Accepted",
+                  "Terminal",
+                  "Unknown"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.operations.MarkDispatchUnknown",
+          "input": {
+            "operation": {
+              "kind": "instance",
+              "instance": "accepted-operation"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.operations.MarkDispatchUnknown",
+            "outcome": "not-accepted"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.operations.NotAccepted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Accepted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Failed"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Terminal"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Unknown"
+        },
+        {
+          "step": "expect_no_events"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.operations.Operations"
+        },
+        {
+          "step": "expect_complete_subject_unchanged",
+          "view": "substrate.operations.Operations"
+        }
+      ],
+      "source": [
+        {
+          "kind": "entity",
+          "name": "substrate.operations.AcceptedOperation"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.operations.MarkDispatchUnknown"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.operations.Reserve"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.operations.MarkDispatchUnknown",
+            "outcome": "not-accepted"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.operations.MarkDispatchUnknown",
+            "outcome": "unknown"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.operations.Reserve",
+            "outcome": "accepted"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Accepted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Failed"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Terminal"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Unknown"
+        },
+        {
+          "kind": "error",
+          "name": "substrate.operations.NotAccepted"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.operations.Operations"
+        }
+      ]
+    },
+    "substrate.operations.AcceptedOperation/transition/complete/by/substrate.operations.CompleteError/terminal": {
+      "purpose": "`substrate.operations.CompleteError` on `terminal` moves a `substrate.operations.AcceptedOperation` to `Terminal` along `complete`",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.operations.Reserve",
+          "input": {
+            "actor": {
+              "kind": "literal",
+              "value": "actor"
+            },
+            "operation_kind": {
+              "kind": "literal",
+              "value": "operation_kind"
+            },
+            "request_hash": {
+              "kind": "literal",
+              "value": "request_hash"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.operations.Reserve",
+            "outcome": "accepted"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "accepted-operation",
+          "entity": "substrate.operations.AcceptedOperation",
+          "event": "substrate.operations.Accepted",
+          "field": "operation"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.operations.CompleteError",
+          "input": {
+            "operation": {
+              "kind": "instance",
+              "instance": "accepted-operation"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.operations.CompleteError",
+            "outcome": "terminal"
+          }
+        },
+        {
+          "step": "expect_event",
+          "event": "substrate.operations.Failed",
+          "shape": {
+            "operation": {
+              "holds": "primitive",
+              "kind": "string"
+            }
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Accepted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Terminal"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Unknown"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.operations.Operations"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.operations.Operations",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "actor": {
+                "kind": "literal",
+                "value": "actor"
+              },
+              "operation": {
+                "kind": "instance",
+                "instance": "accepted-operation"
+              },
+              "operation_kind": {
+                "kind": "literal",
+                "value": "operation_kind"
+              },
+              "request_hash": {
+                "kind": "literal",
+                "value": "request_hash"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Terminal"
+              }
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.operations.Reserve",
+          "input": {
+            "actor": {
+              "kind": "literal",
+              "value": "actor-1"
+            },
+            "operation_kind": {
+              "kind": "literal",
+              "value": "operation_kind-1"
+            },
+            "request_hash": {
+              "kind": "literal",
+              "value": "request_hash-1"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.operations.Reserve",
+            "outcome": "accepted"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "accepted-operation-2",
+          "entity": "substrate.operations.AcceptedOperation",
+          "event": "substrate.operations.Accepted",
+          "field": "operation"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.operations.MarkDispatchUnknown",
+          "input": {
+            "operation": {
+              "kind": "instance",
+              "instance": "accepted-operation-2"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.operations.MarkDispatchUnknown",
+            "outcome": "unknown"
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.operations.CompleteError",
+          "input": {
+            "operation": {
+              "kind": "instance",
+              "instance": "accepted-operation-2"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.operations.CompleteError",
+            "outcome": "terminal"
+          }
+        },
+        {
+          "step": "expect_event",
+          "event": "substrate.operations.Failed",
+          "shape": {
+            "operation": {
+              "holds": "primitive",
+              "kind": "string"
+            }
+          }
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.operations.Operations"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.operations.Operations",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "actor": {
+                "kind": "literal",
+                "value": "actor-1"
+              },
+              "operation": {
+                "kind": "instance",
+                "instance": "accepted-operation-2"
+              },
+              "operation_kind": {
+                "kind": "literal",
+                "value": "operation_kind-1"
+              },
+              "request_hash": {
+                "kind": "literal",
+                "value": "request_hash-1"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Terminal"
+              }
+            }
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "entity",
+          "name": "substrate.operations.AcceptedOperation"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.operations.CompleteError"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.operations.MarkDispatchUnknown"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.operations.Reserve"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.operations.CompleteError",
+            "outcome": "terminal"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.operations.MarkDispatchUnknown",
+            "outcome": "unknown"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.operations.Reserve",
+            "outcome": "accepted"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Accepted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Failed"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Terminal"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Unknown"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.operations.Operations"
+        }
+      ]
+    },
+    "substrate.operations.AcceptedOperation/transition/complete/by/substrate.operations.CompleteSuccess/terminal": {
+      "purpose": "`substrate.operations.CompleteSuccess` on `terminal` moves a `substrate.operations.AcceptedOperation` to `Terminal` along `complete`",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.operations.Reserve",
+          "input": {
+            "actor": {
+              "kind": "literal",
+              "value": "actor"
+            },
+            "operation_kind": {
+              "kind": "literal",
+              "value": "operation_kind"
+            },
+            "request_hash": {
+              "kind": "literal",
+              "value": "request_hash"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.operations.Reserve",
+            "outcome": "accepted"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "accepted-operation",
+          "entity": "substrate.operations.AcceptedOperation",
+          "event": "substrate.operations.Accepted",
+          "field": "operation"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.operations.CompleteSuccess",
+          "input": {
+            "operation": {
+              "kind": "instance",
+              "instance": "accepted-operation"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.operations.CompleteSuccess",
+            "outcome": "terminal"
+          }
+        },
+        {
+          "step": "expect_event",
+          "event": "substrate.operations.Terminal",
+          "shape": {
+            "operation": {
+              "holds": "primitive",
+              "kind": "string"
+            }
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Accepted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Failed"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Unknown"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.operations.Operations"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.operations.Operations",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "actor": {
+                "kind": "literal",
+                "value": "actor"
+              },
+              "operation": {
+                "kind": "instance",
+                "instance": "accepted-operation"
+              },
+              "operation_kind": {
+                "kind": "literal",
+                "value": "operation_kind"
+              },
+              "request_hash": {
+                "kind": "literal",
+                "value": "request_hash"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Terminal"
+              }
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.operations.Reserve",
+          "input": {
+            "actor": {
+              "kind": "literal",
+              "value": "actor-1"
+            },
+            "operation_kind": {
+              "kind": "literal",
+              "value": "operation_kind-1"
+            },
+            "request_hash": {
+              "kind": "literal",
+              "value": "request_hash-1"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.operations.Reserve",
+            "outcome": "accepted"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "accepted-operation-2",
+          "entity": "substrate.operations.AcceptedOperation",
+          "event": "substrate.operations.Accepted",
+          "field": "operation"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.operations.MarkDispatchUnknown",
+          "input": {
+            "operation": {
+              "kind": "instance",
+              "instance": "accepted-operation-2"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.operations.MarkDispatchUnknown",
+            "outcome": "unknown"
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.operations.CompleteSuccess",
+          "input": {
+            "operation": {
+              "kind": "instance",
+              "instance": "accepted-operation-2"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.operations.CompleteSuccess",
+            "outcome": "terminal"
+          }
+        },
+        {
+          "step": "expect_event",
+          "event": "substrate.operations.Terminal",
+          "shape": {
+            "operation": {
+              "holds": "primitive",
+              "kind": "string"
+            }
+          }
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.operations.Operations"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.operations.Operations",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "actor": {
+                "kind": "literal",
+                "value": "actor-1"
+              },
+              "operation": {
+                "kind": "instance",
+                "instance": "accepted-operation-2"
+              },
+              "operation_kind": {
+                "kind": "literal",
+                "value": "operation_kind-1"
+              },
+              "request_hash": {
+                "kind": "literal",
+                "value": "request_hash-1"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Terminal"
+              }
+            }
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "entity",
+          "name": "substrate.operations.AcceptedOperation"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.operations.CompleteSuccess"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.operations.MarkDispatchUnknown"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.operations.Reserve"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.operations.CompleteSuccess",
+            "outcome": "terminal"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.operations.MarkDispatchUnknown",
+            "outcome": "unknown"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.operations.Reserve",
+            "outcome": "accepted"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Accepted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Failed"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Terminal"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Unknown"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.operations.Operations"
+        }
+      ]
+    },
+    "substrate.operations.AcceptedOperation/transition/lose_dispatch_evidence/by/substrate.operations.MarkDispatchUnknown/unknown": {
+      "purpose": "`substrate.operations.MarkDispatchUnknown` on `unknown` moves a `substrate.operations.AcceptedOperation` to `Unknown` along `lose_dispatch_evidence`",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.operations.Reserve",
+          "input": {
+            "actor": {
+              "kind": "literal",
+              "value": "actor"
+            },
+            "operation_kind": {
+              "kind": "literal",
+              "value": "operation_kind"
+            },
+            "request_hash": {
+              "kind": "literal",
+              "value": "request_hash"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.operations.Reserve",
+            "outcome": "accepted"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "accepted-operation",
+          "entity": "substrate.operations.AcceptedOperation",
+          "event": "substrate.operations.Accepted",
+          "field": "operation"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.operations.MarkDispatchUnknown",
+          "input": {
+            "operation": {
+              "kind": "instance",
+              "instance": "accepted-operation"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.operations.MarkDispatchUnknown",
+            "outcome": "unknown"
+          }
+        },
+        {
+          "step": "expect_event",
+          "event": "substrate.operations.Unknown",
+          "shape": {
+            "operation": {
+              "holds": "primitive",
+              "kind": "string"
+            }
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Accepted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Failed"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Terminal"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.operations.Operations"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.operations.Operations",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "actor": {
+                "kind": "literal",
+                "value": "actor"
+              },
+              "operation": {
+                "kind": "instance",
+                "instance": "accepted-operation"
+              },
+              "operation_kind": {
+                "kind": "literal",
+                "value": "operation_kind"
+              },
+              "request_hash": {
+                "kind": "literal",
+                "value": "request_hash"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Unknown"
+              }
+            }
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "entity",
+          "name": "substrate.operations.AcceptedOperation"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.operations.MarkDispatchUnknown"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.operations.Reserve"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.operations.MarkDispatchUnknown",
+            "outcome": "unknown"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.operations.Reserve",
+            "outcome": "accepted"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Accepted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Failed"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Terminal"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Unknown"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.operations.Operations"
+        }
+      ]
+    },
+    "substrate.operations.CompleteError/outcome/absent": {
+      "purpose": "`substrate.operations.CompleteError` for an identity no record carries takes `absent` and reports `substrate.operations.NotAccepted`",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.operations.CompleteError",
+          "input": {
+            "operation": {
+              "kind": "literal",
+              "value": "operation-1048576"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.operations.CompleteError",
+            "outcome": "absent"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.operations.NotAccepted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Accepted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Failed"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Terminal"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Unknown"
+        }
+      ],
+      "source": [
+        {
+          "kind": "entity",
+          "name": "substrate.operations.AcceptedOperation"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.operations.CompleteError"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.operations.CompleteError",
+            "outcome": "absent"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Accepted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Failed"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Terminal"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Unknown"
+        },
+        {
+          "kind": "error",
+          "name": "substrate.operations.NotAccepted"
+        }
+      ]
+    },
+    "substrate.operations.CompleteError/outcome/terminal": {
+      "purpose": "`substrate.operations.CompleteError` answers `terminal` for an input no other branch's guard claims",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.operations.Reserve",
+          "input": {
+            "actor": {
+              "kind": "literal",
+              "value": "actor"
+            },
+            "operation_kind": {
+              "kind": "literal",
+              "value": "operation_kind"
+            },
+            "request_hash": {
+              "kind": "literal",
+              "value": "request_hash"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.operations.Reserve",
+            "outcome": "accepted"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "accepted-operation",
+          "entity": "substrate.operations.AcceptedOperation",
+          "event": "substrate.operations.Accepted",
+          "field": "operation"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.operations.CompleteError",
+          "input": {
+            "operation": {
+              "kind": "instance",
+              "instance": "accepted-operation"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.operations.CompleteError",
+            "outcome": "terminal"
+          }
+        },
+        {
+          "step": "expect_event",
+          "event": "substrate.operations.Failed",
+          "shape": {
+            "operation": {
+              "holds": "primitive",
+              "kind": "string"
+            }
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Accepted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Terminal"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Unknown"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.operations.Operations"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.operations.Operations",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "actor": {
+                "kind": "literal",
+                "value": "actor"
+              },
+              "operation": {
+                "kind": "instance",
+                "instance": "accepted-operation"
+              },
+              "operation_kind": {
+                "kind": "literal",
+                "value": "operation_kind"
+              },
+              "request_hash": {
+                "kind": "literal",
+                "value": "request_hash"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Terminal"
+              }
+            }
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "entity",
+          "name": "substrate.operations.AcceptedOperation"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.operations.CompleteError"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.operations.Reserve"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.operations.CompleteError",
+            "outcome": "terminal"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.operations.Reserve",
+            "outcome": "accepted"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Accepted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Failed"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Terminal"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Unknown"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.operations.Operations"
+        }
+      ]
+    },
+    "substrate.operations.CompleteSuccess/outcome/absent": {
+      "purpose": "`substrate.operations.CompleteSuccess` for an identity no record carries takes `absent` and reports `substrate.operations.NotAccepted`",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.operations.CompleteSuccess",
+          "input": {
+            "operation": {
+              "kind": "literal",
+              "value": "operation-1048576"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.operations.CompleteSuccess",
+            "outcome": "absent"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.operations.NotAccepted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Accepted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Failed"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Terminal"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Unknown"
+        }
+      ],
+      "source": [
+        {
+          "kind": "entity",
+          "name": "substrate.operations.AcceptedOperation"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.operations.CompleteSuccess"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.operations.CompleteSuccess",
+            "outcome": "absent"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Accepted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Failed"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Terminal"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Unknown"
+        },
+        {
+          "kind": "error",
+          "name": "substrate.operations.NotAccepted"
+        }
+      ]
+    },
+    "substrate.operations.CompleteSuccess/outcome/terminal": {
+      "purpose": "`substrate.operations.CompleteSuccess` answers `terminal` for an input no other branch's guard claims",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.operations.Reserve",
+          "input": {
+            "actor": {
+              "kind": "literal",
+              "value": "actor"
+            },
+            "operation_kind": {
+              "kind": "literal",
+              "value": "operation_kind"
+            },
+            "request_hash": {
+              "kind": "literal",
+              "value": "request_hash"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.operations.Reserve",
+            "outcome": "accepted"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "accepted-operation",
+          "entity": "substrate.operations.AcceptedOperation",
+          "event": "substrate.operations.Accepted",
+          "field": "operation"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.operations.CompleteSuccess",
+          "input": {
+            "operation": {
+              "kind": "instance",
+              "instance": "accepted-operation"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.operations.CompleteSuccess",
+            "outcome": "terminal"
+          }
+        },
+        {
+          "step": "expect_event",
+          "event": "substrate.operations.Terminal",
+          "shape": {
+            "operation": {
+              "holds": "primitive",
+              "kind": "string"
+            }
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Accepted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Failed"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Unknown"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.operations.Operations"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.operations.Operations",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "actor": {
+                "kind": "literal",
+                "value": "actor"
+              },
+              "operation": {
+                "kind": "instance",
+                "instance": "accepted-operation"
+              },
+              "operation_kind": {
+                "kind": "literal",
+                "value": "operation_kind"
+              },
+              "request_hash": {
+                "kind": "literal",
+                "value": "request_hash"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Terminal"
+              }
+            }
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "entity",
+          "name": "substrate.operations.AcceptedOperation"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.operations.CompleteSuccess"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.operations.Reserve"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.operations.CompleteSuccess",
+            "outcome": "terminal"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.operations.Reserve",
+            "outcome": "accepted"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Accepted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Failed"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Terminal"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Unknown"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.operations.Operations"
+        }
+      ]
+    },
+    "substrate.operations.MarkDispatchUnknown/outcome/absent": {
+      "purpose": "`substrate.operations.MarkDispatchUnknown` for an identity no record carries takes `absent` and reports `substrate.operations.NotAccepted`",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.operations.MarkDispatchUnknown",
+          "input": {
+            "operation": {
+              "kind": "literal",
+              "value": "operation-1048576"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.operations.MarkDispatchUnknown",
+            "outcome": "absent"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.operations.NotAccepted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Accepted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Failed"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Terminal"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Unknown"
+        }
+      ],
+      "source": [
+        {
+          "kind": "entity",
+          "name": "substrate.operations.AcceptedOperation"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.operations.MarkDispatchUnknown"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.operations.MarkDispatchUnknown",
+            "outcome": "absent"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Accepted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Failed"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Terminal"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Unknown"
+        },
+        {
+          "kind": "error",
+          "name": "substrate.operations.NotAccepted"
+        }
+      ]
+    },
+    "substrate.operations.MarkDispatchUnknown/outcome/unknown": {
+      "purpose": "`substrate.operations.MarkDispatchUnknown` answers `unknown` for an input no other branch's guard claims",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.operations.Reserve",
+          "input": {
+            "actor": {
+              "kind": "literal",
+              "value": "actor"
+            },
+            "operation_kind": {
+              "kind": "literal",
+              "value": "operation_kind"
+            },
+            "request_hash": {
+              "kind": "literal",
+              "value": "request_hash"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.operations.Reserve",
+            "outcome": "accepted"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "accepted-operation",
+          "entity": "substrate.operations.AcceptedOperation",
+          "event": "substrate.operations.Accepted",
+          "field": "operation"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.operations.MarkDispatchUnknown",
+          "input": {
+            "operation": {
+              "kind": "instance",
+              "instance": "accepted-operation"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.operations.MarkDispatchUnknown",
+            "outcome": "unknown"
+          }
+        },
+        {
+          "step": "expect_event",
+          "event": "substrate.operations.Unknown",
+          "shape": {
+            "operation": {
+              "holds": "primitive",
+              "kind": "string"
+            }
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Accepted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Failed"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Terminal"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.operations.Operations"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.operations.Operations",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "actor": {
+                "kind": "literal",
+                "value": "actor"
+              },
+              "operation": {
+                "kind": "instance",
+                "instance": "accepted-operation"
+              },
+              "operation_kind": {
+                "kind": "literal",
+                "value": "operation_kind"
+              },
+              "request_hash": {
+                "kind": "literal",
+                "value": "request_hash"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Unknown"
+              }
+            }
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "entity",
+          "name": "substrate.operations.AcceptedOperation"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.operations.MarkDispatchUnknown"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.operations.Reserve"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.operations.MarkDispatchUnknown",
+            "outcome": "unknown"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.operations.Reserve",
+            "outcome": "accepted"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Accepted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Failed"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Terminal"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Unknown"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.operations.Operations"
+        }
+      ]
+    },
+    "substrate.operations.Reserve/outcome/accepted": {
+      "purpose": "`substrate.operations.Reserve` answers `accepted` for an input no other branch's guard claims",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.operations.Reserve",
+          "input": {
+            "actor": {
+              "kind": "literal",
+              "value": "actor"
+            },
+            "operation_kind": {
+              "kind": "literal",
+              "value": "operation_kind"
+            },
+            "request_hash": {
+              "kind": "literal",
+              "value": "request_hash"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.operations.Reserve",
+            "outcome": "accepted"
+          }
+        },
+        {
+          "step": "expect_event",
+          "event": "substrate.operations.Accepted",
+          "payload": {
+            "actor": "actor",
+            "operation_kind": "operation_kind",
+            "request_hash": "request_hash"
+          },
+          "shape": {
+            "actor": {
+              "holds": "primitive",
+              "kind": "string"
+            },
+            "operation": {
+              "holds": "primitive",
+              "kind": "string"
+            },
+            "operation_kind": {
+              "holds": "primitive",
+              "kind": "string"
+            },
+            "request_hash": {
+              "holds": "primitive",
+              "kind": "string"
+            }
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Failed"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Terminal"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.operations.Unknown"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.operations.Operations"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.operations.Operations",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "actor": {
+                "kind": "literal",
+                "value": "actor"
+              },
+              "operation": {
+                "kind": "observed",
+                "event": "substrate.operations.Accepted",
+                "field": "operation"
+              },
+              "operation_kind": {
+                "kind": "literal",
+                "value": "operation_kind"
+              },
+              "request_hash": {
+                "kind": "literal",
+                "value": "request_hash"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Accepted"
+              }
+            }
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "entity",
+          "name": "substrate.operations.AcceptedOperation"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.operations.Reserve"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.operations.Reserve",
+            "outcome": "accepted"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Accepted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Failed"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Terminal"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.operations.Unknown"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.operations.Operations"
+        }
+      ]
+    }
+  }
+}

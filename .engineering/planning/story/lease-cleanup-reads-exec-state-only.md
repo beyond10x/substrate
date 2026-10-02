@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:lease-cleanup-reads-exec-state-only
 kind: story
 status: implemented
@@ -19,6 +19,10 @@ scope:
 - confidence: cited
   path: crates/substrate-store/src/tests.rs
 revision: 8
+transitions:
+- {from: "draft", to: "proposed", at: "2026-09-04T12:50:32Z", actor: "human:timo", revision: 4, imported: true}
+- {from: "proposed", to: "active", at: "2026-09-04T12:50:32Z", actor: "human:timo", revision: 5, imported: true}
+- {from: "active", to: "implemented", at: "2026-09-04T14:47:50Z", actor: "human:timo", revision: 8, decided_on: {"recorded":{"test_result":1}}, imported: true}
 ---
 # Story: Lease cleanup reads exec state only
 

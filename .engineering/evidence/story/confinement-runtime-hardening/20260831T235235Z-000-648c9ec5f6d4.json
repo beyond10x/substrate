@@ -1,0 +1,13 @@
+{
+  "at": "2026-08-31T23:52:35Z",
+  "actor": "human:timo",
+  "artifact": "story:confinement-runtime-hardening",
+  "kind": "story",
+  "revision": 9,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "bash scripts/delegated-lane.sh: exit 0; host and shipped-daemon delegated lanes passed",
+    "reference": "7b94844"
+  }
+}

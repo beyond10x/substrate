@@ -1,0 +1,13 @@
+{
+  "at": "2026-08-29T21:45:22Z",
+  "actor": "human:timo",
+  "artifact": "story:status-md-re-observed",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "bash scripts/gate.sh",
+    "reference": "~/.cache/claude-tmp/substrate-gate-wave2.log"
+  }
+}

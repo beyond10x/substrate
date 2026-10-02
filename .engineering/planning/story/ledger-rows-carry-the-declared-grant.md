@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:ledger-rows-carry-the-declared-grant
 kind: story
 status: implemented
@@ -11,6 +11,10 @@ tags:
 - o1
 - trust
 revision: 7
+transitions:
+- {from: "draft", to: "proposed", at: "2026-08-29T23:21:58Z", actor: "human:timo", revision: 4, imported: true}
+- {from: "proposed", to: "active", at: "2026-08-30T02:26:31Z", actor: "human:timo", revision: 5, decided_on: {"recorded":{"artifact":1}}, imported: true}
+- {from: "active", to: "implemented", at: "2026-08-30T06:13:31Z", actor: "human:timo", revision: 7, decided_on: {"recorded":{"test_result":1,"artifact":1}}, imported: true}
 ---
 # Story: An operation's ledger row carries the declared grant it ran under
 

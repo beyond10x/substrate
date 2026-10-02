@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:network-session-authority
 kind: story
 status: implemented
@@ -15,6 +15,10 @@ relations:
 - depends_on: story:production-tls-control-listener
 - depends_on: story:hosted-trust-envelope-admission
 revision: 10
+transitions:
+- {from: "draft", to: "proposed", at: "2026-08-30T12:33:20Z", actor: "human:timo", revision: 6, decided_on: {"recorded":{"specification":1}}, imported: true}
+- {from: "proposed", to: "active", at: "2026-09-01T07:00:09Z", actor: "human:timo", revision: 8, decided_on: {"recorded":{"specification":1}}, imported: true}
+- {from: "active", to: "implemented", at: "2026-09-01T07:51:31Z", actor: "human:timo", revision: 10, decided_on: {"recorded":{"test_result":2,"artifact":1,"specification":1}}, imported: true}
 ---
 # Story: Network session transport over TLS with single-use proof-bound authority
 

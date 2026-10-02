@@ -1,0 +1,13 @@
+{
+  "at": "2026-08-30T02:21:29Z",
+  "actor": "human:timo",
+  "artifact": "story:sealed-secret-slots",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "bash scripts/delegated-lane.sh, re-run by the orchestrator",
+    "reference": "48 HTTP cases (delegated lane), exit 0"
+  }
+}

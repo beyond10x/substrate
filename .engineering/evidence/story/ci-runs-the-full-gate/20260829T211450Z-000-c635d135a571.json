@@ -1,0 +1,13 @@
+{
+  "at": "2026-08-29T21:14:50Z",
+  "actor": "human:timo",
+  "artifact": "story:ci-runs-the-full-gate",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "GitHub Actions Gate workflow, push to main, ec82213",
+    "reference": "https://github.com/beyond10x/substrate/actions/runs/33275398365"
+  }
+}

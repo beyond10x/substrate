@@ -1,0 +1,13 @@
+{
+  "at": "2026-09-01T05:59:11Z",
+  "actor": "human:timo",
+  "artifact": "story:production-tls-control-listener",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "local bash scripts/gate.sh: gate passed",
+    "reference": "scripts/gate.sh"
+  }
+}

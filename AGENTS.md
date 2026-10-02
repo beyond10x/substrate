@@ -419,16 +419,18 @@ stability decision. Do not describe a development bundle as stable.
 | Review gates and implementation slices | `docs/plan/` |
 | Ordered exit criteria | `ROADMAP.md` |
 | Observed progress | `STATUS.md` |
-| The plan — epics and stories, with kinds, statuses and legal moves from the `protocol` CLI | `.engineering/planning/`, validated by `protocol artifact validate` |
+| The plan — epics and stories, with kinds, statuses and legal moves from the `aep` CLI | `.engineering/planning/`, validated by `aep plan artifact validate` |
 | Archived reviews, retained as immutable review input | `docs/reviews/archived/` |
 | What shipped | `CHANGELOG.md` |
 
 ## Public website
 
-For any public documentation website change, read and follow the repository-local `website-docs`
-skill at `atlas/.agents/skills/website-docs/SKILL.md` before taking action. The public site is a
-self-contained projection: do not publish or link internal designs, ADRs, plans, reviews, work logs,
-contributor status material, or private source.
+The public site is repository-owned at `https://beyond10x.github.io/substrate/`.
+`cargo xtask check-docs` validates the explicit public page allowlist; `cargo xtask build-docs
+--out <empty-directory> --commit <full-sha>` builds static HTML and provenance.
+`pages.yml` uploads the exact successful main artifact; `b10x-docs-site.yml` uses the pinned
+standalone project-site workflow, like Mantle. Do not add unified Website bundles, route manifests,
+redirect façades, or global docs reconciliation. Publish no internal plans, ADRs or work logs.
 
 **Document placement is a rule, not a habit.** Current architecture goes in `architecture/`;
 sequencing in `ROADMAP.md`; observed progress in `STATUS.md`. `docs/plan/` turns design into gates
@@ -446,11 +448,7 @@ Keep changes reviewable and preserve the direction from composition and products
 A contract change must identify affected capabilities, refusal behaviour, observations, events and
 consumer compatibility **before implementation begins**.
 
-**Worktrees live under `../.worktrees/`, never beside the repository checkout.** Name a Substrate
-worktree `../.worktrees/substrate-<task>` and remove it when its branch is merged. Do not create
-`../substrate-<task>` siblings that clutter the `beyond10x` collection root. Existing worktrees and
-their changes belong to the operator; inspect and preserve them unless the operator explicitly
-authorises their cleanup.
+Use the managed `worktree` CLI and keep primary checkouts clean. Existing worktrees and their changes belong to their active owners; never clear another session's lease.
 
 Three such siblings predate this rule and are **not** admitted by it: `../substrate-wt/` (empty on
 2026-09-15), `../substrate-wt-corrupt-20260831-MNFXtyRu/` (holds `contract-gate` and `pty-sessions`)
@@ -493,52 +491,33 @@ runs from a workstation through `as-bot.sh`, or from a private repository.
 ## Planning artifacts
 
 Plan items are markdown files under `.engineering/planning/<kind>/<slug>.md`: YAML frontmatter the
-`protocol` CLI owns, and a body the agent and operator own. `.engineering/project.yaml` pins the
+`aep` CLI owns, and a body the agent and operator own. `.engineering/project.yaml` pins the
 governing document tree to one commit of `beyond10x/aep` (the repository `engineering-protocols` was
-renamed to on 2026-09-01); advancing the pin is an explicit change to that file. The `aep-plan`
-Claude Code plugin (installed user-scope; skill `/aep-plan:planning`) carries the full model and
-store conventions.
+renamed to on 2026-09-01); advancing the pin is an explicit change to that file. The `aep:planning` skill carries the current model and store conventions.
 
 Kinds, relations, statuses and legal moves come from validated lifecycle documents. Ask the CLI —
-`protocol artifact kinds`, `relations`, `lifecycle <kind>`, `list`, `board`, `graph` — instead of
-reciting them. Before the first planning-store write of a session, run `protocol artifact list`.
+`aep plan artifact kinds`, `relations`, `lifecycle <kind>`, `list`, `board`, `graph` — instead of
+reciting them. Before the first planning-store write of a session, run `aep plan artifact list`.
 
-1. **A status changes only through `protocol artifact move`.** Never edit `status:` directly.
+1. **A status changes only through `aep plan artifact move`.** Never edit `status:` directly.
 2. **Never edit a planning-store file directly.** `new` creates, `relate` links, `move` moves,
    `body <id> --from <path|->` writes prose.
-3. **After a batch, run `protocol artifact validate` and relay its output verbatim.**
+3. **After a batch, run `aep plan artifact validate` and relay its output verbatim.**
 4. **A refusal is an answer.** Relay the legal moves the CLI names; do not route around it.
 5. **An already-satisfied or wrong request still gets an artifact** recording the finding.
 
 New artifacts start in the lifecycle's initial state. Lifecycle moves are claims about project
 state: propose them and wait for the operator unless the operator asked for the specific move.
-`protocol` must be on `PATH` (`cargo install --path crates/edge/aep-cli` in an
-`aep` checkout); if it is absent, do not improvise machine-owned frontmatter.
+`aep` must be on `PATH` (use the official current release); if it is absent, do not improvise machine-owned frontmatter.
 
 A story that changes a contract or a capability still owes its ADR or design document **before
 code** (invariant 8); the story body names which. `ROADMAP.md` keeps the phase order and
 `STATUS.md` the observed state; the store holds the work items and their status, and nothing else
 restates it.
 
-<!-- b10x-docs-operations:start -->
-## Public documentation operations
+## Standalone documentation authority
 
-This repository owns the public source and presentation allowlist in `b10x.docs.yaml`. The generated credential-free `.github/workflows/b10x-docs-bundle.yml` passively packages only those declared files for the exact successful `main` commit; it must never run repository code. The generated `.github/workflows/b10x-docs-check.yml` runs the publisher's per-source checks on every pull request and main push, with read-only contents and no credentials; it is deliberately separate from the shared gate, which runs on `pull_request_target` with a secret and never reads candidate source. Atlas selects the latest successful bundle with every other catalog source, and Website plus Docs System own rendering, shared components, search, and feeds. Do not add a standalone docs deployer or put App credentials in this public repository. If Atlas catalogs a former Pages workflow, that file remains repository-owned validation: preserve its bespoke checks while keeping exact read-only permissions, an unconditional pull-request trigger, and no deployment primitives. Project Pages at `/substrate/` is only the generated stable redirect façade in `.github/workflows/b10x-docs-pages.yml`; content-only publication never rebuilds it.
-
-From the complete organization workspace, verify the contract with a clean Atlas checkout at the current remote `main`. Set `B10X_ATLAS_CHECKOUT` to a managed Atlas worktree when the primary checkout is dirty or stale; never infer command availability from the primary alone.
-
-```bash
-atlas_checkout="${B10X_ATLAS_CHECKOUT:-atlas}"
-atlas_head="$(git -C "$atlas_checkout" rev-parse HEAD)"
-atlas_main="$(git -C "$atlas_checkout" ls-remote origin refs/heads/main | awk '{print $1}')"
-test -z "$(git -C "$atlas_checkout" status --porcelain)"
-test "$atlas_head" = "$atlas_main"
-cargo run --manifest-path "$atlas_checkout/Cargo.toml" --locked -q -- \
-  --store "$atlas_checkout/catalog/store" docs reconcile --workspace . --check
-```
-
-Keep internal plans, stories, ADRs, decisions, worklogs, security material, and research out of the public allowlist unless a repository authority explicitly declares them public.
-<!-- b10x-docs-operations:end -->
+Operator decision, 2026-10-02: Substrate owns its project site, using the same static artifact publication approach as Mantle. This supersedes the former unified docs manifest, source-bundle and redirect-façade instructions for this repository. Do not reconcile this repository back into the global documentation pipeline. App credentials never belong in this public repository.
 
 <!-- b10x-release-operations:start -->
 ## Release completion
@@ -560,3 +539,8 @@ Repositories without a release unit retain their existing publication policy. Th
 boundary supersedes older instructions that attach synchronous documentation ceremony to each
 source release.
 <!-- b10x-release-operations:end -->
+
+
+## Executable specification
+
+`spec/ess-inputs.yaml` pins ESS. `cargo xtask check-ess` validates the specification and regenerates the committed suite to check drift. The first projection is the accepted-operation ledger, with its coverage and excluded boundaries documented in `spec/coverage.md`. Existing runtime and immutable-bundle gates remain required. Never describe this bounded projection as full service conformance.

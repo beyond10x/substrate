@@ -1,0 +1,13 @@
+{
+  "at": "2026-08-30T11:46:13Z",
+  "actor": "human:timo",
+  "artifact": "story:pty-sessions",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "specification",
+    "source": "design 13, proposed",
+    "reference": "docs/design/13-pty-sessions.md"
+  }
+}

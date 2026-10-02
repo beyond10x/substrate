@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:backend-recheck-hashes-only-on-change
 kind: story
 status: draft

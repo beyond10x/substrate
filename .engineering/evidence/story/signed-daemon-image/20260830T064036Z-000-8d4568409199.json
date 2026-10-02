@@ -1,0 +1,13 @@
+{
+  "at": "2026-08-30T06:40:36Z",
+  "actor": "human:timo",
+  "artifact": "story:signed-daemon-image",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "artifact",
+    "source": "PR #22, squash fced5fb",
+    "reference": ".github/workflows/release.yml"
+  }
+}

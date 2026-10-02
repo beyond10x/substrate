@@ -1,0 +1,13 @@
+{
+  "at": "2026-08-30T11:22:14Z",
+  "actor": "human:timo",
+  "artifact": "story:signed-daemon-image",
+  "kind": "story",
+  "revision": 6,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "tag 0.2.3-rc.0 pushed to origin at 062bc89",
+    "reference": "no workflow run created; gh release view 0.2.3-rc.0 -> release not found"
+  }
+}

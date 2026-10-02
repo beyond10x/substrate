@@ -1,0 +1,13 @@
+{
+  "at": "2026-08-30T02:10:40Z",
+  "actor": "human:timo",
+  "artifact": "story:aperture-byte-ceiling",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "specification",
+    "source": "design 12, proposed",
+    "reference": "docs/design/12-aperture-byte-ceiling.md"
+  }
+}

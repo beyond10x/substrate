@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:hosted-trust-envelope-admission
 kind: story
 status: implemented
@@ -15,6 +15,10 @@ relations:
 - decomposes: epic:remote-serving
 - depends_on: story:production-tls-control-listener
 revision: 7
+transitions:
+- {from: "draft", to: "proposed", at: "2026-08-31T22:54:32Z", actor: "human:timo", revision: 2, imported: true}
+- {from: "proposed", to: "active", at: "2026-09-01T06:15:25Z", actor: "human:timo", revision: 4, imported: true}
+- {from: "active", to: "implemented", at: "2026-09-01T06:47:41Z", actor: "human:timo", revision: 7, decided_on: {"recorded":{"test_result":2}}, imported: true}
 ---
 # Story: Hosted requests use the accepted trust envelope
 

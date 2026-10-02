@@ -1,0 +1,13 @@
+{
+  "at": "2026-09-01T09:32:40Z",
+  "actor": "human:timo",
+  "artifact": "story:remote-sdk-transport",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "bash scripts/delegated-lane.sh",
+    "reference": "local:2026-09-01/delegated-remote-wss"
+  }
+}

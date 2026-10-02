@@ -1,0 +1,13 @@
+{
+  "at": "2026-09-06T18:12:13Z",
+  "actor": "human:timo",
+  "artifact": "story:container-private-exec-bootstrap",
+  "kind": "story",
+  "revision": 13,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "Version 0.7.6 full scripts/gate.sh passed, all 16 bundles and 3633 JSON documents",
+    "reference": "substrate-full-gate-release.log"
+  }
+}

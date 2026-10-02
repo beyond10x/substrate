@@ -1,0 +1,13 @@
+{
+  "at": "2026-08-29T23:32:42Z",
+  "actor": "human:timo",
+  "artifact": "story:ledger-rows-carry-the-declared-grant",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "artifact",
+    "source": "identity story:delegated-context-signing-key (draft) — the ADR 0011 issuer question raised in the repo that must answer it",
+    "reference": "https://github.com/beyond10x/identity/blob/c1e3a07/.engineering/planning/story/delegated-context-signing-key.md"
+  }
+}

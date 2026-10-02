@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:the-metrics-stream-cap-is-machine-readable
 kind: story
 status: draft

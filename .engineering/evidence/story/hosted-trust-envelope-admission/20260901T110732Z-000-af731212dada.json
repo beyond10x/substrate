@@ -1,0 +1,13 @@
+{
+  "at": "2026-09-01T11:07:32Z",
+  "actor": "human:timo",
+  "artifact": "story:hosted-trust-envelope-admission",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "deployment_result",
+    "source": "Substrate 0.5.0 release run 33498193209",
+    "reference": "https://github.com/beyond10x/substrate/releases/tag/0.5.0"
+  }
+}

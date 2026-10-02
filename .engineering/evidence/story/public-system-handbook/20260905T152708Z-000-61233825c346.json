@@ -1,0 +1,12 @@
+{
+  "at": "2026-09-05T15:27:08Z",
+  "actor": "human:timo",
+  "artifact": "story:public-system-handbook",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "Exact public quickstart Bash blocks: create/write/read/destroy passed; missing-facts preflight and HTTP refusal stop passed; repository link check passed"
+  }
+}

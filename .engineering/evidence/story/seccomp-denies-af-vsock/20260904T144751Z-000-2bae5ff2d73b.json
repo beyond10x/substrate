@@ -1,0 +1,13 @@
+{
+  "at": "2026-09-04T14:47:51Z",
+  "actor": "human:timo",
+  "artifact": "story:seccomp-denies-af-vsock",
+  "kind": "story",
+  "revision": 8,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "bash scripts/gate.sh, per step, on wave/security-b-2026-09-04",
+    "reference": "2382a21"
+  }
+}

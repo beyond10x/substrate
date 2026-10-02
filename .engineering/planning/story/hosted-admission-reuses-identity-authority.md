@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:hosted-admission-reuses-identity-authority
 kind: story
 status: draft

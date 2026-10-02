@@ -1,0 +1,13 @@
+{
+  "at": "2026-09-04T03:19:53Z",
+  "actor": "human:timo",
+  "artifact": "story:upgraded-connections-keep-their-permit",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "cargo test -p b10x-substrate-daemon --release --locked (unit u2, worktree impl/upgraded-connections-permit)",
+    "reference": "47dce6f"
+  }
+}

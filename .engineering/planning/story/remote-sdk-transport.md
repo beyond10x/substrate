@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:remote-sdk-transport
 kind: story
 status: implemented
@@ -17,6 +17,10 @@ relations:
 - depends_on: story:hosted-trust-envelope-admission
 - depends_on: story:sdk-promoted-contract-parity
 revision: 5
+transitions:
+- {from: "draft", to: "proposed", at: "2026-08-31T22:54:32Z", actor: "human:timo", revision: 2, imported: true}
+- {from: "proposed", to: "active", at: "2026-09-01T08:04:53Z", actor: "human:timo", revision: 4, imported: true}
+- {from: "active", to: "implemented", at: "2026-09-01T09:32:46Z", actor: "human:timo", revision: 5, decided_on: {"recorded":{"test_result":3}}, imported: true}
 ---
 # Story: The Rust SDK connects over HTTPS and WSS
 

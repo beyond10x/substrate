@@ -5,9 +5,7 @@ description: The implemented subsystems, resource and event coverage, and the bo
 
 # What defines the system?
 
-Substrate has an explicit wire contract and implemented resource lifecycles. It does not currently
-have one ESS system specification from which all its subsystems, commands, events and CLI are
-derived. Its definitions live in Rust types, versioned contract sources, route handlers and durable
+Substrate has an explicit wire contract and implemented resource lifecycles. An initial ESS specification now describes the accepted-operation ledger lifecycle; it does not generate the entire service or replace the wire contract. Its definitions live in Rust types, versioned contract sources, route handlers and durable
 store transitions. Conformance checks connect those definitions; they do not replace them.
 
 This page describes the Linux host implementation in release `0.7.3`, which advertises the
@@ -16,21 +14,14 @@ This page describes the Linux host implementation in release `0.7.3`, which adve
 
 ## Subsystems and ownership
 
-```mermaid
-flowchart TB
-  Caller["Caller: intent and operation IDs"]
-  SDK["Rust SDK / disposable MCP adapter"]
-  Daemon["Daemon: authentication, admission and routes"]
-  Store["SQLite: resources, operations and events"]
-  Host["Linux host driver: probes and enforcement"]
-  OS["Kernel, filesystem and confined processes"]
-  Caller --> SDK
-  Caller -->|HTTP or WebSocket| Daemon
-  SDK -->|Authenticated service contract| Daemon
-  Daemon -->|Reserve / record| Store
-  Daemon <-->|Dispatch / observe| Host
-  Host --> OS
-```
+| Boundary | Flow |
+|---|---|
+| Caller and SDK | Authenticated HTTP or WebSocket requests to the daemon |
+| Daemon and SQLite | Reserve operations, record observations and events |
+| Daemon and host driver | Dispatch work and observe its outcome |
+| Host driver and kernel | Probe capabilities and enforce process confinement |
+
+See the [security boundary diagram](https://beyond10x.github.io/substrate/#architecture).
 
 The SDK calls the daemon. The disposable MCP adapter translates tools and resources through that
 SDK. The daemon coordinates admission and lifecycle work; the host driver proves and applies

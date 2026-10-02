@@ -1,26 +1,7 @@
-# Substrate documentation website
+# Substrate public documentation
 
-This directory contains the self-contained public Docusaurus site for Substrate. Its `docs/` tree
-is written for people arriving cold. It does not publish or link to the repository's internal design
-records, plans, reviews, ADRs or status files. Atlas ADR 0010 explicitly authorises the public
-repository, licence and private vulnerability-reporting destinations linked by the site.
+Standalone static project site at https://beyond10x.github.io/substrate/.
 
-## Develop
+`cargo xtask check-docs` validates the public inputs. `cargo xtask build-docs --out website/build --commit <full-sha>` renders the explicitly listed Markdown guides and authored homepage, copies the stylesheet, and writes exact-commit provenance. The destination must be empty to prevent stale files from entering the publication artifact.
 
-```bash
-npm ci
-npm run start
-```
-
-The local site is served at <http://localhost:3000/substrate/>.
-
-## Gate
-
-```bash
-npm run typecheck
-npm audit --audit-level=moderate
-npm run build
-```
-
-Broken links and anchors fail the production build. The GitHub Pages workflow builds documentation
-changes and publishes the static output from `main`.
+The renderer is Rust in `xtask/src/docs.rs`. It does not read internal architecture, planning or review material. The source allowlist is `PAGES`; each guide retains its `/substrate/docs/` path. No Node toolchain or global documentation integration is required.
