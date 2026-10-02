@@ -9,6 +9,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [0.7.9] — 2026-10-02
 
+Published by [release run 37053941591](https://github.com/beyond10x/substrate/actions/runs/37053941591).
+All three artifacts were keyless-signed, verified against the exact tagged workflow identity,
+and anonymously retrieved before announcement:
+
+- Image: `ghcr.io/beyond10x/b10x-substrate-daemon:0.7.9` at `sha256:42246a57457c9b548d0270f51d78c9fd4f9c4d8ba81ad33c99d19ddffa99bf6a`.
+- Contract bundle: `ghcr.io/beyond10x/b10x-substrate-wire:0.17.0` at `sha256:90f047b346a9f35460644521775637dc046228159a426608f6ec5cb71292d8ac`, annotated `development`.
+- Disposable MCP image: `ghcr.io/beyond10x/b10x-substrate-mcp:0.7.9` at `sha256:c1f5cb19369ea32e38ab87e0e844f9de7eacf1758292df52397b0fc82b842682`, development-only.
+
+The [release notes](https://github.com/beyond10x/substrate/releases/tag/0.7.9) provide exact
+`cosign verify` commands and the delegated confinement record for the tagged commit.
+
 ### Added
 
 - Policy-controlled unrecorded PTY and pipe sessions through the public Rust SDK.
