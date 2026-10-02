@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-02T12:35:23Z",
+  "actor": "human:timo",
+  "artifact": "executable-system-specification:accepted-operation-ledger",
+  "kind": "executable-system-specification",
+  "revision": 1,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "ess specify validate --path spec; cargo test --locked -p b10x-substrate-store --test ess_operations -- --nocapture (14 passed; 0 skipped; 0 failed)",
+    "reference": "spec/operations-suite.json"
+  }
+}

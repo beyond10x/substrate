@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-02T12:46:38Z",
+  "actor": "human:timo",
+  "artifact": "story:standalone-docs-and-ess-adoption",
+  "kind": "story",
+  "revision": 2,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "bash scripts/gate.sh: exit 0; all sixteen immutable contract bundles verified; Chromium at 1440, 768, 390 pixels",
+    "reference": ".engineering/reports/standalone-docs-and-ess-adoption.md"
+  }
+}

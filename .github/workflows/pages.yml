@@ -1,14 +1,8 @@
-# Atlas-classified former Pages workflow: repository-owned validation only; deployment authority is forbidden.
-# Builds and audits the self-contained public Docusaurus source; Website owns public delivery.
 name: Documentation validation
 
 on:
   push:
     branches: [main]
-    paths:
-      - .github/workflows/pages.yml
-      - website/**
-  # This job is a required check, so every pull request must create its context.
   pull_request:
   workflow_dispatch:
 
@@ -16,42 +10,34 @@ permissions:
   contents: read
 
 concurrency:
-  group: pages-${{ github.ref }}
+  group: docs-build-${{ github.ref }}
   cancel-in-progress: false
+
+env:
+  CARGO_PROFILE_DEV_DEBUG: 0
 
 jobs:
   build:
-    name: Build Docusaurus
+    name: Build documentation
     runs-on: ubuntu-latest
     timeout-minutes: 20
-    permissions:
-      contents: read
-
     steps:
-      - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
-
-      - name: Set up Node.js
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
         with:
-          node-version: 24
-          cache: npm
-          cache-dependency-path: website/package-lock.json
-
-      - name: Install locked dependencies
-        working-directory: website
-        run: npm ci --ignore-scripts
-
-      - name: Type-check website
-        working-directory: website
-        run: npm run typecheck
-
-      - name: Audit website dependencies
-        working-directory: website
-        run: npm audit --audit-level=moderate
-
-      - name: Build website
-        working-directory: website
-        run: npm run build
+          toolchain: '1.97'
+      - name: Validate and build the static documentation
+        run: |
+          cargo test --locked -p xtask docs::
+          cargo xtask build-docs --out website/build --commit "$GITHUB_SHA"
+      - name: Upload the exact built site
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: b10x-project-site
+          path: website/build
+          include-hidden-files: true
+          retention-days: 30
+          if-no-files-found: error

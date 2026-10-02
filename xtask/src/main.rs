@@ -11,6 +11,8 @@ mod advisories;
 mod bot_files;
 mod bundle;
 mod container_profiles;
+mod docs;
+mod ess;
 mod image_startup;
 mod json;
 mod licenses;
@@ -43,6 +45,12 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Validate the standalone public documentation.
+    CheckDocs,
+    /// Validate ESS and reject drift in the committed conformance suite.
+    CheckEss,
+    /// Build the standalone project site and exact-commit provenance.
+    BuildDocs(docs::BuildArgs),
     /// Verify final daemon image files and non-root startup capability masks on local Linux Docker.
     #[command(name = "check-image-startup")]
     ImageStartup(image_startup::Args),
@@ -113,6 +121,9 @@ fn main() -> ExitCode {
 fn dispatch() -> Result<ExitCode> {
     let cli = Cli::parse();
     let report = match cli.command {
+        Command::CheckEss => ess::check(&repo::root()?)?,
+        Command::CheckDocs => docs::check(&repo::root()?)?,
+        Command::BuildDocs(args) => return docs::build(&args),
         Command::ImageStartup(args) => return image_startup::run(&args),
         Command::Advisories => advisories::check(&repo::root()?)?,
         Command::Licenses => licenses::check(&repo::root()?)?,

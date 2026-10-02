@@ -1,7 +1,7 @@
-planning_scope: substrate-ess-docs
+planning_scope: substrate
 profile: development.standard
 protocol: adp/1
-protocols: git+ssh://git@github.com/beyond10x/aep.git#422966a781ab9091c3c8706ef5b24cc6b6ae4b53
+protocols: git+https://github.com/beyond10x/aep#422966a781ab9091c3c8706ef5b24cc6b6ae4b53
 store:
   git: {}
 summary: 'The b10x execution data plane: confined workspaces, bounded processes, sessions, execution capsules, a durable operation ledger and observed state, published as versioned wire-contract bundles.'

@@ -12,10 +12,10 @@ the machine cannot confine, it says so — an exec on a host with no delegated c
 
 It does not decide product policy, run agent loops, or understand connector vendors.
 
-[Public handbook](https://beyond10x.github.io/docs/substrate/) ·
-[Run a local daemon](https://beyond10x.github.io/docs/substrate/getting-started/) ·
-[System model and derivation](https://beyond10x.github.io/docs/substrate/concepts/model/) ·
-[Run a bounded command](https://beyond10x.github.io/docs/substrate/guides/run-a-command/)
+[Public handbook](https://beyond10x.github.io/substrate/docs/) ·
+[Run a local daemon](https://beyond10x.github.io/substrate/docs/getting-started/) ·
+[System model and derivation](https://beyond10x.github.io/substrate/docs/concepts/model/) ·
+[Run a bounded command](https://beyond10x.github.io/substrate/docs/guides/run-a-command/)
 
 Source: <https://github.com/beyond10x/substrate/> · Security reports:
 <https://github.com/beyond10x/substrate/security/advisories/new>
@@ -64,9 +64,9 @@ that no accepted text states the write-once-tag motive.
 | Transport | Personal Unix peer identity or explicit-root TLS 1.3 HTTPS/WSS with online hosted Identity admission |
 | Rust SDK and MCP | Typed clients and bounded tools over the daemon's authenticated service contract |
 | Capability limits | Execution, PTY, Git, storage quotas and metrics depend on the running daemon's verified facts |
-| Model and derivation | Explicit wire types and frozen contract bundles; authored CLI, handlers and transitions, with no whole-system ESS derivation |
+| Model and derivation | Explicit wire types and frozen contract bundles; authored CLI, handlers and transitions, with an initial [ESS accepted-operation projection](spec/README.md), not whole-system derivation |
 
-Read the [public status page](https://beyond10x.github.io/docs/substrate/status/) for availability
+Read the [public status page](https://beyond10x.github.io/substrate/docs/status/) for availability
 and trust limits. Inspect `GET /v1/machine` for the facts of the daemon you will actually use.
 
 Per-area state with the exact next proof each is waiting for is [`STATUS.md`](STATUS.md); ordered
@@ -192,7 +192,7 @@ target/debug/substrate-daemon \
   --allow-uid "$(id -u)"
 ```
 
-Rust applications can instead follow the [public Rust SDK guide](https://beyond10x.github.io/docs/substrate/guides/rust-sdk/)
+Rust applications can instead follow the [public Rust SDK guide](https://beyond10x.github.io/substrate/docs/guides/rust-sdk/)
 to connect to that socket or supervise the daemon as a separate child.
 
 The daemon image also provides `/usr/local/bin/substrate-daemon-quota` for explicit project-quota
@@ -432,7 +432,7 @@ The Rust SDK addresses this listener only when the caller supplies the exact HTT
 trust roots, expected DNS identity and an asynchronous Identity access-token provider. It uses the
 same TLS 1.3 configuration for HTTP and WSS, refreshes once only after a named authentication 401,
 and mints a fresh one-use attachment authority for every hosted session connection. See the
-[public Rust SDK guide](https://beyond10x.github.io/docs/substrate/guides/rust-sdk/#connect-to-a-remote-daemon)
+[public Rust SDK guide](https://beyond10x.github.io/substrate/docs/guides/rust-sdk/#connect-to-a-remote-daemon)
 for a complete builder example.
 
 ## What is enforced
@@ -471,7 +471,7 @@ workspace backup/restore snapshots remain absent.
 | [`architecture/`](architecture/) | the accepted system boundary and dependency direction |
 | [`docs/design/`](docs/design/) | wire, driver, lifecycle, security, session and trust design; each document states whether it is accepted or under review |
 | [`docs/plan/`](docs/plan/) | design turned into review gates and implementation slices, without implementation |
-| [`.engineering/planning/`](.engineering/planning/) | the plan: epics and stories as governed artifacts, read with `protocol artifact list` / `board` |
+| [`.engineering/planning/`](.engineering/planning/) | the plan: epics and stories as governed artifacts, read with `aep plan artifact list` / `board` |
 | [`adr/`](adr/) | accepted component decisions, with YAML frontmatter |
 | [`scripts/`](scripts/) | `gate.sh` and the checks it runs |
 | [`xtask/`](xtask/) | the workspace member holding the gate's own `cargo xtask` verbs and the bundle renderer |
@@ -491,8 +491,6 @@ Start here, in order:
 Also: [`glossary.md`](glossary.md), [`STATUS.md`](STATUS.md), [`CHANGELOG.md`](CHANGELOG.md), and
 [`AGENTS.md`](AGENTS.md) for the working agreements and invariants.
 
-<!-- b10x-docs:start -->
 ## Documentation
 
-[Substrate documentation](https://beyond10x.github.io/docs/substrate/) · [Start](https://beyond10x.github.io/) · [Ecosystem](https://beyond10x.github.io/ecosystem/) · [Impact](https://beyond10x.github.io/changes/) · [Releases](https://beyond10x.github.io/releases/)
-<!-- b10x-docs:end -->
+[Substrate project site](https://beyond10x.github.io/substrate/) · [Public handbook](https://beyond10x.github.io/substrate/docs/) · [Executable specification](spec/README.md)

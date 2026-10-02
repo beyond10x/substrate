@@ -1,0 +1,39 @@
+# Substrate owns this standalone site caller. It follows ESS's project-site publication boundary.
+name: Documentation site
+
+on:
+  workflow_run:
+    workflows: [Documentation validation]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: b10x-docs-pages
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: >-
+      github.actor == 'b10x-bot[bot]'
+      && github.triggering_actor == 'b10x-bot[bot]'
+      && github.repository == 'beyond10x/substrate'
+      && github.ref == 'refs/heads/main'
+      && (github.event_name == 'workflow_dispatch'
+        || (github.event.workflow_run.conclusion == 'success'
+          && github.event.workflow_run.event == 'push'
+          && github.event.workflow_run.head_branch == 'main'))
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+      actions: read
+    uses: beyond10x/website/.github/workflows/project-site.yml@fb4024ef7846729e5456591b9070db3d48c87e64
+    with:
+      repository: substrate
+      control_sha: ${{ github.event.workflow_run.head_sha || github.sha }}
+      route_base: /substrate/
+      build_workflow: pages.yml
+      artifact: b10x-project-site

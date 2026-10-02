@@ -1,0 +1,115 @@
+domain: substrate.operations
+summary: Durable operation state in one deployment/subject partition of the shipped SQLite store.
+# Source: crates/substrate-wire/src/lib.rs OperationState / OperationRecord;
+# crates/substrate-store/src/operations.rs reserve, record_refusal,
+# mark_dispatch_unknown, complete_success and complete_error.
+# Refused rows are outside this accepted-operation projection: they are inserted
+# directly as refused, never transitioned from accepted. See coverage.md for the
+# compiler refusal for a disconnected creation state.
+# This is a projection of the ledger, not a replacement wire contract. Lowercase
+# stored state names map to the same capitalized ESS lifecycle states.
+entities:
+  - name: substrate.operations.AcceptedOperation
+    identity: {name: operation, type: String}
+    fields:
+      - {name: operation_kind, type: String}
+      - {name: request_hash, type: String}
+      - {name: actor, type: String}
+    lifecycle:
+      initial: Accepted
+      states: [Accepted, Unknown, Terminal]
+      terminal: [Terminal]
+      transitions:
+        - {name: lose_dispatch_evidence, from: [Accepted], to: Unknown}
+        - {name: complete, from: [Accepted, Unknown], to: Terminal}
+errors:
+  - name: substrate.operations.NotAccepted
+    fields: [{name: operation, type: String}]
+commands:
+  # Fresh identities and available ledger capacity are the admission prerequisites
+  # of this projection. Retry/capacity behavior remains in the native store suite.
+  - name: substrate.operations.Reserve
+    input:
+      - {name: operation_kind, type: String}
+      - {name: request_hash, type: String}
+      - {name: actor, type: String}
+    outcomes:
+      - name: accepted
+        creates: substrate.operations.AcceptedOperation
+        instance: operation
+        sets: {operation_kind: input.operation_kind, request_hash: input.request_hash, actor: input.actor}
+        emits: [substrate.operations.Accepted]
+        payload:
+          substrate.operations.Accepted: {operation: {generated: true}, operation_kind: input.operation_kind, request_hash: input.request_hash, actor: input.actor}
+  - name: substrate.operations.MarkDispatchUnknown
+    input: [{name: operation, type: String}]
+    outcomes:
+      - name: unknown
+        moves: substrate.operations.AcceptedOperation.lose_dispatch_evidence
+        instance: operation
+        emits: [substrate.operations.Unknown]
+        payload:
+          substrate.operations.Unknown: {operation: input.operation}
+      - name: not-accepted
+        wrong_state: true
+        error: substrate.operations.NotAccepted
+      - name: absent
+        unknown_instance: true
+        error: substrate.operations.NotAccepted
+  - name: substrate.operations.CompleteSuccess
+    input: [{name: operation, type: String}]
+    outcomes:
+      - name: terminal
+        moves: substrate.operations.AcceptedOperation.complete
+        instance: operation
+        emits: [substrate.operations.Terminal]
+        payload:
+          substrate.operations.Terminal: {operation: input.operation}
+      - name: not-accepted
+        wrong_state: true
+        error: substrate.operations.NotAccepted
+      - name: absent
+        unknown_instance: true
+        error: substrate.operations.NotAccepted
+  - name: substrate.operations.CompleteError
+    input: [{name: operation, type: String}]
+    outcomes:
+      - name: terminal
+        moves: substrate.operations.AcceptedOperation.complete
+        instance: operation
+        emits: [substrate.operations.Failed]
+        payload:
+          substrate.operations.Failed: {operation: input.operation}
+      - name: not-accepted
+        wrong_state: true
+        error: substrate.operations.NotAccepted
+      - name: absent
+        unknown_instance: true
+        error: substrate.operations.NotAccepted
+# These names project the persisted operation.accepted/refused/unknown/terminal
+# events; they are not extra events added to the public wire.
+events:
+  - name: substrate.operations.Accepted
+    fields:
+      - {name: operation, type: String}
+      - {name: operation_kind, type: String}
+      - {name: request_hash, type: String}
+      - {name: actor, type: String}
+  - name: substrate.operations.Unknown
+    fields: [{name: operation, type: String}]
+  - name: substrate.operations.Terminal
+    fields: [{name: operation, type: String}]
+  - name: substrate.operations.Failed
+    fields: [{name: operation, type: String}]
+views:
+  # Store::operation is a scoped identity read. Unfiltered here so synthesis can
+  # observe the addressed instance in every state; no list API is implied.
+  - name: substrate.operations.Operations
+    source: substrate.operations.AcceptedOperation
+    consistency: read_your_writes
+    fields:
+      - {name: operation, type: String}
+      - {name: state, type: substrate.operations.AcceptedOperation.State}
+      - {name: operation_kind, type: String}
+      - {name: request_hash, type: String}
+      - {name: actor, type: String}
