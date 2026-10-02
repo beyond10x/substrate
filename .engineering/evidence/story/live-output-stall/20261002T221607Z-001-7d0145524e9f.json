@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-02T22:16:07Z",
+  "actor": "human:timo",
+  "artifact": "story:live-output-stall",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "VERIFIED actual drain: baseline queue burst red, bounded reservation green; shared-stream cancellation adversary red then independently green at445d74a; recorded and unrecorded modes preserved",
+    "reference": ".engineering/reports/live-output-stall-2026-10-03/"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-02T22:28:24Z",
+  "actor": "human:timo",
+  "artifact": "story:live-output-stall",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "GitHub Full gate passed on exact b8ae300fb0c7c5b92ed34f4f375b2c8a42bb7057 (8m36s)",
+    "reference": "https://github.com/beyond10x/substrate/actions/runs/37071689392"
+  }
+}

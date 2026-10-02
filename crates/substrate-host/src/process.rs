@@ -31,6 +31,8 @@ use crate::{DispatchOutcome, DriverError, HostConfig};
 const TRUNCATION_MARKER: &[u8] = b"\n[substrate: output truncated]\n";
 const PIPE_FRAME_BYTES: usize = 64 * 1024;
 const PIPE_QUEUED_FRAMES: usize = 16;
+// A full queue is transient until its consumer stalls for this long (ADR 0031).
+const PIPE_OUTPUT_STALL_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// The user-namespace posture of every sandbox this crate opens, in one place.
 ///
@@ -2837,7 +2839,7 @@ where
         {
             // Admission counts raw bytes independently of the optional capture accumulator.
             for chunk in buffer[..retained].chunks(frame_limit) {
-                if !forward_frame(sender, stream, chunk, execution.as_ref(), unrecorded) {
+                if !forward_frame(sender, stream, chunk, execution.as_ref(), unrecorded).await {
                     break;
                 }
             }
@@ -2857,15 +2859,20 @@ where
 }
 
 /// Reserve a finite queue slot before copying payload. Occupancy includes reserved slots.
-fn forward_frame(
+async fn forward_frame(
     sender: &mpsc::Sender<PipeFrame>,
     stream: PipeStream,
     chunk: &[u8],
     execution: Option<&Arc<Execution>>,
     unrecorded: bool,
 ) -> bool {
-    match sender.try_reserve() {
-        Ok(permit) => {
+    match tokio::time::timeout(PIPE_OUTPUT_STALL_TIMEOUT, sender.reserve()).await {
+        Ok(Ok(permit)) => {
+            // Stdout and stderr share the refusal. A sibling can time out while this
+            // reservation waits; newly freed capacity must not restart live forwarding.
+            if execution.is_some_and(|e| e.pipe_backpressure.load(Ordering::Acquire)) {
+                return false;
+            }
             if let Some(e) = execution
                 && let Some(stats) = e.observation.lock().resource.unrecorded_output.as_mut()
             {
@@ -2885,14 +2892,14 @@ fn forward_frame(
             });
             true
         }
-        Err(mpsc::error::TrySendError::Full(())) => {
+        Err(_) => {
             if let Some(e) = execution {
                 e.pipe_backpressure.store(true, Ordering::Release);
                 e.cancellation_requested.store(true, Ordering::Release);
             }
             false
         }
-        Err(mpsc::error::TrySendError::Closed(())) => {
+        Ok(Err(_)) => {
             if unrecorded && let Some(e) = execution {
                 e.cancellation_requested.store(true, Ordering::Release);
             }
@@ -3384,8 +3391,11 @@ mod tests {
     use std::collections::BTreeMap;
     use std::os::fd::AsRawFd as _;
     use std::os::unix::fs::symlink;
-    use std::sync::atomic::AtomicU64;
-    use std::time::Duration;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, Instant};
+
+    use tokio::sync::mpsc;
 
     use base64::Engine as _;
     use sha2::{Digest as _, Sha256};
@@ -4150,8 +4160,160 @@ mod tests {
         assert!(truncated);
     }
 
+    #[tokio::test(start_paused = true)]
+    async fn adversary_shared_stall_cannot_resume_sibling_stream() {
+        for unrecorded in [false, true] {
+            let mut observation = running_observation("ex_shared_stall");
+            if unrecorded {
+                observation.resource.unrecorded_output =
+                    Some(substrate_wire::UnrecordedOutput::default());
+            }
+            let execution = Arc::new(Execution::new(observation, None, Instant::now(), None));
+            let (sender, mut receiver) = mpsc::channel(1);
+            let stdout = tokio::spawn(drain_capped(
+                Some(&b"aa"[..]),
+                64,
+                Some(sender.clone()),
+                PipeStream::Stdout,
+                1,
+                Some(Arc::clone(&execution)),
+                None,
+                true,
+            ));
+            tokio::task::yield_now().await;
+            assert_eq!(receiver.len(), 1);
+            tokio::time::advance(Duration::from_millis(100)).await;
+            let stderr = tokio::spawn(drain_capped(
+                Some(&b"b"[..]),
+                64,
+                Some(sender),
+                PipeStream::Stderr,
+                1,
+                Some(Arc::clone(&execution)),
+                None,
+                true,
+            ));
+            tokio::task::yield_now().await;
+            assert!(
+                !stderr.is_finished(),
+                "sibling must be waiting on the same full queue"
+            );
+            tokio::time::advance(Duration::from_millis(901)).await;
+            let (captured, truncated) = stdout.await.unwrap();
+            assert!(!truncated);
+            assert_eq!(
+                captured,
+                if unrecorded {
+                    Vec::new()
+                } else {
+                    b"aa".to_vec()
+                }
+            );
+            assert!(execution.pipe_backpressure.load(Ordering::Acquire));
+            assert!(execution.cancellation_requested.load(Ordering::Acquire));
+            // An attached consumer can free capacity before the supervisor's next tick closes
+            // the queue. A producer already waiting must not resume after its sibling failed.
+            assert_eq!(receiver.recv().await.unwrap().bytes, b"a");
+            let (captured, truncated) = stderr.await.unwrap();
+            assert!(!truncated);
+            assert_eq!(
+                captured,
+                if unrecorded {
+                    Vec::new()
+                } else {
+                    b"b".to_vec()
+                }
+            );
+            assert!(
+                receiver.try_recv().is_err(),
+                "terminal backpressure admitted sibling payload"
+            );
+            if unrecorded {
+                let observation = execution.observation.lock();
+                let stats = observation.resource.unrecorded_output.as_ref().unwrap();
+                assert_eq!(stats.stdout_observed_bytes, 2);
+                assert_eq!(stats.stderr_observed_bytes, 1);
+                assert_eq!(stats.stdout_queued_bytes, 1);
+                assert_eq!(stats.stderr_queued_bytes, 0);
+                assert_eq!(stats.queue_high_water_frames, 1);
+            }
+        }
+    }
+
     #[tokio::test]
-    async fn saturating_a_live_queue_is_terminal_without_falsifying_durable_truncation() {
+    async fn live_queue_burst_waits_for_consumer_without_losing_bytes() {
+        use tokio::io::AsyncWriteExt as _;
+
+        for unrecorded in [false, true] {
+            let payload: Vec<u8> = (0..super::PIPE_QUEUED_FRAMES + 8)
+                .flat_map(|index| vec![u8::try_from(index).unwrap(); 8192])
+                .collect();
+            let (mut writer, reader) = tokio::io::duplex(payload.len());
+            writer.write_all(&payload).await.unwrap();
+            drop(writer);
+            let (sender, mut receiver) = mpsc::channel(super::PIPE_QUEUED_FRAMES);
+            let mut observation = running_observation("ex_burst");
+            if unrecorded {
+                observation.resource.unrecorded_output =
+                    Some(substrate_wire::UnrecordedOutput::default());
+            }
+            let execution = Arc::new(Execution::new(observation, None, Instant::now(), None));
+            let drain = tokio::spawn(drain_capped(
+                Some(reader),
+                payload.len(),
+                Some(sender),
+                PipeStream::Stdout,
+                super::PIPE_FRAME_BYTES,
+                Some(Arc::clone(&execution)),
+                None,
+                true,
+            ));
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while receiver.len() != super::PIPE_QUEUED_FRAMES {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("burst fills the admitted queue");
+            // A real consumer may be scheduled after the producer fills all slots.
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            assert!(
+                !drain.is_finished(),
+                "full queue must wait for an active consumer"
+            );
+            assert!(!execution.pipe_backpressure.load(Ordering::Acquire));
+            let mut delivered = Vec::new();
+            tokio::time::timeout(Duration::from_secs(2), async {
+                while let Some(frame) = receiver.recv().await {
+                    assert_eq!(frame.stream, PipeStream::Stdout);
+                    assert!(frame.bytes.len() <= super::PIPE_FRAME_BYTES);
+                    delivered.extend(frame.bytes);
+                }
+            })
+            .await
+            .expect("consumer drains every frame");
+            let (captured, truncated) = drain.await.unwrap();
+            assert_eq!(delivered, payload);
+            assert!(!truncated);
+            assert!(!execution.cancellation_requested.load(Ordering::Acquire));
+            if unrecorded {
+                assert!(captured.is_empty());
+                let observation = execution.observation.lock();
+                let stats = observation.resource.unrecorded_output.as_ref().unwrap();
+                assert_eq!(stats.stdout_observed_bytes, payload.len() as u64);
+                assert_eq!(stats.stdout_queued_bytes, payload.len() as u64);
+                assert_eq!(
+                    stats.queue_high_water_frames,
+                    u32::try_from(super::PIPE_QUEUED_FRAMES).unwrap()
+                );
+            } else {
+                assert_eq!(captured, payload);
+            }
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn stalled_live_queue_reaches_deadline_without_falsifying_durable_truncation() {
         use tokio::io::AsyncWriteExt as _;
 
         let (mut writer, reader) = tokio::io::duplex(1_024);
@@ -4179,18 +4341,30 @@ mod tests {
             None,
             true,
         ));
-        writer
-            .write_all(b"queue saturation must not block timeout")
-            .await
-            .unwrap();
+        let payload = b"queue saturation must not block timeout";
+        writer.write_all(payload).await.unwrap();
         drop(writer);
         tokio::task::yield_now().await;
-        close_live_output(&execution).await;
-        let (captured, truncated) = tokio::time::timeout(Duration::from_secs(1), drain)
+        assert_eq!(
+            execution.pipe.as_ref().unwrap().output.lock().await.len(),
+            1
+        );
+        let began_waiting = tokio::time::Instant::now();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert!(
+            !drain.is_finished(),
+            "queue must tolerate transient occupancy"
+        );
+        assert!(!execution.pipe_backpressure.load(Ordering::Acquire));
+        let (captured, truncated) = tokio::time::timeout(Duration::from_secs(2), drain)
             .await
-            .expect("closed receiver releases drain")
+            .expect("stall deadline releases drain without a consumer")
             .unwrap();
-        assert!(!captured.is_empty());
+        assert!(began_waiting.elapsed() >= super::PIPE_OUTPUT_STALL_TIMEOUT);
+        assert!(
+            began_waiting.elapsed() < super::PIPE_OUTPUT_STALL_TIMEOUT + Duration::from_millis(10)
+        );
+        assert_eq!(captured, payload);
         assert!(!truncated, "all bytes still fit the durable capture bound");
         assert!(
             execution
@@ -4202,6 +4376,81 @@ mod tests {
                 .cancellation_requested
                 .load(std::sync::atomic::Ordering::Acquire)
         );
+        let mut observation = execution.observation.lock();
+        super::record_pipe_backpressure(&mut observation, &execution);
+        assert_eq!(
+            observation.resource.refusal.as_ref().unwrap().code,
+            substrate_wire::SESSION_OUTPUT_BACKPRESSURE
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn closing_live_receiver_releases_waiting_drain_before_stall_deadline() {
+        use tokio::io::AsyncWriteExt as _;
+
+        for unrecorded in [false, true] {
+            let payload = b"receiver closure releases the drain";
+            let (mut writer, reader) = tokio::io::duplex(1024);
+            writer.write_all(payload).await.unwrap();
+            drop(writer);
+            let (sender, receiver) = mpsc::channel(1);
+            let mut observation = running_observation("ex_closed_output");
+            if unrecorded {
+                observation.resource.unrecorded_output =
+                    Some(substrate_wire::UnrecordedOutput::default());
+            }
+            let execution = Arc::new(Execution::new(
+                observation,
+                Some(PipeState {
+                    stdin: tokio::sync::Mutex::new(None),
+                    output: tokio::sync::Mutex::new(receiver),
+                    input_bytes: AtomicU64::new(0),
+                    input_limit: 1024,
+                    frame_limit: 1,
+                    terminal: None,
+                }),
+                Instant::now(),
+                None,
+            ));
+            let drain = tokio::spawn(drain_capped(
+                Some(reader),
+                64,
+                Some(sender),
+                PipeStream::Stdout,
+                1,
+                Some(Arc::clone(&execution)),
+                None,
+                true,
+            ));
+            tokio::task::yield_now().await;
+            assert_eq!(
+                execution.pipe.as_ref().unwrap().output.lock().await.len(),
+                1
+            );
+            assert!(!drain.is_finished());
+            // Signal and timeout cleanup use this exact production receiver-close operation.
+            close_live_output(&execution).await;
+            let (captured, truncated) = tokio::time::timeout(Duration::from_millis(100), drain)
+                .await
+                .expect("receiver close wakes pending reservation")
+                .unwrap();
+            assert!(!truncated);
+            assert!(!execution.pipe_backpressure.load(Ordering::Acquire));
+            assert_eq!(
+                execution.cancellation_requested.load(Ordering::Acquire),
+                unrecorded
+            );
+            if unrecorded {
+                assert!(captured.is_empty());
+                let observation = execution.observation.lock();
+                let stats = observation.resource.unrecorded_output.as_ref().unwrap();
+                assert_eq!(stats.stdout_observed_bytes, payload.len() as u64);
+                assert_eq!(stats.stdout_queued_bytes, 1);
+                assert_eq!(stats.queue_high_water_frames, 1);
+            } else {
+                assert_eq!(captured, payload);
+            }
+        }
     }
 
     #[test]

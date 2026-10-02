@@ -7,6 +7,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Fixed
+
+- Live PTY and pipe output now waits up to one second for a bounded queue slot, so an
+  active consumer can drain a terminal redraw burst without immediate cancellation.
+  A stalled consumer still receives `session.output-backpressure`; queue capacity,
+  byte ceilings, cancellation cleanup and unrecorded capture guarantees are unchanged.
+
 ## [0.7.9] — 2026-10-02
 
 Published by [release run 37053941591](https://github.com/beyond10x/substrate/actions/runs/37053941591).

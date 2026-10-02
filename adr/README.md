@@ -21,7 +21,7 @@ with YAML frontmatter containing `date` and `status`. Draft design questions rem
 | [0013](0013-egress-apertures-are-declared-by-the-operator.md) | Egress apertures are declared by the operator and referenced by name | accepted |
 | [0014](0014-apertures-carry-a-declared-byte-ceiling.md) | An egress aperture carries a declared byte ceiling | accepted |
 | [0015](0015-declared-host-roots-carry-no-host-ipc.md) | Declared host roots carry no host IPC | accepted |
-| [0016](0016-pipe-output-backpressure-is-terminal.md) | Pipe output backpressure is terminal | accepted |
+| [0016](0016-pipe-output-backpressure-is-terminal.md) | Pipe output backpressure is terminal | superseded by 0031 |
 | [0017](0017-delegated-context-is-verified-before-replay.md) | Delegated context is verified before replay | accepted |
 | [0018](0018-one-registry-declares-every-served-api-major.md) | One registry declares every served API major | accepted |
 | [0019](0019-pty-is-a-second-session-mode.md) | A PTY is a second session mode | accepted |
@@ -36,3 +36,4 @@ with YAML frontmatter containing `date` and `status`. Draft design questions rem
 | [0028](0028-session-is-the-canonical-route-resource-name.md) | Session is the canonical route and resource name | accepted |
 | [0029](0029-the-remote-sdk-shares-one-verified-https-wss-transport.md) | The remote SDK shares one verified HTTPS/WSS transport | accepted |
 | [0030](0030-rust-crates-are-source-distributed-and-non-publishable.md) | Rust crates are source-distributed and non-publishable | accepted |
+| [0031](0031-live-output-backpressure-has-a-stall-deadline.md) | Live output backpressure has a stall deadline | accepted |

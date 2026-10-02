@@ -1,0 +1,19 @@
+   Compiling b10x-substrate-host v0.7.9 ($HOME/.local/state/worktree/trees/b10x/substrate/substrate-live-output-stall/crates/substrate-host)
+    Finished `test` profile [unoptimized] target(s) in 3.35s
+     Running unittests src/lib.rs (/dev/shm/substrate-output-stall-target/debug/deps/substrate_host-58ffa47f72a77857)
+
+running 1 test
+
+thread 'process::tests::adversary_shared_stall_cannot_resume_sibling_stream' (2486226) panicked at crates/substrate-host/src/process.rs:4193:13:
+terminal backpressure admitted sibling payload
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test process::tests::adversary_shared_stall_cannot_resume_sibling_stream ... FAILED
+
+failures:
+
+failures:
+    process::tests::adversary_shared_stall_cannot_resume_sibling_stream
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 121 filtered out; finished in 0.00s
+
+error: test failed, to rerun pass `-p b10x-substrate-host --lib`

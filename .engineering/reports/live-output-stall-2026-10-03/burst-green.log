@@ -1,0 +1,9 @@
+   Compiling b10x-substrate-host v0.7.9 ($HOME/.local/state/worktree/trees/b10x/substrate/substrate-live-output-stall/crates/substrate-host)
+    Finished `test` profile [unoptimized] target(s) in 4.74s
+     Running unittests src/lib.rs (/dev/shm/substrate-output-stall-target/debug/deps/substrate_host-58ffa47f72a77857)
+
+running 1 test
+test process::tests::live_queue_burst_waits_for_consumer_without_losing_bytes ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 119 filtered out; finished in 0.04s
+
