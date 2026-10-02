@@ -7,6 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.7.10] — 2026-10-03
+
 ### Fixed
 
 - Live PTY and pipe output now waits up to one second for a bounded queue slot, so an
