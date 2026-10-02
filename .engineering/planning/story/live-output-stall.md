@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:live-output-stall
 kind: story
-status: active
+status: implemented
 title: Deliver bounded output bursts to active terminal consumers
 refs:
 - provider: github
@@ -20,10 +20,11 @@ scope:
   path: adr/README.md
 - confidence: cited
   path: crates/substrate-host/src/process.rs
-revision: 7
+revision: 8
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-02T22:00:42Z", actor: "human:timo", revision: 3}
 - {from: "proposed", to: "active", at: "2026-10-02T22:00:42Z", actor: "human:timo", revision: 4}
+- {from: "active", to: "implemented", at: "2026-10-02T22:33:10Z", actor: "human:timo", revision: 8, decided_on: {"recorded":{"test_result":3,"review_outcome":1,"verification":2}}}
 ---
 ## Problem
 The current raw/PTY live queue cancels on instantaneous fullness even when an attached consumer drains normally. Mantle cannot reattach its Codex TUI before login; readiness alone remains red. See GitHub115 and accepted architecture-decision-record:live-output-stall; ADR0031 must be written and indexed before implementation.

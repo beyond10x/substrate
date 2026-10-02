@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-02T22:33:10Z",
+  "actor": "human:timo",
+  "artifact": "story:live-output-stall",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "Final delegated-lane.sh exit0 on b8ae300f; host, SDK managed/unrecorded/remote, MCP, WSS and runtime vectors executed. Seven real-quota fixture cases and unserved host counters explicitly absent.",
+    "reference": ".engineering/reports/live-output-stall-2026-10-03/final-validation.md"
+  }
+}
