@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-02T23:45:32Z",
+  "actor": "human:timo",
+  "artifact": "task:release-0-7-10",
+  "kind": "task",
+  "revision": 6,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "Release recovery37077554387 succeeded; exact annotated tag65304 verified; daemon, MCP and unchanged0.17 bundle signatures independently verified with cosign3.0.6 against protected-main recovery identity; daemon layer and binary hashes verified",
+    "reference": "https://github.com/beyond10x/substrate/releases/tag/0.7.10"
+  }
+}

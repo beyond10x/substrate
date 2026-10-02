@@ -9,6 +9,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [0.7.10] — 2026-10-03
 
+Published by [release recovery run 37077554387](https://github.com/beyond10x/substrate/actions/runs/37077554387)
+from tagged commit `65304edf6ebdf4a95f9c2c6138b0c20ea47d157e`. All three artifacts were
+keyless-signed and verified against `release.yml@refs/heads/main`, the protected-main recovery
+workflow identity, and anonymously retrieved before announcement:
+
+- Image: `ghcr.io/beyond10x/b10x-substrate-daemon:0.7.10` at `sha256:90469e101c828c7e88fbf1e98c63ec82b9b010e022cbe8432bfc0619c38d1511`.
+- Contract bundle: `ghcr.io/beyond10x/b10x-substrate-wire:0.17.0` at `sha256:90f047b346a9f35460644521775637dc046228159a426608f6ec5cb71292d8ac`, annotated `development`.
+- Disposable MCP image: `ghcr.io/beyond10x/b10x-substrate-mcp:0.7.10` at `sha256:d84ac8303aa465653ad9caddc18400c06b11b364b2a30b5780c9fb9fc80c0696`, development-only.
+
+The [release notes](https://github.com/beyond10x/substrate/releases/tag/0.7.10) provide exact
+signature verification commands and the successful 97-case delegated confinement record.
+The initial publication attempt encountered a GitHub OIDC token timeout; recovery retained the
+same immutable tag and source revision.
+
 ### Fixed
 
 - Live PTY and pipe output now waits up to one second for a bounded queue slot, so an
