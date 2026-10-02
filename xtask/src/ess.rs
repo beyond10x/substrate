@@ -37,6 +37,40 @@ pub fn check(root: &Path) -> Result<Report> {
         fs::read(suite)? == fs::read(root.join("spec/operations-suite.json"))?,
         "ESS suite drift: regenerate spec/operations-suite.json with the pinned ESS release"
     );
+    run(
+        root,
+        &[
+            "specify",
+            "validate",
+            "--path",
+            "spec/sessions",
+            "--strict-requires",
+        ],
+    )?;
+    let types = dir.path().join("capture-types");
+    run(
+        root,
+        &[
+            "generate",
+            "types",
+            "--path",
+            "spec/sessions",
+            "--root",
+            "substrate.sessions.CaptureMode",
+            "--target",
+            "rust",
+            "--package",
+            "b10x-substrate-capture-types",
+            "--out",
+            types.to_str().context("UTF-8 type output")?,
+            "--strict-requires",
+        ],
+    )?;
+    ensure!(
+        fs::read(types.join("types.rs"))?
+            == fs::read(root.join("crates/substrate-wire/src/generated/capture.rs"))?,
+        "ESS capture type drift: regenerate the selected type with the pinned ESS release"
+    );
     Ok(Report::passed(
         "ESS specification and committed suite are current; production execution runs in the substrate-store test suite",
     ))

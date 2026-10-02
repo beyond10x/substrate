@@ -160,6 +160,7 @@ pub fn probe(config: &HostConfig, openat2: bool) -> CapabilitySnapshot {
         exec_egress_apertures: egress_apertures,
         secrets_slots,
         sessions_pty,
+        sessions_unrecorded: exec.then_some(true),
         snapshot_provenance_events: Some(config.snapshot_provenance_events),
     };
     let driver_version = env!("CARGO_PKG_VERSION");

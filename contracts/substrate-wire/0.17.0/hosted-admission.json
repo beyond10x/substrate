@@ -1,0 +1,81 @@
+{
+  "$schema": "schemas/hosted-admission.json",
+  "audience": "urn:b10x:substrate",
+  "authority": {
+    "claims": [
+      "act.sub",
+      "aud",
+      "exp",
+      "iat",
+      "iss",
+      "jti",
+      "nbf",
+      "principal_kind",
+      "scope",
+      "sub",
+      "tenant_id"
+    ],
+    "credential_format": "identity_access_v1_<43-base64url-characters>",
+    "maximum_lifetime_seconds": 300,
+    "resolution_method": "GET",
+    "resolution_path": "/v1/access-authority",
+    "resolution_transport": "direct-https",
+    "stale_authority": "never-used"
+  },
+  "format": "b10x.substrate-hosted-admission.v1",
+  "refusals": [
+    {
+      "class": "refused",
+      "code": "auth.authority-invalid",
+      "message": "The hosted Identity authority is not admitted.",
+      "retriable": false,
+      "status": 401
+    },
+    {
+      "class": "unserved",
+      "code": "auth.authority-unavailable",
+      "message": "Hosted Identity authority cannot be resolved.",
+      "retriable": true,
+      "status": 503
+    },
+    {
+      "class": "refused",
+      "code": "auth.credential-absent",
+      "message": "A hosted Identity credential is required.",
+      "retriable": false,
+      "status": 401
+    },
+    {
+      "class": "refused",
+      "code": "auth.scope-denied",
+      "message": "The hosted Identity authority does not carry the route scope.",
+      "retriable": false,
+      "status": 403
+    }
+  ],
+  "scopes": [
+    {
+      "route_families": [
+        "execs",
+        "sessions"
+      ],
+      "scope": "exec"
+    },
+    {
+      "route_families": [
+        "events",
+        "machine",
+        "metrics",
+        "operations",
+        "reconciliation-snapshots"
+      ],
+      "scope": "observe"
+    },
+    {
+      "route_families": [
+        "workspaces"
+      ],
+      "scope": "workspaces"
+    }
+  ]
+}

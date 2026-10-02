@@ -1,0 +1,95 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "kind": "http",
+    "operation": "reconciliation.snapshot.create",
+    "request": {
+      "body": {},
+      "headers": {
+        "x-request-id": "req_snapshot_create"
+      },
+      "method": "POST",
+      "path": "/v1/reconciliation-snapshots",
+      "query": {}
+    },
+    "valid_address": true,
+    "valid_input": true
+  },
+  "context": {
+    "actor": "vector-client",
+    "authority": "http-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000",
+    "transport": {
+      "authenticated": true,
+      "kind": "unix",
+      "reachable": false
+    }
+  },
+  "covers": [
+    "route.reconciliation.snapshot.create",
+    "snapshot.barrier"
+  ],
+  "expected": {
+    "kind": "http-response",
+    "response": {
+      "body": {
+        "api_version": "v1",
+        "request_id": "req_snapshot_create",
+        "result": {
+          "expires_at": "2026-08-13T12:05:00Z",
+          "generation": 41,
+          "history": {
+            "first_seq": 7,
+            "item_count": 1,
+            "through_seq": 7,
+            "truncated": false
+          },
+          "id": "snap_01JPHASE3VECTOR",
+          "item_count": 2,
+          "partitions": {
+            "execs": 0,
+            "provenance_events": 1,
+            "workspaces": 1
+          },
+          "resume_cursor": "ev2.scope_vector_subject.41.8",
+          "source_scope": "scope_vector_subject",
+          "through_seq": 8
+        }
+      },
+      "status": 201
+    }
+  },
+  "id": "snapshot-create-materializes-at-event-barrier",
+  "layer": "http",
+  "phase": 3,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/materialized_item_count",
+      "expected": 2,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/event_seq",
+      "expected": 8,
+      "operator": "equals"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "snapshot",
+      "name": "subject-state",
+      "state": {
+        "current_execs": 0,
+        "current_workspaces": 1,
+        "provenance_events": 1
+      }
+    }
+  ]
+}

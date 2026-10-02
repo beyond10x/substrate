@@ -155,6 +155,7 @@ fn seed_streaming_exec(store: &Arc<Store>) {
         .expect("complete workspace fixture");
 
     let exec = Exec {
+        unrecorded_output: None,
         id: EXEC_ID.to_owned(),
         kind: ExecKind::Exec,
         workspace: WORKSPACE_ID.to_owned(),

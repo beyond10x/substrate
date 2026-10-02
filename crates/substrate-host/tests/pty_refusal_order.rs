@@ -25,6 +25,7 @@ use substrate_wire::{
 
 fn pty_start(snapshot: &str, window: Option<substrate_wire::PtyWindow>) -> PipeSessionStartInput {
     PipeSessionStartInput {
+        capture: substrate_wire::CaptureMode::Recorded,
         exec: ExecStartInput {
             workspace: "ws_test".to_owned(),
             argv: vec!["/bin/sh".to_owned()],

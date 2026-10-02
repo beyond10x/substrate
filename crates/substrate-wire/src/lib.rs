@@ -15,9 +15,9 @@ pub const API_VERSION: &str = "v1";
 ///
 /// This is the SHA-256 of the inner immutable `bundle.json`, not the outer OCI manifest digest.
 /// Moving either member is an explicit coordinated promotion (Atlas ADR 0019).
-pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.16.0";
+pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.17.0";
 pub const ADVERTISED_CONTRACT_BUNDLE_SHA256: &str =
-    "cee5845cf425885bdae3be6f59cb9e39ce342df065a01ae65eaae24ad2f29b41";
+    "7499753100066331865615c01ebe7b3b830d256044b9aed2bb7251e7d2bb7121";
 pub const MAX_FILE_BYTES: u64 = 1_048_576;
 pub const MAX_IO_BYTES: u64 = 1_048_576;
 pub const MAX_LIST_ITEMS: u32 = 1_000;
@@ -134,10 +134,8 @@ pub const SESSION_OUTPUT_BACKPRESSURE: &str = "session.output-backpressure";
 /// to notify. This is a field inside one result document, and every released bundle declares it
 /// `{"const": "substrate-wire/<that bundle's own version>"}` — `0.3.0` through `0.10.0`, without
 /// exception — so its value is definitionally *the bundle whose schema this document conforms to*.
-/// A document carrying `modes` and the window and control-rate ceilings is shaped by `0.10.0` and by
-/// no earlier bundle, so naming anything else is a false statement about its own shape: `0.4.0`'s
-/// schema is `additionalProperties: false` over nine properties and forbids all five.
-pub const PIPE_SESSION_CAPABILITY_CONTRACT: &str = "substrate-wire/0.10.0";
+/// Capture selection and published attachment ceilings require the 0.17.0 result schema.
+pub const PIPE_SESSION_CAPABILITY_CONTRACT: &str = "substrate-wire/0.17.0";
 
 /// Hosted production admission received no Identity access credential (ADR 0026).
 pub const AUTH_CREDENTIAL_ABSENT: &str = "auth.credential-absent";
@@ -423,6 +421,14 @@ pub fn session_refusal_is_retriable(code: &str) -> bool {
     code == SESSION_PTY_EXHAUSTED
 }
 
+/// Deployment policy forbids unrecorded capture.
+pub const SESSION_CAPTURE_DISALLOWED: &str = "session.capture-disallowed";
+/// The selected driver cannot guarantee unrecorded capture.
+pub const SESSION_CAPTURE_UNSERVED: &str = "session.capture-unserved";
+/// Refusal class introduced with capture selection in 0.17.0.
+pub const SESSION_CAPTURE_REFUSAL_CODES: [&str; 2] =
+    [SESSION_CAPTURE_DISALLOWED, SESSION_CAPTURE_UNSERVED];
+
 /// **Every** refusal code a session can raise, from either crate, in one place.
 ///
 /// The two arrays below are views of this one — the pty-specific codes and the codes an attachment
@@ -437,7 +443,7 @@ pub fn session_refusal_is_retriable(code: &str) -> bool {
 /// the same as wire-word order — `SESSION_INPUT_CLOSED` precedes `SESSION_INPUT_CLOSE_UNSERVED`
 /// here and `session.input-close-unserved` precedes `session.input-closed` on the wire. Nothing
 /// depends on either order: every consumer collects into a `BTreeSet`.
-pub const SESSION_REFUSAL_CODES: [&str; 36] = [
+pub const SESSION_REFUSAL_CODES: [&str; 38] = [
     SESSION_ALREADY_ATTACHED,
     SESSION_ATTACHMENT_CAPACITY,
     SESSION_AUTHORITY_ABSENT,
@@ -445,6 +451,8 @@ pub const SESSION_REFUSAL_CODES: [&str; 36] = [
     SESSION_AUTHORITY_REDEEMED,
     SESSION_AUTHORITY_UNBOUND,
     SESSION_BASE64_INVALID,
+    SESSION_CAPTURE_DISALLOWED,
+    SESSION_CAPTURE_UNSERVED,
     SESSION_CONFINEMENT_UNAVAILABLE,
     SESSION_CONTROL_RATE_EXCEEDED,
     SESSION_DRIVER_REFUSED,
@@ -1605,6 +1613,9 @@ pub struct ExecExit {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Exec {
+    /// Present exactly when terminal capture was intentionally disabled.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub unrecorded_output: Option<UnrecordedOutput>,
     pub id: String,
     pub kind: ExecKind,
     pub workspace: String,
@@ -1904,11 +1915,47 @@ pub enum OutputStream {
     Stderr,
 }
 
+// The capture selection is generated from spec/sessions, not transcribed.
+#[allow(dead_code, clippy::all, clippy::pedantic)]
+#[rustfmt::skip]
+#[path = "generated/capture.rs"]
+mod capture_types;
+pub use capture_types::SubstrateSessionsCaptureMode as CaptureMode;
+impl Copy for CaptureMode {}
+impl Eq for CaptureMode {}
+impl Default for CaptureMode {
+    fn default() -> Self {
+        Self::Recorded
+    }
+}
+impl CaptureMode {
+    #[allow(non_upper_case_globals)]
+    pub const Recorded: Self = Self::V0;
+    #[allow(non_upper_case_globals)]
+    pub const Unrecorded: Self = Self::V1;
+    pub fn is_recorded(&self) -> bool {
+        *self == Self::Recorded
+    }
+}
+
+/// Content-free accounting. Queued bytes are not a claim of client receipt.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct UnrecordedOutput {
+    pub stdout_observed_bytes: u64,
+    pub stderr_observed_bytes: u64,
+    pub stdout_queued_bytes: u64,
+    pub stderr_queued_bytes: u64,
+    pub queue_high_water_frames: u32,
+}
+
 /// Development raw-pipe start shape. The daemon route is implemented but not released; this closed
 /// shape does not change immutable 0.1.0 or 0.2.0 bundle bytes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PipeSessionStartInput {
+    #[serde(default, skip_serializing_if = "CaptureMode::is_recorded")]
+    pub capture: CaptureMode,
     pub exec: ExecStartInput,
     pub input_limit_bytes: u64,
     pub frame_limit_bytes: u64,
@@ -2155,6 +2202,8 @@ pub struct PipeSessionLimits {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PipeSession {
+    #[serde(default, skip_serializing_if = "CaptureMode::is_recorded")]
+    pub capture: CaptureMode,
     pub id: String,
     pub kind: SessionKind,
     pub mode: SessionMode,
@@ -2228,6 +2277,14 @@ pub struct SessionAbsence {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PipeSessionCapabilities {
+    #[serde(default)]
+    pub capture_modes: Vec<CaptureMode>,
+    #[serde(default)]
+    pub max_attachments: u32,
+    #[serde(default)]
+    pub send_timeout_ms: u64,
+    #[serde(default)]
+    pub attachment_lifetime_ms: u64,
     pub contract: String,
     pub transport: String,
     pub capability_snapshot: String,
@@ -2499,6 +2556,12 @@ pub struct CapabilityFacts {
     #[serde(rename = "sessions.pty", skip_serializing_if = "Option::is_none")]
     pub sessions_pty: Option<bool>,
     #[serde(
+        rename = "sessions.unrecorded",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub sessions_unrecorded: Option<bool>,
+    #[serde(
         rename = "snapshot.provenance-events",
         skip_serializing_if = "Option::is_none"
     )]
@@ -2542,6 +2605,7 @@ impl Default for CapabilityFacts {
             exec_egress_apertures: None,
             secrets_slots: None,
             sessions_pty: None,
+            sessions_unrecorded: None,
             snapshot_provenance_events: None,
         }
     }
@@ -3744,6 +3808,19 @@ mod tests {
         }))
         .expect("a start without a mode decodes");
         assert_eq!(start.mode, SessionMode::Pipes);
+        assert_eq!(start.capture, super::CaptureMode::Recorded);
+        assert!(
+            serde_json::to_value(&start)
+                .unwrap()
+                .get("capture")
+                .is_none()
+        );
+        let mut unrecorded = start.clone();
+        unrecorded.capture = super::CaptureMode::Unrecorded;
+        assert_eq!(
+            serde_json::to_value(&unrecorded).unwrap()["capture"],
+            "unrecorded"
+        );
         assert_eq!(start.window, None);
 
         let pty: PipeSessionStartInput = serde_json::from_value(serde_json::json!({
@@ -4083,8 +4160,8 @@ mod tests {
         let version = ADVERTISED_CONTRACT_BUNDLE
             .strip_prefix("substrate-wire/")
             .expect("advertised contract prefix");
-        assert_eq!(version, "0.16.0", "the reviewed promotion target moved");
-        let bytes = include_bytes!("../../../contracts/substrate-wire/0.16.0/bundle.json");
+        assert_eq!(version, "0.17.0", "the reviewed promotion target moved");
+        let bytes = include_bytes!("../../../contracts/substrate-wire/0.17.0/bundle.json");
         assert_eq!(
             hex::encode(Sha256::digest(bytes)),
             ADVERTISED_CONTRACT_BUNDLE_SHA256
@@ -4550,6 +4627,7 @@ mod egress_aperture_tests {
     #[test]
     fn an_exec_names_the_bound_that_ended_it() {
         let mut exec = super::Exec {
+            unrecorded_output: None,
             id: "exec_01JPCEIL".to_owned(),
             kind: super::ExecKind::Exec,
             workspace: "ws_01JPCEIL".to_owned(),

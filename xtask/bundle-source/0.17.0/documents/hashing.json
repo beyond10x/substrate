@@ -1,0 +1,73 @@
+{
+  "$schema": "schemas/hashing.json",
+  "address_normalization": {
+    "dot_segments": "reject",
+    "encoded_separator": "reject",
+    "path_parameters": "validate-and-substitute-into-registry-template",
+    "percent_encoding": "decode-once-as-utf8-then-encode-non-unreserved-with-uppercase-hex",
+    "query": "canonical-form-query-v1",
+    "repeated_separator": "reject",
+    "trailing_separator": "reject-except-root"
+  },
+  "algorithm": "sha256",
+  "canonical_input": {
+    "accepted": "rfc8785-jcs-integer-domain",
+    "fallback_prefix": "rejected-number-json:",
+    "fallback_structure": "utf16-key-order-json-with-serde-json-number-text",
+    "fallback_use": "schema-rejected-number-only",
+    "origin": "b10x-repository-authored"
+  },
+  "canonical_query": {
+    "invalid": "malformed-raw-nul-lowercase-hex",
+    "pair_order": "utf8-bytewise-name-then-value",
+    "parser": "strict-application-x-www-form-urlencoded-utf8",
+    "valid": "pairs-nul-rfc8785-array-of-pairs"
+  },
+  "capsule_manifest": {
+    "domain": {
+      "$wire": "EXECUTION_CAPSULE_HASH_DOMAIN"
+    },
+    "encoding": "concatenated-u32be-length-prefixed-fields",
+    "fields": [
+      "domain",
+      "entrypoint",
+      "files"
+    ],
+    "file_fields": [
+      "path",
+      "role",
+      "executable-as-ascii-bit",
+      "lowercase-content-sha256"
+    ],
+    "file_order": "strict-utf8-bytewise-path",
+    "length_unit": "octets"
+  },
+  "excluded": [
+    "operation",
+    "request_id",
+    "headers",
+    "authorization",
+    "bearer",
+    "subject",
+    "principal",
+    "deployment"
+  ],
+  "fixtures": "fixtures/canonical-hash.json",
+  "format": "b10x.substrate-request-hash.v2",
+  "ledger_key": [
+    "deployment",
+    "subject",
+    "operation"
+  ],
+  "tuple": {
+    "encoding": "concatenated-u32be-length-prefixed-fields",
+    "fields": [
+      "hash-version-as-ascii-decimal",
+      "uppercase-http-method",
+      "normalized-address",
+      "rfc8785-raw-input",
+      "canonical-query"
+    ],
+    "length_unit": "octets"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-02T14:39:22Z",
+  "actor": "human:timo",
+  "artifact": "story:unrecorded-terminal-streaming",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "task check: full repository gate passed",
+    "reference": ".engineering/reports/issue-112-unrecorded-streaming.md"
+  }
+}

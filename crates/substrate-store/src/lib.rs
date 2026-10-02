@@ -107,6 +107,8 @@ pub struct Store {
 
 #[derive(Debug, Error)]
 pub enum StoreError {
+    #[error("terminal capture contradicts the durable selection")]
+    CaptureViolation,
     #[error("operation {0} is not in an accepted state")]
     NotAccepted(String),
     #[error("stored JSON is invalid: {0}")]

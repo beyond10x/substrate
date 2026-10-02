@@ -143,6 +143,7 @@ fn workspace(id: &str) -> Workspace {
 fn exec(id: &str, workspace: &str, state: ExecState) -> StoredExec {
     StoredExec {
         resource: Exec {
+            unrecorded_output: None,
             id: id.to_owned(),
             kind: ExecKind::Exec,
             workspace: workspace.to_owned(),
@@ -173,6 +174,7 @@ fn exec(id: &str, workspace: &str, state: ExecState) -> StoredExec {
 
 fn pipe_session(id: &str, exec_id: &str, workspace: &str, lease: &NewLease) -> PipeSession {
     PipeSession {
+        capture: substrate_wire::CaptureMode::Recorded,
         id: id.to_owned(),
         kind: SessionKind::Session,
         mode: SessionMode::Pipes,

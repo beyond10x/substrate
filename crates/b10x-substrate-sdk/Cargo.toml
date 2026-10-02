@@ -34,8 +34,8 @@ rustls-pemfile.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_urlencoded.workspace = true
-substrate-daemon = { package = "b10x-substrate-daemon", path = "../substrate-daemon", version = "=0.7.8", optional = true }
-substrate-wire = { package = "b10x-substrate-wire", path = "../substrate-wire", version = "=0.7.8" }
+substrate-daemon = { package = "b10x-substrate-daemon", path = "../substrate-daemon", version = "=0.7.9", optional = true }
+substrate-wire = { package = "b10x-substrate-wire", path = "../substrate-wire", version = "=0.7.9" }
 tempfile.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
@@ -45,6 +45,7 @@ ulid.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+rusqlite.workspace = true
 rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
 
 [lints]

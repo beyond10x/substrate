@@ -1,0 +1,78 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "command": {
+      "operation": "event.stream",
+      "switch_after_seq": 7
+    },
+    "kind": "driver",
+    "port": "lifecycle"
+  },
+  "context": {
+    "authority": "driver-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000"
+  },
+  "covers": [
+    "events.pull-push-identity"
+  ],
+  "expected": {
+    "kind": "driver-outcome",
+    "outcome": {
+      "pull_cursor": "ev2.scope_vector_subject.41.7",
+      "push_last_cursor": "ev2.scope_vector_subject.41.7"
+    }
+  },
+  "id": "push-and-pull-share-source-identities",
+  "layer": "driver",
+  "phase": 3,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/identity_rewrite_count",
+      "expected": 0,
+      "operator": "equals"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "stream",
+      "name": "push-source",
+      "state": {
+        "first_retained_seq": 1,
+        "generation": 41,
+        "items": [
+          {
+            "actor": "vector-client",
+            "cause": {
+              "kind": "operation",
+              "operation": "01JPHASE3EVENTSOURCE0001"
+            },
+            "generation": 41,
+            "observation": {
+              "id": "ws_vector",
+              "kind": "workspace",
+              "labels": {},
+              "observed_at": "2026-08-13T12:00:00Z",
+              "state": "ready"
+            },
+            "observed_at": "2026-08-13T12:00:00Z",
+            "principal": null,
+            "resource": "ws_vector",
+            "resource_kind": "workspace",
+            "seq": 7,
+            "transition": "workspace.created"
+          }
+        ],
+        "next_cursor": "ev2.scope_vector_subject.41.7",
+        "source_scope": "scope_vector_subject",
+        "through_seq": 7
+      }
+    }
+  ]
+}

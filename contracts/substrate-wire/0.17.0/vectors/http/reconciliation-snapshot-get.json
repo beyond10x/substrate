@@ -1,0 +1,122 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "kind": "http",
+    "operation": "reconciliation.snapshot.get",
+    "request": {
+      "headers": {
+        "x-request-id": "req_snapshot_page01"
+      },
+      "method": "GET",
+      "path": "/v1/reconciliation-snapshots/snap_01JPHASE3VECTOR",
+      "query": {
+        "limit": 2
+      }
+    },
+    "valid_address": true,
+    "valid_input": true
+  },
+  "context": {
+    "actor": "vector-client",
+    "authority": "http-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000",
+    "transport": {
+      "authenticated": true,
+      "kind": "unix",
+      "reachable": false
+    }
+  },
+  "covers": [
+    "route.reconciliation.snapshot.get",
+    "snapshot.stable-pagination"
+  ],
+  "expected": {
+    "kind": "http-response",
+    "response": {
+      "body": {
+        "api_version": "v1",
+        "request_id": "req_snapshot_page01",
+        "result": {
+          "complete": false,
+          "generation": 41,
+          "items": [
+            {
+              "id": "workspace:ws_vector",
+              "kind": "workspace",
+              "ordinal": 1,
+              "value": {
+                "id": "ws_vector",
+                "kind": "workspace",
+                "labels": {},
+                "observed_at": "2026-08-13T12:00:00Z",
+                "state": "ready"
+              }
+            },
+            {
+              "id": "event:41:7",
+              "kind": "provenance-event",
+              "ordinal": 2,
+              "value": {
+                "actor": "vector-client",
+                "cause": {
+                  "kind": "operation",
+                  "operation": "01JPHASE3EVENTSOURCE0001"
+                },
+                "generation": 41,
+                "observation": {
+                  "id": "ws_vector",
+                  "kind": "workspace",
+                  "labels": {},
+                  "observed_at": "2026-08-13T12:00:00Z",
+                  "state": "ready"
+                },
+                "observed_at": "2026-08-13T12:00:00Z",
+                "principal": null,
+                "resource": "ws_vector",
+                "resource_kind": "workspace",
+                "seq": 7,
+                "transition": "workspace.created"
+              }
+            }
+          ],
+          "next_cursor": "sp2.snap_01JPHASE3VECTOR.2",
+          "snapshot": "snap_01JPHASE3VECTOR",
+          "through_seq": 8
+        }
+      },
+      "status": 200
+    }
+  },
+  "id": "snapshot-pages-read-one-materialized-view",
+  "layer": "http",
+  "phase": 3,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/live_query_count",
+      "expected": 0,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/page_digest_stable",
+      "expected": true,
+      "operator": "equals"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "snapshot",
+      "name": "materialized",
+      "state": {
+        "id": "snap_01JPHASE3VECTOR",
+        "through_seq": 8
+      }
+    }
+  ]
+}

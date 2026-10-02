@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-02T14:30:00Z",
+  "actor": "human:timo",
+  "artifact": "story:unrecorded-terminal-streaming",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "Production SDK unrecorded journey and delegated confinement lane",
+    "reference": ".engineering/reports/issue-112-unrecorded-streaming.md"
+  }
+}

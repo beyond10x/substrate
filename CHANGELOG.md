@@ -7,6 +7,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.7.9] — 2026-10-02
+
+### Added
+
+- Policy-controlled unrecorded PTY and pipe sessions through the public Rust SDK.
+  Recording remains the default; deployment policy must explicitly admit unrecorded
+  capture. Live output retains finite byte, frame, queue and attachment bounds.
+- Content-free byte accounting, named capture refusals and explicit no-replay output
+  queries. The store rejects unrecorded payload writes and capture-mode changes before SQL.
+- Development contract bundle `substrate-wire/0.17.0`, preserving earlier bundle bytes.
+- A standalone project documentation site, AEP v5 planning store and initial ESS ledger
+  and capture-selection projections.
+
+### Verification
+
+- Production canaries cover PTY and pipes through success, child failure, cancellation,
+  expiry, output/backpressure limits, disconnect, persistence failure and restart. Live
+  database, WAL and diagnostic-log scans include recording-enabled controls.
+- Live resource-measurement assertions require a host advertising the complete counter
+  capability; the development workstation lacks delegated `io.stat`. See the
+  [implementation evidence](.engineering/reports/issue-112-unrecorded-streaming.md).
+
 ## [0.7.8] — 2026-09-25
 
 ### Security

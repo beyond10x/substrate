@@ -1,0 +1,65 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "command": {
+      "authorizing_operation": "01JPHASE3WORKSPACELEASE1",
+      "operation": "lease.sweep",
+      "resource": "ws_vector"
+    },
+    "kind": "driver",
+    "port": "lifecycle"
+  },
+  "context": {
+    "authority": "driver-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000"
+  },
+  "covers": [
+    "lease.authorizing-operation"
+  ],
+  "expected": {
+    "kind": "driver-outcome",
+    "outcome": {
+      "actor": "lease-sweeper",
+      "cause": {
+        "kind": "operation",
+        "operation": "01JPHASE3WORKSPACELEASE1"
+      },
+      "principal": null,
+      "transition": "workspace.lease-expired"
+    }
+  },
+  "id": "lease-sweep-reuses-real-authorizing-operation",
+  "layer": "driver",
+  "phase": 3,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/synthetic_operation_created",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/authorizing_operation_exists",
+      "expected": true,
+      "operator": "equals"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "lease",
+      "name": "deadline-passed",
+      "state": {
+        "actor": "vector-client",
+        "authorizing_operation": "01JPHASE3WORKSPACELEASE1",
+        "deadline_boottime_ms": 1060000,
+        "principal": null
+      }
+    }
+  ]
+}

@@ -1,0 +1,189 @@
+[
+  {
+    "deployment": "dep_a",
+    "id": "workspace-create-base",
+    "method": "POST",
+    "normalized_address": "/v1/workspaces",
+    "operation": "01JHASHBASE00000000001",
+    "raw_input": {
+      "labels": {
+        "a": "first",
+        "z": "last"
+      },
+      "source": "empty"
+    },
+    "raw_query": "",
+    "subject": "local:1000"
+  },
+  {
+    "deployment": "dep_b",
+    "id": "workspace-create-transport-variant",
+    "method": "POST",
+    "normalized_address": "/v1/workspaces",
+    "operation": "01JHASHOTHER0000000002",
+    "raw_input": {
+      "labels": {
+        "a": "first",
+        "z": "last"
+      },
+      "source": "empty"
+    },
+    "raw_query": "",
+    "relation": {
+      "case": "workspace-create-base",
+      "kind": "same-request-hash-different-ledger-key"
+    },
+    "subject": "local:2000"
+  },
+  {
+    "deployment": "dep_a",
+    "id": "workspace-create-replay",
+    "method": "POST",
+    "normalized_address": "/v1/workspaces",
+    "operation": "01JHASHBASE00000000001",
+    "raw_input": {
+      "labels": {
+        "a": "first",
+        "z": "last"
+      },
+      "source": "empty"
+    },
+    "raw_query": "",
+    "relation": {
+      "case": "workspace-create-base",
+      "kind": "same-request-hash-same-ledger-key"
+    },
+    "subject": "local:1000"
+  },
+  {
+    "deployment": "dep_a",
+    "id": "workspace-create-conflict",
+    "method": "POST",
+    "normalized_address": "/v1/workspaces",
+    "operation": "01JHASHBASE00000000001",
+    "raw_input": {
+      "labels": {
+        "a": "changed",
+        "z": "last"
+      },
+      "source": "empty"
+    },
+    "raw_query": "",
+    "relation": {
+      "case": "workspace-create-base",
+      "kind": "different-request-hash-same-ledger-key"
+    },
+    "subject": "local:1000"
+  },
+  {
+    "deployment": "dep_a",
+    "id": "workspace-file-address",
+    "method": "PUT",
+    "normalized_address": "/v1/workspaces/ws_vector/files/src/main.txt",
+    "operation": "01JHASHFILE000000000003",
+    "raw_input": {
+      "content": {
+        "data": "aGVsbG8=",
+        "encoding": "base64"
+      }
+    },
+    "raw_query": "",
+    "subject": "local:1000"
+  },
+  {
+    "deployment": "dep_a",
+    "id": "query-duplicates-base",
+    "method": "POST",
+    "normalized_address": "/v1/workspaces",
+    "operation": "01JHASHQUERY00000000001",
+    "raw_input": {
+      "labels": {},
+      "source": "empty"
+    },
+    "raw_query": "7461673d622673706163653d2b267461673d6126706c75733d253242",
+    "subject": "local:1000"
+  },
+  {
+    "deployment": "dep_a",
+    "id": "query-duplicates-reordered",
+    "method": "POST",
+    "normalized_address": "/v1/workspaces",
+    "operation": "01JHASHQUERY00000000001",
+    "raw_input": {
+      "labels": {},
+      "source": "empty"
+    },
+    "raw_query": "706c75733d253262267461673d61267461673d622673706163653d253230",
+    "relation": {
+      "case": "query-duplicates-base",
+      "kind": "same-request-hash-same-ledger-key"
+    },
+    "subject": "local:1000"
+  },
+  {
+    "deployment": "dep_a",
+    "id": "query-malformed-percent",
+    "method": "POST",
+    "normalized_address": "/v1/workspaces",
+    "operation": "01JHASHQUERY00000000001",
+    "raw_input": {
+      "labels": {},
+      "source": "empty"
+    },
+    "raw_query": "7461673d25",
+    "relation": {
+      "case": "query-duplicates-base",
+      "kind": "different-request-hash-same-ledger-key"
+    },
+    "subject": "local:1000"
+  },
+  {
+    "deployment": "dep_a",
+    "id": "query-malformed-utf8",
+    "method": "POST",
+    "normalized_address": "/v1/workspaces",
+    "operation": "01JHASHQUERY00000000001",
+    "raw_input": {
+      "labels": {},
+      "source": "empty"
+    },
+    "raw_query": "7461673d254646",
+    "relation": {
+      "case": "query-malformed-percent",
+      "kind": "different-request-hash-same-ledger-key"
+    },
+    "subject": "local:1000"
+  },
+  {
+    "deployment": "dep_a",
+    "id": "rejected-float-base",
+    "method": "POST",
+    "normalized_address": "/v1/workspaces",
+    "operation": "01JHASHFLOAT00000000001",
+    "raw_input": {
+      "labels": {},
+      "priority": 1.5,
+      "source": "empty"
+    },
+    "raw_query": "",
+    "subject": "local:1000"
+  },
+  {
+    "deployment": "dep_a",
+    "id": "rejected-float-conflict",
+    "method": "POST",
+    "normalized_address": "/v1/workspaces",
+    "operation": "01JHASHFLOAT00000000001",
+    "raw_input": {
+      "labels": {},
+      "priority": 2.5,
+      "source": "empty"
+    },
+    "raw_query": "",
+    "relation": {
+      "case": "rejected-float-base",
+      "kind": "different-request-hash-same-ledger-key"
+    },
+    "subject": "local:1000"
+  }
+]

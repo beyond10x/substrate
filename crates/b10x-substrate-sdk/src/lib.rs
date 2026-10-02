@@ -55,6 +55,9 @@ use transport::{Transport, decode_result, encode_path};
 pub const MAX_SESSION_INPUT_BYTES: u64 = 16 * 1024 * 1024;
 /// Largest individual client frame accepted by one session.
 pub const MAX_SESSION_FRAME_BYTES: u64 = 64 * 1024;
+/// Capture selection for interactive session builders.
+pub use substrate_wire::CaptureMode;
+
 /// Largest declared live-output queue accepted by one session.
 pub const MAX_SESSION_QUEUED_FRAMES: u32 = 16;
 /// Largest process count accepted by an execution policy.
@@ -669,6 +672,7 @@ impl Workspace {
 
     pub fn pipe_session(&self, program: impl Into<String>) -> PipeSessionBuilder {
         PipeSessionBuilder {
+            capture: substrate_wire::CaptureMode::Recorded,
             workspace: self.clone(),
             argv: vec![program.into()],
             allowed_environment: Vec::new(),
@@ -1093,6 +1097,7 @@ pub struct CommandBuilder {
 
 #[must_use]
 pub struct PipeSessionBuilder {
+    capture: substrate_wire::CaptureMode,
     workspace: Workspace,
     argv: Vec<String>,
     allowed_environment: Vec<BaselineEnvironment>,
@@ -1116,6 +1121,13 @@ pub struct PipeSessionBuilder {
 }
 
 impl PipeSessionBuilder {
+    /// Select terminal capture explicitly. Unrecorded requires daemon policy and driver support.
+    /// No retry downgrades this choice; output remains live-only with no reconnect replay.
+    pub fn capture(mut self, capture: substrate_wire::CaptureMode) -> Self {
+        self.capture = capture;
+        self
+    }
+
     pub fn arg(mut self, arg: impl Into<String>) -> Self {
         self.argv.push(arg.into());
         self
@@ -1270,6 +1282,7 @@ impl PipeSessionBuilder {
             lease_ttl_ms: Some(required_duration_millis(lease_ttl)?),
         };
         let input = substrate_wire::PipeSessionStartInput {
+            capture: self.capture,
             exec,
             input_limit_bytes,
             frame_limit_bytes,
@@ -2077,7 +2090,7 @@ mod tests {
         let socket = temporary.path().join("daemon.sock");
         let listener = UnixListener::bind(&socket).expect("bind fake daemon");
         let vector: Value = serde_json::from_str(include_str!(
-            "../../../contracts/substrate-wire/0.16.0/vectors/http/machine-probe.json"
+            "../../../contracts/substrate-wire/0.17.0/vectors/http/machine-probe.json"
         ))
         .expect("machine vector");
         let machine = serde_json::to_vec(

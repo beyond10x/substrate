@@ -181,6 +181,7 @@ struct PipeState {
 
 #[derive(Debug, Clone, Copy)]
 struct PipeSettings {
+    capture: substrate_wire::CaptureMode,
     input_limit: u64,
     frame_limit: usize,
     queued_frames: usize,
@@ -624,6 +625,15 @@ impl ProcessRuntime {
         // terminal-less deployment to change the request and retry into a refusal it can never get
         // past; `session.pty-unserved` says stop. In no case is a pipe session started instead
         // (design 13, invariant 3).
+        if input.capture == substrate_wire::CaptureMode::Unrecorded
+            && self.capability.facts.sessions_unrecorded != Some(true)
+        {
+            return DispatchOutcome::NotDispatched(DriverError::unserved(
+                substrate_wire::SESSION_CAPTURE_UNSERVED,
+                "This driver does not support unrecorded sessions.",
+                "capture",
+            ));
+        }
         if input.mode == SessionMode::Pty && self.capability.facts.sessions_pty != Some(true) {
             return DispatchOutcome::NotDispatched(DriverError::unserved(
                 substrate_wire::SESSION_PTY_UNSERVED,
@@ -665,6 +675,7 @@ impl ProcessRuntime {
             ));
         }
         let settings = PipeSettings {
+            capture: input.capture,
             input_limit: input.input_limit_bytes,
             frame_limit: usize::try_from(input.frame_limit_bytes)
                 .expect("bounded frame fits usize"),
@@ -976,6 +987,9 @@ impl ProcessRuntime {
             secret_slots: applied_slots,
         };
         let resource = Exec {
+            unrecorded_output: pipe_settings
+                .filter(|s| s.capture == substrate_wire::CaptureMode::Unrecorded)
+                .map(|_| substrate_wire::UnrecordedOutput::default()),
             id: id.to_owned(),
             kind: ExecKind::Exec,
             workspace: input.workspace.clone(),
@@ -1353,6 +1367,13 @@ impl ProcessRuntime {
             ));
         }
         let observation = self.observe(id)?;
+        if observation.resource.unrecorded_output.is_some() {
+            return Err(DriverError::refused(
+                "exec.output-unrecorded",
+                "Terminal content was intentionally not recorded; no replay is available.",
+                "output",
+            ));
+        }
         let (source, truncated) = match query.stream {
             OutputStream::Stdout => (&observation.stdout, observation.stdout_truncated),
             OutputStream::Stderr => (&observation.stderr, observation.stderr_truncated),
@@ -2202,6 +2223,18 @@ async fn run_child(
         });
         (merged, tokio::spawn(async { (Vec::new(), false) }))
     } else {
+        let unrecorded = execution
+            .observation
+            .lock()
+            .resource
+            .unrecorded_output
+            .is_some();
+        let stdout_bound = if unrecorded {
+            Arc::clone(&output_bound)
+        } else {
+            Arc::new(AtomicBool::new(false))
+        };
+        let stderr_bound = Arc::clone(&stdout_bound);
         let stdout_sender = pipe_sender.clone();
         let stdout_execution = stdout_sender.as_ref().map(|_| Arc::clone(&execution));
         let stderr_execution = pipe_sender.as_ref().map(|_| Arc::clone(&execution));
@@ -2214,7 +2247,7 @@ async fn run_child(
                     PipeStream::Stdout,
                     frame_limit,
                     stdout_execution,
-                    None,
+                    Some(Arc::clone(&stdout_bound)),
                     true,
                 )
                 .await
@@ -2227,7 +2260,7 @@ async fn run_child(
                     PipeStream::Stderr,
                     frame_limit,
                     stderr_execution,
-                    None,
+                    Some(stderr_bound),
                     true,
                 )
                 .await
@@ -2757,7 +2790,11 @@ where
     let Some(mut reader) = reader else {
         return (Vec::new(), false);
     };
-    let mut stored = Vec::with_capacity(limit.min(65_536));
+    let unrecorded = execution
+        .as_ref()
+        .is_some_and(|e| e.observation.lock().resource.unrecorded_output.is_some());
+    let mut stored = Vec::with_capacity(if unrecorded { 0 } else { limit.min(65_536) });
+    let mut accounted = 0usize;
     let mut buffer = [0_u8; 8192];
     let mut truncated = false;
     loop {
@@ -2769,11 +2806,26 @@ where
                 break;
             }
         };
-        let remaining = limit.saturating_sub(stored.len());
+        let remaining = limit.saturating_sub(accounted);
         let retained = remaining.min(count);
-        stored.extend_from_slice(&buffer[..retained]);
+        accounted = accounted.saturating_add(retained);
+        if !unrecorded {
+            stored.extend_from_slice(&buffer[..retained]);
+        }
+        if let Some(e) = execution.as_ref()
+            && let Some(stats) = e.observation.lock().resource.unrecorded_output.as_mut()
+        {
+            let observed = match stream {
+                PipeStream::Stdout => &mut stats.stdout_observed_bytes,
+                PipeStream::Stderr => &mut stats.stderr_observed_bytes,
+            };
+            *observed = observed.saturating_add(count as u64);
+        }
         if retained < count {
             truncated = true;
+            if unrecorded && let Some(e) = execution.as_ref() {
+                e.cancellation_requested.store(true, Ordering::Release);
+            }
             if let Some(reached) = bound_reached.as_ref() {
                 reached.store(true, Ordering::Release);
             }
@@ -2781,32 +2833,17 @@ where
         if let Some(sender) = &sender
             && execution
                 .as_ref()
-                .is_none_or(|execution| !execution.pipe_backpressure.load(Ordering::Acquire))
+                .is_none_or(|e| !e.pipe_backpressure.load(Ordering::Acquire))
         {
-            // The live channel carries only bytes retained under the same admitted output bound.
-            // Continue draining excess child output without forwarding it so the child cannot
-            // block and a consumer cannot observe more bytes than Substrate attested.
+            // Admission counts raw bytes independently of the optional capture accumulator.
             for chunk in buffer[..retained].chunks(frame_limit) {
-                match sender.try_send(PipeFrame {
-                    stream,
-                    bytes: chunk.to_vec(),
-                }) {
-                    Ok(()) => {}
-                    Err(mpsc::error::TrySendError::Full(_)) => {
-                        if let Some(execution) = &execution {
-                            execution.pipe_backpressure.store(true, Ordering::Release);
-                            execution
-                                .cancellation_requested
-                                .store(true, Ordering::Release);
-                        }
-                        break;
-                    }
-                    Err(mpsc::error::TrySendError::Closed(_)) => break,
+                if !forward_frame(sender, stream, chunk, execution.as_ref(), unrecorded) {
+                    break;
                 }
             }
         }
     }
-    if truncated {
+    if truncated && !unrecorded {
         if !mark_truncation {
             stored.truncate(limit);
         } else if limit >= TRUNCATION_MARKER.len() {
@@ -2817,6 +2854,51 @@ where
         }
     }
     (stored, truncated)
+}
+
+/// Reserve a finite queue slot before copying payload. Occupancy includes reserved slots.
+fn forward_frame(
+    sender: &mpsc::Sender<PipeFrame>,
+    stream: PipeStream,
+    chunk: &[u8],
+    execution: Option<&Arc<Execution>>,
+    unrecorded: bool,
+) -> bool {
+    match sender.try_reserve() {
+        Ok(permit) => {
+            if let Some(e) = execution
+                && let Some(stats) = e.observation.lock().resource.unrecorded_output.as_mut()
+            {
+                let queued = match stream {
+                    PipeStream::Stdout => &mut stats.stdout_queued_bytes,
+                    PipeStream::Stderr => &mut stats.stderr_queued_bytes,
+                };
+                *queued = queued.saturating_add(chunk.len() as u64);
+                stats.queue_high_water_frames = stats.queue_high_water_frames.max(
+                    u32::try_from(sender.max_capacity() - sender.capacity())
+                        .expect("bounded queue"),
+                );
+            }
+            permit.send(PipeFrame {
+                stream,
+                bytes: chunk.to_vec(),
+            });
+            true
+        }
+        Err(mpsc::error::TrySendError::Full(())) => {
+            if let Some(e) = execution {
+                e.pipe_backpressure.store(true, Ordering::Release);
+                e.cancellation_requested.store(true, Ordering::Release);
+            }
+            false
+        }
+        Err(mpsc::error::TrySendError::Closed(())) => {
+            if unrecorded && let Some(e) = execution {
+                e.cancellation_requested.store(true, Ordering::Release);
+            }
+            false
+        }
+    }
 }
 
 async fn wait_terminal(execution: &Execution, limit: Duration) -> Result<(), DriverError> {
@@ -3325,6 +3407,7 @@ mod tests {
     fn running_observation(id: &str) -> ExecObservation {
         ExecObservation {
             resource: substrate_wire::Exec {
+                unrecorded_output: None,
                 id: id.to_owned(),
                 kind: substrate_wire::ExecKind::Exec,
                 workspace: "ws_test".to_owned(),
@@ -3706,6 +3789,7 @@ mod tests {
                 "ex_pipe",
                 &workspace,
                 &substrate_wire::PipeSessionStartInput {
+                    capture: substrate_wire::CaptureMode::Recorded,
                     exec: input,
                     input_limit_bytes: 65_536,
                     frame_limit_bytes: 4_096,
@@ -3784,6 +3868,7 @@ mod tests {
                     "ex_pty",
                     &workspace,
                     &substrate_wire::PipeSessionStartInput {
+                        capture: substrate_wire::CaptureMode::Recorded,
                         exec: pty_exec_input(&snapshot),
                         input_limit_bytes: 65_536,
                         frame_limit_bytes: 4_096,
@@ -3863,6 +3948,7 @@ mod tests {
                 "ex_ptykill",
                 &workspace,
                 &substrate_wire::PipeSessionStartInput {
+                    capture: substrate_wire::CaptureMode::Recorded,
                     exec: input,
                     input_limit_bytes: 65_536,
                     frame_limit_bytes: 4_096,
@@ -3974,6 +4060,66 @@ mod tests {
             measurements: std::collections::BTreeSet::new(),
             capsule: None,
             lease_ttl_ms: Some(60_000),
+        }
+    }
+
+    #[tokio::test]
+    async fn unrecorded_drain_streams_accounts_and_never_accumulates_payload() {
+        use tokio::io::AsyncWriteExt as _;
+        for stream in [PipeStream::Stdout, PipeStream::Stderr] {
+            let (mut writer, reader) = tokio::io::duplex(1024);
+            let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
+            let mut observation = running_observation("ex_unrecorded");
+            observation.resource.unrecorded_output =
+                Some(substrate_wire::UnrecordedOutput::default());
+            let execution = std::sync::Arc::new(Execution::new(
+                observation,
+                None,
+                std::time::Instant::now(),
+                None,
+            ));
+            let bound = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let drain = tokio::spawn(drain_capped(
+                Some(reader),
+                8,
+                Some(sender),
+                stream,
+                4,
+                Some(std::sync::Arc::clone(&execution)),
+                Some(std::sync::Arc::clone(&bound)),
+                true,
+            ));
+            writer.write_all(b"canary-112").await.unwrap();
+            drop(writer);
+            let (captured, truncated) = drain.await.unwrap();
+            let mut delivered = Vec::new();
+            while let Some(frame) = receiver.recv().await {
+                delivered.extend(frame.bytes);
+            }
+            assert_eq!(delivered, b"canary-1");
+            assert!(
+                captured.is_empty(),
+                "even a truncation marker is not captured"
+            );
+            assert!(truncated);
+            assert!(bound.load(std::sync::atomic::Ordering::Acquire));
+            assert!(
+                execution
+                    .cancellation_requested
+                    .load(std::sync::atomic::Ordering::Acquire)
+            );
+            let observation = execution.observation.lock();
+            let stats = observation.resource.unrecorded_output.as_ref().unwrap();
+            assert_eq!(
+                stats.stdout_observed_bytes,
+                if stream == PipeStream::Stdout { 10 } else { 0 }
+            );
+            assert_eq!(
+                stats.stderr_observed_bytes,
+                if stream == PipeStream::Stderr { 10 } else { 0 }
+            );
+            assert_eq!(stats.stdout_queued_bytes + stats.stderr_queued_bytes, 8);
+            assert_eq!(stats.queue_high_water_frames, 2);
         }
     }
 

@@ -1,0 +1,90 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "kind": "http",
+    "operation": "workspace.create",
+    "request": {
+      "body": {
+        "input": {
+          "labels": {
+            "different": "body"
+          },
+          "source": "empty"
+        },
+        "op": "01JPHASE2REPLAYCONFLICT"
+      },
+      "headers": {
+        "x-request-id": "req_replay_conf01"
+      },
+      "method": "POST",
+      "path": "/v1/workspaces",
+      "query": {}
+    },
+    "valid_address": true,
+    "valid_input": true
+  },
+  "context": {
+    "actor": "vector-client",
+    "authority": "http-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000",
+    "transport": {
+      "authenticated": true,
+      "kind": "unix",
+      "reachable": false
+    }
+  },
+  "covers": [
+    "error.conflict",
+    "lifecycle.different-input-conflict"
+  ],
+  "expected": {
+    "kind": "http-response",
+    "response": {
+      "body": {
+        "api_version": "v1",
+        "error": {
+          "address": "operation",
+          "class": "conflict",
+          "code": "operation.request-conflict",
+          "message": "Operation id is already bound to different input.",
+          "operation": "01JPHASE2REPLAYCONFLICT",
+          "retriable": false
+        },
+        "request_id": "req_replay_conf01"
+      },
+      "status": 409
+    }
+  },
+  "id": "same-operation-different-input-conflicts",
+  "layer": "http",
+  "phase": 2,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/driver/dispatch_count",
+      "expected": 0,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/original_record_changed",
+      "expected": false,
+      "operator": "equals"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "operation",
+      "name": "different-hash",
+      "state": {
+        "operation": "01JPHASE2REPLAYCONFLICT",
+        "request_hash": "3333333333333333333333333333333333333333333333333333333333333333"
+      }
+    }
+  ]
+}

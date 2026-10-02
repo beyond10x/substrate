@@ -217,6 +217,7 @@ impl Driver for PipeFixtureDriver {
         let (sender, receiver) = mpsc::channel(16);
         let observation = ExecObservation {
             resource: Exec {
+                unrecorded_output: None,
                 id: id.to_owned(),
                 kind: substrate_wire::ExecKind::Exec,
                 workspace: input.exec.workspace.clone(),
@@ -1465,6 +1466,7 @@ async fn the_two_entry_points_name_one_refusal_for_a_pty_start_that_earns_two() 
     );
     std::fs::create_dir_all(driver.root().join("ws_pty_order")).expect("workspace directory");
     let input = PipeSessionStartInput {
+        capture: substrate_wire::CaptureMode::Recorded,
         exec: ExecStartInput {
             workspace: "ws_pty_order".to_owned(),
             argv: vec!["/bin/sh".to_owned()],

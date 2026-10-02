@@ -208,6 +208,7 @@ async fn twelve_route_vertical_slice_is_scoped_durable_and_observed() {
 
     let exec_id = "ex_seed";
     let exec = Exec {
+        unrecorded_output: None,
         id: exec_id.to_owned(),
         kind: ExecKind::Exec,
         workspace: workspace.clone(),
