@@ -888,6 +888,10 @@ fn check_classification(version: &str, released: &Tree, failures: &mut Vec<Strin
 /// A successor that rendered, verified and preserved everything while adding nothing is the failure
 /// this catches; the entries are the acceptance list of the story that cut the bundle.
 fn check_additions(version: &str, released: &Tree, failures: &mut Vec<String>) {
+    if version == "0.17.0" {
+        check_capture_additions(released, failures);
+        return;
+    }
     if version == "0.15.0" {
         check_session_route_rename_additions(released, failures);
         return;
@@ -930,6 +934,67 @@ fn check_additions(version: &str, released: &Tree, failures: &mut Vec<String>) {
     }
     if version == "0.5.0" {
         check_secret_slot_additions(released, failures);
+    }
+}
+
+fn check_capture_additions(released: &Tree, failures: &mut Vec<String>) {
+    let Some(start) = json_at(released, "schemas/inputs/pipe-session-start.json", failures) else {
+        return;
+    };
+    if start.pointer("/properties/capture/enum")
+        != Some(&serde_json::json!(["recorded", "unrecorded"]))
+        || start
+            .pointer("/properties/capture/default")
+            .and_then(Value::as_str)
+            != Some("recorded")
+    {
+        failures.push(
+            "capture selection must preserve recording by default and explicitly admit unrecorded"
+                .to_owned(),
+        );
+    }
+    let Some(capabilities) = json_at(
+        released,
+        "schemas/results/pipe-session-capabilities.json",
+        failures,
+    ) else {
+        return;
+    };
+    for (field, expected) in [
+        ("max_attachments", 32),
+        ("send_timeout_ms", 5_000),
+        ("attachment_lifetime_ms", 3_600_000),
+    ] {
+        if capabilities
+            .pointer(&format!("/properties/{field}/const"))
+            .and_then(Value::as_u64)
+            != Some(expected)
+        {
+            failures.push(format!(
+                "capture capability document lost its finite {field}"
+            ));
+        }
+    }
+    let Some(register) = json_at(released, "refusals.json", failures) else {
+        return;
+    };
+    for (code, class, status) in [
+        (substrate_wire::SESSION_CAPTURE_DISALLOWED, "refused", 403),
+        (substrate_wire::SESSION_CAPTURE_UNSERVED, "unserved", 501),
+        ("exec.output-unrecorded", "refused", 409),
+    ] {
+        if !register["refusals"].as_array().is_some_and(|rows| {
+            rows.iter().any(|row| {
+                row["code"] == code
+                    && row["class"] == class
+                    && row["status"] == status
+                    && row["retriable"] == false
+            })
+        }) {
+            failures.push(format!(
+                "capture refusal {code} must name its class, status and no-retry behavior"
+            ));
+        }
     }
 }
 
@@ -1485,7 +1550,10 @@ fn check_pty_refusal_class(released: &Tree, failures: &mut Vec<String>) {
     let required: BTreeSet<&str> = substrate_wire::SESSION_REFUSAL_CODES
         .iter()
         .copied()
-        .filter(|code| !substrate_wire::SESSION_AUTHORITY_REFUSAL_CODES.contains(code))
+        .filter(|code| {
+            !substrate_wire::SESSION_AUTHORITY_REFUSAL_CODES.contains(code)
+                && !substrate_wire::SESSION_CAPTURE_REFUSAL_CODES.contains(code)
+        })
         .collect();
     for code in &required {
         let Some(row) = rows.get(*code) else {
@@ -5167,7 +5235,7 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{}: {error}", bundle.display()));
             checked += 1;
         }
-        assert_eq!(checked, 16, "every released bundle must be checked");
+        assert_eq!(checked, 17, "every released bundle must be checked");
     }
 
     /// Class, the other half: if a parameter's name is not a discriminator, then renaming one is

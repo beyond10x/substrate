@@ -1,0 +1,98 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "kind": "http",
+    "operation": "workspace.create",
+    "request": {
+      "body": {
+        "input": {
+          "labels": {},
+          "source": "empty"
+        },
+        "op": "01JPHASE3LEDGERCAPACITY1"
+      },
+      "headers": {
+        "x-request-id": "req_ledger_cap01"
+      },
+      "method": "POST",
+      "path": "/v1/workspaces",
+      "query": {}
+    },
+    "valid_address": true,
+    "valid_input": true
+  },
+  "context": {
+    "actor": "vector-client",
+    "authority": "http-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000",
+    "transport": {
+      "authenticated": true,
+      "kind": "unix",
+      "reachable": false
+    }
+  },
+  "covers": [
+    "ledger.capacity"
+  ],
+  "expected": {
+    "kind": "http-response",
+    "response": {
+      "body": {
+        "api_version": "v1",
+        "error": {
+          "address": "operation-ledger",
+          "class": "exhausted",
+          "code": "operation.ledger-capacity",
+          "message": "Operation ledger capacity is exhausted.",
+          "retriable": false
+        },
+        "request_id": "req_ledger_cap01"
+      },
+      "status": 507
+    }
+  },
+  "id": "fresh-operation-at-ledger-capacity-is-unbound",
+  "layer": "http",
+  "phase": 3,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/operation_bound",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/operation_row_count_delta",
+      "expected": 0,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/event_count_delta",
+      "expected": 0,
+      "operator": "equals"
+    },
+    {
+      "actual": "/driver/dispatch_count",
+      "expected": 0,
+      "operator": "equals"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "operation",
+      "name": "ledger-at-capacity",
+      "state": {
+        "global_bytes": 4294967296,
+        "global_rows": 1000000,
+        "subject_bytes": 536870912,
+        "subject_rows": 100000
+      }
+    }
+  ]
+}

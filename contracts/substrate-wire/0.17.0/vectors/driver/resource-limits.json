@@ -1,0 +1,65 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "command": {
+      "cpu_millis": 100,
+      "memory_bytes": 16777216,
+      "operation": "exec.start",
+      "processes": 2
+    },
+    "kind": "driver",
+    "port": "exec"
+  },
+  "context": {
+    "authority": "driver-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000"
+  },
+  "covers": [
+    "security.bounds.resource"
+  ],
+  "expected": {
+    "kind": "driver-outcome",
+    "outcome": {
+      "limit": "memory",
+      "state": "exited"
+    }
+  },
+  "id": "exec-resource-limits-are-cgroup-enforced",
+  "layer": "driver",
+  "phase": 2,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/max_processes",
+      "expected": 2,
+      "operator": "lte"
+    },
+    {
+      "actual": "/probes/max_memory_bytes",
+      "expected": 16777216,
+      "operator": "lte"
+    },
+    {
+      "actual": "/probes/cpu_millis",
+      "expected": 100,
+      "operator": "lte"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "process-tree",
+      "name": "exceed-each-cgroup-limit",
+      "state": {
+        "cpu_millis": 101,
+        "memory_bytes": 16777217,
+        "processes": 3
+      }
+    }
+  ]
+}

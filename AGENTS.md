@@ -43,7 +43,8 @@ Each is a claim that can be checked. Breaking one is a design change, not a refa
 5. **Operations are durable before driver dispatch**
    (`adr/0005-operations-are-durable-before-driver-dispatch.md`).
 6. **Every released contract bundle directory is immutable.** `contracts/substrate-wire/0.1.0`
-   through `0.16.0` exist; `0.16.0` is the current development bundle, adding Connector-authorized
+   through `0.17.0` exist; `0.17.0` adds policy-controlled unrecorded terminal streaming
+   (design 23). `0.16.0` added Connector-authorized
    Git source fields, the conditional `workspace.git` capability and two bounded Git observation
    routes. `0.15.0` replaced exactly eight
    `/v1/pipe-sessions` route addresses with `/v1/sessions` without an alias (ADR 0028 and Atlas
@@ -59,7 +60,7 @@ Each is a claim that can be checked. Breaking one is a design change, not a refa
    context and grant attribution (ADR 0011); `0.6.0` added destination-bound egress
    apertures (ADR 0013), and **every earlier directory is frozen** (`STATUS.md:36`,
    `xtask/src/json.rs:152`, `contracts/substrate-wire/0.2.0/README.md:13`).
-   The daemon and Rust SDK advertise `substrate-wire/0.16.0` with the SHA-256 of that bundle's
+   The daemon and Rust SDK advertise `substrate-wire/0.17.0` with the SHA-256 of that bundle's
    inner `bundle.json` (`crates/substrate-wire/src/lib.rs`); design 21 records the Git source and
    observation additions, ADR 0028 records the preceding route promotion, and the gate retains the
    one additional 0.11.0-to-0.12.0 lineage bridge. Moving this
@@ -156,7 +157,7 @@ In order: `cargo test --workspace --release --locked`, `cargo fmt --all --check`
 `cargo xtask check-licenses`, `cargo xtask check-packages`, `cargo xtask check-mcp-boundary`,
 `check-contract-bundle.py`, `check-contract-bundle-0.2.0.py`,
 `-0.3.0.py`, `-0.4.0.py`, one bounded
-`cargo xtask check-bundles 0.5.0 ... 0.16.0`,
+`cargo xtask check-bundles 0.5.0 ... 0.17.0`,
 `cargo xtask check-json` and `cargo xtask check-toolchain`.
 Green here is the bar for `main`.
 The former brand is fenced org-wide by `scripts/check-org-brand.sh` in the **atlas** repo, not here.
@@ -180,7 +181,7 @@ bundles' reproducibility proof (invariant 6), not as tooling.
 | `package-bundle <version> --out <dir>` | produces a released bundle as a deterministic OCI image layout | no — under `cargo test` |
 | `render-bundle <version> --out <dir>` | produces a bundle tree from `substrate-wire` and `xtask/bundle-source/<version>/`; refuses to write anywhere under `contracts/` | no — under `cargo test` |
 | `check-bundle <version>` | a released bundle whose bytes are not the fixed point of `xtask/bundle-source/<version>/` | no — focused form of the batched gate check |
-| `check-bundles <version>...` | the same checks with a bounded worker count and deterministic version-order reporting | yes, `0.5.0` through `0.16.0` in one invocation |
+| `check-bundles <version>...` | the same checks with a bounded worker count and deterministic version-order reporting | yes, `0.5.0` through `0.17.0` in one invocation |
 | `check-json [<version>...]` | JSON beneath a released bundle that no bundled schema classifies, that its schema rejects, or that is not in deterministic source form | yes, all sixteen |
 
 **`cargo xtask package-bundle <version> --out <dir>`** packages a released bundle as a

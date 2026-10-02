@@ -1,0 +1,56 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "configuration": {
+      "authentication": "none",
+      "listen": "0.0.0.0:7443",
+      "tls": false,
+      "trusted_tunnel": false
+    },
+    "kind": "startup"
+  },
+  "context": {
+    "actor": "vector-client",
+    "authority": "http-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "unmapped",
+    "transport": {
+      "authenticated": false,
+      "kind": "tcp",
+      "reachable": true
+    }
+  },
+  "covers": [
+    "security.unauthenticated-reachable-startup"
+  ],
+  "expected": {
+    "kind": "startup-outcome",
+    "outcome": {
+      "code": "daemon.startup-refused",
+      "message": "Reachable listener requires authentication and transport protection.",
+      "started": false
+    }
+  },
+  "id": "reachable-unauthenticated-listener-refuses-startup",
+  "layer": "http",
+  "phase": 2,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/listener_bound",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/driver/probe_count",
+      "expected": 0,
+      "operator": "equals"
+    }
+  ],
+  "setup": []
+}

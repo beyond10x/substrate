@@ -10,7 +10,7 @@ owner-private Unix socket, verifies the daemon's advertised contract, and return
 process, event, operation, and refusal observations.
 
 The SDK and wire contract are development releases below 1.0. Current development source verifies
-the explicitly promoted `substrate-wire/0.16.0` name and inner manifest digest before it serves an
+the explicitly promoted `substrate-wire/0.17.0` name and inner manifest digest before it serves an
 operation. Missing, older, unknown, and wrong-digest daemon claims are refused; a newer Rust type in
 the workspace does not by itself advance that pair.
 
@@ -288,3 +288,27 @@ reconciliation.
 Use `Client::events` for bounded pages, `Client::event_stream` for the cursor-preserving WebSocket
 stream, and `Client::operation` to inspect a known mutation. A retention gap is a typed
 `SdkError::EventGap`; the SDK does not silently skip to current state.
+
+## Stream terminal output without recording it
+
+Starting with the `substrate-wire/0.17.0` development contract, a session builder accepts
+`.capture(CaptureMode::Unrecorded)`, where `CaptureMode` is exported by `b10x_substrate_sdk`.
+This works for both `pipe_session` and `pty_session`. Set the execution policy, lease, input byte
+limit, frame limit and queue size as usual, then attach and read the live frames.
+
+The daemon operator must enable `--allow-unrecorded-sessions`. For an SDK-managed daemon, use
+`.allow_unrecorded_sessions(true)` on its builder. The default remains recording. The machine's
+`sessions.unrecorded` fact reports driver support; `session_capabilities().capture_modes` reports
+which modes the deployment admits. A disallowed request receives `session.capture-disallowed`;
+an unsupported driver receives `session.capture-unserved`. Neither falls back to recording.
+
+The session observation records the selected `capture` mode. Its exec observation carries
+`unrecorded_output` with raw bytes observed and queued separately for stdout/stderr, plus the
+observed queue high-water mark. PTY output is merged into stdout. Queued bytes do not acknowledge
+client receipt. Exit status, resource measurements, lease state and cancellation remain observable.
+After a restart, counters are the last persisted observation, not reconstructed final counts.
+
+There is no durable transcript or reconnect replay: output queries receive `exec.output-unrecorded`.
+A lost attachment kills the process tree and consumes the attachment. The output byte ceiling,
+frame size, queue capacity, five-second send deadline and one-hour attachment lifetime still apply.
+Substrate does not prevent the child or client from writing its own files or diagnostic logs.

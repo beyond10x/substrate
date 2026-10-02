@@ -19,7 +19,7 @@ use super::operations::{
     reservation_response, stored_exec, stored_output, validate_exec_input,
 };
 use super::responses::{
-    not_found, not_found_with_operation, operation_ledger_capacity, outcome_unknown,
+    failure, not_found, not_found_with_operation, operation_ledger_capacity, outcome_unknown,
     query_is_empty, request_id, schema_invalid, store_failure, success, workspace_frozen_refusal,
 };
 use super::{App, Identity};
@@ -127,6 +127,7 @@ pub(super) async fn exec_start(
     );
     let provisional = StoredExec {
         resource: Exec {
+            unrecorded_output: None,
             id: id.clone(),
             kind: ExecKind::Exec,
             workspace: mutation.input.workspace.clone(),
@@ -347,6 +348,18 @@ pub(super) async fn exec_output_get(
         Ok(None) => return not_found(&request_id),
         Err(error) => return store_failure(&request_id, None, &error),
     };
+    if stored.resource.unrecorded_output.is_some() {
+        return failure(
+            StatusCode::CONFLICT,
+            &request_id,
+            None,
+            substrate_wire::ErrorClass::Refused,
+            "exec.output-unrecorded",
+            "Terminal content was intentionally not recorded; no replay is available.",
+            Some("output"),
+            false,
+        );
+    }
     let mut serve_durable_output = false;
     if let Ok(observation) = app.driver.observe_exec(&exec_id).await {
         let proposed = stored_exec(&observation);

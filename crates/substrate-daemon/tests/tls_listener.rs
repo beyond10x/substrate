@@ -462,6 +462,7 @@ fn seed_ready_pipe_session(state_path: &Path, origin: &str) {
     };
     let mut exec = StoredExec {
         resource: Exec {
+            unrecorded_output: None,
             id: "ex_network_authority".to_owned(),
             kind: ExecKind::Exec,
             workspace: workspace.id,
@@ -489,6 +490,7 @@ fn seed_ready_pipe_session(state_path: &Path, origin: &str) {
         leader_pid: None,
     };
     let mut session = PipeSession {
+        capture: substrate_wire::CaptureMode::Recorded,
         id: "ses_network_authority".to_owned(),
         kind: SessionKind::Session,
         mode: SessionMode::Pipes,
@@ -810,7 +812,7 @@ async fn production_tls_refuses_unverified_routes_and_rotates_atomically() {
     assert!(
         response
             .to_ascii_lowercase()
-            .contains("x-b10x-contract: substrate-wire/0.16.0"),
+            .contains("x-b10x-contract: substrate-wire/0.17.0"),
         "{response}"
     );
 

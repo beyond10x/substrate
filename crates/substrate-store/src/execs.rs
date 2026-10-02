@@ -729,6 +729,23 @@ pub(crate) fn upsert_exec(
     scope: &Scope,
     stored: &StoredExec,
 ) -> Result<(), StoreError> {
+    // Refuse before SQL can put payload in either the database or its WAL.
+    let unrecorded = stored.resource.unrecorded_output.is_some();
+    let previous: Option<String> = connection
+        .query_row(
+            "SELECT resource_json FROM execs WHERE deployment = ?1 AND subject = ?2 AND id = ?3",
+            params![scope.deployment, scope.subject, stored.resource.id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let previous: Option<Exec> = previous
+        .map(|json| serde_json::from_str(&json))
+        .transpose()?;
+    if (unrecorded && (!stored.stdout.is_empty() || !stored.stderr.is_empty()))
+        || previous.is_some_and(|previous| previous.unrecorded_output.is_some() != unrecorded)
+    {
+        return Err(StoreError::CaptureViolation);
+    }
     connection.execute(
         "INSERT INTO execs (
             deployment, subject, id, workspace_id, resource_json, stdout, stderr,
@@ -790,6 +807,7 @@ mod tests {
     fn exec(id: &str, workspace: &str, state: ExecState, output_bytes: usize) -> StoredExec {
         StoredExec {
             resource: Exec {
+                unrecorded_output: None,
                 id: id.to_owned(),
                 kind: ExecKind::Exec,
                 workspace: workspace.to_owned(),
@@ -828,6 +846,53 @@ mod tests {
             .parse()
             .expect("resident page count");
         pages * 4096
+    }
+
+    #[test]
+    fn unrecorded_capture_is_rejected_before_sqlite_or_wal_can_observe_payload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("privacy.db");
+        let store = Store::open(&path).unwrap();
+        store
+            .connection
+            .lock()
+            .execute_batch("PRAGMA wal_autocheckpoint=0")
+            .unwrap();
+        let scope = scope();
+        let mut value = exec("ex_private", "ws_private", ExecState::Running, 0);
+        value.resource.unrecorded_output = Some(substrate_wire::UnrecordedOutput::default());
+        upsert_exec(&store.connection.lock(), &scope, &value).unwrap();
+        let canary = b"SYNTHETIC_TERMINAL_CANARY_112";
+        for downgrade in [false, true] {
+            let mut bad = value.clone();
+            bad.stdout = canary.to_vec();
+            if downgrade {
+                bad.resource.unrecorded_output = None;
+            }
+            assert!(matches!(
+                store.put_exec(&scope, &bad),
+                Err(crate::StoreError::CaptureViolation)
+            ));
+        }
+        // Before close/checkpoint: detect the bytes in either durable sink.
+        let scan = || {
+            [path.clone(), path.with_extension("db-wal")]
+                .iter()
+                .any(|p| {
+                    std::fs::read(p)
+                        .unwrap_or_default()
+                        .windows(canary.len())
+                        .any(|w| w == canary)
+                })
+        };
+        assert!(!scan());
+        let mut control = exec("ex_recorded", "ws_private", ExecState::Running, 0);
+        control.stdout = canary.to_vec();
+        upsert_exec(&store.connection.lock(), &scope, &control).unwrap();
+        assert!(
+            scan(),
+            "identical sink scan must detect the recording positive control"
+        );
     }
 
     #[test]

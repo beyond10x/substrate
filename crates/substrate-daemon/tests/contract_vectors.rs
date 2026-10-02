@@ -155,6 +155,7 @@ impl VectorDriver {
     fn signal_observation() -> ExecObservation {
         ExecObservation {
             resource: Exec {
+                unrecorded_output: None,
                 id: "ex_vector".to_owned(),
                 kind: substrate_wire::ExecKind::Exec,
                 workspace: "ws_vector".to_owned(),

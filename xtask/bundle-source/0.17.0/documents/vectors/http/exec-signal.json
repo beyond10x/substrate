@@ -1,0 +1,119 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "kind": "http",
+    "operation": "exec.signal",
+    "request": {
+      "body": {
+        "input": {
+          "grace_ms": 1000,
+          "signal": "TERM"
+        },
+        "op": "01JPHASE2EXECSIGNAL00001"
+      },
+      "headers": {
+        "x-request-id": "req_exec_signal01"
+      },
+      "method": "POST",
+      "path": "/v1/execs/ex_vector/signal",
+      "query": {}
+    },
+    "valid_address": true,
+    "valid_input": true
+  },
+  "context": {
+    "actor": "vector-client",
+    "authority": "http-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000",
+    "transport": {
+      "authenticated": true,
+      "kind": "unix",
+      "reachable": false
+    }
+  },
+  "covers": [
+    "route.exec.signal"
+  ],
+  "expected": {
+    "kind": "http-response",
+    "response": {
+      "body": {
+        "api_version": "v1",
+        "operation": "01JPHASE2EXECSIGNAL00001",
+        "request_id": "req_exec_signal01",
+        "result": {
+          "applied": {
+            "capability_snapshot": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+            "cgroup": "substrate/vector",
+            "filesystem": "workspace-rw-system-ro",
+            "network": "none",
+            "profile": "workspace"
+          },
+          "exit": {
+            "code": null,
+            "signal": "TERM"
+          },
+          "id": "ex_vector",
+          "kind": "exec",
+          "observed_at": "2026-08-13T12:00:00Z",
+          "requested": {
+            "capability_snapshot": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+            "network": "none",
+            "profile": "workspace",
+            "require": true
+          },
+          "state": "cancelled",
+          "workspace": "ws_vector"
+        }
+      },
+      "status": 200
+    }
+  },
+  "id": "exec-signal-observes-cgroup-empty",
+  "layer": "http",
+  "phase": 2,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/cgroup_process_count",
+      "expected": 0,
+      "operator": "equals"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "exec",
+      "name": "owned-running",
+      "state": {
+        "owner": "local:1000",
+        "resource": {
+          "applied": {
+            "capability_snapshot": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+            "cgroup": "substrate/vector",
+            "filesystem": "workspace-rw-system-ro",
+            "network": "none",
+            "profile": "workspace"
+          },
+          "exit": null,
+          "id": "ex_vector",
+          "kind": "exec",
+          "observed_at": "2026-08-13T12:00:00Z",
+          "requested": {
+            "capability_snapshot": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+            "network": "none",
+            "profile": "workspace",
+            "require": true
+          },
+          "state": "running",
+          "workspace": "ws_vector"
+        }
+      }
+    }
+  ]
+}

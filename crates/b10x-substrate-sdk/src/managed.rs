@@ -27,6 +27,7 @@ enum DaemonSource {
 
 #[must_use]
 pub struct ManagedDaemonBuilder {
+    allow_unrecorded_sessions: bool,
     data_dir: Option<PathBuf>,
     deployment: Option<String>,
     source: Option<DaemonSource>,
@@ -41,6 +42,7 @@ pub struct ManagedDaemonBuilder {
 impl Default for ManagedDaemonBuilder {
     fn default() -> Self {
         Self {
+            allow_unrecorded_sessions: false,
             data_dir: None,
             deployment: None,
             source: None,
@@ -55,6 +57,12 @@ impl Default for ManagedDaemonBuilder {
 }
 
 impl ManagedDaemonBuilder {
+    /// Explicit deployment policy opt-in; session requests still choose their own capture mode.
+    pub fn allow_unrecorded_sessions(mut self, allow: bool) -> Self {
+        self.allow_unrecorded_sessions = allow;
+        self
+    }
+
     pub fn data_dir(mut self, path: impl Into<PathBuf>) -> Self {
         self.data_dir = Some(path.into());
         self.temporary = false;
@@ -157,6 +165,7 @@ impl ManagedDaemonBuilder {
         let uid = nix::unistd::geteuid().as_raw();
         #[cfg(feature = "linked-daemon")]
         let linked_config = LinkedChildConfig {
+            allow_unrecorded_sessions: self.allow_unrecorded_sessions,
             socket: path_string(&socket)?,
             state: path_string(&state)?,
             workspaces: path_string(&workspaces)?,
@@ -189,6 +198,9 @@ impl ManagedDaemonBuilder {
                     .arg("--event-retention")
                     .arg(self.event_retention.to_string())
                     .arg("--exit-on-stdin-close");
+                if self.allow_unrecorded_sessions {
+                    command.arg("--allow-unrecorded-sessions");
+                }
                 if let Some(root) = &self.cgroup_root {
                     command.arg("--cgroup-root").arg(root);
                 }
@@ -419,6 +431,7 @@ pub async fn run_daemon_child_if_requested() -> Result<bool, SdkError> {
             child.deployment,
             vec![child.uid],
         );
+        config.allow_unrecorded_sessions = child.allow_unrecorded_sessions;
         config.cgroup_root = child.cgroup_root.map(PathBuf::from);
         config.bubblewrap = PathBuf::from(child.bubblewrap);
         config.event_retention = child.event_retention;

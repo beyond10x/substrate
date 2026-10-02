@@ -82,6 +82,7 @@ impl From<substrate_wire::WorkspaceState> for WorkspaceState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Lease {
+    pub state: substrate_wire::LeaseState,
     pub ttl: Duration,
     pub renew_by: DateTime<Utc>,
     pub authorizing_operation: String,
@@ -90,6 +91,7 @@ pub struct Lease {
 impl From<substrate_wire::LeaseObservation> for Lease {
     fn from(value: substrate_wire::LeaseObservation) -> Self {
         Self {
+            state: value.state,
             ttl: Duration::from_millis(value.ttl_ms),
             renew_by: value.renew_by,
             authorizing_operation: value.authorizing_operation,
@@ -230,6 +232,7 @@ pub struct ExecExit {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct ExecObservation {
+    pub unrecorded_output: Option<substrate_wire::UnrecordedOutput>,
     pub id: String,
     pub workspace: String,
     pub state: ExecState,
@@ -259,6 +262,7 @@ pub struct OutputPage {
 impl From<substrate_wire::Exec> for ExecObservation {
     fn from(value: substrate_wire::Exec) -> Self {
         Self {
+            unrecorded_output: value.unrecorded_output,
             id: value.id,
             workspace: value.workspace,
             state: value.state.into(),
@@ -319,6 +323,7 @@ impl From<substrate_wire::SessionState> for PipeSessionState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct PipeSessionObservation {
+    pub capture: substrate_wire::CaptureMode,
     pub id: String,
     pub exec_id: String,
     pub workspace: String,
@@ -337,6 +342,7 @@ pub struct PipeSessionObservation {
 impl From<substrate_wire::PipeSession> for PipeSessionObservation {
     fn from(value: substrate_wire::PipeSession) -> Self {
         Self {
+            capture: value.capture,
             id: value.id,
             exec_id: value.exec,
             workspace: value.workspace,
@@ -756,6 +762,7 @@ pub(crate) struct EventStreamFrame {
 #[cfg(feature = "linked-daemon")]
 #[derive(Debug, Serialize)]
 pub(crate) struct LinkedChildConfig {
+    pub allow_unrecorded_sessions: bool,
     pub socket: String,
     pub state: String,
     pub workspaces: String,
@@ -774,6 +781,8 @@ impl<'de> Deserialize<'de> for LinkedChildConfig {
     {
         #[derive(Deserialize)]
         struct Fields {
+            #[serde(default)]
+            allow_unrecorded_sessions: bool,
             socket: String,
             state: String,
             workspaces: String,
@@ -785,6 +794,7 @@ impl<'de> Deserialize<'de> for LinkedChildConfig {
         }
         let fields = Fields::deserialize(deserializer)?;
         Ok(Self {
+            allow_unrecorded_sessions: fields.allow_unrecorded_sessions,
             socket: fields.socket,
             state: fields.state,
             workspaces: fields.workspaces,

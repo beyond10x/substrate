@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-02T17:51:14Z",
+  "actor": "human:timo",
+  "artifact": "story:unrecorded-terminal-streaming",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "approval",
+    "source": "Operator requested PR, merge and new release after reviewing fixture exceptions"
+  }
+}

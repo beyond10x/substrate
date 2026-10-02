@@ -69,6 +69,7 @@ fn lane() -> Option<Lane> {
 
 fn pty_start(snapshot: &str) -> PipeSessionStartInput {
     PipeSessionStartInput {
+        capture: substrate_wire::CaptureMode::Recorded,
         exec: ExecStartInput {
             workspace: "ws_test".to_owned(),
             argv: vec![

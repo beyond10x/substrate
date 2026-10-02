@@ -193,11 +193,23 @@ pub(super) async fn pipe_session_capabilities(
         Success::observed(
             request_id,
             PipeSessionCapabilities {
-                // Bound, not written out, and `0.10.0` rather than `0.4.0`: this document carries
-                // `modes` and the window and control-rate ceilings, which `0.4.0`'s closed
-                // nine-property schema forbids, so naming `0.4.0` made the body validate against no
-                // released bundle at all. See `PIPE_SESSION_CAPABILITY_CONTRACT` for why this is not
-                // the `x-b10x-contract` header's claim.
+                capture_modes: if app.allow_unrecorded_sessions
+                    && facts.sessions_unrecorded == Some(true)
+                {
+                    vec![
+                        substrate_wire::CaptureMode::Recorded,
+                        substrate_wire::CaptureMode::Unrecorded,
+                    ]
+                } else {
+                    vec![substrate_wire::CaptureMode::Recorded]
+                },
+                max_attachments: u32::try_from(app.pipe_session_policy.global_attachments)
+                    .expect("bounded attachment capacity"),
+                send_timeout_ms: u64::try_from(app.pipe_session_policy.send_timeout.as_millis())
+                    .expect("bounded deadline"),
+                attachment_lifetime_ms: u64::try_from(app.pipe_session_policy.lifetime.as_millis())
+                    .expect("bounded lifetime"),
+                // This result shape includes the 0.17 capture policy and attachment ceilings.
                 contract: substrate_wire::PIPE_SESSION_CAPABILITY_CONTRACT.to_owned(),
                 transport: "unix-websocket-json".to_owned(),
                 capability_snapshot: machine.snapshot,
@@ -332,6 +344,8 @@ pub(super) async fn pipe_session_start(
     );
     let provisional = StoredExec {
         resource: Exec {
+            unrecorded_output: (mutation.input.capture == substrate_wire::CaptureMode::Unrecorded)
+                .then(substrate_wire::UnrecordedOutput::default),
             id: exec_id.clone(),
             kind: ExecKind::Exec,
             workspace: mutation.input.exec.workspace.clone(),
@@ -360,6 +374,7 @@ pub(super) async fn pipe_session_start(
         leader_pid: None,
     };
     let provisional_session = PipeSession {
+        capture: mutation.input.capture,
         id: session_id.clone(),
         kind: SessionKind::Session,
         mode: mutation.input.mode,

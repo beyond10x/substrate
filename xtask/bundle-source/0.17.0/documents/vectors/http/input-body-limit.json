@@ -1,0 +1,83 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "kind": "raw-http",
+    "operation": "workspace.create",
+    "request": {
+      "body": {
+        "repeat": {
+          "count": 2097153,
+          "octet_hex": "20"
+        },
+        "sha256": "e7d99e4db1392275f200e288c860f9780a935c945e2d55f98c1b68a1f9f3fb5c"
+      },
+      "headers": {
+        "content-type": "application/json",
+        "x-request-id": "req_input_limit01"
+      },
+      "method": "POST",
+      "path": "/v1/workspaces"
+    }
+  },
+  "context": {
+    "actor": "vector-client",
+    "authority": "http-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000",
+    "transport": {
+      "authenticated": true,
+      "kind": "unix",
+      "reachable": false
+    }
+  },
+  "covers": [
+    "security.bounds.input"
+  ],
+  "expected": {
+    "kind": "http-response",
+    "response": {
+      "body": {
+        "api_version": "v1",
+        "error": {
+          "address": "body",
+          "class": "exhausted",
+          "code": "request.body-limit",
+          "message": "Request body exceeds the configured byte limit.",
+          "retriable": false
+        },
+        "request_id": "req_input_limit01"
+      },
+      "status": 429
+    }
+  },
+  "id": "input-body-over-limit-is-exhausted",
+  "layer": "http",
+  "phase": 2,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/json_parse_count",
+      "expected": 0,
+      "operator": "equals"
+    },
+    {
+      "actual": "/driver/dispatch_count",
+      "expected": 0,
+      "operator": "equals"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "transport",
+      "name": "body-limit",
+      "state": {
+        "limit_bytes": 2097152
+      }
+    }
+  ]
+}

@@ -1,0 +1,87 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "kind": "http",
+    "operation": "workspace.file.delete",
+    "request": {
+      "body": {
+        "input": {},
+        "op": "01JPHASE2FILEDELETE0001"
+      },
+      "headers": {
+        "x-request-id": "req_file_delete01"
+      },
+      "method": "DELETE",
+      "path": "/v1/workspaces/ws_vector/files/src/main.txt",
+      "query": {}
+    },
+    "valid_address": true,
+    "valid_input": true
+  },
+  "context": {
+    "actor": "vector-client",
+    "authority": "http-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000",
+    "transport": {
+      "authenticated": true,
+      "kind": "unix",
+      "reachable": false
+    }
+  },
+  "covers": [
+    "route.workspace.file.delete",
+    "security.bounds.delete"
+  ],
+  "expected": {
+    "kind": "http-response",
+    "response": {
+      "body": {
+        "api_version": "v1",
+        "operation": "01JPHASE2FILEDELETE0001",
+        "request_id": "req_file_delete01",
+        "result": {
+          "absent": true,
+          "kind": "file",
+          "observed_at": "2026-08-13T12:00:00Z",
+          "path": "src/main.txt",
+          "workspace": "ws_vector"
+        }
+      },
+      "status": 200
+    }
+  },
+  "id": "bounded-file-delete-observes-absence",
+  "layer": "http",
+  "phase": 2,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/target_exists",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/deleted_entries",
+      "expected": 1,
+      "operator": "equals"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "workspace",
+      "name": "owned-with-file",
+      "state": {
+        "files": {
+          "src/main.txt": "aGVsbG8="
+        },
+        "owner": "local:1000"
+      }
+    }
+  ]
+}

@@ -379,6 +379,7 @@ pub struct DaemonConfig {
     pub workspaces: PathBuf,
     pub deployment: String,
     pub allow_uids: Vec<u32>,
+    pub allow_unrecorded_sessions: bool,
     pub cgroup_root: Option<PathBuf>,
     pub project_quota_ids: Option<(u32, u32)>,
     /// Operator-declared Git source URL prefixes. Credentials are never configuration.
@@ -497,6 +498,7 @@ impl DaemonConfig {
             workspaces: workspaces.into(),
             deployment: deployment.into(),
             allow_uids,
+            allow_unrecorded_sessions: false,
             cgroup_root: None,
             project_quota_ids: None,
             git_sources: Vec::new(),
@@ -615,13 +617,16 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
     host_config.egress_apertures = egress_apertures;
     host_config.ca_bundle = config.ca_bundle;
     let driver = HostDriver::open(host_config).context("open host driver")?;
-    let app = App::with_delegated_context(
+    let mut app = App::with_delegated_context(
         store,
         driver,
         config.deployment,
         Arc::new(SystemAuthority),
         delegated_context,
     );
+    Arc::get_mut(&mut app)
+        .context("configure capture policy before sharing the application")?
+        .allow_unrecorded_sessions = config.allow_unrecorded_sessions;
     app.sweep_expired().await;
     let sweeper_app = Arc::clone(&app);
     let lease_sweeper = tokio::spawn(async move {

@@ -218,6 +218,10 @@ struct Arguments {
     #[arg(long = "allow-uid", env = "SUBSTRATE_ALLOW_UID", value_delimiter = ',')]
     allow_uids: Vec<u32>,
 
+    /// Permit authorized clients to select live terminal delivery without durable capture.
+    #[arg(long, env = "SUBSTRATE_ALLOW_UNRECORDED_SESSIONS")]
+    allow_unrecorded_sessions: bool,
+
     #[arg(long, env = "SUBSTRATE_CGROUP_ROOT")]
     cgroup_root: Option<PathBuf>,
 
@@ -427,6 +431,7 @@ impl From<Arguments> for DaemonConfig {
             workspaces: arguments.workspaces,
             deployment: arguments.deployment,
             allow_uids: arguments.allow_uids,
+            allow_unrecorded_sessions: arguments.allow_unrecorded_sessions,
             cgroup_root: arguments.cgroup_root,
             project_quota_ids: arguments.project_quota_ids,
             git_sources: arguments.git_sources,

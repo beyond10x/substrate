@@ -1,0 +1,78 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "kind": "http",
+    "operation": "event.stream",
+    "request": {
+      "headers": {
+        "x-request-id": "req_event_stream1"
+      },
+      "method": "GET",
+      "path": "/v1/events/stream",
+      "query": {
+        "cursor": "ev2.scope_vector_subject.40.99",
+        "limit": 100
+      }
+    },
+    "valid_address": true,
+    "valid_input": true
+  },
+  "context": {
+    "actor": "vector-client",
+    "authority": "http-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000",
+    "transport": {
+      "authenticated": true,
+      "kind": "unix",
+      "reachable": false
+    }
+  },
+  "covers": [
+    "route.event.stream",
+    "events.generation-reset"
+  ],
+  "expected": {
+    "kind": "http-response",
+    "response": {
+      "body": {
+        "api_version": "v1",
+        "error": {
+          "address": "cursor",
+          "class": "conflict",
+          "code": "event.source-mismatch",
+          "message": "The cursor does not belong to the current event source; reconcile before resuming.",
+          "retriable": true
+        },
+        "request_id": "req_event_stream1"
+      },
+      "status": 409
+    }
+  },
+  "id": "event-stream-rejects-different-generation-before-upgrade",
+  "layer": "http",
+  "phase": 3,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/websocket_upgraded",
+      "expected": false,
+      "operator": "equals"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "event",
+      "name": "current-generation",
+      "state": {
+        "generation": 41,
+        "through_seq": 7
+      }
+    }
+  ]
+}

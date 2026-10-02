@@ -179,6 +179,11 @@ impl Store {
         lease: &NewLease,
         workspace_clock: Option<&LeaseClock>,
     ) -> Result<Reservation, StoreError> {
+        if (provisional_session.capture == substrate_wire::CaptureMode::Unrecorded)
+            != provisional_exec.resource.unrecorded_output.is_some()
+        {
+            return Err(StoreError::CaptureViolation);
+        }
         let mut connection = self.connection.lock();
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if let Some(reservation) = existing_reservation(&transaction, new)? {
@@ -830,6 +835,11 @@ pub(crate) fn upsert_session(
     scope: &Scope,
     session: &PipeSession,
 ) -> Result<(), StoreError> {
+    if load_session(connection, scope, &session.id)?
+        .is_some_and(|previous| previous.capture != session.capture)
+    {
+        return Err(StoreError::CaptureViolation);
+    }
     connection.execute(
         "INSERT INTO sessions (deployment, subject, id, exec_id, resource_json)
          VALUES (?1, ?2, ?3, ?4, ?5)

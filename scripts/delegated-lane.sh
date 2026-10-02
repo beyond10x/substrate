@@ -80,6 +80,9 @@ echo "delegated-lane: shipped daemon ${daemon_bin}"
 SUBSTRATE_TEST_DAEMON="${daemon_bin}" \
   cargo test -p b10x-substrate-sdk --test managed --locked -- --nocapture --test-threads=1
 
+SUBSTRATE_TEST_DAEMON="${daemon_bin}" \
+  cargo test -p b10x-substrate-sdk --test unrecorded --locked -- --nocapture --test-threads=1
+
 # The remote SDK journey reuses the shipped daemon only after the managed instance has stopped. It
 # proves that the same typed session path crosses TLS 1.3 and WSS with a channel-bound, one-use
 # authority, then attempts a reconnect and observes the fresh-mint refusal rather than replaying

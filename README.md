@@ -95,7 +95,7 @@ The table is the gate's own order (`scripts/gate.sh`).
 | contract bundle 0.2.0 | `python3 scripts/check-contract-bundle-0.2.0.py` |
 | contract bundle 0.3.0 | `python3 scripts/check-contract-bundle-0.3.0.py` |
 | contract bundle 0.4.0 | `python3 scripts/check-contract-bundle-0.4.0.py` |
-| contract bundles 0.5.0–0.16.0 | `cargo xtask check-bundles 0.5.0 … 0.16.0` — bounded parallel fixed-point, compatibility, classification and version-addition checks; `check-bundle <version>` remains the focused form |
+| contract bundles 0.5.0–0.17.0 | `cargo xtask check-bundles 0.5.0 … 0.17.0` — bounded parallel fixed-point, compatibility, classification and version-addition checks; `check-bundle <version>` remains the focused form |
 | contract JSON | `cargo xtask check-json` — every JSON under `contracts/` is classified by exactly one bundled schema, or it fails closed |
 | toolchain | `cargo xtask check-toolchain` |
 

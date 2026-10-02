@@ -1,0 +1,43 @@
+domain: substrate.sessions
+summary: Capture admission and immutable selection for an interactive execution; design 23 and issue 112.
+types:
+  - name: substrate.sessions.CaptureMode
+    kind: enum
+    variants: [recorded, unrecorded]
+entities:
+  - name: substrate.sessions.CaptureSelection
+    identity: {name: exec, type: String}
+    fields:
+      - {name: capture, type: substrate.sessions.CaptureMode}
+    lifecycle:
+      initial: Selected
+      states: [Selected]
+      terminal: [Selected]
+# Selection is immutable. Execution lifecycle and transport safety are native
+# conformance obligations named in design 23, not claims of this projection.
+commands:
+  - name: substrate.sessions.SelectCapture
+    input:
+      - {name: capture, type: substrate.sessions.CaptureMode}
+    outcomes:
+      - name: selected
+        creates: substrate.sessions.CaptureSelection
+        instance: exec
+        sets: {capture: input.capture}
+        emits: [substrate.sessions.CaptureSelected]
+        payload:
+          substrate.sessions.CaptureSelected: {exec: {generated: true}, capture: input.capture}
+views:
+  - name: substrate.sessions.CaptureSelections
+    source: substrate.sessions.CaptureSelection
+    consistency: read_your_writes
+    fields:
+      - {name: exec, type: String}
+      - {name: state, type: substrate.sessions.CaptureSelection.State}
+      - {name: capture, type: substrate.sessions.CaptureMode}
+events:
+  # Projection of session.accepted: this introduces no additional runtime event.
+  - name: substrate.sessions.CaptureSelected
+    fields:
+      - {name: exec, type: String}
+      - {name: capture, type: substrate.sessions.CaptureMode}

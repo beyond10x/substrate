@@ -135,3 +135,11 @@ Before making a daemon reachable beyond its owner, answer:
 7. What refuses startup if any required trust control is absent?
 
 If any answer relies on “the surrounding network is probably safe,” keep the Unix socket posture.
+
+## Unrecorded interactive sessions
+
+`--allow-unrecorded-sessions` (or `SUBSTRATE_ALLOW_UNRECORDED_SESSIONS=true`) explicitly permits
+authorized clients to select live-only terminal output. It defaults to disabled and does not
+change ordinary session capture. The same confinement, identity, scope and attachment checks apply.
+See the [Rust SDK guide](./rust-sdk.md#stream-terminal-output-without-recording-it) for selection,
+observations, bounded streaming and the no-replay contract.

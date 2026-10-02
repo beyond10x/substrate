@@ -688,6 +688,38 @@ pub(super) fn validate_pipe_session_input(
     // client to add a window and try again, which on a deployment with no terminals is a retry that
     // can never succeed. `session.pty-unserved` says *stop*, which is the true answer.
     let input = &mutation.input;
+    if input.capture == substrate_wire::CaptureMode::Unrecorded {
+        let (status, class, code, message) =
+            if app.driver.machine().facts.sessions_unrecorded != Some(true) {
+                (
+                    StatusCode::NOT_IMPLEMENTED,
+                    ErrorClass::Unserved,
+                    substrate_wire::SESSION_CAPTURE_UNSERVED,
+                    "This driver does not support unrecorded sessions.",
+                )
+            } else if !app.allow_unrecorded_sessions {
+                (
+                    StatusCode::FORBIDDEN,
+                    ErrorClass::Refused,
+                    substrate_wire::SESSION_CAPTURE_DISALLOWED,
+                    "Deployment policy does not permit unrecorded sessions.",
+                )
+            } else {
+                (StatusCode::OK, ErrorClass::Refused, "", "")
+            };
+        if status != StatusCode::OK {
+            return Err(failure(
+                status,
+                request_id,
+                Some(&mutation.op),
+                class,
+                code,
+                message,
+                Some("capture"),
+                false,
+            ));
+        }
+    }
     if input.mode == substrate_wire::SessionMode::Pty
         && app.driver.machine().facts.sessions_pty != Some(true)
     {
@@ -1154,6 +1186,13 @@ pub(super) fn stored_output(
     exec_id: &str,
     query: &ExecOutputQuery,
 ) -> Result<OutputSlice, DriverError> {
+    if stored.resource.unrecorded_output.is_some() {
+        return Err(DriverError::refused(
+            "exec.output-unrecorded",
+            "Terminal content was intentionally not recorded; no replay is available.",
+            "output",
+        ));
+    }
     let limit = app
         .driver
         .machine()
