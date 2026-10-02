@@ -5,6 +5,10 @@ Observed locally on 2026-10-02 for the implementation of
 The design is [terminal capture selection](../../docs/design/23-terminal-capture-selection.md).
 This records implementation evidence, not release or downstream Mantle acceptance.
 
+Release candidate `d43654350fb3a0eb817e527a6460f162f167362b` (0.7.9) also passed the
+complete delegated lane on 2026-10-02 at 18:03:21 UTC. This is candidate evidence;
+the release tag still requires a run against its exact merged main commit.
+
 ## Production paths
 
 `scripts/delegated-lane.sh` passed the existing host confinement, SDK, remote WSS,
