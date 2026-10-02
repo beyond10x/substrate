@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: epic:kubernetes-deployment-and-driver
 kind: epic
 status: proposed
@@ -13,6 +13,8 @@ tags:
 relations:
 - depends_on: epic:remote-serving
 revision: 2
+transitions:
+- {from: "draft", to: "proposed", at: "2026-08-31T22:54:30Z", actor: "human:timo", revision: 2, imported: true}
 ---
 # Epic: Kubernetes deployment and namespace driver
 

@@ -1,0 +1,13 @@
+{
+  "at": "2026-09-04T09:43:32Z",
+  "actor": "human:timo",
+  "artifact": "story:unattached-claimed-session-is-contained",
+  "kind": "story",
+  "revision": 6,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "bash scripts/gate.sh, per step, on wave/security-2026-09-04",
+    "reference": "160b1df"
+  }
+}

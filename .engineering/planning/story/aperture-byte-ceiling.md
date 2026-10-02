@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:aperture-byte-ceiling
 kind: story
 status: implemented
@@ -9,6 +9,10 @@ relations:
 - decomposes: epic:byte-plane-completion
 - depends_on: story:destination-bound-egress
 revision: 9
+transitions:
+- {from: "draft", to: "proposed", at: "2026-08-30T10:13:39Z", actor: "human:timo", revision: 6, decided_on: {"recorded":{"approval":1,"specification":1}}, imported: true}
+- {from: "proposed", to: "active", at: "2026-08-30T10:13:39Z", actor: "human:timo", revision: 7, decided_on: {"recorded":{"approval":1,"specification":1}}, imported: true}
+- {from: "active", to: "implemented", at: "2026-08-30T11:13:17Z", actor: "human:timo", revision: 9, decided_on: {"recorded":{"test_result":1,"approval":1,"review":1,"specification":1}}, imported: true}
 ---
 # Story: A declared aperture carries a byte ceiling that refuses mid-run
 

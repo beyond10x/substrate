@@ -1,0 +1,13 @@
+{
+  "at": "2026-09-04T14:47:49Z",
+  "actor": "human:timo",
+  "artifact": "story:lease-cleanup-reads-exec-state-only",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "bash scripts/gate.sh, per step, on wave/security-b-2026-09-04",
+    "reference": "2382a21"
+  }
+}

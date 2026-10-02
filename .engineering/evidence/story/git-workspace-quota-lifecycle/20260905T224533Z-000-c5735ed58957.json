@@ -1,0 +1,13 @@
+{
+  "at": "2026-09-05T22:45:33Z",
+  "actor": "human:timo",
+  "artifact": "story:git-workspace-quota-lifecycle",
+  "kind": "story",
+  "revision": 16,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "Exact released main gate succeeded",
+    "reference": "https://github.com/beyond10x/substrate/actions/runs/33994311085"
+  }
+}

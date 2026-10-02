@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: epic:byte-plane-completion
 kind: epic
 status: implemented
@@ -10,6 +10,10 @@ tags:
 - phase-4
 - wire
 revision: 8
+transitions:
+- {from: "draft", to: "proposed", at: "2026-08-31T22:50:10Z", actor: "human:timo", revision: 5, imported: true}
+- {from: "proposed", to: "active", at: "2026-08-31T22:50:10Z", actor: "human:timo", revision: 6, imported: true}
+- {from: "active", to: "implemented", at: "2026-09-14T22:56:52Z", actor: "human:timo", revision: 8, imported: true}
 ---
 # Epic: Byte-plane completion
 

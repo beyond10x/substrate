@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:upgraded-connections-keep-their-permit
 kind: story
 status: implemented
@@ -23,6 +23,10 @@ scope:
 - confidence: cited
   path: docs/design/08-phase-3-closure-invariants.md
 revision: 12
+transitions:
+- {from: "draft", to: "proposed", at: "2026-09-04T02:54:46Z", actor: "human:timo", revision: 4, imported: true}
+- {from: "proposed", to: "active", at: "2026-09-04T02:54:46Z", actor: "human:timo", revision: 5, imported: true}
+- {from: "active", to: "implemented", at: "2026-09-04T14:47:50Z", actor: "human:timo", revision: 12, decided_on: {"recorded":{"test_result":2,"review_outcome":1}}, imported: true}
 ---
 # Story: Upgraded connections keep their permit
 

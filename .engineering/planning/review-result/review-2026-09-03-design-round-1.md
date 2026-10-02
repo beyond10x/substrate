@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: review-result:review-2026-09-03-design-round-1
 kind: review-result
 status: active

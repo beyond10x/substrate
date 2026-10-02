@@ -1,0 +1,13 @@
+{
+  "at": "2026-08-30T11:46:13Z",
+  "actor": "human:timo",
+  "artifact": "story:network-session-authority",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "specification",
+    "source": "design 14, proposed",
+    "reference": "docs/design/14-network-session-authority.md"
+  }
+}

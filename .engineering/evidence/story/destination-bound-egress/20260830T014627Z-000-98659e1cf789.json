@@ -1,0 +1,13 @@
+{
+  "at": "2026-08-30T01:46:27Z",
+  "actor": "human:timo",
+  "artifact": "story:destination-bound-egress",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "bash scripts/gate.sh exit 0; check-bundle 0.6.0 verified 213 files; 9 egress tests pass with 5 real bwrap execve counted under strace; delegated lane absent (no delegated cgroup on this host)",
+    "reference": "crates/substrate-host/src/egress.rs"
+  }
+}

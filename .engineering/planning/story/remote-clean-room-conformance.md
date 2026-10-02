@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:remote-clean-room-conformance
 kind: story
 status: proposed
@@ -16,6 +16,8 @@ relations:
 - depends_on: story:node-bound-kubernetes-serving-profile
 - depends_on: story:operational-health-and-telemetry
 revision: 2
+transitions:
+- {from: "draft", to: "proposed", at: "2026-08-31T22:54:33Z", actor: "human:timo", revision: 2, imported: true}
 ---
 # Story: A clean-room client proves remote Substrate
 

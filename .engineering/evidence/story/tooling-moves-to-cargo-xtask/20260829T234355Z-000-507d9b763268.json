@@ -1,0 +1,13 @@
+{
+  "at": "2026-08-29T23:43:55Z",
+  "actor": "human:timo",
+  "artifact": "story:tooling-moves-to-cargo-xtask",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo xtask render-bundle 0.4.0 — diff -r against the frozen bundle empty, manifest sha256:3758e80b… matches the checked-in line; cargo test -p xtask 64 passed; scripts/gate.sh passed",
+    "reference": "xtask/src/render.rs"
+  }
+}

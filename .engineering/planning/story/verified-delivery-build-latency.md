@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:verified-delivery-build-latency
 kind: story
 status: implemented
@@ -12,6 +12,10 @@ tags:
 relations:
 - derived_from: epic:release-hardening
 revision: 6
+transitions:
+- {from: "draft", to: "proposed", at: "2026-09-01T10:56:02Z", actor: "human:timo", revision: 2, imported: true}
+- {from: "proposed", to: "active", at: "2026-09-01T10:56:02Z", actor: "human:timo", revision: 3, imported: true}
+- {from: "active", to: "implemented", at: "2026-09-01T11:51:36Z", actor: "human:timo", revision: 6, decided_on: {"recorded":{"test_result":4,"metric_observation":1}}, imported: true}
 ---
 # Compile and validate releases without duplicate build work
 

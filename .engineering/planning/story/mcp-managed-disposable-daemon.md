@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:mcp-managed-disposable-daemon
 kind: story
 status: implemented
@@ -15,6 +15,10 @@ relations:
 - decomposes: epic:mcp-test-surface
 - depends_on: story:sdk-promoted-contract-parity
 revision: 7
+transitions:
+- {from: "draft", to: "proposed", at: "2026-08-31T22:50:11Z", actor: "human:timo", revision: 2, imported: true}
+- {from: "proposed", to: "active", at: "2026-09-01T04:30:23Z", actor: "human:timo", revision: 5, imported: true}
+- {from: "active", to: "implemented", at: "2026-09-01T05:14:00Z", actor: "human:timo", revision: 6, decided_on: {"recorded":{"test_result":5}}, imported: true}
 ---
 # Story: Launch a disposable daemon behind MCP
 

@@ -1,0 +1,13 @@
+{
+  "at": "2026-08-30T02:42:48Z",
+  "actor": "human:timo",
+  "artifact": "story:tooling-moves-to-cargo-xtask",
+  "kind": "story",
+  "revision": 10,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "bash scripts/gate.sh, re-run by the orchestrator",
+    "reference": "gate: passed, exit 0, 47.4s"
+  }
+}

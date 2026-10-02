@@ -1,0 +1,13 @@
+{
+  "at": "2026-09-05T08:28:02Z",
+  "actor": "human:timo",
+  "artifact": "story:git-v2-and-startup-efficiency",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "bash scripts/gate.sh; exit 0, final combined source",
+    "reference": "target/git-v2-final-gate.log"
+  }
+}

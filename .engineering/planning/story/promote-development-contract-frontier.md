@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:promote-development-contract-frontier
 kind: story
 status: implemented
@@ -17,6 +17,10 @@ relations:
 - depends_on: story:aperture-install-failure-loses-its-errno
 - depends_on: story:contract-bundle-oci-artifact
 revision: 7
+transitions:
+- {from: "draft", to: "proposed", at: "2026-08-31T22:54:31Z", actor: "human:timo", revision: 2, imported: true}
+- {from: "proposed", to: "active", at: "2026-09-01T03:05:49Z", actor: "human:timo", revision: 4, imported: true}
+- {from: "active", to: "implemented", at: "2026-09-01T03:44:16Z", actor: "human:timo", revision: 7, decided_on: {"recorded":{"test_result":2}}, imported: true}
 ---
 # Story: The daemon advertises the implemented contract frontier
 

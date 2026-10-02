@@ -1,0 +1,13 @@
+{
+  "at": "2026-09-06T18:02:45Z",
+  "actor": "human:timo",
+  "artifact": "story:container-private-exec-bootstrap",
+  "kind": "story",
+  "revision": 10,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "Local final image 8536e5855cc5a52fd562c528d8fa156e9ba8026cc4984ce079e08b43afe8b545: ordinary and quota SDK PTY journeys passed, live measurements and whole-tree cleanup; startup refusal and AppArmor mount denial; clean init and installer termination",
+    "reference": "container-pty-journey-tini-quota.log"
+  }
+}

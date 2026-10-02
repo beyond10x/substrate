@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: epic:mcp-test-surface
 kind: epic
 status: proposed
@@ -13,6 +13,8 @@ tags:
 relations:
 - depends_on: epic:resource-bounded-execution
 revision: 3
+transitions:
+- {from: "draft", to: "proposed", at: "2026-08-31T22:50:11Z", actor: "human:timo", revision: 2, imported: true}
 ---
 # Epic: MCP test surface
 

@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:pty-sessions
 kind: story
 status: implemented
@@ -13,6 +13,10 @@ tags:
 relations:
 - decomposes: epic:byte-plane-completion
 revision: 10
+transitions:
+- {from: "draft", to: "proposed", at: "2026-08-30T12:33:20Z", actor: "human:timo", revision: 7, decided_on: {"recorded":{"specification":1}}, imported: true}
+- {from: "proposed", to: "active", at: "2026-08-30T12:35:45Z", actor: "human:timo", revision: 8, decided_on: {"recorded":{"specification":1}}, imported: true}
+- {from: "active", to: "implemented", at: "2026-08-31T22:49:58Z", actor: "human:timo", revision: 10, decided_on: {"recorded":{"test_result":1,"specification":1}}, imported: true}
 ---
 # Story: PTY sessions are a distinct session kind with resize
 

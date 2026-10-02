@@ -1,0 +1,14 @@
+{
+  "at": "2026-09-04T01:14:07Z",
+  "actor": "human:timo",
+  "artifact": "story:daemon-image-serves-exec-or-says-it-cannot",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:review-2026-09-03-acceptance-round-1",
+    "review": "review-result:review-2026-09-03-acceptance-round-1",
+    "outcome": "fixed"
+  }
+}

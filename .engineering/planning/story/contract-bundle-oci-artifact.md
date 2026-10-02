@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:contract-bundle-oci-artifact
 kind: story
 status: implemented
@@ -14,6 +14,10 @@ relations:
 - decomposes: epic:release-hardening
 - depends_on: story:signed-daemon-image
 revision: 16
+transitions:
+- {from: "draft", to: "proposed", at: "2026-08-29T20:49:15Z", actor: "human:timo", revision: 3, imported: true}
+- {from: "proposed", to: "active", at: "2026-08-29T20:49:15Z", actor: "human:timo", revision: 4, imported: true}
+- {from: "active", to: "implemented", at: "2026-09-01T02:48:58Z", actor: "human:timo", revision: 16, decided_on: {"recorded":{"test_result":3}}, imported: true}
 ---
 # Story: The 0.4.0 contract bundle is a signed, digest-pinned OCI artifact
 

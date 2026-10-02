@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:line-patch-edits-apply-in-line-order
 kind: story
 status: draft

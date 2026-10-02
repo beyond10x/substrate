@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:docker-driver-entry-gate
 kind: story
 status: proposed
@@ -16,6 +16,8 @@ relations:
 - depends_on: story:sealed-secret-slots
 - depends_on: story:network-session-authority
 revision: 5
+transitions:
+- {from: "draft", to: "proposed", at: "2026-08-30T12:33:20Z", actor: "human:timo", revision: 5, decided_on: {"recorded":{"specification":1}}, imported: true}
 ---
 # Story: The Docker driver entry gate is proven before any Docker code
 

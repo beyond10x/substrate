@@ -1,0 +1,13 @@
+{
+  "at": "2026-08-30T06:13:31Z",
+  "actor": "human:timo",
+  "artifact": "story:ledger-rows-carry-the-declared-grant",
+  "kind": "story",
+  "revision": 6,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "bash scripts/gate.sh + delegated-lane.sh, re-run by the orchestrator",
+    "reference": "gate: passed; 50 HTTP cases (delegated lane); 1316 documents in 7 bundles"
+  }
+}

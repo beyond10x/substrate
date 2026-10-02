@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:design-10-cites-a-stale-process-line
 kind: story
 status: draft

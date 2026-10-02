@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:git-workspace-quota-lifecycle
 kind: story
 status: implemented
@@ -51,6 +51,10 @@ scope:
 - confidence: inferred
   path: xtask/src/main.rs
 revision: 17
+transitions:
+- {from: "draft", to: "proposed", at: "2026-09-05T18:54:00Z", actor: "human:timo", revision: 3, imported: true}
+- {from: "proposed", to: "active", at: "2026-09-05T18:54:00Z", actor: "human:timo", revision: 4, imported: true}
+- {from: "active", to: "implemented", at: "2026-09-05T22:49:39Z", actor: "human:timo", revision: 17, decided_on: {"recorded":{"test_result":1}}, imported: true}
 ---
 ## Outcome
 

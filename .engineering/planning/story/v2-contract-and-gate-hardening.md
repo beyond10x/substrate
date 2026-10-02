@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:v2-contract-and-gate-hardening
 kind: story
 status: implemented
@@ -8,6 +8,10 @@ summary: Contract v2 workspace routes, wildcard paths, predecessor order and tra
 relations:
 - decomposes: epic:release-hardening
 revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-08-31T08:37:44Z", actor: "human:timo", revision: 2, imported: true}
+- {from: "proposed", to: "active", at: "2026-08-31T08:37:44Z", actor: "human:timo", revision: 3, imported: true}
+- {from: "active", to: "implemented", at: "2026-08-31T22:50:00Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":1}}, imported: true}
 ---
 # Story: V2 contracts and compatibility hardening
 

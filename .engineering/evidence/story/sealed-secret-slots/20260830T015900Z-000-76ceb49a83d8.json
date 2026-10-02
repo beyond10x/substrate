@@ -1,0 +1,13 @@
+{
+  "at": "2026-08-30T01:59:00Z",
+  "actor": "human:timo",
+  "artifact": "story:sealed-secret-slots",
+  "kind": "story",
+  "revision": 6,
+  "change": {
+    "change": "evidence",
+    "kind": "artifact",
+    "source": "PR #16, squash 95e6188",
+    "reference": "scripts/delegated-lane.sh"
+  }
+}

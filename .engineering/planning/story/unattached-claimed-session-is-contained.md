@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:unattached-claimed-session-is-contained
 kind: story
 status: implemented
@@ -16,6 +16,10 @@ scope:
 - confidence: cited
   path: crates/substrate-daemon/tests/pipe_session.rs
 revision: 7
+transitions:
+- {from: "draft", to: "proposed", at: "2026-09-04T02:54:47Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"review_outcome":1}}, imported: true}
+- {from: "proposed", to: "active", at: "2026-09-04T02:54:47Z", actor: "human:timo", revision: 5, decided_on: {"recorded":{"review_outcome":1}}, imported: true}
+- {from: "active", to: "implemented", at: "2026-09-04T09:43:33Z", actor: "human:timo", revision: 7, decided_on: {"recorded":{"test_result":1,"review_outcome":3}}, imported: true}
 ---
 # Story: A claimed but unattached session is contained
 

@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:rust-sdk-publication
 kind: story
 status: archived
@@ -14,6 +14,10 @@ relations:
 - decomposes: epic:rust-sdk
 - depends_on: story:contract-bundle-oci-artifact
 revision: 8
+transitions:
+- {from: "draft", to: "proposed", at: "2026-08-31T22:50:11Z", actor: "human:timo", revision: 2, imported: true}
+- {from: "proposed", to: "active", at: "2026-08-31T22:50:11Z", actor: "human:timo", revision: 3, imported: true}
+- {from: "active", to: "archived", at: "2026-09-01T09:47:53Z", actor: "human:timo", revision: 8, decided_on: {"recorded":{"test_result":1,"specification":1}}, imported: true}
 ---
 # Story: The Rust SDK and runtime chain are owner-released Rust packages
 

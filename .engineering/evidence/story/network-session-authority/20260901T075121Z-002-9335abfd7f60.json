@@ -1,0 +1,13 @@
+{
+  "at": "2026-09-01T07:51:21Z",
+  "actor": "human:timo",
+  "artifact": "story:network-session-authority",
+  "kind": "story",
+  "revision": 9,
+  "change": {
+    "change": "evidence",
+    "kind": "artifact",
+    "source": "cargo xtask check-bundle 0.14.0",
+    "reference": "contracts/substrate-wire/0.14.0/bundle.json"
+  }
+}

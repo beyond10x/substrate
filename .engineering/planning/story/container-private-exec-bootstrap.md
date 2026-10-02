@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:container-private-exec-bootstrap
 kind: story
 status: implemented
@@ -57,6 +57,10 @@ scope:
 - confidence: cited
   path: xtask/tests/release_workflow.rs
 revision: 15
+transitions:
+- {from: "draft", to: "proposed", at: "2026-09-06T16:36:49Z", actor: "human:timo", revision: 4, imported: true}
+- {from: "proposed", to: "active", at: "2026-09-06T16:36:50Z", actor: "human:timo", revision: 5, imported: true}
+- {from: "active", to: "implemented", at: "2026-09-06T18:48:50Z", actor: "human:timo", revision: 15, decided_on: {"recorded":{"test_result":5,"review_outcome":3}}, imported: true}
 ---
 ## Outcome
 

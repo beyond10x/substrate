@@ -1,10 +1,13 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: release-plan:substrate-0-7-2
 kind: release-plan
 status: implemented
 title: Release Substrate 0.7.2
 revision: 4
+transitions:
+- {from: "draft", to: "active", at: "2026-09-05T00:04:22Z", actor: "human:timo", revision: 2, imported: true}
+- {from: "active", to: "implemented", at: "2026-09-15T10:04:15Z", actor: "human:timo", revision: 3, imported: true}
 ---
 # Release plan: Substrate 0.7.2
 

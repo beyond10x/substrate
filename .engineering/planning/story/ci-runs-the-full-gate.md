@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:ci-runs-the-full-gate
 kind: story
 status: implemented
@@ -11,6 +11,10 @@ tags:
 relations:
 - decomposes: epic:release-hardening
 revision: 7
+transitions:
+- {from: "draft", to: "proposed", at: "2026-08-29T20:49:15Z", actor: "human:timo", revision: 3, imported: true}
+- {from: "proposed", to: "active", at: "2026-08-29T20:49:15Z", actor: "human:timo", revision: 4, imported: true}
+- {from: "active", to: "implemented", at: "2026-08-29T21:23:07Z", actor: "human:timo", revision: 7, decided_on: {"recorded":{"test_result":3}}, imported: true}
 ---
 # Story: CI runs the full gate on every push and pull request
 

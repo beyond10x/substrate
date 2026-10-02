@@ -1,0 +1,13 @@
+{
+  "at": "2026-08-29T21:45:23Z",
+  "actor": "human:timo",
+  "artifact": "story:contract-bundle-oci-artifact",
+  "kind": "story",
+  "revision": 6,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "bash scripts/gate.sh (21 packager tests, tar layer)",
+    "reference": "~/.cache/claude-tmp/substrate-gate-wave2.log"
+  }
+}

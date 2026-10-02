@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:operational-health-and-telemetry
 kind: story
 status: proposed
@@ -14,6 +14,8 @@ relations:
 - decomposes: epic:remote-serving
 - depends_on: story:production-tls-control-listener
 revision: 2
+transitions:
+- {from: "draft", to: "proposed", at: "2026-08-31T22:54:32Z", actor: "human:timo", revision: 2, imported: true}
 ---
 # Story: Operators get safe health and service telemetry
 

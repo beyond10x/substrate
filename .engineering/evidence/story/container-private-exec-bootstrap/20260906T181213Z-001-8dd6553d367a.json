@@ -1,0 +1,13 @@
+{
+  "at": "2026-09-06T18:12:13Z",
+  "actor": "human:timo",
+  "artifact": "story:container-private-exec-bootstrap",
+  "kind": "story",
+  "revision": 13,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "Complete delegated host, SDK, WSS, MCP and wire lane passed; image startup four cases passed",
+    "reference": "substrate-delegated-lane.log"
+  }
+}

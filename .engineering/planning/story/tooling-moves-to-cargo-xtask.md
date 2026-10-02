@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:tooling-moves-to-cargo-xtask
 kind: story
 status: implemented
@@ -12,6 +12,10 @@ tags:
 relations:
 - decomposes: epic:release-hardening
 revision: 11
+transitions:
+- {from: "draft", to: "proposed", at: "2026-08-29T21:47:40Z", actor: "human:timo", revision: 3, imported: true}
+- {from: "proposed", to: "active", at: "2026-08-29T21:47:40Z", actor: "human:timo", revision: 4, imported: true}
+- {from: "active", to: "implemented", at: "2026-08-30T02:42:48Z", actor: "human:timo", revision: 11, decided_on: {"recorded":{"test_result":4,"static_analysis":1,"verification":1}}, imported: true}
 ---
 # Story: Anything that runs is Rust — the gate's Python moves to `cargo xtask`
 

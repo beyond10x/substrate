@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: epic:review-2026-09-03-findings
 kind: epic
 status: draft

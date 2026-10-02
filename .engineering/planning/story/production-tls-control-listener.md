@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:production-tls-control-listener
 kind: story
 status: implemented
@@ -15,6 +15,10 @@ relations:
 - decomposes: epic:remote-serving
 - depends_on: story:promote-development-contract-frontier
 revision: 9
+transitions:
+- {from: "draft", to: "proposed", at: "2026-08-31T22:54:31Z", actor: "human:timo", revision: 2, imported: true}
+- {from: "proposed", to: "active", at: "2026-09-01T05:35:31Z", actor: "human:timo", revision: 5, imported: true}
+- {from: "active", to: "implemented", at: "2026-09-01T05:59:12Z", actor: "human:timo", revision: 8, decided_on: {"recorded":{"test_result":2}}, imported: true}
 ---
 # Story: Production control traffic uses TLS
 

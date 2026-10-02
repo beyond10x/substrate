@@ -1,0 +1,13 @@
+{
+  "at": "2026-08-30T11:22:14Z",
+  "actor": "human:timo",
+  "artifact": "story:signed-daemon-image",
+  "kind": "story",
+  "revision": 6,
+  "change": {
+    "change": "evidence",
+    "kind": "deployment_result",
+    "source": "release.yml run 33304493276",
+    "reference": "ghcr.io/beyond10x/b10x-substrate-daemon:0.2.3 at sha256:ab101582, cosign verify success"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "at": "2026-08-29T23:43:55Z",
+  "actor": "human:timo",
+  "artifact": "story:tooling-moves-to-cargo-xtask",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "static_analysis",
+    "source": "renderer scope finding: 30 of 200 emitted files are computed; no schema shape is derivable from the wire types — schemars is not a dependency and the types are already ahead of 0.4.0",
+    "reference": "xtask/src/render.rs:19-25"
+  }
+}

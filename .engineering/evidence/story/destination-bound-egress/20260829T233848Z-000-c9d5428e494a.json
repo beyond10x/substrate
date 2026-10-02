@@ -1,0 +1,13 @@
+{
+  "at": "2026-08-29T23:38:48Z",
+  "actor": "human:timo",
+  "artifact": "story:destination-bound-egress",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "egress mechanism spike, run on 6.6.144-3-MANJARO at uid 1000 — mechanism (c) works, (a) refuted by EPERM",
+    "reference": "docs/design/10a-egress-mechanism-spike.md"
+  }
+}

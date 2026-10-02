@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:aperture-install-failure-loses-its-errno
 kind: story
 status: implemented
@@ -10,6 +10,10 @@ tags:
 relations:
 - decomposes: epic:release-hardening
 revision: 6
+transitions:
+- {from: "draft", to: "proposed", at: "2026-08-31T08:37:43Z", actor: "human:timo", revision: 2, imported: true}
+- {from: "proposed", to: "active", at: "2026-08-31T08:37:43Z", actor: "human:timo", revision: 3, imported: true}
+- {from: "active", to: "implemented", at: "2026-09-01T00:46:34Z", actor: "human:timo", revision: 6, decided_on: {"recorded":{"test_result":1}}, imported: true}
 ---
 # Story: An aperture install failure names its stage and loses its errno
 

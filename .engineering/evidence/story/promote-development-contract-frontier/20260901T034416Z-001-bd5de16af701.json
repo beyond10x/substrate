@@ -1,0 +1,13 @@
+{
+  "at": "2026-09-01T03:44:16Z",
+  "actor": "human:timo",
+  "artifact": "story:promote-development-contract-frontier",
+  "kind": "story",
+  "revision": 6,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "Harness Gate and MSRV on merged main c587bcf",
+    "reference": "https://github.com/beyond10x/harness/actions/runs/33467112033"
+  }
+}

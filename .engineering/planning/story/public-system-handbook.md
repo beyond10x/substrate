@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:public-system-handbook
 kind: story
 status: implemented
@@ -22,6 +22,10 @@ scope:
 - confidence: cited
   path: website/sidebars.ts
 revision: 9
+transitions:
+- {from: "draft", to: "proposed", at: "2026-09-05T15:02:15Z", actor: "human:timo", revision: 2, imported: true}
+- {from: "proposed", to: "active", at: "2026-09-05T15:02:16Z", actor: "human:timo", revision: 3, imported: true}
+- {from: "active", to: "implemented", at: "2026-09-05T16:16:10Z", actor: "human:timo", revision: 8, decided_on: {"recorded":{"test_result":4}}, imported: true}
 ---
 ## Outcome
 

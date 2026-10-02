@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:docker-image-backed-workload-slice
 kind: story
 status: proposed
@@ -14,6 +14,8 @@ relations:
 - decomposes: epic:container-driver-entry
 - depends_on: story:docker-workspace-and-exec-slice
 revision: 2
+transitions:
+- {from: "draft", to: "proposed", at: "2026-08-31T22:54:33Z", actor: "human:timo", revision: 2, imported: true}
 ---
 # Story: Docker serves immutable image-backed workloads
 

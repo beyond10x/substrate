@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:git-v2-and-startup-efficiency
 kind: story
 status: implemented
@@ -36,6 +36,10 @@ scope:
 - confidence: inferred
   path: xtask/Cargo.toml
 revision: 8
+transitions:
+- {from: "draft", to: "proposed", at: "2026-09-05T07:56:16Z", actor: "human:timo", revision: 3, imported: true}
+- {from: "proposed", to: "active", at: "2026-09-05T07:56:16Z", actor: "human:timo", revision: 4, imported: true}
+- {from: "active", to: "implemented", at: "2026-09-05T08:28:03Z", actor: "human:timo", revision: 8, decided_on: {"recorded":{"test_result":2}}, imported: true}
 ---
 ## Acceptance
 

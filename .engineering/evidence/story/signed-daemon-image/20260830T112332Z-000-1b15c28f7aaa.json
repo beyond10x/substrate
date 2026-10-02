@@ -1,0 +1,13 @@
+{
+  "at": "2026-08-30T11:23:32Z",
+  "actor": "human:timo",
+  "artifact": "story:signed-daemon-image",
+  "kind": "story",
+  "revision": 6,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "bash scripts/gate.sh on main a7c040a, run by the orchestrator",
+    "reference": "gate: passed, exit 0"
+  }
+}

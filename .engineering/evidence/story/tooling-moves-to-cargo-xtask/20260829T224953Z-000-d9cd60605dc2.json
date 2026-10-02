@@ -1,0 +1,13 @@
+{
+  "at": "2026-08-29T22:49:53Z",
+  "actor": "human:timo",
+  "artifact": "story:tooling-moves-to-cargo-xtask",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "GitHub Actions Gate workflow, PR #7 (step 4)",
+    "reference": "https://github.com/beyond10x/substrate/actions/runs/33279445732"
+  }
+}

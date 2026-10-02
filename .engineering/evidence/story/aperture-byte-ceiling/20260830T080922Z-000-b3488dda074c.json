@@ -1,0 +1,13 @@
+{
+  "at": "2026-08-30T08:09:22Z",
+  "actor": "human:timo",
+  "artifact": "story:aperture-byte-ceiling",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "approval",
+    "source": "operator, 2026-08-30",
+    "reference": "adr/0014-apertures-carry-a-declared-byte-ceiling.md accepted"
+  }
+}

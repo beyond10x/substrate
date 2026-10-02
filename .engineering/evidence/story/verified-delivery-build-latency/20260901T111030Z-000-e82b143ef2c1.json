@@ -1,0 +1,13 @@
+{
+  "at": "2026-09-01T11:10:30Z",
+  "actor": "human:timo",
+  "artifact": "story:verified-delivery-build-latency",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "bash scripts/gate.sh (local)",
+    "reference": "scripts/gate.sh"
+  }
+}

@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:a-confined-process-cannot-mutate-host-global-kernel-state
 kind: story
 status: draft

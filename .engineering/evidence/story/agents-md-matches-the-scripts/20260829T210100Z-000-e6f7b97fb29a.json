@@ -1,0 +1,13 @@
+{
+  "at": "2026-08-29T21:01:00Z",
+  "actor": "human:timo",
+  "artifact": "story:agents-md-matches-the-scripts",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "bash scripts/gate.sh",
+    "reference": "~/.cache/claude-tmp/substrate-gate-wave1.log"
+  }
+}

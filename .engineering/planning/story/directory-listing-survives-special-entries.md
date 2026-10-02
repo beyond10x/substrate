@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:directory-listing-survives-special-entries
 kind: story
 status: draft

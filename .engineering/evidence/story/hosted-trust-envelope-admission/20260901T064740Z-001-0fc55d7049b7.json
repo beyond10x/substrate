@@ -1,0 +1,13 @@
+{
+  "at": "2026-09-01T06:47:40Z",
+  "actor": "human:timo",
+  "artifact": "story:hosted-trust-envelope-admission",
+  "kind": "story",
+  "revision": 6,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "local bash scripts/delegated-lane.sh: delegated cgroup v2 lane passed",
+    "reference": "scripts/delegated-lane.sh"
+  }
+}

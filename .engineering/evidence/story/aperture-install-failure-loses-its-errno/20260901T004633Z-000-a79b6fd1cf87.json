@@ -1,0 +1,13 @@
+{
+  "at": "2026-09-01T00:46:33Z",
+  "actor": "human:timo",
+  "artifact": "story:aperture-install-failure-loses-its-errno",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "20/20 delegated module sample, integrated delegated lane, and full repository gate",
+    "reference": "ec4701738e7604eb0b04cba6f33b23c58d3e510f"
+  }
+}

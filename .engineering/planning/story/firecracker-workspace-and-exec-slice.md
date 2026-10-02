@@ -1,5 +1,5 @@
 ---
-format: aep.planning-md/1
+format: aep.planning-md/3
 id: story:firecracker-workspace-and-exec-slice
 kind: story
 status: proposed
@@ -14,6 +14,8 @@ relations:
 - decomposes: epic:firecracker-driver
 - depends_on: story:firecracker-entry-and-boot-artifact-gate
 revision: 2
+transitions:
+- {from: "draft", to: "proposed", at: "2026-08-31T22:54:34Z", actor: "human:timo", revision: 2, imported: true}
 ---
 # Story: Firecracker serves one microVM per exec
 
