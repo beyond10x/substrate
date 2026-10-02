@@ -1,0 +1,25 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Finished `test` profile [unoptimized] target(s) in 1.95s
+     Running unittests src/lib.rs (/dev/shm/substrate-output-stall-target/debug/deps/substrate_host-58ffa47f72a77857)
+
+running 1 test
+test process::tests::live_queue_burst_waits_for_consumer_without_losing_bytes ... FAILED
+
+failures:
+
+---- process::tests::live_queue_burst_waits_for_consumer_without_losing_bytes stdout ----
+
+thread 'process::tests::live_queue_burst_waits_for_consumer_without_losing_bytes' (2050452) panicked at crates/substrate-host/src/process.rs:4183:13:
+full queue must wait for an active consumer
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    process::tests::live_queue_burst_waits_for_consumer_without_losing_bytes
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 119 filtered out; finished in 0.02s
+
+error: test failed, to rerun pass `-p b10x-substrate-host --lib`
