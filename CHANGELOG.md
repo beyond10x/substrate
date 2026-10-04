@@ -7,6 +7,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- The documentation build publishes `.well-known/b10x-routes.json`: every route of the project site
+  with its rendered anchor IDs, at the built commit. The organization Website uses it to redirect
+  the former `/docs/substrate/` pages to `/substrate/docs/`.
+
 ## [0.7.10] — 2026-10-03
 
 Published by [release recovery run 37077554387](https://github.com/beyond10x/substrate/actions/runs/37077554387)

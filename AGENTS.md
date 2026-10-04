@@ -428,10 +428,14 @@ stability decision. Do not describe a development bundle as stable.
 
 The public site is repository-owned at `https://beyond10x.github.io/substrate/`.
 `cargo xtask check-docs` validates the explicit public page allowlist; `cargo xtask build-docs
---out <empty-directory> --commit <full-sha>` builds static HTML and provenance.
+--out <empty-directory> --commit <full-sha>` builds static HTML, `.well-known/b10x-site.json`
+provenance and `.well-known/b10x-routes.json`, every published route with its rendered anchor IDs
+at the same commit. The organization Website reads that inventory, as it does Metaharness's, to
+redirect the former `/docs/substrate/` pages; keep page paths and heading IDs stable.
 `pages.yml` uploads the exact successful main artifact; `b10x-docs-site.yml` uses the pinned
-standalone project-site workflow, like Mantle. Do not add unified Website bundles, route manifests,
-redirect façades, or global docs reconciliation. Publish no internal plans, ADRs or work logs.
+standalone project-site workflow, like Mantle. Do not add unified Website bundles, `b10x.docs.yaml`
+route manifests, redirect façades, or global docs reconciliation. Publish no internal plans, ADRs or
+work logs.
 
 **Document placement is a rule, not a habit.** Current architecture goes in `architecture/`;
 sequencing in `ROADMAP.md`; observed progress in `STATUS.md`. `docs/plan/` turns design into gates
