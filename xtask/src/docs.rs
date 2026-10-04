@@ -311,7 +311,7 @@ pub fn build(args: &BuildArgs) -> Result<ExitCode> {
         "output must be empty to exclude stale/private files"
     );
     fs::create_dir_all(args.out.join(".well-known"))?;
-    for (route, html) in pages {
+    for (route, html) in &pages {
         let dir = args
             .out
             .join(route.strip_prefix("/substrate/").context("site base")?);
@@ -329,8 +329,31 @@ pub fn build(args: &BuildArgs) -> Result<ExitCode> {
             &json!({"schema":"b10x-project-site/v1","repository":"substrate","commit":args.commit,"baseUrl":"/substrate/"}),
         )?,
     )?;
+    fs::write(
+        args.out.join(".well-known/b10x-routes.json"),
+        inventory(&pages, &args.commit)?,
+    )?;
     println!("Substrate documentation built at {}", args.out.display());
     Ok(ExitCode::SUCCESS)
+}
+/// The published route and anchor inventory: every page with its sorted rendered element IDs,
+/// stamped with the same commit as the site provenance. The organization Website reads it to
+/// redirect the former `/docs/substrate/` pages and to check links into this site.
+fn inventory(pages: &BTreeMap<String, String>, commit: &str) -> Result<Vec<u8>> {
+    let routes: Vec<_> = pages
+        .iter()
+        .map(|(path, page)| {
+            let anchors: BTreeSet<_> = attributes(page, "id").into_iter().collect();
+            json!({"path": path, "anchors": anchors})
+        })
+        .collect();
+    Ok(serde_json::to_vec_pretty(&json!({
+        "schema": "b10x-project-routes/v1",
+        "repository": "substrate",
+        "commit": commit,
+        "baseUrl": "/substrate/",
+        "routes": routes,
+    }))?)
 }
 #[cfg(test)]
 mod tests {
@@ -380,6 +403,53 @@ mod tests {
         fs::write(dir.path().join("private.md"), "private").unwrap();
         std::os::unix::fs::symlink("private.md", dir.path().join("public.md")).unwrap();
         assert!(read_public(dir.path(), "public.md").is_err());
+    }
+    #[test]
+    fn the_build_publishes_every_route_with_its_anchors_at_the_built_commit() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("site");
+        let commit = "b".repeat(40);
+        build(&BuildArgs {
+            out: out.clone(),
+            commit: commit.clone(),
+        })
+        .unwrap();
+        let read = |path: &str| -> serde_json::Value {
+            serde_json::from_slice(&fs::read(out.join(path)).unwrap()).unwrap()
+        };
+        let site = read(".well-known/b10x-site.json");
+        let inventory = read(".well-known/b10x-routes.json");
+        assert_eq!(inventory["schema"], "b10x-project-routes/v1");
+        for key in ["repository", "commit", "baseUrl"] {
+            assert_eq!(inventory[key], site[key], "{key}");
+        }
+        assert_eq!(inventory["commit"], commit.as_str());
+        let routes = inventory["routes"].as_array().unwrap();
+        let paths: Vec<_> = routes.iter().map(|r| r["path"].as_str().unwrap()).collect();
+        let mut expected: Vec<_> = PAGES.iter().map(|(page, _)| route(page)).collect();
+        expected.push("/substrate/".into());
+        expected.sort();
+        assert_eq!(paths, expected);
+        let pages = pages(&crate::repo::root().unwrap()).unwrap();
+        for entry in routes {
+            let path = entry["path"].as_str().unwrap();
+            let html = fs::read_to_string(
+                out.join(path.strip_prefix("/substrate/").unwrap())
+                    .join("index.html"),
+            )
+            .unwrap();
+            assert_eq!(html, pages[path]);
+            let anchors: Vec<_> = entry["anchors"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|a| a.as_str().unwrap())
+                .collect();
+            let mut rendered = attributes(&html, "id");
+            rendered.sort_unstable();
+            assert_eq!(anchors, rendered, "{path}");
+            assert!(anchors.contains(&"main"), "{path}");
+        }
     }
     #[test]
     fn public_markdown_refuses_executable_html() {
