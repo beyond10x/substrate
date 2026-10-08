@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-08T18:27:39Z",
+  "actor": "human:timo",
+  "artifact": "task:release-0-7-11",
+  "kind": "task",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "Delegated lane at 7772fd78: 97 delegated runtime-vector cases passed, 0 failed, finished 2026-10-08T17:58:52Z; package gates (fmt, check-licenses, workspace clippy -D warnings, workspace tests 51 suites) passed on the same commit",
+    "reference": "https://github.com/beyond10x/substrate/pull/120"
+  }
+}

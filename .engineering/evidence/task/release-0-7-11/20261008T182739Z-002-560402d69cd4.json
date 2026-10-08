@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-08T18:27:39Z",
+  "actor": "human:timo",
+  "artifact": "task:release-0-7-11",
+  "kind": "task",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "Release run 37821762900 succeeded for annotated bot tag 0.7.11 at 7772fd78; daemon, MCP and unchanged 0.17.0 bundle signatures independently verified with cosign 3.0.6 against release.yml@refs/tags/0.7.11, and all three tags resolved anonymously to the released digests",
+    "reference": "https://github.com/beyond10x/substrate/releases/tag/0.7.11"
+  }
+}
