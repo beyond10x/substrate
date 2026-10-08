@@ -7,6 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.7.11] — 2026-10-08
+
 ### Added
 
 - The documentation build publishes `.well-known/b10x-routes.json`: every route of the project site
