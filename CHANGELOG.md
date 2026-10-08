@@ -9,6 +9,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [0.7.11] — 2026-10-08
 
+Published by [release run 37821762900](https://github.com/beyond10x/substrate/actions/runs/37821762900)
+from tagged commit `7772fd7867b86883d1fd60767e2f07e4dd30324b`. All three artifacts were
+keyless-signed and verified against `release.yml@refs/tags/0.7.11` and anonymously retrieved
+before announcement:
+
+- Image: `ghcr.io/beyond10x/b10x-substrate-daemon:0.7.11` at `sha256:09e322c2510be8f612a32995d133c245984f20eb43139a6031593439061ce2ad`.
+- Contract bundle: `ghcr.io/beyond10x/b10x-substrate-wire:0.17.0` at `sha256:90f047b346a9f35460644521775637dc046228159a426608f6ec5cb71292d8ac`, annotated `development`, byte-identical to 0.7.10's.
+- Disposable MCP image: `ghcr.io/beyond10x/b10x-substrate-mcp:0.7.11` at `sha256:5c020f033450821147d9a697badf9525244c9e4d7bbfb14133aaf72061907e01`, development-only.
+
+The [release notes](https://github.com/beyond10x/substrate/releases/tag/0.7.11) provide exact
+signature verification commands and the successful 97-case delegated confinement record.
+
 ### Added
 
 - The documentation build publishes `.well-known/b10x-routes.json`: every route of the project site

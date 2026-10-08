@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-08T18:27:39Z",
+  "actor": "human:timo",
+  "artifact": "task:release-0-7-11",
+  "kind": "task",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "Full gate run 37819561917 concluded success on PR 120 head 7772fd78; PR merged through the App as b816651e",
+    "reference": "https://github.com/beyond10x/substrate/actions/runs/37819561917"
+  }
+}
