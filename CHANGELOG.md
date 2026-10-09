@@ -7,6 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.7.12] — 2026-10-10
+
 ### Added
 
 - Running Git in a linked worktree: declaring the repository's Git common directory as a read-only root at its own host path lets `git status` and `git log` run inside an exec, while writes to the common directory stay refused; documented under *Confinement and refusal*, proved by delegated host cases.
