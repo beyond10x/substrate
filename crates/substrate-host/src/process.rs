@@ -729,7 +729,7 @@ impl ProcessRuntime {
         let Some(cgroup_root) = self.config.cgroup_root.as_deref() else {
             return DispatchOutcome::NotDispatched(sandbox_unavailable());
         };
-        let cgroup = match Cgroup::create(cgroup_root, id, input) {
+        let cgroup = match Cgroup::create(cgroup_root, id, input, self.config.exec_cpu_cores) {
             Ok(value) => value,
             Err(outcome) => return outcome,
         };
@@ -3020,6 +3020,35 @@ fn sandbox_unavailable() -> DriverError {
     )
 }
 
+/// The `cpu.max` period every exec cgroup is written with, in microseconds.
+const CPU_PERIOD_MICROS: u64 = 100_000;
+
+/// The `cpu.max` quota for one exec: its declared CPU time spread over its declared wall time,
+/// floored at 1 ms per period and capped at the operator's ceiling of `cores` whole periods.
+///
+/// The cap is `HostConfig::exec_cpu_cores`, so an exec runs on at most that many CPUs however
+/// many `cpu_millis` it declared over however short a `timeout_ms`; with the default of one core
+/// this is exactly the historical one-period clamp.
+///
+/// **Deliberately not stated on the capability fact**, and this is the third round that has
+/// asked. `exec.cgroup-limits` is `{processes, memory, cpu}` with `additionalProperties: false` in
+/// every released bundle through `contracts/substrate-wire/0.15.0/schemas/capability.json:38-56`;
+/// a client-visible ceiling would be a new property there, so publishing it is a successor bundle
+/// plus the ADR invariant 8 requires, never an edit to a frozen one (invariant 6). Making the
+/// ceiling configurable changed no wire byte; stating it is its own story.
+fn exec_cpu_quota(cpu_millis: u64, timeout_ms: u64, cores: u32) -> u64 {
+    // `HostDriver::open` refuses a ceiling of 0, so the `max` only keeps `clamp` from ever
+    // panicking on an unvalidated value; it is not a configuration path.
+    let ceiling = CPU_PERIOD_MICROS
+        .saturating_mul(u64::from(cores))
+        .max(CPU_PERIOD_MICROS);
+    cpu_millis
+        .saturating_mul(CPU_PERIOD_MICROS)
+        .checked_div(timeout_ms)
+        .unwrap_or(CPU_PERIOD_MICROS)
+        .clamp(1_000, ceiling)
+}
+
 struct Cgroup {
     path: PathBuf,
     name: String,
@@ -3031,6 +3060,7 @@ impl Cgroup {
         root: &Path,
         id: &str,
         input: &ExecStartInput,
+        exec_cpu_cores: u32,
     ) -> Result<Self, DispatchOutcome<ExecObservation>> {
         let name = format!("substrate-{id}");
         let path = root.join(&name);
@@ -3053,25 +3083,12 @@ impl Cgroup {
             // withholds every exec fact ahead of it, so an exec is never served in a cgroup
             // quietly missing it.
             write_control(&path, "memory.oom.group", "1")?;
-            let period = 100_000_u64;
-            // The quota never exceeds one period, so an exec is clamped to one CPU however many
-            // `cpu_millis` it declared over however short a `timeout_ms`.
-            //
-            // **Deliberately not stated on the capability fact**, and this is the third round
-            // that has asked. `exec.cgroup-limits` is `{processes, memory, cpu}` with
-            // `additionalProperties: false` in every released bundle through
-            // `contracts/substrate-wire/0.15.0/schemas/capability.json:38-56`; a client-visible
-            // clamp would be a new property there, so publishing it is a successor bundle plus
-            // the ADR invariant 8 requires, never an edit to a frozen one (invariant 6). It is
-            // its own story, and the clamp itself is unchanged here.
-            let quota = input
-                .limits
-                .cpu_millis
-                .saturating_mul(period)
-                .checked_div(input.limits.timeout_ms)
-                .unwrap_or(period)
-                .clamp(1_000, period);
-            write_control(&path, "cpu.max", &format!("{quota} {period}"))?;
+            let quota = exec_cpu_quota(
+                input.limits.cpu_millis,
+                input.limits.timeout_ms,
+                exec_cpu_cores,
+            );
+            write_control(&path, "cpu.max", &format!("{quota} {CPU_PERIOD_MICROS}"))?;
             if !path.join("cgroup.kill").is_file() {
                 return Err(sandbox_unavailable());
             }
@@ -3406,6 +3423,7 @@ mod tests {
         NetworkMode, SandboxProfile, canonical_execution_capsule_hash,
     };
 
+    use super::{CPU_PERIOD_MICROS, exec_cpu_quota};
     use super::{
         Cgroup, ChildChannel, ExecObservation, Execution, PipeState, PipeStream, ProcessRuntime,
         USER_NAMESPACE_ARGV, assert_recorded_posture, close_live_output,
@@ -3413,6 +3431,66 @@ mod tests {
         recorded_sandboxes, recording_backend, wait_terminal_with_hook,
     };
     use crate::{DispatchOutcome, HostConfig};
+
+    /// `ProcessCgroup::create`'s quota on `main` before the ceiling was configurable, verbatim.
+    fn one_core_quota_on_main(cpu_millis: u64, timeout_ms: u64) -> u64 {
+        let period = 100_000_u64;
+        cpu_millis
+            .saturating_mul(period)
+            .checked_div(timeout_ms)
+            .unwrap_or(period)
+            .clamp(1_000, period)
+    }
+
+    #[test]
+    fn default_exec_cpu_ceiling_writes_exactly_the_quota_main_writes() {
+        assert_eq!(HostConfig::minimum("/nonexistent").exec_cpu_cores, 1);
+        for cpu_millis in [1, 9, 10, 500, 1_000, 2_000, 30_000, 86_400_000, u64::MAX] {
+            for timeout_ms in [0, 1, 1_000, 2_000, 60_000, 86_400_000, u64::MAX] {
+                assert_eq!(
+                    exec_cpu_quota(cpu_millis, timeout_ms, 1),
+                    one_core_quota_on_main(cpu_millis, timeout_ms),
+                    "cpu_millis {cpu_millis}, timeout_ms {timeout_ms}"
+                );
+            }
+        }
+        // The one case the acceptance names from main: two seconds of CPU over one second of
+        // wall time is still one core by default.
+        assert_eq!(exec_cpu_quota(2_000, 1_000, 1), CPU_PERIOD_MICROS);
+    }
+
+    #[test]
+    fn exec_declaring_exactly_n_cores_gets_n_periods_under_a_ceiling_of_n() {
+        for cores in [2_u32, 4, 8] {
+            let timeout_ms = 10_000;
+            let cpu_millis = u64::from(cores) * timeout_ms;
+            assert_eq!(
+                exec_cpu_quota(cpu_millis, timeout_ms, cores),
+                u64::from(cores) * 100_000,
+                "{cores} cores declared under a ceiling of {cores}"
+            );
+        }
+    }
+
+    #[test]
+    fn exec_declaring_more_than_the_ceiling_is_clamped_to_n_cores() {
+        assert_eq!(exec_cpu_quota(80_000, 10_000, 4), 400_000);
+        assert_eq!(exec_cpu_quota(u64::MAX, 1, 4), 400_000);
+    }
+
+    #[test]
+    fn exec_declaring_less_than_the_ceiling_keeps_its_derived_quota() {
+        // 1.5 cores and a quarter core under a four-core ceiling.
+        assert_eq!(exec_cpu_quota(15_000, 10_000, 4), 150_000);
+        assert_eq!(exec_cpu_quota(2_500, 10_000, 4), 25_000);
+    }
+
+    #[test]
+    fn exec_cpu_quota_keeps_its_one_millisecond_floor_under_any_ceiling() {
+        for cores in [1_u32, 2, 16] {
+            assert_eq!(exec_cpu_quota(1, 86_400_000, cores), 1_000);
+        }
+    }
 
     fn running_observation(id: &str) -> ExecObservation {
         ExecObservation {

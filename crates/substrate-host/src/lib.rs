@@ -166,6 +166,49 @@ pub struct HostConfig {
     pub project_quota_ids: Option<(u32, u32)>,
     /// Closed set of HTTPS Git source apertures served by this host.
     pub git_sources: Vec<GitSourceBinding>,
+    /// The operator's ceiling on one exec's CPU bandwidth, in whole cores.
+    ///
+    /// An exec's `cpu.max` quota is still derived from its declared `cpu_millis` over its
+    /// `timeout_ms`; this only bounds it from above at `exec_cpu_cores` periods. [`HostConfig::minimum`]
+    /// sets 1, the historical one-core clamp. `HostDriver::open` refuses 0 and any value above the
+    /// CPUs this process may run on as `config.exec-cpu-cores-invalid`, never clamping it.
+    pub exec_cpu_cores: u32,
+}
+
+/// Refuses an exec CPU ceiling the host cannot honour, before the host opens.
+///
+/// `available` is what [`std::thread::available_parallelism`] reports: the CPUs this process may
+/// actually be scheduled on — its affinity mask and, on Linux, the CPU quota of its own cgroup —
+/// rather than `/sys/devices/system/cpu/online`, which counts CPUs an exec spawned from here can
+/// still be barred from. When that count is unknown, only the historical ceiling of one core is
+/// admitted: one core is the one value no host can be short of.
+fn validate_exec_cpu_cores(
+    cores: u32,
+    available: Option<std::num::NonZeroUsize>,
+) -> Result<(), DriverError> {
+    let refuse = |reason: String| {
+        Err(DriverError::refused(
+            "config.exec-cpu-cores-invalid",
+            reason,
+            "config.exec_cpu_cores",
+        ))
+    };
+    if cores == 0 {
+        return refuse("The exec CPU ceiling must be at least one core.".to_owned());
+    }
+    match available {
+        Some(available) if usize::try_from(cores).is_ok_and(|cores| cores <= available.get()) => {
+            Ok(())
+        }
+        Some(available) => refuse(format!(
+            "The exec CPU ceiling of {cores} cores exceeds the {available} CPUs this host may use."
+        )),
+        None if cores == 1 => Ok(()),
+        None => refuse(format!(
+            "The exec CPU ceiling of {cores} cores cannot be verified: the CPUs this host may use \
+             are unknown."
+        )),
+    }
 }
 
 impl HostConfig {
@@ -206,6 +249,7 @@ impl HostConfig {
             ca_bundle: None,
             project_quota_ids: None,
             git_sources: Vec::new(),
+            exec_cpu_cores: 1,
         }
     }
 
@@ -685,6 +729,11 @@ impl HostDriver {
     ///
     /// Returns a typed driver error if the workspace root or reconciliation cannot be secured.
     pub fn open(config: HostConfig) -> Result<Arc<Self>, DriverError> {
+        // Before anything is written: a refused configuration leaves no trace on the host.
+        validate_exec_cpu_cores(
+            config.exec_cpu_cores,
+            std::thread::available_parallelism().ok(),
+        )?;
         std::fs::create_dir_all(&config.workspace_root).map_err(|error| {
             DriverError::failed("workspace.root-failed", format!("workspace root: {error}"))
         })?;
@@ -1470,8 +1519,34 @@ mod tests {
 
     use super::{
         Driver as _, GitSourceBinding, HostConfig, HostDriver, WorkspaceDestroyOwnership,
-        WorkspaceDestroyProgress, fs,
+        WorkspaceDestroyProgress, fs, validate_exec_cpu_cores,
     };
+
+    #[test]
+    fn exec_cpu_ceiling_is_admitted_from_one_core_up_to_the_usable_cpus() {
+        let four = std::num::NonZeroUsize::new(4);
+        for cores in [1, 2, 4] {
+            assert!(
+                validate_exec_cpu_cores(cores, four).is_ok(),
+                "{cores} of 4 usable CPUs must be admitted"
+            );
+        }
+    }
+
+    #[test]
+    fn exec_cpu_ceiling_of_zero_or_above_the_usable_cpus_is_refused_by_name() {
+        let four = std::num::NonZeroUsize::new(4);
+        for (cores, available) in [(0, four), (5, four), (u32::MAX, four), (0, None), (2, None)] {
+            let error = validate_exec_cpu_cores(cores, available)
+                .expect_err("an unhonourable ceiling must be refused, never clamped");
+            assert_eq!(error.code, "config.exec-cpu-cores-invalid");
+            assert_eq!(error.class, super::DriverErrorClass::Refused);
+        }
+        assert!(
+            validate_exec_cpu_cores(1, None).is_ok(),
+            "one core is admitted even when the usable CPU count is unknown"
+        );
+    }
 
     #[test]
     fn git_source_binding_requires_and_preserves_a_path_segment_boundary() {

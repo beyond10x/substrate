@@ -382,6 +382,10 @@ pub struct DaemonConfig {
     pub allow_unrecorded_sessions: bool,
     pub cgroup_root: Option<PathBuf>,
     pub project_quota_ids: Option<(u32, u32)>,
+    /// The ceiling on one exec's CPU bandwidth, in whole cores (`HostConfig::exec_cpu_cores`).
+    ///
+    /// Default 1. Opening the daemon refuses 0 or more cores than this process may use.
+    pub exec_cpu_cores: u32,
     /// Operator-declared Git source URL prefixes. Credentials are never configuration.
     pub git_sources: Vec<GitSourceConfig>,
     pub bubblewrap: PathBuf,
@@ -501,6 +505,7 @@ impl DaemonConfig {
             allow_unrecorded_sessions: false,
             cgroup_root: None,
             project_quota_ids: None,
+            exec_cpu_cores: 1,
             git_sources: Vec::new(),
             bubblewrap: PathBuf::from("/usr/bin/bwrap"),
             event_retention: 10_000,
@@ -603,6 +608,7 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
     host_config.config_generation = configuration_generation(&config);
     host_config.cgroup_root = config.cgroup_root;
     host_config.project_quota_ids = config.project_quota_ids;
+    host_config.exec_cpu_cores = config.exec_cpu_cores;
     host_config.git_sources = git_sources;
     host_config.bubblewrap = config.bubblewrap;
     host_config.event_retention = config.event_retention;

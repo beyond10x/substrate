@@ -7,6 +7,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- The exec CPU ceiling is configurable: `HostConfig::exec_cpu_cores` and the daemon's `--exec-cpu-cores N` (default 1, today's one-core clamp) cap an exec's derived `cpu.max` at N cores; 0 or more than the usable CPUs is refused at startup as `config.exec-cpu-cores-invalid`.
+
 ### Changed
 
 - Egress-aperture run state no longer goes into the workspace root: `HostConfig::aperture_root` (default `<workspace_root>/.substrate-apertures`) is created only when an aperture is declared, and the daemon keeps it beside its state database as `<state>.apertures`.
