@@ -148,6 +148,13 @@ pub struct HostConfig {
     /// Every egress aperture this operator declared, each already resolved to a pinned address
     /// (ADR 0013). Empty means the capability is absent and the sandbox keeps `--unshare-net`.
     pub egress_apertures: Vec<EgressAperture>,
+    /// The owner-private directory each aperture run's generated resolution is written beneath.
+    ///
+    /// `HostDriver::open` creates it only when `egress_apertures` is non-empty, so a host with no
+    /// aperture writes nothing here. [`HostConfig::minimum`] keeps the historical
+    /// `<workspace_root>/.substrate-apertures`; an embedder whose workspace root holds anything of
+    /// its own points this elsewhere.
+    pub aperture_root: PathBuf,
     /// The certificate bundle a run with an aperture gets a private read-only copy of.
     ///
     /// `None` means no trust anchor: TLS still crosses the forwarder byte for byte, and a child
@@ -179,6 +186,7 @@ impl HostConfig {
         .max(1);
         Self {
             capsule_root: workspace_root.join(".substrate-capsules"),
+            aperture_root: workspace_root.join(".substrate-apertures"),
             workspace_root,
             cgroup_root: None,
             bubblewrap: PathBuf::from("/usr/bin/bwrap"),
@@ -199,10 +207,6 @@ impl HostConfig {
             project_quota_ids: None,
             git_sources: Vec::new(),
         }
-    }
-
-    fn aperture_root(&self) -> PathBuf {
-        self.workspace_root.join(".substrate-apertures")
     }
 
     fn scratch_root(&self) -> PathBuf {
@@ -691,18 +695,23 @@ impl HostDriver {
             .map_err(|error| {
                 DriverError::failed("capsule.root-failed", format!("capsule root mode: {error}"))
             })?;
-        let aperture_root = config.aperture_root();
-        std::fs::create_dir_all(&aperture_root).map_err(|error| {
-            DriverError::failed("aperture.root-failed", format!("aperture root: {error}"))
-        })?;
-        std::fs::set_permissions(&aperture_root, std::fs::Permissions::from_mode(0o700)).map_err(
-            |error| {
+        // A host without an egress aperture writes no aperture state anywhere. Stale entries
+        // under an existing root are still reconciled by the process runtime either way.
+        if !config.egress_apertures.is_empty() {
+            std::fs::create_dir_all(&config.aperture_root).map_err(|error| {
+                DriverError::failed("aperture.root-failed", format!("aperture root: {error}"))
+            })?;
+            std::fs::set_permissions(
+                &config.aperture_root,
+                std::fs::Permissions::from_mode(0o700),
+            )
+            .map_err(|error| {
                 DriverError::failed(
                     "aperture.root-failed",
                     format!("aperture root mode: {error}"),
                 )
-            },
-        )?;
+            })?;
+        }
         // A host without Git sources must not touch Git metadata in its workspace parent.
         if !config.git_sources.is_empty() {
             let git_baseline_root = config.git_baseline_root();

@@ -7,6 +7,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- Egress-aperture run state no longer goes into the workspace root: `HostConfig::aperture_root` (default `<workspace_root>/.substrate-apertures`) is created only when an aperture is declared, and the daemon keeps it beside its state database as `<state>.apertures`.
+
 ## [0.7.11] — 2026-10-08
 
 Published by [release run 37821762900](https://github.com/beyond10x/substrate/actions/runs/37821762900)

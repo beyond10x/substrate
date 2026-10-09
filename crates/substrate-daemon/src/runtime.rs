@@ -615,6 +615,7 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
         })
         .collect();
     host_config.egress_apertures = egress_apertures;
+    host_config.aperture_root = aperture_state_root(&config.state);
     host_config.ca_bundle = config.ca_bundle;
     let driver = HostDriver::open(host_config).context("open host driver")?;
     let mut app = App::with_delegated_context(
@@ -1362,6 +1363,13 @@ fn owner_only(mode: u32) -> bool {
     mode.trailing_zeros() >= 6
 }
 
+/// Where this daemon's egress-aperture run state lives: beside its durable state database, in
+/// the owner-private state directory, keyed by the same state identity the instance lock holds.
+/// Never in the workspace root, which may hold an embedder's own checkouts.
+fn aperture_state_root(state: &Path) -> PathBuf {
+    state.with_extension("apertures")
+}
+
 fn lock_state_identity(state: &Path) -> anyhow::Result<InstanceLock> {
     let path = state.with_extension("instance.lock");
     if let Some(parent) = path.parent() {
@@ -1717,6 +1725,21 @@ mod tests {
 
         std::os::unix::fs::symlink(&state, private.join("linked.db")).unwrap();
         assert!(prepare_private_state_path(&private.join("linked.db")).is_err());
+    }
+
+    /// `story:aperture-state-outside-workspace-root`: the daemon keeps aperture run state in its
+    /// own owner-private state directory, keyed by its state identity, not in the workspace root.
+    #[test]
+    fn aperture_state_lives_beside_the_durable_state_not_in_the_workspace_root() {
+        let state = Path::new("/srv/substrate/state/state.db");
+        let root = aperture_state_root(state);
+        assert_eq!(root, Path::new("/srv/substrate/state/state.apertures"));
+        assert_eq!(root.parent(), state.parent());
+        assert_ne!(
+            aperture_state_root(Path::new("/srv/substrate/state/other.db")),
+            root,
+            "two state identities in one directory share aperture state"
+        );
     }
 
     /// The production unix accept-and-serve loop, over a route that upgrades to a WebSocket and
