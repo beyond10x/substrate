@@ -9,6 +9,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [0.7.12] — 2026-10-10
 
+Published by [release run 38003936799](https://github.com/beyond10x/substrate/actions/runs/38003936799)
+from tagged commit `7d268e59262aaa03bb836d9605a77a887b010816`. All three artifacts were
+keyless-signed and verified against `release.yml@refs/tags/0.7.12` by the release workflow, and
+each tag resolved anonymously to its released digest:
+
+- Image: `ghcr.io/beyond10x/b10x-substrate-daemon:0.7.12` at `sha256:e7f34d46c4a57f14bf3b4043ba48b752cbab106aab983188dfff7e9f3676fb9b`.
+- Contract bundle: `ghcr.io/beyond10x/b10x-substrate-wire:0.17.0` at `sha256:90f047b346a9f35460644521775637dc046228159a426608f6ec5cb71292d8ac`, annotated `development`, byte-identical to 0.7.11's.
+- Disposable MCP image: `ghcr.io/beyond10x/b10x-substrate-mcp:0.7.12` at `sha256:d82bc5eb62567b383d482e871cd7759d2aa2843d1bc88b3a1d0fd518de3ccd67`, development-only.
+
+The [release notes](https://github.com/beyond10x/substrate/releases/tag/0.7.12) provide exact
+signature verification commands and the successful 97-case delegated confinement record.
+
 ### Added
 
 - Running Git in a linked worktree: declaring the repository's Git common directory as a read-only root at its own host path lets `git status` and `git log` run inside an exec, while writes to the common directory stay refused; documented under *Confinement and refusal*, proved by delegated host cases.
