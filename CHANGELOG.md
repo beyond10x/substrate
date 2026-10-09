@@ -7,6 +7,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- Running Git in a linked worktree: declaring the repository's Git common directory as a read-only root at its own host path lets `git status` and `git log` run inside an exec, while writes to the common directory stay refused; documented under *Confinement and refusal*, proved by delegated host cases.
+- The exec CPU ceiling is configurable: `HostConfig::exec_cpu_cores` and the daemon's `--exec-cpu-cores N` (default 1, today's one-core clamp) cap an exec's derived `cpu.max` at N cores; 0 or more than the usable CPUs is refused at startup as `config.exec-cpu-cores-invalid`.
+
+### Changed
+
+- Egress-aperture run state no longer goes into the workspace root: `HostConfig::aperture_root` (default `<workspace_root>/.substrate-apertures`) is created only when an aperture is declared, and the daemon keeps it beside its state database as `<state>.apertures`.
+
 ## [0.7.11] — 2026-10-08
 
 Published by [release run 37821762900](https://github.com/beyond10x/substrate/actions/runs/37821762900)

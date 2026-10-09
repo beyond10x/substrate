@@ -470,8 +470,8 @@ impl ProcessRuntime {
     }
 
     fn reconcile_apertures(&self, process_trees_reconciled: bool) -> Result<(), DriverError> {
-        let root = self.config.aperture_root();
-        let entries = match std::fs::read_dir(&root) {
+        let root = &self.config.aperture_root;
+        let entries = match std::fs::read_dir(root) {
             Ok(entries) => entries,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(error) => {
@@ -729,7 +729,7 @@ impl ProcessRuntime {
         let Some(cgroup_root) = self.config.cgroup_root.as_deref() else {
             return DispatchOutcome::NotDispatched(sandbox_unavailable());
         };
-        let cgroup = match Cgroup::create(cgroup_root, id, input) {
+        let cgroup = match Cgroup::create(cgroup_root, id, input, self.config.exec_cpu_cores) {
             Ok(value) => value,
             Err(outcome) => return outcome,
         };
@@ -754,7 +754,7 @@ impl ProcessRuntime {
             Some(aperture) => match crate::egress::GeneratedResolution::prepare(
                 aperture,
                 self.config.ca_bundle.as_deref(),
-                &self.config.aperture_root(),
+                &self.config.aperture_root,
             ) {
                 Ok(value) => Some(value),
                 Err(error) => return contain_cgroup(&cgroup, error),
@@ -3020,6 +3020,35 @@ fn sandbox_unavailable() -> DriverError {
     )
 }
 
+/// The `cpu.max` period every exec cgroup is written with, in microseconds.
+const CPU_PERIOD_MICROS: u64 = 100_000;
+
+/// The `cpu.max` quota for one exec: its declared CPU time spread over its declared wall time,
+/// floored at 1 ms per period and capped at the operator's ceiling of `cores` whole periods.
+///
+/// The cap is `HostConfig::exec_cpu_cores`, so an exec runs on at most that many CPUs however
+/// many `cpu_millis` it declared over however short a `timeout_ms`; with the default of one core
+/// this is exactly the historical one-period clamp.
+///
+/// **Deliberately not stated on the capability fact**, and this is the third round that has
+/// asked. `exec.cgroup-limits` is `{processes, memory, cpu}` with `additionalProperties: false` in
+/// every released bundle through `contracts/substrate-wire/0.15.0/schemas/capability.json:38-56`;
+/// a client-visible ceiling would be a new property there, so publishing it is a successor bundle
+/// plus the ADR invariant 8 requires, never an edit to a frozen one (invariant 6). Making the
+/// ceiling configurable changed no wire byte; stating it is its own story.
+fn exec_cpu_quota(cpu_millis: u64, timeout_ms: u64, cores: u32) -> u64 {
+    // `HostDriver::open` refuses a ceiling of 0, so the `max` only keeps `clamp` from ever
+    // panicking on an unvalidated value; it is not a configuration path.
+    let ceiling = CPU_PERIOD_MICROS
+        .saturating_mul(u64::from(cores))
+        .max(CPU_PERIOD_MICROS);
+    cpu_millis
+        .saturating_mul(CPU_PERIOD_MICROS)
+        .checked_div(timeout_ms)
+        .unwrap_or(CPU_PERIOD_MICROS)
+        .clamp(1_000, ceiling)
+}
+
 struct Cgroup {
     path: PathBuf,
     name: String,
@@ -3031,6 +3060,7 @@ impl Cgroup {
         root: &Path,
         id: &str,
         input: &ExecStartInput,
+        exec_cpu_cores: u32,
     ) -> Result<Self, DispatchOutcome<ExecObservation>> {
         let name = format!("substrate-{id}");
         let path = root.join(&name);
@@ -3053,25 +3083,12 @@ impl Cgroup {
             // withholds every exec fact ahead of it, so an exec is never served in a cgroup
             // quietly missing it.
             write_control(&path, "memory.oom.group", "1")?;
-            let period = 100_000_u64;
-            // The quota never exceeds one period, so an exec is clamped to one CPU however many
-            // `cpu_millis` it declared over however short a `timeout_ms`.
-            //
-            // **Deliberately not stated on the capability fact**, and this is the third round
-            // that has asked. `exec.cgroup-limits` is `{processes, memory, cpu}` with
-            // `additionalProperties: false` in every released bundle through
-            // `contracts/substrate-wire/0.15.0/schemas/capability.json:38-56`; a client-visible
-            // clamp would be a new property there, so publishing it is a successor bundle plus
-            // the ADR invariant 8 requires, never an edit to a frozen one (invariant 6). It is
-            // its own story, and the clamp itself is unchanged here.
-            let quota = input
-                .limits
-                .cpu_millis
-                .saturating_mul(period)
-                .checked_div(input.limits.timeout_ms)
-                .unwrap_or(period)
-                .clamp(1_000, period);
-            write_control(&path, "cpu.max", &format!("{quota} {period}"))?;
+            let quota = exec_cpu_quota(
+                input.limits.cpu_millis,
+                input.limits.timeout_ms,
+                exec_cpu_cores,
+            );
+            write_control(&path, "cpu.max", &format!("{quota} {CPU_PERIOD_MICROS}"))?;
             if !path.join("cgroup.kill").is_file() {
                 return Err(sandbox_unavailable());
             }
@@ -3406,6 +3423,7 @@ mod tests {
         NetworkMode, SandboxProfile, canonical_execution_capsule_hash,
     };
 
+    use super::{CPU_PERIOD_MICROS, exec_cpu_quota};
     use super::{
         Cgroup, ChildChannel, ExecObservation, Execution, PipeState, PipeStream, ProcessRuntime,
         USER_NAMESPACE_ARGV, assert_recorded_posture, close_live_output,
@@ -3413,6 +3431,66 @@ mod tests {
         recorded_sandboxes, recording_backend, wait_terminal_with_hook,
     };
     use crate::{DispatchOutcome, HostConfig};
+
+    /// `ProcessCgroup::create`'s quota on `main` before the ceiling was configurable, verbatim.
+    fn one_core_quota_on_main(cpu_millis: u64, timeout_ms: u64) -> u64 {
+        let period = 100_000_u64;
+        cpu_millis
+            .saturating_mul(period)
+            .checked_div(timeout_ms)
+            .unwrap_or(period)
+            .clamp(1_000, period)
+    }
+
+    #[test]
+    fn default_exec_cpu_ceiling_writes_exactly_the_quota_main_writes() {
+        assert_eq!(HostConfig::minimum("/nonexistent").exec_cpu_cores, 1);
+        for cpu_millis in [1, 9, 10, 500, 1_000, 2_000, 30_000, 86_400_000, u64::MAX] {
+            for timeout_ms in [0, 1, 1_000, 2_000, 60_000, 86_400_000, u64::MAX] {
+                assert_eq!(
+                    exec_cpu_quota(cpu_millis, timeout_ms, 1),
+                    one_core_quota_on_main(cpu_millis, timeout_ms),
+                    "cpu_millis {cpu_millis}, timeout_ms {timeout_ms}"
+                );
+            }
+        }
+        // The one case the acceptance names from main: two seconds of CPU over one second of
+        // wall time is still one core by default.
+        assert_eq!(exec_cpu_quota(2_000, 1_000, 1), CPU_PERIOD_MICROS);
+    }
+
+    #[test]
+    fn exec_declaring_exactly_n_cores_gets_n_periods_under_a_ceiling_of_n() {
+        for cores in [2_u32, 4, 8] {
+            let timeout_ms = 10_000;
+            let cpu_millis = u64::from(cores) * timeout_ms;
+            assert_eq!(
+                exec_cpu_quota(cpu_millis, timeout_ms, cores),
+                u64::from(cores) * 100_000,
+                "{cores} cores declared under a ceiling of {cores}"
+            );
+        }
+    }
+
+    #[test]
+    fn exec_declaring_more_than_the_ceiling_is_clamped_to_n_cores() {
+        assert_eq!(exec_cpu_quota(80_000, 10_000, 4), 400_000);
+        assert_eq!(exec_cpu_quota(u64::MAX, 1, 4), 400_000);
+    }
+
+    #[test]
+    fn exec_declaring_less_than_the_ceiling_keeps_its_derived_quota() {
+        // 1.5 cores and a quarter core under a four-core ceiling.
+        assert_eq!(exec_cpu_quota(15_000, 10_000, 4), 150_000);
+        assert_eq!(exec_cpu_quota(2_500, 10_000, 4), 25_000);
+    }
+
+    #[test]
+    fn exec_cpu_quota_keeps_its_one_millisecond_floor_under_any_ceiling() {
+        for cores in [1_u32, 2, 16] {
+            assert_eq!(exec_cpu_quota(1, 86_400_000, cores), 1_000);
+        }
+    }
 
     fn running_observation(id: &str) -> ExecObservation {
         ExecObservation {
@@ -3578,10 +3656,10 @@ mod tests {
             b"stale runtime",
         )
         .expect("stale bytes");
-        std::fs::create_dir_all(config.aperture_root().join("aperture-crashed"))
+        std::fs::create_dir_all(config.aperture_root.join("aperture-crashed"))
             .expect("stale aperture");
         std::fs::write(
-            config.aperture_root().join("aperture-crashed/hosts"),
+            config.aperture_root.join("aperture-crashed/hosts"),
             b"stale generated mapping",
         )
         .expect("stale generated bytes");
@@ -3602,7 +3680,7 @@ mod tests {
             0
         );
         assert_eq!(
-            std::fs::read_dir(config.aperture_root())
+            std::fs::read_dir(&config.aperture_root)
                 .expect("list aperture root")
                 .count(),
             0
@@ -3624,7 +3702,7 @@ mod tests {
 
         std::fs::remove_file(config.capsule_root.join("capsule-symlink"))
             .expect("remove test symlink");
-        symlink(&outside, config.aperture_root().join("aperture-symlink"))
+        symlink(&outside, config.aperture_root.join("aperture-symlink"))
             .expect("malicious stale aperture link");
         let error = ProcessRuntime::new(config.clone(), capability.clone())
             .err()
@@ -3634,7 +3712,7 @@ mod tests {
             std::fs::read(outside.join("keep")).expect("outside retained"),
             b"operator data"
         );
-        std::fs::remove_file(config.aperture_root().join("aperture-symlink"))
+        std::fs::remove_file(config.aperture_root.join("aperture-symlink"))
             .expect("remove test aperture symlink");
         std::fs::create_dir(config.capsule_root.join("capsule-unproven"))
             .expect("unproven capsule");
@@ -4713,6 +4791,114 @@ mod tests {
             "the refusal must come from unshare(2) itself, not from a failed exec: {}",
             String::from_utf8_lossy(&nested.stderr)
         );
+    }
+
+    /// The second acceptance of `story:aperture-state-outside-workspace-root`: a host with an
+    /// aperture and an explicit `aperture_root` writes the run's generated resolution there, not
+    /// into the workspace root, and the aperture exec runs as before.
+    ///
+    /// The generated directory lives only while the run does, so the case watches the configured
+    /// root while the exec is in flight rather than inferring the location afterwards. The child
+    /// reading the declared host out of its `/etc/hosts` is the proof that what was bound is what
+    /// was generated beneath that root.
+    ///
+    /// Delegated only. Without `SUBSTRATE_VECTORS_CGROUP_ROOT` naming a cgroup v2 subtree this
+    /// process is inside, the case is **absent, never reported as passed** (invariant 3).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_aperture_exec_writes_its_state_beneath_the_configured_aperture_root() {
+        let Some(delegated) = delegated_cgroup_root("aperture-root") else {
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("ws_test");
+        std::fs::create_dir(&workspace).unwrap();
+        let destination = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .expect("a pinned loopback destination");
+        let pinned = destination.local_addr().expect("pinned address");
+        let snapshot = format!("sha256:{}", "7".repeat(64));
+        let mut config = HostConfig::minimum(root.path());
+        config.cgroup_root = Some(delegated);
+        config.egress_apertures = vec![crate::egress::EgressAperture {
+            name: "model".to_owned(),
+            host: "app.example.invalid".to_owned(),
+            port: pinned.port(),
+            pinned,
+            max_bytes: None,
+        }];
+        let explicit = root.path().join("daemon-state").join("state.apertures");
+        config.aperture_root.clone_from(&explicit);
+        // What `HostDriver::open` does for a host with an aperture; this case builds the runtime
+        // directly, as the other delegated cases here do.
+        std::fs::create_dir_all(&explicit).unwrap();
+        std::fs::set_permissions(
+            &explicit,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+        )
+        .unwrap();
+        let mut capability = confined_exec_capability(&snapshot);
+        capability.facts.exec_egress_apertures =
+            crate::egress::egress_apertures_fact(&config.egress_apertures, true);
+        let default_root = config.workspace_root.join(".substrate-apertures");
+        let runtime = ProcessRuntime::new(config, capability).expect("runtime");
+
+        let mut input = pty_exec_input(&snapshot);
+        input.argv = vec![
+            "/bin/sh".to_owned(),
+            "-c".to_owned(),
+            "cat /etc/hosts; sleep 2".to_owned(),
+        ];
+        input.sandbox.network = NetworkMode::Aperture;
+        input.sandbox.aperture = Some("model".to_owned());
+        input.wait = true;
+        let watch = async {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while Instant::now() < deadline {
+                let generated = std::fs::read_dir(&explicit)
+                    .expect("list the configured aperture root")
+                    .filter_map(Result::ok)
+                    .any(|entry| entry.file_name().to_string_lossy().starts_with("aperture-"));
+                if generated {
+                    return true;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+            false
+        };
+        let (outcome, seen) =
+            tokio::join!(runtime.start("ex_aperture_root", &workspace, &input), watch);
+        let observed = match outcome {
+            DispatchOutcome::Observed(observed) => observed,
+            DispatchOutcome::NotDispatched(error)
+            | DispatchOutcome::ContainedAbsent(error)
+            | DispatchOutcome::OutcomeUnknown(error) => panic!(
+                "the delegated lane must dispatch an aperture exec: {} {}",
+                error.code, error.message
+            ),
+        };
+        assert!(
+            seen,
+            "no generated aperture state appeared beneath the configured aperture root"
+        );
+        assert_eq!(
+            observed
+                .resource
+                .exit
+                .expect("a waited exec reports its exit")
+                .code,
+            Some(0),
+            "the aperture exec did not run as before: {}",
+            String::from_utf8_lossy(&observed.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&observed.stdout).contains("app.example.invalid"),
+            "the child was not given the generated resolution: {}",
+            String::from_utf8_lossy(&observed.stdout)
+        );
+        assert!(
+            !default_root.exists(),
+            "an explicit aperture root still wrote .substrate-apertures into the workspace root"
+        );
+        drop(destination);
     }
 
     /// The published capability an admitted exec stands on, for the delegated cases below.

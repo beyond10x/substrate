@@ -376,6 +376,11 @@ must:
    been established here;
 4. pass that root through `--cgroup-root`.
 
+Each exec's CPU bandwidth is derived from its declared CPU time over its timeout and capped at
+`--exec-cpu-cores N` whole cores (`SUBSTRATE_EXEC_CPU_CORES`, default 1). Startup refuses 0, or
+more cores than the daemon process may run on, as `config.exec-cpu-cores-invalid`; it never clamps
+the value. The ceiling is not published on any capability fact.
+
 The runtime probe enables and tests the controllers, bubblewrap namespaces, cgroup kill and the
 swap-inclusive memory bound **before** it advertises exec.
 

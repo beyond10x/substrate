@@ -129,6 +129,10 @@ A Linux host that serves exec needs all of the following:
 5. `/usr/bin/socat` for the host-IPC confinement probe;
 6. the delegation passed with `--cgroup-root`.
 
+An exec's CPU bandwidth follows its declared CPU time over its timeout, capped at
+`--exec-cpu-cores N` whole cores (default 1). The daemon refuses to start with 0 or with more cores
+than it may run on.
+
 The daemon probes the backend before advertising execution. Missing enforcement produces a refusal,
 not weaker isolation.
 

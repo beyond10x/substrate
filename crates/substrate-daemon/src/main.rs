@@ -234,6 +234,18 @@ struct Arguments {
     )]
     project_quota_ids: Option<(u32, u32)>,
 
+    /// Ceiling on one exec's CPU bandwidth, in whole cores.
+    ///
+    /// An exec's CPU quota is still derived from its declared CPU time over its timeout; this caps
+    /// it. 0, or more cores than this process may run on, refuses startup.
+    #[arg(
+        long,
+        env = "SUBSTRATE_EXEC_CPU_CORES",
+        value_name = "N",
+        default_value_t = 1
+    )]
+    exec_cpu_cores: u32,
+
     /// Declare a read-only Git source as `name=https://origin/path-prefix/` (repeatable).
     #[arg(
         long = "git-source",
@@ -434,6 +446,7 @@ impl From<Arguments> for DaemonConfig {
             allow_unrecorded_sessions: arguments.allow_unrecorded_sessions,
             cgroup_root: arguments.cgroup_root,
             project_quota_ids: arguments.project_quota_ids,
+            exec_cpu_cores: arguments.exec_cpu_cores,
             git_sources: arguments.git_sources,
             bubblewrap: arguments.bubblewrap,
             event_retention: arguments.event_retention,
@@ -482,7 +495,37 @@ async fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_egress_aperture, parse_project_quota_ids};
+    use clap::Parser as _;
+
+    use super::{Arguments, parse_egress_aperture, parse_project_quota_ids};
+
+    const REQUIRED: [&str; 9] = [
+        "substrate-daemon",
+        "--socket",
+        "s.sock",
+        "--state",
+        "s.db",
+        "--workspaces",
+        "ws",
+        "--deployment",
+        "test",
+    ];
+
+    #[test]
+    fn exec_cpu_cores_defaults_to_one_core_and_takes_an_explicit_count() {
+        let default = Arguments::try_parse_from(REQUIRED).expect("default arguments");
+        assert_eq!(default.exec_cpu_cores, 1);
+        let explicit =
+            Arguments::try_parse_from(REQUIRED.into_iter().chain(["--exec-cpu-cores", "4"]))
+                .expect("explicit ceiling");
+        assert_eq!(explicit.exec_cpu_cores, 4);
+        assert_eq!(super::DaemonConfig::from(explicit).exec_cpu_cores, 4);
+        assert!(
+            Arguments::try_parse_from(REQUIRED.into_iter().chain(["--exec-cpu-cores", "-1"]))
+                .is_err(),
+            "a negative core count is not a ceiling"
+        );
+    }
 
     #[test]
     fn project_quota_ids_are_nonzero_inclusive_and_bounded_below() {

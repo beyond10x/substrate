@@ -37,6 +37,25 @@ An admitted host exec receives:
 Requested isolation and applied isolation are recorded separately. The final observation says what
 the machine actually applied.
 
+## Running Git in a linked worktree
+
+A linked worktree's `.git` is a file naming `gitdir: <common dir>/worktrees/<name>`, a host path
+outside the workspace, so inside an exec Git finds no repository. Declare the common directory —
+`git rev-parse --path-format=absolute --git-common-dir` on the host — as one more entry in
+`read_only_roots`, mounted at its own host path:
+
+```json
+"read_only_roots": [
+  {"host_path": "/srv/repos/app/.git", "mount": "/srv/repos/app/.git"}
+]
+```
+
+Commands that only read, such as `git status` and `git log`, then work. A declared root is always
+mounted read-only, so commands that write the index, refs or objects (`git add`, `git commit`,
+`git fetch`) are refused with a read-only file system error. Several directories are several entries,
+up to the bound the contract publishes (four). A mount point beneath a path Substrate owns, such as
+`/tmp`, is refused, so a repository under `/tmp` cannot be declared at its own path.
+
 ## Capability snapshots
 
 Admission binds an operation to a probed backend and configuration generation. Security-critical
