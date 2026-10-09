@@ -9,6 +9,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Running Git in a linked worktree: declaring the repository's Git common directory as a read-only root at its own host path lets `git status` and `git log` run inside an exec, while writes to the common directory stay refused; documented under *Confinement and refusal*, proved by delegated host cases.
 - The exec CPU ceiling is configurable: `HostConfig::exec_cpu_cores` and the daemon's `--exec-cpu-cores N` (default 1, today's one-core clamp) cap an exec's derived `cpu.max` at N cores; 0 or more than the usable CPUs is refused at startup as `config.exec-cpu-cores-invalid`.
 
 ### Changed
