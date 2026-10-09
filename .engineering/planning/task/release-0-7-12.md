@@ -2,9 +2,13 @@
 format: aep.planning-md/3
 id: task:release-0-7-12
 kind: task
-status: draft
+status: implemented
 title: Release Substrate 0.7.12 with host-run gate changes
-revision: 1
+revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-09T23:39:00Z", actor: "human:timo", revision: 2}
+- {from: "proposed", to: "active", at: "2026-10-09T23:39:00Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-10-09T23:39:00Z", actor: "human:timo", revision: 4}
 ---
 ## Outcome
 Publish the unreleased `main` work since 0.7.11 as Substrate 0.7.12: the configurable exec CPU ceiling, aperture state outside the workspace root, and Git in a linked worktree through a read-only root (PR 122). Daemon and MCP OCI images are rebuilt at 0.7.12; the 0.17.0 development contract bundle is unchanged and reused byte-identically.

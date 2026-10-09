@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-09T23:39:14Z",
+  "actor": "human:timo",
+  "artifact": "task:release-0-7-12",
+  "kind": "task",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "Release run 38003936799 concluded success for tag 0.7.12; daemon 0.7.12, MCP 0.7.12 and bundle 0.17.0 tags resolve anonymously to the released digests",
+    "reference": "https://github.com/beyond10x/substrate/releases/tag/0.7.12"
+  }
+}
