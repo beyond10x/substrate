@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-09T23:05:03Z",
+  "actor": "human:timo",
+  "artifact": "story:linked-worktree-git-common-dir",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "Full gate on a16b12b20 (merge of PR 122)",
+    "reference": "https://github.com/beyond10x/substrate/actions/runs/38001895521"
+  }
+}
