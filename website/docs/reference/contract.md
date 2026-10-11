@@ -131,8 +131,10 @@ across retry. Resource and operation lookup stays within the authenticated subje
 Read [operations and observations](../concepts/operations.md) for retry semantics and
 [status](../status.md) for the implementation boundary.
 
-Development source now advertises `substrate-wire/0.17.0`, adding explicit session capture selection,
-content-free output counters, capture-policy refusals and attachment ceilings. Existing requests
-retain recorded output. Earlier bundle directories remain immutable. This source contract promotion
+Development source now advertises `substrate-wire/0.18.0`. It makes the
+`exec.resource-usage.block_io` fact a boolean: a host without the `io` controller publishes it
+`false` and omits `io_read_bytes` and `io_write_bytes` from every usage record instead of refusing
+execution usage. `0.17.0` added explicit session capture selection, content-free output counters,
+capture-policy refusals and attachment ceilings; existing requests retain recorded output. Earlier bundle directories remain immutable. This source contract promotion
 is not a new signed daemon release; consumers must pin and test the matching SDK/daemon revision.
 The SDK refuses an older daemon's contract before issuing mutations.

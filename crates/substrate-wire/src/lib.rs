@@ -15,9 +15,9 @@ pub const API_VERSION: &str = "v1";
 ///
 /// This is the SHA-256 of the inner immutable `bundle.json`, not the outer OCI manifest digest.
 /// Moving either member is an explicit coordinated promotion (Atlas ADR 0019).
-pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.17.0";
+pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.18.0";
 pub const ADVERTISED_CONTRACT_BUNDLE_SHA256: &str =
-    "7499753100066331865615c01ebe7b3b830d256044b9aed2bb7251e7d2bb7121";
+    "3e0b1b340244afdf18a26e492f75bd52b27ad51c34a201afce2a14ab6fb3fc75";
 pub const MAX_FILE_BYTES: u64 = 1_048_576;
 pub const MAX_IO_BYTES: u64 = 1_048_576;
 pub const MAX_LIST_ITEMS: u32 = 1_000;
@@ -135,6 +135,7 @@ pub const SESSION_OUTPUT_BACKPRESSURE: &str = "session.output-backpressure";
 /// `{"const": "substrate-wire/<that bundle's own version>"}` — `0.3.0` through `0.10.0`, without
 /// exception — so its value is definitionally *the bundle whose schema this document conforms to*.
 /// Capture selection and published attachment ceilings require the 0.17.0 result schema.
+/// `0.18.0` changes no session shape (ADR 0032), so the document still names `0.17.0`.
 pub const PIPE_SESSION_CAPABILITY_CONTRACT: &str = "substrate-wire/0.17.0";
 
 /// Hosted production admission received no Identity access credential (ADR 0026).
@@ -1668,8 +1669,13 @@ pub struct ResourceUsage {
     pub processes_peak: u64,
     pub process_limit_hits: u64,
     pub memory_oom_kills: u64,
-    pub io_read_bytes: u64,
-    pub io_write_bytes: u64,
+    /// Present exactly when the binding snapshot publishes `exec.resource-usage.block_io: true`;
+    /// absent, never zero, on a host whose exec cgroups lack the io controller (ADR 0032).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub io_read_bytes: Option<u64>,
+    /// Present exactly when `io_read_bytes` is (ADR 0032).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub io_write_bytes: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub scratch: Option<StorageUsage>,
 }
@@ -2640,6 +2646,8 @@ pub struct ResourceUsageFacts {
     pub processes_peak: bool,
     pub process_limit_hits: bool,
     pub memory_oom_kills: bool,
+    /// `false` where the exec cgroups lack the io controller: every usage record then omits
+    /// `io_read_bytes` and `io_write_bytes` (ADR 0032, bundle `0.18.0`).
     pub block_io: bool,
 }
 
@@ -4160,12 +4168,60 @@ mod tests {
         let version = ADVERTISED_CONTRACT_BUNDLE
             .strip_prefix("substrate-wire/")
             .expect("advertised contract prefix");
-        assert_eq!(version, "0.17.0", "the reviewed promotion target moved");
-        let bytes = include_bytes!("../../../contracts/substrate-wire/0.17.0/bundle.json");
+        assert_eq!(version, "0.18.0", "the reviewed promotion target moved");
+        let bytes = include_bytes!("../../../contracts/substrate-wire/0.18.0/bundle.json");
         assert_eq!(
             hex::encode(Sha256::digest(bytes)),
             ADVERTISED_CONTRACT_BUNDLE_SHA256
         );
+    }
+
+    /// ADR 0032: a usage record from a host without the io controller carries no block I/O
+    /// counters, and the absence survives a round trip. Zero would claim that no I/O happened.
+    #[test]
+    fn a_usage_record_without_block_io_omits_both_counters() {
+        let record = serde_json::json!({
+            "complete": true,
+            "observed_at": "2026-10-11T12:00:00Z",
+            "wall_time_us": 1_000,
+            "cpu_time_us": 500,
+            "memory_peak_bytes": 2_048,
+            "processes_peak": 1,
+            "process_limit_hits": 0,
+            "memory_oom_kills": 0
+        });
+        let usage: super::ResourceUsage = serde_json::from_value(record.clone())
+            .expect("a record without block I/O counters is admitted");
+        let written = serde_json::to_value(&usage).expect("serializes");
+        assert_eq!(written, record);
+        for key in ["io_read_bytes", "io_write_bytes"] {
+            assert!(
+                written.get(key).is_none(),
+                "{key} must be absent, never zero"
+            );
+        }
+    }
+
+    /// ADR 0032: where block I/O is served, the record is unchanged from `0.17.0`.
+    #[test]
+    fn a_usage_record_with_block_io_keeps_both_counters() {
+        let record = serde_json::json!({
+            "complete": false,
+            "observed_at": "2026-10-11T12:00:00Z",
+            "wall_time_us": 1_000,
+            "cpu_time_us": 500,
+            "memory_current_bytes": 1_024,
+            "memory_peak_bytes": 2_048,
+            "processes_current": 1,
+            "processes_peak": 1,
+            "process_limit_hits": 0,
+            "memory_oom_kills": 0,
+            "io_read_bytes": 0,
+            "io_write_bytes": 8_192
+        });
+        let usage: super::ResourceUsage =
+            serde_json::from_value(record.clone()).expect("a complete record is admitted");
+        assert_eq!(serde_json::to_value(&usage).expect("serializes"), record);
     }
 
     #[test]

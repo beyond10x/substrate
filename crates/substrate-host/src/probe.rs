@@ -49,7 +49,11 @@ pub fn probe(config: &HostConfig, openat2: bool) -> CapabilitySnapshot {
     let workspace = openat2;
     let namespaces = probe_bubblewrap(config);
     let cgroup = probe_cgroup(config);
-    let resource_usage = cgroup && probe_resource_usage(config);
+    let resource_usage = if cgroup {
+        probe_resource_usage(config)
+    } else {
+        None
+    };
     let lease_clock = probe_lease_clock();
     let unprivileged = effective_uid() != 0;
     let close_range = probe_close_range();
@@ -141,18 +145,8 @@ pub fn probe(config: &HostConfig, openat2: bool) -> CapabilitySnapshot {
             max_bytes: substrate_wire::MAX_STORAGE_QUOTA_BYTES,
             max_inodes: substrate_wire::MAX_STORAGE_QUOTA_INODES,
         }),
-        exec_resource_usage: (exec && resource_usage).then_some(ResourceUsageFacts {
-            wall_time: true,
-            cpu_time: true,
-            memory_current: true,
-            memory_peak: true,
-            processes_current: true,
-            processes_peak: true,
-            process_limit_hits: true,
-            memory_oom_kills: true,
-            block_io: true,
-        }),
-        metrics_stream: (exec && resource_usage).then_some(MetricsStreamFacts {
+        exec_resource_usage: resource_usage.filter(|_| exec),
+        metrics_stream: (exec && resource_usage.is_some()).then_some(MetricsStreamFacts {
             sample_interval_ms: substrate_wire::RESOURCE_USAGE_SAMPLE_INTERVAL_MS,
             latest_wins: true,
             replay: false,
@@ -245,20 +239,36 @@ fn probe_workspace_scoped_write(config: &HostConfig) -> bool {
         && !workspace.join("root-probe").exists()
 }
 
-fn probe_resource_usage(config: &HostConfig) -> bool {
-    config.cgroup_root.as_ref().is_some_and(|root| {
-        [
-            "cpu.stat",
-            "memory.current",
-            "memory.peak",
-            "memory.events",
-            "pids.current",
-            "pids.peak",
-            "pids.events",
-            "io.stat",
-        ]
-        .iter()
-        .all(|name| root.join(name).is_file())
+/// The exact counters a delegation root proves, or nothing.
+///
+/// CPU, memory and process counters are the floor: any one missing withholds the whole fact
+/// (invariant 3). Block I/O is published as observed (ADR 0032): `true` only when the root enables
+/// the `io` controller for its children, which is what puts `io.stat` in every exec cgroup. A
+/// systemd-delegated user scope carries `cpu memory pids` and no `io`, and still serves the rest.
+fn probe_resource_usage(config: &HostConfig) -> Option<ResourceUsageFacts> {
+    let root = config.cgroup_root.as_ref()?;
+    [
+        "cpu.stat",
+        "memory.current",
+        "memory.peak",
+        "memory.events",
+        "pids.current",
+        "pids.peak",
+        "pids.events",
+    ]
+    .iter()
+    .all(|name| root.join(name).is_file())
+    .then(|| ResourceUsageFacts {
+        wall_time: true,
+        cpu_time: true,
+        memory_current: true,
+        memory_peak: true,
+        processes_current: true,
+        processes_peak: true,
+        process_limit_hits: true,
+        memory_oom_kills: true,
+        block_io: std::fs::read_to_string(root.join("cgroup.subtree_control"))
+            .is_ok_and(|enabled| enabled.split_whitespace().any(|item| item == "io")),
     })
 }
 
@@ -769,6 +779,99 @@ mod tests {
         std::fs::write(&bubblewrap, b"replacement backend").unwrap();
         let second = backend_binding(&config).unwrap();
         assert_ne!(first, second);
+    }
+
+    /// A fake delegation root carrying every counter `exec.resource-usage` reads at its root, with
+    /// `controllers` both available and enabled for its children.
+    fn counter_root(directory: &Path, controllers: &str) -> PathBuf {
+        let root = directory.join("cgroup");
+        std::fs::create_dir(&root).unwrap();
+        for name in [
+            "cpu.stat",
+            "memory.current",
+            "memory.peak",
+            "memory.events",
+            "pids.current",
+            "pids.peak",
+            "pids.events",
+        ] {
+            std::fs::write(root.join(name), "0\n").unwrap();
+        }
+        std::fs::write(root.join("cgroup.controllers"), format!("{controllers}\n")).unwrap();
+        std::fs::write(
+            root.join("cgroup.subtree_control"),
+            format!("{controllers}\n"),
+        )
+        .unwrap();
+        root
+    }
+
+    const EVERY_COUNTER_BUT_BLOCK_IO: ResourceUsageFacts = ResourceUsageFacts {
+        wall_time: true,
+        cpu_time: true,
+        memory_current: true,
+        memory_peak: true,
+        processes_current: true,
+        processes_peak: true,
+        process_limit_hits: true,
+        memory_oom_kills: true,
+        block_io: false,
+    };
+
+    /// ADR 0032: a systemd-delegated scope carries `cpu memory pids` and no `io`. The fact is
+    /// still published, with `block_io: false` and every other member `true`.
+    #[test]
+    fn resource_usage_is_published_on_a_root_without_the_io_controller() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = HostConfig::minimum(directory.path().join("workspaces"));
+        config.cgroup_root = Some(counter_root(directory.path(), "cpu memory pids"));
+        assert_eq!(
+            probe_resource_usage(&config),
+            Some(EVERY_COUNTER_BUT_BLOCK_IO)
+        );
+    }
+
+    /// ADR 0032: where the root enables `io` for its children the fact is unchanged from 0.17.0.
+    #[test]
+    fn block_io_is_published_where_the_io_controller_reaches_exec_cgroups() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = HostConfig::minimum(directory.path().join("workspaces"));
+        let root = counter_root(directory.path(), "cpu io memory pids");
+        std::fs::write(root.join("io.stat"), "").unwrap();
+        config.cgroup_root = Some(root);
+        assert_eq!(
+            probe_resource_usage(&config),
+            Some(ResourceUsageFacts {
+                block_io: true,
+                ..EVERY_COUNTER_BUT_BLOCK_IO
+            })
+        );
+    }
+
+    /// `io` available on the root but not enabled for its children puts no `io.stat` in an exec
+    /// cgroup, so block I/O is not published.
+    #[test]
+    fn an_io_controller_not_enabled_for_children_is_not_block_io() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = HostConfig::minimum(directory.path().join("workspaces"));
+        let root = counter_root(directory.path(), "cpu io memory pids");
+        std::fs::write(root.join("cgroup.subtree_control"), "cpu memory pids\n").unwrap();
+        config.cgroup_root = Some(root);
+        assert_eq!(
+            probe_resource_usage(&config),
+            Some(EVERY_COUNTER_BUT_BLOCK_IO)
+        );
+    }
+
+    /// Any other missing counter still withholds the whole fact (invariant 3).
+    #[test]
+    fn a_missing_non_io_counter_withholds_the_fact() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut config = HostConfig::minimum(directory.path().join("workspaces"));
+        let root = counter_root(directory.path(), "cpu memory pids");
+        std::fs::remove_file(root.join("pids.peak")).unwrap();
+        config.cgroup_root = Some(root);
+        assert_eq!(probe_resource_usage(&config), None);
     }
 
     /// Invariant 4: `sessions.pty` is published only after a probe that observed what it publishes.

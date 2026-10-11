@@ -3179,6 +3179,19 @@ impl Cgroup {
         read_named_counter(&self.path.join("memory.events"), "oom_kill")
     }
 
+    /// Whether the kernel enabled the io controller in this cgroup, which is what gives it an
+    /// `io.stat`.
+    fn has_io_controller(&self) -> Result<bool, DriverError> {
+        let controllers =
+            std::fs::read_to_string(self.path.join("cgroup.controllers")).map_err(|error| {
+                DriverError::failed(
+                    "exec.metrics-read-failed",
+                    format!("cgroup controllers: {error}"),
+                )
+            })?;
+        Ok(controllers.split_whitespace().any(|item| item == "io"))
+    }
+
     fn resource_usage(
         &self,
         complete: bool,
@@ -3190,7 +3203,15 @@ impl Cgroup {
         let processes_peak = read_decimal_counter(&self.path.join("pids.peak"))?;
         let process_limit_hits = read_named_counter(&self.path.join("pids.events"), "max")?;
         let memory_oom_kills = self.memory_oom_kills()?;
-        let (io_read_bytes, io_write_bytes) = read_io_counters(&self.path.join("io.stat"))?;
+        // Block I/O is read only where this cgroup has the io controller; elsewhere both counters
+        // are absent, never zero (ADR 0032). A listed controller whose `io.stat` cannot be read
+        // stays a named failure.
+        let (io_read_bytes, io_write_bytes) = if self.has_io_controller()? {
+            let (read, written) = read_io_counters(&self.path.join("io.stat"))?;
+            (Some(read), Some(written))
+        } else {
+            (None, None)
+        };
         Ok(ResourceUsage {
             complete,
             observed_at: Utc::now(),
@@ -3431,6 +3452,86 @@ mod tests {
         recorded_sandboxes, recording_backend, wait_terminal_with_hook,
     };
     use crate::{DispatchOutcome, HostConfig};
+
+    /// A fake exec cgroup carrying every counter `resource_usage` reads, with `controllers` as its
+    /// own `cgroup.controllers`.
+    fn counter_cgroup(directory: &std::path::Path, controllers: &str) -> Cgroup {
+        for (name, contents) in [
+            ("cpu.stat", "usage_usec 500\nuser_usec 300\n"),
+            ("memory.current", "1024\n"),
+            ("memory.peak", "2048\n"),
+            ("memory.events", "low 0\noom_kill 0\n"),
+            ("pids.current", "1\n"),
+            ("pids.peak", "3\n"),
+            ("pids.events", "max 0\n"),
+        ] {
+            std::fs::write(directory.join(name), contents).unwrap();
+        }
+        std::fs::write(
+            directory.join("cgroup.controllers"),
+            format!("{controllers}\n"),
+        )
+        .unwrap();
+        Cgroup {
+            path: directory.to_path_buf(),
+            name: "substrate-ex_usage".to_owned(),
+        }
+    }
+
+    /// ADR 0032: an exec cgroup without the io controller has no `io.stat`, and its usage record
+    /// carries CPU, memory and process counters with both block I/O counters **absent** — the
+    /// keys are missing from the JSON, never zero.
+    #[test]
+    fn usage_without_the_io_controller_omits_block_io_counters() {
+        let directory = tempfile::tempdir().unwrap();
+        let cgroup = counter_cgroup(directory.path(), "cpu memory pids");
+        let usage = cgroup
+            .resource_usage(true, Instant::now())
+            .expect("usage is observed without io.stat");
+        let record = serde_json::to_value(&usage).unwrap();
+        assert_eq!(record["cpu_time_us"], 500);
+        assert_eq!(record["memory_peak_bytes"], 2048);
+        assert_eq!(record["processes_peak"], 3);
+        for key in ["io_read_bytes", "io_write_bytes"] {
+            assert!(
+                record.get(key).is_none(),
+                "{key} must be absent, never zero: {record}"
+            );
+        }
+    }
+
+    /// ADR 0032: with the io controller the record is unchanged from 0.17.0.
+    #[test]
+    fn usage_with_the_io_controller_reports_block_io_counters() {
+        let directory = tempfile::tempdir().unwrap();
+        let cgroup = counter_cgroup(directory.path(), "cpu io memory pids");
+        std::fs::write(
+            directory.path().join("io.stat"),
+            "8:0 rbytes=4096 wbytes=8192 rios=1 wios=2 dbytes=0 dios=0\n\
+             259:0 rbytes=1 wbytes=2 rios=1 wios=1 dbytes=0 dios=0\n",
+        )
+        .unwrap();
+        let record = serde_json::to_value(
+            cgroup
+                .resource_usage(true, Instant::now())
+                .expect("usage is observed"),
+        )
+        .unwrap();
+        assert_eq!(record["io_read_bytes"], 4097);
+        assert_eq!(record["io_write_bytes"], 8194);
+    }
+
+    /// A listed io controller whose `io.stat` cannot be read is a named failure, never a silent
+    /// absence (invariant 3).
+    #[test]
+    fn a_listed_io_controller_without_io_stat_is_a_named_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let cgroup = counter_cgroup(directory.path(), "cpu io memory pids");
+        let error = cgroup
+            .resource_usage(true, Instant::now())
+            .expect_err("a missing io.stat under a listed controller is refused");
+        assert_eq!(error.code, "exec.metrics-read-failed");
+    }
 
     /// `ProcessCgroup::create`'s quota on `main` before the ceiling was configurable, verbatim.
     fn one_core_quota_on_main(cpu_millis: u64, timeout_ms: u64) -> u64 {

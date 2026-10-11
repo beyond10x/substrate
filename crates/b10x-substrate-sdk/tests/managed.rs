@@ -308,6 +308,23 @@ async fn delegated_external_daemon_serves_pty_metrics_and_cleans_the_process_tre
             .await
             .expect("live metrics");
         assert!(matches!(metrics, MetricsObservation::Exec { .. }));
+        // ADR 0032: the block I/O counters are present exactly when the snapshot says so, and
+        // absent rather than zero on a delegation root without the io controller.
+        let block_io = managed
+            .client()
+            .machine()
+            .facts
+            .exec_resource_usage
+            .expect("metrics are supported")
+            .block_io;
+        if let MetricsObservation::Exec {
+            usage: b10x_substrate_sdk::ExecUsage::Observed(usage),
+            ..
+        } = &metrics
+        {
+            assert_eq!(usage.io_read_bytes.is_some(), block_io, "{usage:?}");
+            assert_eq!(usage.io_write_bytes.is_some(), block_io, "{usage:?}");
+        }
         let mut stream = managed
             .client()
             .metrics_stream(&exec_id)

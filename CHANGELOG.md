@@ -7,6 +7,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- Development contract bundle `substrate-wire/0.18.0` (ADR 0032), preserving every earlier bundle's
+  bytes. `exec.resource-usage.block_io` is a published boolean, and `io_read_bytes` and
+  `io_write_bytes` are optional in a usage record. The daemon and the Rust SDK advertise
+  `substrate-wire/0.18.0` with its inner manifest digest.
+
+### Changed
+
+- A host whose delegation root lacks the `io` controller, such as a systemd-delegated user scope,
+  now publishes `exec.resource-usage` with `block_io: false` and serves execution usage instead of
+  refusing it `exec.metrics-unserved`. Its usage records and metrics samples omit both block I/O
+  counters rather than reporting zero. `ResourceUsage::io_read_bytes` and `io_write_bytes` are now
+  `Option<u64>`; a consumer that required them must tolerate their absence.
+- The executable specification is pinned to ESS 0.59.0. The committed suite is regenerated in the
+  `ess-conformance/34` format, and the store's conformance runner resolves the instance values of
+  its `expect_event_values` steps.
+
+### Fixed
+
+- The MCP stdio journey checks the usage record's `wall_time_us`, the field it has always carried,
+  instead of a `wall_ms` field it never had; the check ran for the first time on a host without `io`.
+
 ## [0.7.12] — 2026-10-10
 
 Published by [release run 38003936799](https://github.com/beyond10x/substrate/actions/runs/38003936799)
