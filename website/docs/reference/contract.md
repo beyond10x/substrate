@@ -134,7 +134,9 @@ Read [operations and observations](../concepts/operations.md) for retry semantic
 Development source now advertises `substrate-wire/0.18.0`. It makes the
 `exec.resource-usage.block_io` fact a boolean: a host without the `io` controller publishes it
 `false` and omits `io_read_bytes` and `io_write_bytes` from every usage record instead of refusing
-execution usage. `0.17.0` added explicit session capture selection, content-free output counters,
+execution usage. It also adds the optional `read_only_files` start field, which binds single host
+files read-only, together with the `exec.read-only-files` fact and that field's named refusals.
+`0.17.0` added explicit session capture selection, content-free output counters,
 capture-policy refusals and attachment ceilings; existing requests retain recorded output. Earlier bundle directories remain immutable. This source contract promotion
 is not a new signed daemon release; consumers must pin and test the matching SDK/daemon revision.
 The SDK refuses an older daemon's contract before issuing mutations.

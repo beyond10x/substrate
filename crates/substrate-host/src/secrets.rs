@@ -541,6 +541,7 @@ mod tests {
             scratch: None,
             measurements: std::collections::BTreeSet::new(),
             read_only_roots: Vec::new(),
+            read_only_files: Vec::new(),
             secret_slots: slots,
             capsule: None,
             lease_ttl_ms: None,
@@ -736,6 +737,7 @@ mod tests {
             profile: SandboxProfile::Workspace,
             capsule: None,
             read_only_roots: Vec::new(),
+            read_only_files: Vec::new(),
             secret_slots: requests.clone(),
         };
         let applied_json = serde_json::to_string(&applied).expect("applied record");

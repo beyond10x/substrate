@@ -43,7 +43,7 @@ pub use substrate_wire::{
     GitChangeStatus, GitChangesQuery, GitSource, GitSourceEnvelope, LinePatchEdit,
     MAX_EVENT_PAGE_ITEMS, MAX_FILE_BYTES, MAX_IO_BYTES, MAX_LIST_ITEMS, MAX_PTY_WINDOW_COLUMNS,
     MAX_PTY_WINDOW_ROWS, MAX_SNAPSHOT_PAGE_ITEMS, MetricsResourceKind, PipeSessionCapabilities,
-    PtyWindow, RESOURCE_USAGE_SAMPLE_INTERVAL_MS, ReadOnlyRoot, SecretSlotRequest,
+    PtyWindow, RESOURCE_USAGE_SAMPLE_INTERVAL_MS, ReadOnlyFile, ReadOnlyRoot, SecretSlotRequest,
     SessionAttachmentState, SessionMode, SnapshotMetadata, SnapshotPage, StorageLimit,
     TextMatchPolicy, UnifiedDiff, WorkspaceAccess, WorkspaceTree, WorkspaceTreeEntry,
 };
@@ -662,6 +662,7 @@ impl Workspace {
             scratch: None,
             measurements: BTreeSet::new(),
             read_only_roots: Vec::new(),
+            read_only_files: Vec::new(),
             secret_slots: Vec::new(),
             capsule: None,
             policy: None,
@@ -683,6 +684,7 @@ impl Workspace {
             scratch: None,
             measurements: BTreeSet::new(),
             read_only_roots: Vec::new(),
+            read_only_files: Vec::new(),
             secret_slots: Vec::new(),
             capsule: None,
             policy: None,
@@ -1088,6 +1090,7 @@ pub struct CommandBuilder {
     scratch: Option<StorageLimit>,
     measurements: BTreeSet<ExecMeasurement>,
     read_only_roots: Vec<ReadOnlyRoot>,
+    read_only_files: Vec<ReadOnlyFile>,
     secret_slots: Vec<SecretSlotRequest>,
     capsule: Option<ExecutionCapsuleInput>,
     policy: Option<ExecutionPolicy>,
@@ -1108,6 +1111,7 @@ pub struct PipeSessionBuilder {
     scratch: Option<StorageLimit>,
     measurements: BTreeSet<ExecMeasurement>,
     read_only_roots: Vec<ReadOnlyRoot>,
+    read_only_files: Vec<ReadOnlyFile>,
     secret_slots: Vec<SecretSlotRequest>,
     capsule: Option<ExecutionCapsuleInput>,
     policy: Option<ExecutionPolicy>,
@@ -1175,6 +1179,12 @@ impl PipeSessionBuilder {
 
     pub fn read_only_root(mut self, root: ReadOnlyRoot) -> Self {
         self.read_only_roots.push(root);
+        self
+    }
+
+    /// Declares one host file read-only at a mount (ADR 0033).
+    pub fn read_only_file(mut self, file: ReadOnlyFile) -> Self {
+        self.read_only_files.push(file);
         self
     }
 
@@ -1277,6 +1287,7 @@ impl PipeSessionBuilder {
             scratch: self.scratch,
             measurements: self.measurements,
             read_only_roots: self.read_only_roots,
+            read_only_files: self.read_only_files,
             secret_slots: self.secret_slots,
             capsule: self.capsule,
             lease_ttl_ms: Some(required_duration_millis(lease_ttl)?),
@@ -1635,6 +1646,12 @@ impl CommandBuilder {
         self
     }
 
+    /// Declares one host file read-only at a mount (ADR 0033).
+    pub fn read_only_file(mut self, file: ReadOnlyFile) -> Self {
+        self.read_only_files.push(file);
+        self
+    }
+
     pub fn secret_slot(mut self, slot: SecretSlotRequest) -> Self {
         self.secret_slots.push(slot);
         self
@@ -1710,6 +1727,7 @@ impl CommandBuilder {
             scratch: self.scratch,
             measurements: self.measurements,
             read_only_roots: self.read_only_roots,
+            read_only_files: self.read_only_files,
             secret_slots: self.secret_slots,
             capsule: self.capsule,
             lease_ttl_ms: duration_millis(self.lease_ttl)?,
@@ -2059,6 +2077,7 @@ mod tests {
             scratch: None,
             measurements: BTreeSet::new(),
             read_only_roots: Vec::new(),
+            read_only_files: Vec::new(),
             secret_slots: Vec::new(),
             capsule: None,
             lease_ttl_ms: None,
@@ -2072,7 +2091,13 @@ mod tests {
         let object = value.as_object().expect("mutation object");
         assert!(!object.contains_key("delegated_context"));
         let input = object["input"].as_object().expect("input object");
-        for later in ["scratch", "measurements", "read_only_roots", "secret_slots"] {
+        for later in [
+            "scratch",
+            "measurements",
+            "read_only_roots",
+            "read_only_files",
+            "secret_slots",
+        ] {
             assert!(!input.contains_key(later), "unexpected {later}");
         }
         assert!(

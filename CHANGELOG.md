@@ -13,6 +13,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   bytes. `exec.resource-usage.block_io` is a published boolean, and `io_read_bytes` and
   `io_write_bytes` are optional in a usage record. The daemon and the Rust SDK advertise
   `substrate-wire/0.18.0` with its inner manifest digest.
+- A single host file can be admitted read-only (ADR 0033). The optional `read_only_files` start
+  field, beside `read_only_roots`, binds each declared regular file read-only at its mount through
+  a descriptor pinned at admission, which bubblewrap mounts and closes before the program starts;
+  none of its host siblings becomes visible. Up to 16 files are
+  admitted, the bound the new `exec.read-only-files` capability fact publishes. The applied
+  confinement observation lists every bound file. A list over the bound, a non-canonical path (one
+  carrying a NUL, over 4000 bytes, with a component over 255 bytes or over 64 components deep), a
+  mount that collides with an owned mount, a declared root or another file, a duplicate mount, an
+  absent path, a symlink in any component and a non-regular file are each refused by name before
+  dispatch; a host that has not proved the mechanism refuses `exec.read-only-files-unserved`. The
+  Rust SDK gains `read_only_file` on its exec and session builders. Bundle `0.18.0`, not yet
+  released, carries the field, fact, observation and refusal set, and its advertised digest moves
+  accordingly. The runtime vectors grow to 76 portable and 106 delegated cases.
 
 ### Changed
 
@@ -29,6 +42,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 - The MCP stdio journey checks the usage record's `wall_time_us`, the field it has always carried,
   instead of a `wall_ms` field it never had; the check ran for the first time on a host without `io`.
+- A `read_only_roots` host path or mount carrying a NUL byte is refused by the lexical check as
+  `exec.read-only-root-invalid`, rather than by whatever filesystem or spawn step met it later.
+
+### Security
+
+- A read-only or scoped workspace (ADR 0023) no longer hands its pinned root descriptor to the
+  confined program. Bubblewrap was given `/proc/self/fd/<n>` as a path, so the descriptor stayed
+  open in the program, which could reopen it for writing on the host's writable mount and write
+  anywhere in a workspace it was granted read-only, or outside its writable subtrees. This was
+  present in every release since `0.4.0`. The workspace descriptors are now bound with
+  `--ro-bind-fd` and `--bind-fd`, which close them before the program starts, and the scoped-write
+  probe withholds `exec.workspace-scoped-write` unless it finds no such descriptor in the program.
+- A secret slot declared at a driver-owned descriptor number could replace the seccomp program or
+  the launch barrier (or, with an egress aperture, the info pipe) that bubblewrap consumes: a slot
+  on the seccomp descriptor was installed as the filter, so the program ran without Substrate's
+  profile, and a slot on the barrier released bubblewrap before the cgroup attach. Driver
+  descriptors now sit above the slot range, close-on-exec in the daemon and inherited only by the
+  one bubblewrap child, and a start in which any of them lies in the slot range is refused before
+  the spawn.
 
 ## [0.7.12] — 2026-10-10
 

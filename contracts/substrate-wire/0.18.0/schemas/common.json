@@ -43,6 +43,12 @@
       "pattern": "^ex_[A-Za-z0-9]+$",
       "type": "string"
     },
+    "host-absolute-path": {
+      "description": "Absolute and canonical: every component non-empty, never `.` or `..`, no NUL, no trailing slash. At most 64 components, each at most 255 UTF-8 bytes, and at most 4000 UTF-8 bytes in all; `maxLength` and the pattern count characters, so the byte bounds are the stricter for a non-ASCII path.",
+      "maxLength": 4000,
+      "pattern": "^(?:/(?!\\.\\.?(?:/|$))[^/\\u0000]{1,255}){1,64}$",
+      "type": "string"
+    },
     "labels": {
       "additionalProperties": {
         "maxLength": 256,
@@ -65,6 +71,105 @@
       "maximum": 18446744073709551615,
       "minimum": 1,
       "type": "integer"
+    },
+    "read-only-file": {
+      "additionalProperties": false,
+      "description": "A single host file bound read-only at one mount (ADR 0033).",
+      "properties": {
+        "host_path": {
+          "$ref": "#/$defs/host-absolute-path",
+          "x-b10x-host-object": "an-existing-regular-file-reached-without-any-symlink-component-pinned-at-admission"
+        },
+        "mount": {
+          "$ref": "#/$defs/host-absolute-path",
+          "x-b10x-not-equal-beneath-or-above": [
+            "/",
+            "/usr",
+            "/bin",
+            "/lib",
+            "/lib64",
+            "/proc",
+            "/dev",
+            "/tmp",
+            "/workspace",
+            "/runtime",
+            "/scratch",
+            "/etc/hosts",
+            "/etc/ssl/certs/ca-certificates.crt",
+            "every-declared-read-only-root-mount",
+            "every-other-declared-read-only-file-mount"
+          ]
+        }
+      },
+      "required": [
+        "host_path",
+        "mount"
+      ],
+      "type": "object"
+    },
+    "read-only-files": {
+      "description": "Declared read-only host files (ADR 0033). Every rule is checked before dispatch; a refused file refuses the start.",
+      "items": {
+        "$ref": "#/$defs/read-only-file"
+      },
+      "maxItems": 16,
+      "type": "array",
+      "x-b10x-failures": [
+        {
+          "class": "failed",
+          "code": "exec.read-only-file-pin-failed",
+          "status": 500
+        }
+      ],
+      "x-b10x-refusals": [
+        {
+          "class": "refused",
+          "code": "exec.read-only-files-exceeded",
+          "status": 422
+        },
+        {
+          "class": "refused",
+          "code": "exec.read-only-file-path-invalid",
+          "status": 422
+        },
+        {
+          "class": "refused",
+          "code": "exec.read-only-file-mount-reserved",
+          "status": 422
+        },
+        {
+          "class": "refused",
+          "code": "exec.read-only-file-mount-overlap",
+          "status": 422
+        },
+        {
+          "class": "refused",
+          "code": "exec.read-only-file-mount-duplicate",
+          "status": 422
+        },
+        {
+          "class": "unserved",
+          "code": "exec.read-only-files-unserved",
+          "status": 501
+        },
+        {
+          "class": "refused",
+          "code": "exec.read-only-file-absent",
+          "status": 422
+        },
+        {
+          "class": "refused",
+          "code": "exec.read-only-file-symlink",
+          "status": 422
+        },
+        {
+          "class": "refused",
+          "code": "exec.read-only-file-not-a-file",
+          "status": 422
+        }
+      ],
+      "x-b10x-requires-capability": "exec.read-only-files",
+      "x-b10x-unique": "mount"
     },
     "relative-path": {
       "maxLength": 4096,

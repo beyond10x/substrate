@@ -44,7 +44,9 @@ Each is a claim that can be checked. Breaking one is a design change, not a refa
    (`adr/0005-operations-are-durable-before-driver-dispatch.md`).
 6. **Every released contract bundle directory is immutable.** `contracts/substrate-wire/0.1.0`
    through `0.18.0` exist; `0.18.0` makes `exec.resource-usage.block_io` a published boolean and
-   the block I/O usage counters optional, absent on a host without the io controller (ADR 0032);
+   the block I/O usage counters optional, absent on a host without the io controller (ADR 0032),
+   and adds the optional `read_only_files` start field, the `exec.read-only-files` fact and nine
+   named refusals for binding a single host file read-only (ADR 0033);
    `0.17.0` added policy-controlled unrecorded terminal streaming (design 23). `0.16.0` added
    Connector-authorized
    Git source fields, the conditional `workspace.git` capability and two bounded Git observation
@@ -207,7 +209,7 @@ already ahead of `0.4.0` — `ExecStartInput::read_only_roots` (the `ExecStartIn
 `crates/substrate-wire/src/lib.rs`) has no `0.4.0` schema — and no bound sits *on* a type as a
 derive attribute. The bounds the schemas state are free constants: the wire crate's own
 `pub const MAX_…`/`MIN_…` items (`grep -c '^pub const \(MAX\|MIN\)_' crates/substrate-wire/src/lib.rs`
-= 31), which a schema binds with the `{"$wire": "CONSTANT"}` marker, plus the daemon- and
+= 34), which a schema binds with the `{"$wire": "CONSTANT"}` marker, plus the daemon- and
 host-local literals their enforcement sites hold — `PIPE_MAX_FRAME_BYTES`,
 `PIPE_MAX_INPUT_BYTES` and `PIPE_MAX_QUEUED_FRAMES` in `crates/substrate-daemon/src/app.rs`, and
 `PIPE_FRAME_BYTES` and `PIPE_QUEUED_FRAMES` in `crates/substrate-host/src/process.rs`.
@@ -224,8 +226,9 @@ reason.** `crates/substrate-daemon/tests/runtime_vectors.rs` spawns the *shipped
 hand-written HTTP/1.1 and WebSocket client, so it links no implementation and asserts only on
 the wire; `cargo test --workspace --release --locked` runs it. Its portable lane asserts three named
 refusals — `exec.sandbox-unavailable` (501), `exec.secret-slots-unserved` (501) and
-`exec.secret-slot-descriptor-invalid` (422) — plus `session.pty-unserved` (501) — across 70 cases,
-and its delegated lane 97. Both totals include one route/refusal probe for every operation in the
+`exec.secret-slot-descriptor-invalid` (422) — plus `session.pty-unserved` (501), the five lexical
+`exec.read-only-file*` refusals (422) and `exec.read-only-files-unserved` (501) — across 76 cases,
+and its delegated lane 106. Both totals include one route/refusal probe for every operation in the
 promoted registry; the delegated cases also include an interactive shell driven through a `pty` session
 (`crates/substrate-daemon/tests/runtime_vectors.rs`, `PORTABLE_CASES` and `DELEGATED_CASES`). Its delegated lane runs only when
 `SUBSTRATE_VECTORS_CGROUP_ROOT` names a delegated cgroup v2 subtree the test process is inside;

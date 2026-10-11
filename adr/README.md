@@ -38,3 +38,4 @@ with YAML frontmatter containing `date` and `status`. Draft design questions rem
 | [0030](0030-rust-crates-are-source-distributed-and-non-publishable.md) | Rust crates are source-distributed and non-publishable | accepted |
 | [0031](0031-live-output-backpressure-has-a-stall-deadline.md) | Live output backpressure has a stall deadline | accepted |
 | [0032](0032-exec-usage-without-block-io.md) | Exec usage is served without block I/O | accepted |
+| [0033](0033-a-single-host-file-is-admitted-read-only.md) | A single host file is admitted read-only | accepted |

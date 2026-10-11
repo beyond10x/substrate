@@ -291,6 +291,9 @@
     },
     "workspace_access": {
       "$ref": "../common.json#/$defs/workspace-access"
+    },
+    "read_only_files": {
+      "$ref": "../common.json#/$defs/read-only-files"
     }
   },
   "required": [

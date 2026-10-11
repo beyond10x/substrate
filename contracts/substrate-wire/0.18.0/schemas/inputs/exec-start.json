@@ -183,6 +183,9 @@
       "type": "array",
       "uniqueItems": true
     },
+    "read_only_files": {
+      "$ref": "../common.json#/$defs/read-only-files"
+    },
     "sandbox": {
       "additionalProperties": false,
       "allOf": [

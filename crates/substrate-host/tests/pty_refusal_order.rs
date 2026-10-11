@@ -52,6 +52,7 @@ fn pty_start(snapshot: &str, window: Option<substrate_wire::PtyWindow>) -> PipeS
             scratch: None,
             measurements: std::collections::BTreeSet::new(),
             read_only_roots: Vec::new(),
+            read_only_files: Vec::new(),
             secret_slots: Vec::new(),
             capsule: None,
             lease_ttl_ms: Some(60_000),

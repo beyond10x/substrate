@@ -119,6 +119,15 @@
             },
             "workspace_access": {
               "$ref": "common.json#/$defs/workspace-access"
+            },
+            "read_only_files": {
+              "items": {
+                "$ref": "common.json#/$defs/read-only-file"
+              },
+              "maxItems": 16,
+              "minItems": 1,
+              "type": "array",
+              "x-b10x-applied-not-requested": "what-was-bound"
             }
           },
           "required": [
@@ -219,6 +228,15 @@
             },
             "workspace_access": {
               "$ref": "common.json#/$defs/workspace-access"
+            },
+            "read_only_files": {
+              "items": {
+                "$ref": "common.json#/$defs/read-only-file"
+              },
+              "maxItems": 16,
+              "minItems": 1,
+              "type": "array",
+              "x-b10x-applied-not-requested": "what-was-bound"
             }
           },
           "required": [

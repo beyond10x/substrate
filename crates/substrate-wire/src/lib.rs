@@ -17,7 +17,7 @@ pub const API_VERSION: &str = "v1";
 /// Moving either member is an explicit coordinated promotion (Atlas ADR 0019).
 pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.18.0";
 pub const ADVERTISED_CONTRACT_BUNDLE_SHA256: &str =
-    "3e0b1b340244afdf18a26e492f75bd52b27ad51c34a201afce2a14ab6fb3fc75";
+    "3fe64bf0873e07b1cda16a05ca641d976513306f2626e99b98954750fb605d1e";
 pub const MAX_FILE_BYTES: u64 = 1_048_576;
 pub const MAX_IO_BYTES: u64 = 1_048_576;
 pub const MAX_LIST_ITEMS: u32 = 1_000;
@@ -41,6 +41,62 @@ pub const EXEC_SCRATCH_MOUNT: &str = "/scratch";
 /// Small on purpose. A closure that needs many roots is a closure that should be assembled rather
 /// than enumerated, and a long list is a request nobody reviewed.
 pub const MAX_READ_ONLY_ROOTS: u32 = 4;
+/// How many single host files one start may declare read-only (ADR 0033).
+///
+/// Enough for the handful of programs and configuration files one gate run names, and too few to
+/// rebuild a directory file by file: a closure that needs more is a root or a capsule. It also
+/// bounds what one start adds to the confinement command — this many pinned descriptors and three
+/// bubblewrap arguments each.
+pub const MAX_READ_ONLY_FILES: u32 = 16;
+/// Longest declared read-only file `host_path` or `mount`, in UTF-8 bytes (ADR 0033).
+///
+/// Below the kernel's 4096-byte `PATH_MAX`, terminator included, with room for the prefix the
+/// confinement backend puts in front of a mount while it builds the sandbox root (bubblewrap
+/// prepends `/newroot`; measured, a 4087-byte mount binds and a 4088-byte one fails). So no path
+/// this crate admits reaches the kernel's name-length refusal. Bytes, not characters: the kernel
+/// counts bytes, and the bundle's `maxLength` counts characters, so the schema states the same
+/// number and this crate is the stricter of the two for a non-ASCII path.
+pub const MAX_READ_ONLY_FILE_PATH_BYTES: usize = 4_000;
+/// Longest component of a declared read-only file path, in UTF-8 bytes: the kernel's `NAME_MAX`
+/// (ADR 0033).
+pub const MAX_READ_ONLY_FILE_COMPONENT_BYTES: usize = 255;
+/// `read_only_files` holds more entries than [`MAX_READ_ONLY_FILES`] (ADR 0033).
+pub const READ_ONLY_FILES_EXCEEDED: &str = "exec.read-only-files-exceeded";
+/// A declared file's host path or mount is not absolute and canonical (ADR 0033).
+pub const READ_ONLY_FILE_PATH_INVALID: &str = "exec.read-only-file-path-invalid";
+/// A declared file's mount equals, lies beneath or contains a mount substrate owns (ADR 0033).
+pub const READ_ONLY_FILE_MOUNT_RESERVED: &str = "exec.read-only-file-mount-reserved";
+/// A declared file's mount collides with a declared root, or nests with another file (ADR 0033).
+pub const READ_ONLY_FILE_MOUNT_OVERLAP: &str = "exec.read-only-file-mount-overlap";
+/// Two declared files name the same mount (ADR 0033).
+pub const READ_ONLY_FILE_MOUNT_DUPLICATE: &str = "exec.read-only-file-mount-duplicate";
+/// Files were declared and the capability snapshot publishes no `exec.read-only-files` (ADR 0033).
+pub const READ_ONLY_FILES_UNSERVED: &str = "exec.read-only-files-unserved";
+/// A declared file's host path is not present on this host (ADR 0033).
+pub const READ_ONLY_FILE_ABSENT: &str = "exec.read-only-file-absent";
+/// A declared file's host path is reached through a symlink, in any component (ADR 0033).
+pub const READ_ONLY_FILE_SYMLINK: &str = "exec.read-only-file-symlink";
+/// A declared file's host path is not a regular file (ADR 0033).
+pub const READ_ONLY_FILE_NOT_A_FILE: &str = "exec.read-only-file-not-a-file";
+/// A declared file passed every rule and its descriptor could not be pinned (ADR 0033).
+///
+/// Machinery failure, not a refusal: the caller's request was admissible.
+pub const READ_ONLY_FILE_PIN_FAILED: &str = "exec.read-only-file-pin-failed";
+/// Every refusal a declared read-only file can raise, all before dispatch (ADR 0033).
+///
+/// The one place the set is written down: the daemon and the host bind their codes from the
+/// constants above, and the `0.18.0` additions check asks the bundle to publish exactly this set.
+pub const READ_ONLY_FILE_REFUSAL_CODES: [&str; 9] = [
+    READ_ONLY_FILES_EXCEEDED,
+    READ_ONLY_FILE_PATH_INVALID,
+    READ_ONLY_FILE_MOUNT_RESERVED,
+    READ_ONLY_FILE_MOUNT_OVERLAP,
+    READ_ONLY_FILE_MOUNT_DUPLICATE,
+    READ_ONLY_FILES_UNSERVED,
+    READ_ONLY_FILE_ABSENT,
+    READ_ONLY_FILE_SYMLINK,
+    READ_ONLY_FILE_NOT_A_FILE,
+];
 /// Largest number of distinct writable workspace subtrees in one execution.
 pub const MAX_WORKSPACE_WRITABLE_SUBTREES: u32 = 64;
 /// How many secret slots one start may name (ADR 0012).
@@ -1281,6 +1337,9 @@ pub struct AppliedConfinement {
     /// visible.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub read_only_roots: Vec<ReadOnlyRoot>,
+    /// Every declared host file that was bound read-only (ADR 0033), listed as roots are.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub read_only_files: Vec<ReadOnlyFile>,
     /// Every secret slot that was placed, by name and descriptor (ADR 0012).
     ///
     /// An auditor sees that this run held `vendor_api_key` and where it arrived, and never what was
@@ -1549,6 +1608,12 @@ pub struct ExecStartInput {
     /// package registry — for a process that still has no network to fetch one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub read_only_roots: Vec<ReadOnlyRoot>,
+    /// Single host files admitted read-only inside this process (ADR 0033).
+    ///
+    /// One program or one configuration file, without the directory around it. Empty on every
+    /// existing consumer, and skipped when empty, so an unchanged start hashes as it always did.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub read_only_files: Vec<ReadOnlyFile>,
     /// Operator-declared credentials this start wants, and the descriptors they must arrive at
     /// (ADR 0012).
     ///
@@ -2526,6 +2591,13 @@ pub struct CapabilityFacts {
     pub exec_inline_capsule: Option<ExecutionCapsuleFacts>,
     #[serde(rename = "exec.scratch-quota", skip_serializing_if = "Option::is_none")]
     pub exec_scratch_quota: Option<ScratchQuotaFacts>,
+    /// The served bound on declared read-only host files (ADR 0033). Absent leaves every start
+    /// that declares one `exec.read-only-files-unserved`.
+    #[serde(
+        rename = "exec.read-only-files",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub exec_read_only_files: Option<ReadOnlyFileFacts>,
     #[serde(
         rename = "exec.resource-usage",
         skip_serializing_if = "Option::is_none"
@@ -2606,6 +2678,7 @@ impl Default for CapabilityFacts {
             exec_signals: None,
             exec_inline_capsule: None,
             exec_scratch_quota: None,
+            exec_read_only_files: None,
             exec_resource_usage: None,
             metrics_stream: None,
             exec_egress_apertures: None,
@@ -2632,6 +2705,16 @@ pub struct ScratchQuotaFacts {
     pub allocation_unit_bytes: u64,
     pub max_bytes: u64,
     pub max_inodes: u64,
+}
+
+/// The served bound on declared read-only host files (ADR 0033).
+///
+/// Published only after a startup probe bound a pinned regular file read-only in a throwaway
+/// sandbox, executed it, failed to write it and found none of its siblings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadOnlyFileFacts {
+    pub max_files: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -2773,6 +2856,16 @@ pub enum WireValidationError {
     DuplicateReadOnlyRootMount,
     #[error("two declared read-only root mount trees overlap")]
     OverlappingReadOnlyRootMount,
+    #[error("declared read-only files are outside the closed bounds")]
+    InvalidReadOnlyFileBounds,
+    #[error("a declared read-only file path is not absolute and canonical")]
+    InvalidReadOnlyFilePath,
+    #[error("a declared read-only file mount collides with one substrate owns")]
+    ReservedReadOnlyFileMount,
+    #[error("a declared read-only file mount overlaps a declared root or another file")]
+    OverlappingReadOnlyFileMount,
+    #[error("two declared read-only files name the same mount point")]
+    DuplicateReadOnlyFileMount,
     #[error("writable workspace subtrees are outside the closed bounds")]
     InvalidWorkspaceAccessBounds,
     #[error("a writable workspace subtree is not a safe relative path")]
@@ -2943,22 +3036,7 @@ pub fn validate_read_only_roots(roots: &[ReadOnlyRoot]) -> Result<(), WireValida
         if !is_absolute_canonical(&root.host_path) || !is_absolute_canonical(&root.mount) {
             return Err(WireValidationError::InvalidReadOnlyRootPath);
         }
-        let owned_mount = RESERVED_MOUNTS
-            .iter()
-            .copied()
-            .chain([
-                EXECUTION_CAPSULE_MOUNT,
-                EXEC_SCRATCH_MOUNT,
-                APERTURE_HOSTS_PATH,
-                APERTURE_CA_BUNDLE_PATH,
-            ])
-            .any(|owned| {
-                root.mount == owned
-                    || (owned != "/"
-                        && (is_path_beneath(&root.mount, owned)
-                            || is_path_beneath(owned, &root.mount)))
-            });
-        if owned_mount {
+        if collides_with_owned_mount(&root.mount) {
             return Err(WireValidationError::ReservedReadOnlyRootMount);
         }
         if !seen.insert(root.mount.as_str()) {
@@ -2972,6 +3050,96 @@ pub fn validate_read_only_roots(roots: &[ReadOnlyRoot]) -> Result<(), WireValida
         }
     }
     Ok(())
+}
+
+/// Whether a caller's mount point equals, lies beneath or contains a mount substrate owns.
+fn collides_with_owned_mount(mount: &str) -> bool {
+    RESERVED_MOUNTS
+        .iter()
+        .copied()
+        .chain([
+            EXECUTION_CAPSULE_MOUNT,
+            EXEC_SCRATCH_MOUNT,
+            APERTURE_HOSTS_PATH,
+            APERTURE_CA_BUNDLE_PATH,
+        ])
+        .any(|owned| {
+            mount == owned
+                || (owned != "/"
+                    && (is_path_beneath(mount, owned) || is_path_beneath(owned, mount)))
+        })
+}
+
+/// A single host file admitted read-only inside a confined process (ADR 0033).
+///
+/// The file counterpart of [`ReadOnlyRoot`]: one program or one configuration file at one mount,
+/// and nothing else from the directory it lives in. Substrate knows nothing about what it is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadOnlyFile {
+    /// The host file, absolute and canonical; a regular file reached without any symlink.
+    pub host_path: String,
+    /// Where it appears inside, absolute and canonical.
+    pub mount: String,
+}
+
+/// Checks a start's declared files against every lexical rule ADR 0033 names.
+///
+/// `roots` are the same start's declared roots: a file may not land on, beneath or above one.
+/// Whether the host path exists, is a regular file and is reached without a symlink are the
+/// driver's questions, because this crate performs no I/O.
+///
+/// # Errors
+///
+/// Returns the first rule that was broken; [`read_only_file_refusal`] names its code. **Nothing is
+/// adjusted**: a file that cannot be bound as asked refuses the dispatch.
+pub fn validate_read_only_files(
+    files: &[ReadOnlyFile],
+    roots: &[ReadOnlyRoot],
+) -> Result<(), WireValidationError> {
+    if files.len() > MAX_READ_ONLY_FILES as usize {
+        return Err(WireValidationError::InvalidReadOnlyFileBounds);
+    }
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for file in files {
+        if !is_bounded_file_path(&file.host_path) || !is_bounded_file_path(&file.mount) {
+            return Err(WireValidationError::InvalidReadOnlyFilePath);
+        }
+        if collides_with_owned_mount(&file.mount) {
+            return Err(WireValidationError::ReservedReadOnlyFileMount);
+        }
+        if roots.iter().any(|root| {
+            root.mount == file.mount
+                || is_path_beneath(&file.mount, &root.mount)
+                || is_path_beneath(&root.mount, &file.mount)
+        }) {
+            return Err(WireValidationError::OverlappingReadOnlyFileMount);
+        }
+        if !seen.insert(file.mount.as_str()) {
+            return Err(WireValidationError::DuplicateReadOnlyFileMount);
+        }
+        if seen
+            .iter()
+            .any(|other| is_path_beneath(other, &file.mount) || is_path_beneath(&file.mount, other))
+        {
+            return Err(WireValidationError::OverlappingReadOnlyFileMount);
+        }
+    }
+    Ok(())
+}
+
+/// The published refusal code for a lexical read-only file rule (ADR 0033), or `None` for any
+/// other validation error.
+#[must_use]
+pub const fn read_only_file_refusal(error: &WireValidationError) -> Option<&'static str> {
+    match error {
+        WireValidationError::InvalidReadOnlyFileBounds => Some(READ_ONLY_FILES_EXCEEDED),
+        WireValidationError::InvalidReadOnlyFilePath => Some(READ_ONLY_FILE_PATH_INVALID),
+        WireValidationError::ReservedReadOnlyFileMount => Some(READ_ONLY_FILE_MOUNT_RESERVED),
+        WireValidationError::OverlappingReadOnlyFileMount => Some(READ_ONLY_FILE_MOUNT_OVERLAP),
+        WireValidationError::DuplicateReadOnlyFileMount => Some(READ_ONLY_FILE_MOUNT_DUPLICATE),
+        _ => None,
+    }
 }
 
 /// Checks the closed, lexical portion of ADR 0023's workspace access contract.
@@ -3232,7 +3400,13 @@ pub fn validate_session_window(
 /// Canonical in the textual sense only. Whether the host path exists and is a directory is the
 /// driver's question, because only it can answer without racing.
 fn is_absolute_canonical(path: &str) -> bool {
-    if !path.starts_with('/') || path.len() > 1 && path.ends_with('/') || path.contains("//") {
+    // A NUL ends the string the kernel sees, so a path carrying one names a different path than the
+    // one admitted; the published `host-absolute-path` pattern excludes it as well.
+    if !path.starts_with('/')
+        || path.len() > 1 && path.ends_with('/')
+        || path.contains("//")
+        || path.contains('\0')
+    {
         return false;
     }
     let components: Vec<&str> = path
@@ -3243,6 +3417,16 @@ fn is_absolute_canonical(path: &str) -> bool {
     !components.is_empty()
         && components.len() <= MAX_PATH_DEPTH
         && components.iter().all(|part| *part != "." && *part != "..")
+}
+
+/// [`is_absolute_canonical`], within the byte bounds the `0.18.0` `host-absolute-path` definition
+/// publishes for a declared read-only file (ADR 0033): the whole path and every component.
+fn is_bounded_file_path(path: &str) -> bool {
+    is_absolute_canonical(path)
+        && path.len() <= MAX_READ_ONLY_FILE_PATH_BYTES
+        && path
+            .split('/')
+            .all(|part| part.len() <= MAX_READ_ONLY_FILE_COMPONENT_BYTES)
 }
 
 /// Validates all capsule bytes and returns the exact admitted size observation.
@@ -4726,3 +4910,6 @@ mod egress_aperture_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod read_only_file_tests;
