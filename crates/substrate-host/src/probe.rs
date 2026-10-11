@@ -145,6 +145,12 @@ pub fn probe(config: &HostConfig, openat2: bool) -> CapabilitySnapshot {
             max_bytes: substrate_wire::MAX_STORAGE_QUOTA_BYTES,
             max_inodes: substrate_wire::MAX_STORAGE_QUOTA_INODES,
         }),
+        // The mechanism itself in a throwaway sandbox — a pinned file bound, run, refused a write,
+        // found alone and held by no descriptor in the program — and never a constant (ADR 0033).
+        // Gated on `exec`: the bind rides the floor.
+        exec_read_only_files: crate::read_only_files::fact(
+            exec && crate::read_only_files::mechanism_is_provable(&config.bubblewrap),
+        ),
         exec_resource_usage: resource_usage.filter(|_| exec),
         metrics_stream: (exec && resource_usage.is_some()).then_some(MetricsStreamFacts {
             sample_interval_ms: substrate_wire::RESOURCE_USAGE_SAMPLE_INTERVAL_MS,
@@ -179,7 +185,9 @@ pub fn probe(config: &HostConfig, openat2: bool) -> CapabilitySnapshot {
 }
 
 /// Proves ADR 0023's mount ordering in a disposable tree rather than publishing it from a
-/// bubblewrap version or a constant.
+/// bubblewrap version or a constant, through the driver's own pinning and descriptor binds — and
+/// that the program holds none of those descriptors: none resolves to the workspace or the subtree,
+/// and a write through every descriptor it holds lands nowhere in the workspace.
 fn probe_workspace_scoped_write(config: &HostConfig) -> bool {
     let Ok(root) = tempfile::tempdir() else {
         return false;
@@ -190,7 +198,29 @@ fn probe_workspace_scoped_write(config: &HostConfig) -> bool {
     if std::fs::create_dir_all(&allowed).is_err() || std::fs::create_dir_all(&blocked).is_err() {
         return false;
     }
-    let status = Command::new(&config.bubblewrap)
+    let Ok(Some(pinned)) = crate::process::ProcessRuntime::prepare_workspace_access(
+        &workspace,
+        &substrate_wire::WorkspaceAccess::Scoped {
+            writable_subtrees: vec!["allowed".to_owned()],
+        },
+    ) else {
+        return false;
+    };
+    let descriptors = pinned.raw_fds();
+    let script = format!(
+        "echo yes >allowed/probe && ! echo no >blocked/probe && ! echo no >root-probe && {}",
+        crate::process::no_descriptor_resolves_to(
+            &["/workspace", "/workspace/allowed"],
+            "/descriptor-probe"
+        )
+    );
+    let mut command = Command::new(&config.bubblewrap);
+    // SAFETY: `pre_exec` runs after the fork and calls only async-signal-safe `fcntl`; the vector is
+    // built before the fork and only read after it.
+    unsafe {
+        command.pre_exec(move || crate::process::inherit(&descriptors));
+    }
+    let status = command
         .env_clear()
         .args(crate::process::USER_NAMESPACE_ARGV)
         .args([
@@ -217,23 +247,15 @@ fn probe_workspace_scoped_write(config: &HostConfig) -> bool {
             "/proc",
             "--dev",
             "/dev",
-            "--ro-bind",
         ])
-        .arg(&workspace)
-        .arg("/workspace")
-        .arg("--bind")
-        .arg(&allowed)
-        .arg("/workspace/allowed")
-        .args([
-            "--chdir",
-            "/workspace",
-            "--",
-            "/bin/sh",
-            "-c",
-            "echo yes >allowed/probe && ! echo no >blocked/probe && ! echo no >root-probe",
-        ])
+        .args(pinned.bind_args())
+        .args(["--chdir", "/workspace", "--", "/bin/sh", "-c"])
+        .arg(script)
         .status();
+    drop(pinned);
     status.is_ok_and(|status| status.success())
+        && !workspace.join("descriptor-probe").exists()
+        && !allowed.join("descriptor-probe").exists()
         && allowed.join("probe").is_file()
         && !blocked.join("probe").exists()
         && !workspace.join("root-probe").exists()

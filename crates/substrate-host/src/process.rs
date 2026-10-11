@@ -63,6 +63,44 @@ const PIPE_OUTPUT_STALL_TIMEOUT: Duration = Duration::from_secs(1);
 /// (invariant 3).
 pub(crate) const USER_NAMESPACE_ARGV: [&str; 2] = ["--unshare-user", "--disable-userns"];
 
+/// Clears `FD_CLOEXEC` on each pinned descriptor so bubblewrap inherits it to mount.
+///
+/// Runs inside `pre_exec`: async-signal-safe `fcntl` only, no allocation. Bubblewrap's descriptor
+/// binds close each one again before the program starts.
+pub(crate) fn inherit(descriptors: &[RawFd]) -> io::Result<()> {
+    for descriptor in descriptors {
+        // SAFETY: `fcntl` reads and updates the flags of a plain descriptor number.
+        let flags = unsafe { libc::fcntl(*descriptor, libc::F_GETFD) };
+        // SAFETY: as above.
+        if flags < 0
+            || unsafe { libc::fcntl(*descriptor, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } != 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+/// A shell fragment for a probe sandbox that fails unless the program holds no descriptor
+/// resolving to any of `paths`, then writes through every non-stdio descriptor it does hold, at
+/// `<descriptor><write_through>`, so the host side can prove the write changed nothing.
+///
+/// `test A -ef A` first: a shell whose `test` lacked `-ef` would otherwise pass the loop unread.
+pub(crate) fn no_descriptor_resolves_to(paths: &[&str], write_through: &str) -> String {
+    use std::fmt::Write as _;
+    let mut controls = String::new();
+    let mut refusals = String::new();
+    for path in paths {
+        // Writing to a `String` cannot fail.
+        let _ = write!(controls, "test {path} -ef {path} && ");
+        let _ = write!(refusals, "if test \"$f\" -ef {path}; then exit 1; fi; ");
+    }
+    format!(
+        "{controls}{{ for f in /proc/self/fd/*; do {refusals}case $f in /proc/self/fd/[012]) ;; \
+         *) (printf x >\"$f{write_through}\") 2>/dev/null;; esac; :; done; }}"
+    )
+}
+
 /// A `bwrap` that records the argv it was handed and refuses to be a sandbox, for the cases that
 /// assert on what each site of this crate actually builds.
 ///
@@ -252,11 +290,54 @@ impl Drop for PreparedScratch {
 /// Stable directory objects used for narrower workspace mounts.
 ///
 /// Paths are checked at admission for useful refusals, then opened component by component without
-/// following links. Bubblewrap consumes `/proc/self/fd/N`, so a concurrent rename cannot redirect
-/// an already-admitted mount.
-struct PreparedWorkspaceAccess {
+/// following links. Bubblewrap mounts each descriptor itself (`--ro-bind-fd`/`--bind-fd`), so a
+/// concurrent rename cannot redirect an already-admitted mount.
+pub(crate) struct PreparedWorkspaceAccess {
     root: OwnedFd,
     subtrees: Vec<(OwnedFd, String)>,
+}
+
+impl PreparedWorkspaceAccess {
+    /// Every pinned descriptor, which the confinement backend must inherit to mount.
+    pub(crate) fn raw_fds(&self) -> Vec<RawFd> {
+        std::iter::once(self.root.as_raw_fd())
+            .chain(
+                self.subtrees
+                    .iter()
+                    .map(|(directory, _)| directory.as_raw_fd()),
+            )
+            .collect()
+    }
+
+    /// The root read-only at `/workspace`, then each admitted subtree read-write over it.
+    ///
+    /// Descriptor binds, never `/proc/self/fd/<n>` as a path: bubblewrap mounts the pinned object,
+    /// checks the mount is that object, and closes the descriptor before the program starts. A
+    /// descriptor bound by path stays open in the program, which reopens it through
+    /// `/proc/self/fd/<n>` on the host's writable mount and writes the read-only workspace.
+    pub(crate) fn bind_args(&self) -> Vec<String> {
+        let mut argv = vec![
+            "--ro-bind-fd".to_owned(),
+            self.root.as_raw_fd().to_string(),
+            "/workspace".to_owned(),
+        ];
+        for (directory, subtree) in &self.subtrees {
+            argv.push("--bind-fd".to_owned());
+            argv.push(directory.as_raw_fd().to_string());
+            argv.push(format!("/workspace/{subtree}"));
+        }
+        argv
+    }
+}
+
+/// Moves a pinned descriptor above every descriptor a secret slot may be placed at, so placing one
+/// in the child can never replace it (ADR 0012's range is `3..=MAX_SECRET_SLOT_FD`).
+pub(crate) fn above_secret_slots(descriptor: &OwnedFd) -> Option<OwnedFd> {
+    let floor = RawFd::try_from(substrate_wire::MAX_SECRET_SLOT_FD + 1).ok()?;
+    // SAFETY: duplicates a live descriptor; the result is owned below.
+    let raised = unsafe { libc::fcntl(descriptor.as_raw_fd(), libc::F_DUPFD_CLOEXEC, floor) };
+    // SAFETY: `fcntl` returned a new descriptor owned by this scope.
+    (raised >= 0).then(|| unsafe { OwnedFd::from_raw_fd(raised) })
 }
 
 impl Execution {
@@ -707,6 +788,11 @@ impl ProcessRuntime {
                 Ok(value) => value,
                 Err(error) => return DispatchOutcome::NotDispatched(error),
             };
+        // Pinned at admission: the object bound is the object inspected (ADR 0033).
+        let read_only_files = match crate::read_only_files::pin(&input.read_only_files) {
+            Ok(value) => value,
+            Err(error) => return DispatchOutcome::NotDispatched(error),
+        };
         let capsule = match self.prepare_capsule(input.capsule.as_ref()) {
             Ok(value) => value,
             Err(error) => return DispatchOutcome::NotDispatched(error),
@@ -826,6 +912,7 @@ impl ProcessRuntime {
             info_fd,
             scratch.as_ref(),
             workspace_access.as_ref(),
+            &read_only_files,
         ) {
             Ok(value) => value,
             Err(error) => return contain_cgroup(&cgroup, error),
@@ -839,17 +926,18 @@ impl ProcessRuntime {
             retained.dedup();
         }
         retained.push(u32::try_from(seccomp.as_raw_fd()).expect("seccomp descriptor fits u32"));
+        // Inherited by bubblewrap only: it mounts each through its descriptor bind and closes it
+        // before the program starts, so none is open in the confined program (ADR 0023, ADR 0033).
         let workspace_fds = workspace_access
             .as_ref()
+            .map(PreparedWorkspaceAccess::raw_fds)
+            .unwrap_or_default()
             .into_iter()
-            .flat_map(|access| {
-                std::iter::once(access.root.as_raw_fd()).chain(
-                    access
-                        .subtrees
-                        .iter()
-                        .map(|(directory, _)| directory.as_raw_fd()),
-                )
-            })
+            .chain(
+                read_only_files
+                    .iter()
+                    .map(crate::read_only_files::PinnedFile::raw_fd),
+            )
             .collect::<Vec<_>>();
         retained.extend(
             workspace_fds
@@ -866,13 +954,7 @@ impl ProcessRuntime {
                 if libc::close(write_fd) != 0 {
                     return Err(std::io::Error::last_os_error());
                 }
-                for fd in &workspace_fds {
-                    let flags = libc::fcntl(*fd, libc::F_GETFD);
-                    if flags < 0 || libc::fcntl(*fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) != 0
-                    {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                }
+                inherit(&workspace_fds)?;
                 crate::secrets::place_and_close(&placements, &retained)?;
                 if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
                     return Err(std::io::Error::last_os_error());
@@ -984,6 +1066,9 @@ impl ProcessRuntime {
             // mount exactly as declared, so by here the two are the same list — and a reader gets
             // it from the record rather than from the fact that a build happened to succeed.
             read_only_roots: input.read_only_roots.clone(),
+            // Bound, as roots are mounted: `pin` refused anything it could not bind exactly as
+            // declared (ADR 0033).
+            read_only_files: input.read_only_files.clone(),
             // Placed, not requested: this list is taken from the acquired set, so it names what
             // actually crossed into the child.
             secret_slots: applied_slots,
@@ -1552,7 +1637,7 @@ impl ProcessRuntime {
     }
 
     /// Pins every narrower workspace mount to the directory object that admission inspected.
-    fn prepare_workspace_access(
+    pub(crate) fn prepare_workspace_access(
         workspace: &Path,
         access: &substrate_wire::WorkspaceAccess,
     ) -> Result<Option<PreparedWorkspaceAccess>, DriverError> {
@@ -1582,6 +1667,12 @@ impl ProcessRuntime {
         }
         // SAFETY: `open` returned a new descriptor owned by this scope.
         let root = unsafe { OwnedFd::from_raw_fd(root) };
+        let root = above_secret_slots(&root).ok_or_else(|| {
+            DriverError::failed(
+                "exec.workspace-pin-failed",
+                "The admitted workspace root could not be pinned above the secret-slot range.",
+            )
+        })?;
         let mut subtrees = Vec::new();
         if let Some(paths) = access.writable_subtrees() {
             for path in paths {
@@ -1625,7 +1716,13 @@ impl ProcessRuntime {
                     // SAFETY: openat returned a new descriptor owned by this scope.
                     current = unsafe { OwnedFd::from_raw_fd(next) };
                 }
-                subtrees.push((current, path.clone()));
+                let pinned = above_secret_slots(&current).ok_or_else(|| {
+                    DriverError::failed(
+                        "exec.workspace-pin-failed",
+                        "An admitted workspace subtree could not be pinned above the secret-slot range.",
+                    )
+                })?;
+                subtrees.push((pinned, path.clone()));
             }
         }
         Ok(Some(PreparedWorkspaceAccess { root, subtrees }))
@@ -1764,6 +1861,11 @@ impl ProcessRuntime {
             ));
         }
         Self::admit_read_only_roots(&input.read_only_roots)?;
+        crate::read_only_files::admit(
+            &input.read_only_files,
+            &input.read_only_roots,
+            self.capability.facts.exec_read_only_files.as_ref(),
+        )?;
         Self::admit_workspace_access(
             workspace,
             &input.workspace_access,
@@ -1903,6 +2005,7 @@ impl ProcessRuntime {
         info_fd: Option<RawFd>,
         scratch: Option<&PreparedScratch>,
         workspace_access: Option<&PreparedWorkspaceAccess>,
+        read_only_files: &[crate::read_only_files::PinnedFile],
     ) -> Result<(Command, File), DriverError> {
         let seccomp = crate::seccomp::profile()?;
         let seccomp_fd = seccomp.as_raw_fd();
@@ -1976,6 +2079,12 @@ impl ProcessRuntime {
                 .arg(&root.host_path)
                 .arg(&root.mount);
         }
+        // One file each, through its pinned descriptor rather than its path, so a rename after
+        // admission cannot redirect it. Bubblewrap creates the mount point and its parents in the
+        // sandbox root, so nothing else from the host directory appears (ADR 0033).
+        for file in read_only_files {
+            command.args(file.bind_args());
+        }
         // The whole of `/etc` a run ever gets, and only when it has an aperture: exactly the
         // declared name mapped to the forwarder, and — where the operator configured one — a
         // snapshot of a trust anchor. Read-only, generated, and gone with the run.
@@ -1991,16 +2100,7 @@ impl ProcessRuntime {
                 .arg(substrate_wire::EXEC_SCRATCH_MOUNT);
         }
         if let Some(access) = workspace_access {
-            command
-                .arg("--ro-bind")
-                .arg(format!("/proc/self/fd/{}", access.root.as_raw_fd()))
-                .arg("/workspace");
-            for (directory, subtree) in &access.subtrees {
-                command
-                    .arg("--bind")
-                    .arg(format!("/proc/self/fd/{}", directory.as_raw_fd()))
-                    .arg(Path::new("/workspace").join(subtree));
-            }
+            command.args(access.bind_args());
         } else {
             command.arg("--bind").arg(workspace).arg("/workspace");
         }
@@ -3869,6 +3969,7 @@ mod tests {
         let runtime = ProcessRuntime::new(config, capability).expect("runtime");
         let input = ExecStartInput {
             read_only_roots: Vec::new(),
+            read_only_files: Vec::new(),
             secret_slots: Vec::new(),
             workspace: "ws_test".to_owned(),
             argv: vec!["/usr/bin/true".to_owned()],
@@ -3945,6 +4046,7 @@ mod tests {
         let runtime = ProcessRuntime::new(config, capability).unwrap();
         let input = ExecStartInput {
             read_only_roots: Vec::new(),
+            read_only_files: Vec::new(),
             secret_slots: Vec::new(),
             workspace: "ws_test".to_owned(),
             argv: vec!["/usr/bin/true".to_owned()],
@@ -4222,6 +4324,7 @@ mod tests {
     fn pty_exec_input(snapshot: &str) -> ExecStartInput {
         ExecStartInput {
             read_only_roots: Vec::new(),
+            read_only_files: Vec::new(),
             secret_slots: Vec::new(),
             workspace: "ws_test".to_owned(),
             argv: vec!["/bin/sh".to_owned()],
@@ -5503,6 +5606,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
             )
             .expect("the exec argv builds");
         let argv: Vec<String> = command

@@ -447,16 +447,16 @@
       "sha256": "68c8c652482db5410bf399aa9214947bf3142dae2376ddeb7f3df722f12b60f9"
     },
     {
-      "byte_length": 10562,
+      "byte_length": 11051,
       "media_type": "application/json",
       "path": "schemas/capability.json",
-      "sha256": "2e145a1349dee069af616a0a0c3e7bf4ff163da340ccc8852c3a5ff372a7eb83"
+      "sha256": "c789f7b0a01fec88e248a7035a9cf8190f5c68b46a69b6b4a4d99017cef73c6b"
     },
     {
-      "byte_length": 4880,
+      "byte_length": 8093,
       "media_type": "application/json",
       "path": "schemas/common.json",
-      "sha256": "7b30be05492baa1071f58e9e4fd24307d2cc2b4852d619278797a1a1ce2161eb"
+      "sha256": "0f65181d4ee165e8a6823ca19d9849fad198dd32bc0ccb6071db3b3a79a9a4ab"
     },
     {
       "byte_length": 1061,
@@ -543,10 +543,10 @@
       "sha256": "10dcdea97ecaf21e9f89f6c4998caf4a736af29a767c957a7606dd90ba7656d1"
     },
     {
-      "byte_length": 6924,
+      "byte_length": 7010,
       "media_type": "application/json",
       "path": "schemas/inputs/exec-start.json",
-      "sha256": "fd74a1f46b00eb2495f7ef1842c2178d9b06c7a00cbf66e72077a8f73fbeb836"
+      "sha256": "be961098c2444ea02843bff9718984d5ea22fb9110071ef28d6baa4a86835f5f"
     },
     {
       "byte_length": 373,
@@ -603,10 +603,10 @@
       "sha256": "d4aefc61de640c4e313643297a73aeff35b95f4c3efc8568e7fcc2ad7a10e8c2"
     },
     {
-      "byte_length": 9599,
+      "byte_length": 9697,
       "media_type": "application/json",
       "path": "schemas/inputs/pipe-session-start.json",
-      "sha256": "ae882b0302afb012519328e953502abc3d4218fc947ebaeeee219ea514006c53"
+      "sha256": "fc45c2368abe56e0c3ec82de62af567b473d20046a72442c2fd1669c665bcc17"
     },
     {
       "byte_length": 296,
@@ -753,10 +753,10 @@
       "sha256": "b6a19e862bfbc0c5bf4e17400a98da0811b2b15c62f5b651130719644be940f8"
     },
     {
-      "byte_length": 89151,
+      "byte_length": 89757,
       "media_type": "application/json",
       "path": "schemas/resource.json",
-      "sha256": "79c662d28e0f164b423b6b7646cb4ddf2bf10d715809fc79d66b4f891921e701"
+      "sha256": "d889718a17927bd50ea43ee4a4367fc9dd1a9b77c87f85c87f62af18bc52a525"
     },
     {
       "byte_length": 18941,

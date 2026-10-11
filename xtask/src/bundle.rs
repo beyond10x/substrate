@@ -890,6 +890,7 @@ fn check_classification(version: &str, released: &Tree, failures: &mut Vec<Strin
 fn check_additions(version: &str, released: &Tree, failures: &mut Vec<String>) {
     if version == "0.18.0" {
         check_block_io_relaxation_additions(released, failures);
+        check_read_only_file_additions(released, failures);
         return;
     }
     if version == "0.17.0" {
@@ -1022,6 +1023,207 @@ fn check_block_io_relaxation_additions(released: &Tree, failures: &mut Vec<Strin
                 "schemas/resource.json: {counter} must arrive together with {partner}"
             ));
         }
+    }
+}
+
+/// `0.18.0`'s second addition (ADR 0033): a single host file admitted read-only.
+///
+/// Every bound is bound to the wire crate rather than restated here, because `render_v2.rs` is
+/// hashed by every bundle it rendered and cannot gain a `{"$wire": "MAX_READ_ONLY_FILES"}` binding.
+/// The published refusal set is compared with `READ_ONLY_FILE_REFUSAL_CODES` in both directions,
+/// so a code the crate raises and the bundle does not name fails here, and so does the reverse.
+fn check_read_only_file_additions(released: &Tree, failures: &mut Vec<String>) {
+    const REFERENCE: &str = "../common.json#/$defs/read-only-files";
+    let bound = json!(substrate_wire::MAX_READ_ONLY_FILES);
+    if let Some(common) = json_at(released, "schemas/common.json", failures) {
+        check_read_only_file_definitions(&common, &bound, failures);
+    }
+    for (path, pointer) in [
+        (
+            "schemas/inputs/exec-start.json",
+            "/properties/read_only_files/$ref",
+        ),
+        (
+            "schemas/inputs/pipe-session-start.json",
+            "/properties/exec/properties/read_only_files/$ref",
+        ),
+    ] {
+        let Some(input) = json_at(released, path, failures) else {
+            continue;
+        };
+        if input.pointer(pointer) != Some(&json!(REFERENCE)) {
+            failures.push(format!(
+                "{path}: read_only_files is not the declared file list"
+            ));
+        }
+    }
+    if let Some(capability) = json_at(released, "schemas/capability.json", failures) {
+        let fact = capability.pointer("/properties/facts/properties/exec.read-only-files");
+        if fact.and_then(|fact| fact.pointer("/properties/max_files/const")) != Some(&bound) {
+            failures.push(format!(
+                "schemas/capability.json: exec.read-only-files does not publish max_files {bound}"
+            ));
+        }
+        if fact.and_then(|fact| fact.get("required")) != Some(&json!(["max_files"])) {
+            failures.push(
+                "schemas/capability.json: exec.read-only-files does not require max_files"
+                    .to_owned(),
+            );
+        }
+    }
+    let Some(resource) = json_at(released, "schemas/resource.json", failures) else {
+        return;
+    };
+    let branches = resource
+        .pointer("/$defs/confinement-applied/oneOf")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    if branches.is_empty() {
+        failures.push("schemas/resource.json: confinement-applied has no branch".to_owned());
+    }
+    for (index, branch) in branches.iter().enumerate() {
+        let applied = branch.pointer("/properties/read_only_files");
+        if applied.and_then(|applied| applied.pointer("/items/$ref"))
+            != Some(&json!("common.json#/$defs/read-only-file"))
+            || applied.and_then(|applied| applied.get("maxItems")) != Some(&bound)
+        {
+            failures.push(format!(
+                "schemas/resource.json: confinement-applied branch {index} does not list the \
+                 bound read_only_files"
+            ));
+        }
+    }
+}
+
+/// The `host-absolute-path` pattern the wire crate's bounds imply: no `.` or `..` component, no
+/// NUL, each component at most `MAX_READ_ONLY_FILE_COMPONENT_BYTES` and at most `MAX_PATH_DEPTH`
+/// of them.
+fn host_absolute_path_pattern() -> String {
+    format!(
+        "^(?:/(?!\\.\\.?(?:/|$))[^/\\u0000]{{1,{}}}){{1,{}}}$",
+        substrate_wire::MAX_READ_ONLY_FILE_COMPONENT_BYTES,
+        substrate_wire::MAX_PATH_DEPTH
+    )
+}
+
+/// The wire crate is the daemon's and the driver's only lexical check, so the bounds the schema
+/// publishes for a path must be the bounds it enforces: the byte length, the component length and
+/// the depth, each from its constant.
+fn check_host_absolute_path(common: &Value, failures: &mut Vec<String>) {
+    let path = common.pointer("/$defs/host-absolute-path");
+    if path.and_then(|path| path.get("maxLength"))
+        != Some(&json!(substrate_wire::MAX_READ_ONLY_FILE_PATH_BYTES))
+    {
+        failures.push(format!(
+            "schemas/common.json: host-absolute-path maxLength is not {}",
+            substrate_wire::MAX_READ_ONLY_FILE_PATH_BYTES
+        ));
+    }
+    let pattern = host_absolute_path_pattern();
+    if path
+        .and_then(|path| path.get("pattern"))
+        .and_then(Value::as_str)
+        != Some(&pattern)
+    {
+        failures.push(format!(
+            "schemas/common.json: host-absolute-path pattern is not {pattern}"
+        ));
+    }
+}
+
+fn check_read_only_file_definitions(common: &Value, bound: &Value, failures: &mut Vec<String>) {
+    let Some(list) = common.pointer("/$defs/read-only-files") else {
+        failures.push("schemas/common.json: no read-only-files definition".to_owned());
+        return;
+    };
+    if list.get("maxItems") != Some(bound) {
+        failures.push(format!(
+            "schemas/common.json: read-only-files maxItems is not {bound}"
+        ));
+    }
+    check_host_absolute_path(common, failures);
+    let file = common.pointer("/$defs/read-only-file");
+    if file.and_then(|file| file.get("required")) != Some(&json!(["host_path", "mount"]))
+        || file.and_then(|file| file.get("additionalProperties")) != Some(&json!(false))
+    {
+        failures.push(
+            "schemas/common.json: read-only-file is not exactly host_path and mount".to_owned(),
+        );
+    }
+    let owned: BTreeSet<&str> = substrate_wire::RESERVED_MOUNTS
+        .iter()
+        .copied()
+        .chain([
+            substrate_wire::EXECUTION_CAPSULE_MOUNT,
+            substrate_wire::EXEC_SCRATCH_MOUNT,
+            substrate_wire::APERTURE_HOSTS_PATH,
+            substrate_wire::APERTURE_CA_BUNDLE_PATH,
+        ])
+        .collect();
+    let named: BTreeSet<&str> = file
+        .and_then(|file| file.pointer("/properties/mount/x-b10x-not-equal-beneath-or-above"))
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    for mount in owned.difference(&named) {
+        failures.push(format!(
+            "schemas/common.json: read-only-file does not name owned mount {mount}"
+        ));
+    }
+    let published: BTreeMap<&str, (Option<&str>, Option<u64>)> = list
+        .get("x-b10x-refusals")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|row| {
+            Some((
+                row.get("code")?.as_str()?,
+                (
+                    row.get("class").and_then(Value::as_str),
+                    row.get("status").and_then(Value::as_u64),
+                ),
+            ))
+        })
+        .collect();
+    for code in substrate_wire::READ_ONLY_FILE_REFUSAL_CODES {
+        let expected = if code == substrate_wire::READ_ONLY_FILES_UNSERVED {
+            (Some("unserved"), Some(501))
+        } else {
+            (Some("refused"), Some(422))
+        };
+        match published.get(code) {
+            None => failures.push(format!(
+                "schemas/common.json: read-only-files does not publish refusal {code}"
+            )),
+            Some(row) if *row != expected => failures.push(format!(
+                "schemas/common.json: refusal {code} publishes {row:?}, the daemon sends \
+                 {expected:?}"
+            )),
+            Some(_) => {}
+        }
+    }
+    for code in published.keys() {
+        if !substrate_wire::READ_ONLY_FILE_REFUSAL_CODES.contains(code) {
+            failures.push(format!(
+                "schemas/common.json: refusal {code} is published and nothing raises it"
+            ));
+        }
+    }
+    let failure_codes: Vec<&str> = list
+        .get("x-b10x-failures")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|row| row.get("code").and_then(Value::as_str))
+        .collect();
+    if failure_codes != [substrate_wire::READ_ONLY_FILE_PIN_FAILED] {
+        failures.push(format!(
+            "schemas/common.json: read-only-files failures {failure_codes:?} are not exactly \
+             the pin failure"
+        ));
     }
 }
 
@@ -6877,6 +7079,65 @@ mod block_io_relaxation {
 
     /// A check that passes on the tree that predates the change proves nothing about the tree
     /// that carries it: `0.17.0` declares `block_io` `const: true` and requires both counters.
+    /// ADR 0033's addition, alone: the released `0.18.0` carries every piece of it.
+    #[test]
+    fn the_successor_carries_the_read_only_file_bind() {
+        let mut failures = Vec::new();
+        super::check_read_only_file_additions(&released("0.18.0"), &mut failures);
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    /// And `0.17.0` carries none of it, so the check is not reading back something every bundle
+    /// already says.
+    #[test]
+    fn the_predecessor_carries_no_read_only_file_bind() {
+        let mut failures = Vec::new();
+        super::check_read_only_file_additions(&released("0.17.0"), &mut failures);
+        for named in [
+            "read-only-files definition",
+            "schemas/inputs/exec-start.json",
+            "schemas/inputs/pipe-session-start.json",
+            "exec.read-only-files",
+            "confinement-applied branch 0",
+            "confinement-applied branch 1",
+        ] {
+            assert!(
+                failures.iter().any(|failure| failure.contains(named)),
+                "0.17.0 was not reported for {named}: {failures:?}"
+            );
+        }
+    }
+
+    /// The refusal set is compared in both directions: a published code nothing raises is a
+    /// failure, and so is a raised code the bundle does not publish.
+    #[test]
+    fn the_published_refusal_set_is_exactly_the_wire_crates() {
+        let mut tree = released("0.18.0");
+        let path = "schemas/common.json".to_owned();
+        let mut common: serde_json::Value =
+            serde_json::from_slice(tree.get(&path).expect("common")).expect("parses");
+        let refusals = common
+            .pointer_mut("/$defs/read-only-files/x-b10x-refusals")
+            .and_then(serde_json::Value::as_array_mut)
+            .expect("published refusals");
+        refusals.retain(|row| row["code"] != "exec.read-only-file-symlink");
+        refusals.push(serde_json::json!({
+            "class": "refused", "code": "exec.read-only-file-invented", "status": 422
+        }));
+        tree.insert(path, serde_json::to_vec(&common).expect("serializes"));
+        let mut failures = Vec::new();
+        super::check_read_only_file_additions(&tree, &mut failures);
+        for named in [
+            "does not publish refusal exec.read-only-file-symlink",
+            "exec.read-only-file-invented is published and nothing raises it",
+        ] {
+            assert!(
+                failures.iter().any(|failure| failure.contains(named)),
+                "not reported: {named}: {failures:?}"
+            );
+        }
+    }
+
     #[test]
     fn the_predecessor_carries_none_of_it() {
         let mut failures = Vec::new();

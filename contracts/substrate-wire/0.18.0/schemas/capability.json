@@ -155,6 +155,20 @@
           "minimum": 1,
           "type": "integer"
         },
+        "exec.read-only-files": {
+          "additionalProperties": false,
+          "properties": {
+            "max_files": {
+              "const": 16
+            }
+          },
+          "required": [
+            "max_files"
+          ],
+          "type": "object",
+          "x-b10x-absent-means": "every-declared-read-only-file-is-unserved-by-name",
+          "x-b10x-published-only-after": "a-pinned-file-bound-run-refused-a-write-and-found-alone-in-a-throwaway-sandbox"
+        },
         "exec.resource-usage": {
           "additionalProperties": false,
           "properties": {

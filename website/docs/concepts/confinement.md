@@ -56,6 +56,27 @@ mounted read-only, so commands that write the index, refs or objects (`git add`,
 up to the bound the contract publishes (four). A mount point beneath a path Substrate owns, such as
 `/tmp`, is refused, so a repository under `/tmp` cannot be declared at its own path.
 
+## Admitting one host file
+
+A program or a configuration file that lives in a directory beside many others can be admitted
+alone. Declare it in `read_only_files`, and put its mount's directory on the `PATH` you set:
+
+```json
+"env": {"allow": [], "set": {"PATH": "/opt/gates/bin:/usr/bin"}},
+"read_only_files": [
+  {"host_path": "/srv/tools/bin/gate", "mount": "/opt/gates/bin/gate"}
+]
+```
+
+The file is bound read-only with its host mode bits, so `gate` runs by name, a write to it fails,
+and nothing else from `/srv/tools/bin` is visible. The host path must be an existing regular file
+reached without any symlink. Both paths are absolute and canonical, contain no NUL, and are at
+most 4000 bytes with no component over 255. The mount must lie outside every path Substrate owns
+and every declared root, and be unique. A start may declare up to the bound the machine's
+`exec.read-only-files` fact publishes (16). Each rejection is a named refusal before dispatch, and
+the applied observation lists every bound file. The program holds no descriptor on the host file:
+the only way to it is the read-only mount.
+
 ## Capability snapshots
 
 Admission binds an operation to a probed backend and configuration generation. Security-critical

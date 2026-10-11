@@ -467,6 +467,7 @@ pub(super) fn validate_exec_input(
     }
     check_egress_aperture(&facts, &input.sandbox, mutation, request_id)?;
     check_secret_slots(&facts, mutation, request_id)?;
+    check_read_only_files(&facts, mutation, request_id)?;
     if !input.measurements.is_empty() && facts.exec_resource_usage.is_none() {
         return Err(failure(
             StatusCode::NOT_IMPLEMENTED,
@@ -662,6 +663,51 @@ fn check_secret_slots(
                 false,
             ));
         }
+    }
+    Ok(())
+}
+
+/// Daemon-side admission for declared read-only host files (ADR 0033).
+///
+/// Shape, then capability — the order the driver uses independently, so a caller hears the same
+/// answer whichever layer sees the request first. Whether each host path exists, is a regular file
+/// and is reached without a symlink is the driver's question, answered against the object it pins.
+fn check_read_only_files(
+    facts: &substrate_wire::CapabilityFacts,
+    mutation: &BoundMutation<ExecStartInput>,
+    request_id: &str,
+) -> Result<(), Response> {
+    let input = &mutation.input;
+    if input.read_only_files.is_empty() {
+        return Ok(());
+    }
+    if let Err(error) =
+        substrate_wire::validate_read_only_files(&input.read_only_files, &input.read_only_roots)
+    {
+        let code = substrate_wire::read_only_file_refusal(&error)
+            .unwrap_or(substrate_wire::READ_ONLY_FILE_PATH_INVALID);
+        return Err(failure(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            request_id,
+            Some(&mutation.op),
+            ErrorClass::Refused,
+            code,
+            &format!("A declared read-only file is invalid: {error}."),
+            Some("read_only_files"),
+            false,
+        ));
+    }
+    if facts.exec_read_only_files.is_none() {
+        return Err(failure(
+            StatusCode::NOT_IMPLEMENTED,
+            request_id,
+            Some(&mutation.op),
+            ErrorClass::Unserved,
+            substrate_wire::READ_ONLY_FILES_UNSERVED,
+            "Declared read-only files are not served by this host.",
+            Some("read_only_files"),
+            false,
+        ));
     }
     Ok(())
 }

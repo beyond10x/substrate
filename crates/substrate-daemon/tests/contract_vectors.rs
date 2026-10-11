@@ -171,6 +171,7 @@ impl VectorDriver {
                 applied: Some(AppliedConfinement {
                     workspace_access: substrate_wire::WorkspaceAccess::ReadWrite,
                     read_only_roots: Vec::new(),
+                    read_only_files: Vec::new(),
                     secret_slots: Vec::new(),
                     capability_snapshot: SNAPSHOT.to_owned(),
                     profile: SandboxProfile::Workspace,

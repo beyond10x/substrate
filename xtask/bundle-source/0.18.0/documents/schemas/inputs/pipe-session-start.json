@@ -300,6 +300,9 @@
         },
         "workspace": {
           "$ref": "../common.json#/$defs/workspace-id"
+        },
+        "read_only_files": {
+          "$ref": "../common.json#/$defs/read-only-files"
         }
       },
       "required": [
