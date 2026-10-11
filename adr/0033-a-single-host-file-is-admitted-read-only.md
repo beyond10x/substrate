@@ -83,8 +83,11 @@ use descriptor binds. The pinned workspace descriptors are also moved above `MAX
 The descriptors the confined program legitimately holds are its standard input, output and error,
 and the secret slots it named ([ADR 0012](0012-secret-slots-are-sealed-memfds.md)) at
 their declared descriptors. Bubblewrap consumes and closes its seccomp, launch-barrier and info
-descriptors before the program starts. Every other descriptor is closed by `close_range` before
-bubblewrap runs.
+descriptors before the program starts. Those three, like the pinned descriptors, are moved above
+`MAX_SECRET_SLOT_FD` and are close-on-exec in the daemon; only the bubblewrap child clears the flag,
+so no other spawn inherits them and no slot placement can replace one. A start in which any
+descriptor bubblewrap inherits lies in the slot range is refused before the spawn. Every other
+descriptor is closed by `close_range` before bubblewrap runs.
 
 ### The path bounds
 
@@ -98,8 +101,10 @@ states the same numbers: `maxLength` 4000, and a pattern with at most 64 compone
 characters each. JSON Schema counts characters, so for a non-ASCII path the wire crate's byte bounds
 are the stricter check. The `0.18.0` additions check pins the schema's numbers to the constants.
 
-Pinned descriptors are moved above `MAX_SECRET_SLOT_FD`, so placing a secret slot at its declared
-descriptor can never replace one. A descriptor that cannot be moved is the machinery failure
+Pinned descriptors are moved above `MAX_SECRET_SLOT_FD`, as are bubblewrap's own seccomp,
+launch-barrier and info descriptors, so placing a secret slot at its declared descriptor can never
+replace one, and every slot recorded as placed reaches the program at its declared number. A
+pinned descriptor that cannot be moved is the machinery failure
 `exec.read-only-file-pin-failed` (500, retriable), not a refusal, because the request was
 admissible.
 

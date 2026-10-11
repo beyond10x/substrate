@@ -1017,7 +1017,9 @@ pub(crate) fn mechanism_is_provable(bubblewrap: &Path) -> bool {
 ///
 /// `std::io::pipe` sets `O_CLOEXEC`, so a sandbox given `--info-fd` from one reports nothing and
 /// `--block-fd` from one is never read — and both failures are silent, which is how a test can
-/// "open a sandbox" that never opened. `pipe2` with no flags is what the spawn barrier already uses
+/// "open a sandbox" that never opened. This throwaway sandbox places no secret slot, so `pipe2`
+/// with no flags is enough here; the exec spawn instead creates its barrier and info pipes
+/// close-on-exec above the slot range and clears the flag in its own `pre_exec`
 /// (`crates/substrate-host/src/process.rs`).
 fn inheritable_pipe() -> io::Result<(File, File)> {
     let mut descriptors = [-1; 2];

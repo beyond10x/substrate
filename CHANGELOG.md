@@ -54,6 +54,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   present in every release since `0.4.0`. The workspace descriptors are now bound with
   `--ro-bind-fd` and `--bind-fd`, which close them before the program starts, and the scoped-write
   probe withholds `exec.workspace-scoped-write` unless it finds no such descriptor in the program.
+- A secret slot declared at a driver-owned descriptor number could replace the seccomp program or
+  the launch barrier (or, with an egress aperture, the info pipe) that bubblewrap consumes: a slot
+  on the seccomp descriptor was installed as the filter, so the program ran without Substrate's
+  profile, and a slot on the barrier released bubblewrap before the cgroup attach. Driver
+  descriptors now sit above the slot range, close-on-exec in the daemon and inherited only by the
+  one bubblewrap child, and a start in which any of them lies in the slot range is refused before
+  the spawn.
 
 ## [0.7.12] — 2026-10-10
 

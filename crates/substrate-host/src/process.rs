@@ -340,6 +340,59 @@ pub(crate) fn above_secret_slots(descriptor: &OwnedFd) -> Option<OwnedFd> {
     (raised >= 0).then(|| unsafe { OwnedFd::from_raw_fd(raised) })
 }
 
+/// Moves a driver-owned descriptor that bubblewrap consumes — the launch barrier, the info pipe,
+/// the seccomp program — above the slot range, close-on-exec, and closes the original.
+///
+/// A secret slot is `dup2`ed onto its declared number in `pre_exec`, so a driver descriptor left
+/// at a low number would be replaced by the slot's bytes: bubblewrap would install the slot as the
+/// seccomp program, or never block on the barrier (ADR 0012, ADR 0033).
+pub(crate) fn bubblewrap_descriptor(
+    descriptor: OwnedFd,
+    role: &str,
+) -> Result<OwnedFd, DriverError> {
+    let raised = above_secret_slots(&descriptor).ok_or_else(|| {
+        DriverError::failed(
+            "exec.spawn-failed",
+            format!(
+                "{role} descriptor could not be moved above the secret-slot range: {}",
+                io::Error::last_os_error()
+            ),
+        )
+    });
+    // The low original goes now: only the raised copy may reach bubblewrap.
+    drop(descriptor);
+    raised
+}
+
+/// Refuses a start in which any descriptor bubblewrap inherits could be replaced by a slot.
+///
+/// Every descriptor in `inherited` must lie above `MAX_SECRET_SLOT_FD`, where no slot can be
+/// declared, and so be distinct from every placement target. [`bubblewrap_descriptor`] and
+/// [`above_secret_slots`] put them there; this is the check that a new descriptor added without
+/// them is refused by name before the spawn rather than silently replaced after it.
+pub(crate) fn inherited_clear_of_slots(
+    inherited: &[RawFd],
+    placements: &[(RawFd, RawFd)],
+) -> Result<(), DriverError> {
+    let ceiling = RawFd::try_from(substrate_wire::MAX_SECRET_SLOT_FD).unwrap_or(RawFd::MAX);
+    for descriptor in inherited {
+        if *descriptor <= ceiling
+            || placements
+                .iter()
+                .any(|(source, target)| source == descriptor || target == descriptor)
+        {
+            return Err(DriverError::failed(
+                "exec.spawn-failed",
+                format!(
+                    "driver descriptor {descriptor} lies in the secret-slot range \
+                     3..={ceiling}, where a slot placement could replace it"
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 impl Execution {
     fn new(
         observation: ExecObservation,
@@ -847,7 +900,10 @@ impl ProcessRuntime {
             },
             None => None,
         };
-        let (sync_read, sync_write) = match pipe() {
+        // The end bubblewrap reads sits above the slot range, so no slot placement can replace it.
+        let (sync_read, sync_write) = match pipe()
+            .and_then(|(read, write)| Ok((bubblewrap_descriptor(read, "launch barrier")?, write)))
+        {
             Ok(pipe) => pipe,
             Err(error) => {
                 return contain_cgroup(&cgroup, error);
@@ -855,9 +911,12 @@ impl ProcessRuntime {
         };
         let sync_fd = sync_read.as_raw_fd();
         // Trap 2: the namespace to bind the aperture in belongs to the pid bubblewrap *reports*,
-        // never to the bubblewrap process itself.
+        // never to the bubblewrap process itself. The end bubblewrap writes sits above the slot
+        // range, as the barrier does.
         let info = match aperture.as_ref() {
-            Some(_) => match pipe() {
+            Some(_) => match pipe()
+                .and_then(|(read, write)| Ok((read, bubblewrap_descriptor(write, "info pipe")?)))
+            {
                 Ok(pipe) => Some(pipe),
                 Err(error) => return contain_cgroup(&cgroup, error),
             },
@@ -946,15 +1005,28 @@ impl ProcessRuntime {
         );
         retained.sort_unstable();
         retained.dedup();
+        // Every descriptor bubblewrap consumes, and nothing else: the launch barrier, the info
+        // pipe, the seccomp program and the pinned mounts. Each is close-on-exec in this process,
+        // so no other spawn inherits it; this child clears the flag in `pre_exec`, and bubblewrap
+        // closes each before the program starts. All of them lie above the slot range, which the
+        // check below proves rather than assumes.
+        let inherited = [Some(sync_fd), info_fd, Some(seccomp.as_raw_fd())]
+            .into_iter()
+            .flatten()
+            .chain(workspace_fds)
+            .collect::<Vec<_>>();
+        if let Err(error) = inherited_clear_of_slots(&inherited, &placements) {
+            return contain_cgroup(&cgroup, error);
+        }
         // SAFETY: pre_exec runs after fork; it invokes only async-signal-safe libc calls and does
         // not allocate. The captured descriptors are plain integers owned by the parent until spawn,
-        // and the two vectors are built before the fork and only read after it.
+        // and the vectors are built before the fork and only read after it.
         unsafe {
             command.as_std_mut().pre_exec(move || {
                 if libc::close(write_fd) != 0 {
                     return Err(std::io::Error::last_os_error());
                 }
-                inherit(&workspace_fds)?;
+                inherit(&inherited)?;
                 crate::secrets::place_and_close(&placements, &retained)?;
                 if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
                     return Err(std::io::Error::last_os_error());
@@ -2007,7 +2079,13 @@ impl ProcessRuntime {
         workspace_access: Option<&PreparedWorkspaceAccess>,
         read_only_files: &[crate::read_only_files::PinnedFile],
     ) -> Result<(Command, File), DriverError> {
-        let seccomp = crate::seccomp::profile()?;
+        // Above the slot range, close-on-exec: a slot declared at the profile's original number
+        // would otherwise become the program bubblewrap installs. `start` clears the flag in the
+        // one child that must inherit it.
+        let seccomp = File::from(bubblewrap_descriptor(
+            OwnedFd::from(crate::seccomp::profile()?),
+            "seccomp program",
+        )?);
         let seccomp_fd = seccomp.as_raw_fd();
         let mut command = Command::new(&self.config.bubblewrap);
         let mut terminal = false;
@@ -3463,10 +3541,15 @@ fn write_control(path: &Path, name: &str, value: &str) -> Result<(), DriverError
     })
 }
 
+/// A private pipe whose two ends are close-on-exec.
+///
+/// Close-on-exec on purpose: no other spawn in this daemon may inherit either end. The one end
+/// bubblewrap reads or writes is moved above the slot range with [`bubblewrap_descriptor`] and made
+/// inheritable in that one child's `pre_exec` by [`inherit`].
 fn pipe() -> Result<(OwnedFd, OwnedFd), DriverError> {
     let mut descriptors = [-1; 2];
     // SAFETY: descriptors points to two writable integers; pipe2 initializes both on success.
-    if unsafe { libc::pipe2(descriptors.as_mut_ptr(), 0) } != 0 {
+    if unsafe { libc::pipe2(descriptors.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
         return Err(DriverError::failed(
             "exec.spawn-failed",
             format!("sync pipe: {}", std::io::Error::last_os_error()),
@@ -3551,6 +3634,7 @@ mod tests {
         contain_spawned_with_reconciliation, drain_capped, is_secretish_name, is_terminal,
         recorded_sandboxes, recording_backend, wait_terminal_with_hook,
     };
+    use super::{RawFd, bubblewrap_descriptor, inherited_clear_of_slots, pipe};
     use crate::{DispatchOutcome, HostConfig};
 
     /// A fake exec cgroup carrying every counter `resource_usage` reads, with `controllers` as its
@@ -5594,7 +5678,7 @@ mod tests {
         let runtime = ProcessRuntime::new(config, capability).expect("runtime");
         let slots = crate::secrets::SecretSlotSet::acquire(&[], &[]).expect("no slots");
         let sync = std::fs::File::open("/dev/null").expect("a barrier descriptor");
-        let (command, _seccomp) = runtime
+        let (command, seccomp) = runtime
             .command(
                 &workspace,
                 &pty_exec_input(&snapshot),
@@ -5621,6 +5705,72 @@ mod tests {
                  namespace: {argv:?}"
             );
         }
+        // The seccomp program bubblewrap reads lies above every number a slot may be declared at,
+        // and is close-on-exec here: only the exec child's `pre_exec` makes it inheritable.
+        let seccomp_fd: RawFd = argv
+            .iter()
+            .position(|part| part == "--seccomp")
+            .and_then(|at| argv.get(at + 1))
+            .and_then(|value| value.parse().ok())
+            .expect("the exec argv names its seccomp descriptor");
+        assert!(
+            seccomp_fd > RawFd::try_from(substrate_wire::MAX_SECRET_SLOT_FD).unwrap(),
+            "the seccomp program sits at {seccomp_fd}, inside the secret-slot range"
+        );
+        assert_eq!(seccomp_fd, seccomp.as_raw_fd());
+        assert_cloexec(seccomp_fd);
+    }
+
+    fn assert_cloexec(descriptor: RawFd) {
+        // SAFETY: reads the flags of a live descriptor.
+        let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
+        assert!(
+            flags >= 0 && flags & libc::FD_CLOEXEC != 0,
+            "descriptor {descriptor} is inheritable by every spawn of this process"
+        );
+    }
+
+    /// The launch barrier and the info pipe end bubblewrap uses sit above the slot range,
+    /// close-on-exec, and the parent-side ends are close-on-exec too.
+    #[test]
+    fn every_bubblewrap_pipe_end_sits_above_the_secret_slot_range() {
+        let ceiling = RawFd::try_from(substrate_wire::MAX_SECRET_SLOT_FD).unwrap();
+        for role in ["launch barrier", "info pipe"] {
+            let (read, write) = pipe().expect("a pipe");
+            assert_cloexec(read.as_raw_fd());
+            assert_cloexec(write.as_raw_fd());
+            let raised = bubblewrap_descriptor(read, role).expect("raised");
+            assert!(
+                raised.as_raw_fd() > ceiling,
+                "{role} at {}",
+                raised.as_raw_fd()
+            );
+            assert_cloexec(raised.as_raw_fd());
+        }
+    }
+
+    /// The residual check: a descriptor bubblewrap inherits inside `3..=MAX_SECRET_SLOT_FD` is a
+    /// named refusal before the spawn, whether or not a slot is declared at it.
+    #[test]
+    fn a_driver_descriptor_inside_the_slot_range_is_refused_before_the_spawn() {
+        let ceiling = RawFd::try_from(substrate_wire::MAX_SECRET_SLOT_FD).unwrap();
+        for low in [3, 10, 12, ceiling] {
+            let error = inherited_clear_of_slots(&[ceiling + 5, low], &[(ceiling + 9, low)])
+                .expect_err("a slot target on a driver descriptor");
+            assert_eq!(error.code, "exec.spawn-failed");
+            let error = inherited_clear_of_slots(&[low], &[])
+                .expect_err("a driver descriptor in the slot range");
+            assert!(
+                error.message.contains("secret-slot range"),
+                "{}",
+                error.message
+            );
+        }
+        inherited_clear_of_slots(
+            &[ceiling + 1, ceiling + 2],
+            &[(ceiling + 3, 3), (ceiling + 4, ceiling)],
+        )
+        .expect("descriptors above the slot range are clear of every placement");
     }
 
     /// The same claim for the three sandboxes this module's neighbours open: both pty probes and
