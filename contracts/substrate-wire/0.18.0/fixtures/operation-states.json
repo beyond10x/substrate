@@ -1,0 +1,197 @@
+{
+  "$schema": "../schemas/schema-fixtures.json",
+  "format": "b10x.substrate-schema-fixtures.v1",
+  "invalid": [
+    {
+      "id": "accepted-cannot-have-outcome",
+      "instance": {
+        "accepted_at": "2026-08-13T12:00:00Z",
+        "actor": "vector-client",
+        "capability_snapshot": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+        "operation": "01JPHASE2STATE_ACCEPTED1",
+        "operation_kind": "workspace.create",
+        "outcome": {
+          "kind": "success",
+          "result": {
+            "id": "ws_invalid",
+            "kind": "workspace",
+            "labels": {},
+            "observed_at": "2026-08-13T12:00:00Z",
+            "state": "ready"
+          }
+        },
+        "principal": null,
+        "request_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "resource": null,
+        "state": "accepted",
+        "terminal_at": null
+      }
+    },
+    {
+      "id": "operation-kind-must-match-result",
+      "instance": {
+        "accepted_at": "2026-08-13T11:59:59Z",
+        "actor": "vector-client",
+        "capability_snapshot": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+        "operation": "01JPHASE2WORKSPACECREATE",
+        "operation_kind": "workspace.create",
+        "outcome": {
+          "kind": "success",
+          "result": {
+            "applied": {
+              "capability_snapshot": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+              "cgroup": "substrate/vector",
+              "filesystem": "workspace-rw-system-ro",
+              "network": "none",
+              "profile": "workspace"
+            },
+            "exit": null,
+            "id": "ex_vector",
+            "kind": "exec",
+            "observed_at": "2026-08-13T12:00:00Z",
+            "requested": {
+              "capability_snapshot": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+              "network": "none",
+              "profile": "workspace",
+              "require": true
+            },
+            "state": "running",
+            "workspace": "ws_vector"
+          }
+        },
+        "principal": null,
+        "request_hash": "dd909608d6877fe6181e9d90db7e32d97d2d4e93acb82908e474b95318c8a399",
+        "resource": "ws_created",
+        "state": "terminal",
+        "terminal_at": "2026-08-13T12:00:00Z"
+      }
+    },
+    {
+      "id": "terminal-requires-terminal-time",
+      "instance": {
+        "accepted_at": "2026-08-13T11:59:59Z",
+        "actor": "vector-client",
+        "capability_snapshot": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+        "operation": "01JPHASE2WORKSPACECREATE",
+        "operation_kind": "workspace.create",
+        "outcome": {
+          "kind": "success",
+          "result": {
+            "id": "ws_created",
+            "kind": "workspace",
+            "labels": {
+              "vector": "workspace-create"
+            },
+            "observed_at": "2026-08-13T12:00:00Z",
+            "state": "ready"
+          }
+        },
+        "principal": null,
+        "request_hash": "dd909608d6877fe6181e9d90db7e32d97d2d4e93acb82908e474b95318c8a399",
+        "resource": "ws_created",
+        "state": "terminal",
+        "terminal_at": null
+      }
+    },
+    {
+      "id": "refused-cannot-have-capability-snapshot",
+      "instance": {
+        "accepted_at": null,
+        "actor": "vector-client",
+        "capability_snapshot": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+        "operation": "01JPHASE2STATE_REFUSED1",
+        "operation_kind": "workspace.create",
+        "outcome": {
+          "error": {
+            "class": "refused",
+            "code": "request.schema-invalid",
+            "message": "Request does not match the closed operation schema.",
+            "operation": "01JPHASE2STATE_REFUSED1",
+            "retriable": false
+          },
+          "kind": "error"
+        },
+        "principal": null,
+        "request_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "resource": null,
+        "state": "refused",
+        "terminal_at": "2026-08-13T12:00:00Z"
+      }
+    }
+  ],
+  "schema": "schemas/operation.json",
+  "valid": [
+    {
+      "accepted_at": null,
+      "actor": "vector-client",
+      "capability_snapshot": null,
+      "operation": "01JPHASE2STATE_REFUSED1",
+      "operation_kind": "workspace.create",
+      "outcome": {
+        "error": {
+          "class": "refused",
+          "code": "request.schema-invalid",
+          "message": "Request does not match the closed operation schema.",
+          "operation": "01JPHASE2STATE_REFUSED1",
+          "retriable": false
+        },
+        "kind": "error"
+      },
+      "principal": null,
+      "request_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "resource": null,
+      "state": "refused",
+      "terminal_at": "2026-08-13T12:00:00Z"
+    },
+    {
+      "accepted_at": "2026-08-13T12:00:00Z",
+      "actor": "vector-client",
+      "capability_snapshot": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+      "operation": "01JPHASE2STATE_ACCEPTED1",
+      "operation_kind": "workspace.create",
+      "outcome": null,
+      "principal": null,
+      "request_hash": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "resource": null,
+      "state": "accepted",
+      "terminal_at": null
+    },
+    {
+      "accepted_at": "2026-08-13T12:00:00Z",
+      "actor": "vector-client",
+      "capability_snapshot": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+      "operation": "01JPHASE2STATE_UNKNOWN01",
+      "operation_kind": "workspace.create",
+      "outcome": null,
+      "principal": null,
+      "request_hash": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "resource": "ws_unknown",
+      "state": "unknown",
+      "terminal_at": null
+    },
+    {
+      "accepted_at": "2026-08-13T11:59:59Z",
+      "actor": "vector-client",
+      "capability_snapshot": "sha256:7777777777777777777777777777777777777777777777777777777777777777",
+      "operation": "01JPHASE2WORKSPACECREATE",
+      "operation_kind": "workspace.create",
+      "outcome": {
+        "kind": "success",
+        "result": {
+          "id": "ws_created",
+          "kind": "workspace",
+          "labels": {
+            "vector": "workspace-create"
+          },
+          "observed_at": "2026-08-13T12:00:00Z",
+          "state": "ready"
+        }
+      },
+      "principal": null,
+      "request_hash": "dd909608d6877fe6181e9d90db7e32d97d2d4e93acb82908e474b95318c8a399",
+      "resource": "ws_created",
+      "state": "terminal",
+      "terminal_at": "2026-08-13T12:00:00Z"
+    }
+  ]
+}

@@ -187,7 +187,7 @@ impl Target {
                 self.instances.insert(text(&step["instance"]).into(), value);
             }
             "query_view" => self.query(text(&step["view"])),
-            "expect_event" => {
+            kind @ ("expect_event" | "expect_event_values") => {
                 let event = self
                     .events
                     .get(text(&step["event"]))
@@ -198,7 +198,13 @@ impl Target {
                 }
                 if let Some(payload) = step.get("payload") {
                     for (name, value) in payload.as_object().unwrap() {
-                        assert_eq!(&event[name], value);
+                        // `expect_event_values` carries expressions; `expect_event` literals.
+                        let expected = if kind == "expect_event_values" {
+                            self.value(value)
+                        } else {
+                            value.clone()
+                        };
+                        assert_eq!(event[name], expected, "event field {name}");
                     }
                 }
             }
@@ -269,7 +275,8 @@ impl Target {
 #[test]
 fn ess_operations_execute_the_committed_suite() {
     let suite: Value = serde_json::from_str(SUITE).unwrap();
-    assert_eq!(suite["provenance"]["suite_version"], "ess-conformance/12");
+    assert_eq!(suite["provenance"]["suite_version"], "ess-conformance/34");
+    assert_eq!(suite["provenance"]["scenario_initial_state"], "empty");
     let scenarios = suite["scenarios"].as_object().unwrap();
     assert_eq!(
         scenarios.len(),

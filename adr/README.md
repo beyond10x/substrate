@@ -37,3 +37,4 @@ with YAML frontmatter containing `date` and `status`. Draft design questions rem
 | [0029](0029-the-remote-sdk-shares-one-verified-https-wss-transport.md) | The remote SDK shares one verified HTTPS/WSS transport | accepted |
 | [0030](0030-rust-crates-are-source-distributed-and-non-publishable.md) | Rust crates are source-distributed and non-publishable | accepted |
 | [0031](0031-live-output-backpressure-has-a-stall-deadline.md) | Live output backpressure has a stall deadline | accepted |
+| [0032](0032-exec-usage-without-block-io.md) | Exec usage is served without block I/O | accepted |

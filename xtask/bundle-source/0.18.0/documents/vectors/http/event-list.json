@@ -1,0 +1,117 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "kind": "http",
+    "operation": "event.list",
+    "request": {
+      "headers": {
+        "x-request-id": "req_events_page01"
+      },
+      "method": "GET",
+      "path": "/v1/events",
+      "query": {
+        "limit": 100
+      }
+    },
+    "valid_address": true,
+    "valid_input": true
+  },
+  "context": {
+    "actor": "vector-client",
+    "authority": "http-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000",
+    "transport": {
+      "authenticated": true,
+      "kind": "unix",
+      "reachable": false
+    }
+  },
+  "covers": [
+    "route.event.list",
+    "events.pull-push-identity"
+  ],
+  "expected": {
+    "kind": "http-response",
+    "response": {
+      "body": {
+        "api_version": "v1",
+        "request_id": "req_events_page01",
+        "result": {
+          "first_retained_seq": 1,
+          "generation": 41,
+          "items": [
+            {
+              "actor": "vector-client",
+              "cause": {
+                "kind": "operation",
+                "operation": "01JPHASE3EVENTSOURCE0001"
+              },
+              "generation": 41,
+              "observation": {
+                "id": "ws_vector",
+                "kind": "workspace",
+                "labels": {},
+                "observed_at": "2026-08-13T12:00:00Z",
+                "state": "ready"
+              },
+              "observed_at": "2026-08-13T12:00:00Z",
+              "principal": null,
+              "resource": "ws_vector",
+              "resource_kind": "workspace",
+              "seq": 7,
+              "transition": "workspace.created"
+            }
+          ],
+          "next_cursor": "ev2.scope_vector_subject.41.7",
+          "source_scope": "scope_vector_subject",
+          "through_seq": 7
+        }
+      },
+      "status": 200
+    }
+  },
+  "id": "event-pull-returns-durable-source-identities",
+  "layer": "http",
+  "phase": 3,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/live_state_visible_before_event",
+      "expected": true,
+      "operator": "equals"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "event",
+      "name": "retained-source",
+      "state": {
+        "actor": "vector-client",
+        "cause": {
+          "kind": "operation",
+          "operation": "01JPHASE3EVENTSOURCE0001"
+        },
+        "generation": 41,
+        "observation": {
+          "id": "ws_vector",
+          "kind": "workspace",
+          "labels": {},
+          "observed_at": "2026-08-13T12:00:00Z",
+          "state": "ready"
+        },
+        "observed_at": "2026-08-13T12:00:00Z",
+        "principal": null,
+        "resource": "ws_vector",
+        "resource_kind": "workspace",
+        "seq": 7,
+        "transition": "workspace.created"
+      }
+    }
+  ]
+}

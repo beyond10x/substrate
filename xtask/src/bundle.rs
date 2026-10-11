@@ -888,6 +888,10 @@ fn check_classification(version: &str, released: &Tree, failures: &mut Vec<Strin
 /// A successor that rendered, verified and preserved everything while adding nothing is the failure
 /// this catches; the entries are the acceptance list of the story that cut the bundle.
 fn check_additions(version: &str, released: &Tree, failures: &mut Vec<String>) {
+    if version == "0.18.0" {
+        check_block_io_relaxation_additions(released, failures);
+        return;
+    }
     if version == "0.17.0" {
         check_capture_additions(released, failures);
         return;
@@ -934,6 +938,90 @@ fn check_additions(version: &str, released: &Tree, failures: &mut Vec<String>) {
     }
     if version == "0.5.0" {
         check_secret_slot_additions(released, failures);
+    }
+}
+
+/// What `0.18.0` exists for (ADR 0032): exec usage served on a host without the io controller.
+///
+/// `block_io` is a published boolean while every other `exec.resource-usage` member stays
+/// `const: true`, and the observed usage record admits both block I/O counters as optional but
+/// only together.
+fn check_block_io_relaxation_additions(released: &Tree, failures: &mut Vec<String>) {
+    const FACT: &str = "/properties/facts/properties/exec.resource-usage/properties";
+    if let Some(capability) = json_at(released, "schemas/capability.json", failures) {
+        match capability.pointer(FACT).and_then(Value::as_object) {
+            Some(members) => {
+                for (name, member) in members {
+                    let admitted = if name == "block_io" {
+                        member.get("type") == Some(&json!("boolean"))
+                            && member.get("const").is_none()
+                    } else {
+                        member.get("const") == Some(&json!(true))
+                    };
+                    if !admitted {
+                        failures.push(format!(
+                            "schemas/capability.json: exec.resource-usage member {name} must be {}",
+                            if name == "block_io" {
+                                "a published boolean"
+                            } else {
+                                "const true"
+                            }
+                        ));
+                    }
+                }
+                if !members.contains_key("block_io") {
+                    failures.push(
+                        "schemas/capability.json: exec.resource-usage lost block_io".to_owned(),
+                    );
+                }
+            }
+            None => failures.push(
+                "schemas/capability.json: exec.resource-usage declares no members".to_owned(),
+            ),
+        }
+    }
+    let Some(resource) = json_at(released, "schemas/resource.json", failures) else {
+        return;
+    };
+    let observed = resource
+        .pointer("/$defs/exec-usage/oneOf")
+        .and_then(Value::as_array)
+        .and_then(|branches| {
+            branches.iter().find(|branch| {
+                branch.pointer("/properties/status/const") == Some(&json!("observed"))
+            })
+        });
+    let Some(observed) = observed else {
+        failures.push("schemas/resource.json: exec-usage has no observed branch".to_owned());
+        return;
+    };
+    let required = observed
+        .get("required")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for (counter, partner) in [
+        ("io_read_bytes", "io_write_bytes"),
+        ("io_write_bytes", "io_read_bytes"),
+    ] {
+        if observed
+            .pointer(&format!("/properties/{counter}"))
+            .is_none()
+        {
+            failures.push(format!(
+                "schemas/resource.json: the observed usage record lost {counter}"
+            ));
+        }
+        if required.contains(&json!(counter)) {
+            failures.push(format!(
+                "schemas/resource.json: {counter} is still required; it is absent under block_io false"
+            ));
+        }
+        if observed.pointer(&format!("/dependentRequired/{counter}")) != Some(&json!([partner])) {
+            failures.push(format!(
+                "schemas/resource.json: {counter} must arrive together with {partner}"
+            ));
+        }
     }
 }
 
@@ -5235,7 +5323,7 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{}: {error}", bundle.display()));
             checked += 1;
         }
-        assert_eq!(checked, 17, "every released bundle must be checked");
+        assert_eq!(checked, 18, "every released bundle must be checked");
     }
 
     /// Class, the other half: if a parameter's name is not a discriminator, then renaming one is
@@ -6761,6 +6849,43 @@ mod tests {
             } else {
                 std::fs::copy(entry.path(), &target).expect("copy");
             }
+        }
+    }
+}
+
+/// `0.18.0`'s addition (ADR 0032): exec usage without block I/O.
+#[cfg(test)]
+mod block_io_relaxation {
+    use crate::repo;
+
+    fn released(version: &str) -> super::Tree {
+        super::tree_of(
+            &repo::root()
+                .expect("root")
+                .join("contracts/substrate-wire")
+                .join(version),
+        )
+        .expect("the bundle reads")
+    }
+
+    #[test]
+    fn the_successor_carries_the_relaxation() {
+        let mut failures = Vec::new();
+        super::check_additions("0.18.0", &released("0.18.0"), &mut failures);
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    /// A check that passes on the tree that predates the change proves nothing about the tree
+    /// that carries it: `0.17.0` declares `block_io` `const: true` and requires both counters.
+    #[test]
+    fn the_predecessor_carries_none_of_it() {
+        let mut failures = Vec::new();
+        super::check_additions("0.18.0", &released("0.17.0"), &mut failures);
+        for named in ["block_io", "io_read_bytes", "io_write_bytes"] {
+            assert!(
+                failures.iter().any(|failure| failure.contains(named)),
+                "0.17.0 was not reported for {named}: {failures:?}"
+            );
         }
     }
 }

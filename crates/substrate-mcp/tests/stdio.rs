@@ -340,7 +340,7 @@ async fn stdio_adapter_serves_the_portable_or_delegated_clean_room_journey() {
                 )
                 .await;
             assert_eq!(metrics["isError"], false, "{metrics}");
-            assert!(metrics["structuredContent"]["usage"]["wall_ms"].is_number());
+            assert!(metrics["structuredContent"]["usage"]["wall_time_us"].is_number());
         }
         let retired = session
             .call(
