@@ -2,11 +2,13 @@
 format: aep.planning-md/3
 id: decision-blocker:host-run-gates-contract-route
 kind: decision-blocker
-status: open
+status: cleared
 title: Contract and specification route for host-run gates
 relations:
 - blocks: epic:host-run-gates
-revision: 2
+revision: 4
+transitions:
+- {from: "open", to: "cleared", at: "2026-10-11T19:53:37Z", actor: "human:timo", revision: 4}
 ---
 # Decision blocker: contract and specification route for the host-run-gates epic
 
@@ -32,6 +34,10 @@ revision: 2
 
 ## Decision
 
+- Q1: A (operator, 2026-10-11). Successor bundle `0.18.0` makes `exec.resource-usage.block_io` a
+  boolean; when it is `false` the two I/O counters are absent from every usage record, never zero.
+  ADR 0032 records it before code. Harness, the one in-collection client, moves at its next pin;
+  this repository does not change harness. `story:read-only-host-file-bind` may ride the same
+  bundle.
 - Q2: A, read-only only. A writable bind of a host directory outside `/workspace` is not built.
 - Q3: A, native host tests and the delegated lane; `spec/coverage.md` keeps confinement outside the ESS projection.
-- Q1: open. `story:exec-usage-without-io-controller` stays draft; no successor bundle and no ADR until it is decided.
