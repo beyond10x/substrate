@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:exec-usage-without-io-controller
 kind: story
-status: active
+status: implemented
 title: Exec usage is served on a host without the io controller
 relations:
 - decomposes: epic:host-run-gates
@@ -21,10 +21,11 @@ scope:
   path: scripts/gate.sh
 - confidence: cited
   path: xtask/bundle-source/0.18.0
-revision: 11
+revision: 12
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-11T19:53:37Z", actor: "human:timo", revision: 3}
 - {from: "proposed", to: "active", at: "2026-10-11T19:54:15Z", actor: "human:timo", revision: 11}
+- {from: "active", to: "implemented", at: "2026-10-12T17:11:09Z", actor: "human:timo", revision: 12, decided_on: {"recorded":{"test_result":1}}}
 ---
 # Story: exec usage is served on a host without the io controller
 

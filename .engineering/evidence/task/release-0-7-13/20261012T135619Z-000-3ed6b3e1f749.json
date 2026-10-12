@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-12T13:56:19Z",
+  "actor": "human:timo",
+  "artifact": "task:release-0-7-13",
+  "kind": "task",
+  "revision": 1,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "Gate workflow success on main at 44e2505e, completed 2026-10-12T13:56:19Z; corrects the instant of the record at 2026-10-12T17:00:00Z, which was typed, not read from the run",
+    "reference": "https://github.com/beyond10x/substrate/actions/runs/38258346080"
+  }
+}
