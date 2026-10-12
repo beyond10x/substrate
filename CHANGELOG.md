@@ -9,6 +9,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [0.7.13] — 2026-10-11
 
+Published by [release run 38280358137](https://github.com/beyond10x/substrate/actions/runs/38280358137)
+from tagged commit `44e2505e31d32733fc997b84f76eeb42cce1dfc6`. All three artifacts were
+keyless-signed and verified against `release.yml@refs/tags/0.7.13` by the release workflow, and
+each tag resolved anonymously to its released digest:
+
+- Image: `ghcr.io/beyond10x/b10x-substrate-daemon:0.7.13` at `sha256:0de7bbdee8dd44b10ccbc3715b15b5551603033e566b29db9331f9f889932be0`.
+- Contract bundle: `ghcr.io/beyond10x/b10x-substrate-wire:0.18.0` at `sha256:0fc268003bcb02645759cb916f0790359598943c07fa3647320821f2375450ae`, annotated `development`, published for the first time.
+- Disposable MCP image: `ghcr.io/beyond10x/b10x-substrate-mcp:0.7.13` at `sha256:94de49281fe1916de21ff510270c53fc51d2d1193d04138fbba0ecf600c98f7b`, development-only.
+
+The [release notes](https://github.com/beyond10x/substrate/releases/tag/0.7.13) provide exact
+signature verification commands and the successful 106-case delegated confinement record.
+
 ### Added
 
 - Development contract bundle `substrate-wire/0.18.0` (ADR 0032), preserving every earlier bundle's
