@@ -2,11 +2,25 @@
 format: aep.planning-md/3
 id: story:read-only-host-file-bind
 kind: story
-status: draft
+status: active
 title: A single host file is admitted read-only
 relations:
 - decomposes: epic:host-run-gates
-revision: 1
+scope:
+- confidence: cited
+  path: adr/0033-a-single-host-file-is-admitted-read-only.md
+- confidence: cited
+  path: contracts/substrate-wire/0.18.0
+- confidence: cited
+  path: crates/substrate-host/src/process.rs
+- confidence: cited
+  path: crates/substrate-wire
+- confidence: cited
+  path: xtask/bundle-source/0.18.0
+revision: 9
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-11T19:53:37Z", actor: "human:timo", revision: 3}
+- {from: "proposed", to: "active", at: "2026-10-11T19:54:15Z", actor: "human:timo", revision: 9}
 ---
 # Story: a single host file is admitted read-only
 
@@ -20,7 +34,8 @@ directory around it, which admits everything else in it, or copy the file into t
 ## Contract
 
 A new, optional, bounded start field beside `read_only_roots`, so existing roots keep their exact
-meaning and validation:
+meaning and validation. It rides successor bundle `0.18.0` with
+`story:exec-usage-without-io-controller`; ADR 0033 records it before code.
 
 - `read_only_files: [{ host_path, mount }]` on exec and raw-pipe start. `host_path` is absolute,
   canonical and an existing regular file reached without a symlink; `mount` is absolute, canonical,
@@ -29,9 +44,11 @@ meaning and validation:
   confinement observation lists every file bound, as it does roots.
 - The mount is `--ro-bind` of the file; executable bits are the host file's.
 
-This needs a successor wire bundle and an ADR before code (invariants 6 and 8). It can ride the same
-successor bundle as `story:exec-usage-without-io-controller` if both are approved. Not built until
-then.
+## Specification
+
+Decision Q3 of `decision-blocker:host-run-gates-contract-route`: filesystem confinement stays
+outside the ESS projection (`spec/coverage.md`); the story is proved by host tests, the runtime
+vectors and the delegated lane.
 
 ## Acceptance
 

@@ -63,6 +63,44 @@ const PIPE_OUTPUT_STALL_TIMEOUT: Duration = Duration::from_secs(1);
 /// (invariant 3).
 pub(crate) const USER_NAMESPACE_ARGV: [&str; 2] = ["--unshare-user", "--disable-userns"];
 
+/// Clears `FD_CLOEXEC` on each pinned descriptor so bubblewrap inherits it to mount.
+///
+/// Runs inside `pre_exec`: async-signal-safe `fcntl` only, no allocation. Bubblewrap's descriptor
+/// binds close each one again before the program starts.
+pub(crate) fn inherit(descriptors: &[RawFd]) -> io::Result<()> {
+    for descriptor in descriptors {
+        // SAFETY: `fcntl` reads and updates the flags of a plain descriptor number.
+        let flags = unsafe { libc::fcntl(*descriptor, libc::F_GETFD) };
+        // SAFETY: as above.
+        if flags < 0
+            || unsafe { libc::fcntl(*descriptor, libc::F_SETFD, flags & !libc::FD_CLOEXEC) } != 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+    }
+    Ok(())
+}
+
+/// A shell fragment for a probe sandbox that fails unless the program holds no descriptor
+/// resolving to any of `paths`, then writes through every non-stdio descriptor it does hold, at
+/// `<descriptor><write_through>`, so the host side can prove the write changed nothing.
+///
+/// `test A -ef A` first: a shell whose `test` lacked `-ef` would otherwise pass the loop unread.
+pub(crate) fn no_descriptor_resolves_to(paths: &[&str], write_through: &str) -> String {
+    use std::fmt::Write as _;
+    let mut controls = String::new();
+    let mut refusals = String::new();
+    for path in paths {
+        // Writing to a `String` cannot fail.
+        let _ = write!(controls, "test {path} -ef {path} && ");
+        let _ = write!(refusals, "if test \"$f\" -ef {path}; then exit 1; fi; ");
+    }
+    format!(
+        "{controls}{{ for f in /proc/self/fd/*; do {refusals}case $f in /proc/self/fd/[012]) ;; \
+         *) (printf x >\"$f{write_through}\") 2>/dev/null;; esac; :; done; }}"
+    )
+}
+
 /// A `bwrap` that records the argv it was handed and refuses to be a sandbox, for the cases that
 /// assert on what each site of this crate actually builds.
 ///
@@ -252,11 +290,107 @@ impl Drop for PreparedScratch {
 /// Stable directory objects used for narrower workspace mounts.
 ///
 /// Paths are checked at admission for useful refusals, then opened component by component without
-/// following links. Bubblewrap consumes `/proc/self/fd/N`, so a concurrent rename cannot redirect
-/// an already-admitted mount.
-struct PreparedWorkspaceAccess {
+/// following links. Bubblewrap mounts each descriptor itself (`--ro-bind-fd`/`--bind-fd`), so a
+/// concurrent rename cannot redirect an already-admitted mount.
+pub(crate) struct PreparedWorkspaceAccess {
     root: OwnedFd,
     subtrees: Vec<(OwnedFd, String)>,
+}
+
+impl PreparedWorkspaceAccess {
+    /// Every pinned descriptor, which the confinement backend must inherit to mount.
+    pub(crate) fn raw_fds(&self) -> Vec<RawFd> {
+        std::iter::once(self.root.as_raw_fd())
+            .chain(
+                self.subtrees
+                    .iter()
+                    .map(|(directory, _)| directory.as_raw_fd()),
+            )
+            .collect()
+    }
+
+    /// The root read-only at `/workspace`, then each admitted subtree read-write over it.
+    ///
+    /// Descriptor binds, never `/proc/self/fd/<n>` as a path: bubblewrap mounts the pinned object,
+    /// checks the mount is that object, and closes the descriptor before the program starts. A
+    /// descriptor bound by path stays open in the program, which reopens it through
+    /// `/proc/self/fd/<n>` on the host's writable mount and writes the read-only workspace.
+    pub(crate) fn bind_args(&self) -> Vec<String> {
+        let mut argv = vec![
+            "--ro-bind-fd".to_owned(),
+            self.root.as_raw_fd().to_string(),
+            "/workspace".to_owned(),
+        ];
+        for (directory, subtree) in &self.subtrees {
+            argv.push("--bind-fd".to_owned());
+            argv.push(directory.as_raw_fd().to_string());
+            argv.push(format!("/workspace/{subtree}"));
+        }
+        argv
+    }
+}
+
+/// Moves a pinned descriptor above every descriptor a secret slot may be placed at, so placing one
+/// in the child can never replace it (ADR 0012's range is `3..=MAX_SECRET_SLOT_FD`).
+pub(crate) fn above_secret_slots(descriptor: &OwnedFd) -> Option<OwnedFd> {
+    let floor = RawFd::try_from(substrate_wire::MAX_SECRET_SLOT_FD + 1).ok()?;
+    // SAFETY: duplicates a live descriptor; the result is owned below.
+    let raised = unsafe { libc::fcntl(descriptor.as_raw_fd(), libc::F_DUPFD_CLOEXEC, floor) };
+    // SAFETY: `fcntl` returned a new descriptor owned by this scope.
+    (raised >= 0).then(|| unsafe { OwnedFd::from_raw_fd(raised) })
+}
+
+/// Moves a driver-owned descriptor that bubblewrap consumes — the launch barrier, the info pipe,
+/// the seccomp program — above the slot range, close-on-exec, and closes the original.
+///
+/// A secret slot is `dup2`ed onto its declared number in `pre_exec`, so a driver descriptor left
+/// at a low number would be replaced by the slot's bytes: bubblewrap would install the slot as the
+/// seccomp program, or never block on the barrier (ADR 0012, ADR 0033).
+pub(crate) fn bubblewrap_descriptor(
+    descriptor: OwnedFd,
+    role: &str,
+) -> Result<OwnedFd, DriverError> {
+    let raised = above_secret_slots(&descriptor).ok_or_else(|| {
+        DriverError::failed(
+            "exec.spawn-failed",
+            format!(
+                "{role} descriptor could not be moved above the secret-slot range: {}",
+                io::Error::last_os_error()
+            ),
+        )
+    });
+    // The low original goes now: only the raised copy may reach bubblewrap.
+    drop(descriptor);
+    raised
+}
+
+/// Refuses a start in which any descriptor bubblewrap inherits could be replaced by a slot.
+///
+/// Every descriptor in `inherited` must lie above `MAX_SECRET_SLOT_FD`, where no slot can be
+/// declared, and so be distinct from every placement target. [`bubblewrap_descriptor`] and
+/// [`above_secret_slots`] put them there; this is the check that a new descriptor added without
+/// them is refused by name before the spawn rather than silently replaced after it.
+pub(crate) fn inherited_clear_of_slots(
+    inherited: &[RawFd],
+    placements: &[(RawFd, RawFd)],
+) -> Result<(), DriverError> {
+    let ceiling = RawFd::try_from(substrate_wire::MAX_SECRET_SLOT_FD).unwrap_or(RawFd::MAX);
+    for descriptor in inherited {
+        if *descriptor <= ceiling
+            || placements
+                .iter()
+                .any(|(source, target)| source == descriptor || target == descriptor)
+        {
+            return Err(DriverError::failed(
+                "exec.spawn-failed",
+                format!(
+                    "driver descriptor {descriptor} lies in the secret-slot range \
+                     3..={ceiling}, where a slot placement could replace it"
+                ),
+            ));
+        }
+    }
+    Ok(())
 }
 
 impl Execution {
@@ -707,6 +841,11 @@ impl ProcessRuntime {
                 Ok(value) => value,
                 Err(error) => return DispatchOutcome::NotDispatched(error),
             };
+        // Pinned at admission: the object bound is the object inspected (ADR 0033).
+        let read_only_files = match crate::read_only_files::pin(&input.read_only_files) {
+            Ok(value) => value,
+            Err(error) => return DispatchOutcome::NotDispatched(error),
+        };
         let capsule = match self.prepare_capsule(input.capsule.as_ref()) {
             Ok(value) => value,
             Err(error) => return DispatchOutcome::NotDispatched(error),
@@ -761,7 +900,10 @@ impl ProcessRuntime {
             },
             None => None,
         };
-        let (sync_read, sync_write) = match pipe() {
+        // The end bubblewrap reads sits above the slot range, so no slot placement can replace it.
+        let (sync_read, sync_write) = match pipe()
+            .and_then(|(read, write)| Ok((bubblewrap_descriptor(read, "launch barrier")?, write)))
+        {
             Ok(pipe) => pipe,
             Err(error) => {
                 return contain_cgroup(&cgroup, error);
@@ -769,9 +911,12 @@ impl ProcessRuntime {
         };
         let sync_fd = sync_read.as_raw_fd();
         // Trap 2: the namespace to bind the aperture in belongs to the pid bubblewrap *reports*,
-        // never to the bubblewrap process itself.
+        // never to the bubblewrap process itself. The end bubblewrap writes sits above the slot
+        // range, as the barrier does.
         let info = match aperture.as_ref() {
-            Some(_) => match pipe() {
+            Some(_) => match pipe()
+                .and_then(|(read, write)| Ok((read, bubblewrap_descriptor(write, "info pipe")?)))
+            {
                 Ok(pipe) => Some(pipe),
                 Err(error) => return contain_cgroup(&cgroup, error),
             },
@@ -826,6 +971,7 @@ impl ProcessRuntime {
             info_fd,
             scratch.as_ref(),
             workspace_access.as_ref(),
+            &read_only_files,
         ) {
             Ok(value) => value,
             Err(error) => return contain_cgroup(&cgroup, error),
@@ -839,17 +985,18 @@ impl ProcessRuntime {
             retained.dedup();
         }
         retained.push(u32::try_from(seccomp.as_raw_fd()).expect("seccomp descriptor fits u32"));
+        // Inherited by bubblewrap only: it mounts each through its descriptor bind and closes it
+        // before the program starts, so none is open in the confined program (ADR 0023, ADR 0033).
         let workspace_fds = workspace_access
             .as_ref()
+            .map(PreparedWorkspaceAccess::raw_fds)
+            .unwrap_or_default()
             .into_iter()
-            .flat_map(|access| {
-                std::iter::once(access.root.as_raw_fd()).chain(
-                    access
-                        .subtrees
-                        .iter()
-                        .map(|(directory, _)| directory.as_raw_fd()),
-                )
-            })
+            .chain(
+                read_only_files
+                    .iter()
+                    .map(crate::read_only_files::PinnedFile::raw_fd),
+            )
             .collect::<Vec<_>>();
         retained.extend(
             workspace_fds
@@ -858,21 +1005,28 @@ impl ProcessRuntime {
         );
         retained.sort_unstable();
         retained.dedup();
+        // Every descriptor bubblewrap consumes, and nothing else: the launch barrier, the info
+        // pipe, the seccomp program and the pinned mounts. Each is close-on-exec in this process,
+        // so no other spawn inherits it; this child clears the flag in `pre_exec`, and bubblewrap
+        // closes each before the program starts. All of them lie above the slot range, which the
+        // check below proves rather than assumes.
+        let inherited = [Some(sync_fd), info_fd, Some(seccomp.as_raw_fd())]
+            .into_iter()
+            .flatten()
+            .chain(workspace_fds)
+            .collect::<Vec<_>>();
+        if let Err(error) = inherited_clear_of_slots(&inherited, &placements) {
+            return contain_cgroup(&cgroup, error);
+        }
         // SAFETY: pre_exec runs after fork; it invokes only async-signal-safe libc calls and does
         // not allocate. The captured descriptors are plain integers owned by the parent until spawn,
-        // and the two vectors are built before the fork and only read after it.
+        // and the vectors are built before the fork and only read after it.
         unsafe {
             command.as_std_mut().pre_exec(move || {
                 if libc::close(write_fd) != 0 {
                     return Err(std::io::Error::last_os_error());
                 }
-                for fd in &workspace_fds {
-                    let flags = libc::fcntl(*fd, libc::F_GETFD);
-                    if flags < 0 || libc::fcntl(*fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) != 0
-                    {
-                        return Err(std::io::Error::last_os_error());
-                    }
-                }
+                inherit(&inherited)?;
                 crate::secrets::place_and_close(&placements, &retained)?;
                 if libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 {
                     return Err(std::io::Error::last_os_error());
@@ -984,6 +1138,9 @@ impl ProcessRuntime {
             // mount exactly as declared, so by here the two are the same list — and a reader gets
             // it from the record rather than from the fact that a build happened to succeed.
             read_only_roots: input.read_only_roots.clone(),
+            // Bound, as roots are mounted: `pin` refused anything it could not bind exactly as
+            // declared (ADR 0033).
+            read_only_files: input.read_only_files.clone(),
             // Placed, not requested: this list is taken from the acquired set, so it names what
             // actually crossed into the child.
             secret_slots: applied_slots,
@@ -1552,7 +1709,7 @@ impl ProcessRuntime {
     }
 
     /// Pins every narrower workspace mount to the directory object that admission inspected.
-    fn prepare_workspace_access(
+    pub(crate) fn prepare_workspace_access(
         workspace: &Path,
         access: &substrate_wire::WorkspaceAccess,
     ) -> Result<Option<PreparedWorkspaceAccess>, DriverError> {
@@ -1582,6 +1739,12 @@ impl ProcessRuntime {
         }
         // SAFETY: `open` returned a new descriptor owned by this scope.
         let root = unsafe { OwnedFd::from_raw_fd(root) };
+        let root = above_secret_slots(&root).ok_or_else(|| {
+            DriverError::failed(
+                "exec.workspace-pin-failed",
+                "The admitted workspace root could not be pinned above the secret-slot range.",
+            )
+        })?;
         let mut subtrees = Vec::new();
         if let Some(paths) = access.writable_subtrees() {
             for path in paths {
@@ -1625,7 +1788,13 @@ impl ProcessRuntime {
                     // SAFETY: openat returned a new descriptor owned by this scope.
                     current = unsafe { OwnedFd::from_raw_fd(next) };
                 }
-                subtrees.push((current, path.clone()));
+                let pinned = above_secret_slots(&current).ok_or_else(|| {
+                    DriverError::failed(
+                        "exec.workspace-pin-failed",
+                        "An admitted workspace subtree could not be pinned above the secret-slot range.",
+                    )
+                })?;
+                subtrees.push((pinned, path.clone()));
             }
         }
         Ok(Some(PreparedWorkspaceAccess { root, subtrees }))
@@ -1764,6 +1933,11 @@ impl ProcessRuntime {
             ));
         }
         Self::admit_read_only_roots(&input.read_only_roots)?;
+        crate::read_only_files::admit(
+            &input.read_only_files,
+            &input.read_only_roots,
+            self.capability.facts.exec_read_only_files.as_ref(),
+        )?;
         Self::admit_workspace_access(
             workspace,
             &input.workspace_access,
@@ -1903,8 +2077,15 @@ impl ProcessRuntime {
         info_fd: Option<RawFd>,
         scratch: Option<&PreparedScratch>,
         workspace_access: Option<&PreparedWorkspaceAccess>,
+        read_only_files: &[crate::read_only_files::PinnedFile],
     ) -> Result<(Command, File), DriverError> {
-        let seccomp = crate::seccomp::profile()?;
+        // Above the slot range, close-on-exec: a slot declared at the profile's original number
+        // would otherwise become the program bubblewrap installs. `start` clears the flag in the
+        // one child that must inherit it.
+        let seccomp = File::from(bubblewrap_descriptor(
+            OwnedFd::from(crate::seccomp::profile()?),
+            "seccomp program",
+        )?);
         let seccomp_fd = seccomp.as_raw_fd();
         let mut command = Command::new(&self.config.bubblewrap);
         let mut terminal = false;
@@ -1976,6 +2157,12 @@ impl ProcessRuntime {
                 .arg(&root.host_path)
                 .arg(&root.mount);
         }
+        // One file each, through its pinned descriptor rather than its path, so a rename after
+        // admission cannot redirect it. Bubblewrap creates the mount point and its parents in the
+        // sandbox root, so nothing else from the host directory appears (ADR 0033).
+        for file in read_only_files {
+            command.args(file.bind_args());
+        }
         // The whole of `/etc` a run ever gets, and only when it has an aperture: exactly the
         // declared name mapped to the forwarder, and — where the operator configured one — a
         // snapshot of a trust anchor. Read-only, generated, and gone with the run.
@@ -1991,16 +2178,7 @@ impl ProcessRuntime {
                 .arg(substrate_wire::EXEC_SCRATCH_MOUNT);
         }
         if let Some(access) = workspace_access {
-            command
-                .arg("--ro-bind")
-                .arg(format!("/proc/self/fd/{}", access.root.as_raw_fd()))
-                .arg("/workspace");
-            for (directory, subtree) in &access.subtrees {
-                command
-                    .arg("--bind")
-                    .arg(format!("/proc/self/fd/{}", directory.as_raw_fd()))
-                    .arg(Path::new("/workspace").join(subtree));
-            }
+            command.args(access.bind_args());
         } else {
             command.arg("--bind").arg(workspace).arg("/workspace");
         }
@@ -3179,6 +3357,19 @@ impl Cgroup {
         read_named_counter(&self.path.join("memory.events"), "oom_kill")
     }
 
+    /// Whether the kernel enabled the io controller in this cgroup, which is what gives it an
+    /// `io.stat`.
+    fn has_io_controller(&self) -> Result<bool, DriverError> {
+        let controllers =
+            std::fs::read_to_string(self.path.join("cgroup.controllers")).map_err(|error| {
+                DriverError::failed(
+                    "exec.metrics-read-failed",
+                    format!("cgroup controllers: {error}"),
+                )
+            })?;
+        Ok(controllers.split_whitespace().any(|item| item == "io"))
+    }
+
     fn resource_usage(
         &self,
         complete: bool,
@@ -3190,7 +3381,15 @@ impl Cgroup {
         let processes_peak = read_decimal_counter(&self.path.join("pids.peak"))?;
         let process_limit_hits = read_named_counter(&self.path.join("pids.events"), "max")?;
         let memory_oom_kills = self.memory_oom_kills()?;
-        let (io_read_bytes, io_write_bytes) = read_io_counters(&self.path.join("io.stat"))?;
+        // Block I/O is read only where this cgroup has the io controller; elsewhere both counters
+        // are absent, never zero (ADR 0032). A listed controller whose `io.stat` cannot be read
+        // stays a named failure.
+        let (io_read_bytes, io_write_bytes) = if self.has_io_controller()? {
+            let (read, written) = read_io_counters(&self.path.join("io.stat"))?;
+            (Some(read), Some(written))
+        } else {
+            (None, None)
+        };
         Ok(ResourceUsage {
             complete,
             observed_at: Utc::now(),
@@ -3342,10 +3541,15 @@ fn write_control(path: &Path, name: &str, value: &str) -> Result<(), DriverError
     })
 }
 
+/// A private pipe whose two ends are close-on-exec.
+///
+/// Close-on-exec on purpose: no other spawn in this daemon may inherit either end. The one end
+/// bubblewrap reads or writes is moved above the slot range with [`bubblewrap_descriptor`] and made
+/// inheritable in that one child's `pre_exec` by [`inherit`].
 fn pipe() -> Result<(OwnedFd, OwnedFd), DriverError> {
     let mut descriptors = [-1; 2];
     // SAFETY: descriptors points to two writable integers; pipe2 initializes both on success.
-    if unsafe { libc::pipe2(descriptors.as_mut_ptr(), 0) } != 0 {
+    if unsafe { libc::pipe2(descriptors.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
         return Err(DriverError::failed(
             "exec.spawn-failed",
             format!("sync pipe: {}", std::io::Error::last_os_error()),
@@ -3430,7 +3634,88 @@ mod tests {
         contain_spawned_with_reconciliation, drain_capped, is_secretish_name, is_terminal,
         recorded_sandboxes, recording_backend, wait_terminal_with_hook,
     };
+    use super::{RawFd, bubblewrap_descriptor, inherited_clear_of_slots, pipe};
     use crate::{DispatchOutcome, HostConfig};
+
+    /// A fake exec cgroup carrying every counter `resource_usage` reads, with `controllers` as its
+    /// own `cgroup.controllers`.
+    fn counter_cgroup(directory: &std::path::Path, controllers: &str) -> Cgroup {
+        for (name, contents) in [
+            ("cpu.stat", "usage_usec 500\nuser_usec 300\n"),
+            ("memory.current", "1024\n"),
+            ("memory.peak", "2048\n"),
+            ("memory.events", "low 0\noom_kill 0\n"),
+            ("pids.current", "1\n"),
+            ("pids.peak", "3\n"),
+            ("pids.events", "max 0\n"),
+        ] {
+            std::fs::write(directory.join(name), contents).unwrap();
+        }
+        std::fs::write(
+            directory.join("cgroup.controllers"),
+            format!("{controllers}\n"),
+        )
+        .unwrap();
+        Cgroup {
+            path: directory.to_path_buf(),
+            name: "substrate-ex_usage".to_owned(),
+        }
+    }
+
+    /// ADR 0032: an exec cgroup without the io controller has no `io.stat`, and its usage record
+    /// carries CPU, memory and process counters with both block I/O counters **absent** — the
+    /// keys are missing from the JSON, never zero.
+    #[test]
+    fn usage_without_the_io_controller_omits_block_io_counters() {
+        let directory = tempfile::tempdir().unwrap();
+        let cgroup = counter_cgroup(directory.path(), "cpu memory pids");
+        let usage = cgroup
+            .resource_usage(true, Instant::now())
+            .expect("usage is observed without io.stat");
+        let record = serde_json::to_value(&usage).unwrap();
+        assert_eq!(record["cpu_time_us"], 500);
+        assert_eq!(record["memory_peak_bytes"], 2048);
+        assert_eq!(record["processes_peak"], 3);
+        for key in ["io_read_bytes", "io_write_bytes"] {
+            assert!(
+                record.get(key).is_none(),
+                "{key} must be absent, never zero: {record}"
+            );
+        }
+    }
+
+    /// ADR 0032: with the io controller the record is unchanged from 0.17.0.
+    #[test]
+    fn usage_with_the_io_controller_reports_block_io_counters() {
+        let directory = tempfile::tempdir().unwrap();
+        let cgroup = counter_cgroup(directory.path(), "cpu io memory pids");
+        std::fs::write(
+            directory.path().join("io.stat"),
+            "8:0 rbytes=4096 wbytes=8192 rios=1 wios=2 dbytes=0 dios=0\n\
+             259:0 rbytes=1 wbytes=2 rios=1 wios=1 dbytes=0 dios=0\n",
+        )
+        .unwrap();
+        let record = serde_json::to_value(
+            cgroup
+                .resource_usage(true, Instant::now())
+                .expect("usage is observed"),
+        )
+        .unwrap();
+        assert_eq!(record["io_read_bytes"], 4097);
+        assert_eq!(record["io_write_bytes"], 8194);
+    }
+
+    /// A listed io controller whose `io.stat` cannot be read is a named failure, never a silent
+    /// absence (invariant 3).
+    #[test]
+    fn a_listed_io_controller_without_io_stat_is_a_named_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let cgroup = counter_cgroup(directory.path(), "cpu io memory pids");
+        let error = cgroup
+            .resource_usage(true, Instant::now())
+            .expect_err("a missing io.stat under a listed controller is refused");
+        assert_eq!(error.code, "exec.metrics-read-failed");
+    }
 
     /// `ProcessCgroup::create`'s quota on `main` before the ceiling was configurable, verbatim.
     fn one_core_quota_on_main(cpu_millis: u64, timeout_ms: u64) -> u64 {
@@ -3768,6 +4053,7 @@ mod tests {
         let runtime = ProcessRuntime::new(config, capability).expect("runtime");
         let input = ExecStartInput {
             read_only_roots: Vec::new(),
+            read_only_files: Vec::new(),
             secret_slots: Vec::new(),
             workspace: "ws_test".to_owned(),
             argv: vec!["/usr/bin/true".to_owned()],
@@ -3844,6 +4130,7 @@ mod tests {
         let runtime = ProcessRuntime::new(config, capability).unwrap();
         let input = ExecStartInput {
             read_only_roots: Vec::new(),
+            read_only_files: Vec::new(),
             secret_slots: Vec::new(),
             workspace: "ws_test".to_owned(),
             argv: vec!["/usr/bin/true".to_owned()],
@@ -4121,6 +4408,7 @@ mod tests {
     fn pty_exec_input(snapshot: &str) -> ExecStartInput {
         ExecStartInput {
             read_only_roots: Vec::new(),
+            read_only_files: Vec::new(),
             secret_slots: Vec::new(),
             workspace: "ws_test".to_owned(),
             argv: vec!["/bin/sh".to_owned()],
@@ -5390,7 +5678,7 @@ mod tests {
         let runtime = ProcessRuntime::new(config, capability).expect("runtime");
         let slots = crate::secrets::SecretSlotSet::acquire(&[], &[]).expect("no slots");
         let sync = std::fs::File::open("/dev/null").expect("a barrier descriptor");
-        let (command, _seccomp) = runtime
+        let (command, seccomp) = runtime
             .command(
                 &workspace,
                 &pty_exec_input(&snapshot),
@@ -5402,6 +5690,7 @@ mod tests {
                 None,
                 None,
                 None,
+                &[],
             )
             .expect("the exec argv builds");
         let argv: Vec<String> = command
@@ -5416,6 +5705,72 @@ mod tests {
                  namespace: {argv:?}"
             );
         }
+        // The seccomp program bubblewrap reads lies above every number a slot may be declared at,
+        // and is close-on-exec here: only the exec child's `pre_exec` makes it inheritable.
+        let seccomp_fd: RawFd = argv
+            .iter()
+            .position(|part| part == "--seccomp")
+            .and_then(|at| argv.get(at + 1))
+            .and_then(|value| value.parse().ok())
+            .expect("the exec argv names its seccomp descriptor");
+        assert!(
+            seccomp_fd > RawFd::try_from(substrate_wire::MAX_SECRET_SLOT_FD).unwrap(),
+            "the seccomp program sits at {seccomp_fd}, inside the secret-slot range"
+        );
+        assert_eq!(seccomp_fd, seccomp.as_raw_fd());
+        assert_cloexec(seccomp_fd);
+    }
+
+    fn assert_cloexec(descriptor: RawFd) {
+        // SAFETY: reads the flags of a live descriptor.
+        let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
+        assert!(
+            flags >= 0 && flags & libc::FD_CLOEXEC != 0,
+            "descriptor {descriptor} is inheritable by every spawn of this process"
+        );
+    }
+
+    /// The launch barrier and the info pipe end bubblewrap uses sit above the slot range,
+    /// close-on-exec, and the parent-side ends are close-on-exec too.
+    #[test]
+    fn every_bubblewrap_pipe_end_sits_above_the_secret_slot_range() {
+        let ceiling = RawFd::try_from(substrate_wire::MAX_SECRET_SLOT_FD).unwrap();
+        for role in ["launch barrier", "info pipe"] {
+            let (read, write) = pipe().expect("a pipe");
+            assert_cloexec(read.as_raw_fd());
+            assert_cloexec(write.as_raw_fd());
+            let raised = bubblewrap_descriptor(read, role).expect("raised");
+            assert!(
+                raised.as_raw_fd() > ceiling,
+                "{role} at {}",
+                raised.as_raw_fd()
+            );
+            assert_cloexec(raised.as_raw_fd());
+        }
+    }
+
+    /// The residual check: a descriptor bubblewrap inherits inside `3..=MAX_SECRET_SLOT_FD` is a
+    /// named refusal before the spawn, whether or not a slot is declared at it.
+    #[test]
+    fn a_driver_descriptor_inside_the_slot_range_is_refused_before_the_spawn() {
+        let ceiling = RawFd::try_from(substrate_wire::MAX_SECRET_SLOT_FD).unwrap();
+        for low in [3, 10, 12, ceiling] {
+            let error = inherited_clear_of_slots(&[ceiling + 5, low], &[(ceiling + 9, low)])
+                .expect_err("a slot target on a driver descriptor");
+            assert_eq!(error.code, "exec.spawn-failed");
+            let error = inherited_clear_of_slots(&[low], &[])
+                .expect_err("a driver descriptor in the slot range");
+            assert!(
+                error.message.contains("secret-slot range"),
+                "{}",
+                error.message
+            );
+        }
+        inherited_clear_of_slots(
+            &[ceiling + 1, ceiling + 2],
+            &[(ceiling + 3, 3), (ceiling + 4, ceiling)],
+        )
+        .expect("descriptors above the slot range are clear of every placement");
     }
 
     /// The same claim for the three sandboxes this module's neighbours open: both pty probes and

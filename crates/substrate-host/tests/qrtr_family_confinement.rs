@@ -92,6 +92,7 @@ fn lane() -> Option<Lane> {
 fn exec_input(snapshot: &str, argv: &[&str]) -> ExecStartInput {
     ExecStartInput {
         read_only_roots: Vec::new(),
+        read_only_files: Vec::new(),
         secret_slots: Vec::new(),
         workspace: "ws_test".to_owned(),
         argv: argv.iter().map(|part| (*part).to_owned()).collect(),

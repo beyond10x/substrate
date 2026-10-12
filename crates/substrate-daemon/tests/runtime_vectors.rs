@@ -43,9 +43,9 @@ const DAEMON: &str = env!("CARGO_BIN_EXE_substrate-daemon");
 const CGROUP_EXEC: &str = env!("CARGO_BIN_EXE_substrate-cgroup-exec");
 const DAEMON_OVERRIDE_VARIABLE: &str = "SUBSTRATE_VECTORS_DAEMON";
 /// Pinned independently of the daemon implementation: the clean-room client verifies what ships.
-const ADVERTISED_CONTRACT: &str = "substrate-wire/0.17.0";
+const ADVERTISED_CONTRACT: &str = "substrate-wire/0.18.0";
 const ADVERTISED_CONTRACT_SHA256: &str =
-    "7499753100066331865615c01ebe7b3b830d256044b9aed2bb7251e7d2bb7121";
+    "3fe64bf0873e07b1cda16a05ca641d976513306f2626e99b98954750fb605d1e";
 
 fn daemon_binary() -> PathBuf {
     std::env::var_os(DAEMON_OVERRIDE_VARIABLE).map_or_else(|| PathBuf::from(DAEMON), PathBuf::from)
@@ -744,6 +744,8 @@ struct ExecInput<'a> {
     environment: Value,
     aperture: Option<&'a str>,
     secret_slot: Option<(&'a str, u32)>,
+    read_only_files: Option<Value>,
+    read_only_roots: Option<Value>,
 }
 
 impl<'a> ExecInput<'a> {
@@ -757,7 +759,21 @@ impl<'a> ExecInput<'a> {
             environment: json!({}),
             aperture: None,
             secret_slot: None,
+            read_only_files: None,
+            read_only_roots: None,
         }
+    }
+
+    /// Declares single host files read-only (ADR 0033): `[{"host_path", "mount"}]`.
+    fn read_only_files(mut self, files: Value) -> Self {
+        self.read_only_files = Some(files);
+        self
+    }
+
+    /// Declares host directories read-only (ADR 0010): `[{"host_path", "mount"}]`.
+    fn read_only_roots(mut self, roots: Value) -> Self {
+        self.read_only_roots = Some(roots);
+        self
     }
 
     /// Names one operator-declared secret slot and the descriptor it must arrive at (ADR 0012).
@@ -819,6 +835,12 @@ impl<'a> ExecInput<'a> {
         // and keeps hashing to what the ledger recorded for it.
         if let Some((slot, fd)) = self.secret_slot {
             input["secret_slots"] = json!([{ "slot": slot, "fd": fd }]);
+        }
+        if let Some(files) = &self.read_only_files {
+            input["read_only_files"] = files.clone();
+        }
+        if let Some(roots) = &self.read_only_roots {
+            input["read_only_roots"] = roots.clone();
         }
         input
     }
@@ -2199,7 +2221,7 @@ async fn check_promoted_route_inventory(daemon: &Daemon, workspace: &str) -> usi
     let expected: BTreeSet<String> = {
         let registry = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
-            .join("contracts/substrate-wire/0.17.0/operations.json");
+            .join("contracts/substrate-wire/0.18.0/operations.json");
         let document: Value = serde_json::from_slice(
             &std::fs::read(&registry).expect("promoted operation registry bytes"),
         )
@@ -2545,13 +2567,17 @@ async fn check_http_journey(
     );
     passed += 1;
 
+    passed += check_read_only_file_shape(daemon, &workspace, &snapshot).await;
+
     if let Some(cgroup_root) = cgroup_root {
         passed += check_confined_execs(daemon, &workspace, &snapshot, cgroup_root).await;
         passed += check_confined_apertures(daemon, &workspace, &snapshot, inside, outside).await;
         passed += check_confined_aperture_ceiling(daemon, &workspace, &snapshot, firehose).await;
         passed += check_confined_secret_slots(daemon, &workspace, &snapshot).await;
         passed += check_confined_pty(daemon, &workspace, &snapshot).await;
+        passed += check_confined_read_only_files(daemon, &workspace, &snapshot).await;
     } else {
+        passed += check_read_only_files_unserved(daemon, &workspace, &snapshot).await;
         // No confinement means no verified mechanism, so the capability is absent and every
         // aperture request is `unserved` — never a run that quietly got no network instead.
         expect_error(
@@ -3825,12 +3851,286 @@ async fn delegated_context_bound_to_another_subject_is_refused() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// Declared read-only host files (ADR 0033)
+// ---------------------------------------------------------------------------------------------
+
+const READ_ONLY_FILE_MOUNT_DIRECTORY: &str = "/opt/gates/bin";
+const READ_ONLY_FILE_MOUNT: &str = "/opt/gates/bin/gate";
+const READ_ONLY_FILE_OUTPUT: &str = "gate ran from a single bound file";
+
+fn read_only_file(host_path: &str, mount: &str) -> Value {
+    json!({ "host_path": host_path, "mount": mount })
+}
+
+/// Shape before capability, in both lanes: every lexical rule is refused by name before the daemon
+/// asks whether this host could bind a file at all.
+async fn check_read_only_file_shape(daemon: &Daemon, workspace: &str, snapshot: &str) -> usize {
+    let mut passed = 0;
+    let program = "/opt/host/bin/gate";
+    let over: Vec<Value> = (0..=16)
+        .map(|index| read_only_file(program, &format!("/opt/many/{index}")))
+        .collect();
+    let root = json!([{ "host_path": "/opt/host", "mount": "/opt/gates" }]);
+    for (operation, request, files, roots, code) in [
+        (
+            "01JROFILECLEANSHAPE0001",
+            "req_clean_rofile_exceeded",
+            Value::Array(over),
+            None,
+            "exec.read-only-files-exceeded",
+        ),
+        (
+            "01JROFILECLEANSHAPE0002",
+            "req_clean_rofile_path",
+            json!([read_only_file(program, "opt/gates/bin/gate")]),
+            None,
+            "exec.read-only-file-path-invalid",
+        ),
+        (
+            "01JROFILECLEANSHAPE0003",
+            "req_clean_rofile_reserved",
+            json!([read_only_file(program, "/workspace/gate")]),
+            None,
+            "exec.read-only-file-mount-reserved",
+        ),
+        (
+            "01JROFILECLEANSHAPE0004",
+            "req_clean_rofile_overlap",
+            json!([read_only_file(program, READ_ONLY_FILE_MOUNT)]),
+            Some(root),
+            "exec.read-only-file-mount-overlap",
+        ),
+        (
+            "01JROFILECLEANSHAPE0005",
+            "req_clean_rofile_duplicate",
+            json!([
+                read_only_file(program, READ_ONLY_FILE_MOUNT),
+                read_only_file("/opt/host/bin/other", READ_ONLY_FILE_MOUNT),
+            ]),
+            None,
+            "exec.read-only-file-mount-duplicate",
+        ),
+    ] {
+        let mut input = ExecInput::new(workspace, snapshot, &["gate"], true).read_only_files(files);
+        if let Some(roots) = roots {
+            input = input.read_only_roots(roots);
+        }
+        expect_error(
+            &daemon
+                .call(
+                    "POST",
+                    "/v1/execs",
+                    request,
+                    Some(&mutation(operation, &input.build())),
+                )
+                .await,
+            422,
+            code,
+        );
+        passed += 1;
+    }
+    passed
+}
+
+/// No proved mechanism, no fact, and a well-formed declaration is `unserved` by name — never a run
+/// without the file (invariant 3).
+async fn check_read_only_files_unserved(daemon: &Daemon, workspace: &str, snapshot: &str) -> usize {
+    let (status, machine) = daemon
+        .call("GET", "/v1/machine", "req_clean_rofile_fact_absent", None)
+        .await;
+    assert_eq!(status, 200);
+    assert!(
+        machine["result"]["facts"]
+            .get("exec.read-only-files")
+            .is_none(),
+        "a portable host publishes no read-only file fact: {machine}"
+    );
+    expect_error(
+        &daemon
+            .call(
+                "POST",
+                "/v1/execs",
+                "req_clean_rofile_unserved",
+                Some(&mutation(
+                    "01JROFILECLEANUNSERVED01",
+                    &ExecInput::new(workspace, snapshot, &["gate"], true)
+                        .read_only_files(json!([read_only_file(
+                            "/opt/host/bin/gate",
+                            READ_ONLY_FILE_MOUNT
+                        )]))
+                        .build(),
+                )),
+            )
+            .await,
+        501,
+        "exec.read-only-files-unserved",
+    );
+    1
+}
+
+/// A host program beside a sibling, in a canonical directory under `CARGO_TARGET_TMPDIR`.
+fn read_only_file_fixture() -> (TempDir, PathBuf) {
+    let fixture = tempfile::Builder::new()
+        .prefix("rofile-cleanroom-")
+        .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
+        .expect("fixture under CARGO_TARGET_TMPDIR");
+    let host = std::fs::canonicalize(fixture.path())
+        .expect("canonical fixture")
+        .join("bin");
+    std::fs::create_dir(&host).expect("host program directory");
+    let program = host.join("gate");
+    std::fs::write(
+        &program,
+        format!("#!/bin/sh\necho '{READ_ONLY_FILE_OUTPUT}'\n"),
+    )
+    .expect("host program");
+    std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755))
+        .expect("executable host program");
+    std::fs::write(host.join("sibling"), "never visible inside\n").expect("sibling");
+    (fixture, host)
+}
+
+/// The delegated journey: a host program bound at a mount on `PATH` runs by name and is listed in
+/// the applied observation; it cannot be written and has no visible sibling; and a directory or a
+/// symlinked path is refused by name before dispatch.
+async fn check_confined_read_only_files(daemon: &Daemon, workspace: &str, snapshot: &str) -> usize {
+    let mut passed = 0;
+    let (status, machine) = daemon
+        .call("GET", "/v1/machine", "req_clean_rofile_fact", None)
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        machine["result"]["facts"]["exec.read-only-files"],
+        json!({ "max_files": 16 }),
+        "a delegated host proves and publishes the bound: {machine}"
+    );
+
+    let (_fixture, host) = read_only_file_fixture();
+    let program = host.join("gate");
+    let program_text = program.to_str().expect("UTF-8 fixture").to_owned();
+    let declared = json!([read_only_file(&program_text, READ_ONLY_FILE_MOUNT)]);
+    let path = json!({ "PATH": format!("{READ_ONLY_FILE_MOUNT_DIRECTORY}:/usr/bin:/bin") });
+
+    let (status, run) = daemon
+        .call(
+            "POST",
+            "/v1/execs",
+            "req_clean_rofile_runs",
+            Some(&mutation(
+                "01JROFILECLEANRUNS00001",
+                &ExecInput::new(workspace, snapshot, &["gate"], true)
+                    .environment(path.clone())
+                    .read_only_files(declared.clone())
+                    .build(),
+            )),
+        )
+        .await;
+    assert_eq!(status, 200, "{run}");
+    assert_eq!(run["result"]["state"], "exited", "{run}");
+    assert_eq!(run["result"]["exit"], EXITED_CLEANLY(), "{run}");
+    let stdout = decoded(&read_output(daemon, &text(&run["result"]["id"]), "stdout").await);
+    assert_eq!(
+        String::from_utf8_lossy(&stdout).trim(),
+        READ_ONLY_FILE_OUTPUT
+    );
+    assert_eq!(
+        run["result"]["applied"]["read_only_files"], declared,
+        "the applied observation lists the bound file: {run}"
+    );
+    passed += 1;
+
+    let before = std::fs::read(&program).expect("host program");
+    let script = format!(
+        "test -x {READ_ONLY_FILE_MOUNT} \
+         && ! (echo overwritten >{READ_ONLY_FILE_MOUNT}) 2>/dev/null \
+         && test ! -e {READ_ONLY_FILE_MOUNT_DIRECTORY}/sibling \
+         && test \"$(ls -A {READ_ONLY_FILE_MOUNT_DIRECTORY})\" = gate"
+    );
+    let (status, run) = daemon
+        .call(
+            "POST",
+            "/v1/execs",
+            "req_clean_rofile_confined",
+            Some(&mutation(
+                "01JROFILECLEANCONFINED1",
+                &ExecInput::new(workspace, snapshot, &["/bin/sh", "-c", &script], true)
+                    .read_only_files(declared)
+                    .build(),
+            )),
+        )
+        .await;
+    assert_eq!(status, 200, "{run}");
+    assert_eq!(
+        run["result"]["exit"],
+        EXITED_CLEANLY(),
+        "the file is read-only and alone in its mount directory: {run}"
+    );
+    assert_eq!(
+        std::fs::read(&program).expect("host program"),
+        before,
+        "the host file is unchanged"
+    );
+    passed += 1;
+    passed + check_read_only_file_host_refusals(daemon, workspace, snapshot, &host).await
+}
+
+/// The driver's filesystem rules over the wire: a directory and a symlink are refused by name
+/// before dispatch.
+async fn check_read_only_file_host_refusals(
+    daemon: &Daemon,
+    workspace: &str,
+    snapshot: &str,
+    host: &Path,
+) -> usize {
+    let mut passed = 0;
+    let link = host.join("gate-link");
+    std::os::unix::fs::symlink(host.join("gate"), &link).expect("symlink to the program");
+    for (operation, request, host_path, code) in [
+        (
+            "01JROFILECLEANDIRECTORY",
+            "req_clean_rofile_directory",
+            host.to_str().expect("UTF-8 fixture").to_owned(),
+            "exec.read-only-file-not-a-file",
+        ),
+        (
+            "01JROFILECLEANSYMLINK01",
+            "req_clean_rofile_symlink",
+            link.to_str().expect("UTF-8 fixture").to_owned(),
+            "exec.read-only-file-symlink",
+        ),
+    ] {
+        expect_error(
+            &daemon
+                .call(
+                    "POST",
+                    "/v1/execs",
+                    request,
+                    Some(&mutation(
+                        operation,
+                        &ExecInput::new(workspace, snapshot, &["gate"], true)
+                            .read_only_files(json!([read_only_file(
+                                &host_path,
+                                READ_ONLY_FILE_MOUNT
+                            )]))
+                            .build(),
+                    )),
+                )
+                .await,
+            422,
+            code,
+        );
+        passed += 1;
+    }
+    passed
+}
+
+// ---------------------------------------------------------------------------------------------
 // The lane
 // ---------------------------------------------------------------------------------------------
 
 /// The predecessor printed its case count; the port asserts it, so a case cannot vanish quietly.
-const PORTABLE_CASES: usize = 70;
-const DELEGATED_CASES: usize = 97;
+const PORTABLE_CASES: usize = 76;
+const DELEGATED_CASES: usize = 106;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {

@@ -8,6 +8,7 @@ mod probe;
 mod process;
 mod pty;
 mod quota;
+mod read_only_files;
 mod seccomp;
 mod secrets;
 

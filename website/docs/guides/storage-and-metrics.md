@@ -128,7 +128,10 @@ A running observation can include current memory and process counts. A terminal 
 ```
 
 The numbers above illustrate the response shape; actual values come from the kernel. Counters that
-do not have a meaningful terminal “current” value are absent, not replaced by zero.
+do not have a meaningful terminal “current” value are absent, not replaced by zero. On a host whose
+delegated cgroup lacks the `io` controller, such as a systemd user scope, the machine's
+`exec.resource-usage` fact reports `block_io: false` and every observation omits `io_read_bytes`
+and `io_write_bytes`.
 
 ## Stream without building a history service
 
