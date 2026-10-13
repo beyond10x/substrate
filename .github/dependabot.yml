@@ -9,16 +9,6 @@ updates:
       rust-dependencies:
         patterns:
           - "*"
-  - package-ecosystem: npm
-    directory: /website
-    schedule:
-      interval: weekly
-    open-pull-requests-limit: 5
-    groups:
-      website-minor-and-patch:
-        update-types:
-          - minor
-          - patch
   - package-ecosystem: github-actions
     directory: /
     schedule:
