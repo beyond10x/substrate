@@ -3,6 +3,9 @@
 #[path = "quota_tests.rs"]
 mod quota_tests;
 
+#[path = "../backend_recheck_conformance_tests.rs"]
+mod backend_recheck_conformance_tests;
+
 use std::fmt::Write as _;
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::net::{TcpListener, TcpStream};

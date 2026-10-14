@@ -1978,6 +1978,113 @@ fn deployment_global_stream_schema_migrates_to_fresh_subject_scopes() {
     );
 }
 
+/// Secondary indexes on `events` whose key columns are exactly its primary key.
+///
+/// `PRAGMA index_list` reports the `WITHOUT ROWID` primary key itself with origin `pk`; anything
+/// else over `(deployment, subject, seq)` is a second B-tree every append writes for nothing.
+fn events_indexes_duplicating_primary_key(path: &std::path::Path) -> Vec<String> {
+    let connection = rusqlite::Connection::open(path).expect("inspect database");
+    let mut list = connection
+        .prepare("PRAGMA index_list(events)")
+        .expect("index list");
+    let indexes = list
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>("name")?,
+                row.get::<_, String>("origin")?,
+            ))
+        })
+        .expect("index rows")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("index names");
+    let mut duplicates = Vec::new();
+    for (name, origin) in indexes {
+        if origin == "pk" {
+            continue;
+        }
+        let mut info = connection
+            .prepare(&format!("PRAGMA index_info(\"{name}\")"))
+            .expect("index info");
+        let columns = info
+            .query_map([], |row| row.get::<_, String>("name"))
+            .expect("index columns")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("column names");
+        if columns == ["deployment", "subject", "seq"] {
+            duplicates.push(name);
+        }
+    }
+    duplicates
+}
+
+#[test]
+fn events_table_carries_no_index_duplicating_its_primary_key() {
+    let directory = tempdir().expect("tempdir");
+
+    let fresh = directory.path().join("fresh.db");
+    drop(Store::open(&fresh).expect("fresh store"));
+    assert_eq!(
+        events_indexes_duplicating_primary_key(&fresh),
+        Vec::<String>::new(),
+        "a fresh store"
+    );
+
+    // A store written by the previous schema carries the duplicate; opening it migrates it away.
+    let current = directory.path().join("current.db");
+    drop(Store::open(&current).expect("current store"));
+    rusqlite::Connection::open(&current)
+        .expect("current database")
+        .execute_batch(
+            "CREATE INDEX IF NOT EXISTS events_subject_sequence
+                 ON events (deployment, subject, seq);",
+        )
+        .expect("previous-schema index");
+    assert_eq!(
+        events_indexes_duplicating_primary_key(&current),
+        vec!["events_subject_sequence".to_owned()],
+        "the fixture reproduces the previous schema"
+    );
+    let store = Store::open(&current).expect("migrated store");
+    store
+        .stream_position(&scope("local:1000"))
+        .expect("stream reads through the primary key");
+    drop(store);
+    assert_eq!(
+        events_indexes_duplicating_primary_key(&current),
+        Vec::<String>::new(),
+        "a store migrated from the previous schema"
+    );
+
+    // The deployment-global legacy schema is rebuilt by the subject-stream migration.
+    let legacy = directory.path().join("legacy.db");
+    rusqlite::Connection::open(&legacy)
+        .expect("legacy database")
+        .execute_batch(
+            "
+            CREATE TABLE stream_meta (
+                deployment TEXT NOT NULL PRIMARY KEY,
+                generation INTEGER NOT NULL,
+                next_seq INTEGER NOT NULL
+            ) WITHOUT ROWID;
+            CREATE TABLE events (
+                deployment TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                generation INTEGER NOT NULL,
+                seq INTEGER NOT NULL,
+                event_json TEXT NOT NULL,
+                PRIMARY KEY (deployment, seq)
+            ) WITHOUT ROWID;
+            ",
+        )
+        .expect("legacy schema");
+    drop(Store::open(&legacy).expect("legacy store"));
+    assert_eq!(
+        events_indexes_duplicating_primary_key(&legacy),
+        Vec::<String>::new(),
+        "a store migrated from the deployment-global schema"
+    );
+}
+
 #[test]
 fn stream_scope_migration_rotates_every_invalid_suffix_but_preserves_valid_tokens() {
     let connection = rusqlite::Connection::open_in_memory().expect("database");

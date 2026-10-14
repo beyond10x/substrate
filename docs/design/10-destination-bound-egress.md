@@ -31,17 +31,17 @@ and a daemon that cannot prove an aperture publishes no aperture.
 
 | Fact | Evidence |
 |---|---|
-| Every exec and pipe session runs under `--unshare-net` with `--unshare-user/ipc/pid/uts` | `crates/substrate-host/src/process.rs:901-905` |
+| Every exec and pipe session runs under `--unshare-net` with `--unshare-ipc/pid/uts` and the user-namespace pair `USER_NAMESPACE_ARGV` — `--unshare-user --disable-userns`, so the child cannot create a nested user namespace | `crates/substrate-host/src/process.rs`: `USER_NAMESPACE_ARGV` at `:64`, spliced by `ProcessRuntime::command` at `:2115-2120` |
 | The startup probe runs the same argv before publishing anything | `crates/substrate-host/src/probe.rs:180-184` |
-| The sandbox mounts `/usr`, `/bin`, `/lib`, `/lib64`, `/proc`, `/dev`, `/tmp` — **no `/etc`** | `crates/substrate-host/src/process.rs:901-926` |
+| The sandbox mounts `/usr`, `/bin`, `/lib`, `/lib64`, `/proc`, `/dev`, `/tmp` — **no `/etc`**; since this design shipped, only a run with an aperture gets the generated `/etc` resolution binds | `crates/substrate-host/src/process.rs`, `ProcessRuntime::command`: `:2116-2142`, aperture binds `:2166-2173` |
 | `exec.no-egress` is published only when the whole exec predicate holds, and `exec` is withheld when the daemon is root — `unprivileged = effective_uid() != 0` | `crates/substrate-host/src/probe.rs:49-51`, `:78` |
-| Admission refuses `network: "aperture"` as `unserved` before dispatch, and the driver refuses it again independently | `crates/substrate-daemon/src/app/operations.rs:290-300`, `crates/substrate-host/src/process.rs:810-815` |
+| Admission refuses `network: "aperture"` as `unserved` before dispatch, and the driver refuses it again independently | `crates/substrate-daemon/src/app/operations.rs:290-300`, `crates/substrate-host/src/process.rs` `ProcessRuntime::admit_egress_aperture` (at HEAD it refuses `exec.egress-apertures-unserved` when the fact is absent, `:1892-1899`) |
 | The request word exists — `NetworkMode::{None, Aperture}` — but the **applied** word does not: `AppliedNetwork` has one variant | `crates/substrate-wire/src/lib.rs:595-599`, `:657-660` |
 | 0.4.0 pins applied network to `"network": {"const": "none"}` in both branches | `contracts/substrate-wire/0.4.0/schemas/resource.json`, `$defs/confinement-applied` |
 | The refusal is a frozen vector covering `security.no-egress`, with postconditions `/probes/network_was_weakened == false` and `dispatch_count == 0` | `contracts/substrate-wire/0.4.0/vectors/http/egress-unserved.json` |
 | The only **executed** no-egress proof is one confined `socket.create_connection(('1.1.1.1',53),1)` asserted to exit non-zero | `crates/substrate-daemon/tests/runtime_vectors.rs:620-640` |
 | The portable lane proves the typed refusal without confinement | `crates/substrate-daemon/tests/pipe_session.rs:800-824` |
-| A spawn barrier already exists between namespace creation and `exec`: `--block-fd`, released after cgroup attach | `crates/substrate-host/src/process.rs:947-948`, `:398-402` |
+| A spawn barrier already exists between namespace creation and `exec`: `--block-fd`, released after cgroup attach | `crates/substrate-host/src/process.rs` `ProcessRuntime::command` `:2186-2187`; `ProcessRuntime::start_inner` attaches the cgroup at `:1083` and calls `release_barrier` at `:1113` |
 
 **`exec.no-egress` is derived, not observed.** It is `exec.then_some(true)` where `exec` means the
 bubblewrap probe succeeded (`probe.rs:51`, `:78`); nothing in the probe attempts a connection, and a
@@ -106,8 +106,9 @@ privileged helper — a new trust boundary this repository does not have.
 **Recommendation: (c).** It is the only option that keeps the kernel floor literally intact — the
 sandbox netns still has no interface — while working with a vendor binary that speaks a base URL, and
 it needs no privilege the daemon has refused to hold. The forwarder starts at the existing spawn
-barrier (`process.rs:398-402`), joins the child's namespaces, listens on loopback, connects out from
-the host namespace to the pinned address, and dies with the run's cgroup.
+barrier (`release_barrier`, called from `ProcessRuntime::start_inner` at `process.rs:1113`), joins
+the child's namespaces, listens on loopback, connects out from the host namespace to the pinned
+address, and dies with the run's cgroup.
 
 **It is not yet proven and must not be accepted on reasoning alone.** Whether a process can `setns`
 into the namespaces bubblewrap created for its sibling, holding only `/proc/<pid>/ns/*`, under this
@@ -133,7 +134,8 @@ braces: the successor input schema has no destination field, so a conforming cli
 is `schema-invalid` first, and the typed refusal exists so a *name* that parses as `host:port` fails
 legibly rather than as "no such aperture" — a rejected escalation, not a configuration typo. Unchanged:
 a request omitting the aperture gets `--unshare-net` and `applied.network = "none"`, and a driver
-serving no apertures answers exactly as today (`operations.rs:290-300`, `process.rs:810-815`).
+serving no apertures answers exactly as today (`operations.rs:290-300`; in the driver, `ProcessRuntime::admit_egress_aperture`,
+`process.rs:1892-1899`).
 
 ## 6. Observation
 

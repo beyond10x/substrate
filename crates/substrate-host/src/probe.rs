@@ -294,13 +294,121 @@ fn probe_resource_usage(config: &HostConfig) -> Option<ResourceUsageFacts> {
     })
 }
 
-pub(crate) fn backend_binding(config: &HostConfig) -> Option<BackendBinding> {
-    let bubblewrap_path = config.bubblewrap.canonicalize().ok()?;
-    let bubblewrap_metadata = std::fs::metadata(&bubblewrap_path).ok()?;
-    if !bubblewrap_metadata.is_file() || bubblewrap_metadata.len() > MAX_BACKEND_BINARY_BYTES {
-        return None;
+/// How long before the probe began the bubblewrap binary's change time must lie for its stamp to
+/// stand in for rereading it. A write lands in a timestamp tick (a jiffy on most local
+/// filesystems; two seconds bounds the coarsest common modification-time granularity), so a write
+/// after the probe can share the probed change time only when the probed change was itself that
+/// recent.
+pub(crate) const BACKEND_STAMP_SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// What `stat` says about the bubblewrap binary: everything an in-place write, a `touch`, a
+/// rename over it or a mount over it moves. On a filesystem whose change time the kernel maintains,
+/// it cannot be set from userspace, so a rewrite that restores size and modification time still
+/// moves it. A filesystem that supplies or caches its own attributes (FUSE, NFS) or keeps no
+/// separate change time does not give that guarantee; the bubblewrap binary belongs on a local
+/// filesystem.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FileStamp {
+    device: u64,
+    inode: u64,
+    size: u64,
+    modified: (i64, i64),
+    changed: (i64, i64),
+}
+
+impl FileStamp {
+    fn of(metadata: &std::fs::Metadata) -> Self {
+        Self {
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            size: metadata.len(),
+            modified: (metadata.mtime(), metadata.mtime_nsec()),
+            changed: (metadata.ctime(), metadata.ctime_nsec()),
+        }
     }
-    let bubblewrap = std::fs::read(&bubblewrap_path).ok()?;
+
+    /// Whether the change time lies at least [`BACKEND_STAMP_SETTLE`] before `instant`.
+    fn settled_before(&self, instant: std::time::SystemTime) -> bool {
+        let Ok(seconds) = u64::try_from(self.changed.0) else {
+            return false;
+        };
+        let Ok(nanos) = u32::try_from(self.changed.1) else {
+            return false;
+        };
+        let changed = std::time::UNIX_EPOCH + std::time::Duration::new(seconds, nanos);
+        changed
+            .checked_add(BACKEND_STAMP_SETTLE)
+            .is_some_and(|settled| settled <= instant)
+    }
+}
+
+/// The backend binding admitted at startup, with the bubblewrap stamp its hash was read under.
+/// `stamp` is absent when the binary changed while it was read or too close to the probe; every
+/// recheck then rehashes.
+#[derive(Debug, Clone)]
+pub(crate) struct ProbedBackend {
+    binding: BackendBinding,
+    stamp: Option<FileStamp>,
+}
+
+/// The full startup probe of the backend: the binary is read and hashed, between two `stat`s of
+/// it.
+pub(crate) fn probe_backend(config: &HostConfig) -> Option<ProbedBackend> {
+    let started = std::time::SystemTime::now();
+    let (path, before) = bubblewrap_file(config)?;
+    let sha256 = bubblewrap_sha256(&path)?;
+    let after = bubblewrap_file(config);
+    let stamp = FileStamp::of(&before);
+    let stamp = after
+        .filter(|(again, metadata)| *again == path && FileStamp::of(metadata) == stamp)
+        .and(stamp.settled_before(started).then_some(stamp));
+    Some(ProbedBackend {
+        binding: bind(&path, &before, sha256, config)?,
+        stamp,
+    })
+}
+
+/// Whether the backend still is the one `probed` admitted. The binary is reread and rehashed
+/// unless its stamp equals the trusted probed stamp; metadata that cannot be read refuses.
+pub(crate) fn backend_unchanged(config: &HostConfig, probed: &ProbedBackend) -> bool {
+    let Some((path, metadata)) = bubblewrap_file(config) else {
+        return false;
+    };
+    let sha256 = if probed.stamp == Some(FileStamp::of(&metadata)) {
+        probed.binding.bubblewrap_sha256.clone()
+    } else {
+        let Some(sha256) = bubblewrap_sha256(&path) else {
+            return false;
+        };
+        sha256
+    };
+    bind(&path, &metadata, sha256, config).is_some_and(|current| current == probed.binding)
+}
+
+fn bubblewrap_file(config: &HostConfig) -> Option<(PathBuf, std::fs::Metadata)> {
+    let path = config.bubblewrap.canonicalize().ok()?;
+    let metadata = std::fs::metadata(&path).ok()?;
+    (metadata.is_file() && metadata.len() <= MAX_BACKEND_BINARY_BYTES).then_some((path, metadata))
+}
+
+fn bubblewrap_sha256(path: &Path) -> Option<String> {
+    let bubblewrap = std::fs::read(path).ok()?;
+    (u64::try_from(bubblewrap.len()).ok()? <= MAX_BACKEND_BINARY_BYTES)
+        .then(|| hex::encode(Sha256::digest(bubblewrap)))
+}
+
+pub(crate) fn backend_binding(config: &HostConfig) -> Option<BackendBinding> {
+    let (path, metadata) = bubblewrap_file(config)?;
+    let sha256 = bubblewrap_sha256(&path)?;
+    bind(&path, &metadata, sha256, config)
+}
+
+fn bind(
+    bubblewrap_path: &Path,
+    bubblewrap_metadata: &std::fs::Metadata,
+    bubblewrap_sha256: String,
+    config: &HostConfig,
+) -> Option<BackendBinding> {
     let cgroup_root = config.cgroup_root.as_ref()?.canonicalize().ok()?;
     let cgroup_metadata = std::fs::metadata(&cgroup_root).ok()?;
     if !cgroup_metadata.is_dir() {
@@ -321,7 +429,7 @@ pub(crate) fn backend_binding(config: &HostConfig) -> Option<BackendBinding> {
     }
     Some(BackendBinding {
         bubblewrap_path: bubblewrap_path.to_string_lossy().into_owned(),
-        bubblewrap_sha256: hex::encode(Sha256::digest(bubblewrap)),
+        bubblewrap_sha256,
         bubblewrap_device: bubblewrap_metadata.dev(),
         bubblewrap_inode: bubblewrap_metadata.ino(),
         cgroup_root: cgroup_root.to_string_lossy().into_owned(),
@@ -801,6 +909,46 @@ mod tests {
         std::fs::write(&bubblewrap, b"replacement backend").unwrap();
         let second = backend_binding(&config).unwrap();
         assert_ne!(first, second);
+    }
+
+    fn backend_fixture(directory: &Path) -> HostConfig {
+        let bubblewrap = directory.join("bwrap");
+        let cgroup = directory.join("cgroup");
+        std::fs::create_dir(&cgroup).unwrap();
+        std::fs::write(&bubblewrap, b"probed backend").unwrap();
+        std::fs::write(cgroup.join("cgroup.controllers"), "cpu memory pids\n").unwrap();
+        let mut config = HostConfig::minimum(directory.join("workspaces"));
+        config.bubblewrap = bubblewrap;
+        config.cgroup_root = Some(cgroup);
+        config
+    }
+
+    #[test]
+    fn a_backend_changed_just_before_the_probe_is_rehashed_at_every_recheck() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = backend_fixture(directory.path());
+        let probed = probe_backend(&config).unwrap();
+        assert_eq!(
+            probed.stamp, None,
+            "a change inside the settle window is not trusted"
+        );
+        assert_eq!(probed.binding, backend_binding(&config).unwrap());
+        assert!(backend_unchanged(&config, &probed));
+        std::fs::write(&config.bubblewrap, b"probed BACKEND").unwrap();
+        assert!(!backend_unchanged(&config, &probed));
+    }
+
+    #[test]
+    fn a_backend_whose_metadata_cannot_be_read_refuses_the_recheck() {
+        let directory = tempfile::tempdir().unwrap();
+        let config = backend_fixture(directory.path());
+        let mut probed = probe_backend(&config).unwrap();
+        probed.stamp = Some(FileStamp::of(
+            &std::fs::metadata(&config.bubblewrap).unwrap(),
+        ));
+        assert!(backend_unchanged(&config, &probed));
+        std::fs::remove_file(&config.bubblewrap).unwrap();
+        assert!(!backend_unchanged(&config, &probed));
     }
 
     /// A fake delegation root carrying every counter `exec.resource-usage` reads at its root, with

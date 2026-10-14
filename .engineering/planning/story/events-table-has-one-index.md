@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:events-table-has-one-index
 kind: story
-status: draft
+status: active
 title: The events table carries no index duplicating its primary key
 summary: events_subject_sequence duplicates the WITHOUT ROWID primary key (schema.rs:203-206).
 tags:
@@ -12,7 +12,10 @@ relations:
 scope:
 - confidence: cited
   path: crates/substrate-store/src/schema.rs
-revision: 2
+revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-14T09:53:42Z", actor: "human:timo", revision: 3}
+- {from: "proposed", to: "active", at: "2026-10-14T09:53:43Z", actor: "human:timo", revision: 4}
 ---
 # Story: The events table has one index
 

@@ -7,6 +7,33 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.7.14] — 2026-10-14
+
+### Changed
+
+- Exec admission rechecks the bubblewrap binary by its device, inode, size, nanosecond
+  modification time and change time against the startup probe, and reads and hashes it only when
+  one of them differs. A differing hash still refuses `exec.capability-stale`, metadata that cannot
+  be read refuses the recheck, and a binary changed within two seconds before the probe is hashed
+  at every recheck. The startup probe still hashes the whole binary.
+- The event store no longer keeps `events_subject_sequence`, an index on the same columns as the
+  `events` primary key; a new store does not create it and an existing store drops it on open.
+- `scripts/delegated-lane.sh` takes the daemon binary's path from cargo's own build output, so the
+  lane runs wherever cargo places its build directory.
+
+### Fixed
+
+- A workspace line patch applies its edits in line order, so every order of the same
+  non-overlapping edit list writes the same bytes. An edit list that was not ascending could land
+  edits on the wrong lines, or fail with `host.blocking-failed` from an out-of-range splice.
+- Design documents 10 and 10a cite the sandbox argv, the egress refusal and the spawn barrier at
+  the functions and lines where they are.
+
+### Security
+
+- `rustls` moves from 0.23.45 to 0.23.46, which fixes RUSTSEC-2026-0346, RUSTSEC-2026-0347,
+  RUSTSEC-2026-0348 and RUSTSEC-2026-0349.
+
 ## [0.7.13] — 2026-10-11
 
 Published by [release run 38280358137](https://github.com/beyond10x/substrate/actions/runs/38280358137)

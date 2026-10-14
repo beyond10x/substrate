@@ -76,9 +76,25 @@ impl PipeSessionPolicy {
     }
 }
 
+/// The id of the session an attachment names, as the attach route read it from its path.
+///
+/// Its own type because the attachment-permit machinery is keyed by session, while the
+/// attachment it admits then drives the session's *exec* by a plain `String` id: passing that
+/// exec id where a session id belongs is a compile error rather than a reading exercise.
+/// Deserialized transparently, so the route parses exactly the string it always did.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Deserialize)]
+#[serde(transparent)]
+pub(super) struct PipeSessionId(String);
+
+impl PipeSessionId {
+    fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 pub(super) struct PipeAttachmentLimits {
     global: Arc<Semaphore>,
-    attached: ParkingMutex<HashSet<(Scope, String)>>,
+    attached: ParkingMutex<HashSet<(Scope, PipeSessionId)>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,7 +106,7 @@ enum PipeAttachmentRefusal {
 struct PipeAttachmentPermit {
     limits: Arc<PipeAttachmentLimits>,
     scope: Scope,
-    exec_id: String,
+    session_id: PipeSessionId,
     /// Held for the attachment's lifetime and never read. Dropping it is what returns the slot to
     /// the fixed global bound, and every path out of the attach handler must reach that drop:
     /// `session.attachment-capacity` is published as *exhausted* and retriable, so capacity a
@@ -113,19 +129,19 @@ impl PipeAttachmentLimits {
     fn acquire(
         self: &Arc<Self>,
         scope: &Scope,
-        exec_id: &str,
+        session_id: &PipeSessionId,
     ) -> Result<PipeAttachmentPermit, PipeAttachmentRefusal> {
         let global = Arc::clone(&self.global)
             .try_acquire_owned()
             .map_err(|_| PipeAttachmentRefusal::Capacity)?;
-        let key = (scope.clone(), exec_id.to_owned());
+        let key = (scope.clone(), session_id.clone());
         if !self.attached.lock().insert(key) {
             return Err(PipeAttachmentRefusal::AlreadyAttached);
         }
         Ok(PipeAttachmentPermit {
             limits: Arc::clone(self),
             scope: scope.clone(),
-            exec_id: exec_id.to_owned(),
+            session_id: session_id.clone(),
             _global: global,
         })
     }
@@ -147,7 +163,7 @@ impl Drop for PipeAttachmentPermit {
         self.limits
             .attached
             .lock()
-            .remove(&(self.scope.clone(), self.exec_id.clone()));
+            .remove(&(self.scope.clone(), self.session_id.clone()));
     }
 }
 
@@ -1127,7 +1143,7 @@ pub(super) async fn pipe_session_attach(
     Extension(transport): Extension<SessionTransport>,
     transport_permit: Option<Extension<TransportPermit>>,
     headers: HeaderMap,
-    Path(session_id): Path<String>,
+    Path(session_id): Path<PipeSessionId>,
     RawQuery(raw_query): RawQuery,
     ws: WebSocketUpgrade,
 ) -> Response {
@@ -1143,7 +1159,7 @@ pub(super) async fn pipe_session_attach(
             match verify_network_session_authority(
                 &app,
                 &scope,
-                &session_id,
+                session_id.as_str(),
                 &headers,
                 &exporter,
                 &request_id,
@@ -1157,7 +1173,7 @@ pub(super) async fn pipe_session_attach(
         SessionTransport::DevelopmentTcp => return not_found(&request_id),
     };
     let session = match app
-        .store_io(|| app.store.session(&scope, &session_id))
+        .store_io(|| app.store.session(&scope, session_id.as_str()))
         .await
     {
         Ok(Some(value)) => value,
@@ -1225,14 +1241,15 @@ pub(super) async fn pipe_session_attach(
         .store_io(|| match network_authority.as_ref() {
             Some(authority) => app.store.claim_pipe_session_attachment_with_authority(
                 &scope,
-                &session_id,
+                session_id.as_str(),
                 &authority.authority_id,
                 &authority.bearer_sha256,
                 observed_at,
             ),
-            None => app
-                .store
-                .claim_pipe_session_attachment(&scope, &session_id, observed_at),
+            None => {
+                app.store
+                    .claim_pipe_session_attachment(&scope, session_id.as_str(), observed_at)
+            }
         })
         .await
     {
@@ -1921,6 +1938,38 @@ async fn terminate_pipe_session(app: &App, scope: &Scope, exec_id: &str) -> bool
     persist_pipe_observation(app, scope, &observation)
         .await
         .is_ok()
+}
+
+#[cfg(test)]
+mod attachment_permit_tests {
+    use substrate_store::Scope;
+
+    use super::{PipeAttachmentLimits, PipeAttachmentRefusal, PipeSessionId};
+
+    fn scope() -> Scope {
+        Scope {
+            deployment: "attachment-permit-test".to_owned(),
+            subject: "local:1000".to_owned(),
+        }
+    }
+
+    #[test]
+    fn an_attachment_permit_is_keyed_by_the_session_it_attaches() {
+        let limits = PipeAttachmentLimits::new(4);
+        let session_id = PipeSessionId("ses_attachment_permit_one".to_owned());
+        let permit = limits
+            .acquire(&scope(), &session_id)
+            .expect("the first attachment to a session is admitted");
+        assert_eq!(permit.session_id, session_id);
+        assert_eq!(
+            limits.acquire(&scope(), &session_id).err(),
+            Some(PipeAttachmentRefusal::AlreadyAttached)
+        );
+        let other = PipeSessionId("ses_attachment_permit_two".to_owned());
+        assert!(limits.acquire(&scope(), &other).is_ok());
+        drop(permit);
+        assert!(limits.acquire(&scope(), &session_id).is_ok());
+    }
 }
 
 #[cfg(test)]
