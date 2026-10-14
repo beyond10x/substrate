@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-14T16:59:27Z",
+  "actor": "human:timo",
+  "artifact": "story:the-delegated-lane-script-honours-cargo-target-dir",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "Shipped in Substrate 0.7.14 from e74d6647 (PR 129); release run concluded success",
+    "reference": "https://github.com/beyond10x/substrate/releases/tag/0.7.14"
+  }
+}

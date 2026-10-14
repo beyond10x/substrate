@@ -9,6 +9,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [0.7.14] — 2026-10-14
 
+Published by [release run 38597672533](https://github.com/beyond10x/substrate/actions/runs/38597672533)
+from tagged commit `e74d6647e4f0cefc81292a1e9d0a723cefadeb8b`. All three artifacts were
+keyless-signed and verified against `release.yml@refs/tags/0.7.14` by the release workflow, and
+each tag resolved anonymously to its released digest:
+
+- Image: `ghcr.io/beyond10x/b10x-substrate-daemon:0.7.14` at `sha256:79f93a03f80e7e03a2d412ad3db1ce447a5ec30748be1ccc64940171a9ad2c62`.
+- Contract bundle: `ghcr.io/beyond10x/b10x-substrate-wire:0.18.0` at `sha256:0fc268003bcb02645759cb916f0790359598943c07fa3647320821f2375450ae`, annotated `development`, the byte-identical bundle 0.7.13 published, signed again with this release's identity.
+- Disposable MCP image: `ghcr.io/beyond10x/b10x-substrate-mcp:0.7.14` at `sha256:80c2c2679a9cc228bd438da312a0d9a4c7a49454a4d902761acdd8384e94422e`, development-only.
+
+The [release notes](https://github.com/beyond10x/substrate/releases/tag/0.7.14) provide exact
+signature verification commands and the successful 106-case delegated confinement record.
+
 ### Changed
 
 - Exec admission rechecks the bubblewrap binary by its device, inode, size, nanosecond
