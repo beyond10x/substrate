@@ -84,7 +84,7 @@ impl PipeSessionPolicy {
 /// Deserialized transparently, so the route parses exactly the string it always did.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Deserialize)]
 #[serde(transparent)]
-struct PipeSessionId(String);
+pub(super) struct PipeSessionId(String);
 
 impl PipeSessionId {
     fn as_str(&self) -> &str {
