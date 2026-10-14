@@ -202,8 +202,6 @@ impl Store {
                 event_json TEXT NOT NULL,
                 PRIMARY KEY (deployment, subject, seq)
             ) WITHOUT ROWID;
-            CREATE INDEX IF NOT EXISTS events_subject_sequence
-                ON events (deployment, subject, seq);
 
             CREATE TABLE IF NOT EXISTS leases (
                 deployment TEXT NOT NULL,
@@ -272,6 +270,7 @@ impl Store {
             ",
         )?;
         migrate_subject_streams(&connection)?;
+        migrate_events_duplicate_index(&connection)?;
         migrate_stream_scope_grammar(&connection)?;
         migrate_snapshot_source_scope(&connection)?;
         migrate_lease_authority(&connection)?;
@@ -320,12 +319,21 @@ fn migrate_subject_streams(connection: &Connection) -> Result<(), StoreError> {
             event_json TEXT NOT NULL,
             PRIMARY KEY (deployment, subject, seq)
         ) WITHOUT ROWID;
-        CREATE INDEX events_subject_sequence ON events (deployment, subject, seq);
         DELETE FROM snapshot_items;
         DELETE FROM snapshots;
         COMMIT;
         ",
     )?;
+    Ok(())
+}
+
+/// Drops `events_subject_sequence`, which a store written before this change still carries.
+///
+/// `events` is `WITHOUT ROWID` with primary key `(deployment, subject, seq)`, so the primary key
+/// is already the B-tree that index described; keeping it made every append write two identical
+/// trees. No query names the index, and the primary key serves every lookup it served.
+fn migrate_events_duplicate_index(connection: &Connection) -> Result<(), StoreError> {
+    connection.execute("DROP INDEX IF EXISTS events_subject_sequence", [])?;
     Ok(())
 }
 
