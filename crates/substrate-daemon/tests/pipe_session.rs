@@ -2723,6 +2723,35 @@ async fn a_failed_upgrade_whose_first_kill_is_refused_is_contained_by_the_next_r
     drop(stranding);
 }
 
+/// A failed upgrade's containment is performed by the containment step, `App::contain_pending`,
+/// and by nothing the attach handler spawns.
+///
+/// No round runs in this harness unless the case calls one, so the exec is still running, and its
+/// driver has seen no kill, until the one round the case drives — and that round contains it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_upgrade_is_contained_by_one_driven_containment_round() {
+    let harness = Harness::driven().await;
+    let (session_id, exec_id) = harness.start_pipe().await;
+    let stranding = harness.strand(&session_id).await;
+    harness.await_pending_containments(1).await;
+    assert_eq!(
+        harness.driver.signal_calls.load(Ordering::SeqCst),
+        0,
+        "no kill is attempted outside the containment step"
+    );
+    assert_eq!(harness.exec(&exec_id).await["result"]["state"], "running");
+
+    harness.app.contain_pending().await;
+    let observed = harness.exec(&exec_id).await;
+    assert_eq!(
+        observed["result"]["state"], "cancelled",
+        "one containment round contains a failed upgrade: {observed}"
+    );
+    assert_eq!(observed["result"]["exit"]["signal"], "KILL", "{observed}");
+    assert_eq!(harness.app.pending_containments(), 0);
+    drop(stranding);
+}
+
 /// The served-attachment hand-off: an attachment that ends without a terminal observation, whose
 /// kill the driver refuses once, is contained by the next containment round.
 #[tokio::test(flavor = "multi_thread")]

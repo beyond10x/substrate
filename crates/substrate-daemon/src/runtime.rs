@@ -635,34 +635,10 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
         .context("configure capture policy before sharing the application")?
         .allow_unrecorded_sessions = config.allow_unrecorded_sessions;
     app.sweep_expired().await;
-    let sweeper_app = Arc::clone(&app);
-    let lease_sweeper = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_millis(250));
-        loop {
-            tokio::select! {
-                _ = interval.tick() => {}
-                () = sweeper_app.maintenance_notified() => {}
-            }
-            sweeper_app.sweep_expired().await;
-        }
-    });
-    // Containment of claimed sessions whose kill is unproven runs in a task of its own, never
-    // inside `sweep_expired`, so a driver that hangs on a kill stalls no other maintenance duty.
-    let containment_app = Arc::clone(&app);
-    let containment = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(std::time::Duration::from_millis(250));
-        loop {
-            tokio::select! {
-                _ = interval.tick() => {}
-                () = containment_app.containment_notified() => {}
-            }
-            containment_app.contain_pending().await;
-        }
-    });
+    let maintenance = MaintenanceTasks::start(&app);
     if let Some(tcp) = config.tcp.as_ref() {
         let result = serve_tcp(Arc::clone(&app), tcp).await;
-        lease_sweeper.abort();
-        containment.abort();
+        maintenance.abort();
         return result;
     }
     if let (Some(tls), Some(identity)) = (config.tls.as_ref(), tls_identity) {
@@ -672,8 +648,7 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
             )
         })?;
         let result = serve_tls(Arc::clone(&app), tls, identity, hosted_admission).await;
-        lease_sweeper.abort();
-        containment.abort();
+        maintenance.abort();
         return result;
     }
     let listener = UnixListener::bind(&config.socket).context("bind unix socket")?;
@@ -741,8 +716,7 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
             }
         }
     }
-    lease_sweeper.abort();
-    containment.abort();
+    maintenance.abort();
     drop(listener);
     connections.abort_all();
     while let Some(result) = connections.join_next().await {
@@ -1427,6 +1401,61 @@ fn prepare_socket(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The daemon's two maintenance tasks: the lease sweeper and the containment step.
+///
+/// They are separate tasks so a driver that hangs on a containment kill stalls no other
+/// maintenance duty, and they have one owner so every shutdown path that stops one stops the
+/// other. Each of the three listener exits calls [`MaintenanceTasks::abort`]; dropping the value
+/// aborts both on any other exit, an early `?` included. An attempt in flight when the daemon
+/// stops is cancelled with its task, and `reconcile_after_restart` answers for its exec on the next
+/// start, as it does for any exec live across a restart.
+struct MaintenanceTasks {
+    lease_sweeper: tokio::task::JoinHandle<()>,
+    containment: tokio::task::JoinHandle<()>,
+}
+
+impl MaintenanceTasks {
+    fn start(app: &Arc<App>) -> Self {
+        let sweeper_app = Arc::clone(app);
+        let lease_sweeper = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(250));
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {}
+                    () = sweeper_app.maintenance_notified() => {}
+                }
+                sweeper_app.sweep_expired().await;
+            }
+        });
+        let containment_app = Arc::clone(app);
+        let containment = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_millis(250));
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {}
+                    () = containment_app.containment_notified() => {}
+                }
+                containment_app.contain_pending().await;
+            }
+        });
+        Self {
+            lease_sweeper,
+            containment,
+        }
+    }
+
+    fn abort(&self) {
+        self.lease_sweeper.abort();
+        self.containment.abort();
+    }
+}
+
+impl Drop for MaintenanceTasks {
+    fn drop(&mut self) {
+        self.abort();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::VecDeque;
@@ -1435,6 +1464,50 @@ mod tests {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     use super::*;
+
+    fn idle_maintenance_tasks() -> MaintenanceTasks {
+        MaintenanceTasks {
+            lease_sweeper: tokio::spawn(std::future::pending::<()>()),
+            containment: tokio::spawn(std::future::pending::<()>()),
+        }
+    }
+
+    async fn await_finished(handles: &[tokio::task::AbortHandle]) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !handles.iter().all(tokio::task::AbortHandle::is_finished) {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("both maintenance tasks end");
+    }
+
+    /// The call each of the three listener exits makes stops the containment step with the sweeper.
+    #[tokio::test]
+    async fn aborting_the_maintenance_tasks_stops_the_containment_step_with_the_sweeper() {
+        let tasks = idle_maintenance_tasks();
+        let handles = [
+            tasks.lease_sweeper.abort_handle(),
+            tasks.containment.abort_handle(),
+        ];
+        assert!(!handles.iter().any(tokio::task::AbortHandle::is_finished));
+        tasks.abort();
+        await_finished(&handles).await;
+        drop(tasks);
+    }
+
+    /// Any other exit — an early `?` between starting the tasks and serving — drops the owner, and
+    /// that stops both tasks too.
+    #[tokio::test]
+    async fn dropping_the_maintenance_tasks_stops_both() {
+        let tasks = idle_maintenance_tasks();
+        let handles = [
+            tasks.lease_sweeper.abort_handle(),
+            tasks.containment.abort_handle(),
+        ];
+        drop(tasks);
+        await_finished(&handles).await;
+    }
 
     /// The RFC 6455 example handshake key, spelled the way every other hand-written WebSocket
     /// client in this repository spells it (`tests/websocket.rs:23`, `tests/pipe_session.rs:40`,

@@ -1341,30 +1341,21 @@ pub(super) async fn pipe_session_attach(
             // which returns its slot to the global bound and clears its key — and nothing here
             // needs it, because this session's durable attachment claim is already spent and the
             // state gate above refuses every further attach for it before `acquire` is reached.
-            tokio::spawn(async move {
-                if terminate_pipe_session(&stranded_app, &stranded_scope, &stranded_exec).await {
-                    tracing::info!(
-                        exec = %stranded_exec,
-                        %error,
-                        "terminated a claimed session whose attachment never upgraded"
-                    );
-                } else {
-                    // Invariant 3: an unproven containment is said out loud, never assumed. The
-                    // process outlives this attempt, so the session is queued for the
-                    // containment step (`App::contain_pending`), which retries the kill.
-                    tracing::warn!(
-                        exec = %stranded_exec,
-                        %error,
-                        "could not terminate a claimed session whose attachment never upgraded; \
-                         containment will retry"
-                    );
-                    stranded_app.queue_containment(
-                        stranded_scope,
-                        stranded_exec,
-                        ContainmentCause::FailedUpgrade(error.to_string()),
-                    );
-                }
-            });
+            //
+            // No task is spawned here either. The session is queued for the containment step the
+            // daemon runs beside its lease sweeper (`App::contain_pending`), which makes the first
+            // attempt at once, retries an unproven one on its tick, and is aborted with the sweeper
+            // at shutdown — so this containment has one owner and one shutdown path.
+            tracing::info!(
+                exec = %stranded_exec,
+                %error,
+                "queued containment for a claimed session whose attachment never upgraded"
+            );
+            stranded_app.queue_containment(
+                stranded_scope,
+                stranded_exec,
+                ContainmentCause::FailedUpgrade(error.to_string()),
+            );
         })
         .on_upgrade(move |socket| async move {
             // Held for as long as this attachment serves, so the transport budget counts it.
@@ -2004,8 +1995,8 @@ enum ContainmentOutcome {
 }
 
 impl App {
-    /// Records a claimed session whose containment kill is unproven and wakes the containment
-    /// step. An exec already pending keeps its first cause.
+    /// Records a claimed session that must be contained and whose kill is not yet proven, and
+    /// wakes the containment step. An exec already pending keeps its first cause.
     pub(super) fn queue_containment(&self, scope: Scope, exec_id: String, cause: ContainmentCause) {
         self.containments
             .entries

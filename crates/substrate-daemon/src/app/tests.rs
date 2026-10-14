@@ -1169,3 +1169,39 @@ mod transport_documents_and_the_transport {
         );
     }
 }
+
+/// The daemon's `app/` code spawns no detached task: containment that follows a failed upgrade is
+/// queued for the containment step the runtime owns and aborts at shutdown, rather than run in a
+/// `tokio::spawn` nothing owns.
+///
+/// What a test may spawn is excluded: `app/tests.rs` whole, and every other file from its first
+/// `#[cfg(test)]` module on (`metrics.rs` and `sessions.rs` close with one).
+#[test]
+fn app_code_spawns_no_detached_task() {
+    let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/app");
+    let mut checked = 0_usize;
+    let mut spawning = Vec::new();
+    for entry in std::fs::read_dir(&directory).expect("read src/app") {
+        let path = entry.expect("src/app entry").path();
+        if path.extension().is_none_or(|extension| extension != "rs")
+            || path.file_name().is_some_and(|name| name == "tests.rs")
+        {
+            continue;
+        }
+        let source = std::fs::read_to_string(&path).expect("read app source");
+        let production = source
+            .find("#[cfg(test)]\nmod ")
+            .map_or(source.as_str(), |test_module| &source[..test_module]);
+        checked += 1;
+        for (index, line) in production.lines().enumerate() {
+            if line.contains("tokio::spawn") {
+                spawning.push(format!("{}:{}", path.display(), index + 1));
+            }
+        }
+    }
+    assert!(checked >= 9, "only {checked} app source files were read");
+    assert!(
+        spawning.is_empty(),
+        "detached tasks in the daemon's app code: {spawning:?}"
+    );
+}
