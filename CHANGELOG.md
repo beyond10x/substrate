@@ -7,6 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.7.15] — 2026-10-14
+
 ### Security
 
 - A workspace file read, a digested read and the current-content observation of a
