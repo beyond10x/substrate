@@ -111,7 +111,7 @@ what `codex` and `claude` accept. Two details are load-bearing and both fail sil
   namespace returns `EPERM` and reads like kernel policy when it is an addressing mistake.
 - **The netns comes from bwrap's `--info-fd` `child-pid`, never the spawned pid.**
   `/proc/<bwrap pid>/ns/net` is `net:[4026531840]`, the **host** namespace, and
-  `crates/substrate-host/src/process.rs:393` uses `child.id()` — the bwrap pid. Using it here binds
+  `ProcessRuntime::start_inner` (`crates/substrate-host/src/process.rs:1078`) uses `child.id()` — the bwrap pid. Using it here binds
   the aperture on host loopback, exposed to everything on the machine.
 
 ## 5 What it costs per run
@@ -132,7 +132,7 @@ One extra loopback hop; the p95 ranges overlap, and the internet destination cos
 | # | Must prove |
 |---|---|
 | 1 | **The forwarder dies with the run.** Observed failure to copy: after the sandbox exited, `forwarder alive? yes`, still holding 2 sockets pinning the dead netns. Join the run's cgroup **before** opening the listening socket, so `cgroup.kill` reaps it |
-| 2 | **The listener is created at the existing spawn barrier** `--block-fd` (`crates/substrate-host/src/process.rs:947-948`, `:398-402`) — never before the aperture exists or after it is gone |
+| 2 | **The listener is created at the existing spawn barrier** `--block-fd` (`crates/substrate-host/src/process.rs` `ProcessRuntime::command` `:2186-2187`; `release_barrier` called at `:1113`) — never before the aperture exists or after it is gone |
 | 3 | **The probe exercises the mechanism** in a throwaway sandbox at startup and publishes `exec.egress-apertures` only then, never the destination's liveness (design 10 § 9 decision 6) |
 | 4 | **A CA bundle decision.** § 3.1 shows TLS verification failing for want of `/etc`; an HTTPS endpoint needs a read-only CA bundle mount or the aperture unlocks nothing. Design 10 § 9 decision 2 covered the `/etc/hosts` half only. **Answered: a generated per-run snapshot of an operator-configured anchor — [design 10 § 11](10-destination-bound-egress.md#11-what-shipped-and-what-did-not)** |
 | 5 | **The delegated-lane vectors** of design 10 § 7 — `declared-aperture-is-reachable` and `undeclared-destination-is-unreachable` as one run with two connects in the § 3.1 shape, plus `applied-aperture-is-observed` |
