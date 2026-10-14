@@ -296,13 +296,17 @@ fn probe_resource_usage(config: &HostConfig) -> Option<ResourceUsageFacts> {
 
 /// How long before the probe began the bubblewrap binary's change time must lie for its stamp to
 /// stand in for rereading it. A write lands in a timestamp tick (a jiffy on most local
-/// filesystems, two seconds on FAT), so a write after the probe can share the probed change time
-/// only when the probed change was itself that recent.
+/// filesystems; two seconds bounds the coarsest common modification-time granularity), so a write
+/// after the probe can share the probed change time only when the probed change was itself that
+/// recent.
 pub(crate) const BACKEND_STAMP_SETTLE: std::time::Duration = std::time::Duration::from_secs(2);
 
 /// What `stat` says about the bubblewrap binary: everything an in-place write, a `touch`, a
-/// rename over it or a mount over it moves. The change time cannot be set from userspace, so a
-/// rewrite that restores size and modification time still moves it.
+/// rename over it or a mount over it moves. On a filesystem whose change time the kernel maintains,
+/// it cannot be set from userspace, so a rewrite that restores size and modification time still
+/// moves it. A filesystem that supplies or caches its own attributes (FUSE, NFS) or keeps no
+/// separate change time does not give that guarantee; the bubblewrap binary belongs on a local
+/// filesystem.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct FileStamp {
     device: u64,
