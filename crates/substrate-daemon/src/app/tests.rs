@@ -1169,3 +1169,187 @@ mod transport_documents_and_the_transport {
         );
     }
 }
+
+/// The 1-based lines of `source` that start a task or thread nothing owns, outside test modules.
+///
+/// A line names a spawn when it holds the identifier `spawn`, any `spawn_…` (`spawn_blocking`,
+/// `spawn_local`), or `JoinSet` — whatever path, receiver or `use` group it is reached through. A
+/// line whose code starts with `//` is prose and is not read.
+///
+/// The body of a `#[cfg(test)] mod … {` is skipped up to the line that closes it: the `}` at the
+/// `mod` line's own indentation, which `cargo fmt` (a gate step) guarantees. A string literal in a
+/// test module holding such a line ends the skip early, which can only report a test line as a
+/// finding — the scan fails closed, never open. Code after a test module is read again.
+fn detached_spawn_lines(source: &str) -> Vec<usize> {
+    let names_a_spawn = |code: &str| {
+        code.split(|character: char| !(character.is_alphanumeric() || character == '_'))
+            .any(|token| token == "spawn" || token.starts_with("spawn_") || token == "JoinSet")
+    };
+    let mut found = Vec::new();
+
+    // The closer and the line of the `mod` that opened the skip.
+    let mut test_module: Option<(String, usize)> = None;
+    let mut after_cfg_test = false;
+    for (index, line) in source.lines().enumerate() {
+        if let Some((closer, _)) = &test_module {
+            // A trailing comment on the closing brace still closes the module.
+            let without_comment = line.split("//").next().unwrap_or_default().trim_end();
+            if without_comment == closer {
+                test_module = None;
+            }
+            continue;
+        }
+        let code = line.trim_start();
+        if after_cfg_test && code.starts_with("mod ") && code.trim_end().ends_with('{') {
+            let indentation = &line[..line.len() - code.len()];
+            test_module = Some((format!("{indentation}}}"), index + 1));
+            after_cfg_test = false;
+            continue;
+        }
+        after_cfg_test = code.trim_end() == "#[cfg(test)]";
+        if !code.starts_with("//") && names_a_spawn(code) {
+            found.push(index + 1);
+        }
+    }
+    // A test module whose closer was never found would hide everything after it: the scan
+    // reports the module's own line instead of passing unread code.
+    if let Some((_, opened)) = test_module {
+        found.push(opened);
+    }
+    found
+}
+
+/// Every `.rs` file beneath `directory`, subdirectories included, in a stable order.
+fn rust_sources(directory: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut sources = Vec::new();
+    let mut pending = vec![directory.to_path_buf()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(&directory).expect("read an app source directory") {
+            let path = entry.expect("app source entry").path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if path.extension().is_some_and(|extension| extension == "rs") {
+                sources.push(path);
+            }
+        }
+    }
+    sources.sort();
+    sources
+}
+
+/// The scan rule's own cases: each spelling of an unowned task or thread is found, wherever it sits
+/// outside a test module — including after one — and nothing inside a test module is.
+#[test]
+fn the_detached_spawn_scan_finds_every_spelling_outside_test_modules() {
+    let cases: &[(&str, &str, &[usize])] = &[
+        (
+            "tokio::spawn",
+            "fn a() {\n    tokio::spawn(async {});\n}\n",
+            &[2],
+        ),
+        (
+            "tokio::task::spawn",
+            "fn a() {\n    tokio::task::spawn(async {});\n}\n",
+            &[2],
+        ),
+        (
+            "spawn_blocking",
+            "fn a() {\n    task::spawn_blocking(|| ());\n}\n",
+            &[2],
+        ),
+        (
+            "an imported spawn",
+            "use tokio::spawn;\nfn a() {\n    spawn(async {});\n}\n",
+            &[1, 3],
+        ),
+        (
+            "an imported spawn in a multi-line group",
+            "use tokio::task::{\n    JoinHandle,\n    spawn,\n};\n",
+            &[3],
+        ),
+        (
+            "a JoinSet",
+            "fn a() {\n    let mut set = JoinSet::new();\n    set.spawn(async {});\n}\n",
+            &[2, 3],
+        ),
+        (
+            "a runtime handle",
+            "fn a(handle: Handle) {\n    handle.spawn(async {});\n}\n",
+            &[2],
+        ),
+        (
+            "a thread",
+            "fn a() {\n    std::thread::spawn(|| ());\n}\n",
+            &[2],
+        ),
+        (
+            "production code after a test module",
+            "#[cfg(test)]\nmod tests {\n    fn t() {\n        tokio::spawn(async {});\n    }\n}\n\nfn a() {\n    tokio::spawn(async {});\n}\n",
+            &[9],
+        ),
+        (
+            "a test module declared out of line",
+            "#[cfg(test)]\nmod tests;\n\nfn a() {\n    tokio::spawn(async {});\n}\n",
+            &[5],
+        ),
+        (
+            "only a test module",
+            "#[cfg(test)]\nmod tests {\n    fn t() {\n        tokio::spawn(async {});\n        std::thread::spawn(|| ());\n    }\n}\n",
+            &[],
+        ),
+        (
+            "production code after a test module whose closing brace carries a comment",
+            "#[cfg(test)]\nmod tests {\n    fn t() {}\n} // mod tests\n\nfn a() {\n    tokio::spawn(async {});\n}\n",
+            &[7],
+        ),
+        (
+            "a test module whose closer is never found",
+            "#[cfg(test)]\nmod tests {\n    fn t() {}\n  }\n  fn a() {\n    tokio::spawn(async {});\n  }\n",
+            &[2],
+        ),
+        (
+            "prose about spawning",
+            "// No task is spawned here.\n/// Nothing calls `tokio::spawn`.\nfn respawned() {}\n",
+            &[],
+        ),
+    ];
+    let wrong: Vec<String> = cases
+        .iter()
+        .filter_map(|(name, source, expected)| {
+            let found = detached_spawn_lines(source);
+            (found != *expected).then(|| format!("{name}: found {found:?}, expected {expected:?}"))
+        })
+        .collect();
+    assert!(wrong.is_empty(), "the scan misreads: {wrong:#?}");
+}
+
+/// The daemon's `app` module spawns no detached task: containment that follows a failed upgrade is
+/// queued for the containment step the runtime owns and aborts at shutdown, rather than run in a
+/// task nothing owns.
+///
+/// Reads `src/app.rs` and every file beneath `src/app/`. What a test may spawn is excluded: the
+/// test-only `app/tests.rs` whole (declared `#[cfg(test)] mod tests;` in `app.rs`), and the body
+/// of every `#[cfg(test)]` module elsewhere, which `detached_spawn_lines` skips.
+#[test]
+fn app_code_spawns_no_detached_task() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut sources = rust_sources(&root.join("app"));
+    sources.push(root.join("app.rs"));
+    let mut checked = 0_usize;
+    let mut spawning = Vec::new();
+    for path in sources {
+        if path == root.join("app").join("tests.rs") {
+            continue;
+        }
+        let source = std::fs::read_to_string(&path).expect("read app source");
+        checked += 1;
+        for line in detached_spawn_lines(&source) {
+            spawning.push(format!("{}:{line}", path.display()));
+        }
+    }
+    assert!(checked >= 10, "only {checked} app source files were read");
+    assert!(
+        spawning.is_empty(),
+        "detached tasks in the daemon's app code: {spawning:?}"
+    );
+}

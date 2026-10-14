@@ -72,21 +72,130 @@ impl DelegatedCgroup {
     }
 }
 
+/// What a cgroup held when it could not be removed: its `cgroup.procs`, `cgroup.events`, each
+/// member process as `/proc` describes it, and every child group, recursively.
+fn describe_cgroup(path: &Path, out: &mut String) {
+    let read = |name: &str| {
+        std::fs::read_to_string(path.join(name)).map_or_else(
+            |error| format!("<{error}>"),
+            |text| text.trim().replace('\n', " "),
+        )
+    };
+    let _ = writeln!(
+        out,
+        "  {}: procs=[{}] events=[{}]",
+        path.display(),
+        read("cgroup.procs"),
+        read("cgroup.events")
+    );
+    if let Ok(procs) = std::fs::read_to_string(path.join("cgroup.procs")) {
+        for pid in procs.split_whitespace() {
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .unwrap_or_else(|error| format!("<{error}>"));
+            let cmdline = std::fs::read(format!("/proc/{pid}/cmdline")).map_or_else(
+                |error| format!("<{error}>"),
+                |raw| String::from_utf8_lossy(&raw).replace('\0', " "),
+            );
+            let _ = writeln!(out, "    pid {pid}: stat={} cmdline={cmdline}", stat.trim());
+        }
+    }
+    if let Ok(entries) = std::fs::read_dir(path) {
+        for entry in entries.filter_map(Result::ok) {
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                describe_cgroup(&entry.path(), out);
+            }
+        }
+    }
+}
+
+impl DelegatedCgroup {
+    /// Removes one per-test group, once, and fails with what it still held if it is busy.
+    ///
+    /// No wait and no retry: a group that is not empty when the daemon has exited is the finding
+    /// itself, and the snapshot taken at that instant is its evidence. A test that is already
+    /// panicking reports the snapshot instead of panicking a second time, which would abort the
+    /// test binary and lose the first failure's own message.
+    fn remove(path: &Path, what: &str) {
+        let Err(error) = std::fs::remove_dir(path) else {
+            return;
+        };
+        let mut held = String::new();
+        describe_cgroup(path, &mut held);
+        let message = format!(
+            "per-test {what} cgroup {} was not empty at teardown: {error}\n{held}",
+            path.display()
+        );
+        if std::thread::panicking() {
+            eprintln!("{message}");
+        } else {
+            panic!("{message}");
+        }
+    }
+}
+
 impl Drop for DelegatedCgroup {
     fn drop(&mut self) {
-        std::fs::remove_dir(self.0.join("daemon")).unwrap_or_else(|error| {
-            panic!(
-                "per-test daemon cgroup {} was not empty at teardown: {error}",
-                self.0.join("daemon").display()
-            )
-        });
-        std::fs::remove_dir(&self.0).unwrap_or_else(|error| {
-            panic!(
-                "per-test delegated cgroup {} was not empty at teardown: {error}",
-                self.0.display()
-            )
-        });
+        Self::remove(&self.0.join("daemon"), "daemon");
+        Self::remove(&self.0, "delegated");
     }
+}
+
+/// A busy per-test group fails its teardown naming the process that held it.
+///
+/// The teardown failure this harness has shown intermittently said only `Device or resource busy`,
+/// which cannot tell a process the daemon left behind from a child group it did not remove. Here
+/// a process is placed in the per-test daemon group on purpose, and the failure must carry its pid
+/// and the group's `cgroup.events`. Delegated lane only: without a delegated root it is absent.
+#[test]
+fn a_busy_per_test_cgroup_fails_teardown_naming_what_it_held() {
+    let Some(delegated) = DelegatedCgroup::acquire() else {
+        return;
+    };
+    let group = delegated.path().to_path_buf();
+    let procs = group.join("daemon/cgroup.procs");
+    let mut holder = std::process::Command::new(CGROUP_EXEC)
+        .arg(&procs)
+        .args(["/bin/sleep", "30"])
+        .stdin(Stdio::null())
+        .spawn()
+        .expect("spawn a process into the per-test daemon group");
+    let pid = holder.id().to_string();
+    // The fixture's own process, not anything a daemon left: it has joined before teardown runs.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !std::fs::read_to_string(&procs)
+        .expect("read the daemon group's cgroup.procs")
+        .split_whitespace()
+        .any(|member| member == pid)
+    {
+        assert!(
+            Instant::now() < deadline,
+            "pid {pid} never joined {}",
+            procs.display()
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(delegated)))
+        .expect_err("removing a group that holds a process must fail");
+    let message = failure
+        .downcast_ref::<String>()
+        .cloned()
+        .unwrap_or_default();
+    holder.kill().expect("kill the holding process");
+    holder.wait().expect("reap the holding process");
+    std::fs::remove_dir(group.join("daemon")).expect("remove the emptied daemon group");
+    std::fs::remove_dir(&group).expect("remove the emptied per-test group");
+    assert!(
+        message.contains("was not empty at teardown"),
+        "teardown failure: {message}"
+    );
+    assert!(
+        message.contains(&format!("procs=[{pid}]")) && message.contains(&format!("pid {pid}: ")),
+        "teardown failure does not name the holding pid {pid}: {message}"
+    );
+    assert!(
+        message.contains("populated 1"),
+        "teardown failure does not carry cgroup.events: {message}"
+    );
 }
 
 /// The RFC 6455 sample key and the accept value it forces, as in `tests/websocket.rs`.

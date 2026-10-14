@@ -56,6 +56,15 @@ edits, and patches.
 | `POST` | `/v2/workspaces/{workspace_id}/file-edits/{*path}` | apply one bounded positional edit |
 | `POST` | `/v2/workspaces/{workspace_id}/file-patches/{*path}` | apply one bounded patch |
 
+A directory entry the contract cannot name is omitted from both listings: an entry that is not a
+regular file, directory or symbolic link (a FIFO, socket or device), or whose name is not UTF-8.
+The v1 directory page (`mode=directory`) and the v2 tree leave it out, as they leave out `.git`,
+and the tree never descends into it or counts it toward `limit_items`. The v1 page gives no signal
+that it omitted an entry. The v2 tree answers `truncated: true` for either of two causes: it
+reached `limit_items`, or it omitted at least one such entry, so a retry with a higher limit after
+an omission still answers `truncated: true`. Neither listing refuses because of such an entry;
+`workspace.path-escape` stays the answer for a path that escapes the workspace.
+
 Release `0.7.3` advertises `substrate-wire/0.16.0` in `x-b10x-contract` and its inner
 `bundle.json` SHA-256 in `x-b10x-contract-bundle-sha256`. The two headers are one claim. The signed
 outer OCI manifest has a different digest because it identifies the distribution package rather
