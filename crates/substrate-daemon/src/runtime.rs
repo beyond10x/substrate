@@ -1430,6 +1430,9 @@ impl MaintenanceTasks {
         let containment_app = Arc::clone(app);
         let containment = tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(250));
+            // A round held up by a kill the driver does not answer is followed by one tick, not
+            // by a burst of the ticks it missed.
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 tokio::select! {
                     _ = interval.tick() => {}

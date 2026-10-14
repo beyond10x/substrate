@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::Extension;
 use axum::body::Body;
@@ -1375,21 +1376,34 @@ pub(super) async fn pipe_session_attach(
             .await
             .is_ok_and(|terminal| terminal);
             if !completed {
-                if terminate_pipe_session(&app, &scope, &exec_id).await {
-                    tracing::info!(
-                        exec = %exec_id,
-                        "terminated a session whose attachment ended without a terminal observation"
-                    );
-                } else {
-                    // Invariant 3: an unproven containment is said out loud, never assumed. The
-                    // process outlives this attempt, so the session is queued for the
-                    // containment step (`App::contain_pending`), which retries the kill.
-                    tracing::warn!(
-                        exec = %exec_id,
-                        "could not terminate a session whose attachment ended without a terminal \
-                         observation; containment will retry"
-                    );
-                    app.queue_containment(scope, exec_id, ContainmentCause::EndedAttachment);
+                match terminate_pipe_session(&app, &scope, &exec_id).await {
+                    Some(ExecState::Unknown) => {
+                        // Invariant 3: the exec ended, but the kill did not prove its whole tree
+                        // went with it. Lease cleanup re-kills an `unknown` exec; this says so.
+                        tracing::warn!(
+                            exec = %exec_id,
+                            "a session whose attachment ended without a terminal observation was \
+                             killed into state unknown; its whole-tree kill is unproven"
+                        );
+                    }
+                    Some(_) => {
+                        tracing::info!(
+                            exec = %exec_id,
+                            "terminated a session whose attachment ended without a terminal \
+                             observation"
+                        );
+                    }
+                    None => {
+                        // Invariant 3: an unproven containment is said out loud, never assumed.
+                        // The process outlives this attempt, so the session is queued for the
+                        // containment step (`App::contain_pending`), which retries the kill.
+                        tracing::warn!(
+                            exec = %exec_id,
+                            "could not terminate a session whose attachment ended without a \
+                             terminal observation; containment will retry"
+                        );
+                        app.queue_containment(scope, exec_id, ContainmentCause::EndedAttachment);
+                    }
                 }
             }
         })
@@ -1923,7 +1937,12 @@ const fn is_pipe_terminal(state: ExecState) -> bool {
     )
 }
 
-async fn terminate_pipe_session(app: &App, scope: &Scope, exec_id: &str) -> bool {
+/// Kills a session's exec and persists the terminal observation the driver answers with.
+///
+/// `Some` carries the terminal state that kill was observed in; `None` means nothing was proven
+/// and the process may still run. `Some(ExecState::Unknown)` ended the exec without proving the
+/// whole tree went with it, which a caller reports rather than calls a termination.
+async fn terminate_pipe_session(app: &App, scope: &Scope, exec_id: &str) -> Option<ExecState> {
     let signal = ExecSignalInput {
         signal: substrate_wire::Signal::Kill,
         grace_ms: 0,
@@ -1934,11 +1953,12 @@ async fn terminate_pipe_session(app: &App, scope: &Scope, exec_id: &str) -> bool
     )
     .await
     else {
-        return false;
+        return None;
     };
     persist_pipe_observation(app, scope, &observation)
         .await
-        .is_ok()
+        .ok()
+        .map(|()| observation.resource.state)
 }
 
 /// Why a claimed session's containment is pending, carried into the lines that report its outcome.
@@ -1954,6 +1974,10 @@ pub(super) enum ContainmentCause {
 struct PendingContainment {
     cause: ContainmentCause,
     in_flight: bool,
+    /// Attempts made so far, counting the one in flight.
+    attempts: u32,
+    /// The round that last attempted this entry; zero before its first attempt.
+    last_round: u64,
 }
 
 /// Claimed sessions whose containment kill is not yet proven, keyed by `(scope, exec)`.
@@ -1963,6 +1987,8 @@ struct PendingContainment {
 #[derive(Debug, Default)]
 pub(super) struct PendingContainments {
     entries: ParkingMutex<HashMap<(Scope, String), PendingContainment>>,
+    /// Containment rounds started, so each entry records the last one that attempted it.
+    rounds: AtomicU64,
     wake: Notify,
 }
 
@@ -1982,16 +2008,22 @@ impl Drop for ContainmentAttempt<'_> {
 }
 
 enum ContainmentOutcome {
-    /// The kill was proven and persisted.
-    Contained,
-    /// The store already records the exec terminal; nothing is left to contain.
-    AlreadyTerminal,
+    /// The kill was observed and persisted in this terminal state.
+    Contained(ExecState),
+    /// The store already records the exec in this terminal state; no kill is made.
+    AlreadyTerminal(ExecState),
     /// The exec's lease has expired: `cleanup_expired` owns it from here.
     LeaseExpired,
     /// The store holds no record of the exec under this scope.
     Unrecorded,
     /// The kill or its observation could not be proven; the next round retries it.
     Unproven,
+}
+
+/// An unproven attempt is reported on the first failure and then each time the count doubles, so
+/// an entry retried every 250 ms is not one `warn` line per round.
+const fn unproven_attempt_is_reported(attempts: u32) -> bool {
+    attempts.is_power_of_two()
 }
 
 impl App {
@@ -2005,6 +2037,8 @@ impl App {
             .or_insert(PendingContainment {
                 cause,
                 in_flight: false,
+                attempts: 0,
+                last_round: 0,
             });
         self.containments.wake.notify_one();
     }
@@ -2019,23 +2053,33 @@ impl App {
         self.containments.entries.lock().len()
     }
 
-    /// One containment round: attempts every pending containment that has no attempt in flight,
+    /// One containment round: attempts the pending containments that have no attempt in flight,
     /// at most [`CONTAINMENT_BATCH`] of them, concurrently, each kill bounded by
     /// `MAINTENANCE_DRIVER_TIMEOUT`.
+    ///
+    /// The batch is the least recently attempted entries, never-attempted ones first, so entries
+    /// that stay unproven round after round cannot keep any other entry out of every batch.
     ///
     /// Separate from [`App::sweep_expired`] and outside its `lease_sweep` guard, so a driver that
     /// never answers a kill holds only its own attempt — never reconcile, lease cleanup or any
     /// other maintenance duty.
     pub async fn contain_pending(&self) {
-        let batch: Vec<((Scope, String), ContainmentCause)> = {
+        let round = self.containments.rounds.fetch_add(1, Ordering::Relaxed) + 1;
+        let batch: Vec<((Scope, String), ContainmentCause, u32)> = {
             let mut entries = self.containments.entries.lock();
-            entries
+            let mut eligible: Vec<(&(Scope, String), &mut PendingContainment)> = entries
                 .iter_mut()
                 .filter(|(_, entry)| !entry.in_flight)
+                .collect();
+            eligible.sort_unstable_by_key(|(_, entry)| entry.last_round);
+            eligible
+                .into_iter()
                 .take(CONTAINMENT_BATCH)
                 .map(|(key, entry)| {
                     entry.in_flight = true;
-                    (key.clone(), entry.cause.clone())
+                    entry.last_round = round;
+                    entry.attempts = entry.attempts.saturating_add(1);
+                    (key.clone(), entry.cause.clone(), entry.attempts)
                 })
                 .collect()
         };
@@ -2047,12 +2091,12 @@ impl App {
         futures_util::future::join_all(
             batch
                 .into_iter()
-                .map(|(key, cause)| self.contain_one(key, cause)),
+                .map(|(key, cause, attempts)| self.contain_one(key, cause, attempts)),
         )
         .await;
     }
 
-    async fn contain_one(&self, key: (Scope, String), cause: ContainmentCause) {
+    async fn contain_one(&self, key: (Scope, String), cause: ContainmentCause, attempts: u32) {
         let attempt = ContainmentAttempt {
             pending: &self.containments,
             key,
@@ -2065,20 +2109,38 @@ impl App {
             ContainmentCause::EndedAttachment => None,
         };
         match (outcome, &cause) {
-            (ContainmentOutcome::Contained, ContainmentCause::FailedUpgrade(error)) => {
+            (
+                ContainmentOutcome::Contained(ExecState::Unknown)
+                | ContainmentOutcome::AlreadyTerminal(ExecState::Unknown),
+                _,
+            ) => {
+                // Invariant 3: the exec ended, but nothing proved its whole tree went with it.
+                // Lease cleanup re-kills an `unknown` exec, so the entry is dropped — said out
+                // loud, never assumed contained.
+                tracing::warn!(
+                    exec = %exec_id,
+                    error = error.unwrap_or_default(),
+                    attempts,
+                    "a claimed session pending containment ended in state unknown; its whole-tree \
+                     kill is unproven and lease cleanup owns it now"
+                );
+            }
+            (ContainmentOutcome::Contained(_), ContainmentCause::FailedUpgrade(error)) => {
                 tracing::info!(
                     exec = %exec_id,
                     %error,
+                    attempts,
                     "terminated a claimed session whose attachment never upgraded"
                 );
             }
-            (ContainmentOutcome::Contained, ContainmentCause::EndedAttachment) => {
+            (ContainmentOutcome::Contained(_), ContainmentCause::EndedAttachment) => {
                 tracing::info!(
                     exec = %exec_id,
+                    attempts,
                     "terminated a session whose attachment ended without a terminal observation"
                 );
             }
-            (ContainmentOutcome::AlreadyTerminal, _) => {
+            (ContainmentOutcome::AlreadyTerminal(_), _) => {
                 tracing::debug!(
                     exec = %exec_id,
                     "a pending containment's exec is already terminal"
@@ -2090,6 +2152,7 @@ impl App {
                 tracing::warn!(
                     exec = %exec_id,
                     error = error.unwrap_or_default(),
+                    attempts,
                     "a claimed session's containment kill was never proven before its lease \
                      expired; lease cleanup owns it now"
                 );
@@ -2101,12 +2164,14 @@ impl App {
                     "a claimed session pending containment has no durable record; dropping it"
                 );
             }
+            (ContainmentOutcome::Unproven, _) if !unproven_attempt_is_reported(attempts) => {}
             (ContainmentOutcome::Unproven, ContainmentCause::FailedUpgrade(error)) => {
                 // Invariant 3: an unproven containment is said out loud, never assumed. It stays
                 // pending, and the next containment round retries it.
                 tracing::warn!(
                     exec = %exec_id,
                     %error,
+                    attempts,
                     "could not terminate a claimed session whose attachment never upgraded; \
                      containment will retry"
                 );
@@ -2114,6 +2179,7 @@ impl App {
             (ContainmentOutcome::Unproven, ContainmentCause::EndedAttachment) => {
                 tracing::warn!(
                     exec = %exec_id,
+                    attempts,
                     "could not terminate a session whose attachment ended without a terminal \
                      observation; containment will retry"
                 );
@@ -2131,7 +2197,7 @@ impl App {
             Err(_) => return ContainmentOutcome::Unproven,
         };
         if is_pipe_terminal(stored.resource.state) {
-            return ContainmentOutcome::AlreadyTerminal;
+            return ContainmentOutcome::AlreadyTerminal(stored.resource.state);
         }
         let now = self
             .lease_clock()
@@ -2144,11 +2210,9 @@ impl App {
         {
             return ContainmentOutcome::LeaseExpired;
         }
-        if terminate_pipe_session(self, scope, exec_id).await {
-            ContainmentOutcome::Contained
-        } else {
-            ContainmentOutcome::Unproven
-        }
+        terminate_pipe_session(self, scope, exec_id)
+            .await
+            .map_or(ContainmentOutcome::Unproven, ContainmentOutcome::Contained)
     }
 }
 
