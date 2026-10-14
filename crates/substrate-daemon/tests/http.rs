@@ -18,7 +18,7 @@ use tempfile::TempDir;
 use tower::ServiceExt as _;
 
 struct Harness {
-    _directory: TempDir,
+    directory: TempDir,
     app: Arc<App>,
     store: Arc<Store>,
 }
@@ -31,7 +31,7 @@ impl Harness {
             .expect("host driver");
         let app = App::new(Arc::clone(&store), driver, "dep_http_test");
         Self {
-            _directory: directory,
+            directory,
             app,
             store,
         }
@@ -603,6 +603,102 @@ async fn v2_file_mutations_enforce_digest_cas_and_return_bounded_diffs() {
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(stale["api_version"], "v2");
     assert_eq!(stale["error"]["code"], "workspace.stale-content");
+}
+
+/// A FIFO, a socket and a non-UTF-8 name are entries a confined process can create in its own
+/// workspace. Both listing routes omit them and answer `200`; neither names an escape.
+#[tokio::test(flavor = "multi_thread")]
+async fn special_entries_are_omitted_from_both_listing_routes_rather_than_refused() {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let harness = Harness::open();
+    let (_, created) = harness
+        .call(
+            "local:1000",
+            Method::POST,
+            "/v1/workspaces",
+            "req_special_create",
+            mutation(
+                "01JSPECIALCREATEHTTP001",
+                json!({ "source": "empty", "labels": {} }),
+            ),
+        )
+        .await;
+    let workspace = created["result"]["id"].as_str().expect("workspace id");
+    let (status, _) = harness
+        .call(
+            "local:1000",
+            Method::PUT,
+            &format!("/v2/workspaces/{workspace}/files/mixed/visible.txt"),
+            "req_special_write",
+            mutation(
+                "01JSPECIALWRITEHTTP0001",
+                json!({
+                    "content": { "encoding": "base64", "data": "aGVsbG8K" },
+                    "expected": { "state": "absent" },
+                    "create_parents": true
+                }),
+            ),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+
+    // The host names a workspace root by its id; the written file proves the path.
+    let mixed = harness
+        .directory
+        .path()
+        .join("workspaces")
+        .join(workspace)
+        .join("mixed");
+    assert_eq!(
+        std::fs::read(mixed.join("visible.txt")).expect("the API-written file"),
+        b"hello\n"
+    );
+    let fifo = std::process::Command::new("mkfifo")
+        .arg(mixed.join("a-fifo"))
+        .status()
+        .expect("run mkfifo");
+    assert!(fifo.success(), "mkfifo");
+    drop(std::os::unix::net::UnixListener::bind(mixed.join("b-socket")).expect("bind socket"));
+    std::fs::write(
+        mixed.join(std::ffi::OsString::from_vec(b"c\xff".to_vec())),
+        b"x",
+    )
+    .expect("non-UTF-8 name");
+
+    let (status, page) = harness
+        .call(
+            "local:1000",
+            Method::GET,
+            &format!("/v1/workspaces/{workspace}/files/mixed?mode=directory&limit_items=100"),
+            "req_special_page",
+            Body::empty(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{page}");
+    assert_eq!(
+        page["result"]["items"],
+        json!([{"name": "visible.txt", "kind": "file", "size": 6}])
+    );
+
+    let (status, tree) = harness
+        .call(
+            "local:1000",
+            Method::GET,
+            &format!("/v2/workspaces/{workspace}/tree?limit_items=10&include_hidden=false"),
+            "req_special_tree",
+            Body::empty(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{tree}");
+    assert_eq!(
+        tree["result"]["items"],
+        json!([
+            {"path": "mixed", "kind": "directory", "size": null},
+            {"path": "mixed/visible.txt", "kind": "file", "size": 6}
+        ])
+    );
+    assert_eq!(tree["result"]["truncated"], true);
 }
 
 #[tokio::test(flavor = "multi_thread")]

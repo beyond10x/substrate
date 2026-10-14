@@ -329,19 +329,19 @@ impl GuardedFilesystem {
         let mut items = Vec::with_capacity(
             usize::try_from(query.limit_items).expect("u32 tree limit fits usize"),
         );
-        let mut truncated = false;
+        let mut walk = TreeWalk::default();
         walk_tree(
             workspace.as_raw_fd(),
             "",
             query.include_hidden,
             usize::try_from(query.limit_items).expect("u32 tree limit fits usize"),
             &mut items,
-            &mut truncated,
+            &mut walk,
         )?;
         Ok(WorkspaceTree {
             workspace: workspace_id.to_owned(),
             items,
-            truncated,
+            truncated: walk.limit_reached || walk.omitted,
             observed_at: Utc::now(),
         })
     }
@@ -761,19 +761,33 @@ fn openat2_cstr(
     )
 }
 
+/// The wire name and kind of one directory entry, or `None` for an entry the contract cannot
+/// name: a type other than regular file, directory or symlink (a FIFO, socket or device), or a
+/// name that is not UTF-8. Such an entry is omitted from listings; it is not an escape.
+fn representable_entry(
+    name: &CStr,
+    file_type: libc::mode_t,
+    size: Option<u64>,
+) -> Option<(String, DirectoryEntryKind, Option<u64>)> {
+    let (kind, size) = match file_type {
+        libc::S_IFREG => (DirectoryEntryKind::File, size),
+        libc::S_IFDIR => (DirectoryEntryKind::Directory, None),
+        libc::S_IFLNK => (DirectoryEntryKind::Symlink, None),
+        _ => return None,
+    };
+    let name = String::from_utf8(name.to_bytes().to_vec()).ok()?;
+    Some((name, kind, size))
+}
+
 fn list_directory(fd: RawFd) -> Result<Vec<DirectoryEntry>, DriverError> {
     let entries = raw_directory_entries(fd)?;
     let mut result = Vec::new();
     for (name, file_type, size) in entries {
-        let name_text = String::from_utf8(name.to_bytes().to_vec()).map_err(|_| path_escape())?;
-        if name_text == ".git" {
+        if name.to_bytes() == b".git" {
             continue;
         }
-        let (kind, size) = match file_type {
-            libc::S_IFREG => (DirectoryEntryKind::File, size),
-            libc::S_IFDIR => (DirectoryEntryKind::Directory, None),
-            libc::S_IFLNK => (DirectoryEntryKind::Symlink, None),
-            _ => return Err(path_escape()),
+        let Some((name_text, kind, size)) = representable_entry(&name, file_type, size) else {
+            continue;
         };
         result.push(DirectoryEntry {
             name: name_text,
@@ -784,13 +798,21 @@ fn list_directory(fd: RawFd) -> Result<Vec<DirectoryEntry>, DriverError> {
     Ok(result)
 }
 
+/// Why a tree walk answers an incomplete tree. The two causes are kept apart because only
+/// reaching the limit stops the walk; an omission only marks the answer incomplete.
+#[derive(Default)]
+struct TreeWalk {
+    limit_reached: bool,
+    omitted: bool,
+}
+
 fn walk_tree(
     directory: RawFd,
     prefix: &str,
     include_hidden: bool,
     limit: usize,
     result: &mut Vec<WorkspaceTreeEntry>,
-    truncated: &mut bool,
+    walk: &mut TreeWalk,
 ) -> Result<(), DriverError> {
     let mut entries = raw_directory_entries(directory)?;
     entries.sort_by(|left, right| left.0.as_bytes().cmp(right.0.as_bytes()));
@@ -802,21 +824,21 @@ fn walk_tree(
         if !include_hidden && name_bytes.first() == Some(&b'.') {
             continue;
         }
+        // Omitted before the limit check: an unrepresentable entry is never counted toward the
+        // limit and never descended into, and its omission alone reports an incomplete tree.
+        let Some((name_text, kind, entry_size)) = representable_entry(&name, file_type, size)
+        else {
+            walk.omitted = true;
+            continue;
+        };
         if result.len() == limit {
-            *truncated = true;
+            walk.limit_reached = true;
             return Ok(());
         }
-        let name_text = String::from_utf8(name_bytes.to_vec()).map_err(|_| path_escape())?;
         let path = if prefix.is_empty() {
             name_text
         } else {
             format!("{prefix}/{name_text}")
-        };
-        let (kind, entry_size) = match file_type {
-            libc::S_IFREG => (DirectoryEntryKind::File, size),
-            libc::S_IFDIR => (DirectoryEntryKind::Directory, None),
-            libc::S_IFLNK => (DirectoryEntryKind::Symlink, None),
-            _ => return Err(path_escape()),
         };
         result.push(WorkspaceTreeEntry {
             path: path.clone(),
@@ -836,9 +858,9 @@ fn walk_tree(
                 include_hidden,
                 limit,
                 result,
-                truncated,
+                walk,
             )?;
-            if *truncated {
+            if walk.limit_reached {
                 return Ok(());
             }
         }
@@ -1805,6 +1827,80 @@ mod tests {
             .expect("tree listing");
         assert_eq!(tree.items.len(), 1);
         assert_eq!(tree.items[0].path, "visible.txt");
+    }
+
+    #[test]
+    fn special_entries_are_omitted_from_directory_pages_and_trees_rather_than_refused() {
+        // Prevents a FIFO, a socket or a non-UTF-8 name, any of which a confined process can
+        // create, from making its directory page and the whole workspace tree answer
+        // `workspace.path-escape` for an escape that did not happen.
+        let directory = tempdir().expect("tempdir");
+        let filesystem =
+            GuardedFilesystem::open(directory.path(), 1024, 1024, 100).expect("guarded filesystem");
+        if !filesystem.openat2_available() {
+            return;
+        }
+        filesystem.create_workspace("ws_mixed").expect("workspace");
+        let mixed = directory.path().join("ws_mixed/mixed");
+        std::fs::create_dir_all(mixed.join("sub")).expect("sub directory");
+        std::fs::write(mixed.join("sub/inner.txt"), b"inner").expect("inner file");
+        std::fs::write(mixed.join("visible.txt"), b"visible").expect("visible file");
+        std::fs::write(directory.path().join("ws_mixed/z-after.txt"), b"after")
+            .expect("after file");
+        let fifo = CString::new(mixed.join("a-fifo").into_os_string().into_vec()).expect("path");
+        // SAFETY: `fifo` is a valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0, "mkfifo");
+        let socket = std::os::unix::net::UnixListener::bind(mixed.join("b-socket")).expect("bind");
+        drop(socket);
+        let raw_name = mixed.join(std::path::PathBuf::from(OsString::from_vec(
+            b"c\xff-dir".to_vec(),
+        )));
+        std::fs::create_dir(&raw_name).expect("non-UTF-8 directory");
+        std::fs::write(raw_name.join("never-listed.txt"), b"x").expect("file beneath it");
+
+        let page = filesystem
+            .read(
+                "ws_mixed",
+                "ws_mixed",
+                "mixed",
+                &FileReadQuery {
+                    mode: FileMode::Directory,
+                    offset: None,
+                    limit_bytes: None,
+                    cursor: None,
+                    limit_items: Some(100),
+                },
+            )
+            .expect("directory page with special entries");
+        let super::FileReadResult::Directory(page) = page else {
+            panic!("directory mode answers a directory page");
+        };
+        let names: Vec<&str> = page.items.iter().map(|item| item.name.as_str()).collect();
+        assert_eq!(names, ["sub", "visible.txt"]);
+        assert_eq!(page.next_cursor, None);
+
+        let expected = [
+            "mixed",
+            "mixed/sub",
+            "mixed/sub/inner.txt",
+            "mixed/visible.txt",
+            "z-after.txt",
+        ];
+        for limit_items in [100, 5] {
+            let tree = filesystem
+                .list_tree(
+                    "ws_mixed",
+                    "ws_mixed",
+                    &substrate_wire::WorkspaceTreeQuery {
+                        limit_items,
+                        include_hidden: false,
+                    },
+                )
+                .expect("tree with special entries");
+            let paths: Vec<&str> = tree.items.iter().map(|item| item.path.as_str()).collect();
+            assert_eq!(paths, expected, "limit {limit_items}");
+            assert!(tree.truncated, "an omission reports truncated");
+        }
     }
 
     #[test]
