@@ -1984,3 +1984,6 @@ mod tests {
         panic!("workspace cleanup did not complete within the test bound");
     }
 }
+
+#[cfg(test)]
+mod line_patch_order_tests;
