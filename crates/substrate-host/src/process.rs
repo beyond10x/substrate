@@ -416,7 +416,7 @@ impl Execution {
 pub struct ProcessRuntime {
     config: HostConfig,
     capability: CapabilitySnapshot,
-    backend_binding: Option<crate::probe::BackendBinding>,
+    backend_binding: Option<crate::probe::ProbedBackend>,
     executions: Arc<Mutex<HashMap<String, Arc<Execution>>>>,
     reservations: Arc<Mutex<HashSet<String>>>,
     active: Arc<AtomicUsize>,
@@ -434,7 +434,7 @@ impl ProcessRuntime {
         capability: CapabilitySnapshot,
         quotas: Option<Arc<crate::quota::ProjectQuotas>>,
     ) -> Result<Self, DriverError> {
-        let backend_binding = crate::probe::backend_binding(&config);
+        let backend_binding = crate::probe::probe_backend(&config);
         let runtime = Self {
             config,
             capability,
@@ -2047,11 +2047,10 @@ impl ProcessRuntime {
     }
 
     fn recheck_backend(&self) -> Result<(), DriverError> {
-        if self.backend_binding.is_none() {
+        let Some(probed) = self.backend_binding.as_ref() else {
             return Err(sandbox_unavailable());
-        }
-        let current = crate::probe::backend_binding(&self.config);
-        if current.is_none() || current != self.backend_binding {
+        };
+        if !crate::probe::backend_unchanged(&self.config, probed) {
             return Err(DriverError::refused(
                 "exec.capability-stale",
                 "The admitted confinement backend identity or configuration changed after probing.",
@@ -4089,6 +4088,163 @@ mod tests {
             panic!("stale snapshot must refuse before dispatch");
         };
         assert_eq!(error.code, "exec.capability-stale");
+    }
+
+    /// Runs `action` and returns its result with the number of times the kernel reported `path`
+    /// opened meanwhile. `inotify` observes every open of the inode from any code path, so the
+    /// count needs no hook in the code under test.
+    fn opens_of<T>(path: &std::path::Path, action: impl FnOnce() -> T) -> (T, usize) {
+        use std::os::unix::ffi::OsStrExt as _;
+        let path = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("path has no NUL");
+        // SAFETY: inotify_init1 takes no pointers; the returned descriptor is checked below.
+        let descriptor = unsafe { libc::inotify_init1(libc::IN_NONBLOCK | libc::IN_CLOEXEC) };
+        assert!(descriptor >= 0, "inotify_init1 failed");
+        // SAFETY: `descriptor` is a live inotify descriptor and `path` a NUL-terminated string.
+        let watch = unsafe { libc::inotify_add_watch(descriptor, path.as_ptr(), libc::IN_OPEN) };
+        assert!(watch >= 0, "inotify_add_watch failed");
+        let result = action();
+        let mut opens = 0;
+        let mut buffer = [0_u8; 4096];
+        loop {
+            // SAFETY: `buffer` is writable for its whole length.
+            let read = unsafe {
+                libc::read(
+                    descriptor,
+                    buffer.as_mut_ptr().cast::<libc::c_void>(),
+                    buffer.len(),
+                )
+            };
+            let Ok(read) = usize::try_from(read) else {
+                break;
+            };
+            let mut offset = 0;
+            let header = std::mem::size_of::<libc::inotify_event>();
+            while offset + header <= read {
+                // SAFETY: the kernel wrote a whole event header at `offset`; read_unaligned
+                // copies it out without assuming the byte buffer's alignment.
+                let event = unsafe {
+                    std::ptr::read_unaligned(
+                        buffer.as_ptr().add(offset).cast::<libc::inotify_event>(),
+                    )
+                };
+                if event.mask & libc::IN_OPEN != 0 {
+                    opens += 1;
+                }
+                offset += header + event.len as usize;
+            }
+        }
+        // SAFETY: `descriptor` is owned here and closed exactly once.
+        unsafe { libc::close(descriptor) };
+        (result, opens)
+    }
+
+    #[test]
+    fn unchanged_backend_admission_does_not_open_the_binary() {
+        let root = tempfile::tempdir().unwrap();
+        let bubblewrap = root.path().join("bwrap");
+        std::fs::write(&bubblewrap, b"probed backend").unwrap();
+        let cgroup = root.path().join("cgroup");
+        std::fs::create_dir(&cgroup).unwrap();
+        std::fs::write(cgroup.join("cgroup.controllers"), "cpu memory pids\n").unwrap();
+        let workspaces = root.path().join("workspaces");
+        let workspace = workspaces.join("ws_test");
+        std::fs::create_dir_all(&workspace).unwrap();
+        let mut config = HostConfig::minimum(&workspaces);
+        config.bubblewrap = bubblewrap.clone();
+        config.cgroup_root = Some(cgroup);
+        // A binary changed within a timestamp tick of the probe is never trusted by metadata.
+        std::thread::sleep(crate::probe::BACKEND_STAMP_SETTLE + Duration::from_millis(100));
+        let snapshot = format!("sha256:{}", "7".repeat(64));
+        let capability = CapabilitySnapshot {
+            snapshot: snapshot.clone(),
+            driver: HostDriverKind::Host,
+            driver_version: "test".to_owned(),
+            config_generation: config.config_generation,
+            probed_at: chrono::Utc::now(),
+            valid_until: None,
+            facts: CapabilityFacts {
+                exec_argv_only: Some(true),
+                exec_namespaces: Some(NamespaceFacts {
+                    user: true,
+                    mount: true,
+                    pid: true,
+                    ipc: true,
+                    uts: true,
+                    network: true,
+                }),
+                exec_no_egress: Some(true),
+                exec_cgroup_limits: Some(CgroupLimitFacts {
+                    processes: true,
+                    memory: true,
+                    cpu: true,
+                }),
+                exec_cgroup_kill: Some(true),
+                exec_output_limit_bytes: Some(65_536),
+                ..CapabilityFacts::default()
+            },
+        };
+        let runtime = ProcessRuntime::new(config, capability).expect("runtime");
+        let input = ExecStartInput {
+            read_only_roots: Vec::new(),
+            read_only_files: Vec::new(),
+            secret_slots: Vec::new(),
+            workspace: "ws_test".to_owned(),
+            argv: vec!["/usr/bin/true".to_owned()],
+            env: ExecEnvironment {
+                allow: vec![],
+                set: BTreeMap::new(),
+            },
+            sandbox: substrate_wire::ConfinementRequest {
+                capability_snapshot: snapshot,
+                network: NetworkMode::None,
+                aperture: None,
+                profile: SandboxProfile::Workspace,
+                required: true,
+            },
+            limits: ExecLimits {
+                timeout_ms: 5_000,
+                output_bytes: 65_536,
+                processes: 16,
+                memory_bytes: 67_108_864,
+                cpu_millis: 1_000,
+            },
+            wait: false,
+            workspace_access: substrate_wire::WorkspaceAccess::ReadWrite,
+            scratch: None,
+            measurements: std::collections::BTreeSet::new(),
+            capsule: None,
+            lease_ttl_ms: None,
+        };
+
+        let (admitted, opens) =
+            opens_of(&bubblewrap, || runtime.admit("ex_test", &workspace, &input));
+        admitted.expect("an unchanged backend admits");
+        assert_eq!(
+            opens, 0,
+            "an unchanged backend is not reopened at admission"
+        );
+
+        // Control: the same size with the modification time put back. Only the change time
+        // still moves, so admission must reopen, rehash and refuse.
+        let modified = std::fs::metadata(&bubblewrap).unwrap().modified().unwrap();
+        std::fs::write(&bubblewrap, b"probed BACKEND").unwrap();
+        assert_eq!(
+            std::fs::metadata(&bubblewrap).unwrap().len(),
+            b"probed backend".len() as u64
+        );
+        std::fs::File::options()
+            .write(true)
+            .open(&bubblewrap)
+            .unwrap()
+            .set_modified(modified)
+            .unwrap();
+        let (refused, opens) =
+            opens_of(&bubblewrap, || runtime.admit("ex_test", &workspace, &input));
+        assert_eq!(
+            refused.expect_err("a replaced backend refuses").code,
+            "exec.capability-stale"
+        );
+        assert!(opens >= 1, "a changed backend is reopened and rehashed");
     }
 
     #[tokio::test]
