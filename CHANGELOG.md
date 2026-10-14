@@ -29,6 +29,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - Design documents 10 and 10a cite the sandbox argv, the egress refusal and the spawn barrier at
   the functions and lines where they are.
 
+### Security
+
+- `rustls` moves from 0.23.45 to 0.23.46, which fixes RUSTSEC-2026-0346, RUSTSEC-2026-0347,
+  RUSTSEC-2026-0348 and RUSTSEC-2026-0349.
+
 ## [0.7.13] — 2026-10-11
 
 Published by [release run 38280358137](https://github.com/beyond10x/substrate/actions/runs/38280358137)
