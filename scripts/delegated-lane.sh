@@ -59,20 +59,26 @@ cargo test -p b10x-substrate-host --locked -- --nocapture --test-threads=1
 # PTY resize, live metrics and orderly whole-tree cleanup through SDK types only; without this
 # explicit command that test would be absent from the daemon-only lane below.
 #
-# The binary is wherever cargo put it. `CARGO_TARGET_DIR` moves the whole build directory, and a
-# machine that shares one build directory across a repository's worktrees sets it; `${PWD}/target`
-# was then a path nothing had ever written, so both SDK cases below failed with
-# `Startup("No such file or directory (os error 2)")` — which reads as a daemon defect rather than
-# a missing build artefact. Resolve the same directory cargo used, and refuse here, by name, if the
-# build did not leave the binary there. (Only the environment variable is honoured: nothing in this
-# repository sets `build.target-dir`, and `.cargo/config.toml` carries the `xtask` alias alone.)
-target_dir="${CARGO_TARGET_DIR:-${PWD}/target}"
-daemon_bin="${target_dir}/debug/substrate-daemon"
-
-cargo build -p b10x-substrate-daemon --bin substrate-daemon --locked
-if [[ ! -x "${daemon_bin}" ]]; then
-  echo "delegated-lane: the build left no executable at ${daemon_bin}" >&2
-  echo "delegated-lane: CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-<unset>}, PWD=${PWD}" >&2
+# The binary is wherever cargo put it, and only cargo knows where that is. `CARGO_TARGET_DIR`,
+# `CARGO_BUILD_TARGET_DIR`, a `build.target-dir` in any Cargo config file up the directory tree or
+# in `CARGO_HOME`, and `--config` all move the build directory; a path guessed here from `${PWD}`
+# or from one of those variables was, under any of the others, a path nothing had ever written, so
+# both SDK cases below failed with `Startup("No such file or directory (os error 2)")` — which
+# reads as a daemon defect rather than a missing build artefact. So no path is derived here: the
+# build itself reports the `executable` it produced (`--message-format=json-render-diagnostics`
+# keeps the human diagnostics on stderr), and the script refuses, by name, if it reported none.
+if ! command -v jq >/dev/null 2>&1; then
+  echo "delegated-lane: jq is required to read the daemon path cargo reports" >&2
+  exit 1
+fi
+daemon_bin="$(
+  cargo build -p b10x-substrate-daemon --bin substrate-daemon --locked \
+    --message-format=json-render-diagnostics \
+    | jq -r 'select(.reason == "compiler-artifact" and .target.name == "substrate-daemon"
+                    and .executable != null) | .executable'
+)"
+if [[ -z "${daemon_bin}" || "${daemon_bin}" == *$'\n'* || ! -x "${daemon_bin}" ]]; then
+  echo "delegated-lane: cargo reported no single executable for substrate-daemon (got: '${daemon_bin}')" >&2
   exit 1
 fi
 echo "delegated-lane: shipped daemon ${daemon_bin}"
