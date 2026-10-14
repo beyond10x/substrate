@@ -1379,7 +1379,8 @@ pub(super) async fn pipe_session_attach(
                 match terminate_pipe_session(&app, &scope, &exec_id).await {
                     Some(ExecState::Unknown) => {
                         // Invariant 3: the exec ended, but the kill did not prove its whole tree
-                        // went with it. Lease cleanup re-kills an `unknown` exec; this says so.
+                        // went with it, and nothing retries that kill before the daemon restarts;
+                        // this says so.
                         tracing::warn!(
                             exec = %exec_id,
                             "a session whose attachment ended without a terminal observation was \
@@ -2115,14 +2116,15 @@ impl App {
                 _,
             ) => {
                 // Invariant 3: the exec ended, but nothing proved its whole tree went with it.
-                // Lease cleanup re-kills an `unknown` exec, so the entry is dropped — said out
-                // loud, never assumed contained.
+                // A driver treats `unknown` as terminal, so a further kill from here or from
+                // lease cleanup reaches its recorded answer, not the tree; the entry is dropped —
+                // said out loud, never assumed contained.
                 tracing::warn!(
                     exec = %exec_id,
                     error = error.unwrap_or_default(),
                     attempts,
                     "a claimed session pending containment ended in state unknown; its whole-tree \
-                     kill is unproven and lease cleanup owns it now"
+                     kill is unproven and is not retried before the daemon restarts"
                 );
             }
             (ContainmentOutcome::Contained(_), ContainmentCause::FailedUpgrade(error)) => {

@@ -26,8 +26,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   until the kill is proven, the exec is terminal or its lease has expired; before, only lease
   expiry ended it. Retries run in their own containment step, so a kill the driver never answers
   holds up no other maintenance. Each round takes up to 64 pending sessions, least recently
-  attempted first; an exec that ends `unknown` is handed to lease cleanup with a warning rather
-  than reported as terminated; a repeated failure is logged on its 1st, 2nd, 4th, 8th attempt and
+  attempted first; an exec that ends `unknown` leaves the step with a warning rather than being
+  reported as terminated; a repeated failure is logged on its 1st, 2nd, 4th, 8th attempt and
   so on.
 - A directory page and the v2 workspace tree no longer refuse with `workspace.path-escape` when a
   directory holds a FIFO, a socket or a name that is not UTF-8. Such entries are omitted, as `.git`

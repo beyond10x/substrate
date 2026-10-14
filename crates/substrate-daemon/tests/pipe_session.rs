@@ -3364,9 +3364,9 @@ impl CapturedLog {
     }
 }
 
-/// A pending containment whose exec the store records `unknown` leaves the set — lease cleanup
-/// re-kills an `unknown` exec — but says so at `warn`, naming the exec, because the whole-tree kill
-/// was never proven.
+/// A pending containment whose exec the store records `unknown` leaves the set — nothing retries
+/// a kill of an `unknown` exec before the daemon restarts — but says so at `warn`, naming the
+/// exec, because the whole-tree kill was never proven.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_pending_containment_whose_exec_ended_unknown_is_dropped_with_a_warning() {
     let harness = Harness::driven().await;
@@ -3420,8 +3420,8 @@ async fn an_unproven_containment_is_reported_on_its_first_failure_then_at_doubli
 }
 
 /// A containment kill the driver answers with `unknown` ended the exec without proving the whole
-/// tree went with it. The containment step drops it — lease cleanup re-kills an `unknown` exec —
-/// but says so at `warn`, naming the exec, rather than reporting it terminated.
+/// tree went with it. The containment step drops it — nothing retries that kill before the daemon
+/// restarts — but says so at `warn`, naming the exec, rather than reporting it terminated.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_containment_kill_answered_unknown_is_reported_at_warn() {
     let harness = Harness::driven().await;

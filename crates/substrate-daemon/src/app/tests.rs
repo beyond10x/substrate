@@ -1187,19 +1187,22 @@ fn detached_spawn_lines(source: &str) -> Vec<usize> {
     };
     let mut found = Vec::new();
 
-    let mut test_module_closer: Option<String> = None;
+    // The closer and the line of the `mod` that opened the skip.
+    let mut test_module: Option<(String, usize)> = None;
     let mut after_cfg_test = false;
     for (index, line) in source.lines().enumerate() {
-        if let Some(closer) = &test_module_closer {
-            if line == closer {
-                test_module_closer = None;
+        if let Some((closer, _)) = &test_module {
+            // A trailing comment on the closing brace still closes the module.
+            let without_comment = line.split("//").next().unwrap_or_default().trim_end();
+            if without_comment == closer {
+                test_module = None;
             }
             continue;
         }
         let code = line.trim_start();
         if after_cfg_test && code.starts_with("mod ") && code.trim_end().ends_with('{') {
             let indentation = &line[..line.len() - code.len()];
-            test_module_closer = Some(format!("{indentation}}}"));
+            test_module = Some((format!("{indentation}}}"), index + 1));
             after_cfg_test = false;
             continue;
         }
@@ -1207,6 +1210,11 @@ fn detached_spawn_lines(source: &str) -> Vec<usize> {
         if !code.starts_with("//") && names_a_spawn(code) {
             found.push(index + 1);
         }
+    }
+    // A test module whose closer was never found would hide everything after it: the scan
+    // reports the module's own line instead of passing unread code.
+    if let Some((_, opened)) = test_module {
+        found.push(opened);
     }
     found
 }
@@ -1288,6 +1296,16 @@ fn the_detached_spawn_scan_finds_every_spelling_outside_test_modules() {
             "only a test module",
             "#[cfg(test)]\nmod tests {\n    fn t() {\n        tokio::spawn(async {});\n        std::thread::spawn(|| ());\n    }\n}\n",
             &[],
+        ),
+        (
+            "production code after a test module whose closing brace carries a comment",
+            "#[cfg(test)]\nmod tests {\n    fn t() {}\n} // mod tests\n\nfn a() {\n    tokio::spawn(async {});\n}\n",
+            &[7],
+        ),
+        (
+            "a test module whose closer is never found",
+            "#[cfg(test)]\nmod tests {\n    fn t() {}\n  }\n  fn a() {\n    tokio::spawn(async {});\n  }\n",
+            &[2],
         ),
         (
             "prose about spawning",
