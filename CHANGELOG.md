@@ -9,6 +9,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [0.7.15] — 2026-10-14
 
+Published by [release run 38646569421](https://github.com/beyond10x/substrate/actions/runs/38646569421)
+from tagged commit `abc5ea2c9ebd490420b4205d0913ad721c41b3a1`. All three artifacts were
+keyless-signed and verified against `release.yml@refs/tags/0.7.15` by the release workflow, and
+each tag resolved anonymously to its released digest:
+
+- Image: `ghcr.io/beyond10x/b10x-substrate-daemon:0.7.15` at `sha256:2367f049ddc022a452b2aa04e8afcc8b8d36fb1472267578d5a596fbce4f6073`.
+- Contract bundle: `ghcr.io/beyond10x/b10x-substrate-wire:0.18.0` at `sha256:0fc268003bcb02645759cb916f0790359598943c07fa3647320821f2375450ae`, annotated `development`, the byte-identical bundle 0.7.13 published, signed again with this release's identity.
+- Disposable MCP image: `ghcr.io/beyond10x/b10x-substrate-mcp:0.7.15` at `sha256:8760c096fbd4a825560f207a4bdac018b3b3a3e92c97c67a3a4435fefb29e472`, development-only.
+
+The [release notes](https://github.com/beyond10x/substrate/releases/tag/0.7.15) provide exact
+signature verification commands and the successful 106-case delegated confinement record.
+
 ### Security
 
 - A workspace file read, a digested read and the current-content observation of a

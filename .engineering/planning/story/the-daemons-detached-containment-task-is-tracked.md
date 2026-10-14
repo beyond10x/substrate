@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:the-daemons-detached-containment-task-is-tracked
 kind: story
-status: active
+status: implemented
 title: The daemon's detached containment task is tracked
 relations:
 - depends_on: story:session-containment-retries-an-unproven-kill
@@ -13,10 +13,11 @@ scope:
   path: crates/substrate-daemon/src/runtime.rs
 - confidence: cited
   path: crates/substrate-daemon/tests/pipe_session.rs
-revision: 9
+revision: 10
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-14T17:24:21Z", actor: "human:timo", revision: 8, decided_on: {"recorded":{"review_outcome":7}}}
 - {from: "proposed", to: "active", at: "2026-10-14T17:24:21Z", actor: "human:timo", revision: 9, decided_on: {"recorded":{"review_outcome":7}}}
+- {from: "active", to: "implemented", at: "2026-10-14T22:37:45Z", actor: "human:timo", revision: 10, decided_on: {"recorded":{"test_result":1,"review_outcome":9}}}
 ---
 # Story: The daemon's detached containment task is tracked
 

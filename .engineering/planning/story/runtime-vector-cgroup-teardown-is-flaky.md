@@ -2,15 +2,16 @@
 format: aep.planning-md/3
 id: story:runtime-vector-cgroup-teardown-is-flaky
 kind: story
-status: active
+status: implemented
 title: The runtime-vector delegated lane tears its cgroups down deterministically
 scope:
 - confidence: cited
   path: crates/substrate-daemon/tests/runtime_vectors.rs
-revision: 7
+revision: 8
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-14T17:24:21Z", actor: "human:timo", revision: 6, decided_on: {"recorded":{"review_outcome":5}}}
 - {from: "proposed", to: "active", at: "2026-10-14T17:24:21Z", actor: "human:timo", revision: 7, decided_on: {"recorded":{"review_outcome":5}}}
+- {from: "active", to: "implemented", at: "2026-10-14T22:37:45Z", actor: "human:timo", revision: 8, decided_on: {"recorded":{"test_result":1,"review_outcome":5}}}
 ---
 # Story: The runtime-vector delegated lane tears its cgroups down deterministically
 

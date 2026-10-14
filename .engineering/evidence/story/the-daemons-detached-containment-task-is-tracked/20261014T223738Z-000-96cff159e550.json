@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-14T22:37:38Z",
+  "actor": "human:timo",
+  "artifact": "story:the-daemons-detached-containment-task-is-tracked",
+  "kind": "story",
+  "revision": 9,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "Shipped in Substrate 0.7.15: PR 131 merged at abc5ea2c with the full gate green; release run 38646569421 published and verified the artifacts",
+    "reference": "https://github.com/beyond10x/substrate/releases/tag/0.7.15"
+  }
+}
