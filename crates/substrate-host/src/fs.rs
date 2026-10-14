@@ -1227,17 +1227,21 @@ fn apply_line_patch(source: &str, edits: &[LinePatchEdit]) -> Result<String, Dri
                 "edits",
             ));
         }
-        ranges.push(range);
+        ranges.push((range, edit));
     }
-    ranges.sort_unstable();
-    if ranges.windows(2).any(|pair| pair[0].1 >= pair[1].0) {
+    ranges.sort_unstable_by_key(|(range, _)| *range);
+    if ranges.windows(2).any(|pair| pair[0].0.1 >= pair[1].0.0) {
         return Err(DriverError::refused(
             "workspace.patch-overlap",
             "Patch edits overlap in original coordinates.",
             "edits",
         ));
     }
-    for edit in edits.iter().rev() {
+    // Apply bottom-up in original line order, never in request order, so an earlier edit never
+    // shifts the lines a later one addresses and every permutation of the list gives the same
+    // bytes. No tie-break between kinds is needed: two edits anchored to one original line
+    // overlap and were refused above, so start lines are strictly ascending here.
+    for (_, edit) in ranges.into_iter().rev() {
         match edit {
             LinePatchEdit::InsertBefore { line, text } => {
                 lines.splice(index(*line)..index(*line), text_lines(text));
@@ -1491,13 +1495,104 @@ mod tests {
     use std::os::unix::ffi::OsStringExt as _;
     use std::os::unix::fs::symlink;
 
-    use substrate_wire::{FileMode, FileReadQuery};
+    use substrate_wire::{FileMode, FileReadQuery, LinePatchEdit};
     use tempfile::tempdir;
 
     use super::{
-        DESTROY_BATCH_ITEMS, GuardedFilesystem, WorkspaceDestroyBatch, list_directory, openat2,
-        read_bounded_complete, remove_children_batch, validate_root_name,
+        DESTROY_BATCH_ITEMS, GuardedFilesystem, WorkspaceDestroyBatch, apply_line_patch,
+        list_directory, openat2, read_bounded_complete, remove_children_batch, validate_root_name,
     };
+
+    const SIX_LINES: &str = "L1\nL2\nL3\nL4\nL5\nL6\n";
+
+    fn insert_before(line: u32, text: &str) -> LinePatchEdit {
+        LinePatchEdit::InsertBefore {
+            line,
+            text: text.to_owned(),
+        }
+    }
+
+    fn insert_after(line: u32, text: &str) -> LinePatchEdit {
+        LinePatchEdit::InsertAfter {
+            line,
+            text: text.to_owned(),
+        }
+    }
+
+    fn replace(start_line: u32, end_line: u32, text: &str) -> LinePatchEdit {
+        LinePatchEdit::ReplaceRange {
+            start_line,
+            end_line,
+            text: text.to_owned(),
+        }
+    }
+
+    fn every_permutation(edits: &[LinePatchEdit]) -> Vec<Vec<LinePatchEdit>> {
+        if edits.len() <= 1 {
+            return vec![edits.to_vec()];
+        }
+        let mut all = Vec::new();
+        for (at, first) in edits.iter().enumerate() {
+            let mut rest = edits.to_vec();
+            rest.remove(at);
+            for mut tail in every_permutation(&rest) {
+                tail.insert(0, first.clone());
+                all.push(tail);
+            }
+        }
+        all
+    }
+
+    #[test]
+    fn a_line_patch_gives_the_same_bytes_whatever_order_its_two_edits_arrive_in() {
+        // Prevents the regression where edits were applied in reverse *input* order, so a
+        // non-ascending list shifted the later edit onto the wrong line.
+        let ascending = [insert_before(2, "A\nB"), replace(5, 5, "X")];
+        let expected = "L1\nA\nB\nL2\nL3\nL4\nX\nL6\n";
+        assert_eq!(
+            apply_line_patch(SIX_LINES, &ascending).expect("ascending patch"),
+            expected
+        );
+        let descending = [replace(5, 5, "X"), insert_before(2, "A\nB")];
+        assert_eq!(
+            apply_line_patch(SIX_LINES, &descending).expect("descending patch"),
+            expected
+        );
+    }
+
+    #[test]
+    fn a_line_patch_gives_the_same_bytes_for_every_permutation_of_three_edits() {
+        // `insert_after(2)` and `insert_before(3)` land at the same boundary between L2 and L3;
+        // the one anchored to the earlier line is applied nearer the top.
+        let edits = [
+            insert_after(2, "after-2"),
+            insert_before(3, "before-3"),
+            replace(5, 6, "X"),
+        ];
+        let expected = "L1\nL2\nafter-2\nbefore-3\nL3\nL4\nX\n";
+        for permutation in every_permutation(&edits) {
+            assert_eq!(
+                apply_line_patch(SIX_LINES, &permutation).expect("permuted patch"),
+                expected,
+                "{permutation:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn two_line_patch_edits_anchored_to_one_line_are_refused_in_either_order() {
+        // Edits at the same original line have no ordering to apply in; they are refused as
+        // overlapping, whichever kind arrives first.
+        for pair in [
+            [insert_before(3, "A"), replace(3, 3, "X")],
+            [replace(3, 3, "X"), insert_before(3, "A")],
+            [insert_before(3, "A"), insert_after(3, "B")],
+            [insert_after(3, "B"), insert_before(3, "A")],
+        ] {
+            let error = apply_line_patch(SIX_LINES, &pair).expect_err("same-line edits");
+            assert_eq!(error.code, "workspace.patch-overlap", "{pair:?}");
+        }
+    }
 
     #[test]
     fn a_file_growing_after_metadata_is_still_read_under_the_complete_file_bound() {
