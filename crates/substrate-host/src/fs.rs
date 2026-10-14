@@ -25,6 +25,11 @@ const RESOLVE_NO_SYMLINKS: u64 = 0x04;
 const RESOLVE_BENEATH: u64 = 0x08;
 const GUARDED_RESOLVE: u64 =
     RESOLVE_BENEATH | RESOLVE_NO_MAGICLINKS | RESOLVE_NO_SYMLINKS | RESOLVE_NO_XDEV;
+/// The only flags a workspace file is opened with for reading. A confined process can put a FIFO
+/// (or, with privilege, a device) at any workspace path; without `O_NONBLOCK` opening it waits for
+/// a writer forever, before the regular-file check that follows every such open can refuse it.
+/// `O_NONBLOCK` does not change reads of a regular file.
+const FILE_READ_FLAGS: i32 = libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK;
 const MAX_DIRECTORY_SCAN_ITEMS: usize = 100_000;
 const MAX_DIFF_LINES: usize = 200;
 const MAX_PATCH_EDITS: usize = 128;
@@ -164,12 +169,7 @@ impl GuardedFilesystem {
                     ));
                 }
                 let offset = query.offset.expect("shape validated");
-                let fd = openat2(
-                    workspace.as_raw_fd(),
-                    path,
-                    libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-                    0,
-                )?;
+                let fd = openat2(workspace.as_raw_fd(), path, FILE_READ_FLAGS, 0)?;
                 let stat = fstat(fd.as_raw_fd())?;
                 if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
                     return Err(path_escape());
@@ -451,12 +451,7 @@ impl GuardedFilesystem {
     }
 
     fn read_complete_from(&self, workspace: RawFd, path: &str) -> Result<Vec<u8>, DriverError> {
-        let fd = openat2(
-            workspace,
-            path,
-            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
-            0,
-        )?;
+        let fd = openat2(workspace, path, FILE_READ_FLAGS, 0)?;
         let stat = fstat(fd.as_raw_fd())?;
         if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
             return Err(path_escape());
@@ -1901,6 +1896,295 @@ mod tests {
             assert_eq!(paths, expected, "limit {limit_items}");
             assert!(tree.truncated, "an omission reports truncated");
         }
+    }
+
+    /// Runs `operation` on its own thread and answers whether it returned within a bound. A
+    /// blocked open of `fifo` is released afterwards by a non-blocking writer, so a red case
+    /// does not leave its thread parked for the rest of the test process.
+    fn answers_promptly<R: Send + 'static>(
+        fifo: &std::path::Path,
+        operation: impl FnOnce() -> R + Send + 'static,
+    ) -> Option<R> {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let _ = sender.send(operation());
+        });
+        let answer = receiver
+            .recv_timeout(std::time::Duration::from_secs(3))
+            .ok();
+        if answer.is_none() {
+            let path = CString::new(fifo.as_os_str().as_encoded_bytes()).expect("fifo path");
+            // SAFETY: `path` is a valid NUL-terminated path; the descriptor is closed at once.
+            let writer = unsafe { libc::open(path.as_ptr(), libc::O_WRONLY | libc::O_NONBLOCK) };
+            if writer >= 0 {
+                // SAFETY: `writer` was just opened by this function.
+                unsafe { libc::close(writer) };
+            }
+            let _ = worker.join();
+        }
+        answer
+    }
+
+    fn workspace_with_fifo(name: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+        let directory = tempdir().expect("tempdir");
+        let root = directory.path().join(name);
+        std::fs::create_dir(&root).expect("workspace root");
+        let fifo = root.join("pipe");
+        let path = CString::new(fifo.as_os_str().as_encoded_bytes()).expect("fifo path");
+        // SAFETY: `path` is a valid NUL-terminated path.
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0, "mkfifo");
+        (directory, fifo)
+    }
+
+    #[test]
+    fn a_fifo_omitted_from_listings_still_blocks_a_v1_file_read_of_its_path() {
+        // The listing now hides a FIFO a confined process made, but its path is still
+        // addressable: a file-mode read opens it without O_NONBLOCK and waits for a writer that
+        // never comes, before the regular-file check at fs.rs:174 can refuse it.
+        let (directory, fifo) = workspace_with_fifo("ws_fifo_read");
+        let filesystem =
+            GuardedFilesystem::open(directory.path(), 1024, 1024, 100).expect("guarded filesystem");
+        if !filesystem.openat2_available() {
+            return;
+        }
+        let answer = answers_promptly(&fifo, move || {
+            filesystem
+                .read(
+                    "ws_fifo_read",
+                    "ws_fifo_read",
+                    "pipe",
+                    &FileReadQuery {
+                        mode: FileMode::File,
+                        offset: Some(0),
+                        limit_bytes: Some(16),
+                        cursor: None,
+                        limit_items: None,
+                    },
+                )
+                .map(|_| ())
+                .map_err(|error| error.code)
+        });
+        let answer = answer.expect("a file read of a FIFO answers within 3 s instead of blocking");
+        assert!(answer.is_err(), "a FIFO is not a readable file: {answer:?}");
+    }
+
+    #[test]
+    fn a_fifo_omitted_from_listings_still_blocks_a_v2_digested_read_of_its_path() {
+        // The same open in read_complete_from (fs.rs:454) serves v2 digested reads and every CAS
+        // mutation's current-content observation (replace_cas, edit_cas, patch).
+        let (directory, fifo) = workspace_with_fifo("ws_fifo_digest");
+        let filesystem =
+            GuardedFilesystem::open(directory.path(), 1024, 1024, 100).expect("guarded filesystem");
+        if !filesystem.openat2_available() {
+            return;
+        }
+        let answer = answers_promptly(&fifo, move || {
+            filesystem
+                .read_digested(
+                    "ws_fifo_digest",
+                    "ws_fifo_digest",
+                    "pipe",
+                    &FileReadQuery {
+                        mode: FileMode::File,
+                        offset: Some(0),
+                        limit_bytes: Some(16),
+                        cursor: None,
+                        limit_items: None,
+                    },
+                )
+                .map(|_| ())
+                .map_err(|error| error.code)
+        });
+        let answer =
+            answer.expect("a digested read of a FIFO answers within 3 s instead of blocking");
+        assert!(answer.is_err(), "a FIFO is not a readable file: {answer:?}");
+    }
+
+    #[test]
+    fn no_open_of_a_workspace_path_can_wait_for_a_fifo_writer() {
+        // The class behind the FIFO cases above: an open of a workspace path that is not O_PATH,
+        // not O_DIRECTORY and not O_CREAT|O_EXCL opens whatever is there, and on a FIFO without
+        // O_NONBLOCK it waits for a writer. Every open call in this module's non-test source must
+        // name its flags within a few lines, and each such flag set must be one of those safe
+        // shapes or FILE_READ_FLAGS, which carries O_NONBLOCK.
+        const WINDOW: usize = 6;
+        const FORWARDING: &str = "openat2_cstr(directory, &path, flags, mode)";
+        let source = include_str!("fs.rs");
+        let production = source
+            .split("\n#[cfg(test)]\nmod tests {")
+            .next()
+            .expect("module source");
+        assert!(
+            production.len() < source.len(),
+            "the test module boundary was not found, so the scan read the wrong text"
+        );
+        let lines: Vec<&str> = production.lines().collect();
+        let safe = |line: &str| {
+            line.contains("libc::O_PATH")
+                || line.contains("libc::O_DIRECTORY")
+                || (line.contains("libc::O_CREAT") && line.contains("libc::O_EXCL"))
+                || (line.contains("libc::O_NONBLOCK") && line.contains("const FILE_READ_FLAGS"))
+        };
+        let mut strays = Vec::new();
+        let mut flag_lines = 0;
+        for (index, line) in lines.iter().enumerate() {
+            if line.contains("libc::O_CLOEXEC") {
+                flag_lines += 1;
+                if !safe(line) {
+                    strays.push(format!("fs.rs:{}: {}", index + 1, line.trim()));
+                }
+            }
+            if line.contains("std::fs::File::open")
+                || line.contains("File::open(")
+                || line.contains("OpenOptions")
+            {
+                strays.push(format!("fs.rs:{}: {}", index + 1, line.trim()));
+            }
+            let call = ["openat2(", "openat2_cstr(", "libc::open(", "libc::openat("]
+                .iter()
+                .any(|name| line.contains(name));
+            if call && !line.trim_start().starts_with("fn ") && line.trim() != FORWARDING {
+                let window = &lines[index..lines.len().min(index + WINDOW)];
+                if !window.iter().any(|candidate| {
+                    candidate.contains("libc::O_CLOEXEC") || candidate.contains("FILE_READ_FLAGS")
+                }) {
+                    strays.push(format!(
+                        "fs.rs:{}: {} (flags not named)",
+                        index + 1,
+                        line.trim()
+                    ));
+                }
+            }
+        }
+        assert!(
+            flag_lines >= 15,
+            "found {flag_lines} flag sets; the module has more, so the scan is not reading them"
+        );
+        assert!(
+            strays.is_empty(),
+            "opens that can wait for a FIFO writer: {strays:#?}"
+        );
+        assert!(
+            production.matches("FILE_READ_FLAGS, 0)").count() >= 2,
+            "the file read and the complete read both open with FILE_READ_FLAGS"
+        );
+    }
+
+    #[test]
+    fn every_compare_and_set_mutation_of_a_fifo_path_answers_instead_of_blocking() {
+        // replace_cas, edit_cas and patch_cas observe the current content through the same
+        // read_complete_from before they verify anything; each must refuse a FIFO promptly.
+        let digest = "0".repeat(64);
+        for mutation in ["replace", "edit", "patch"] {
+            let name = format!("ws_fifo_{mutation}");
+            let (directory, fifo) = workspace_with_fifo(&name);
+            let filesystem = GuardedFilesystem::open(directory.path(), 1024, 1024, 100)
+                .expect("guarded filesystem");
+            if !filesystem.openat2_available() {
+                return;
+            }
+            let digest = digest.clone();
+            let answer = answers_promptly(&fifo, move || {
+                let result = match mutation {
+                    "replace" => filesystem.replace_cas(
+                        &name,
+                        &name,
+                        "pipe",
+                        &substrate_wire::FileReplaceInput {
+                            content: substrate_wire::Base64Content {
+                                encoding: substrate_wire::Base64Encoding::Base64,
+                                data: "eA==".to_owned(),
+                            },
+                            expected: substrate_wire::ExpectedFileState::Absent,
+                            create_parents: false,
+                        },
+                    ),
+                    "edit" => filesystem.edit_cas(
+                        &name,
+                        &name,
+                        "pipe",
+                        &substrate_wire::FileEditInput {
+                            expected_sha256: digest,
+                            old_text: "a".to_owned(),
+                            new_text: "b".to_owned(),
+                            match_policy: substrate_wire::TextMatchPolicy::Exact,
+                        },
+                    ),
+                    _ => filesystem.patch_cas(
+                        &name,
+                        &name,
+                        "pipe",
+                        &substrate_wire::FilePatchInput {
+                            expected_sha256: digest,
+                            edits: vec![insert_before(1, "x")],
+                        },
+                    ),
+                };
+                result.map(|_| ()).map_err(|error| error.code)
+            });
+            let answer = answer
+                .unwrap_or_else(|| panic!("{mutation} of a FIFO answers within 3 s, not blocking"));
+            assert!(
+                answer.is_err(),
+                "{mutation} of a FIFO is refused: {answer:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn tree_omission_probe_deep_hidden_and_exact_limit() {
+        // Probe, expected green: an omission three levels deep still reports truncated; a hidden
+        // FIFO excluded by include_hidden=false is not an omission; an exact-limit tree with no
+        // omission is not truncated; and omitted entries never consume limit_items.
+        let directory = tempdir().expect("tempdir");
+        let filesystem =
+            GuardedFilesystem::open(directory.path(), 1024, 1024, 100).expect("guarded filesystem");
+        if !filesystem.openat2_available() {
+            return;
+        }
+        let mkfifo = |path: std::path::PathBuf| {
+            let path = CString::new(path.into_os_string().into_vec()).expect("path");
+            // SAFETY: `path` is a valid NUL-terminated path.
+            assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0, "mkfifo");
+        };
+        let tree = |name: &str, limit_items: u32, include_hidden: bool| {
+            filesystem
+                .list_tree(
+                    name,
+                    name,
+                    &substrate_wire::WorkspaceTreeQuery {
+                        limit_items,
+                        include_hidden,
+                    },
+                )
+                .expect("tree")
+        };
+
+        filesystem.create_workspace("ws_deep").expect("workspace");
+        let deep = directory.path().join("ws_deep");
+        std::fs::create_dir_all(deep.join("a/b/c")).expect("deep dirs");
+        mkfifo(deep.join("a/b/c/0-fifo"));
+        std::fs::write(deep.join("a/b/c/x.txt"), b"x").expect("deep file");
+        std::fs::write(deep.join("z.txt"), b"z").expect("last file");
+        let observed = tree("ws_deep", 5, false);
+        let paths: Vec<&str> = observed.items.iter().map(|i| i.path.as_str()).collect();
+        assert_eq!(paths, ["a", "a/b", "a/b/c", "a/b/c/x.txt", "z.txt"]);
+        assert!(observed.truncated, "a deep omission reports truncated");
+
+        filesystem.create_workspace("ws_hidden").expect("workspace");
+        let hidden = directory.path().join("ws_hidden");
+        mkfifo(hidden.join(".hidden-fifo"));
+        std::fs::write(hidden.join("a.txt"), b"a").expect("file");
+        std::fs::write(hidden.join("b.txt"), b"b").expect("file");
+        let observed = tree("ws_hidden", 2, false);
+        assert_eq!(observed.items.len(), 2);
+        assert!(
+            !observed.truncated,
+            "a hidden entry the caller excluded is no omission"
+        );
+        let observed = tree("ws_hidden", 2, true);
+        assert_eq!(observed.items.len(), 2);
+        assert!(observed.truncated, "an included hidden FIFO is an omission");
     }
 
     #[test]
