@@ -646,9 +646,23 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
             sweeper_app.sweep_expired().await;
         }
     });
+    // Containment of claimed sessions whose kill is unproven runs in a task of its own, never
+    // inside `sweep_expired`, so a driver that hangs on a kill stalls no other maintenance duty.
+    let containment_app = Arc::clone(&app);
+    let containment = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_millis(250));
+        loop {
+            tokio::select! {
+                _ = interval.tick() => {}
+                () = containment_app.containment_notified() => {}
+            }
+            containment_app.contain_pending().await;
+        }
+    });
     if let Some(tcp) = config.tcp.as_ref() {
         let result = serve_tcp(Arc::clone(&app), tcp).await;
         lease_sweeper.abort();
+        containment.abort();
         return result;
     }
     if let (Some(tls), Some(identity)) = (config.tls.as_ref(), tls_identity) {
@@ -659,6 +673,7 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
         })?;
         let result = serve_tls(Arc::clone(&app), tls, identity, hosted_admission).await;
         lease_sweeper.abort();
+        containment.abort();
         return result;
     }
     let listener = UnixListener::bind(&config.socket).context("bind unix socket")?;
@@ -727,6 +742,7 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
         }
     }
     lease_sweeper.abort();
+    containment.abort();
     drop(listener);
     connections.abort_all();
     while let Some(result) = connections.join_next().await {

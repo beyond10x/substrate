@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::net::SocketAddr;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -59,6 +60,15 @@ struct PipeFixtureDriver {
     /// hand-off out of the attach handler. Off by default, so no case written before this field
     /// changes behaviour.
     refuse_signal: std::sync::atomic::AtomicBool,
+    /// How many of the next `signal` calls refuse, each spending one; zero by default.
+    ///
+    /// A *transient* refusal: the first containment kill is refused and the next is allowed,
+    /// which is the driver recovering between two containment rounds.
+    refuse_signals: AtomicU32,
+    /// When set, `signal` never answers: the kill is in the driver and stays there.
+    hang_signal: std::sync::atomic::AtomicBool,
+    /// Every `signal` call that reached this driver, answered or not.
+    signal_calls: AtomicU32,
 }
 
 impl PipeFixtureDriver {
@@ -69,6 +79,9 @@ impl PipeFixtureDriver {
             terminals,
             resizes: Mutex::new(HashMap::new()),
             refuse_signal: std::sync::atomic::AtomicBool::new(false),
+            refuse_signals: AtomicU32::new(0),
+            hang_signal: std::sync::atomic::AtomicBool::new(false),
+            signal_calls: AtomicU32::new(0),
         })
     }
 
@@ -354,9 +367,20 @@ impl Driver for PipeFixtureDriver {
         id: &str,
         input: &ExecSignalInput,
     ) -> Result<ExecObservation, DriverError> {
-        if self
-            .refuse_signal
-            .load(std::sync::atomic::Ordering::Relaxed)
+        self.signal_calls.fetch_add(1, Ordering::SeqCst);
+        if self.hang_signal.load(Ordering::SeqCst) {
+            std::future::pending::<()>().await;
+        }
+        let transient = self
+            .refuse_signals
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+                left.checked_sub(1)
+            })
+            .is_ok();
+        if transient
+            || self
+                .refuse_signal
+                .load(std::sync::atomic::Ordering::Relaxed)
         {
             return Err(DriverError::failed(
                 "session.signal-refused",
@@ -412,19 +436,51 @@ struct Harness {
     _directory: TempDir,
     app: Arc<App>,
     server: TestServer,
+    _containment: Option<ContainmentTask>,
+}
+
+/// The daemon's containment step, run the way `runtime.rs` runs it: `App::contain_pending` on a
+/// 250 ms tick and whenever a containment is queued. Aborted when the harness drops.
+struct ContainmentTask(JoinHandle<()>);
+
+impl ContainmentTask {
+    fn spawn(app: Arc<App>) -> Self {
+        Self(tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_millis(250));
+            loop {
+                tokio::select! {
+                    _ = interval.tick() => {}
+                    () = app.containment_notified() => {}
+                }
+                app.contain_pending().await;
+            }
+        }))
+    }
+}
+
+impl Drop for ContainmentTask {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
 }
 
 impl Harness {
     async fn open() -> Self {
-        Self::opened(false).await
+        Self::opened(false, true).await
     }
 
     /// A daemon whose driver published `sessions.pty` after a verified allocation.
     async fn with_terminals() -> Self {
-        Self::opened(true).await
+        Self::opened(true, true).await
     }
 
-    async fn opened(terminals: bool) -> Self {
+    /// A daemon with no containment task: each containment round happens only when the case
+    /// calls `App::contain_pending`, so a case can count rounds.
+    async fn driven() -> Self {
+        Self::opened(false, false).await
+    }
+
+    async fn opened(terminals: bool, containment_task: bool) -> Self {
         let directory = tempfile::tempdir().expect("temporary pipe harness");
         let store = Arc::new(
             substrate_store::Store::open(directory.path().join("state.db")).expect("state store"),
@@ -433,12 +489,70 @@ impl Harness {
             PipeFixtureDriver::with_terminals(&directory.path().join("workspaces"), terminals);
         let app = App::new(store, Arc::clone(&driver) as Arc<dyn Driver>, DEPLOYMENT);
         let server = TestServer::spawn(Arc::clone(&app)).await;
+        let containment = containment_task.then(|| ContainmentTask::spawn(Arc::clone(&app)));
         Self {
             driver,
             _directory: directory,
             app,
             server,
+            _containment: containment,
         }
+    }
+
+    async fn exec(&self, exec_id: &str) -> Value {
+        let (status, observed) = self
+            .call(Method::GET, &format!("/v1/execs/{exec_id}"), Body::empty())
+            .await;
+        assert_eq!(status, StatusCode::OK, "{observed}");
+        observed
+    }
+
+    /// Waits until exactly `count` containments are pending, or fails naming what it waited for.
+    async fn await_pending_containments(&self, count: usize) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while self.app.pending_containments() != count {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| {
+            panic!(
+                "{} containments are pending ten seconds on, not {count}",
+                self.app.pending_containments()
+            )
+        });
+    }
+
+    /// Drives containment rounds until every queued transient refusal has been spent.
+    ///
+    /// Whichever hand-off made the first, refused attempt — the attach handler itself or a
+    /// containment round — the case continues from the same state: the refusal is spent, the
+    /// exec is still running and its containment is still pending.
+    async fn spend_refused_kills(&self) {
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while self.driver.refuse_signals.load(Ordering::SeqCst) != 0 {
+                self.app.contain_pending().await;
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("a pending containment reaches the driver within ten seconds of rounds");
+    }
+
+    /// Strands a claimed pipe session the way `on_failed_upgrade` sees it: `101`, then no upgrade.
+    async fn strand(&self, session_id: &str) -> TestServer {
+        let stranding = TestServer::spawn_without_upgrades(Arc::clone(&self.app)).await;
+        let handshake = Handshake::open(
+            stranding.address,
+            &format!("/v1/sessions/{session_id}/attach"),
+        )
+        .await;
+        assert_eq!(
+            handshake.status, 101,
+            "the attach handshake is answered before the upgrade can fail"
+        );
+        drop(handshake);
+        stranding
     }
 
     fn resizes(&self, exec_id: &str) -> Vec<substrate_wire::PtyWindow> {
@@ -2511,24 +2625,23 @@ async fn adversary_a_stranded_attach_with_an_unproven_kill_keeps_the_bounded_cap
     drop(stranding);
 }
 
-/// Pinned current state: an unproven kill is never retried, and only lease expiry ends the process.
+/// An unproven containment kill is retried, so a stranded exec ends inside the maintenance window,
+/// with its lease nowhere near expiry.
 ///
-/// **This case asserts what the daemon does today, not what it should do.** The failed-upgrade
-/// containment is one `terminate_pipe_session` call. When the driver cannot prove that kill the
-/// process outlives the attempt, and nothing — not the containment, not `sweep_expired` — tries
-/// again; the only thing that ends it is `cleanup_expired` acting on the expired lease
-/// (`crates/substrate-daemon/src/app/service.rs`, the `LeaseResource::Exec` arm), which is the
-/// very "until its lease or timeout ended it" the story's Context calls the defect.
+/// **This case is the inversion of the one that pinned the defect**,
+/// `a_stranded_attach_whose_kill_is_unproven_is_only_ended_by_lease_expiry`. That case asserted
+/// that the failed-upgrade containment was one `terminate_pipe_session` call, that nothing retried
+/// a refused kill, and that only `cleanup_expired` acting on the expired lease ended the process —
+/// the very "until its lease or timeout ended it" `story:unattached-claimed-session-is-contained`
+/// calls the defect. `story:session-containment-retries-an-unproven-kill` landed the retry, and the
+/// case went red as its own documentation said it would.
 ///
-/// Closing that gap needs a retry or a maintenance backstop, which is a design change beyond
-/// `story:unattached-claimed-session-is-contained`. It is tracked as
-/// `story:session-containment-retries-an-unproven-kill`.
-///
-/// **When this case goes red, the backstop landed.** The right answer then is to *invert* it — the
-/// exec should reach a terminal state inside the maintenance window below, with no lease renewal
-/// needed — never to relax the assertion or widen the window.
+/// The setup and the window are unchanged: the same transient 500 ms refusal, the same 20
+/// maintenance ticks 25 ms apart, the same sixty-second lease, and no renewal. What is inverted is
+/// the outcome: the exec must now be `cancelled` by a `KILL` inside that window — not `expired`,
+/// which is what lease cleanup records.
 #[tokio::test(flavor = "multi_thread")]
-async fn a_stranded_attach_whose_kill_is_unproven_is_only_ended_by_lease_expiry() {
+async fn a_stranded_attach_whose_kill_is_unproven_is_contained_before_lease_expiry() {
     let harness = Harness::open().await;
     let (session_id, exec_id) = harness.start_pipe().await;
     harness
@@ -2536,64 +2649,257 @@ async fn a_stranded_attach_whose_kill_is_unproven_is_only_ended_by_lease_expiry(
         .refuse_signal
         .store(true, std::sync::atomic::Ordering::Relaxed);
 
-    let stranding = TestServer::spawn_without_upgrades(Arc::clone(&harness.app)).await;
-    let handshake = Handshake::open(
-        stranding.address,
-        &format!("/v1/sessions/{session_id}/attach"),
-    )
-    .await;
-    assert_eq!(
-        handshake.status, 101,
-        "the attach handshake is answered before the upgrade can fail"
-    );
-    drop(handshake);
+    let stranding = harness.strand(&session_id).await;
 
-    // The refusal is transient: the driver is healthy again long before the window below. Nothing
-    // this case pins depends on the driver staying broken.
+    // The refusal is transient: the driver is healthy again long before the window below closes.
     tokio::time::sleep(Duration::from_millis(500)).await;
     harness
         .driver
         .refuse_signal
         .store(false, std::sync::atomic::Ordering::Relaxed);
 
-    // Many maintenance ticks under a lease that is nowhere near expiry, and the process is still
-    // running: the single containment attempt was refused and nothing retries it.
-    for tick in 0..20_u32 {
+    // The same maintenance ticks under a lease that is nowhere near expiry. The exec must leave
+    // `running` inside them, because the containment step retried the refused kill.
+    let mut contained = None;
+    for _tick in 0..20_u32 {
         harness.app.sweep_expired().await;
-        let (status, observed) = harness
-            .call(Method::GET, &format!("/v1/execs/{exec_id}"), Body::empty())
-            .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(
-            observed["result"]["state"], "running",
-            "maintenance tick {tick} ended a stranded exec whose containment kill was refused. \
-             That is story:session-containment-retries-an-unproven-kill landing: invert this case \
-             to assert containment inside the maintenance window, do not relax it. {observed}"
-        );
+        let observed = harness.exec(&exec_id).await;
+        if observed["result"]["state"] != "running" {
+            contained = Some(observed);
+            break;
+        }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
+    let observed = contained.expect(
+        "twenty maintenance ticks after the driver recovered, a stranded exec whose first \
+         containment kill was refused is still running: nothing retried the unproven kill, so \
+         only lease expiry would end it",
+    );
+    assert_eq!(
+        observed["result"]["state"], "cancelled",
+        "the containment kill, not lease cleanup, must end the exec: {observed}"
+    );
+    assert_eq!(observed["result"]["exit"]["signal"], "KILL", "{observed}");
+    assert_eq!(
+        harness.app.pending_containments(),
+        0,
+        "a proven kill leaves no pending containment"
+    );
+    drop(stranding);
+}
 
-    // The lease is the only thing that ends it. Renewing to the published minimum is what makes
-    // that observable in a test rather than in sixty seconds.
+/// The failed-upgrade hand-off: a first kill the driver refuses is retried by the next containment
+/// round once the driver recovers, and that one round leaves no running process.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_failed_upgrade_whose_first_kill_is_refused_is_contained_by_the_next_round() {
+    let harness = Harness::driven().await;
+    let (session_id, exec_id) = harness.start_pipe().await;
+    harness.driver.refuse_signals.store(1, Ordering::SeqCst);
+
+    let stranding = harness.strand(&session_id).await;
+    harness.await_pending_containments(1).await;
+    harness.spend_refused_kills().await;
+
+    let observed = harness.exec(&exec_id).await;
+    assert_eq!(
+        observed["result"]["state"], "running",
+        "the refused kill proved nothing: {observed}"
+    );
+    assert_eq!(
+        harness.app.pending_containments(),
+        1,
+        "an unproven containment stays pending rather than being forgotten"
+    );
+
+    harness.app.contain_pending().await;
+    let observed = harness.exec(&exec_id).await;
+    assert_eq!(
+        observed["result"]["state"], "cancelled",
+        "one containment round after the driver recovered must leave no running process: \
+         {observed}"
+    );
+    assert_eq!(observed["result"]["exit"]["signal"], "KILL", "{observed}");
+    assert_eq!(harness.app.pending_containments(), 0);
+    drop(stranding);
+}
+
+/// The served-attachment hand-off: an attachment that ends without a terminal observation, whose
+/// kill the driver refuses once, is contained by the next containment round.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_served_attachment_whose_first_kill_is_refused_is_contained_by_the_next_round() {
+    let harness = Harness::driven().await;
+    let (session_id, exec_id) = harness.start_pipe().await;
+    let client = harness
+        .attach(&format!("/v1/sessions/{session_id}/attach"))
+        .await;
+    harness.driver.refuse_signals.store(1, Ordering::SeqCst);
+    // The client goes away: `run_pipe_attachment` reads EOF and reports a non-terminal attachment,
+    // and the `on_upgrade` hand-off's own kill is refused.
+    drop(client);
+    harness.await_pending_containments(1).await;
+    harness.spend_refused_kills().await;
+
+    let observed = harness.exec(&exec_id).await;
+    assert_eq!(
+        observed["result"]["state"], "running",
+        "the refused kill proved nothing: {observed}"
+    );
+
+    harness.app.contain_pending().await;
+    let observed = harness.exec(&exec_id).await;
+    assert_eq!(
+        observed["result"]["state"], "cancelled",
+        "one containment round after the driver recovered must leave no running process: \
+         {observed}"
+    );
+    assert_eq!(observed["result"]["exit"]["signal"], "KILL", "{observed}");
+    assert_eq!(harness.app.pending_containments(), 0);
+}
+
+/// A kill the driver never answers holds its containment attempt, and nothing else.
+///
+/// `App::sweep_expired` returns while that attempt is still pending in the driver, a second round
+/// does not attempt the same exec twice, and an attempt cancelled with the task that ran it leaves
+/// the exec pending for the next round rather than marked in flight forever.
+#[tokio::test(flavor = "multi_thread")]
+async fn sweep_expired_returns_while_a_containment_kill_is_unanswered() {
+    let harness = Harness::driven().await;
+    let (session_id, exec_id) = harness.start_pipe().await;
+    harness.driver.refuse_signals.store(1, Ordering::SeqCst);
+    let stranding = harness.strand(&session_id).await;
+    harness.await_pending_containments(1).await;
+    harness.spend_refused_kills().await;
+
+    harness.driver.hang_signal.store(true, Ordering::SeqCst);
+    let calls = harness.driver.signal_calls.load(Ordering::SeqCst);
+    let round_app = Arc::clone(&harness.app);
+    let round = tokio::spawn(async move { round_app.contain_pending().await });
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while harness.driver.signal_calls.load(Ordering::SeqCst) == calls {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("the containment round reaches the driver's kill");
+
+    tokio::time::timeout(Duration::from_secs(5), harness.app.sweep_expired())
+        .await
+        .expect("sweep_expired must not wait behind a containment kill the driver never answers");
+    assert!(
+        !round.is_finished(),
+        "the containment attempt is still pending in the driver"
+    );
+    assert_eq!(harness.app.pending_containments(), 1);
+
+    tokio::time::timeout(Duration::from_secs(5), harness.app.contain_pending())
+        .await
+        .expect("a round with every pending entry already in flight returns at once");
+    assert_eq!(
+        harness.driver.signal_calls.load(Ordering::SeqCst),
+        calls + 1,
+        "an entry with an attempt in flight is not attempted twice"
+    );
+    assert_eq!(harness.exec(&exec_id).await["result"]["state"], "running");
+
+    round.abort();
+    assert!(
+        round
+            .await
+            .expect_err("the hung round is cancelled")
+            .is_cancelled(),
+        "the hung round ends by cancellation"
+    );
+    harness.driver.hang_signal.store(false, Ordering::SeqCst);
+    harness.app.contain_pending().await;
+    let observed = harness.exec(&exec_id).await;
+    assert_eq!(
+        observed["result"]["state"], "cancelled",
+        "a cancelled attempt leaves its exec pending for the next round: {observed}"
+    );
+    assert_eq!(harness.app.pending_containments(), 0);
+    drop(stranding);
+}
+
+/// A pending containment whose exec the store already records terminal leaves the set without a
+/// kill: there is nothing left to contain.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pending_containment_whose_exec_is_terminal_is_dropped_without_a_kill() {
+    let harness = Harness::driven().await;
+    let (session_id, exec_id) = harness.start_pipe().await;
+    harness.driver.refuse_signals.store(1, Ordering::SeqCst);
+    let stranding = harness.strand(&session_id).await;
+    harness.await_pending_containments(1).await;
+    harness.spend_refused_kills().await;
+
+    harness.driver.terminal(&exec_id, ExecState::Exited, None);
+    harness.app.sweep_expired().await;
+    assert_eq!(harness.exec(&exec_id).await["result"]["state"], "exited");
+
+    let calls = harness.driver.signal_calls.load(Ordering::SeqCst);
+    harness.app.contain_pending().await;
+    assert_eq!(harness.app.pending_containments(), 0);
+    assert_eq!(
+        harness.driver.signal_calls.load(Ordering::SeqCst),
+        calls,
+        "a terminal exec is not signalled again"
+    );
+    drop(stranding);
+}
+
+/// A pending containment whose lease has expired leaves the set without a kill, and lease cleanup
+/// (`cleanup_expired`) is what ends the exec from then on.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_pending_containment_whose_lease_expired_is_left_to_lease_cleanup() {
+    let harness = Harness::driven().await;
+    let (session_id, exec_id) = harness.start_pipe().await;
+    harness
+        .driver
+        .refuse_signal
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    let stranding = harness.strand(&session_id).await;
+    harness.await_pending_containments(1).await;
+
     let (status, renewed) = harness
         .call(
             Method::POST,
             &format!("/v1/sessions/{session_id}/lease/renew"),
             mutation(
-                "01JU3STRANDEDLEASERENEW1",
+                "01JU1CONTAINLEASERENEW01",
                 json!({"ttl_ms": substrate_wire::MIN_LEASE_TTL_MS}),
             ),
         )
         .await;
     assert_eq!(status, StatusCode::OK, "{renewed}");
+    let lease = harness.exec(&exec_id).await["result"]["lease"].clone();
+    let renew_by: chrono::DateTime<Utc> = lease["renew_by"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the renewed exec names its lease deadline: {lease}"))
+        .parse()
+        .expect("an RFC 3339 lease deadline");
+    let remaining = (renew_by - Utc::now()).to_std().unwrap_or_default();
+    tokio::time::sleep(remaining + Duration::from_millis(100)).await;
 
+    let calls = harness.driver.signal_calls.load(Ordering::SeqCst);
+    harness.app.contain_pending().await;
+    assert_eq!(
+        harness.app.pending_containments(),
+        0,
+        "an expired lease hands the exec to lease cleanup"
+    );
+    assert_eq!(
+        harness.driver.signal_calls.load(Ordering::SeqCst),
+        calls,
+        "the containment step makes no kill for an exec lease cleanup owns"
+    );
+
+    harness
+        .driver
+        .refuse_signal
+        .store(false, std::sync::atomic::Ordering::Relaxed);
     let observed = tokio::time::timeout(Duration::from_secs(20), async {
         loop {
             harness.app.sweep_expired().await;
-            let (status, observed) = harness
-                .call(Method::GET, &format!("/v1/execs/{exec_id}"), Body::empty())
-                .await;
-            assert_eq!(status, StatusCode::OK);
+            let observed = harness.exec(&exec_id).await;
             if observed["result"]["state"] != "running" {
                 return observed;
             }
@@ -2601,7 +2907,7 @@ async fn a_stranded_attach_whose_kill_is_unproven_is_only_ended_by_lease_expiry(
         }
     })
     .await
-    .expect("lease expiry is the one backstop this daemon has for an unproven containment kill");
+    .expect("lease cleanup ends an exec the containment step handed over");
     assert_eq!(observed["result"]["state"], "expired", "{observed}");
     drop(stranding);
 }
