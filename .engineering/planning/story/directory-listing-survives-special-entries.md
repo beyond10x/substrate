@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:directory-listing-survives-special-entries
 kind: story
-status: active
+status: implemented
 title: A FIFO, socket or non-UTF-8 name never makes a directory page or tree refuse
 summary: list_directory and walk_tree answer workspace.path-escape for special entries a confined process can create (fs.rs:768-813).
 tags:
@@ -14,10 +14,11 @@ scope:
   path: crates/substrate-host/src/fs.rs
 - confidence: cited
   path: website/docs/reference/contract.md
-revision: 9
+revision: 10
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-14T17:24:21Z", actor: "human:timo", revision: 8, decided_on: {"recorded":{"review_outcome":8}}}
 - {from: "proposed", to: "active", at: "2026-10-14T17:24:21Z", actor: "human:timo", revision: 9, decided_on: {"recorded":{"review_outcome":8}}}
+- {from: "active", to: "implemented", at: "2026-10-14T22:37:45Z", actor: "human:timo", revision: 10, decided_on: {"recorded":{"test_result":1,"review_outcome":9}}}
 ---
 # Story: Directory listing survives special entries
 

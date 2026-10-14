@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:session-containment-retries-an-unproven-kill
 kind: story
-status: active
+status: implemented
 title: Session containment retries an unproven kill
 scope:
 - confidence: cited
@@ -13,10 +13,11 @@ scope:
   path: crates/substrate-daemon/src/runtime.rs
 - confidence: cited
   path: crates/substrate-daemon/tests/pipe_session.rs
-revision: 10
+revision: 11
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-14T17:24:21Z", actor: "human:timo", revision: 9, decided_on: {"recorded":{"review_outcome":6}}}
 - {from: "proposed", to: "active", at: "2026-10-14T17:24:21Z", actor: "human:timo", revision: 10, decided_on: {"recorded":{"review_outcome":6}}}
+- {from: "active", to: "implemented", at: "2026-10-14T22:37:45Z", actor: "human:timo", revision: 11, decided_on: {"recorded":{"test_result":1,"review_outcome":8}}}
 ---
 # Story: Session containment retries an unproven kill
 

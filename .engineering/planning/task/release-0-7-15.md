@@ -2,9 +2,13 @@
 format: aep.planning-md/3
 id: task:release-0-7-15
 kind: task
-status: draft
+status: implemented
 title: Release Substrate 0.7.15 with the containment-and-listing wave
-revision: 1
+revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-14T22:37:45Z", actor: "human:timo", revision: 2, decided_on: {"recorded":{"test_result":1}}}
+- {from: "proposed", to: "active", at: "2026-10-14T22:37:45Z", actor: "human:timo", revision: 3, decided_on: {"recorded":{"test_result":1}}}
+- {from: "active", to: "implemented", at: "2026-10-14T22:37:45Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Outcome
 Publish the 2026-10-14 containment-and-listing wave as Substrate 0.7.15: a claimed session's unproven containment kill retried by a tracked containment step, failed-upgrade containment moved out of a detached task, directory listings that omit FIFOs, sockets and non-UTF-8 names instead of refusing, workspace file reads that no longer block on a FIFO, and runtime-vector cgroup teardown failures that name what the group held. No wire change: the release keeps the development bundle `substrate-wire/0.18.0`. Daemon and MCP OCI images are rebuilt at 0.7.15.
