@@ -7,6 +7,33 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Security
+
+- A workspace file read, a digested read and the current-content observation of a
+  compare-and-set replace, edit or patch no longer block on a FIFO a confined process created at
+  the requested path: the file is opened non-blocking and refused as a non-regular file, as
+  before. One `mkfifo` and one read request could otherwise park a daemon worker indefinitely.
+
+### Changed
+
+- Containment after a failed WebSocket upgrade no longer runs in a detached task. The daemon's
+  containment step performs it, and that step stops with the lease sweeper on every shutdown path,
+  including the early return of TLS identity setup.
+
+### Fixed
+
+- A claimed pipe session whose containment kill the driver refused or did not answer is retried
+  until the kill is proven, the exec is terminal or its lease has expired; before, only lease
+  expiry ended it. Retries run in their own containment step, so a kill the driver never answers
+  holds up no other maintenance. Each round takes up to 64 pending sessions, least recently
+  attempted first; an exec that ends `unknown` is handed to lease cleanup with a warning rather
+  than reported as terminated; a repeated failure is logged on its 1st, 2nd, 4th, 8th attempt and
+  so on.
+- A directory page and the v2 workspace tree no longer refuse with `workspace.path-escape` when a
+  directory holds a FIFO, a socket or a name that is not UTF-8. Such entries are omitted, as `.git`
+  is, and the tree answers `truncated: true` when it omits one. A confined process could
+  previously make its own workspace unlistable with one `mkfifo`.
+
 ## [0.7.14] — 2026-10-14
 
 Published by [release run 38597672533](https://github.com/beyond10x/substrate/actions/runs/38597672533)
