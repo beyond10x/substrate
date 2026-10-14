@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:line-patch-edits-apply-in-line-order
 kind: story
-status: draft
+status: active
 title: A line patch applies the same result whatever order its edits arrive in
 summary: apply_line_patch iterates edits in reverse input order; unsorted edits land on the wrong lines (fs.rs:1226), reproduced at runtime.
 tags:
@@ -12,7 +12,10 @@ relations:
 scope:
 - confidence: cited
   path: crates/substrate-host/src/fs.rs
-revision: 3
+revision: 5
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-14T09:53:43Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"review_outcome":1}}}
+- {from: "proposed", to: "active", at: "2026-10-14T09:53:44Z", actor: "human:timo", revision: 5, decided_on: {"recorded":{"review_outcome":1}}}
 ---
 # Story: Line patch edits apply in line order
 
