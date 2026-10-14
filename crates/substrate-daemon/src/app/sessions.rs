@@ -1,5 +1,6 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::Extension;
 use axum::body::Body;
@@ -20,13 +21,13 @@ use substrate_store::{
 };
 use substrate_wire::{
     Base64Content, Base64Encoding, EmptyInput, ErrorClass, Exec, ExecKind, ExecSignalInput,
-    ExecState, LeaseRenewInput, MAX_LEASE_TTL_MS, MAX_PTY_WINDOW_COLUMNS, MAX_PTY_WINDOW_ROWS,
-    MIN_LEASE_TTL_MS, OutputStream, PipeClientFrame, PipeServerFrame, PipeSession,
-    PipeSessionCapabilities, PipeSessionLimits, PipeSessionStartInput, SessionAttachmentAuthority,
-    SessionAttachmentState, SessionAuthorityMintInput, SessionKind, SessionMode,
-    SessionProtocolErrorCode, SessionState, Success, session_authority_transcript,
+    ExecState, LeaseRenewInput, LeaseState, MAX_LEASE_TTL_MS, MAX_PTY_WINDOW_COLUMNS,
+    MAX_PTY_WINDOW_ROWS, MIN_LEASE_TTL_MS, OutputStream, PipeClientFrame, PipeServerFrame,
+    PipeSession, PipeSessionCapabilities, PipeSessionLimits, PipeSessionStartInput,
+    SessionAttachmentAuthority, SessionAttachmentState, SessionAuthorityMintInput, SessionKind,
+    SessionMode, SessionProtocolErrorCode, SessionState, Success, session_authority_transcript,
 };
-use tokio::sync::Semaphore;
+use tokio::sync::{Notify, Semaphore};
 
 use crate::runtime::TransportPermit;
 
@@ -47,6 +48,9 @@ use super::{
     App, Identity, MAINTENANCE_DRIVER_TIMEOUT, PIPE_MAX_FRAME_BYTES, PIPE_MAX_INPUT_BYTES,
     PIPE_MAX_QUEUED_FRAMES, SessionTransport,
 };
+
+/// At most this many pending containments are attempted in one containment round.
+const CONTAINMENT_BATCH: usize = 64;
 
 #[derive(Clone, Copy)]
 pub(super) struct PipeSessionPolicy {
@@ -1338,24 +1342,21 @@ pub(super) async fn pipe_session_attach(
             // which returns its slot to the global bound and clears its key — and nothing here
             // needs it, because this session's durable attachment claim is already spent and the
             // state gate above refuses every further attach for it before `acquire` is reached.
-            tokio::spawn(async move {
-                if terminate_pipe_session(&stranded_app, &stranded_scope, &stranded_exec).await {
-                    tracing::info!(
-                        exec = %stranded_exec,
-                        %error,
-                        "terminated a claimed session whose attachment never upgraded"
-                    );
-                } else {
-                    // Invariant 3: an unproven containment is said out loud, never assumed. The
-                    // process outlives this attempt and nothing here retries it; only lease
-                    // expiry ends it (`app/service.rs`, `cleanup_expired`).
-                    tracing::warn!(
-                        exec = %stranded_exec,
-                        %error,
-                        "could not terminate a claimed session whose attachment never upgraded"
-                    );
-                }
-            });
+            //
+            // No task is spawned here either. The session is queued for the containment step the
+            // daemon runs beside its lease sweeper (`App::contain_pending`), which makes the first
+            // attempt at once, retries an unproven one on its tick, and is aborted with the sweeper
+            // at shutdown — so this containment has one owner and one shutdown path.
+            tracing::info!(
+                exec = %stranded_exec,
+                %error,
+                "queued containment for a claimed session whose attachment never upgraded"
+            );
+            stranded_app.queue_containment(
+                stranded_scope,
+                stranded_exec,
+                ContainmentCause::FailedUpgrade(error.to_string()),
+            );
         })
         .on_upgrade(move |socket| async move {
             // Held for as long as this attachment serves, so the transport budget counts it.
@@ -1375,20 +1376,34 @@ pub(super) async fn pipe_session_attach(
             .await
             .is_ok_and(|terminal| terminal);
             if !completed {
-                if terminate_pipe_session(&app, &scope, &exec_id).await {
-                    tracing::info!(
-                        exec = %exec_id,
-                        "terminated a session whose attachment ended without a terminal observation"
-                    );
-                } else {
-                    // Invariant 3: an unproven containment is said out loud, never assumed. The
-                    // process outlives this attempt and nothing here retries it; only lease
-                    // expiry ends it (`app/service.rs`, `cleanup_expired`).
-                    tracing::warn!(
-                        exec = %exec_id,
-                        "could not terminate a session whose attachment ended without a terminal \
-                         observation"
-                    );
+                match terminate_pipe_session(&app, &scope, &exec_id).await {
+                    Some(ExecState::Unknown) => {
+                        // Invariant 3: the exec ended, but the kill did not prove its whole tree
+                        // went with it. Lease cleanup re-kills an `unknown` exec; this says so.
+                        tracing::warn!(
+                            exec = %exec_id,
+                            "a session whose attachment ended without a terminal observation was \
+                             killed into state unknown; its whole-tree kill is unproven"
+                        );
+                    }
+                    Some(_) => {
+                        tracing::info!(
+                            exec = %exec_id,
+                            "terminated a session whose attachment ended without a terminal \
+                             observation"
+                        );
+                    }
+                    None => {
+                        // Invariant 3: an unproven containment is said out loud, never assumed.
+                        // The process outlives this attempt, so the session is queued for the
+                        // containment step (`App::contain_pending`), which retries the kill.
+                        tracing::warn!(
+                            exec = %exec_id,
+                            "could not terminate a session whose attachment ended without a \
+                             terminal observation; containment will retry"
+                        );
+                        app.queue_containment(scope, exec_id, ContainmentCause::EndedAttachment);
+                    }
                 }
             }
         })
@@ -1922,7 +1937,12 @@ const fn is_pipe_terminal(state: ExecState) -> bool {
     )
 }
 
-async fn terminate_pipe_session(app: &App, scope: &Scope, exec_id: &str) -> bool {
+/// Kills a session's exec and persists the terminal observation the driver answers with.
+///
+/// `Some` carries the terminal state that kill was observed in; `None` means nothing was proven
+/// and the process may still run. `Some(ExecState::Unknown)` ended the exec without proving the
+/// whole tree went with it, which a caller reports rather than calls a termination.
+async fn terminate_pipe_session(app: &App, scope: &Scope, exec_id: &str) -> Option<ExecState> {
     let signal = ExecSignalInput {
         signal: substrate_wire::Signal::Kill,
         grace_ms: 0,
@@ -1933,11 +1953,267 @@ async fn terminate_pipe_session(app: &App, scope: &Scope, exec_id: &str) -> bool
     )
     .await
     else {
-        return false;
+        return None;
     };
     persist_pipe_observation(app, scope, &observation)
         .await
-        .is_ok()
+        .ok()
+        .map(|()| observation.resource.state)
+}
+
+/// Why a claimed session's containment is pending, carried into the lines that report its outcome.
+#[derive(Debug, Clone)]
+pub(super) enum ContainmentCause {
+    /// `on_failed_upgrade`: the attachment never upgraded, for the reason the transport gave.
+    FailedUpgrade(String),
+    /// `on_upgrade`: the attachment ended without a terminal observation.
+    EndedAttachment,
+}
+
+#[derive(Debug)]
+struct PendingContainment {
+    cause: ContainmentCause,
+    in_flight: bool,
+    /// Attempts made so far, counting the one in flight.
+    attempts: u32,
+    /// The round that last attempted this entry; zero before its first attempt.
+    last_round: u64,
+}
+
+/// Claimed sessions whose containment kill is not yet proven, keyed by `(scope, exec)`.
+///
+/// In memory only: a daemon restart drops the set, and `reconcile_after_restart` answers for an
+/// exec that was live across the restart, as it does for every other one.
+#[derive(Debug, Default)]
+pub(super) struct PendingContainments {
+    entries: ParkingMutex<HashMap<(Scope, String), PendingContainment>>,
+    /// Containment rounds started, so each entry records the last one that attempted it.
+    rounds: AtomicU64,
+    wake: Notify,
+}
+
+/// Clears an entry's in-flight mark when its attempt ends, however it ends — including when the
+/// task running the round is cancelled, which must leave the exec attemptable, not stuck.
+struct ContainmentAttempt<'a> {
+    pending: &'a PendingContainments,
+    key: (Scope, String),
+}
+
+impl Drop for ContainmentAttempt<'_> {
+    fn drop(&mut self) {
+        if let Some(entry) = self.pending.entries.lock().get_mut(&self.key) {
+            entry.in_flight = false;
+        }
+    }
+}
+
+enum ContainmentOutcome {
+    /// The kill was observed and persisted in this terminal state.
+    Contained(ExecState),
+    /// The store already records the exec in this terminal state; no kill is made.
+    AlreadyTerminal(ExecState),
+    /// The exec's lease has expired: `cleanup_expired` owns it from here.
+    LeaseExpired,
+    /// The store holds no record of the exec under this scope.
+    Unrecorded,
+    /// The kill or its observation could not be proven; the next round retries it.
+    Unproven,
+}
+
+/// An unproven attempt is reported on the first failure and then each time the count doubles, so
+/// an entry retried every 250 ms is not one `warn` line per round.
+const fn unproven_attempt_is_reported(attempts: u32) -> bool {
+    attempts.is_power_of_two()
+}
+
+impl App {
+    /// Records a claimed session that must be contained and whose kill is not yet proven, and
+    /// wakes the containment step. An exec already pending keeps its first cause.
+    pub(super) fn queue_containment(&self, scope: Scope, exec_id: String, cause: ContainmentCause) {
+        self.containments
+            .entries
+            .lock()
+            .entry((scope, exec_id))
+            .or_insert(PendingContainment {
+                cause,
+                in_flight: false,
+                attempts: 0,
+                last_round: 0,
+            });
+        self.containments.wake.notify_one();
+    }
+
+    /// Resolves when a containment has been queued since the containment step last looked.
+    pub async fn containment_notified(&self) {
+        self.containments.wake.notified().await;
+    }
+
+    /// How many claimed sessions have a containment kill not yet proven.
+    pub fn pending_containments(&self) -> usize {
+        self.containments.entries.lock().len()
+    }
+
+    /// One containment round: attempts the pending containments that have no attempt in flight,
+    /// at most [`CONTAINMENT_BATCH`] of them, concurrently, each kill bounded by
+    /// `MAINTENANCE_DRIVER_TIMEOUT`.
+    ///
+    /// The batch is the least recently attempted entries, never-attempted ones first, so entries
+    /// that stay unproven round after round cannot keep any other entry out of every batch.
+    ///
+    /// Separate from [`App::sweep_expired`] and outside its `lease_sweep` guard, so a driver that
+    /// never answers a kill holds only its own attempt — never reconcile, lease cleanup or any
+    /// other maintenance duty.
+    pub async fn contain_pending(&self) {
+        let round = self.containments.rounds.fetch_add(1, Ordering::Relaxed) + 1;
+        let batch: Vec<((Scope, String), ContainmentCause, u32)> = {
+            let mut entries = self.containments.entries.lock();
+            let mut eligible: Vec<(&(Scope, String), &mut PendingContainment)> = entries
+                .iter_mut()
+                .filter(|(_, entry)| !entry.in_flight)
+                .collect();
+            eligible.sort_unstable_by_key(|(_, entry)| entry.last_round);
+            eligible
+                .into_iter()
+                .take(CONTAINMENT_BATCH)
+                .map(|(key, entry)| {
+                    entry.in_flight = true;
+                    entry.last_round = round;
+                    entry.attempts = entry.attempts.saturating_add(1);
+                    (key.clone(), entry.cause.clone(), entry.attempts)
+                })
+                .collect()
+        };
+        // The round ends when its slowest attempt does. A kill the driver never answers therefore
+        // delays entries queued after this round began by up to `MAINTENANCE_DRIVER_TIMEOUT`,
+        // because the containment task awaits each round before it starts the next. That delay is
+        // accepted: it is bounded, it holds no other maintenance duty, and an entry already in
+        // this round is not held behind another entry's kill.
+        futures_util::future::join_all(
+            batch
+                .into_iter()
+                .map(|(key, cause, attempts)| self.contain_one(key, cause, attempts)),
+        )
+        .await;
+    }
+
+    async fn contain_one(&self, key: (Scope, String), cause: ContainmentCause, attempts: u32) {
+        let attempt = ContainmentAttempt {
+            pending: &self.containments,
+            key,
+        };
+        let (scope, exec_id) = &attempt.key;
+        let outcome = self.containment_attempt(scope, exec_id).await;
+        let settled = !matches!(outcome, ContainmentOutcome::Unproven);
+        let error = match &cause {
+            ContainmentCause::FailedUpgrade(error) => Some(error.as_str()),
+            ContainmentCause::EndedAttachment => None,
+        };
+        match (outcome, &cause) {
+            (
+                ContainmentOutcome::Contained(ExecState::Unknown)
+                | ContainmentOutcome::AlreadyTerminal(ExecState::Unknown),
+                _,
+            ) => {
+                // Invariant 3: the exec ended, but nothing proved its whole tree went with it.
+                // Lease cleanup re-kills an `unknown` exec, so the entry is dropped — said out
+                // loud, never assumed contained.
+                tracing::warn!(
+                    exec = %exec_id,
+                    error = error.unwrap_or_default(),
+                    attempts,
+                    "a claimed session pending containment ended in state unknown; its whole-tree \
+                     kill is unproven and lease cleanup owns it now"
+                );
+            }
+            (ContainmentOutcome::Contained(_), ContainmentCause::FailedUpgrade(error)) => {
+                tracing::info!(
+                    exec = %exec_id,
+                    %error,
+                    attempts,
+                    "terminated a claimed session whose attachment never upgraded"
+                );
+            }
+            (ContainmentOutcome::Contained(_), ContainmentCause::EndedAttachment) => {
+                tracing::info!(
+                    exec = %exec_id,
+                    attempts,
+                    "terminated a session whose attachment ended without a terminal observation"
+                );
+            }
+            (ContainmentOutcome::AlreadyTerminal(_), _) => {
+                tracing::debug!(
+                    exec = %exec_id,
+                    "a pending containment's exec is already terminal"
+                );
+            }
+            (ContainmentOutcome::LeaseExpired, _) => {
+                // Invariant 3: the hand-off is said out loud. From here `cleanup_expired` acting
+                // on the expired lease ends the process, not this step.
+                tracing::warn!(
+                    exec = %exec_id,
+                    error = error.unwrap_or_default(),
+                    attempts,
+                    "a claimed session's containment kill was never proven before its lease \
+                     expired; lease cleanup owns it now"
+                );
+            }
+            (ContainmentOutcome::Unrecorded, _) => {
+                tracing::warn!(
+                    exec = %exec_id,
+                    error = error.unwrap_or_default(),
+                    "a claimed session pending containment has no durable record; dropping it"
+                );
+            }
+            (ContainmentOutcome::Unproven, _) if !unproven_attempt_is_reported(attempts) => {}
+            (ContainmentOutcome::Unproven, ContainmentCause::FailedUpgrade(error)) => {
+                // Invariant 3: an unproven containment is said out loud, never assumed. It stays
+                // pending, and the next containment round retries it.
+                tracing::warn!(
+                    exec = %exec_id,
+                    %error,
+                    attempts,
+                    "could not terminate a claimed session whose attachment never upgraded; \
+                     containment will retry"
+                );
+            }
+            (ContainmentOutcome::Unproven, ContainmentCause::EndedAttachment) => {
+                tracing::warn!(
+                    exec = %exec_id,
+                    attempts,
+                    "could not terminate a session whose attachment ended without a terminal \
+                     observation; containment will retry"
+                );
+            }
+        }
+        if settled {
+            self.containments.entries.lock().remove(&attempt.key);
+        }
+    }
+
+    async fn containment_attempt(&self, scope: &Scope, exec_id: &str) -> ContainmentOutcome {
+        let stored = match self.store_io(|| self.store.exec(scope, exec_id)).await {
+            Ok(Some(stored)) => stored,
+            Ok(None) => return ContainmentOutcome::Unrecorded,
+            Err(_) => return ContainmentOutcome::Unproven,
+        };
+        if is_pipe_terminal(stored.resource.state) {
+            return ContainmentOutcome::AlreadyTerminal(stored.resource.state);
+        }
+        let now = self
+            .lease_clock()
+            .map_or_else(|_| self.authority.now(), |clock| clock.wall);
+        if stored
+            .resource
+            .lease
+            .as_ref()
+            .is_some_and(|lease| lease.state != LeaseState::Active || lease.renew_by <= now)
+        {
+            return ContainmentOutcome::LeaseExpired;
+        }
+        terminate_pipe_session(self, scope, exec_id)
+            .await
+            .map_or(ContainmentOutcome::Unproven, ContainmentOutcome::Contained)
+    }
 }
 
 #[cfg(test)]

@@ -25,7 +25,7 @@ use crate::delegation::DelegatedContextPolicy;
 use super::events::{EventStreamLimits, EventStreamPolicy, EventWakeups};
 use super::metrics::MetricsStreamPolicy;
 use super::operations::{driver_detail, linux_lease_clock, stored_exec};
-use super::sessions::{PipeAttachmentLimits, PipeSessionPolicy};
+use super::sessions::{PendingContainments, PipeAttachmentLimits, PipeSessionPolicy};
 use super::{
     LEASE_CLEANUP_BATCH, MAINTENANCE_DRIVER_TIMEOUT, PROVISIONAL_RECOVERY_BATCH,
     RESTART_RECONCILE_BATCH, WORKSPACE_CLEANUP_BATCH, WORKSPACE_LOCK_STRIPES,
@@ -175,6 +175,8 @@ pub struct App {
     provisional_recovery: Mutex<()>,
     workspace_locks: WorkspaceLockDomains,
     maintenance_nudge: Notify,
+    /// Claimed sessions whose containment kill is unproven, retried by `contain_pending`.
+    pub(super) containments: PendingContainments,
     blocking_store_slots: Arc<Semaphore>,
     #[cfg(test)]
     pub(super) refusal_before_record: ParkingMutex<Option<RefusalBeforeRecordHook>>,
@@ -252,6 +254,7 @@ impl App {
             provisional_recovery: Mutex::new(()),
             workspace_locks: WorkspaceLockDomains::default(),
             maintenance_nudge: Notify::new(),
+            containments: PendingContainments::default(),
             blocking_store_slots: Arc::new(Semaphore::new(16)),
             #[cfg(test)]
             refusal_before_record: ParkingMutex::new(None),
