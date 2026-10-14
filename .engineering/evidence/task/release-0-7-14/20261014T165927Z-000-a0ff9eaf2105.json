@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-14T16:59:27Z",
+  "actor": "human:timo",
+  "artifact": "task:release-0-7-14",
+  "kind": "task",
+  "revision": 1,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "Release run for tag 0.7.14 concluded success: daemon, MCP and bundle signed and verified; each tag resolved anonymously to its released digest",
+    "reference": "https://github.com/beyond10x/substrate/actions/runs/38597672533"
+  }
+}

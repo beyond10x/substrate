@@ -2,15 +2,16 @@
 format: aep.planning-md/3
 id: story:design-10-cites-a-stale-process-line
 kind: story
-status: active
+status: implemented
 title: Design 10's egress evidence row cites the argv where it is
 scope:
 - confidence: cited
   path: docs/design/10-destination-bound-egress.md
-revision: 4
+revision: 5
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-14T09:53:41Z", actor: "human:timo", revision: 3}
 - {from: "proposed", to: "active", at: "2026-10-14T09:53:41Z", actor: "human:timo", revision: 4}
+- {from: "active", to: "implemented", at: "2026-10-14T17:00:32Z", actor: "human:timo", revision: 5, decided_on: {"recorded":{"test_result":1}}}
 ---
 # Story: Design 10's egress evidence row cites the argv where it is
 

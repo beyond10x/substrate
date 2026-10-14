@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:backend-recheck-hashes-only-on-change
 kind: story
-status: active
+status: implemented
 title: Exec admission rechecks the backend binary without re-hashing it when its metadata is unchanged
 summary: recheck_backend re-reads and SHA-256s the bwrap binary on every exec admission (process.rs:1753, probe.rs:267).
 tags:
@@ -14,10 +14,11 @@ scope:
   path: crates/substrate-host/src/probe.rs
 - confidence: cited
   path: crates/substrate-host/src/process.rs
-revision: 7
+revision: 8
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-14T09:53:46Z", actor: "human:timo", revision: 6, decided_on: {"recorded":{"review_outcome":2}}}
 - {from: "proposed", to: "active", at: "2026-10-14T09:53:46Z", actor: "human:timo", revision: 7, decided_on: {"recorded":{"review_outcome":2}}}
+- {from: "active", to: "implemented", at: "2026-10-14T17:00:32Z", actor: "human:timo", revision: 8, decided_on: {"recorded":{"test_result":1,"review_outcome":2}}}
 ---
 # Story: Backend recheck hashes only on change
 
