@@ -10,9 +10,9 @@ use std::sync::OnceLock;
 use b10x_substrate_sdk::ManagedDaemon;
 use serde_json::Value;
 
-/// The shipped daemon binary. `SUBSTRATE_TEST_DAEMON` names one; otherwise the workspace's own
-/// `substrate-daemon` target is built once, in this test's profile and target directory, so the
-/// lane never runs against a stale or absent daemon.
+/// The shipped daemon binary. `SUBSTRATE_TEST_DAEMON` names one; otherwise the one beside this
+/// test, which a workspace run builds; otherwise the workspace's own `substrate-daemon` target is
+/// built once, in this test's profile and target directory, so the lane never runs without one.
 fn daemon_binary() -> PathBuf {
     static BINARY: OnceLock<PathBuf> = OnceLock::new();
     BINARY
@@ -24,6 +24,12 @@ fn daemon_binary() -> PathBuf {
             profile_dir.pop();
             if profile_dir.file_name().is_some_and(|name| name == "deps") {
                 profile_dir.pop();
+            }
+            // `cargo test --workspace` has already built the daemon beside this test, as the SDK's
+            // own tests rely on; only a package-scoped run builds it here.
+            let sibling = profile_dir.join("substrate-daemon");
+            if sibling.is_file() {
+                return sibling;
             }
             let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml");
             let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
