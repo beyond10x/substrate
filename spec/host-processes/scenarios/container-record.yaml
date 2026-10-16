@@ -1,0 +1,28 @@
+# S8: a container record is listed beside host processes with restart=no, and lease expiry stops it.
+type: ess-scenario/1
+domain: substrate.host_processes
+scenario: container-record
+summary: A docker record starts with restart=no, is listed with its owner, and lease expiry stops it.
+
+arrange:
+  - instance: db
+    entity: substrate.host_processes.HostProcess
+
+timeline:
+  - at: 2026-10-16T09:00:00Z
+    command: substrate.host_processes.StartContainer
+    input: {name: preview-db, owner_session_id: s-1, owner_session_name: worker, reason: database for the preview, kind: docker, argv: [run, postgres:17], lease_ttl_seconds: 600, keep: false}
+    outcome: started
+    capture: {instance: db, event: substrate.host_processes.ProcessStarted, field: process}
+  - at: 2026-10-16T09:00:01Z
+    command: substrate.host_processes.ConfirmRunning
+    input: {process: {$instance: db}}
+    outcome: running
+  - at: 2026-10-16T09:10:00Z
+    command: substrate.host_processes.ExpireLease
+    input: {process: {$instance: db}}
+    outcome: expired
+
+assert:
+  - view: substrate.host_processes.HostProcesses
+    contains: {process: {$instance: db}, state: Stopping, container_kind: docker, restart: "no", owner_session_id: s-1, end_cause: lease-expired}
