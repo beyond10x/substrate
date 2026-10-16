@@ -22,6 +22,7 @@ const PAGES: &[(&str, &str)] = &[
     ("guides/storage-and-metrics", "Storage and metrics"),
     ("guides/deployment", "Deployment"),
     ("guides/rust-sdk", "Rust SDK"),
+    ("guides/cli", "Command line"),
     ("guides/mcp-adapter", "MCP adapter"),
     ("reference/contract", "Contract"),
     ("use-cases", "Use cases"),

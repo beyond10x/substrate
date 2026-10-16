@@ -7,12 +7,13 @@ use anyhow::{Context as _, Result};
 
 use crate::report::Report;
 
-const SOURCE_PACKAGES: [(&str, &str); 5] = [
+const SOURCE_PACKAGES: [(&str, &str); 6] = [
     ("crates/substrate-wire", "b10x-substrate-wire"),
     ("crates/substrate-store", "b10x-substrate-store"),
     ("crates/substrate-host", "b10x-substrate-host"),
     ("crates/substrate-daemon", "b10x-substrate-daemon"),
     ("crates/b10x-substrate-sdk", "b10x-substrate-sdk"),
+    ("crates/b10x-substrate-cli", "b10x-substrate-cli"),
 ];
 
 pub fn check(root: &Path) -> Result<Report> {

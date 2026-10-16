@@ -243,6 +243,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "b10x-substrate-cli"
+version = "0.7.15"
+dependencies = [
+ "b10x-substrate-sdk",
+ "clap",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "b10x-substrate-daemon"
 version = "0.7.15"
 dependencies = [
