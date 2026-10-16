@@ -7,6 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.7.16] — 2026-10-16
+
 ### Added
 
 - `spec/client`: the client CLI's presentation domain and `ess-cli/2` binding for the
@@ -21,6 +23,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `error.data.code`; `exec run` passes output through and exits with the command's status. A
   test holds the clap command line to `spec/generated/cli/binding.json`, and the story's five
   scenarios run against the shipped daemon. No route, wire field or bundle changes.
+  Install it from a checkout with `cargo install --path crates/b10x-substrate-cli --locked`.
 
 ### Changed
 
