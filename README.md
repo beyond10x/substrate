@@ -195,6 +195,21 @@ target/debug/substrate-daemon \
 Rust applications can instead follow the [public Rust SDK guide](https://beyond10x.github.io/substrate/docs/guides/rust-sdk/)
 to connect to that socket or supervise the daemon as a separate child.
 
+From a shell, the `b10x-substrate` client drives that socket through the same SDK. `--socket`
+selects the daemon and falls back to `SUBSTRATE_SOCKET`; `--output json` prints a
+`{"ok":…}` envelope, and a refusal prints the daemon's named code and exits non-zero. `exec run`
+passes the command's output through and exits with its status. The
+[command-line guide](https://beyond10x.github.io/substrate/docs/guides/cli/) lists every command.
+
+```bash
+cargo install --path crates/b10x-substrate-cli --locked
+export SUBSTRATE_SOCKET=./run/substrate.sock
+b10x-substrate machine
+ws=$(b10x-substrate --output json workspace create | jq -r .result.workspace)
+b10x-substrate exec run --workspace "$ws" -- /usr/bin/printf 'hello\n'
+b10x-substrate workspace destroy "$ws"
+```
+
 The daemon image also provides `/usr/local/bin/substrate-daemon-quota` for explicit project-quota
 deployments. It is a root-owned, byte-identical copy carrying only `cap_sys_admin=ep`; the default
 executable and entrypoint have no file capabilities. Select the quota executable together with

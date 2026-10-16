@@ -1,0 +1,1601 @@
+{
+  "format": "ess-cli-plan/2",
+  "binary": "b10x-substrate",
+  "about": "Drive a Substrate daemon over its Unix socket",
+  "globals": {
+    "state": "socket",
+    "output": "output"
+  },
+  "callables": {
+    "events": {
+      "target": {
+        "kind": "local",
+        "owner": "substrate.client",
+        "action": "events"
+      },
+      "input": {
+        "type_ref": "substrate.client.EventsRequest",
+        "shape": {
+          "kind": "struct",
+          "fields": {
+            "cursor": {
+              "kind": "optional",
+              "of": {
+                "kind": "string"
+              }
+            },
+            "limit": {
+              "kind": "optional",
+              "of": {
+                "kind": "integer"
+              }
+            }
+          }
+        }
+      },
+      "result": {
+        "type_ref": "substrate.client.EventPage",
+        "shape": {
+          "kind": "struct",
+          "fields": {
+            "first_retained_seq": {
+              "kind": "optional",
+              "of": {
+                "kind": "integer"
+              }
+            },
+            "generation": {
+              "kind": "integer"
+            },
+            "items": {
+              "kind": "list",
+              "of": {
+                "kind": "json"
+              }
+            },
+            "next_cursor": {
+              "kind": "string"
+            },
+            "source_scope": {
+              "kind": "string"
+            },
+            "through_seq": {
+              "kind": "integer"
+            }
+          }
+        }
+      },
+      "errors": {
+        "refused": {
+          "type_ref": "substrate.client.RefusalData",
+          "shape": {
+            "kind": "struct",
+            "fields": {
+              "address": {
+                "kind": "optional",
+                "of": {
+                  "kind": "string"
+                }
+              },
+              "class": {
+                "kind": "enum",
+                "variants": [
+                  "refused",
+                  "conflict",
+                  "unserved",
+                  "exhausted",
+                  "failed"
+                ]
+              },
+              "code": {
+                "kind": "string"
+              },
+              "message": {
+                "kind": "string"
+              },
+              "operation": {
+                "kind": "optional",
+                "of": {
+                  "kind": "string"
+                }
+              },
+              "retriable": {
+                "kind": "boolean"
+              }
+            }
+          }
+        },
+        "unavailable": {
+          "type_ref": "substrate.client.UnavailableData",
+          "shape": {
+            "kind": "struct",
+            "fields": {
+              "reason": {
+                "kind": "enum",
+                "variants": [
+                  "transport",
+                  "protocol",
+                  "contract_mismatch",
+                  "unknown_operation",
+                  "event_gap"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "exec-run": {
+      "target": {
+        "kind": "service_forward",
+        "owner": "substrate-daemon",
+        "operation": "substrate.client.RunExec"
+      },
+      "input": {
+        "type_ref": "substrate.client.ExecRunRequest",
+        "shape": {
+          "kind": "struct",
+          "fields": {
+            "argv": {
+              "kind": "list",
+              "of": {
+                "kind": "string"
+              }
+            },
+            "cpu_millis": {
+              "kind": "optional",
+              "of": {
+                "kind": "integer"
+              }
+            },
+            "memory_bytes": {
+              "kind": "optional",
+              "of": {
+                "kind": "integer"
+              }
+            },
+            "operation_id": {
+              "kind": "optional",
+              "of": {
+                "kind": "string"
+              }
+            },
+            "output_bytes": {
+              "kind": "optional",
+              "of": {
+                "kind": "integer"
+              }
+            },
+            "processes": {
+              "kind": "optional",
+              "of": {
+                "kind": "integer"
+              }
+            },
+            "timeout_ms": {
+              "kind": "optional",
+              "of": {
+                "kind": "integer"
+              }
+            },
+            "workspace": {
+              "kind": "string"
+            }
+          }
+        }
+      },
+      "result": {
+        "type_ref": "substrate.client.ExecRunResult",
+        "shape": {
+          "kind": "struct",
+          "fields": {
+            "exec": {
+              "kind": "string"
+            },
+            "observation": {
+              "kind": "json"
+            },
+            "stderr": {
+              "kind": "string"
+            },
+            "stderr_truncated": {
+              "kind": "boolean"
+            },
+            "stdout": {
+              "kind": "string"
+            },
+            "stdout_truncated": {
+              "kind": "boolean"
+            }
+          }
+        }
+      },
+      "errors": {
+        "refused": {
+          "type_ref": "substrate.client.RefusalData",
+          "shape": {
+            "kind": "struct",
+            "fields": {
+              "address": {
+                "kind": "optional",
+                "of": {
+                  "kind": "string"
+                }
+              },
+              "class": {
+                "kind": "enum",
+                "variants": [
+                  "refused",
+                  "conflict",
+                  "unserved",
+                  "exhausted",
+                  "failed"
+                ]
+              },
+              "code": {
+                "kind": "string"
+              },
+              "message": {
+                "kind": "string"
+              },
+              "operation": {
+                "kind": "optional",
+                "of": {
+                  "kind": "string"
+                }
+              },
+              "retriable": {
+                "kind": "boolean"
+              }
+            }
+          }
+        },
+        "unavailable": {
+          "type_ref": "substrate.client.UnavailableData",
+          "shape": {
+            "kind": "struct",
+            "fields": {
+              "reason": {
+                "kind": "enum",
+                "variants": [
+                  "transport",
+                  "protocol",
+                  "contract_mismatch",
+                  "unknown_operation",
+                  "event_gap"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "exec-show": {
+      "target": {
+        "kind": "service_forward",
+        "owner": "substrate-daemon",
+        "operation": "substrate.client.Execs"
+      },
+      "input": {
+        "type_ref": "substrate.client.ExecKey",
+        "shape": {
+          "kind": "struct",
+          "fields": {
+            "exec": {
+              "kind": "string"
+            }
+          }
+        }
+      },
+      "result": {
+        "type_ref": "substrate.client.ExecRow",
+        "shape": {
+          "kind": "struct",
+          "fields": {
+            "exec": {
+              "kind": "string"
+            },
+            "observation": {
+              "kind": "json"
+            }
+          }
+        }
+      },
+      "errors": {
+        "refused": {
+          "type_ref": "substrate.client.RefusalData",
+          "shape": {
+            "kind": "struct",
+            "fields": {
+              "address": {
+                "kind": "optional",
+                "of": {
+                  "kind": "string"
+                }
+              },
+              "class": {
+                "kind": "enum",
+                "variants": [
+                  "refused",
+                  "conflict",
+                  "unserved",
+                  "exhausted",
+                  "failed"
+                ]
+              },
+              "code": {
+                "kind": "string"
+              },
+              "message": {
+                "kind": "string"
+              },
+              "operation": {
+                "kind": "optional",
+                "of": {
+                  "kind": "string"
+                }
+              },
+              "retriable": {
+                "kind": "boolean"
+              }
+            }
+          }
+        },
+        "unavailable": {
+          "type_ref": "substrate.client.UnavailableData",
+          "shape": {
+            "kind": "struct",
+            "fields": {
+              "reason": {
+                "kind": "enum",
+                "variants": [
+                  "transport",
+                  "protocol",
+                  "contract_mismatch",
+                  "unknown_operation",
+                  "event_gap"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "machine": {
+      "target": {
+        "kind": "service_forward",
+        "owner": "substrate-daemon",
+        "operation": "substrate.client.Machine"
+      },
+      "input": null,
+      "result": {
+        "type_ref": "substrate.client.MachineRow",
+        "shape": {
+          "kind": "struct",
+          "fields": {
+            "observation": {
+              "kind": "json"
+            },
+            "snapshot": {
+              "kind": "string"
+            }
+          }
+        }
+      },
+      "errors": {
+        "refused": {
+          "type_ref": "substrate.client.RefusalData",
+          "shape": {
+            "kind": "struct",
+            "fields": {
+              "address": {
+                "kind": "optional",
+                "of": {
+                  "kind": "string"
+                }
+              },
+              "class": {
+                "kind": "enum",
+                "variants": [
+                  "refused",
+                  "conflict",
+                  "unserved",
+                  "exhausted",
+                  "failed"
+                ]
+              },
+              "code": {
+                "kind": "string"
+              },
+              "message": {
+                "kind": "string"
+              },
+              "operation": {
+                "kind": "optional",
+                "of": {
+                  "kind": "string"
+                }
+              },
+              "retriable": {
+                "kind": "boolean"
+              }
+            }
+          }
+        },
+        "unavailable": {
+          "type_ref": "substrate.client.UnavailableData",
+          "shape": {
+            "kind": "struct",
+            "fields": {
+              "reason": {
+                "kind": "enum",
+                "variants": [
+                  "transport",
+                  "protocol",
+                  "contract_mismatch",
+                  "unknown_operation",
+                  "event_gap"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "metrics": {
+      "target": {
+        "kind": "service_forward",
+        "owner": "substrate-daemon",
+        "operation": "substrate.client.Metrics"
+      },
+      "input": {
+        "type_ref": "substrate.client.MetricsKey",
+        "shape": {
+          "kind": "struct",
+          "fields": {
+            "resource_id": {
+              "kind": "string"
+            },
+            "resource_kind": {
+              "kind": "enum",
+              "variants": [
+                "exec",
+                "workspace"
+              ]
+            }
+          }
+        }
+      },
+      "result": {
+        "type_ref": "substrate.client.MetricsRow",
+        "shape": {
+          "kind": "struct",
+          "fields": {
+            "observation": {
+              "kind": "json"
+            },
+            "resource_id": {
+              "kind": "string"
+            },
+            "resource_kind": {
+              "kind": "enum",
+              "variants": [
+                "exec",
+                "workspace"
+              ]
+            }
+          }
+        }
+      },
+      "errors": {
+        "refused": {
+          "type_ref": "substrate.client.RefusalData",
+          "shape": {
+            "kind": "struct",
+            "fields": {
+              "address": {
+                "kind": "optional",
+                "of": {
+                  "kind": "string"
+                }
+              },
+              "class": {
+                "kind": "enum",
+                "variants": [
+                  "refused",
+                  "conflict",
+                  "unserved",
+                  "exhausted",
+                  "failed"
+                ]
+              },
+              "code": {
+                "kind": "string"
+              },
+              "message": {
+                "kind": "string"
+              },
+              "operation": {
+                "kind": "optional",
+                "of": {
+                  "kind": "string"
+                }
+              },
+              "retriable": {
+                "kind": "boolean"
+              }
+            }
+          }
+        },
+        "unavailable": {
+          "type_ref": "substrate.client.UnavailableData",
+          "shape": {
+            "kind": "struct",
+            "fields": {
+              "reason": {
+                "kind": "enum",
+                "variants": [
+                  "transport",
+                  "protocol",
+                  "contract_mismatch",
+                  "unknown_operation",
+                  "event_gap"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "operation-show": {
+      "target": {
+        "kind": "service_forward",
+        "owner": "substrate-daemon",
+        "operation": "substrate.client.Operations"
+      },
+      "input": {
+        "type_ref": "substrate.client.OperationKey",
+        "shape": {
+          "kind": "struct",
+          "fields": {
+            "operation": {
+              "kind": "string"
+            }
+          }
+        }
+      },
+      "result": {
+        "type_ref": "substrate.client.OperationRow",
+        "shape": {
+          "kind": "struct",
+          "fields": {
+            "observation": {
+              "kind": "json"
+            },
+            "operation": {
+              "kind": "string"
+            }
+          }
+        }
+      },
+      "errors": {
+        "refused": {
+          "type_ref": "substrate.client.RefusalData",
+          "shape": {
+            "kind": "struct",
+            "fields": {
+              "address": {
+                "kind": "optional",
+                "of": {
+                  "kind": "string"
+                }
+              },
+              "class": {
+                "kind": "enum",
+                "variants": [
+                  "refused",
+                  "conflict",
+                  "unserved",
+                  "exhausted",
+                  "failed"
+                ]
+              },
+              "code": {
+                "kind": "string"
+              },
+              "message": {
+                "kind": "string"
+              },
+              "operation": {
+                "kind": "optional",
+                "of": {
+                  "kind": "string"
+                }
+              },
+              "retriable": {
+                "kind": "boolean"
+              }
+            }
+          }
+        },
+        "unavailable": {
+          "type_ref": "substrate.client.UnavailableData",
+          "shape": {
+            "kind": "struct",
+            "fields": {
+              "reason": {
+                "kind": "enum",
+                "variants": [
+                  "transport",
+                  "protocol",
+                  "contract_mismatch",
+                  "unknown_operation",
+                  "event_gap"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "session-show": {
+      "target": {
+        "kind": "service_forward",
+        "owner": "substrate-daemon",
+        "operation": "substrate.client.Sessions"
+      },
+      "input": {
+        "type_ref": "substrate.client.SessionKey",
+        "shape": {
+          "kind": "struct",
+          "fields": {
+            "session": {
+              "kind": "string"
+            }
+          }
+        }
+      },
+      "result": {
+        "type_ref": "substrate.client.SessionRow",
+        "shape": {
+          "kind": "struct",
+          "fields": {
+            "observation": {
+              "kind": "json"
+            },
+            "session": {
+              "kind": "string"
+            }
+          }
+        }
+      },
+      "errors": {
+        "refused": {
+          "type_ref": "substrate.client.RefusalData",
+          "shape": {
+            "kind": "struct",
+            "fields": {
+              "address": {
+                "kind": "optional",
+                "of": {
+                  "kind": "string"
+                }
+              },
+              "class": {
+                "kind": "enum",
+                "variants": [
+                  "refused",
+                  "conflict",
+                  "unserved",
+                  "exhausted",
+                  "failed"
+                ]
+              },
+              "code": {
+                "kind": "string"
+              },
+              "message": {
+                "kind": "string"
+              },
+              "operation": {
+                "kind": "optional",
+                "of": {
+                  "kind": "string"
+                }
+              },
+              "retriable": {
+                "kind": "boolean"
+              }
+            }
+          }
+        },
+        "unavailable": {
+          "type_ref": "substrate.client.UnavailableData",
+          "shape": {
+            "kind": "struct",
+            "fields": {
+              "reason": {
+                "kind": "enum",
+                "variants": [
+                  "transport",
+                  "protocol",
+                  "contract_mismatch",
+                  "unknown_operation",
+                  "event_gap"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "session-signal": {
+      "target": {
+        "kind": "service_forward",
+        "owner": "substrate-daemon",
+        "operation": "substrate.client.SignalSession"
+      },
+      "input": {
+        "type_ref": "substrate.client.SessionSignalRequest",
+        "shape": {
+          "kind": "struct",
+          "fields": {
+            "grace_ms": {
+              "kind": "optional",
+              "of": {
+                "kind": "integer"
+              }
+            },
+            "operation_id": {
+              "kind": "optional",
+              "of": {
+                "kind": "string"
+              }
+            },
+            "session": {
+              "kind": "string"
+            },
+            "signal": {
+              "kind": "enum",
+              "variants": [
+                "int",
+                "term",
+                "kill"
+              ]
+            }
+          }
+        }
+      },
+      "result": {
+        "type_ref": "substrate.client.SessionRow",
+        "shape": {
+          "kind": "struct",
+          "fields": {
+            "observation": {
+              "kind": "json"
+            },
+            "session": {
+              "kind": "string"
+            }
+          }
+        }
+      },
+      "errors": {
+        "refused": {
+          "type_ref": "substrate.client.RefusalData",
+          "shape": {
+            "kind": "struct",
+            "fields": {
+              "address": {
+                "kind": "optional",
+                "of": {
+                  "kind": "string"
+                }
+              },
+              "class": {
+                "kind": "enum",
+                "variants": [
+                  "refused",
+                  "conflict",
+                  "unserved",
+                  "exhausted",
+                  "failed"
+                ]
+              },
+              "code": {
+                "kind": "string"
+              },
+              "message": {
+                "kind": "string"
+              },
+              "operation": {
+                "kind": "optional",
+                "of": {
+                  "kind": "string"
+                }
+              },
+              "retriable": {
+                "kind": "boolean"
+              }
+            }
+          }
+        },
+        "unavailable": {
+          "type_ref": "substrate.client.UnavailableData",
+          "shape": {
+            "kind": "struct",
+            "fields": {
+              "reason": {
+                "kind": "enum",
+                "variants": [
+                  "transport",
+                  "protocol",
+                  "contract_mismatch",
+                  "unknown_operation",
+                  "event_gap"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "workspace-create": {
+      "target": {
+        "kind": "service_forward",
+        "owner": "substrate-daemon",
+        "operation": "substrate.client.CreateWorkspace"
+      },
+      "input": {
+        "type_ref": "substrate.client.WorkspaceCreateRequest",
+        "shape": {
+          "kind": "struct",
+          "fields": {
+            "labels": {
+              "kind": "optional",
+              "of": {
+                "kind": "map",
+                "value": {
+                  "kind": "string"
+                }
+              }
+            },
+            "lease_ttl_ms": {
+              "kind": "optional",
+              "of": {
+                "kind": "integer"
+              }
+            },
+            "operation_id": {
+              "kind": "optional",
+              "of": {
+                "kind": "string"
+              }
+            },
+            "storage": {
+              "kind": "optional",
+              "of": {
+                "kind": "struct",
+                "fields": {
+                  "max_bytes": {
+                    "kind": "integer"
+                  },
+                  "max_inodes": {
+                    "kind": "integer"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "result": {
+        "type_ref": "substrate.client.WorkspaceRow",
+        "shape": {
+          "kind": "struct",
+          "fields": {
+            "observation": {
+              "kind": "json"
+            },
+            "workspace": {
+              "kind": "string"
+            }
+          }
+        }
+      },
+      "errors": {
+        "refused": {
+          "type_ref": "substrate.client.RefusalData",
+          "shape": {
+            "kind": "struct",
+            "fields": {
+              "address": {
+                "kind": "optional",
+                "of": {
+                  "kind": "string"
+                }
+              },
+              "class": {
+                "kind": "enum",
+                "variants": [
+                  "refused",
+                  "conflict",
+                  "unserved",
+                  "exhausted",
+                  "failed"
+                ]
+              },
+              "code": {
+                "kind": "string"
+              },
+              "message": {
+                "kind": "string"
+              },
+              "operation": {
+                "kind": "optional",
+                "of": {
+                  "kind": "string"
+                }
+              },
+              "retriable": {
+                "kind": "boolean"
+              }
+            }
+          }
+        },
+        "unavailable": {
+          "type_ref": "substrate.client.UnavailableData",
+          "shape": {
+            "kind": "struct",
+            "fields": {
+              "reason": {
+                "kind": "enum",
+                "variants": [
+                  "transport",
+                  "protocol",
+                  "contract_mismatch",
+                  "unknown_operation",
+                  "event_gap"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "workspace-destroy": {
+      "target": {
+        "kind": "service_forward",
+        "owner": "substrate-daemon",
+        "operation": "substrate.client.DestroyWorkspace"
+      },
+      "input": {
+        "type_ref": "substrate.client.WorkspaceDestroyRequest",
+        "shape": {
+          "kind": "struct",
+          "fields": {
+            "operation_id": {
+              "kind": "optional",
+              "of": {
+                "kind": "string"
+              }
+            },
+            "workspace": {
+              "kind": "string"
+            }
+          }
+        }
+      },
+      "result": {
+        "type_ref": "substrate.client.WorkspaceAbsenceRow",
+        "shape": {
+          "kind": "struct",
+          "fields": {
+            "observation": {
+              "kind": "json"
+            },
+            "workspace": {
+              "kind": "string"
+            }
+          }
+        }
+      },
+      "errors": {
+        "refused": {
+          "type_ref": "substrate.client.RefusalData",
+          "shape": {
+            "kind": "struct",
+            "fields": {
+              "address": {
+                "kind": "optional",
+                "of": {
+                  "kind": "string"
+                }
+              },
+              "class": {
+                "kind": "enum",
+                "variants": [
+                  "refused",
+                  "conflict",
+                  "unserved",
+                  "exhausted",
+                  "failed"
+                ]
+              },
+              "code": {
+                "kind": "string"
+              },
+              "message": {
+                "kind": "string"
+              },
+              "operation": {
+                "kind": "optional",
+                "of": {
+                  "kind": "string"
+                }
+              },
+              "retriable": {
+                "kind": "boolean"
+              }
+            }
+          }
+        },
+        "unavailable": {
+          "type_ref": "substrate.client.UnavailableData",
+          "shape": {
+            "kind": "struct",
+            "fields": {
+              "reason": {
+                "kind": "enum",
+                "variants": [
+                  "transport",
+                  "protocol",
+                  "contract_mismatch",
+                  "unknown_operation",
+                  "event_gap"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "workspace-renew": {
+      "target": {
+        "kind": "service_forward",
+        "owner": "substrate-daemon",
+        "operation": "substrate.client.RenewWorkspaceLease"
+      },
+      "input": {
+        "type_ref": "substrate.client.WorkspaceRenewRequest",
+        "shape": {
+          "kind": "struct",
+          "fields": {
+            "operation_id": {
+              "kind": "optional",
+              "of": {
+                "kind": "string"
+              }
+            },
+            "ttl_ms": {
+              "kind": "integer"
+            },
+            "workspace": {
+              "kind": "string"
+            }
+          }
+        }
+      },
+      "result": {
+        "type_ref": "substrate.client.WorkspaceRow",
+        "shape": {
+          "kind": "struct",
+          "fields": {
+            "observation": {
+              "kind": "json"
+            },
+            "workspace": {
+              "kind": "string"
+            }
+          }
+        }
+      },
+      "errors": {
+        "refused": {
+          "type_ref": "substrate.client.RefusalData",
+          "shape": {
+            "kind": "struct",
+            "fields": {
+              "address": {
+                "kind": "optional",
+                "of": {
+                  "kind": "string"
+                }
+              },
+              "class": {
+                "kind": "enum",
+                "variants": [
+                  "refused",
+                  "conflict",
+                  "unserved",
+                  "exhausted",
+                  "failed"
+                ]
+              },
+              "code": {
+                "kind": "string"
+              },
+              "message": {
+                "kind": "string"
+              },
+              "operation": {
+                "kind": "optional",
+                "of": {
+                  "kind": "string"
+                }
+              },
+              "retriable": {
+                "kind": "boolean"
+              }
+            }
+          }
+        },
+        "unavailable": {
+          "type_ref": "substrate.client.UnavailableData",
+          "shape": {
+            "kind": "struct",
+            "fields": {
+              "reason": {
+                "kind": "enum",
+                "variants": [
+                  "transport",
+                  "protocol",
+                  "contract_mismatch",
+                  "unknown_operation",
+                  "event_gap"
+                ]
+              }
+            }
+          }
+        }
+      }
+    },
+    "workspace-show": {
+      "target": {
+        "kind": "service_forward",
+        "owner": "substrate-daemon",
+        "operation": "substrate.client.Workspaces"
+      },
+      "input": {
+        "type_ref": "substrate.client.WorkspaceKey",
+        "shape": {
+          "kind": "struct",
+          "fields": {
+            "workspace": {
+              "kind": "string"
+            }
+          }
+        }
+      },
+      "result": {
+        "type_ref": "substrate.client.WorkspaceRow",
+        "shape": {
+          "kind": "struct",
+          "fields": {
+            "observation": {
+              "kind": "json"
+            },
+            "workspace": {
+              "kind": "string"
+            }
+          }
+        }
+      },
+      "errors": {
+        "refused": {
+          "type_ref": "substrate.client.RefusalData",
+          "shape": {
+            "kind": "struct",
+            "fields": {
+              "address": {
+                "kind": "optional",
+                "of": {
+                  "kind": "string"
+                }
+              },
+              "class": {
+                "kind": "enum",
+                "variants": [
+                  "refused",
+                  "conflict",
+                  "unserved",
+                  "exhausted",
+                  "failed"
+                ]
+              },
+              "code": {
+                "kind": "string"
+              },
+              "message": {
+                "kind": "string"
+              },
+              "operation": {
+                "kind": "optional",
+                "of": {
+                  "kind": "string"
+                }
+              },
+              "retriable": {
+                "kind": "boolean"
+              }
+            }
+          }
+        },
+        "unavailable": {
+          "type_ref": "substrate.client.UnavailableData",
+          "shape": {
+            "kind": "struct",
+            "fields": {
+              "reason": {
+                "kind": "enum",
+                "variants": [
+                  "transport",
+                  "protocol",
+                  "contract_mismatch",
+                  "unknown_operation",
+                  "event_gap"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "commands": [
+    {
+      "path": [
+        "events"
+      ],
+      "aliases": [],
+      "callable": "events",
+      "about": "Read one page of the daemon's event log",
+      "arguments": [
+        {
+          "field": "cursor",
+          "source": {
+            "kind": "option",
+            "long": "cursor"
+          }
+        },
+        {
+          "field": "limit",
+          "source": {
+            "kind": "option",
+            "long": "limit"
+          }
+        }
+      ]
+    },
+    {
+      "path": [
+        "exec",
+        "run"
+      ],
+      "aliases": [],
+      "callable": "exec-run",
+      "about": "Run a command in a workspace and wait for it to end",
+      "arguments": [
+        {
+          "field": "workspace",
+          "source": {
+            "kind": "option",
+            "long": "workspace"
+          }
+        },
+        {
+          "field": "timeout_ms",
+          "source": {
+            "kind": "option",
+            "long": "timeout-ms"
+          }
+        },
+        {
+          "field": "cpu_millis",
+          "source": {
+            "kind": "option",
+            "long": "cpu-millis"
+          }
+        },
+        {
+          "field": "memory_bytes",
+          "source": {
+            "kind": "option",
+            "long": "memory-bytes"
+          }
+        },
+        {
+          "field": "processes",
+          "source": {
+            "kind": "option",
+            "long": "processes"
+          }
+        },
+        {
+          "field": "output_bytes",
+          "source": {
+            "kind": "option",
+            "long": "output-bytes"
+          }
+        },
+        {
+          "field": "operation_id",
+          "source": {
+            "kind": "option",
+            "long": "operation-id"
+          }
+        },
+        {
+          "field": "argv",
+          "source": {
+            "kind": "trailing"
+          }
+        }
+      ]
+    },
+    {
+      "path": [
+        "exec",
+        "show"
+      ],
+      "aliases": [],
+      "callable": "exec-show",
+      "about": "Show an exec as the daemon observes it",
+      "arguments": [
+        {
+          "field": "exec",
+          "source": {
+            "kind": "positional",
+            "index": 1
+          }
+        }
+      ]
+    },
+    {
+      "path": [
+        "machine"
+      ],
+      "aliases": [],
+      "callable": "machine",
+      "about": "Show the daemon's capability snapshot and facts",
+      "arguments": []
+    },
+    {
+      "path": [
+        "metrics"
+      ],
+      "aliases": [],
+      "callable": "metrics",
+      "about": "Show the resource usage the daemon observes for an exec or a workspace",
+      "arguments": [
+        {
+          "field": "resource_kind",
+          "source": {
+            "kind": "option",
+            "long": "kind"
+          }
+        },
+        {
+          "field": "resource_id",
+          "source": {
+            "kind": "option",
+            "long": "id"
+          }
+        }
+      ]
+    },
+    {
+      "path": [
+        "operation",
+        "show"
+      ],
+      "aliases": [],
+      "callable": "operation-show",
+      "about": "Show an accepted operation's ledger record",
+      "arguments": [
+        {
+          "field": "operation",
+          "source": {
+            "kind": "positional",
+            "index": 1
+          }
+        }
+      ]
+    },
+    {
+      "path": [
+        "session",
+        "show"
+      ],
+      "aliases": [],
+      "callable": "session-show",
+      "about": "Show a session as the daemon observes it",
+      "arguments": [
+        {
+          "field": "session",
+          "source": {
+            "kind": "positional",
+            "index": 1
+          }
+        }
+      ]
+    },
+    {
+      "path": [
+        "session",
+        "signal"
+      ],
+      "aliases": [],
+      "callable": "session-signal",
+      "about": "Signal a session's process",
+      "arguments": [
+        {
+          "field": "session",
+          "source": {
+            "kind": "positional",
+            "index": 1
+          }
+        },
+        {
+          "field": "signal",
+          "source": {
+            "kind": "option",
+            "long": "signal"
+          }
+        },
+        {
+          "field": "grace_ms",
+          "source": {
+            "kind": "option",
+            "long": "grace-ms"
+          }
+        },
+        {
+          "field": "operation_id",
+          "source": {
+            "kind": "option",
+            "long": "operation-id"
+          }
+        }
+      ]
+    },
+    {
+      "path": [
+        "workspace",
+        "create"
+      ],
+      "aliases": [],
+      "callable": "workspace-create",
+      "about": "Create an empty workspace",
+      "arguments": [
+        {
+          "field": "labels",
+          "source": {
+            "kind": "option",
+            "long": "labels"
+          }
+        },
+        {
+          "field": "storage",
+          "source": {
+            "kind": "option",
+            "long": "storage"
+          }
+        },
+        {
+          "field": "lease_ttl_ms",
+          "source": {
+            "kind": "option",
+            "long": "lease-ttl-ms"
+          }
+        },
+        {
+          "field": "operation_id",
+          "source": {
+            "kind": "option",
+            "long": "operation-id"
+          }
+        }
+      ]
+    },
+    {
+      "path": [
+        "workspace",
+        "destroy"
+      ],
+      "aliases": [],
+      "callable": "workspace-destroy",
+      "about": "Destroy a workspace",
+      "arguments": [
+        {
+          "field": "workspace",
+          "source": {
+            "kind": "positional",
+            "index": 1
+          }
+        },
+        {
+          "field": "operation_id",
+          "source": {
+            "kind": "option",
+            "long": "operation-id"
+          }
+        }
+      ]
+    },
+    {
+      "path": [
+        "workspace",
+        "renew"
+      ],
+      "aliases": [],
+      "callable": "workspace-renew",
+      "about": "Renew a workspace lease",
+      "arguments": [
+        {
+          "field": "workspace",
+          "source": {
+            "kind": "positional",
+            "index": 1
+          }
+        },
+        {
+          "field": "ttl_ms",
+          "source": {
+            "kind": "option",
+            "long": "ttl-ms"
+          }
+        },
+        {
+          "field": "operation_id",
+          "source": {
+            "kind": "option",
+            "long": "operation-id"
+          }
+        }
+      ]
+    },
+    {
+      "path": [
+        "workspace",
+        "show"
+      ],
+      "aliases": [],
+      "callable": "workspace-show",
+      "about": "Show a workspace as the daemon observes it",
+      "arguments": [
+        {
+          "field": "workspace",
+          "source": {
+            "kind": "positional",
+            "index": 1
+          }
+        }
+      ]
+    }
+  ],
+  "obligations": [
+    "handler:events: implement the owner-qualified callable and its declared result/error contract",
+    "handler:exec-run: implement the owner-qualified callable and its declared result/error contract",
+    "handler:exec-show: implement the owner-qualified callable and its declared result/error contract",
+    "handler:machine: implement the owner-qualified callable and its declared result/error contract",
+    "handler:metrics: implement the owner-qualified callable and its declared result/error contract",
+    "handler:operation-show: implement the owner-qualified callable and its declared result/error contract",
+    "handler:session-show: implement the owner-qualified callable and its declared result/error contract",
+    "handler:session-signal: implement the owner-qualified callable and its declared result/error contract",
+    "handler:workspace-create: implement the owner-qualified callable and its declared result/error contract",
+    "handler:workspace-destroy: implement the owner-qualified callable and its declared result/error contract",
+    "handler:workspace-renew: implement the owner-qualified callable and its declared result/error contract",
+    "handler:workspace-show: implement the owner-qualified callable and its declared result/error contract"
+  ]
+}

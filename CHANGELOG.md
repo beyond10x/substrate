@@ -7,6 +7,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.7.16] — 2026-10-16
+
+### Added
+
+- `spec/client`: the client CLI's presentation domain and `ess-cli/2` binding for the
+  `b10x-substrate` binary, with its generated contract package in `spec/generated/cli`.
+  `cargo xtask check-ess` validates both and fails on drift in the package. It types the
+  commands, arguments and refusal the CLI presents; observations stay under the released bundle's
+  authority, and no conformance suite runs for it.
+- `b10x-substrate`, a command-line client of the daemon socket (`crates/b10x-substrate-cli`,
+  `publish = false`) over `b10x-substrate-sdk` only: machine facts, workspace create, show, renew
+  and destroy, exec run and show, session show and signal, operation show, metrics and events.
+  `--output json` prints the binding's envelope with a daemon refusal's named code in
+  `error.data.code`; `exec run` passes output through and exits with the command's status. A
+  test holds the clap command line to `spec/generated/cli/binding.json`, and the story's five
+  scenarios run against the shipped daemon. No route, wire field or bundle changes.
+  Install it from a checkout with `cargo install --path crates/b10x-substrate-cli --locked`.
+
+### Changed
+
+- The executable specification is pinned to ESS 0.60.0. The committed operations suite is
+  unchanged; the generated capture type differs only in its generator header.
+
 ## [0.7.15] — 2026-10-14
 
 Published by [release run 38646569421](https://github.com/beyond10x/substrate/actions/runs/38646569421)
