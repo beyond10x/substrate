@@ -25,7 +25,10 @@
               }
             },
             "limit": {
-              "kind": "integer"
+              "kind": "optional",
+              "of": {
+                "kind": "integer"
+              }
             }
           }
         }
@@ -738,7 +741,10 @@
           "kind": "struct",
           "fields": {
             "grace_ms": {
-              "kind": "integer"
+              "kind": "optional",
+              "of": {
+                "kind": "integer"
+              }
             },
             "operation_id": {
               "kind": "optional",

@@ -70,12 +70,13 @@ types:
       - {name: processes, type: 'Optional<Integer>'}
       - {name: output_bytes, type: 'Optional<Integer>'}
       - {name: operation_id, type: 'Optional<String>'}
+  # An unset grace_ms waits 5000 ms before the kill.
   - name: substrate.client.SessionSignalRequest
     kind: struct
     fields:
       - {name: session, type: String}
       - {name: signal, type: substrate.client.Signal}
-      - {name: grace_ms, type: Integer}
+      - {name: grace_ms, type: 'Optional<Integer>'}
       - {name: operation_id, type: 'Optional<String>'}
   - name: substrate.client.WorkspaceKey
     kind: struct
@@ -94,12 +95,13 @@ types:
     fields:
       - {name: resource_kind, type: substrate.client.MetricsResourceKind}
       - {name: resource_id, type: String}
-  # EventQuery, crates/substrate-wire/src/lib.rs; limit is 1..=MAX_EVENT_PAGE_ITEMS (1000).
+  # EventQuery, crates/substrate-wire/src/lib.rs; limit is 1..=MAX_EVENT_PAGE_ITEMS (1000), and
+  # an unset limit reads a page of 100.
   - name: substrate.client.EventsRequest
     kind: struct
     fields:
       - {name: cursor, type: 'Optional<String>'}
-      - {name: limit, type: Integer}
+      - {name: limit, type: 'Optional<Integer>'}
 
   # The CLI's error data. ess-cli resolves error codes to declared types, not to `errors:`
   # declarations, so these restate substrate.client.Refusal and .Unavailable member for member.
@@ -383,7 +385,7 @@ commands:
     input:
       - {name: session, type: String}
       - {name: signal, type: substrate.client.Signal}
-      - {name: grace_ms, type: Integer}
+      - {name: grace_ms, type: 'Optional<Integer>'}
       - {name: operation_id, type: 'Optional<String>'}
     outcomes:
       - name: refused

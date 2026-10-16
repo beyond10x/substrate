@@ -1,0 +1,31 @@
+[package]
+name = "b10x-substrate-cli"
+description = "Command-line client that drives a b10x Substrate daemon over its Unix socket"
+homepage = "https://beyond10x.github.io/substrate/"
+documentation = "https://beyond10x.github.io/substrate/docs/guides/cli"
+edition.workspace = true
+license.workspace = true
+readme = "README.md"
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+publish = false
+keywords = ["sandbox", "cli", "execution", "workspace"]
+categories = ["command-line-utilities"]
+
+[[bin]]
+name = "b10x-substrate"
+path = "src/main.rs"
+
+[dependencies]
+b10x-substrate-sdk = { path = "../b10x-substrate-sdk", version = "=0.7.15" }
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
