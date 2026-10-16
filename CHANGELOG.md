@@ -7,6 +7,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- The executable specification is pinned to ESS 0.60.0. The committed operations suite is
+  unchanged; the generated capture type differs only in its generator header.
+
 ## [0.7.15] — 2026-10-14
 
 Published by [release run 38646569421](https://github.com/beyond10x/substrate/actions/runs/38646569421)
