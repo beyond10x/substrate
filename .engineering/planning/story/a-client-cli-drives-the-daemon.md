@@ -4,7 +4,7 @@ id: story:a-client-cli-drives-the-daemon
 kind: story
 status: active
 title: A client CLI drives the daemon over its socket
-revision: 3
+revision: 4
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-16T08:16:47Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-10-16T08:16:47Z", actor: "human:timo", revision: 3}
@@ -25,23 +25,26 @@ it adds no route, no wire field and no daemon behaviour, so it needs no successo
 
 Commands cover the served surface the SDK exposes: the machine and its capability facts, workspaces
 (create, show, renew, destroy), exec (run a command in a workspace, show an exec), sessions (show,
-signal), operations (show), metrics and events. `--socket` selects the daemon socket, with the
-daemon's default when absent. Every command has `--json`; the default is a table or a line.
+signal), operations (show), metrics and events. `--socket` selects the daemon socket, falling back to
+`SUBSTRATE_SOCKET` (the daemon has no built-in default). The global `--output human|json` selects
+the rendering, as the ESS binding states; human output is a table or a line.
 A daemon refusal is printed with its named code and the CLI exits non-zero; a capability the
 daemon does not advertise is reported absent, never assumed.
 
 ## Specification
 
-The command line is an ESS CLI presentation binding (`ess-cli`) over the commands and views it
-exposes, validated with `ess specify cli`; the binding and any views it needs are added before the
-crate.
+The command line is an ESS CLI presentation binding (`spec/client/cli.yaml`) over the commands and
+views it exposes, validated with `ess specify cli`. The clap derive command line is held to the
+generated `spec/generated/cli/binding.json` by `cli-binding-validates`. What the binding cannot
+state is kept in the crate and named in `spec/coverage.md`: `exec run` passes the command's bytes
+through and exits with its code, and a daemon refusal code travels in `error.data.code`.
 
 ## Acceptance
 
 Named scenarios, run by `cargo test -p b10x-substrate-cli` against the shipped daemon binary over
 a Unix socket:
 
-- `cli-machine-shows-facts`: `b10x-substrate machine --json` prints the daemon's capability facts.
+- `cli-machine-shows-facts`: `b10x-substrate --output json machine` prints the daemon's capability facts.
 - `cli-workspace-lifecycle`: create, show, renew and destroy an empty workspace; each step's JSON
   matches the daemon's observation.
 - `cli-exec-runs-and-reports-exit`: `exec run` prints the command's output and exits with its code,
