@@ -1,0 +1,35 @@
+# S11: a hard timeout stops the record and it ends with cause timed-out.
+type: ess-scenario/1
+domain: substrate.host_processes
+scenario: timeout-kills
+summary: Reaching the timeout stops the record, and it ends with cause timed-out.
+
+arrange:
+  - instance: build
+    entity: substrate.host_processes.HostProcess
+
+timeline:
+  - at: 2026-10-16T09:00:00Z
+    command: substrate.host_processes.StartProcess
+    input: {name: dev-server, owner_session_id: s-1, owner_session_name: worker, reason: serve the preview, env_passthrough: [], argv: [cargo, test], cwd: /srv/app, profile: host, lease_ttl_seconds: 3600, keep: false, timeout_seconds: 600}
+    outcome: started
+    capture: {instance: build, event: substrate.host_processes.ProcessStarted, field: process}
+  - at: 2026-10-16T09:00:01Z
+    command: substrate.host_processes.ConfirmRunning
+    input: {process: {$instance: build}}
+    outcome: running
+  - at: 2026-10-16T09:10:00Z
+    command: substrate.host_processes.EnforceDeadline
+    input: {process: {$instance: build}}
+    outcome: timed-out
+    events:
+      - event: substrate.host_processes.StopRequested
+        payload: {end_cause: timed-out}
+  - at: 2026-10-16T09:10:01Z
+    command: substrate.host_processes.RecordExit
+    input: {process: {$instance: build}, exit_signal: SIGKILL}
+    outcome: stopped
+
+assert:
+  - view: substrate.host_processes.HostProcesses
+    contains: {process: {$instance: build}, state: Ended, end_cause: timed-out, exit_signal: SIGKILL}

@@ -1,0 +1,17 @@
+format: ess-inputs/2
+requires: ess 0.60.0
+specification: [system.yaml, components.yaml, processes.yaml]
+scenarios:
+  - scenarios/start-is-listed.yaml
+  - scenarios/start-refusals.yaml
+  - scenarios/lease-expiry-stops.yaml
+  - scenarios/keep-needs-reason.yaml
+  - scenarios/stop-by-owner-scope.yaml
+  - scenarios/adopt-is-ownerless.yaml
+  - scenarios/container-record.yaml
+  - scenarios/timeout-kills.yaml
+  - scenarios/renewal-keeps-deadline.yaml
+  - scenarios/deadline-refusals.yaml
+  - scenarios/stream-order.yaml
+  - scenarios/stream-terminal.yaml
+  - scenarios/logs-bounded.yaml
