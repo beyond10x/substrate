@@ -292,15 +292,18 @@ impl From<SdkError> for Failure {
 
 /// Runs the CLI on `args` and returns its exit status.
 pub fn main_with(args: impl IntoIterator<Item = OsString>) -> ExitCode {
-    let cli = match Cli::try_parse_from(args) {
+    let args: Vec<OsString> = args.into_iter().collect();
+    let wants_json = asks_for_json(&args);
+    let cli = match Cli::try_parse_from(&args) {
         Ok(cli) => cli,
-        Err(error) => error.exit(),
+        Err(error) => return usage_error(&error, wants_json),
     };
     let output = cli.output;
-    let socket = cli
-        .socket
-        .clone()
-        .or_else(|| std::env::var_os(SOCKET_ENV).map(PathBuf::from));
+    let socket = cli.socket.clone().or_else(|| {
+        std::env::var_os(SOCKET_ENV)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    });
     let Some(socket) = socket else {
         return fail(
             output,
@@ -333,6 +336,41 @@ pub fn main_with(args: impl IntoIterator<Item = OsString>) -> ExitCode {
         Ok(Answer::Run(run)) => report_run(output, &run),
         Err(failure) => fail(output, &failure),
     }
+}
+
+/// Whether the words ask for `--output json`, as `--output json` or `--output=json`, before any
+/// `--`. A parse that failed cannot say, so this reads the words themselves.
+fn asks_for_json(args: &[OsString]) -> bool {
+    let mut words = args.iter().skip(1).map(|word| word.to_string_lossy());
+    let mut json = false;
+    while let Some(word) = words.next() {
+        match word.as_ref() {
+            "--" => break,
+            "--output" => json = words.next().is_some_and(|value| value == "json"),
+            "--output=json" => json = true,
+            other if other.starts_with("--output=") => json = false,
+            _ => {}
+        }
+    }
+    json
+}
+
+/// A clap parse failure. Help and version keep clap's output; under `--output json` every other
+/// failure is one `cli_input` envelope on stderr with exit 2, and otherwise clap's own text.
+fn usage_error(error: &clap::Error, wants_json: bool) -> ExitCode {
+    use clap::error::ErrorKind;
+    if wants_json
+        && !matches!(
+            error.kind(),
+            ErrorKind::DisplayHelp
+                | ErrorKind::DisplayVersion
+                | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+        )
+    {
+        let message = error.to_string();
+        return fail(Output::Json, &Failure::Usage(message.trim_end().to_owned()));
+    }
+    error.exit()
 }
 
 async fn run(socket: PathBuf, command: Command) -> Result<Answer, Failure> {
@@ -639,7 +677,10 @@ fn report_run(output: Output, run: &RunAnswer) -> ExitCode {
             let _ = stdout.flush();
             let mut stderr = std::io::stderr().lock();
             let _ = stderr.write_all(&run.stderr);
-            if run.exec.exit.is_none() || !matches!(run.exec.state, ExecState::Exited) {
+            if run.exec.exit.is_none()
+                || run.exec.refusal.is_some()
+                || !matches!(run.exec.state, ExecState::Exited)
+            {
                 let _ = writeln!(stderr, "b10x-substrate: {}", exec_line(&run.exec));
             }
             for (name, truncated) in [

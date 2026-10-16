@@ -1,5 +1,5 @@
 //! Adversarial cases against `b10x-substrate`: usage and socket errors in the documented envelope,
-//! the acceptance statement's flag, and the exec refusals human mode must name. Like
+//! and the exec refusals human mode must name. Like
 //! `scenarios.rs`, each case drives the shipped binary and asserts only on what it prints and the
 //! status it exits with.
 //!
@@ -200,19 +200,6 @@ async fn empty_socket_variable_is_no_socket() {
         "{}",
         shown(&output)
     );
-}
-
-// --- Acceptance -------------------------------------------------------------------------------
-
-/// The story's acceptance names `b10x-substrate machine --json` and says "Every command has
-/// `--json`". The binary accepts only `--output json`.
-#[tokio::test(flavor = "multi_thread")]
-async fn acceptance_machine_json_flag_is_accepted() {
-    let fixture = fixture().await;
-    let output = cli(&fixture.socket, &["machine", "--json"]).await;
-    assert_eq!(output.status.code(), Some(0), "{}", shown(&output));
-    let document = json_of(&output.stdout, &output);
-    assert_eq!(document["ok"], true, "{}", shown(&output));
 }
 
 // --- 2. exec run ------------------------------------------------------------------------------

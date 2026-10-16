@@ -1,160 +1,17 @@
 //! Mutants of the clap command against the `cli_binding_validates` check (`tests/binding.rs`).
 //!
-//! `accepted_by_binding_check` is that test's comparison, line for line, returning whether it
-//! would pass instead of asserting. Each `mutant_*` case feeds it `Cli::command()` with one
+//! `accepted_by_binding_check` is that test's own comparison (`tests/common/mod.rs`), returning
+//! whether it would pass instead of asserting. Each `mutant_*` case feeds it `Cli::command()` with one
 //! presented difference from `spec/generated/cli/binding.json` and asserts the check refuses it.
 //! A red `mutant_*` case is a binary that presents something the binding does not name and still
-//! passes `cli-binding-validates`. The `control_*` cases prove the replica refuses what the
-//! original refuses, so a red mutant is the check's blind spot and not the replica's.
-
-use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+//! passes `cli-binding-validates`. The `control_*` cases prove the predicate accepts the shipped
+//! command and refuses the basic differences.
 
 use b10x_substrate_cli::Cli;
 use clap::{Arg, ArgAction, CommandFactory as _};
-use serde_json::Value;
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-enum Source {
-    Option(String),
-    Positional(usize),
-    Trailing,
-}
-
-type Leaves = BTreeMap<Vec<String>, (String, BTreeMap<String, Source>)>;
-
-fn binding() -> Value {
-    let path =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../spec/generated/cli/binding.json");
-    serde_json::from_str(&std::fs::read_to_string(path).expect("binding")).expect("JSON")
-}
-
-fn binding_leaves(binding: &Value) -> Leaves {
-    let mut leaves = BTreeMap::new();
-    for command in binding["commands"].as_array().expect("commands") {
-        let path: Vec<String> = command["path"]
-            .as_array()
-            .expect("path")
-            .iter()
-            .map(|word| word.as_str().expect("word").to_owned())
-            .collect();
-        let about = command["about"].as_str().unwrap_or_default().to_owned();
-        let mut arguments = BTreeMap::new();
-        for argument in command["arguments"].as_array().expect("arguments") {
-            let field = argument["field"].as_str().expect("field").to_owned();
-            let source = &argument["source"];
-            let source = match source["kind"].as_str().expect("kind") {
-                "option" => Source::Option(source["long"].as_str().expect("long").to_owned()),
-                "positional" => Source::Positional(
-                    usize::try_from(source["index"].as_u64().expect("index")).expect("index"),
-                ),
-                "trailing" => Source::Trailing,
-                other => panic!("{other}"),
-            };
-            arguments.insert(field, source);
-        }
-        leaves.insert(path, (about, arguments));
-    }
-    leaves
-}
-
-fn clap_leaves(
-    command: &clap::Command,
-    prefix: &[String],
-    globals: &BTreeSet<String>,
-    out: &mut Leaves,
-) {
-    for sub in command.get_subcommands() {
-        let mut path = prefix.to_vec();
-        if sub.get_name() == "help" {
-            continue;
-        }
-        path.push(sub.get_name().to_owned());
-        if sub.has_subcommands() {
-            clap_leaves(sub, &path, globals, out);
-            continue;
-        }
-        let about = sub.get_about().map(ToString::to_string).unwrap_or_default();
-        let mut arguments = BTreeMap::new();
-        let mut positional = 0;
-        for argument in sub.get_arguments() {
-            let id = argument.get_id().as_str().to_owned();
-            if id == "help" || id == "version" || globals.contains(&id) {
-                continue;
-            }
-            let source = if argument.is_positional() {
-                if argument.is_last_set() || argument.is_trailing_var_arg_set() {
-                    Source::Trailing
-                } else {
-                    positional += 1;
-                    Source::Positional(positional)
-                }
-            } else {
-                match argument.get_long() {
-                    Some(long) => Source::Option(long.to_owned()),
-                    None => return,
-                }
-            };
-            arguments.insert(id, source);
-        }
-        out.insert(path, (about, arguments));
-    }
-}
-
-/// `cli_binding_validates`, as a predicate.
-fn accepted_by_binding_check(mut command: clap::Command) -> bool {
-    let binding = binding();
-    command.build();
-    if command.get_name() != binding["binary"].as_str().expect("binary") {
-        return false;
-    }
-    if command.get_about().map(ToString::to_string).as_deref() != binding["about"].as_str() {
-        return false;
-    }
-    let state = binding["globals"]["state"].as_str().expect("state");
-    let output = binding["globals"]["output"].as_str().expect("output");
-    let globals: BTreeSet<String> = [state.to_owned(), output.to_owned()].into();
-    let Some(socket) = command.get_arguments().find(|a| a.get_id() == state) else {
-        return false;
-    };
-    if !socket.is_global_set() || socket.get_long() != Some(state) {
-        return false;
-    }
-    let Some(output_arg) = command.get_arguments().find(|a| a.get_id() == output) else {
-        return false;
-    };
-    if !output_arg.is_global_set() || output_arg.get_long() != Some(output) {
-        return false;
-    }
-    let values: Vec<String> = output_arg
-        .get_possible_values()
-        .iter()
-        .map(|value| value.get_name().to_owned())
-        .collect();
-    if values != ["human", "json"] {
-        return false;
-    }
-    let defaults: Vec<String> = output_arg
-        .get_default_values()
-        .iter()
-        .map(|value| value.to_string_lossy().into_owned())
-        .collect();
-    if defaults != ["human"] {
-        return false;
-    }
-    let expected = binding_leaves(&binding);
-    let mut observed = BTreeMap::new();
-    clap_leaves(&command, &[], &globals, &mut observed);
-    let expected_paths: BTreeSet<_> = expected.keys().cloned().collect();
-    let observed_paths: BTreeSet<_> = observed.keys().cloned().collect();
-    if observed_paths != expected_paths || expected_paths.len() != 12 {
-        return false;
-    }
-    expected.iter().all(|(path, (about, arguments))| {
-        let (observed_about, observed_arguments) = &observed[path];
-        observed_arguments == arguments && observed_about == about
-    })
-}
+mod common;
+use common::accepted_by_binding_check;
 
 fn in_workspace(
     name: &'static str,

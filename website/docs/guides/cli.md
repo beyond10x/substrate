@@ -65,6 +65,10 @@ of recorded output per stream; `--timeout-ms`, `--cpu-millis`, `--memory-bytes`,
 On a host where the daemon cannot confine a process, `exec run` prints the daemon's named refusal,
 `exec.sandbox-unavailable`, and exits non-zero. It never runs the command unconfined.
 
+A bound the daemon records on an exec that ran, such as `exec.memory-limit` or `exec.timeout`, is
+an outcome of that exec and not a refusal of the request: it appears in `observation.refusal`, the
+default output names its code on stderr, and the exit status stays the command's.
+
 ## Machine-readable output
 
 `--output json` prints one JSON document per call. A success goes to stdout as
@@ -79,6 +83,10 @@ goes to stderr as `{"ok":false,"error":{"code":…,"data":…}}`:
 
 `exec run` in JSON mode returns `stdout` and `stderr` as text, with any invalid UTF-8 replaced, and
 still exits with the command's own status.
+
+An exit status of an `exec run` passes through unchanged, so a command that itself exits 1 or 2 is
+indistinguishable by status alone from a client failure; read `error.code` in JSON mode to tell
+them apart.
 
 ## Capability facts
 
