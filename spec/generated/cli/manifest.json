@@ -1,0 +1,30 @@
+{
+  "binary": "b10x-substrate",
+  "files": [
+    "Cargo.toml",
+    "README.md",
+    "binding.json",
+    "completions/b10x-substrate.bash",
+    "help.txt",
+    "src/lib.rs",
+    "src/main.rs",
+    "src/runtime.rs",
+    "src/wire.rs"
+  ],
+  "format": "ess-cli-artifacts/1",
+  "obligations": [
+    "handler:events: implement the owner-qualified callable and its declared result/error contract",
+    "handler:exec-run: implement the owner-qualified callable and its declared result/error contract",
+    "handler:exec-show: implement the owner-qualified callable and its declared result/error contract",
+    "handler:machine: implement the owner-qualified callable and its declared result/error contract",
+    "handler:metrics: implement the owner-qualified callable and its declared result/error contract",
+    "handler:operation-show: implement the owner-qualified callable and its declared result/error contract",
+    "handler:session-show: implement the owner-qualified callable and its declared result/error contract",
+    "handler:session-signal: implement the owner-qualified callable and its declared result/error contract",
+    "handler:workspace-create: implement the owner-qualified callable and its declared result/error contract",
+    "handler:workspace-destroy: implement the owner-qualified callable and its declared result/error contract",
+    "handler:workspace-renew: implement the owner-qualified callable and its declared result/error contract",
+    "handler:workspace-show: implement the owner-qualified callable and its declared result/error contract"
+  ],
+  "package": "b10x-substrate-cli-contract"
+}

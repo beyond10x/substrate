@@ -7,6 +7,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- `spec/client`: the client CLI's presentation domain and `ess-cli/2` binding for the
+  `b10x-substrate` binary, with its generated contract package in `spec/generated/cli`.
+  `cargo xtask check-ess` validates both and fails on drift in the package. It types the
+  commands, arguments and refusal the CLI presents; observations stay under the released bundle's
+  authority, and no conformance suite runs for it.
+
+### Changed
+
+- The executable specification is pinned to ESS 0.60.0. The committed operations suite is
+  unchanged; the generated capture type differs only in its generator header.
+
 ## [0.7.15] — 2026-10-14
 
 Published by [release run 38646569421](https://github.com/beyond10x/substrate/actions/runs/38646569421)

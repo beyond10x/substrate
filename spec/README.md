@@ -4,8 +4,8 @@ The first ESS projection describes the **accepted-operation ledger** implemented
 store. It is derived from shipped code; it neither changes the runtime nor replaces the immutable
 wire bundles. Read [coverage and limitations](coverage.md) before interpreting a green result.
 
-The exact CLI pin is in `ess-inputs.yaml`: ESS 0.59.0. Install that official release, or use
-`ess specify toolchain install 0.59.0` with an existing ESS CLI. CI installs its checksum-verified
+The exact CLI pin is in `ess-inputs.yaml`: ESS 0.60.0. Install that official release, or use
+`ess specify toolchain install 0.60.0` with an existing ESS CLI. CI installs its checksum-verified
 Linux archive. There is no ESS implementation dependency in the Substrate workspace.
 
 ```console
@@ -23,3 +23,7 @@ and pins the scenario count so a changed inventory requires review. It does not 
 reference implementation or infer observations from the expected outcome.
 
 `task check` runs the complete existing repository gate, including ESS and public documentation.
+
+The `b10x-substrate` client CLI has its own projection in [`client/`](client/README.md): a
+presentation domain and an `ess-cli/2` binding, whose generated contract package is committed in
+`generated/cli` and drift-checked by `cargo xtask check-ess`. It runs no conformance suite.
