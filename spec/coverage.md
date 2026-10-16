@@ -21,6 +21,68 @@ transitions, persisted event payloads and unchanged complete projected rows afte
 `crates/substrate-store/tests/ess_operations.rs` is the production adapter and closed step runner.
 No runtime entity, wire shape, authorization rule or existing contract byte changes.
 
+## Client CLI presentation projection
+
+`client/client.yaml` (domain `substrate.client`) and its `ess-cli/2` binding `client/cli.yaml`
+describe the `b10x-substrate` command line, a client of the socket API through
+`b10x-substrate-sdk`. It adds no route, wire field or daemon behaviour. What the green check
+establishes:
+
+- Every command path, its arguments, its callable, the callable's input, result and error types,
+  and the process globals (`--socket`, `--output human|json`) are typed in the model, and
+  `ess specify cli` resolves them. A `service_forward` callable's input carries exactly its
+  command's input or its view's parameters, and a view callable's result is that view's row.
+- `spec/generated/cli` is the exact `ess generate cli` projection of the binding;
+  `cargo xtask check-ess` fails on drift. Its `binding.json` is the leaf list: twelve command paths.
+
+| CLI command | Callable target | Route (`crates/substrate-daemon/src/app/routes.rs`) | Wire type (`crates/substrate-wire/src/lib.rs`) |
+|---|---|---|---|
+| `machine` | view `Machine` | `GET /v1/machine` | `CapabilitySnapshot` |
+| `workspace create` | command `CreateWorkspace` | `POST /v1/workspaces` | `WorkspaceCreateInput` → `Workspace` |
+| `workspace show` | view `Workspaces` | `GET /v1/workspaces/{workspace_id}` | `Workspace` |
+| `workspace renew` | command `RenewWorkspaceLease` | `POST /v1/workspaces/{workspace_id}/lease/renew` | `LeaseRenewInput` → `Workspace` |
+| `workspace destroy` | command `DestroyWorkspace` | `DELETE /v1/workspaces/{workspace_id}` | `WorkspaceAbsence` |
+| `exec run` | command `RunExec` | `POST /v1/execs` (`wait: true`), `GET /v1/execs/{exec_id}/output` | `ExecStartInput` → `Exec`, `OutputSlice` |
+| `exec show` | view `Execs` | `GET /v1/execs/{exec_id}` | `Exec` |
+| `session show` | view `Sessions` | `GET /v1/sessions/{session_id}` | `PipeSession` |
+| `session signal` | command `SignalSession` | `POST /v1/sessions/{session_id}/signal` | `ExecSignalInput` → `PipeSession` |
+| `operation show` | view `Operations` | `GET /v1/ops/{operation_id}` | `OperationRecord` |
+| `metrics` | view `Metrics` | `GET /v1/metrics` | `MetricsQuery` → `MetricsObservation` |
+| `events` | local action `events` | `GET /v1/events` | `EventQuery` → `EventPage` |
+
+What it does not establish:
+
+- **No wire shape.** Each daemon observation is one `observation: Json` member, carried verbatim;
+  the released contract bundle remains its only authority. The CLI's runtime check accepts any JSON
+  there.
+- **No lifecycle.** Every `substrate.client` entity holds one state, `Observed`. The daemon's
+  workspace, exec, session and operation states are members of the observation; no transition
+  between them is claimed.
+- **No conformance.** No suite is committed or run for this domain. `ess verify conform
+  synthesize --path spec/client` writes 12 scenarios and one refusal (`ESS-SYNTH-004`:
+  `SignalSession/signalled` needs a session, and no command the CLI presents creates one; session
+  start is not a CLI command). The CLI's acceptance scenarios run against the shipped daemon in
+  the CLI crate's own tests.
+- **No refusal inventory.** Every command and view answers the daemon's `ErrorDetail` as the CLI
+  error `refused`; which named code answers which request stays in the daemon and the bundle's
+  vectors. ESS CLI error codes admit only `[A-Za-z0-9_-]`, so the daemon's dotted code
+  (`resource.not-found`) is in the error's `data.code`, never the CLI's own code.
+- **Empty workspaces only.** A Git source needs a source authorization the binding does not take.
+  No file access, session start or attachment, reconciliation snapshot, exec signal, retire or
+  lease renewal, metrics stream, event stream, or exec start without waiting is presented.
+
+What the binding cannot state, and the handler owns (`spec/generated/cli/manifest.json` lists the
+twelve handler obligations):
+
+- The socket default. ess-cli has no environment fallback for a global; `--socket` absent means
+  the handler reads `SUBSTRATE_SOCKET`, the daemon's own variable. The daemon has no built-in path.
+- `exec run` exit status and raw output. The generated runtime exits 0 on success and renders the
+  typed result (compact JSON in human mode); it cannot exit with the command's own code or stream
+  its bytes. The result's `stdout`/`stderr` are `String`, so non-UTF-8 output has no faithful value
+  (an `UNMAPPED:` marker in `client.yaml`).
+- Human tables. Human mode is the runtime's compact JSON; a table or one-line rendering is not
+  expressible in the binding.
+
 ## Explicitly outside this projection
 
 - Refused-before-admission operation rows, replay/conflict behavior, ledger capacity, crash recovery,

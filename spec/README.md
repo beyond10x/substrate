@@ -23,3 +23,7 @@ and pins the scenario count so a changed inventory requires review. It does not 
 reference implementation or infer observations from the expected outcome.
 
 `task check` runs the complete existing repository gate, including ESS and public documentation.
+
+The `b10x-substrate` client CLI has its own projection in [`client/`](client/README.md): a
+presentation domain and an `ess-cli/2` binding, whose generated contract package is committed in
+`generated/cli` and drift-checked by `cargo xtask check-ess`. It runs no conformance suite.

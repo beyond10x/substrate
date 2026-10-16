@@ -1,0 +1,17 @@
+format: ess/25
+system: substrate
+version: v1
+domains: [substrate.client]
+components:
+  # The daemon serves every route this domain projects (crates/substrate-daemon/src/app/routes.rs).
+  # This component claims ownership for the CLI binding's service_forward targets only; it is not
+  # a deployment description and reached_by is deliberately absent (no OpenAPI is projected).
+  - component: substrate-daemon
+    owns: {domains: [substrate.client]}
+    accepts:
+      commands:
+        - substrate.client.CreateWorkspace
+        - substrate.client.RenewWorkspaceLease
+        - substrate.client.DestroyWorkspace
+        - substrate.client.RunExec
+        - substrate.client.SignalSession

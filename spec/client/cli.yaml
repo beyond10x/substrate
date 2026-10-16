@@ -1,0 +1,154 @@
+format: ess-cli/2
+binary: b10x-substrate
+about: Drive a Substrate daemon over its Unix socket
+# `state` is the only global ess-cli/2 requires; it is an optional path that never enters a
+# command payload. This binding spends it on the daemon socket, so `--socket <path>` is global.
+# Absent, the client reads SUBSTRATE_SOCKET, the daemon's own variable (substrate-daemon --socket);
+# the daemon has no built-in socket path. ess-cli declares no environment fallback, so that
+# rule is the handler's (coverage.md).
+globals:
+  state: socket
+  output: output
+callables:
+  machine:
+    target: {kind: service_forward, owner: substrate-daemon, operation: substrate.client.Machine}
+    input: null
+    result: substrate.client.MachineRow
+    errors: &read_errors
+      refused: substrate.client.RefusalData
+      unavailable: substrate.client.UnavailableData
+  workspace-create:
+    target: {kind: service_forward, owner: substrate-daemon, operation: substrate.client.CreateWorkspace}
+    input: substrate.client.WorkspaceCreateRequest
+    result: substrate.client.WorkspaceRow
+    errors: *read_errors
+  workspace-show:
+    target: {kind: service_forward, owner: substrate-daemon, operation: substrate.client.Workspaces}
+    input: substrate.client.WorkspaceKey
+    result: substrate.client.WorkspaceRow
+    errors: *read_errors
+  workspace-renew:
+    target: {kind: service_forward, owner: substrate-daemon, operation: substrate.client.RenewWorkspaceLease}
+    input: substrate.client.WorkspaceRenewRequest
+    result: substrate.client.WorkspaceRow
+    errors: *read_errors
+  workspace-destroy:
+    target: {kind: service_forward, owner: substrate-daemon, operation: substrate.client.DestroyWorkspace}
+    input: substrate.client.WorkspaceDestroyRequest
+    result: substrate.client.WorkspaceAbsenceRow
+    errors: *read_errors
+  exec-run:
+    target: {kind: service_forward, owner: substrate-daemon, operation: substrate.client.RunExec}
+    input: substrate.client.ExecRunRequest
+    result: substrate.client.ExecRunResult
+    errors: *read_errors
+  exec-show:
+    target: {kind: service_forward, owner: substrate-daemon, operation: substrate.client.Execs}
+    input: substrate.client.ExecKey
+    result: substrate.client.ExecRow
+    errors: *read_errors
+  session-show:
+    target: {kind: service_forward, owner: substrate-daemon, operation: substrate.client.Sessions}
+    input: substrate.client.SessionKey
+    result: substrate.client.SessionRow
+    errors: *read_errors
+  session-signal:
+    target: {kind: service_forward, owner: substrate-daemon, operation: substrate.client.SignalSession}
+    input: substrate.client.SessionSignalRequest
+    result: substrate.client.SessionRow
+    errors: *read_errors
+  operation-show:
+    target: {kind: service_forward, owner: substrate-daemon, operation: substrate.client.Operations}
+    input: substrate.client.OperationKey
+    result: substrate.client.OperationRow
+    errors: *read_errors
+  metrics:
+    target: {kind: service_forward, owner: substrate-daemon, operation: substrate.client.Metrics}
+    input: substrate.client.MetricsKey
+    result: substrate.client.MetricsRow
+    errors: *read_errors
+  # GET /v1/events answers a page with a resume cursor. A service_forward view answers rows only,
+  # so the page is a local action whose typed result is the wire EventPage (coverage.md).
+  events:
+    target: {kind: local, owner: substrate.client, action: events}
+    input: substrate.client.EventsRequest
+    result: substrate.client.EventPage
+    errors: *read_errors
+commands:
+  - path: [machine]
+    callable: machine
+    about: Show the daemon's capability snapshot and facts
+    arguments: []
+  - path: [workspace, create]
+    callable: workspace-create
+    about: Create an empty workspace
+    arguments:
+      - {field: labels, source: {kind: option, long: labels}}
+      - {field: storage, source: {kind: option, long: storage}}
+      - {field: lease_ttl_ms, source: {kind: option, long: lease-ttl-ms}}
+      - {field: operation_id, source: {kind: option, long: operation-id}}
+  - path: [workspace, show]
+    callable: workspace-show
+    about: Show a workspace as the daemon observes it
+    arguments:
+      - {field: workspace, source: {kind: positional, index: 1}}
+  - path: [workspace, renew]
+    callable: workspace-renew
+    about: Renew a workspace lease
+    arguments:
+      - {field: workspace, source: {kind: positional, index: 1}}
+      - {field: ttl_ms, source: {kind: option, long: ttl-ms}}
+      - {field: operation_id, source: {kind: option, long: operation-id}}
+  - path: [workspace, destroy]
+    callable: workspace-destroy
+    about: Destroy a workspace
+    arguments:
+      - {field: workspace, source: {kind: positional, index: 1}}
+      - {field: operation_id, source: {kind: option, long: operation-id}}
+  - path: [exec, run]
+    callable: exec-run
+    about: Run a command in a workspace and wait for it to end
+    arguments:
+      - {field: workspace, source: {kind: option, long: workspace}}
+      - {field: timeout_ms, source: {kind: option, long: timeout-ms}}
+      - {field: cpu_millis, source: {kind: option, long: cpu-millis}}
+      - {field: memory_bytes, source: {kind: option, long: memory-bytes}}
+      - {field: processes, source: {kind: option, long: processes}}
+      - {field: output_bytes, source: {kind: option, long: output-bytes}}
+      - {field: operation_id, source: {kind: option, long: operation-id}}
+      - {field: argv, source: {kind: trailing}}
+  - path: [exec, show]
+    callable: exec-show
+    about: Show an exec as the daemon observes it
+    arguments:
+      - {field: exec, source: {kind: positional, index: 1}}
+  - path: [session, show]
+    callable: session-show
+    about: Show a session as the daemon observes it
+    arguments:
+      - {field: session, source: {kind: positional, index: 1}}
+  - path: [session, signal]
+    callable: session-signal
+    about: Signal a session's process
+    arguments:
+      - {field: session, source: {kind: positional, index: 1}}
+      - {field: signal, source: {kind: option, long: signal}}
+      - {field: grace_ms, source: {kind: option, long: grace-ms}}
+      - {field: operation_id, source: {kind: option, long: operation-id}}
+  - path: [operation, show]
+    callable: operation-show
+    about: Show an accepted operation's ledger record
+    arguments:
+      - {field: operation, source: {kind: positional, index: 1}}
+  - path: [metrics]
+    callable: metrics
+    about: Show the resource usage the daemon observes for an exec or a workspace
+    arguments:
+      - {field: resource_kind, source: {kind: option, long: kind}}
+      - {field: resource_id, source: {kind: option, long: id}}
+  - path: [events]
+    callable: events
+    about: Read one page of the daemon's event log
+    arguments:
+      - {field: cursor, source: {kind: option, long: cursor}}
+      - {field: limit, source: {kind: option, long: limit}}

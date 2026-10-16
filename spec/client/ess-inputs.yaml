@@ -1,0 +1,4 @@
+format: ess-inputs/2
+requires: ess 0.60.0
+specification: [system.yaml, client.yaml]
+scenarios: []

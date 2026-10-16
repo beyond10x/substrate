@@ -2,6 +2,11 @@
 use crate::report::Report;
 use anyhow::{Context, Result, ensure};
 use std::{fs, path::Path, process::Command};
+
+/// The `b10x-substrate` presentation binding over `spec/client`.
+const CLI_BINDING: &str = "spec/client/cli.yaml";
+/// The package `ess generate cli` projects from [`CLI_BINDING`], committed with its output record.
+const CLI_CONTRACT: &str = "spec/generated/cli";
 fn run(root: &Path, args: &[&str]) -> Result<()> {
     let result = Command::new("ess")
         .args(args)
@@ -71,7 +76,48 @@ pub fn check(root: &Path) -> Result<Report> {
             == fs::read(root.join("crates/substrate-wire/src/generated/capture.rs"))?,
         "ESS capture type drift: regenerate the selected type with the pinned ESS release"
     );
+    run(
+        root,
+        &[
+            "specify",
+            "validate",
+            "--path",
+            "spec/client",
+            "--strict-requires",
+        ],
+    )?;
+    run(
+        root,
+        &[
+            "specify",
+            "cli",
+            "--path",
+            "spec/client",
+            "--binding",
+            CLI_BINDING,
+            "--strict-requires",
+        ],
+    )?;
+    // `--check` regenerates in memory and exits 1 naming each edited, missing or stale file.
+    run(
+        root,
+        &[
+            "generate",
+            "cli",
+            "--path",
+            "spec/client",
+            "--binding",
+            CLI_BINDING,
+            "--out",
+            CLI_CONTRACT,
+            "--check",
+            "--strict-requires",
+        ],
+    )
+    .context(format!(
+        "ESS CLI contract drift: regenerate {CLI_CONTRACT} from {CLI_BINDING} with the pinned ESS release"
+    ))?;
     Ok(Report::passed(
-        "ESS specification and committed suite are current; production execution runs in the substrate-store test suite",
+        "ESS specification, committed suite and CLI contract are current; production execution runs in the substrate-store test suite",
     ))
 }

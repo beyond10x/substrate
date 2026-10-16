@@ -1,0 +1,416 @@
+domain: substrate.client
+summary: >-
+  The served socket surface as the b10x-substrate client CLI presents it: what it reads, what it
+  asks the daemon to do, and how the daemon refuses. A presentation projection, not a lifecycle
+  model of workspaces, execs or sessions.
+# Sources: the route registry in crates/substrate-daemon/src/app/routes.rs, the wire types in
+# crates/substrate-wire/src/lib.rs and the client methods in crates/b10x-substrate-sdk/src/lib.rs.
+#
+# Every observation the daemon returns is carried as `observation: Json`, verbatim. Its shape is
+# owned by the released contract bundle (contracts/substrate-wire/<version>/schemas, invariant 6),
+# not by this domain; restating it here would be a second, unchecked copy of a frozen contract.
+#
+# Every entity holds one lifecycle state, `Observed`. The daemon's own state (WorkspaceState,
+# ExecState, SessionState, OperationState in crates/substrate-wire/src/lib.rs) is a member of the
+# observation. This domain claims no transition between those states.
+types:
+  # ErrorClass, crates/substrate-wire/src/lib.rs.
+  - name: substrate.client.RefusalClass
+    kind: enum
+    variants: [refused, conflict, unserved, exhausted, failed]
+  # Signal, crates/substrate-wire/src/lib.rs.
+  - name: substrate.client.Signal
+    kind: enum
+    variants: [int, term, kill]
+  # MetricsResourceKind, crates/substrate-wire/src/lib.rs.
+  - name: substrate.client.MetricsResourceKind
+    kind: enum
+    variants: [exec, workspace]
+  # StorageLimit, crates/substrate-wire/src/lib.rs.
+  - name: substrate.client.StorageLimit
+    kind: struct
+    fields:
+      - {name: max_bytes, type: Integer}
+      - {name: max_inodes, type: Integer}
+  # The SdkError variants a socket client can meet that are not a daemon refusal
+  # (crates/b10x-substrate-sdk/src/lib.rs): Transport, Protocol, ContractMismatch,
+  # UnknownOperation and EventGap. Their text is not carried: it can hold a path or a peer answer.
+  - name: substrate.client.UnavailableReason
+    kind: enum
+    variants: [transport, protocol, contract_mismatch, unknown_operation, event_gap]
+
+  # Callable inputs of the CLI binding (spec/client/cli.yaml). A service_forward callable's input
+  # must carry exactly the command's input or the view's parameters, which ess specify cli checks.
+  - name: substrate.client.WorkspaceCreateRequest
+    kind: struct
+    fields:
+      - {name: labels, type: 'Optional<Map<String, String>>'}
+      - {name: storage, type: 'Optional<substrate.client.StorageLimit>'}
+      - {name: lease_ttl_ms, type: 'Optional<Integer>'}
+      - {name: operation_id, type: 'Optional<String>'}
+  - name: substrate.client.WorkspaceRenewRequest
+    kind: struct
+    fields:
+      - {name: workspace, type: String}
+      - {name: ttl_ms, type: Integer}
+      - {name: operation_id, type: 'Optional<String>'}
+  - name: substrate.client.WorkspaceDestroyRequest
+    kind: struct
+    fields:
+      - {name: workspace, type: String}
+      - {name: operation_id, type: 'Optional<String>'}
+  - name: substrate.client.ExecRunRequest
+    kind: struct
+    fields:
+      - {name: workspace, type: String}
+      - {name: argv, type: 'List<String>'}
+      - {name: timeout_ms, type: 'Optional<Integer>'}
+      - {name: cpu_millis, type: 'Optional<Integer>'}
+      - {name: memory_bytes, type: 'Optional<Integer>'}
+      - {name: processes, type: 'Optional<Integer>'}
+      - {name: output_bytes, type: 'Optional<Integer>'}
+      - {name: operation_id, type: 'Optional<String>'}
+  - name: substrate.client.SessionSignalRequest
+    kind: struct
+    fields:
+      - {name: session, type: String}
+      - {name: signal, type: substrate.client.Signal}
+      - {name: grace_ms, type: Integer}
+      - {name: operation_id, type: 'Optional<String>'}
+  - name: substrate.client.WorkspaceKey
+    kind: struct
+    fields: [{name: workspace, type: String}]
+  - name: substrate.client.ExecKey
+    kind: struct
+    fields: [{name: exec, type: String}]
+  - name: substrate.client.SessionKey
+    kind: struct
+    fields: [{name: session, type: String}]
+  - name: substrate.client.OperationKey
+    kind: struct
+    fields: [{name: operation, type: String}]
+  - name: substrate.client.MetricsKey
+    kind: struct
+    fields:
+      - {name: resource_kind, type: substrate.client.MetricsResourceKind}
+      - {name: resource_id, type: String}
+  # EventQuery, crates/substrate-wire/src/lib.rs; limit is 1..=MAX_EVENT_PAGE_ITEMS (1000).
+  - name: substrate.client.EventsRequest
+    kind: struct
+    fields:
+      - {name: cursor, type: 'Optional<String>'}
+      - {name: limit, type: Integer}
+
+  # The CLI's error data. ess-cli resolves error codes to declared types, not to `errors:`
+  # declarations, so these restate substrate.client.Refusal and .Unavailable member for member.
+  - name: substrate.client.RefusalData
+    kind: struct
+    fields:
+      - {name: class, type: substrate.client.RefusalClass}
+      - {name: code, type: String}
+      - {name: message, type: String}
+      - {name: retriable, type: Boolean}
+      - {name: address, type: 'Optional<String>'}
+      - {name: operation, type: 'Optional<String>'}
+  - name: substrate.client.UnavailableData
+    kind: struct
+    fields:
+      - {name: reason, type: substrate.client.UnavailableReason}
+
+  # Callable results. A view's result is its row (`ess specify cli` refuses any other shape);
+  # these are the rows of the views below, and the command answers.
+  - name: substrate.client.MachineRow
+    kind: struct
+    fields:
+      - {name: snapshot, type: String}
+      - {name: observation, type: Json}
+  - name: substrate.client.WorkspaceRow
+    kind: struct
+    fields:
+      - {name: workspace, type: String}
+      - {name: observation, type: Json}
+  - name: substrate.client.ExecRow
+    kind: struct
+    fields:
+      - {name: exec, type: String}
+      - {name: observation, type: Json}
+  - name: substrate.client.SessionRow
+    kind: struct
+    fields:
+      - {name: session, type: String}
+      - {name: observation, type: Json}
+  - name: substrate.client.OperationRow
+    kind: struct
+    fields:
+      - {name: operation, type: String}
+      - {name: observation, type: Json}
+  - name: substrate.client.MetricsRow
+    kind: struct
+    fields:
+      - {name: resource_id, type: String}
+      - {name: resource_kind, type: substrate.client.MetricsResourceKind}
+      - {name: observation, type: Json}
+  # The observation is WorkspaceAbsence.
+  - name: substrate.client.WorkspaceAbsenceRow
+    kind: struct
+    fields:
+      - {name: workspace, type: String}
+      - {name: observation, type: Json}
+  # RunOutput, crates/b10x-substrate-sdk/src/model.rs: the terminal Exec observation and both
+  # captured streams.
+  # UNMAPPED: RunOutput holds the streams as bytes (Vec<u8>). The CLI projection has no byte
+  # primitive, so `stdout`/`stderr` are String, and a non-UTF-8 output has no faithful value here.
+  # Lossy decoding, base64, or a separate raw-output path is the owner's decision.
+  - name: substrate.client.ExecRunResult
+    kind: struct
+    fields:
+      - {name: exec, type: String}
+      - {name: observation, type: Json}
+      - {name: stdout, type: String}
+      - {name: stderr, type: String}
+      - {name: stdout_truncated, type: Boolean}
+      - {name: stderr_truncated, type: Boolean}
+  # EventPage, crates/substrate-wire/src/lib.rs. Each item is one wire Event, verbatim.
+  - name: substrate.client.EventPage
+    kind: struct
+    fields:
+      - {name: source_scope, type: String}
+      - {name: generation, type: Integer}
+      - {name: items, type: 'List<Json>'}
+      - {name: next_cursor, type: String}
+      - {name: through_seq, type: Integer}
+      - {name: first_retained_seq, type: 'Optional<Integer>'}
+entities:
+  # GET /v1/machine answers a CapabilitySnapshot keyed by its `snapshot` member.
+  - name: substrate.client.CapabilitySnapshot
+    identity: {name: snapshot, type: String}
+    fields:
+      - {name: observation, type: Json}
+    lifecycle: {initial: Observed, states: [Observed], terminal: [Observed]}
+  # POST /v1/workspaces, GET and DELETE /v1/workspaces/{workspace_id}; wire type Workspace.
+  - name: substrate.client.Workspace
+    identity: {name: workspace, type: String}
+    fields:
+      - {name: observation, type: Json}
+    lifecycle: {initial: Observed, states: [Observed], terminal: [Observed]}
+  # POST /v1/execs, GET /v1/execs/{exec_id}; wire type Exec.
+  # UNMAPPED: an exec names its workspace (Exec.workspace), and destroy refuses with
+  # workspace.execs-active while one runs; nothing read here says whether a retired exec's record
+  # outlives its workspace (references) or not (owns). No relation is declared until the owner says.
+  - name: substrate.client.Exec
+    identity: {name: exec, type: String}
+    fields:
+      - {name: observation, type: Json}
+    lifecycle: {initial: Observed, states: [Observed], terminal: [Observed]}
+  # GET /v1/sessions/{session_id}, POST /v1/sessions/{session_id}/signal; wire type PipeSession.
+  # The CLI starts no session, so no command here creates one.
+  # UNMAPPED: a session names its exec and workspace (PipeSession.exec, .workspace); owns or
+  # references is not read from any source here. No relation is declared.
+  - name: substrate.client.Session
+    identity: {name: session, type: String}
+    fields:
+      - {name: observation, type: Json}
+    lifecycle: {initial: Observed, states: [Observed], terminal: [Observed]}
+  # GET /v1/ops/{operation_id}; wire type OperationRecord. The accepted-operation ledger itself is
+  # specified in spec/domains/operations.yaml; this is only the row a client reads back.
+  - name: substrate.client.Operation
+    identity: {name: operation, type: String}
+    fields:
+      - {name: observation, type: Json}
+    lifecycle: {initial: Observed, states: [Observed], terminal: [Observed]}
+  # GET /v1/metrics?resource_kind=&resource_id=; wire type MetricsObservation.
+  - name: substrate.client.ResourceMetrics
+    identity: {name: resource_id, type: String}
+    fields:
+      - {name: resource_kind, type: substrate.client.MetricsResourceKind}
+      - {name: observation, type: Json}
+    lifecycle: {initial: Observed, states: [Observed], terminal: [Observed]}
+errors:
+  # ErrorDetail, crates/substrate-wire/src/lib.rs: the `error` member of every refusal body.
+  - name: substrate.client.Refusal
+    fields:
+      - {name: class, type: substrate.client.RefusalClass}
+      - {name: code, type: String}
+      - {name: message, type: String}
+      - {name: retriable, type: Boolean}
+      - {name: address, type: 'Optional<String>'}
+      - {name: operation, type: 'Optional<String>'}
+  - name: substrate.client.Unavailable
+    fields:
+      - {name: reason, type: substrate.client.UnavailableReason}
+views:
+  - name: substrate.client.Machine
+    source: substrate.client.CapabilitySnapshot
+    consistency: read_your_writes
+    fields:
+      - {name: snapshot, type: String}
+      - {name: observation, type: Json}
+  - name: substrate.client.Workspaces
+    source: substrate.client.Workspace
+    consistency: read_your_writes
+    params: [{name: workspace, type: String}]
+    filter: {all: [workspace == param.workspace]}
+    fields:
+      - {name: workspace, type: String}
+      - {name: observation, type: Json}
+  - name: substrate.client.Execs
+    source: substrate.client.Exec
+    consistency: read_your_writes
+    params: [{name: exec, type: String}]
+    filter: {all: [exec == param.exec]}
+    fields:
+      - {name: exec, type: String}
+      - {name: observation, type: Json}
+  - name: substrate.client.Sessions
+    source: substrate.client.Session
+    consistency: read_your_writes
+    params: [{name: session, type: String}]
+    filter: {all: [session == param.session]}
+    fields:
+      - {name: session, type: String}
+      - {name: observation, type: Json}
+  - name: substrate.client.Operations
+    source: substrate.client.Operation
+    consistency: read_your_writes
+    params: [{name: operation, type: String}]
+    filter: {all: [operation == param.operation]}
+    fields:
+      - {name: operation, type: String}
+      - {name: observation, type: Json}
+  - name: substrate.client.Metrics
+    source: substrate.client.ResourceMetrics
+    consistency: read_your_writes
+    params:
+      - {name: resource_kind, type: substrate.client.MetricsResourceKind}
+      - {name: resource_id, type: String}
+    filter: {all: [resource_kind == param.resource_kind, resource_id == param.resource_id]}
+    fields:
+      - {name: resource_id, type: String}
+      - {name: resource_kind, type: substrate.client.MetricsResourceKind}
+      - {name: observation, type: Json}
+commands:
+  # Every command's `refused` branch is the daemon's ErrorDetail. Which named code answers which
+  # request is the daemon's and the released bundle's (vectors/http), not restated here.
+  # `operation_id` is the client-chosen idempotency key the SDK sends (`operation_id(..)` builders).
+
+  # POST /v1/workspaces with WorkspaceCreateInput; an empty source only. The Git source needs a
+  # source authorization the binding does not take (see coverage.md).
+  - name: substrate.client.CreateWorkspace
+    input:
+      - {name: labels, type: 'Optional<Map<String, String>>'}
+      - {name: storage, type: 'Optional<substrate.client.StorageLimit>'}
+      - {name: lease_ttl_ms, type: 'Optional<Integer>'}
+      - {name: operation_id, type: 'Optional<String>'}
+    outcomes:
+      - name: refused
+        external: the daemon refuses the create with a named code
+        error: substrate.client.Refusal
+      - name: created
+        creates: substrate.client.Workspace
+        instance: workspace
+        sets: {observation: {generated: true}}
+        # Store event transition workspace.created (crates/substrate-store/src/workspaces.rs).
+        emits: [substrate.client.WorkspaceCreated]
+        payload:
+          substrate.client.WorkspaceCreated: {workspace: {generated: true}}
+  # POST /v1/workspaces/{workspace_id}/lease/renew with LeaseRenewInput.
+  - name: substrate.client.RenewWorkspaceLease
+    input:
+      - {name: workspace, type: String}
+      - {name: ttl_ms, type: Integer}
+      - {name: operation_id, type: 'Optional<String>'}
+    outcomes:
+      - name: refused
+        external: the daemon refuses the renewal with a named code
+        error: substrate.client.Refusal
+      - name: absent
+        unknown_instance: true
+        error: substrate.client.Refusal
+      - name: renewed
+        updates: substrate.client.Workspace
+        instance: workspace
+        sets: {observation: {generated: true}}
+        # Store event transition workspace.lease-renewed.
+        emits: [substrate.client.WorkspaceLeaseRenewed]
+        payload:
+          substrate.client.WorkspaceLeaseRenewed: {workspace: input.workspace}
+  # DELETE /v1/workspaces/{workspace_id}; answers WorkspaceAbsence. The store deletes the row and
+  # leaves a tombstone (Store destroy path, crates/substrate-store/src/workspaces.rs).
+  - name: substrate.client.DestroyWorkspace
+    input:
+      - {name: workspace, type: String}
+      - {name: operation_id, type: 'Optional<String>'}
+    outcomes:
+      - name: refused
+        external: the daemon refuses the destroy with a named code
+        error: substrate.client.Refusal
+      - name: absent
+        unknown_instance: true
+        error: substrate.client.Refusal
+      - name: destroyed
+        deletes: substrate.client.Workspace
+        instance: workspace
+        # Store event transition workspace.destroyed.
+        emits: [substrate.client.WorkspaceDestroyed]
+        payload:
+          substrate.client.WorkspaceDestroyed: {workspace: input.workspace}
+  # POST /v1/execs with ExecStartInput and `wait: true`, then GET /v1/execs/{exec_id}/output for
+  # each stream: the SDK's CommandBuilder::run. Unset limits take ExecutionPolicy's defaults.
+  - name: substrate.client.RunExec
+    input:
+      - {name: workspace, type: String}
+      - {name: argv, type: 'List<String>'}
+      - {name: timeout_ms, type: 'Optional<Integer>'}
+      - {name: cpu_millis, type: 'Optional<Integer>'}
+      - {name: memory_bytes, type: 'Optional<Integer>'}
+      - {name: processes, type: 'Optional<Integer>'}
+      - {name: output_bytes, type: 'Optional<Integer>'}
+      - {name: operation_id, type: 'Optional<String>'}
+    outcomes:
+      - name: refused
+        external: the daemon refuses the start with a named code, exec.sandbox-unavailable where confinement is unserved
+        error: substrate.client.Refusal
+      - name: accepted
+        creates: substrate.client.Exec
+        instance: exec
+        sets: {observation: {generated: true}}
+        # Store event transition exec.accepted (crates/substrate-store/src/execs.rs).
+        emits: [substrate.client.ExecAccepted]
+        payload:
+          substrate.client.ExecAccepted: {exec: {generated: true}, workspace: input.workspace}
+  # POST /v1/sessions/{session_id}/signal with ExecSignalInput.
+  - name: substrate.client.SignalSession
+    input:
+      - {name: session, type: String}
+      - {name: signal, type: substrate.client.Signal}
+      - {name: grace_ms, type: Integer}
+      - {name: operation_id, type: 'Optional<String>'}
+    outcomes:
+      - name: refused
+        external: the daemon refuses the signal with a named code
+        error: substrate.client.Refusal
+      - name: absent
+        unknown_instance: true
+        error: substrate.client.Refusal
+      - name: signalled
+        updates: substrate.client.Session
+        instance: session
+        sets: {observation: {generated: true}}
+        # The ledger records a session.signal operation's terminal transition as session.cancelled
+        # (crates/substrate-store/src/operations.rs).
+        emits: [substrate.client.SessionCancelled]
+        payload:
+          substrate.client.SessionCancelled: {session: input.session}
+events:
+  - name: substrate.client.WorkspaceCreated
+    fields: [{name: workspace, type: String}]
+  - name: substrate.client.WorkspaceLeaseRenewed
+    fields: [{name: workspace, type: String}]
+  - name: substrate.client.WorkspaceDestroyed
+    fields: [{name: workspace, type: String}]
+  - name: substrate.client.ExecAccepted
+    fields:
+      - {name: exec, type: String}
+      - {name: workspace, type: String}
+  - name: substrate.client.SessionCancelled
+    fields: [{name: session, type: String}]
