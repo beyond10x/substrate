@@ -2,9 +2,13 @@
 format: aep.planning-md/3
 id: task:release-0-7-16
 kind: task
-status: draft
+status: implemented
 title: Release Substrate 0.7.16 with the client CLI wave
-revision: 1
+revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-16T16:50:33Z", actor: "human:timo", revision: 2, decided_on: {"recorded":{"test_result":1}}}
+- {from: "proposed", to: "active", at: "2026-10-16T16:50:33Z", actor: "human:timo", revision: 3, decided_on: {"recorded":{"test_result":1}}}
+- {from: "active", to: "implemented", at: "2026-10-16T16:50:33Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Outcome
 Publish the 2026-10-16 client CLI wave as Substrate 0.7.16: the `b10x-substrate` command-line client of the daemon socket over `b10x-substrate-sdk`, its ESS CLI presentation binding in `spec/client` with the generated contract package in `spec/generated/cli`, and the ESS pin at 0.60.0. No wire change: the release keeps the development bundle `substrate-wire/0.18.0`. Daemon and MCP OCI images are rebuilt at 0.7.16. The CLI ships as source: `cargo install --path crates/b10x-substrate-cli --locked` from a checkout of the tag.

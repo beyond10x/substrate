@@ -9,6 +9,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [0.7.16] — 2026-10-16
 
+Published by [release run 38931900566](https://github.com/beyond10x/substrate/actions/runs/38931900566)
+from tagged commit `6245807636b432e3f61fb1aa662af8a81c37ea8a`. All three artifacts were
+keyless-signed and verified against `release.yml@refs/tags/0.7.16` by the release workflow, and
+each tag resolved anonymously to its released digest:
+
+- Image: `ghcr.io/beyond10x/b10x-substrate-daemon:0.7.16` at `sha256:9a5fa7ab955db5773fc9b6ce746b38a61d74304014f1a5f94aa761ec6199fdcd`.
+- Contract bundle: `ghcr.io/beyond10x/b10x-substrate-wire:0.18.0` at `sha256:0fc268003bcb02645759cb916f0790359598943c07fa3647320821f2375450ae`, annotated `development`, the byte-identical bundle 0.7.13 published, signed again with this release's identity.
+- Disposable MCP image: `ghcr.io/beyond10x/b10x-substrate-mcp:0.7.16` at `sha256:3116fc5638841719c74d6c1765beb2017c218cda3dfa1dd8ed6e51582aaca017`, development-only.
+
+The [release notes](https://github.com/beyond10x/substrate/releases/tag/0.7.16) provide exact
+signature verification commands and the successful 106-case delegated confinement record. The
+`b10x-substrate` client installs from the tag with
+`cargo install --git https://github.com/beyond10x/substrate --tag 0.7.16 b10x-substrate-cli --locked`.
+
 ### Added
 
 - `spec/client`: the client CLI's presentation domain and `ess-cli/2` binding for the
