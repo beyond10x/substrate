@@ -18,8 +18,8 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use b10x_substrate_sdk::{
-    Client, ExecObservation, ExecState, ExecutionPolicy, Machine, MetricsResourceKind, Refusal,
-    RefusalClass, SdkError, Signal, StorageLimit,
+    Client, ExecObservation, ExecState, ExecutionPolicy, MAX_EVENT_PAGE_ITEMS, Machine,
+    MetricsResourceKind, Refusal, RefusalClass, SdkError, Signal, StorageLimit,
 };
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use serde::Serialize;
@@ -77,7 +77,11 @@ pub struct EventsArgs {
     #[arg(long)]
     pub cursor: Option<String>,
     /// Largest number of events to read (1..=1000)
-    #[arg(long, default_value_t = 100)]
+    #[arg(
+        long,
+        default_value_t = 100,
+        value_parser = clap::value_parser!(u32).range(1..=i64::from(MAX_EVENT_PAGE_ITEMS))
+    )]
     pub limit: u32,
 }
 

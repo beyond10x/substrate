@@ -159,6 +159,9 @@ fn clap_leaves(
         let at = format!("{path:?}");
         let aliases: Vec<String> = sub.get_all_aliases().map(str::to_owned).collect();
         let arguments = own_arguments(sub, false, globals, &at)?;
+        if let Some(group) = constraining_group(sub) {
+            return Err(format!("{at}: the group {group} requires or excludes"));
+        }
         if sub.has_subcommands() {
             if !aliases.is_empty() {
                 return Err(format!("{at}: a group presents aliases {aliases:?}"));
@@ -178,6 +181,9 @@ fn clap_leaves(
             let id = argument.get_id().as_str().to_owned();
             if argument.get_short().is_some() || argument.get_all_aliases().is_some() {
                 return Err(format!("{at}: {id} presents a short flag or alias"));
+            }
+            if let Some(relation) = relation(argument) {
+                return Err(format!("{at}: {id} presents the relation {relation}"));
             }
             let source = if argument.is_positional() {
                 if argument.is_last_set() || argument.is_trailing_var_arg_set() {
@@ -302,4 +308,39 @@ pub fn check(mut command: Command) -> Result<(), String> {
 /// `check`, as a predicate.
 pub fn accepted_by_binding_check(command: Command) -> bool {
     check(command).is_ok()
+}
+
+/// The first relation `argument` holds to another argument, if any: a conflict, an override, a
+/// requirement, a conditional requirement or a conditional default. The binding states none of
+/// these, so each would make an invocation the binding admits fail to parse, or one it refuses
+/// parse. clap exposes them through no getter, so this reads its `Debug` form; `r_ifs_all` and
+/// `r_unless_all` are absent from that form, and are not seen.
+fn relation(argument: &clap::Arg) -> Option<&'static str> {
+    let debug = format!("{argument:?}");
+    [
+        "conflicts",
+        "overrides",
+        "requires",
+        "r_ifs",
+        "r_unless",
+        "default_vals_ifs",
+    ]
+    .into_iter()
+    .find(|field| !debug.contains(&format!("{field}: []")))
+}
+
+/// The first group of `command` that requires, excludes or conflicts, read from its `Debug`
+/// form as [`relation`] reads an argument's. The derive's own group per `#[derive(Args)]` struct
+/// does none of these.
+fn constraining_group(command: &Command) -> Option<String> {
+    command
+        .get_groups()
+        .find(|group| {
+            let debug = format!("{group:?}");
+            !(debug.contains("required: false")
+                && debug.contains("requires: []")
+                && debug.contains("conflicts: []")
+                && debug.contains("multiple: true"))
+        })
+        .map(|group| group.get_id().to_string())
 }
