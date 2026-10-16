@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-16T16:50:42Z",
+  "actor": "human:timo",
+  "artifact": "story:a-client-cli-drives-the-daemon",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "Gate run on main at 6245807636b4 concluded success, including the story's five scenarios against the shipped daemon; released as 0.7.16",
+    "reference": "https://github.com/beyond10x/substrate/actions/runs/38929711254"
+  }
+}
