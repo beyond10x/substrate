@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: approval-record:wave-2026-10-17b-hostproc-routes
 kind: approval-record
-status: draft
+status: active
 title: 'Wave 2026-10-17b: the adopt runtime vector and the host-process routes'
 relations:
 - decides: story:exec-in-an-adopted-directory
@@ -13,7 +13,9 @@ relations:
 - decides: story:host-process-listing
 - decides: story:host-process-logs
 - decides: story:host-process-deadlines
-revision: 1
+revision: 2
+transitions:
+- {from: "draft", to: "active", at: "2026-10-17T16:21:09Z", actor: "human:timo", revision: 2}
 ---
 # Wave 2026-10-17b: the adopt runtime vector and the host-process routes
 
