@@ -11,6 +11,7 @@ use thiserror::Error;
 
 mod events;
 mod execs;
+mod host_processes;
 mod leases;
 mod operations;
 mod recovery;
@@ -24,6 +25,17 @@ mod tests;
 
 pub use events::{CommitEffect, CommitEffectSink, EventCursorError};
 pub use execs::{ExecRetireReservation, ExecWrite, StoredExec, WorkspaceExecState};
+pub use host_processes::{
+    DEFAULT_HOST_PROCESS_MAX_PAGE, DEFAULT_HOST_PROCESS_RETAIN_ENDED_COUNT,
+    DEFAULT_HOST_PROCESS_RETAIN_ENDED_MS, DEFAULT_HOST_PROCESS_SUBJECT_MAX_LIVE,
+    DEFAULT_MAX_PROCESS_TIMEOUT_MS, DueHostProcess, HOST_PROCESS_CONFINEMENT, HOST_PROCESS_PROFILE,
+    HOST_PROCESS_RENEW_KIND, HOST_PROCESS_START_KIND, HOST_PROCESS_STOP_KIND,
+    HOST_PROCESS_SUPERVISOR_ACTOR, HostProcessDeadline, HostProcessDeadlineSource, HostProcessEnd,
+    HostProcessEndedBy, HostProcessExit, HostProcessFilter, HostProcessLease,
+    HostProcessLeaseRequest, HostProcessLimits, HostProcessPage, HostProcessRecord,
+    HostProcessRefusal, HostProcessRenewal, HostProcessStartReservation, HostProcessState,
+    HostProcessStopReservation, HostProcessTransition, NewHostProcess,
+};
 pub use leases::{ExpiredLease, LeaseClock, LeaseResource, NewLease};
 pub use operations::{
     NewOperation, OperationCapacity, Reservation, ResourceCapacity, StoredAnswer,
@@ -151,6 +163,8 @@ pub enum StoreError {
     InvalidEventShape,
     #[error("stored session authority does not match its closed shape")]
     InvalidSessionAuthority,
+    #[error("host process record invariant violated: {0}")]
+    HostProcessInvariant(&'static str),
 }
 
 fn to_u64(value: i64) -> Result<u64, StoreError> {
