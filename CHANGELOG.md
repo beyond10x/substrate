@@ -7,6 +7,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- The clean-room runtime vectors drive `workspace.adopt` through the shipped daemon: an operator's
+  directory without the `ws_` prefix is adopted, out-of-set root names are refused as
+  `request.schema-invalid` before dispatch and replayed from the ledger, an exec addressing the
+  directory by its root name is refused, and destroying it leaves the operator's files. On the
+  delegated lane an exec runs confined in the adopted directory with its output and exit observed,
+  and the isolation cases run against the adopted workspace as well as a created one; on the
+  portable lane the adopted exec is `exec.sandbox-unavailable`. A no-nested-user-namespace case
+  joins the isolation cases. The runtime vectors grow to 83 portable and 125 delegated cases.
+
 ## [0.7.17] — 2026-10-17
 
 ### Added
