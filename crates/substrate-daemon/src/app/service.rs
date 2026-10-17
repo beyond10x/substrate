@@ -190,8 +190,11 @@ pub struct App {
     /// The uid a host-process peer must have: the daemon's own effective uid (S2). A peer of any
     /// other uid is `process.host-subject-mismatch`, because a host process runs as this uid.
     pub host_process_uid: u32,
-    /// Whether this run reconciled the host-process records an earlier run left (S3), done once.
+    /// Whether this run reconciled the host-process records an earlier run left (S3). A pass with a
+    /// failed re-attachment leaves it false, so the next sweep retries.
     pub(super) host_process_reconciled: Mutex<bool>,
+    /// What this run's host-process driver is known to hold, and the stops it has begun.
+    pub(super) host_process_run: Arc<super::processes::DriverRun>,
     lease_sweep: Mutex<()>,
     workspace_recovery: Mutex<()>,
     provisional_recovery: Mutex<()>,
@@ -275,6 +278,7 @@ impl App {
             host_process_logs: None,
             host_process_uid: nix::unistd::geteuid().as_raw(),
             host_process_reconciled: Mutex::new(false),
+            host_process_run: Arc::default(),
             lease_sweep: Mutex::new(()),
             workspace_recovery: Mutex::new(()),
             provisional_recovery: Mutex::new(()),

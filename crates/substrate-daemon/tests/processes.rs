@@ -2613,3 +2613,264 @@ async fn host_process_deadline_passed_during_downtime_stops_on_restart() {
     assert_eq!(record["ended_by"], "timeout");
     harness.finish().await;
 }
+
+// ---------------------------------------------------------------------------------------------
+// Portable, behind the port: integrity of the record against what the driver still runs.
+// ---------------------------------------------------------------------------------------------
+
+/// A driver that answers as the cgroup driver does for an id it does not hold
+/// (`process.not-found`), whose `start` can be held at its entry so a test can order another
+/// request between the durable `starting` record and the dispatch, and whose `reattach` can be
+/// made to fail as the cgroup driver's does on an unreadable cgroup or log.
+struct StrictSupervisor {
+    running: parking_lot::Mutex<std::collections::BTreeSet<String>>,
+    stops: parking_lot::Mutex<Vec<String>>,
+    reattach_calls: std::sync::atomic::AtomicUsize,
+    reattach_fails: bool,
+    /// How many of the next `begin_stop` calls fail as a cgroup write the kernel refused does.
+    begin_stop_failures: std::sync::atomic::AtomicUsize,
+    gate: Option<StartGate>,
+}
+
+/// Where a held `start` reports its entry, and what releases it.
+type StartGate = (
+    parking_lot::Mutex<std::sync::mpsc::Sender<()>>,
+    parking_lot::Mutex<std::sync::mpsc::Receiver<()>>,
+);
+
+impl StrictSupervisor {
+    fn new(
+        reattach_fails: bool,
+        gate: Option<(std::sync::mpsc::Sender<()>, std::sync::mpsc::Receiver<()>)>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            running: parking_lot::Mutex::default(),
+            stops: parking_lot::Mutex::default(),
+            reattach_calls: std::sync::atomic::AtomicUsize::new(0),
+            reattach_fails,
+            begin_stop_failures: std::sync::atomic::AtomicUsize::new(0),
+            gate: gate.map(|(entered, proceed)| {
+                (
+                    parking_lot::Mutex::new(entered),
+                    parking_lot::Mutex::new(proceed),
+                )
+            }),
+        })
+    }
+
+    fn runs(&self, id: &str) -> bool {
+        self.running.lock().contains(id) && !self.stops.lock().iter().any(|stop| stop == id)
+    }
+}
+
+impl ProcessLogs for StrictSupervisor {
+    fn log_tail(
+        &self,
+        _id: &str,
+        _selection: LogStreamSelection,
+        _max_bytes: u64,
+    ) -> Result<LogTail, DriverError> {
+        Err(DriverError::not_found())
+    }
+}
+
+impl ProcessSupervisor for StrictSupervisor {
+    fn start(
+        self: Arc<Self>,
+        id: &str,
+        spec: &HostProcessSpec,
+    ) -> Result<HostProcessStarted, DriverError> {
+        if let Some((entered, proceed)) = &self.gate {
+            let _ = entered.lock().send(());
+            let _ = proceed.lock().recv();
+        }
+        self.running.lock().insert(id.to_owned());
+        Ok(HostProcessStarted {
+            id: id.to_owned(),
+            pid: 1,
+            cgroup: format!("strict-{id}"),
+            started_at: Utc::now(),
+            deadline: spec.deadline,
+            profile: HostProfile::Host,
+            confinement: Confinement::None,
+        })
+    }
+
+    fn reattach(self: Arc<Self>, _id: &str) -> Result<Reattached, DriverError> {
+        self.reattach_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.reattach_fails {
+            return Err(DriverError::failed(
+                "process.log-failed",
+                "the retained log could not be reopened",
+            ));
+        }
+        Ok(Reattached::Live)
+    }
+
+    fn begin_stop(&self, id: &str, _cause: StopCause) -> Result<(), DriverError> {
+        if !self.running.lock().contains(id) {
+            return Err(DriverError::not_found());
+        }
+        if self
+            .begin_stop_failures
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |left| left.checked_sub(1),
+            )
+            .is_ok()
+        {
+            return Err(DriverError::failed(
+                "process.cgroup-failed",
+                "the stop signal could not be delivered",
+            ));
+        }
+        self.stops.lock().push(id.to_owned());
+        Ok(())
+    }
+
+    fn ended(&self, id: &str) -> Result<Option<HostProcessEnd>, DriverError> {
+        if !self.running.lock().contains(id) {
+            return Err(DriverError::not_found());
+        }
+        Ok(self
+            .stops
+            .lock()
+            .iter()
+            .any(|stopped| stopped == id)
+            .then(|| HostProcessEnd {
+                ended_by: EndedBy::Stop,
+                exit: Some(ProcessExit::Signal(15)),
+                stop_step: Some(StopStep::Term),
+                ended_at: Utc::now(),
+            }))
+    }
+
+    fn observe(&self, _id: &str) -> Result<HostProcessObservation, DriverError> {
+        Err(DriverError::not_found())
+    }
+
+    fn forget(&self, _id: &str) -> Result<(), DriverError> {
+        Ok(())
+    }
+}
+
+/// S3/S5 and invariant 5: a stop by owner that lands while a start of the same owner session is
+/// between its durable `starting` record and its dispatch must not leave the record `ended` while
+/// the program the start then dispatches keeps running. A session-end handler running while one
+/// of its starts is in flight reaches exactly this order.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn host_process_stop_during_start_never_orphans_the_dispatched_process() {
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (proceed_tx, proceed_rx) = std::sync::mpsc::channel();
+    let strict = StrictSupervisor::new(false, Some((entered_tx, proceed_rx)));
+    let mut harness = Harness::portable();
+    Arc::get_mut(&mut harness.app)
+        .expect("unshared application")
+        .host_processes = Some(Arc::clone(&strict) as Arc<dyn ProcessSupervisor>);
+    let cwd = harness.workdir("race");
+    let harness = Arc::new(harness);
+    let racer = Arc::clone(&harness);
+    let start_input = input(&["/bin/sleep", "300"], &cwd, "s-race", "dev");
+    let start = tokio::spawn(async move { racer.start("op_race_start_000001", start_input).await });
+    // The start is now durable as `starting` and held at the driver's entry.
+    tokio::task::spawn_blocking(move || entered_rx.recv_timeout(Duration::from_secs(10)))
+        .await
+        .expect("join")
+        .expect("the start reached the driver");
+    let (status, stopped) = harness
+        .call(
+            SUBJECT,
+            Method::POST,
+            "/v1/processes/stop",
+            Some(json!({ "owner_session": "s-race" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{stopped}");
+    proceed_tx.send(()).expect("release the start");
+    let (_, started) = start.await.expect("start task");
+    let id = text(&started["result"]["id"]).to_owned();
+    for _ in 0..5 {
+        harness.sweep().await;
+    }
+    let record = harness.get(&id).await;
+    assert!(
+        !(record["state"] == "ended" && strict.runs(&id)),
+        "the record of {id} is ended ({}) while the driver still runs the program the start \
+         dispatched after the stop; nothing will ever stop it: start answered {started}, \
+         stop by owner answered {stopped}",
+        record["ended_by"]
+    );
+}
+
+/// S3 restart reconciliation and S4: a record whose re-attachment failed was not shown gone, so
+/// a later lease expiry must not record it ended (and complete its stop) while its cgroup may
+/// still hold the program: the failed re-attachment is retried, or the record is kept from ending.
+#[tokio::test(flavor = "multi_thread")]
+async fn host_process_failed_reattach_is_retried_before_the_record_ends() {
+    let (mut harness, _fake) = Harness::faked();
+    let cwd = harness.workdir("reattach");
+    let id = harness
+        .started(
+            "op_reattach_start_001",
+            input(&["/bin/sleep", "300"], &cwd, "s-1", "dev"),
+        )
+        .await;
+    harness.authority.advance(1_000);
+    // A fresh daemon run whose driver cannot re-attach this record.
+    harness.unserve();
+    let strict = StrictSupervisor::new(true, None);
+    Arc::get_mut(&mut harness.app)
+        .expect("unshared application")
+        .host_processes = Some(Arc::clone(&strict) as Arc<dyn ProcessSupervisor>);
+    harness.sweep().await;
+    // The lease passes.
+    harness.authority.advance(61_000);
+    harness.sweep().await;
+    harness.sweep().await;
+    let record = harness.get(&id).await;
+    let attempts = strict
+        .reattach_calls
+        .load(std::sync::atomic::Ordering::SeqCst);
+    assert!(
+        attempts >= 2 || record["state"] != "ended",
+        "{id} was recorded ended after {attempts} failed re-attachment(s) and no retry, although \
+         nothing showed its cgroup empty: {record}"
+    );
+}
+
+/// S3 and invariant 5: a stop whose first `begin_stop` the driver failed (an error other than
+/// not-found) stays recorded `stopping`, and the supervisor clock begins it again, so the program
+/// is stopped and the record ends with the cause its stop recorded.
+#[tokio::test(flavor = "multi_thread")]
+async fn host_process_stop_the_driver_failed_to_begin_is_retried() {
+    let strict = StrictSupervisor::new(false, None);
+    let mut harness = Harness::portable();
+    Arc::get_mut(&mut harness.app)
+        .expect("unshared application")
+        .host_processes = Some(Arc::clone(&strict) as Arc<dyn ProcessSupervisor>);
+    let cwd = harness.workdir("retry-stop");
+    let id = harness
+        .started(
+            "op_retry_stop_start_01",
+            input(&["/bin/sleep", "300"], &cwd, "s-1", "dev"),
+        )
+        .await;
+    strict
+        .begin_stop_failures
+        .store(1, std::sync::atomic::Ordering::SeqCst);
+    let (status, stopped) = harness.stop("op_retry_stop_stop_001", &id).await;
+    assert_eq!(status, StatusCode::OK, "{stopped}");
+    assert_eq!(stopped["result"]["state"], "stopping", "{stopped}");
+    for _ in 0..3 {
+        harness.sweep().await;
+    }
+    let record = harness.get(&id).await;
+    assert!(
+        !strict.runs(&id),
+        "the driver still runs {id}: the stop it failed to begin was never begun again: {record}"
+    );
+    assert_eq!(record["state"], "ended", "{record}");
+    assert_eq!(record["ended_by"], "stop", "{record}");
+}

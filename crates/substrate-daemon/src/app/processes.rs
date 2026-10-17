@@ -26,7 +26,7 @@
 //! keeps the variable names and a digest of the whole map; the values reach the driver and
 //! nothing else.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::{Path as FsPath, PathBuf};
 use std::sync::Arc;
@@ -108,12 +108,51 @@ const START_MEMBERS: [&str; 9] = [
     "expires_at",
 ];
 
+/// What this daemon run knows of its host-process driver, which a durable record cannot say:
+/// the ids the driver is known to hold, because this run dispatched their start or re-attached
+/// their cgroup, and the ids whose recorded stop the driver has begun.
+///
+/// **A driver not-found is evidence only for a held id.** For any other record it says nothing
+/// about the program: a start still between its durable `starting` record and its dispatch is not
+/// held yet, and neither is a record an earlier run left whose re-attachment has not succeeded.
+/// Such a record is never ended on a not-found; it stays as recorded until its start dispatches
+/// or its re-attachment succeeds, and the stop it records is begun then.
+#[derive(Default)]
+pub(super) struct DriverRun {
+    held: parking_lot::Mutex<BTreeSet<String>>,
+    stops_begun: parking_lot::Mutex<BTreeSet<String>>,
+}
+
+impl DriverRun {
+    fn hold(&self, id: &str) {
+        self.held.lock().insert(id.to_owned());
+    }
+
+    fn holds(&self, id: &str) -> bool {
+        self.held.lock().contains(id)
+    }
+
+    fn stop_begun(&self, id: &str) {
+        self.stops_begun.lock().insert(id.to_owned());
+    }
+
+    fn has_begun_stop(&self, id: &str) -> bool {
+        self.stops_begun.lock().contains(id)
+    }
+
+    fn release(&self, id: &str) {
+        self.held.lock().remove(id);
+        self.stops_begun.lock().remove(id);
+    }
+}
+
 /// Everything a host-process action needs: the store, the driver, the clock and the store-I/O
 /// bound, for a request and for the maintenance sweep alike.
 #[derive(Clone)]
 pub(super) struct ProcessCtx {
     store: Arc<Store>,
     supervisor: Arc<dyn ProcessSupervisor>,
+    run: Arc<DriverRun>,
     authority: Arc<dyn Authority>,
     slots: Arc<Semaphore>,
     deployment: String,
@@ -124,6 +163,7 @@ impl App {
         self.host_processes.as_ref().map(|supervisor| ProcessCtx {
             store: Arc::clone(&self.store),
             supervisor: Arc::clone(supervisor),
+            run: Arc::clone(&self.host_process_run),
             authority: Arc::clone(&self.authority),
             slots: Arc::clone(&self.blocking_store_slots),
             deployment: self.deployment.clone(),
@@ -260,7 +300,9 @@ impl ProcessCtx {
     /// Answers one accepted stop: its operation is completed with the record as recorded
     /// `stopping`, built once so the stored result and the response are the same record, and then
     /// the driver's stop sequence is begun. Nothing waits for the end: the supervisor clock
-    /// records it ([`ProcessCtx::collect_ends`]).
+    /// records it ([`ProcessCtx::collect_ends`]). The operation is completed first, so a sweep
+    /// that collects the end cannot conclude it ahead of this answer; a stop the driver fails to
+    /// begin stays recorded `stopping` and is begun again by that same sweep.
     async fn accept_stop(
         &self,
         scope: &Scope,
@@ -285,13 +327,22 @@ impl ProcessCtx {
         Ok(result)
     }
 
-    /// Begins the stop of a record already recorded `stopping`. A record the driver does not hold
-    /// has nothing left running: it ends `vanished` under the cause its stop recorded, and the
-    /// open stop operation is completed.
+    /// Begins the stop of a record already recorded `stopping`.
+    ///
+    /// A not-found ends the record only when this run's driver held it ([`DriverRun`]): then
+    /// nothing is left running, the record ends `vanished` under the cause its stop recorded, and
+    /// the open stop operation is completed. Whether it was held is read before the driver is
+    /// asked, so a start that dispatches meanwhile is never mistaken for one already gone; that
+    /// start finds the record `stopping` and begins the stop itself. A record not held stays
+    /// `stopping` until its start dispatches or its re-attachment succeeds.
+    ///
+    /// Any other driver error leaves the stop not begun, and [`ProcessCtx::collect_ends`] begins
+    /// it again on the next sweep.
     async fn begin_recorded_stop(&self, scope: &Scope, id: &str, cause: HostProcessEndedBy) {
+        let held = self.run.holds(id);
         match self.supervisor.begin_stop(id, stop_cause(cause)) {
-            Ok(()) => {}
-            Err(error) if error.class == DriverErrorClass::NotFound => {
+            Ok(()) => self.run.stop_begun(id),
+            Err(error) if error.class == DriverErrorClass::NotFound && held => {
                 if let Some(record) = self
                     .record_end_as(scope, id, &HostProcessEnd::Vanished)
                     .await
@@ -299,9 +350,57 @@ impl ProcessCtx {
                     self.complete_open_stop(scope, &record).await;
                 }
             }
+            Err(error) if error.class == DriverErrorClass::NotFound => {
+                tracing::debug!(
+                    process = %id,
+                    "host process stop is recorded; the driver does not hold the process yet"
+                );
+            }
             Err(error) => {
                 tracing::warn!(process = %id, code = error.code, "host process stop did not begin");
             }
+        }
+    }
+
+    /// A start just dispatched found its record no longer `starting`: a stop was accepted while
+    /// it was in flight, or the program already ended and the sweep recorded it. A `stopping`
+    /// record's stop is begun now, under the cause it recorded; an ended one is stopped again,
+    /// which the driver answers at once for a program already gone. Returns the record as it is
+    /// afterwards, which is what the start answers.
+    async fn stop_after_dispatch(
+        &self,
+        scope: &Scope,
+        record: HostProcessRecord,
+    ) -> HostProcessRecord {
+        let cause = record.ended_by.unwrap_or(HostProcessEndedBy::Stop);
+        match record.state {
+            HostProcessState::Stopping => self.begin_recorded_stop(scope, &record.id, cause).await,
+            HostProcessState::Ended => {
+                let _ = self.supervisor.begin_stop(&record.id, stop_cause(cause));
+            }
+            HostProcessState::Starting | HostProcessState::Running => {}
+        }
+        match self.io(|| self.store.host_process(scope, &record.id)).await {
+            Ok(Some(current)) => current,
+            Ok(None) | Err(_) => record,
+        }
+    }
+
+    /// A start the driver refused found its record `stopping`: a stop was accepted while it was in
+    /// flight. Nothing was started, so the record ends `vanished` under its stop's cause and that
+    /// stop's operation is completed.
+    async fn end_undispatched(&self, scope: &Scope, id: &str) {
+        let Ok(Some(record)) = self.io(|| self.store.host_process(scope, id)).await else {
+            return;
+        };
+        if record.state != HostProcessState::Stopping {
+            return;
+        }
+        if let Some(ended) = self
+            .record_end_as(scope, id, &HostProcessEnd::Vanished)
+            .await
+        {
+            self.complete_open_stop(scope, &ended).await;
         }
     }
 
@@ -340,6 +439,10 @@ impl ProcessCtx {
     /// Records every end the driver has published for a record not yet ended, however it came:
     /// the main process's exit, a stop the driver ran, or a re-attached cgroup that emptied. The
     /// stop operation that caused an end is completed with it.
+    ///
+    /// Only records this run's driver holds are asked about ([`DriverRun`]); a `stopping` one
+    /// whose stop the driver has not begun (it failed, or the record was stopped before the
+    /// driver held it) is begun again first.
     async fn collect_ends(&self) {
         let Ok(live) = self
             .io(|| {
@@ -354,6 +457,14 @@ impl ProcessCtx {
             return;
         };
         for (scope, record) in live {
+            if !self.run.holds(&record.id) {
+                continue;
+            }
+            if record.state == HostProcessState::Stopping && !self.run.has_begun_stop(&record.id) {
+                let cause = record.ended_by.unwrap_or(HostProcessEndedBy::Stop);
+                self.begin_recorded_stop(&scope, &record.id, cause).await;
+                continue;
+            }
             let end = match self.supervisor.ended(&record.id) {
                 Ok(Some(end)) => Ok(end),
                 // A stopping record the driver does not hold has nothing left running.
@@ -386,6 +497,7 @@ impl ProcessCtx {
         };
         for (_, id) in removed {
             let _ = self.supervisor.forget(&id);
+            self.run.release(&id);
         }
     }
 
@@ -398,10 +510,15 @@ impl ProcessCtx {
     ///   removed. It is never re-dispatched, because its environment values were never stored.
     /// - `running`: a cgroup with members is observed again; a cgroup gone ends `vanished`.
     /// - `stopping`: the interrupted stop is begun again with the cause it recorded first, and
-    ///   its operation completed when it ends.
+    ///   its operation completed when it ends; a cgroup gone ends it `vanished` at once.
     ///
     /// A deadline or lease that passed during the downtime is then enforced by the same sweep's
     /// clock, at once.
+    ///
+    /// A record whose re-attachment failed was shown neither live nor gone: the pass is reported
+    /// incomplete, so the next sweep tries it again, and until one succeeds the driver does not
+    /// hold it ([`DriverRun`]), so no lease expiry or deadline stop ends it on a not-found. A
+    /// record re-attached by an earlier pass is not visited again.
     async fn reconcile_after_restart(&self, cutoff: DateTime<Utc>) -> bool {
         let Ok(records) = self
             .io(|| {
@@ -412,10 +529,26 @@ impl ProcessCtx {
         else {
             return false;
         };
+        let mut complete = true;
         for (scope, record) in records {
-            let Ok(found) = Arc::clone(&self.supervisor).reattach(&record.id) else {
+            if self.run.holds(&record.id) {
                 continue;
+            }
+            let found = match Arc::clone(&self.supervisor).reattach(&record.id) {
+                Ok(found) => found,
+                Err(error) => {
+                    tracing::warn!(
+                        process = %record.id,
+                        code = error.code,
+                        "host process was not re-attached; retried on the next sweep"
+                    );
+                    complete = false;
+                    continue;
+                }
             };
+            if matches!(found, Reattached::Live) {
+                self.run.hold(&record.id);
+            }
             match (record.state, found) {
                 (HostProcessState::Starting, Reattached::Gone) => {
                     self.abandon_start(&scope, &record).await;
@@ -447,13 +580,22 @@ impl ProcessCtx {
                     self.record_end_as(&scope, &record.id, &HostProcessEnd::Vanished)
                         .await;
                 }
-                (HostProcessState::Stopping, _) => {
+                (HostProcessState::Stopping, Reattached::Live) => {
                     let cause = record.ended_by.unwrap_or(HostProcessEndedBy::Stop);
                     self.begin_recorded_stop(&scope, &record.id, cause).await;
                 }
+                // The cgroup is gone: nothing of it is left, and the stop it recorded concludes.
+                (HostProcessState::Stopping, Reattached::Gone) => {
+                    if let Some(ended) = self
+                        .record_end_as(&scope, &record.id, &HostProcessEnd::Vanished)
+                        .await
+                    {
+                        self.complete_open_stop(&scope, &ended).await;
+                    }
+                }
             }
         }
-        true
+        complete
     }
 
     async fn abandon_start(&self, scope: &Scope, record: &HostProcessRecord) {
@@ -483,6 +625,7 @@ impl ProcessCtx {
             .is_ok()
         {
             let _ = self.supervisor.forget(&record.id);
+            self.run.release(&record.id);
         }
     }
 }
@@ -1152,20 +1295,33 @@ pub(super) async fn process_start(
         {
             return store_failure(&request_id, Some(&operation), &store_error);
         }
+        // A stop accepted while this start was in flight left the record `stopping`, which the
+        // abandonment does not remove. Nothing was started, so that stop concludes here.
+        ctx.end_undispatched(&scope, &id).await;
         let _ = ctx.supervisor.forget(&id);
+        ctx.run.release(&id);
         return failure_detail(status, &request_id, detail);
     }
+    // The driver holds the program from here on; a not-found for it is evidence again.
+    ctx.run.hold(&id);
     let at = ctx.now();
     let record = match ctx
         .io(|| ctx.store.mark_host_process_running(&scope, &id, at))
         .await
     {
-        Ok(HostProcessTransition::Applied(record) | HostProcessTransition::Unchanged(record)) => {
-            *record
+        Ok(HostProcessTransition::Applied(record)) => *record,
+        // A stop (or a lease or deadline stop) was accepted while this start was between its
+        // durable record and its dispatch. What was just started is stopped now, under the cause
+        // the record names, and the start answers the record as it now is, never as running.
+        Ok(HostProcessTransition::Unchanged(record)) => {
+            ctx.stop_after_dispatch(&scope, *record).await
         }
         Ok(HostProcessTransition::Missing) => {
+            // No record describes the program any more: stop it rather than leave it unowned.
+            let _ = ctx.supervisor.begin_stop(&id, StopCause::Stop);
             return outcome_unknown(&request_id, &operation);
         }
+        // The record stays `starting` and held, so the supervisor clock still collects its end.
         Err(error) => return store_failure(&request_id, Some(&operation), &error),
     };
     let result = wire_record(&record, None, at);

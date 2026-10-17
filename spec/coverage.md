@@ -160,7 +160,7 @@ green check establishes:
   (ESS-SYNTH-022). An authored scenario exercises each of those branches and bindings except
   `StartProcess/hosted-posture`, whose cause is the daemon's posture and belongs to the runtime
   suite.
-- `ess verify conform run --target interpreted` passes all 95 scenarios, synthesized and
+- `ess verify conform run --target interpreted` passes all 96 scenarios, synthesized and
   authored, against the ESS reference. That checks the model only.
 
 What it does not establish:
