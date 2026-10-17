@@ -1,0 +1,4 @@
+format: ess/25
+system: substrate
+version: v1
+domains: [substrate.workspaces]

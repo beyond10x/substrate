@@ -515,6 +515,24 @@ pub trait Driver: Send + Sync {
         root_name: &str,
     ) -> Result<WorkspaceDestroyProgress, DriverError>;
 
+    /// Forget an adopted workspace (ADR 0035 decision 7): remove only what the driver itself made
+    /// for it outside the operator's directory, and never the directory or anything in it.
+    ///
+    /// The default touches nothing, which is the whole obligation for a driver that keeps no
+    /// state of its own beside a workspace.
+    async fn forget_workspace(
+        &self,
+        workspace_id: &str,
+        _root_name: &str,
+    ) -> Result<WorkspaceAbsence, DriverError> {
+        Ok(WorkspaceAbsence {
+            kind: substrate_wire::WorkspaceKind::Workspace,
+            id: workspace_id.to_owned(),
+            absent: true,
+            observed_at: Utc::now(),
+        })
+    }
+
     async fn start_exec(
         &self,
         id: &str,
@@ -994,6 +1012,8 @@ impl Driver for HostDriver {
                     labels,
                     observed_at: Utc::now(),
                     state: substrate_wire::WorkspaceState::Ready,
+                    origin: substrate_wire::WorkspaceOrigin::Created,
+                    root_name: substrate_wire::RootName::from(root_name.as_str()),
                     storage,
                     lease: None,
                 })
@@ -1155,6 +1175,8 @@ impl Driver for HostDriver {
                         labels,
                         observed_at: Utc::now(),
                         state: substrate_wire::WorkspaceState::Ready,
+                        origin: substrate_wire::WorkspaceOrigin::Created,
+                        root_name: substrate_wire::RootName::from(root_name.as_str()),
                         storage,
                         lease: None,
                     })
@@ -1435,6 +1457,27 @@ impl Driver for HostDriver {
         .await
     }
 
+    async fn forget_workspace(
+        &self,
+        workspace_id: &str,
+        root_name: &str,
+    ) -> Result<WorkspaceAbsence, DriverError> {
+        fs::validate_root_name(root_name)?;
+        // The baseline is the daemon's, made beside the directory and never in it; it goes
+        // whatever the current Git source configuration, because an earlier one may have written
+        // it. The operator's directory is not opened at all.
+        let baseline_root = self.config.git_baseline_root();
+        let root_name = root_name.to_owned();
+        self.filesystem_io(move |_| git::remove_baseline(&baseline_root, &root_name))
+            .await?;
+        Ok(WorkspaceAbsence {
+            kind: substrate_wire::WorkspaceKind::Workspace,
+            id: workspace_id.to_owned(),
+            absent: true,
+            observed_at: Utc::now(),
+        })
+    }
+
     async fn start_exec(
         &self,
         id: &str,
@@ -1583,6 +1626,37 @@ mod tests {
                 .is_err(),
             "an ambiguous non-segment prefix must be refused"
         );
+    }
+
+    #[tokio::test]
+    async fn forgetting_an_adopted_workspace_leaves_the_operator_directory() {
+        // Prevents destroy of an adopted workspace from removing operator-owned files (ADR 0035
+        // decision 7): only what the daemon made outside the directory, a git baseline, goes.
+        let directory = tempdir().expect("tempdir");
+        let driver = HostDriver::open(HostConfig::minimum(directory.path())).expect("host driver");
+        let operator = directory.path().join("adopted-repo");
+        std::fs::create_dir_all(operator.join("nested")).expect("operator directory");
+        std::fs::write(operator.join("nested/keep.txt"), b"keep").expect("operator file");
+        let baselines = directory.path().join(".substrate-git-baselines");
+        std::fs::create_dir(&baselines).expect("baseline root");
+        std::fs::write(baselines.join("adopted-repo"), b"0".repeat(40)).expect("baseline");
+
+        let absence = driver
+            .forget_workspace("ws_adopted", "adopted-repo")
+            .await
+            .expect("forget");
+        assert!(absence.absent);
+        assert_eq!(absence.id, "ws_adopted");
+        assert_eq!(
+            std::fs::read(operator.join("nested/keep.txt")).expect("kept"),
+            b"keep"
+        );
+        assert!(!baselines.join("adopted-repo").exists());
+        let error = driver
+            .forget_workspace("ws_adopted", "../escape")
+            .await
+            .expect_err("a non-root-name is refused");
+        assert_eq!(error.code, "workspace.path-escape");
     }
 
     #[tokio::test]

@@ -399,6 +399,8 @@ fn seed_ready_pipe_session(state_path: &Path, origin: &str) {
         labels: BTreeMap::default(),
         observed_at: now,
         state: WorkspaceState::Ready,
+        origin: substrate_wire::WorkspaceOrigin::Created,
+        root_name: substrate_wire::RootName::from("ws_network_authority"),
         storage: None,
         lease: None,
     };

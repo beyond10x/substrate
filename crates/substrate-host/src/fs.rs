@@ -1342,23 +1342,15 @@ fn split_parent(path: &str) -> Result<(&str, &str), DriverError> {
 /// component, never `/`, `.` or `..` — because a single component under a pinned descriptor
 /// cannot address anything outside the root whatever it is called.
 ///
-/// Dropping the prefix is what lets an operator hand over a directory they already have, say
-/// `harness` or `engineering-protocols`, and have it served as a confined workspace under its
-/// own name. The workspace id then *is* the directory name, so no path-to-id mapping has to be
-/// held anywhere, and there is no second record to drift out of step with the disk.
-/// `create_workspace` keeps minting `ws_…` ids; only adoption of an existing directory is new.
+/// Dropping the prefix is what lets `workspace.adopt` (ADR 0035) serve a directory the operator
+/// already has, say `harness` or `engineering-protocols`, under its own name: the store row keeps
+/// a minted `ws_…` id and this name as its `root_name`.
 ///
-/// A leading `-` is refused as well: such a name is indistinguishable from an option to any
-/// tool that is ever handed it as an argv element.
-fn validate_root_name(name: &str) -> Result<(), DriverError> {
-    let single_component = !name.is_empty()
-        && name != "."
-        && name != ".."
-        && !name.starts_with('-')
-        && name
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-');
-    if single_component {
+/// The set is `substrate_wire::is_root_name`, the one predicate the adopt admission also uses.
+/// It adds the `NAME_MAX` length bound, and refuses a leading `-` because such a name is
+/// indistinguishable from an option to any tool that is ever handed it as an argv element.
+pub(crate) fn validate_root_name(name: &str) -> Result<(), DriverError> {
+    if substrate_wire::is_root_name(name) {
         Ok(())
     } else {
         Err(path_escape())
@@ -1684,6 +1676,11 @@ mod tests {
             let error = validate_root_name(name).expect_err(name);
             assert_eq!(error.code, "workspace.path-escape", "{name:?}");
         }
+        // One predicate with the wire (ADR 0035): Linux NAME_MAX bounds a root name.
+        let longest = "a".repeat(substrate_wire::MAX_ROOT_NAME_BYTES);
+        validate_root_name(&longest).expect("NAME_MAX bytes");
+        let error = validate_root_name(&format!("{longest}a")).expect_err("over NAME_MAX");
+        assert_eq!(error.code, "workspace.path-escape");
     }
 
     #[test]

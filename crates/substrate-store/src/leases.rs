@@ -6,7 +6,7 @@ use crate::sessions::{
 };
 use crate::workspaces::{
     WORKSPACE_CLEANUP_INITIAL_BACKOFF_MS, WORKSPACE_CLEANUP_MAX_BACKOFF_MS, insert_tombstone,
-    upsert_workspace,
+    origin_from_column, upsert_workspace,
 };
 use crate::{ExecWrite, Scope, Store, StoreConfig, StoreError, StoredExec, to_i64, to_u64};
 use chrono::{DateTime, Utc};
@@ -14,7 +14,7 @@ use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 use serde::Serialize;
 use substrate_wire::{
     ErrorClass, ErrorDetail, Event, Exec, ExecState, LeaseObservation, LeaseState,
-    OperationOutcome, PipeSession, Workspace, WorkspaceState,
+    OperationOutcome, PipeSession, Workspace, WorkspaceOrigin, WorkspaceState,
 };
 
 pub(crate) const LEASE_SWEEPER_ACTOR: &str = "lease-sweeper";
@@ -52,8 +52,15 @@ impl NewLease {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LeaseResource {
-    Workspace { root_name: String },
-    Exec { workspace_id: String },
+    /// A workspace lease, with the row's origin: an adopted directory is the operator's, and an
+    /// expiry forgets the row without removing it (ADR 0035 decision 7).
+    Workspace {
+        root_name: String,
+        origin: WorkspaceOrigin,
+    },
+    Exec {
+        workspace_id: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -251,7 +258,7 @@ impl Store {
         let mut statement = transaction.prepare(
             "SELECT l.subject, l.resource_kind, l.resource_id, l.issued_wall, l.renew_by_wall,
                     l.boot_id, l.issued_boottime_ms, l.deadline_boottime_ms, l.state,
-                    w.root_name, e.workspace_id
+                    w.root_name, e.workspace_id, w.origin
              FROM leases AS l
              LEFT JOIN workspaces AS w
                ON w.deployment = l.deployment AND w.subject = l.subject AND w.id = l.resource_id
@@ -292,6 +299,7 @@ impl Store {
                         row.get::<_, String>(8)?,
                         row.get::<_, Option<String>>(9)?,
                         row.get::<_, Option<String>>(10)?,
+                        row.get::<_, Option<String>>(11)?,
                     ))
                 },
             )?
@@ -311,6 +319,7 @@ impl Store {
             state,
             root_name,
             workspace_id,
+            origin,
         ) in rows
         {
             last_examined = Some((subject.clone(), kind.clone(), id.clone()));
@@ -329,6 +338,9 @@ impl Store {
             let resource = if kind == "workspace" {
                 LeaseResource::Workspace {
                     root_name: root_name.unwrap_or_else(|| id.clone()),
+                    origin: origin
+                        .as_deref()
+                        .map_or(WorkspaceOrigin::Created, origin_from_column),
                 }
             } else if let Some(workspace_id) = workspace_id {
                 LeaseResource::Exec { workspace_id }

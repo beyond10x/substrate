@@ -1,0 +1,40 @@
+# A second adopt of the same root name by the subject that holds it is refused:
+# the store's root name is unique in the deployment.
+type: ess-scenario/5
+domain: substrate.workspaces
+scenario: adopt-twice-same-subject
+summary: A subject adopting a root name it already holds is refused as workspace.already-exists, and its row is unchanged.
+
+arrange:
+  - instance: dir
+    entity: substrate.workspaces.RootEntry
+    setup:
+      identity: adopted-repo
+      fields: {kind: directory}
+      state: Present
+  - instance: repo
+    entity: substrate.workspaces.Workspace
+
+timeline:
+  - at: 2026-10-15T09:00:00Z
+    command: substrate.workspaces.Adopt
+    actor: substrate.workspaces.AllowedSubject
+    caller: {subject: "local:1000"}
+    input: {root_name: adopted-repo, labels: {}}
+    outcome: adopted
+    capture: {instance: repo, event: substrate.workspaces.WorkspaceAdopted, field: workspace}
+
+  - at: 2026-10-15T09:00:01Z
+    command: substrate.workspaces.Adopt
+    actor: substrate.workspaces.AllowedSubject
+    caller: {subject: "local:1000"}
+    input: {root_name: adopted-repo, labels: {}}
+    outcome: held
+    error:
+      name: substrate.workspaces.AlreadyExists
+      fields: {root_name: adopted-repo}
+    no_events: [substrate.workspaces.WorkspaceAdopted]
+
+assert:
+  - view: substrate.workspaces.Workspaces
+    contains: {workspace: {$instance: repo}, state: Ready, root_name: adopted-repo, origin: adopted, owner: "local:1000"}

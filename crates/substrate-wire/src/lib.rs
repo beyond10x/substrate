@@ -99,6 +99,9 @@ pub const READ_ONLY_FILE_REFUSAL_CODES: [&str; 9] = [
 ];
 /// Largest number of distinct writable workspace subtrees in one execution.
 pub const MAX_WORKSPACE_WRITABLE_SUBTREES: u32 = 64;
+/// Longest root name, in bytes: Linux `NAME_MAX` (ADR 0035). Every member is ASCII, so bytes and
+/// characters count alike.
+pub const MAX_ROOT_NAME_BYTES: usize = 255;
 /// How many secret slots one start may name (ADR 0012).
 ///
 /// A slot is a credential, and a process that needs many credentials is a process that has been
@@ -666,6 +669,16 @@ impl Failure {
     }
 }
 
+/// `workspace.adopt` input (ADR 0035): the root name of a directory the operator placed under the
+/// workspace root, and labels as `workspace.create` takes them. No lease and no storage limit: the
+/// directory belongs to the operator.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WorkspaceAdoptInput {
+    pub root_name: RootName,
+    pub labels: Labels,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceCreateInput {
@@ -780,6 +793,11 @@ pub struct Workspace {
     pub labels: Labels,
     pub observed_at: DateTime<Utc>,
     pub state: WorkspaceState,
+    /// How the row came to exist (ADR 0035), read-only: an adopted workspace's directory is the
+    /// operator's, and destroy forgets the record without removing it.
+    pub origin: WorkspaceOrigin,
+    /// The directory under the workspace root this workspace is served from, read-only.
+    pub root_name: RootName,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage: Option<StorageUsage>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2009,6 +2027,65 @@ impl CaptureMode {
     }
 }
 
+// The root-name set and the workspace origin are generated from spec/workspaces, not transcribed
+// (ADR 0035). ESS generates them structurally only: the alphabet, the length bound and the
+// leading-`-` rule are runtime obligations [`is_root_name`] enforces (spec/workspaces/README.md).
+#[allow(dead_code, clippy::all, clippy::pedantic)]
+#[rustfmt::skip]
+#[path = "generated/workspace.rs"]
+mod workspace_types;
+pub use workspace_types::SubstrateWorkspacesOrigin as WorkspaceOrigin;
+pub use workspace_types::SubstrateWorkspacesRootName as RootName;
+impl Copy for WorkspaceOrigin {}
+impl Eq for WorkspaceOrigin {}
+impl WorkspaceOrigin {
+    /// The row was written by `workspace.adopt`; destroy forgets it and leaves the directory.
+    #[allow(non_upper_case_globals)]
+    pub const Adopted: Self = Self::V0;
+    /// The row was written by `workspace.create`; destroy removes the directory it made.
+    #[allow(non_upper_case_globals)]
+    pub const Created: Self = Self::V1;
+    pub fn is_adopted(self) -> bool {
+        self == Self::Adopted
+    }
+    /// The store column spelling, identical to the wire spelling.
+    pub fn as_str(self) -> &'static str {
+        if self.is_adopted() {
+            "adopted"
+        } else {
+            "created"
+        }
+    }
+}
+impl Eq for RootName {}
+impl RootName {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+    /// Whether this value is a member of the root-name set ([`is_root_name`]).
+    pub fn is_valid(&self) -> bool {
+        is_root_name(&self.0)
+    }
+}
+impl From<&str> for RootName {
+    fn from(value: &str) -> Self {
+        Self(value.to_owned())
+    }
+}
+
+/// Whether `name` is a member of the root-name set (ADR 0035 decision 1): ASCII alphanumerics,
+/// `_` and `-`, 1 to [`MAX_ROOT_NAME_BYTES`] bytes, no leading `-`. The set has no `.`, so a root
+/// name never names a hidden entry, a `.substrate-*` service directory, `.` or `..`, and has no
+/// `/` or NUL, so it is always exactly one path component. The host's `validate_root_name` and the
+/// daemon's adopt admission both call this one predicate.
+pub fn is_root_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() <= MAX_ROOT_NAME_BYTES
+        && !name.starts_with('-')
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
 /// Content-free accounting. Queued bytes are not a claim of client receipt.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -4913,3 +4990,80 @@ mod egress_aperture_tests {
 
 #[cfg(test)]
 mod read_only_file_tests;
+
+#[cfg(test)]
+mod adoption_tests {
+    use super::{
+        MAX_ROOT_NAME_BYTES, RootName, Workspace, WorkspaceAdoptInput, WorkspaceOrigin,
+        is_root_name,
+    };
+
+    #[test]
+    fn the_root_name_set_is_one_component_of_the_published_alphabet() {
+        // Prevents the adopt admission and the host from disagreeing about which names may reach
+        // openat2: both call this predicate, and it is ADR 0035's set exactly.
+        for name in ["harness", "engineering-protocols", "ws_01ABC", "_x", "a"] {
+            assert!(is_root_name(name), "{name:?}");
+        }
+        let longest = "a".repeat(MAX_ROOT_NAME_BYTES);
+        assert!(is_root_name(&longest));
+        for name in [
+            "",
+            ".",
+            "..",
+            ".hidden",
+            ".substrate-apertures",
+            "a/b",
+            "-rf",
+            "a b",
+            "ws_test\0",
+            "caf\u{e9}",
+        ] {
+            assert!(!is_root_name(name), "{name:?}");
+        }
+        assert!(!is_root_name(&"a".repeat(MAX_ROOT_NAME_BYTES + 1)));
+        assert!(RootName::from("adopted-repo").is_valid());
+    }
+
+    #[test]
+    fn the_workspace_resource_publishes_origin_and_root_name() {
+        // Prevents a resource that leaves a client unable to tell whether destroy removes the
+        // directory: both members are required on every workspace answer (ADR 0035 decision 4).
+        let value = serde_json::json!({
+            "id": "ws_01",
+            "kind": "workspace",
+            "labels": {},
+            "observed_at": "2026-10-17T00:00:00Z",
+            "state": "ready",
+            "origin": "adopted",
+            "root_name": "adopted-repo"
+        });
+        let workspace: Workspace = serde_json::from_value(value.clone()).expect("workspace");
+        assert_eq!(workspace.origin, WorkspaceOrigin::Adopted);
+        assert!(workspace.origin.is_adopted());
+        assert_eq!(workspace.root_name.as_str(), "adopted-repo");
+        assert_eq!(serde_json::to_value(&workspace).expect("json"), value);
+        let mut missing = value;
+        missing.as_object_mut().expect("object").remove("origin");
+        assert!(serde_json::from_value::<Workspace>(missing).is_err());
+        assert_eq!(WorkspaceOrigin::Created.as_str(), "created");
+    }
+
+    #[test]
+    fn adopt_input_is_closed_and_takes_no_lease_or_storage() {
+        let input: WorkspaceAdoptInput = serde_json::from_value(serde_json::json!({
+            "root_name": "adopted-repo",
+            "labels": {"purpose": "gate"}
+        }))
+        .expect("adopt input");
+        assert_eq!(input.root_name.as_str(), "adopted-repo");
+        for extra in ["lease_ttl_ms", "storage", "source"] {
+            let mut value = serde_json::json!({"root_name": "r", "labels": {}});
+            value[extra] = serde_json::json!(1);
+            assert!(
+                serde_json::from_value::<WorkspaceAdoptInput>(value).is_err(),
+                "{extra}"
+            );
+        }
+    }
+}

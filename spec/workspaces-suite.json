@@ -1,0 +1,5189 @@
+{
+  "provenance": {
+    "suite_version": "ess-conformance/34",
+    "system": "substrate",
+    "specification_version": "v1",
+    "spec_digest": "b29907e47155a50f7ae195e6e7db2fcac8e0b075ff569a7545889469bd3e1501",
+    "contract_digest": "3310b3e41cb85ea882652f7cf155be997403ebf8e2cb68b1d18b20aadd3ffddf",
+    "scenario_initial_state": "empty"
+  },
+  "scenarios": {
+    "substrate.workspaces.Adopt/outcome/absent": {
+      "purpose": "`substrate.workspaces.Adopt` answers `absent` for the cause it declares as external, injected",
+      "steps": [
+        {
+          "step": "configure_external_outcome",
+          "force": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "absent"
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Adopt",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262144"
+          },
+          "input": {
+            "labels": {
+              "kind": "literal",
+              "value": {
+                "labels": "labels.0"
+              }
+            },
+            "root_name": {
+              "kind": "literal",
+              "value": "adopted-repo"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "absent"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.workspaces.NotFound"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceForgotten"
+        },
+        {
+          "step": "configure_external_outcome",
+          "force": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "absent"
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Adopt",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262145"
+          },
+          "input": {
+            "labels": {
+              "kind": "literal",
+              "value": {
+                "labels": "labels.0"
+              }
+            },
+            "root_name": {
+              "kind": "literal",
+              "value": "adopted-repo"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "absent"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.workspaces.NotFound"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceForgotten"
+        }
+      ],
+      "source": [
+        {
+          "kind": "type",
+          "name": "substrate.workspaces.RootName"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.workspaces.Adopt"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "absent"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceForgotten"
+        },
+        {
+          "kind": "error",
+          "name": "substrate.workspaces.NotFound"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.workspaces.AllowedSubject"
+        }
+      ]
+    },
+    "substrate.workspaces.Adopt/outcome/adopted": {
+      "purpose": "`substrate.workspaces.Adopt` answers `adopted` for an input no other branch's guard claims",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Adopt",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262144"
+          },
+          "input": {
+            "labels": {
+              "kind": "literal",
+              "value": {
+                "labels": "labels.0"
+              }
+            },
+            "root_name": {
+              "kind": "literal",
+              "value": "adopted-repo"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "adopted"
+          }
+        },
+        {
+          "step": "expect_event",
+          "event": "substrate.workspaces.WorkspaceAdopted",
+          "payload": {
+            "owner": "subject-262144",
+            "root_name": "adopted-repo"
+          },
+          "shape": {
+            "owner": {
+              "holds": "primitive",
+              "kind": "string"
+            },
+            "root_name": {
+              "holds": "primitive",
+              "kind": "string"
+            },
+            "workspace": {
+              "holds": "primitive",
+              "kind": "string"
+            }
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceForgotten"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.workspaces.Workspaces",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "labels": {
+                "kind": "literal",
+                "value": {
+                  "labels": "labels.0"
+                }
+              },
+              "origin": {
+                "kind": "literal",
+                "value": "adopted"
+              },
+              "owner": {
+                "kind": "literal",
+                "value": "subject-262144"
+              },
+              "root_name": {
+                "kind": "literal",
+                "value": "adopted-repo"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Ready"
+              },
+              "workspace": {
+                "kind": "observed",
+                "event": "substrate.workspaces.WorkspaceAdopted",
+                "field": "workspace"
+              }
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Adopt",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262145"
+          },
+          "input": {
+            "labels": {
+              "kind": "literal",
+              "value": {
+                "labels": "labels.0"
+              }
+            },
+            "root_name": {
+              "kind": "literal",
+              "value": "adopted-repo"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "adopted"
+          }
+        },
+        {
+          "step": "expect_event",
+          "event": "substrate.workspaces.WorkspaceAdopted",
+          "payload": {
+            "owner": "subject-262145",
+            "root_name": "adopted-repo"
+          },
+          "shape": {
+            "owner": {
+              "holds": "primitive",
+              "kind": "string"
+            },
+            "root_name": {
+              "holds": "primitive",
+              "kind": "string"
+            },
+            "workspace": {
+              "holds": "primitive",
+              "kind": "string"
+            }
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "observed-1-swapped",
+          "entity": "substrate.workspaces.Workspace",
+          "event": "substrate.workspaces.WorkspaceAdopted",
+          "field": "workspace"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceForgotten"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.workspaces.Workspaces",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "labels": {
+                "kind": "literal",
+                "value": {
+                  "labels": "labels.0"
+                }
+              },
+              "origin": {
+                "kind": "literal",
+                "value": "adopted"
+              },
+              "owner": {
+                "kind": "literal",
+                "value": "subject-262145"
+              },
+              "root_name": {
+                "kind": "literal",
+                "value": "adopted-repo"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Ready"
+              },
+              "workspace": {
+                "kind": "instance",
+                "instance": "observed-1-swapped"
+              }
+            }
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "type",
+          "name": "substrate.workspaces.RootName"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.workspaces.Subject"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.workspaces.WorkspaceId"
+        },
+        {
+          "kind": "entity",
+          "name": "substrate.workspaces.Workspace"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.workspaces.Adopt"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "adopted"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceForgotten"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.workspaces.Workspaces"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.workspaces.AllowedSubject"
+        }
+      ]
+    },
+    "substrate.workspaces.Adopt/outcome/full": {
+      "purpose": "`substrate.workspaces.Adopt` answers `full` for the cause it declares as external, injected",
+      "steps": [
+        {
+          "step": "configure_external_outcome",
+          "force": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "full"
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Adopt",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262144"
+          },
+          "input": {
+            "labels": {
+              "kind": "literal",
+              "value": {
+                "labels": "labels.0"
+              }
+            },
+            "root_name": {
+              "kind": "literal",
+              "value": "adopted-repo"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "full"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.workspaces.Capacity"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceForgotten"
+        },
+        {
+          "step": "configure_external_outcome",
+          "force": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "full"
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Adopt",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262145"
+          },
+          "input": {
+            "labels": {
+              "kind": "literal",
+              "value": {
+                "labels": "labels.0"
+              }
+            },
+            "root_name": {
+              "kind": "literal",
+              "value": "adopted-repo"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "full"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.workspaces.Capacity"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceForgotten"
+        }
+      ],
+      "source": [
+        {
+          "kind": "type",
+          "name": "substrate.workspaces.RootName"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.workspaces.Adopt"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "full"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceForgotten"
+        },
+        {
+          "kind": "error",
+          "name": "substrate.workspaces.Capacity"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.workspaces.AllowedSubject"
+        }
+      ]
+    },
+    "substrate.workspaces.Adopt/outcome/held": {
+      "purpose": "`substrate.workspaces.Adopt` answers `held` for the cause it declares as external, injected",
+      "steps": [
+        {
+          "step": "configure_external_outcome",
+          "force": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "held"
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Adopt",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262144"
+          },
+          "input": {
+            "labels": {
+              "kind": "literal",
+              "value": {
+                "labels": "labels.0"
+              }
+            },
+            "root_name": {
+              "kind": "literal",
+              "value": "adopted-repo"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "held"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.workspaces.AlreadyExists",
+          "fields": {
+            "root_name": "adopted-repo"
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceForgotten"
+        },
+        {
+          "step": "configure_external_outcome",
+          "force": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "held"
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Adopt",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262145"
+          },
+          "input": {
+            "labels": {
+              "kind": "literal",
+              "value": {
+                "labels": "labels.0"
+              }
+            },
+            "root_name": {
+              "kind": "literal",
+              "value": "adopted-repo"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "held"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.workspaces.AlreadyExists",
+          "fields": {
+            "root_name": "adopted-repo"
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceForgotten"
+        }
+      ],
+      "source": [
+        {
+          "kind": "type",
+          "name": "substrate.workspaces.RootName"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.workspaces.Adopt"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "held"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceForgotten"
+        },
+        {
+          "kind": "error",
+          "name": "substrate.workspaces.AlreadyExists"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.workspaces.AllowedSubject"
+        }
+      ]
+    },
+    "substrate.workspaces.Adopt/outcome/held-elsewhere": {
+      "purpose": "`substrate.workspaces.Adopt` answers `held-elsewhere` for the cause it declares as external, injected",
+      "steps": [
+        {
+          "step": "configure_external_outcome",
+          "force": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "held-elsewhere"
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Adopt",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262144"
+          },
+          "input": {
+            "labels": {
+              "kind": "literal",
+              "value": {
+                "labels": "labels.0"
+              }
+            },
+            "root_name": {
+              "kind": "literal",
+              "value": "adopted-repo"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "held-elsewhere"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.workspaces.NotFound"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceForgotten"
+        },
+        {
+          "step": "configure_external_outcome",
+          "force": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "held-elsewhere"
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Adopt",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262145"
+          },
+          "input": {
+            "labels": {
+              "kind": "literal",
+              "value": {
+                "labels": "labels.0"
+              }
+            },
+            "root_name": {
+              "kind": "literal",
+              "value": "adopted-repo"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "held-elsewhere"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.workspaces.NotFound"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceForgotten"
+        }
+      ],
+      "source": [
+        {
+          "kind": "type",
+          "name": "substrate.workspaces.RootName"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.workspaces.Adopt"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "held-elsewhere"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceForgotten"
+        },
+        {
+          "kind": "error",
+          "name": "substrate.workspaces.NotFound"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.workspaces.AllowedSubject"
+        }
+      ]
+    },
+    "substrate.workspaces.Adopt/outcome/not-a-directory": {
+      "purpose": "`substrate.workspaces.Adopt` answers `not-a-directory` for the cause it declares as external, injected",
+      "steps": [
+        {
+          "step": "configure_external_outcome",
+          "force": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "not-a-directory"
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Adopt",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262144"
+          },
+          "input": {
+            "labels": {
+              "kind": "literal",
+              "value": {
+                "labels": "labels.0"
+              }
+            },
+            "root_name": {
+              "kind": "literal",
+              "value": "adopted-repo"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "not-a-directory"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.workspaces.PathEscape",
+          "fields": {
+            "root_name": "adopted-repo"
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceForgotten"
+        },
+        {
+          "step": "configure_external_outcome",
+          "force": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "not-a-directory"
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Adopt",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262145"
+          },
+          "input": {
+            "labels": {
+              "kind": "literal",
+              "value": {
+                "labels": "labels.0"
+              }
+            },
+            "root_name": {
+              "kind": "literal",
+              "value": "adopted-repo"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "not-a-directory"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.workspaces.PathEscape",
+          "fields": {
+            "root_name": "adopted-repo"
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceForgotten"
+        }
+      ],
+      "source": [
+        {
+          "kind": "type",
+          "name": "substrate.workspaces.RootName"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.workspaces.Adopt"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "not-a-directory"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceForgotten"
+        },
+        {
+          "kind": "error",
+          "name": "substrate.workspaces.PathEscape"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.workspaces.AllowedSubject"
+        }
+      ]
+    },
+    "substrate.workspaces.Adopt/outcome/not-owned": {
+      "purpose": "`substrate.workspaces.Adopt` answers `not-owned` for the cause it declares as external, injected",
+      "steps": [
+        {
+          "step": "configure_external_outcome",
+          "force": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "not-owned"
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Adopt",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262144"
+          },
+          "input": {
+            "labels": {
+              "kind": "literal",
+              "value": {
+                "labels": "labels.0"
+              }
+            },
+            "root_name": {
+              "kind": "literal",
+              "value": "adopted-repo"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "not-owned"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.workspaces.PathEscape",
+          "fields": {
+            "root_name": "adopted-repo"
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceForgotten"
+        },
+        {
+          "step": "configure_external_outcome",
+          "force": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "not-owned"
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Adopt",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262145"
+          },
+          "input": {
+            "labels": {
+              "kind": "literal",
+              "value": {
+                "labels": "labels.0"
+              }
+            },
+            "root_name": {
+              "kind": "literal",
+              "value": "adopted-repo"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "not-owned"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.workspaces.PathEscape",
+          "fields": {
+            "root_name": "adopted-repo"
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceForgotten"
+        }
+      ],
+      "source": [
+        {
+          "kind": "type",
+          "name": "substrate.workspaces.RootName"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.workspaces.Adopt"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "not-owned"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceForgotten"
+        },
+        {
+          "kind": "error",
+          "name": "substrate.workspaces.PathEscape"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.workspaces.AllowedSubject"
+        }
+      ]
+    },
+    "substrate.workspaces.Create/outcome/created": {
+      "purpose": "`substrate.workspaces.Create` answers `created` for an input no other branch's guard claims",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Create",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262144"
+          },
+          "input": {
+            "labels": {
+              "kind": "literal",
+              "value": {
+                "labels": "labels.0"
+              }
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Create",
+            "outcome": "created"
+          }
+        },
+        {
+          "step": "expect_event",
+          "event": "substrate.workspaces.WorkspaceCreated",
+          "payload": {
+            "owner": "subject-262144"
+          },
+          "shape": {
+            "owner": {
+              "holds": "primitive",
+              "kind": "string"
+            },
+            "workspace": {
+              "holds": "primitive",
+              "kind": "string"
+            }
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceForgotten"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.workspaces.Workspaces",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "labels": {
+                "kind": "literal",
+                "value": {
+                  "labels": "labels.0"
+                }
+              },
+              "origin": {
+                "kind": "literal",
+                "value": "created"
+              },
+              "owner": {
+                "kind": "literal",
+                "value": "subject-262144"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Ready"
+              },
+              "workspace": {
+                "kind": "observed",
+                "event": "substrate.workspaces.WorkspaceCreated",
+                "field": "workspace"
+              }
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Create",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262145"
+          },
+          "input": {
+            "labels": {
+              "kind": "literal",
+              "value": {
+                "labels": "labels.0"
+              }
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Create",
+            "outcome": "created"
+          }
+        },
+        {
+          "step": "expect_event",
+          "event": "substrate.workspaces.WorkspaceCreated",
+          "payload": {
+            "owner": "subject-262145"
+          },
+          "shape": {
+            "owner": {
+              "holds": "primitive",
+              "kind": "string"
+            },
+            "workspace": {
+              "holds": "primitive",
+              "kind": "string"
+            }
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "observed-1-swapped",
+          "entity": "substrate.workspaces.Workspace",
+          "event": "substrate.workspaces.WorkspaceCreated",
+          "field": "workspace"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceForgotten"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.workspaces.Workspaces",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "labels": {
+                "kind": "literal",
+                "value": {
+                  "labels": "labels.0"
+                }
+              },
+              "origin": {
+                "kind": "literal",
+                "value": "created"
+              },
+              "owner": {
+                "kind": "literal",
+                "value": "subject-262145"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Ready"
+              },
+              "workspace": {
+                "kind": "instance",
+                "instance": "observed-1-swapped"
+              }
+            }
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "type",
+          "name": "substrate.workspaces.Subject"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.workspaces.WorkspaceId"
+        },
+        {
+          "kind": "entity",
+          "name": "substrate.workspaces.Workspace"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.workspaces.Create"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.workspaces.Create",
+            "outcome": "created"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceForgotten"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.workspaces.Workspaces"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.workspaces.AllowedSubject"
+        }
+      ]
+    },
+    "substrate.workspaces.Create/outcome/full": {
+      "purpose": "`substrate.workspaces.Create` answers `full` for the cause it declares as external, injected",
+      "steps": [
+        {
+          "step": "configure_external_outcome",
+          "force": {
+            "command": "substrate.workspaces.Create",
+            "outcome": "full"
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Create",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262144"
+          },
+          "input": {
+            "labels": {
+              "kind": "literal",
+              "value": {
+                "labels": "labels.0"
+              }
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Create",
+            "outcome": "full"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.workspaces.Capacity"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceForgotten"
+        },
+        {
+          "step": "configure_external_outcome",
+          "force": {
+            "command": "substrate.workspaces.Create",
+            "outcome": "full"
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Create",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262145"
+          },
+          "input": {
+            "labels": {
+              "kind": "literal",
+              "value": {
+                "labels": "labels.0"
+              }
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Create",
+            "outcome": "full"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.workspaces.Capacity"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceForgotten"
+        }
+      ],
+      "source": [
+        {
+          "kind": "command",
+          "name": "substrate.workspaces.Create"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.workspaces.Create",
+            "outcome": "full"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceForgotten"
+        },
+        {
+          "kind": "error",
+          "name": "substrate.workspaces.Capacity"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.workspaces.AllowedSubject"
+        }
+      ]
+    },
+    "substrate.workspaces.Destroy/outcome/absent": {
+      "purpose": "`substrate.workspaces.Destroy` for an identity no record carries takes `absent` and reports `substrate.workspaces.NotFound`",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Destroy",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262144"
+          },
+          "input": {
+            "workspace": {
+              "kind": "literal",
+              "value": "ws_workspacet1048576"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Destroy",
+            "outcome": "absent"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.workspaces.NotFound"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceForgotten"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Destroy",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262145"
+          },
+          "input": {
+            "workspace": {
+              "kind": "literal",
+              "value": "ws_workspacet524288"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Destroy",
+            "outcome": "absent"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.workspaces.NotFound"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceForgotten"
+        }
+      ],
+      "source": [
+        {
+          "kind": "entity",
+          "name": "substrate.workspaces.Workspace"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.workspaces.Destroy"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.workspaces.Destroy",
+            "outcome": "absent"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceForgotten"
+        },
+        {
+          "kind": "error",
+          "name": "substrate.workspaces.NotFound"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.workspaces.AllowedSubject"
+        }
+      ]
+    },
+    "substrate.workspaces.Destroy/outcome/destroying": {
+      "purpose": "`substrate.workspaces.Destroy` answers `destroying` for an input no other branch's guard claims",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Create",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262144"
+          },
+          "input": {
+            "labels": {
+              "kind": "literal",
+              "value": {
+                "labels": "labels.0"
+              }
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Create",
+            "outcome": "created"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "workspace",
+          "entity": "substrate.workspaces.Workspace",
+          "event": "substrate.workspaces.WorkspaceCreated",
+          "field": "workspace"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.workspaces.Workspaces",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "origin": {
+                "kind": "literal",
+                "value": "created"
+              },
+              "owner": {
+                "kind": "literal",
+                "value": "subject-262144"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Ready"
+              },
+              "workspace": {
+                "kind": "instance",
+                "instance": "workspace"
+              }
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Destroy",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262144"
+          },
+          "input": {
+            "workspace": {
+              "kind": "instance",
+              "instance": "workspace"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Destroy",
+            "outcome": "destroying"
+          }
+        },
+        {
+          "step": "expect_no_error"
+        },
+        {
+          "step": "expect_event_values",
+          "event": "substrate.workspaces.DestroyStarted",
+          "payload": {
+            "workspace": {
+              "kind": "instance",
+              "instance": "workspace"
+            }
+          },
+          "shape": {
+            "workspace": {
+              "holds": "primitive",
+              "kind": "string"
+            }
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceForgotten"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.workspaces.Workspaces",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "origin": {
+                "kind": "literal",
+                "value": "created"
+              },
+              "owner": {
+                "kind": "literal",
+                "value": "subject-262144"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Destroying"
+              },
+              "workspace": {
+                "kind": "instance",
+                "instance": "workspace"
+              }
+            }
+          }
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.workspaces.Workspaces",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "labels": {
+                "kind": "literal",
+                "value": {
+                  "labels": "labels.0"
+                }
+              },
+              "origin": {
+                "kind": "literal",
+                "value": "created"
+              },
+              "owner": {
+                "kind": "literal",
+                "value": "subject-262144"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Destroying"
+              },
+              "workspace": {
+                "kind": "instance",
+                "instance": "workspace"
+              }
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Create",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262145"
+          },
+          "input": {
+            "labels": {
+              "kind": "literal",
+              "value": {
+                "labels": "labels.0"
+              }
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Create",
+            "outcome": "created"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "workspace-swapped",
+          "entity": "substrate.workspaces.Workspace",
+          "event": "substrate.workspaces.WorkspaceCreated",
+          "field": "workspace"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.workspaces.Workspaces",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "origin": {
+                "kind": "literal",
+                "value": "created"
+              },
+              "owner": {
+                "kind": "literal",
+                "value": "subject-262145"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Ready"
+              },
+              "workspace": {
+                "kind": "instance",
+                "instance": "workspace-swapped"
+              }
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Destroy",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262145"
+          },
+          "input": {
+            "workspace": {
+              "kind": "instance",
+              "instance": "workspace-swapped"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Destroy",
+            "outcome": "destroying"
+          }
+        },
+        {
+          "step": "expect_no_error"
+        },
+        {
+          "step": "expect_event_values",
+          "event": "substrate.workspaces.DestroyStarted",
+          "payload": {
+            "workspace": {
+              "kind": "instance",
+              "instance": "workspace-swapped"
+            }
+          },
+          "shape": {
+            "workspace": {
+              "holds": "primitive",
+              "kind": "string"
+            }
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceForgotten"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.workspaces.Workspaces",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "origin": {
+                "kind": "literal",
+                "value": "created"
+              },
+              "owner": {
+                "kind": "literal",
+                "value": "subject-262145"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Destroying"
+              },
+              "workspace": {
+                "kind": "instance",
+                "instance": "workspace-swapped"
+              }
+            }
+          }
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.workspaces.Workspaces",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "labels": {
+                "kind": "literal",
+                "value": {
+                  "labels": "labels.0"
+                }
+              },
+              "origin": {
+                "kind": "literal",
+                "value": "created"
+              },
+              "owner": {
+                "kind": "literal",
+                "value": "subject-262145"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Destroying"
+              },
+              "workspace": {
+                "kind": "instance",
+                "instance": "workspace-swapped"
+              }
+            }
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "type",
+          "name": "substrate.workspaces.WorkspaceId"
+        },
+        {
+          "kind": "entity",
+          "name": "substrate.workspaces.Workspace"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.workspaces.Create"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.workspaces.Destroy"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.workspaces.Create",
+            "outcome": "created"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.workspaces.Destroy",
+            "outcome": "destroying"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceForgotten"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.workspaces.Workspaces"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.workspaces.AllowedSubject"
+        }
+      ]
+    },
+    "substrate.workspaces.Destroy/outcome/execs-active": {
+      "purpose": "`substrate.workspaces.Destroy` answers `execs-active` for the cause it declares as external, injected",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Adopt",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262144"
+          },
+          "input": {
+            "labels": {
+              "kind": "literal",
+              "value": {
+                "labels": "labels.0"
+              }
+            },
+            "root_name": {
+              "kind": "literal",
+              "value": "adopted-repo"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "adopted"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "workspace",
+          "entity": "substrate.workspaces.Workspace",
+          "event": "substrate.workspaces.WorkspaceAdopted",
+          "field": "workspace"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.workspaces.Workspaces",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "origin": {
+                "kind": "literal",
+                "value": "adopted"
+              },
+              "owner": {
+                "kind": "literal",
+                "value": "subject-262144"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Ready"
+              },
+              "workspace": {
+                "kind": "instance",
+                "instance": "workspace"
+              }
+            }
+          }
+        },
+        {
+          "step": "configure_external_outcome",
+          "force": {
+            "command": "substrate.workspaces.Destroy",
+            "outcome": "execs-active"
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Destroy",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262145"
+          },
+          "input": {
+            "workspace": {
+              "kind": "instance",
+              "instance": "workspace"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Destroy",
+            "outcome": "execs-active"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.workspaces.ExecsActive"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceForgotten"
+        },
+        {
+          "step": "configure_external_outcome",
+          "force": {
+            "command": "substrate.workspaces.Destroy",
+            "outcome": "execs-active"
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Destroy",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262145"
+          },
+          "input": {
+            "workspace": {
+              "kind": "literal",
+              "value": "ws_workspacet1048576"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Destroy",
+            "outcome": "execs-active"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.workspaces.ExecsActive",
+          "fields": {
+            "workspace": "ws_workspacet1048576"
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceForgotten"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Adopt",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262145"
+          },
+          "input": {
+            "labels": {
+              "kind": "literal",
+              "value": {
+                "labels": "labels.0"
+              }
+            },
+            "root_name": {
+              "kind": "literal",
+              "value": "adopted-repo"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "adopted"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "workspace-swapped",
+          "entity": "substrate.workspaces.Workspace",
+          "event": "substrate.workspaces.WorkspaceAdopted",
+          "field": "workspace"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.workspaces.Workspaces",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "origin": {
+                "kind": "literal",
+                "value": "adopted"
+              },
+              "owner": {
+                "kind": "literal",
+                "value": "subject-262145"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Ready"
+              },
+              "workspace": {
+                "kind": "instance",
+                "instance": "workspace-swapped"
+              }
+            }
+          }
+        },
+        {
+          "step": "configure_external_outcome",
+          "force": {
+            "command": "substrate.workspaces.Destroy",
+            "outcome": "execs-active"
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Destroy",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262144"
+          },
+          "input": {
+            "workspace": {
+              "kind": "instance",
+              "instance": "workspace-swapped"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Destroy",
+            "outcome": "execs-active"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.workspaces.ExecsActive"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceForgotten"
+        },
+        {
+          "step": "configure_external_outcome",
+          "force": {
+            "command": "substrate.workspaces.Destroy",
+            "outcome": "execs-active"
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Destroy",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262144"
+          },
+          "input": {
+            "workspace": {
+              "kind": "literal",
+              "value": "ws_workspacet524288"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Destroy",
+            "outcome": "execs-active"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.workspaces.ExecsActive",
+          "fields": {
+            "workspace": "ws_workspacet524288"
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceForgotten"
+        }
+      ],
+      "source": [
+        {
+          "kind": "type",
+          "name": "substrate.workspaces.WorkspaceId"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.workspaces.Adopt"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.workspaces.Destroy"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "adopted"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.workspaces.Destroy",
+            "outcome": "execs-active"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceForgotten"
+        },
+        {
+          "kind": "error",
+          "name": "substrate.workspaces.ExecsActive"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.workspaces.Workspaces"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.workspaces.AllowedSubject"
+        }
+      ]
+    },
+    "substrate.workspaces.Destroy/outcome/forgotten": {
+      "purpose": "`substrate.workspaces.Destroy` answers `forgotten` for an independently observed subject enum fact and an eligible input",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Adopt",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262144"
+          },
+          "input": {
+            "labels": {
+              "kind": "literal",
+              "value": {
+                "labels": "labels.0"
+              }
+            },
+            "root_name": {
+              "kind": "literal",
+              "value": "adopted-repo"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "adopted"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "workspace",
+          "entity": "substrate.workspaces.Workspace",
+          "event": "substrate.workspaces.WorkspaceAdopted",
+          "field": "workspace"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.workspaces.Workspaces",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "origin": {
+                "kind": "literal",
+                "value": "adopted"
+              },
+              "owner": {
+                "kind": "literal",
+                "value": "subject-262144"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Ready"
+              },
+              "workspace": {
+                "kind": "instance",
+                "instance": "workspace"
+              }
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Destroy",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262144"
+          },
+          "input": {
+            "workspace": {
+              "kind": "instance",
+              "instance": "workspace"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Destroy",
+            "outcome": "forgotten"
+          }
+        },
+        {
+          "step": "expect_no_error"
+        },
+        {
+          "step": "expect_event_values",
+          "event": "substrate.workspaces.WorkspaceForgotten",
+          "payload": {
+            "workspace": {
+              "kind": "instance",
+              "instance": "workspace"
+            }
+          },
+          "shape": {
+            "workspace": {
+              "holds": "primitive",
+              "kind": "string"
+            }
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_subject_absent",
+          "view": "substrate.workspaces.Workspaces",
+          "subject": {
+            "workspace": {
+              "kind": "instance",
+              "instance": "workspace"
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Destroy",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262144"
+          },
+          "input": {
+            "workspace": {
+              "kind": "instance",
+              "instance": "workspace"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Destroy",
+            "outcome": "absent"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.workspaces.NotFound"
+        },
+        {
+          "step": "expect_no_events"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Adopt",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262145"
+          },
+          "input": {
+            "labels": {
+              "kind": "literal",
+              "value": {
+                "labels": "labels.0"
+              }
+            },
+            "root_name": {
+              "kind": "literal",
+              "value": "adopted-repo"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "adopted"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "workspace-swapped",
+          "entity": "substrate.workspaces.Workspace",
+          "event": "substrate.workspaces.WorkspaceAdopted",
+          "field": "workspace"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.workspaces.Workspaces",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "origin": {
+                "kind": "literal",
+                "value": "adopted"
+              },
+              "owner": {
+                "kind": "literal",
+                "value": "subject-262145"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Ready"
+              },
+              "workspace": {
+                "kind": "instance",
+                "instance": "workspace-swapped"
+              }
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Destroy",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262145"
+          },
+          "input": {
+            "workspace": {
+              "kind": "instance",
+              "instance": "workspace-swapped"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Destroy",
+            "outcome": "forgotten"
+          }
+        },
+        {
+          "step": "expect_no_error"
+        },
+        {
+          "step": "expect_event_values",
+          "event": "substrate.workspaces.WorkspaceForgotten",
+          "payload": {
+            "workspace": {
+              "kind": "instance",
+              "instance": "workspace-swapped"
+            }
+          },
+          "shape": {
+            "workspace": {
+              "holds": "primitive",
+              "kind": "string"
+            }
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_subject_absent",
+          "view": "substrate.workspaces.Workspaces",
+          "subject": {
+            "workspace": {
+              "kind": "instance",
+              "instance": "workspace-swapped"
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Destroy",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262145"
+          },
+          "input": {
+            "workspace": {
+              "kind": "instance",
+              "instance": "workspace-swapped"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Destroy",
+            "outcome": "absent"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.workspaces.NotFound"
+        },
+        {
+          "step": "expect_no_events"
+        }
+      ],
+      "source": [
+        {
+          "kind": "type",
+          "name": "substrate.workspaces.WorkspaceId"
+        },
+        {
+          "kind": "entity",
+          "name": "substrate.workspaces.Workspace"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.workspaces.Adopt"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.workspaces.Destroy"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "adopted"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.workspaces.Destroy",
+            "outcome": "absent"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.workspaces.Destroy",
+            "outcome": "forgotten"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceForgotten"
+        },
+        {
+          "kind": "error",
+          "name": "substrate.workspaces.NotFound"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.workspaces.Workspaces"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.workspaces.AllowedSubject"
+        }
+      ]
+    },
+    "substrate.workspaces.Destroy/outcome/not-yours": {
+      "purpose": "`substrate.workspaces.Destroy` answers `not-yours` for an independently observed subject enum fact and an eligible input",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Destroy",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262145"
+          },
+          "input": {
+            "workspace": {
+              "kind": "literal",
+              "value": "ws_workspace"
+            }
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceForgotten"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.workspaces.Workspaces",
+          "expectation": {
+            "expect": "excludes",
+            "fields": {
+              "workspace": {
+                "kind": "literal",
+                "value": "ws_workspace"
+              }
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Create",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262144"
+          },
+          "input": {
+            "labels": {
+              "kind": "literal",
+              "value": {
+                "labels": "labels.0"
+              }
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Create",
+            "outcome": "created"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "workspace",
+          "entity": "substrate.workspaces.Workspace",
+          "event": "substrate.workspaces.WorkspaceCreated",
+          "field": "workspace"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.workspaces.Workspaces",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "origin": {
+                "kind": "literal",
+                "value": "created"
+              },
+              "owner": {
+                "kind": "literal",
+                "value": "subject-262144"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Ready"
+              },
+              "workspace": {
+                "kind": "instance",
+                "instance": "workspace"
+              }
+            }
+          }
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "snapshot_complete_subject",
+          "view": "substrate.workspaces.Workspaces",
+          "subject": {
+            "workspace": {
+              "kind": "instance",
+              "instance": "workspace"
+            }
+          },
+          "shape": {
+            "identity_field": "workspace",
+            "fields": [
+              {
+                "name": "workspace",
+                "type": "substrate.workspaces.WorkspaceId"
+              },
+              {
+                "name": "state",
+                "type": "substrate.workspaces.Workspace.State"
+              },
+              {
+                "name": "root_name",
+                "type": "substrate.workspaces.RootName"
+              },
+              {
+                "name": "labels",
+                "type": "Map<String, String>"
+              },
+              {
+                "name": "origin",
+                "type": "substrate.workspaces.Origin"
+              },
+              {
+                "name": "owner",
+                "type": "substrate.workspaces.Subject"
+              }
+            ],
+            "declarations": {
+              "substrate.workspaces.Origin": {
+                "kind": "enum",
+                "variants": [
+                  "created",
+                  "adopted"
+                ]
+              },
+              "substrate.workspaces.RootName": {
+                "kind": "newtype",
+                "of": "String"
+              },
+              "substrate.workspaces.Subject": {
+                "kind": "newtype",
+                "of": "String"
+              },
+              "substrate.workspaces.Workspace.State": {
+                "kind": "enum",
+                "variants": [
+                  "Destroying",
+                  "Ready"
+                ]
+              },
+              "substrate.workspaces.WorkspaceId": {
+                "kind": "newtype",
+                "of": "String"
+              }
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Destroy",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262145"
+          },
+          "input": {
+            "workspace": {
+              "kind": "instance",
+              "instance": "workspace"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Destroy",
+            "outcome": "not-yours"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.workspaces.NotFound"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceForgotten"
+        },
+        {
+          "step": "expect_no_events"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_complete_subject_unchanged",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Destroy",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262144"
+          },
+          "input": {
+            "workspace": {
+              "kind": "literal",
+              "value": "ws_workspacet524288"
+            }
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceForgotten"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.workspaces.Workspaces",
+          "expectation": {
+            "expect": "excludes",
+            "fields": {
+              "workspace": {
+                "kind": "literal",
+                "value": "ws_workspacet524288"
+              }
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Create",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262145"
+          },
+          "input": {
+            "labels": {
+              "kind": "literal",
+              "value": {
+                "labels": "labels.0"
+              }
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Create",
+            "outcome": "created"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "workspace-swapped",
+          "entity": "substrate.workspaces.Workspace",
+          "event": "substrate.workspaces.WorkspaceCreated",
+          "field": "workspace"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.workspaces.Workspaces",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "origin": {
+                "kind": "literal",
+                "value": "created"
+              },
+              "owner": {
+                "kind": "literal",
+                "value": "subject-262145"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Ready"
+              },
+              "workspace": {
+                "kind": "instance",
+                "instance": "workspace-swapped"
+              }
+            }
+          }
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "snapshot_complete_subject",
+          "view": "substrate.workspaces.Workspaces",
+          "subject": {
+            "workspace": {
+              "kind": "instance",
+              "instance": "workspace-swapped"
+            }
+          },
+          "shape": {
+            "identity_field": "workspace",
+            "fields": [
+              {
+                "name": "workspace",
+                "type": "substrate.workspaces.WorkspaceId"
+              },
+              {
+                "name": "state",
+                "type": "substrate.workspaces.Workspace.State"
+              },
+              {
+                "name": "root_name",
+                "type": "substrate.workspaces.RootName"
+              },
+              {
+                "name": "labels",
+                "type": "Map<String, String>"
+              },
+              {
+                "name": "origin",
+                "type": "substrate.workspaces.Origin"
+              },
+              {
+                "name": "owner",
+                "type": "substrate.workspaces.Subject"
+              }
+            ],
+            "declarations": {
+              "substrate.workspaces.Origin": {
+                "kind": "enum",
+                "variants": [
+                  "created",
+                  "adopted"
+                ]
+              },
+              "substrate.workspaces.RootName": {
+                "kind": "newtype",
+                "of": "String"
+              },
+              "substrate.workspaces.Subject": {
+                "kind": "newtype",
+                "of": "String"
+              },
+              "substrate.workspaces.Workspace.State": {
+                "kind": "enum",
+                "variants": [
+                  "Destroying",
+                  "Ready"
+                ]
+              },
+              "substrate.workspaces.WorkspaceId": {
+                "kind": "newtype",
+                "of": "String"
+              }
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Destroy",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262144"
+          },
+          "input": {
+            "workspace": {
+              "kind": "instance",
+              "instance": "workspace-swapped"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Destroy",
+            "outcome": "not-yours"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.workspaces.NotFound"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceForgotten"
+        },
+        {
+          "step": "expect_no_events"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_complete_subject_unchanged",
+          "view": "substrate.workspaces.Workspaces"
+        }
+      ],
+      "source": [
+        {
+          "kind": "type",
+          "name": "substrate.workspaces.WorkspaceId"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.workspaces.Create"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.workspaces.Destroy"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.workspaces.Create",
+            "outcome": "created"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.workspaces.Destroy",
+            "outcome": "not-yours"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceForgotten"
+        },
+        {
+          "kind": "error",
+          "name": "substrate.workspaces.NotFound"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.workspaces.Workspaces"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.workspaces.AllowedSubject"
+        }
+      ]
+    },
+    "substrate.workspaces.Workspace/state/Destroying/refuses/substrate.workspaces.Destroy": {
+      "purpose": "`substrate.workspaces.Destroy` does not move a `substrate.workspaces.Workspace` that is in `Destroying`, and reports `substrate.workspaces.NotReady`",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Create",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262144"
+          },
+          "input": {
+            "labels": {
+              "kind": "literal",
+              "value": {
+                "labels": "labels.0"
+              }
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Create",
+            "outcome": "created"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "workspace",
+          "entity": "substrate.workspaces.Workspace",
+          "event": "substrate.workspaces.WorkspaceCreated",
+          "field": "workspace"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.workspaces.Workspaces",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "origin": {
+                "kind": "literal",
+                "value": "created"
+              },
+              "owner": {
+                "kind": "literal",
+                "value": "subject-262144"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Ready"
+              },
+              "workspace": {
+                "kind": "instance",
+                "instance": "workspace"
+              }
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Destroy",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262144"
+          },
+          "input": {
+            "workspace": {
+              "kind": "instance",
+              "instance": "workspace"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Destroy",
+            "outcome": "destroying"
+          }
+        },
+        {
+          "step": "expect_no_error"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.workspaces.Workspaces",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "origin": {
+                "kind": "literal",
+                "value": "created"
+              },
+              "owner": {
+                "kind": "literal",
+                "value": "subject-262144"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Destroying"
+              },
+              "workspace": {
+                "kind": "instance",
+                "instance": "workspace"
+              }
+            }
+          }
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "snapshot_complete_subject",
+          "view": "substrate.workspaces.Workspaces",
+          "subject": {
+            "workspace": {
+              "kind": "instance",
+              "instance": "workspace"
+            }
+          },
+          "shape": {
+            "identity_field": "workspace",
+            "fields": [
+              {
+                "name": "workspace",
+                "type": "substrate.workspaces.WorkspaceId"
+              },
+              {
+                "name": "state",
+                "type": "substrate.workspaces.Workspace.State"
+              },
+              {
+                "name": "root_name",
+                "type": "substrate.workspaces.RootName"
+              },
+              {
+                "name": "labels",
+                "type": "Map<String, String>"
+              },
+              {
+                "name": "origin",
+                "type": "substrate.workspaces.Origin"
+              },
+              {
+                "name": "owner",
+                "type": "substrate.workspaces.Subject"
+              }
+            ],
+            "declarations": {
+              "substrate.workspaces.Origin": {
+                "kind": "enum",
+                "variants": [
+                  "created",
+                  "adopted"
+                ]
+              },
+              "substrate.workspaces.RootName": {
+                "kind": "newtype",
+                "of": "String"
+              },
+              "substrate.workspaces.Subject": {
+                "kind": "newtype",
+                "of": "String"
+              },
+              "substrate.workspaces.Workspace.State": {
+                "kind": "enum",
+                "variants": [
+                  "Destroying",
+                  "Ready"
+                ]
+              },
+              "substrate.workspaces.WorkspaceId": {
+                "kind": "newtype",
+                "of": "String"
+              }
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Destroy",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262144"
+          },
+          "input": {
+            "workspace": {
+              "kind": "instance",
+              "instance": "workspace"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Destroy",
+            "outcome": "not-ready"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.workspaces.NotReady"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceForgotten"
+        },
+        {
+          "step": "expect_no_events"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_complete_subject_unchanged",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Create",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262145"
+          },
+          "input": {
+            "labels": {
+              "kind": "literal",
+              "value": {
+                "labels": "labels.0"
+              }
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Create",
+            "outcome": "created"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "workspace-swapped",
+          "entity": "substrate.workspaces.Workspace",
+          "event": "substrate.workspaces.WorkspaceCreated",
+          "field": "workspace"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.workspaces.Workspaces",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "origin": {
+                "kind": "literal",
+                "value": "created"
+              },
+              "owner": {
+                "kind": "literal",
+                "value": "subject-262145"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Ready"
+              },
+              "workspace": {
+                "kind": "instance",
+                "instance": "workspace-swapped"
+              }
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Destroy",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262145"
+          },
+          "input": {
+            "workspace": {
+              "kind": "instance",
+              "instance": "workspace-swapped"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Destroy",
+            "outcome": "destroying"
+          }
+        },
+        {
+          "step": "expect_no_error"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.workspaces.Workspaces",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "origin": {
+                "kind": "literal",
+                "value": "created"
+              },
+              "owner": {
+                "kind": "literal",
+                "value": "subject-262145"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Destroying"
+              },
+              "workspace": {
+                "kind": "instance",
+                "instance": "workspace-swapped"
+              }
+            }
+          }
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "snapshot_complete_subject",
+          "view": "substrate.workspaces.Workspaces",
+          "subject": {
+            "workspace": {
+              "kind": "instance",
+              "instance": "workspace-swapped"
+            }
+          },
+          "shape": {
+            "identity_field": "workspace",
+            "fields": [
+              {
+                "name": "workspace",
+                "type": "substrate.workspaces.WorkspaceId"
+              },
+              {
+                "name": "state",
+                "type": "substrate.workspaces.Workspace.State"
+              },
+              {
+                "name": "root_name",
+                "type": "substrate.workspaces.RootName"
+              },
+              {
+                "name": "labels",
+                "type": "Map<String, String>"
+              },
+              {
+                "name": "origin",
+                "type": "substrate.workspaces.Origin"
+              },
+              {
+                "name": "owner",
+                "type": "substrate.workspaces.Subject"
+              }
+            ],
+            "declarations": {
+              "substrate.workspaces.Origin": {
+                "kind": "enum",
+                "variants": [
+                  "created",
+                  "adopted"
+                ]
+              },
+              "substrate.workspaces.RootName": {
+                "kind": "newtype",
+                "of": "String"
+              },
+              "substrate.workspaces.Subject": {
+                "kind": "newtype",
+                "of": "String"
+              },
+              "substrate.workspaces.Workspace.State": {
+                "kind": "enum",
+                "variants": [
+                  "Destroying",
+                  "Ready"
+                ]
+              },
+              "substrate.workspaces.WorkspaceId": {
+                "kind": "newtype",
+                "of": "String"
+              }
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Destroy",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262145"
+          },
+          "input": {
+            "workspace": {
+              "kind": "instance",
+              "instance": "workspace-swapped"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Destroy",
+            "outcome": "not-ready"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.workspaces.NotReady"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceForgotten"
+        },
+        {
+          "step": "expect_no_events"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_complete_subject_unchanged",
+          "view": "substrate.workspaces.Workspaces"
+        }
+      ],
+      "source": [
+        {
+          "kind": "entity",
+          "name": "substrate.workspaces.Workspace"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.workspaces.Create"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.workspaces.Destroy"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.workspaces.Create",
+            "outcome": "created"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.workspaces.Destroy",
+            "outcome": "destroying"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.workspaces.Destroy",
+            "outcome": "not-ready"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceForgotten"
+        },
+        {
+          "kind": "error",
+          "name": "substrate.workspaces.NotReady"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.workspaces.Workspaces"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.workspaces.AllowedSubject"
+        }
+      ]
+    },
+    "substrate.workspaces.Workspace/transition/begin_destroy/by/substrate.workspaces.Destroy/destroying": {
+      "purpose": "`substrate.workspaces.Destroy` on `destroying` moves a `substrate.workspaces.Workspace` to `Destroying` along `begin_destroy`",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Create",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262144"
+          },
+          "input": {
+            "labels": {
+              "kind": "literal",
+              "value": {
+                "labels": "labels.0"
+              }
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Create",
+            "outcome": "created"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "workspace",
+          "entity": "substrate.workspaces.Workspace",
+          "event": "substrate.workspaces.WorkspaceCreated",
+          "field": "workspace"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.workspaces.Workspaces",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "origin": {
+                "kind": "literal",
+                "value": "created"
+              },
+              "owner": {
+                "kind": "literal",
+                "value": "subject-262144"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Ready"
+              },
+              "workspace": {
+                "kind": "instance",
+                "instance": "workspace"
+              }
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Destroy",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262144"
+          },
+          "input": {
+            "workspace": {
+              "kind": "instance",
+              "instance": "workspace"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Destroy",
+            "outcome": "destroying"
+          }
+        },
+        {
+          "step": "expect_no_error"
+        },
+        {
+          "step": "expect_event_values",
+          "event": "substrate.workspaces.DestroyStarted",
+          "payload": {
+            "workspace": {
+              "kind": "instance",
+              "instance": "workspace"
+            }
+          },
+          "shape": {
+            "workspace": {
+              "holds": "primitive",
+              "kind": "string"
+            }
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceForgotten"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.workspaces.Workspaces",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "origin": {
+                "kind": "literal",
+                "value": "created"
+              },
+              "owner": {
+                "kind": "literal",
+                "value": "subject-262144"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Destroying"
+              },
+              "workspace": {
+                "kind": "instance",
+                "instance": "workspace"
+              }
+            }
+          }
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.workspaces.Workspaces",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "labels": {
+                "kind": "literal",
+                "value": {
+                  "labels": "labels.0"
+                }
+              },
+              "origin": {
+                "kind": "literal",
+                "value": "created"
+              },
+              "owner": {
+                "kind": "literal",
+                "value": "subject-262144"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Destroying"
+              },
+              "workspace": {
+                "kind": "instance",
+                "instance": "workspace"
+              }
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Create",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262145"
+          },
+          "input": {
+            "labels": {
+              "kind": "literal",
+              "value": {
+                "labels": "labels.0"
+              }
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Create",
+            "outcome": "created"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "workspace-swapped",
+          "entity": "substrate.workspaces.Workspace",
+          "event": "substrate.workspaces.WorkspaceCreated",
+          "field": "workspace"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.workspaces.Workspaces",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "origin": {
+                "kind": "literal",
+                "value": "created"
+              },
+              "owner": {
+                "kind": "literal",
+                "value": "subject-262145"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Ready"
+              },
+              "workspace": {
+                "kind": "instance",
+                "instance": "workspace-swapped"
+              }
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Destroy",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262145"
+          },
+          "input": {
+            "workspace": {
+              "kind": "instance",
+              "instance": "workspace-swapped"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Destroy",
+            "outcome": "destroying"
+          }
+        },
+        {
+          "step": "expect_no_error"
+        },
+        {
+          "step": "expect_event_values",
+          "event": "substrate.workspaces.DestroyStarted",
+          "payload": {
+            "workspace": {
+              "kind": "instance",
+              "instance": "workspace-swapped"
+            }
+          },
+          "shape": {
+            "workspace": {
+              "holds": "primitive",
+              "kind": "string"
+            }
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceForgotten"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.workspaces.Workspaces",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "origin": {
+                "kind": "literal",
+                "value": "created"
+              },
+              "owner": {
+                "kind": "literal",
+                "value": "subject-262145"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Destroying"
+              },
+              "workspace": {
+                "kind": "instance",
+                "instance": "workspace-swapped"
+              }
+            }
+          }
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.workspaces.Workspaces",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "labels": {
+                "kind": "literal",
+                "value": {
+                  "labels": "labels.0"
+                }
+              },
+              "origin": {
+                "kind": "literal",
+                "value": "created"
+              },
+              "owner": {
+                "kind": "literal",
+                "value": "subject-262145"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Destroying"
+              },
+              "workspace": {
+                "kind": "instance",
+                "instance": "workspace-swapped"
+              }
+            }
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "type",
+          "name": "substrate.workspaces.WorkspaceId"
+        },
+        {
+          "kind": "entity",
+          "name": "substrate.workspaces.Workspace"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.workspaces.Create"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.workspaces.Destroy"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.workspaces.Create",
+            "outcome": "created"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.workspaces.Destroy",
+            "outcome": "destroying"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceCreated"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceForgotten"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.workspaces.Workspaces"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.workspaces.AllowedSubject"
+        }
+      ]
+    },
+    "substrate.workspaces/authored/adopt-absent-directory": {
+      "purpose": "Adopting a root name with no directory under the workspace root is refused as not found, and writes no row.",
+      "steps": [
+        {
+          "step": "configure_external_outcome",
+          "force": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "absent"
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Adopt",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "local:1000"
+          },
+          "input": {
+            "labels": {
+              "kind": "literal",
+              "value": {}
+            },
+            "root_name": {
+              "kind": "literal",
+              "value": "never-placed"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "absent"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.workspaces.NotFound"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceAdopted"
+        }
+      ],
+      "source": [
+        {
+          "kind": "domain",
+          "name": "substrate.workspaces"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.workspaces.RootName"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.workspaces.Subject"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.workspaces.Adopt"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "absent"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "kind": "error",
+          "name": "substrate.workspaces.NotFound"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.workspaces.AllowedSubject"
+        }
+      ]
+    },
+    "substrate.workspaces/authored/adopt-succeeds": {
+      "purpose": "Adopting a placed directory writes a Ready row owned by the caller, with a minted id and origin adopted.",
+      "steps": [
+        {
+          "step": "establish_entity",
+          "instance": "dir",
+          "entity": "substrate.workspaces.RootEntry",
+          "identity": "adopted-repo",
+          "fields": {
+            "kind": "directory"
+          },
+          "state": "Present"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Adopt",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "local:1000"
+          },
+          "input": {
+            "labels": {
+              "kind": "literal",
+              "value": {}
+            },
+            "root_name": {
+              "kind": "literal",
+              "value": "adopted-repo"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "adopted"
+          }
+        },
+        {
+          "step": "expect_event",
+          "event": "substrate.workspaces.WorkspaceAdopted",
+          "payload": {
+            "owner": "local:1000",
+            "root_name": "adopted-repo"
+          },
+          "shape": {
+            "owner": {
+              "holds": "primitive",
+              "kind": "string"
+            },
+            "root_name": {
+              "holds": "primitive",
+              "kind": "string"
+            },
+            "workspace": {
+              "holds": "primitive",
+              "kind": "string"
+            }
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "repo",
+          "entity": "substrate.workspaces.Workspace",
+          "event": "substrate.workspaces.WorkspaceAdopted",
+          "field": "workspace"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.workspaces.Workspaces",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "origin": {
+                "kind": "literal",
+                "value": "adopted"
+              },
+              "owner": {
+                "kind": "literal",
+                "value": "local:1000"
+              },
+              "root_name": {
+                "kind": "literal",
+                "value": "adopted-repo"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Ready"
+              },
+              "workspace": {
+                "kind": "instance",
+                "instance": "repo"
+              }
+            }
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "domain",
+          "name": "substrate.workspaces"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.workspaces.EntryKind"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.workspaces.Origin"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.workspaces.RootName"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.workspaces.Subject"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.workspaces.Workspace.State"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.workspaces.WorkspaceId"
+        },
+        {
+          "kind": "entity",
+          "name": "substrate.workspaces.RootEntry"
+        },
+        {
+          "kind": "entity",
+          "name": "substrate.workspaces.Workspace"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.workspaces.Adopt"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "adopted"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.workspaces.Workspaces"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.workspaces.AllowedSubject"
+        }
+      ]
+    },
+    "substrate.workspaces/authored/adopt-twice-other-subject": {
+      "purpose": "A second subject adopting a root name another subject holds is refused as resource.not-found, and the first row is unchanged.",
+      "steps": [
+        {
+          "step": "establish_entity",
+          "instance": "dir",
+          "entity": "substrate.workspaces.RootEntry",
+          "identity": "adopted-repo",
+          "fields": {
+            "kind": "directory"
+          },
+          "state": "Present"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Adopt",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "local:1000"
+          },
+          "input": {
+            "labels": {
+              "kind": "literal",
+              "value": {}
+            },
+            "root_name": {
+              "kind": "literal",
+              "value": "adopted-repo"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "adopted"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "repo",
+          "entity": "substrate.workspaces.Workspace",
+          "event": "substrate.workspaces.WorkspaceAdopted",
+          "field": "workspace"
+        },
+        {
+          "step": "configure_external_outcome",
+          "force": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "held-elsewhere"
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Adopt",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "local:1001"
+          },
+          "input": {
+            "labels": {
+              "kind": "literal",
+              "value": {}
+            },
+            "root_name": {
+              "kind": "literal",
+              "value": "adopted-repo"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "held-elsewhere"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.workspaces.NotFound"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.workspaces.Workspaces",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "origin": {
+                "kind": "literal",
+                "value": "adopted"
+              },
+              "owner": {
+                "kind": "literal",
+                "value": "local:1000"
+              },
+              "root_name": {
+                "kind": "literal",
+                "value": "adopted-repo"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Ready"
+              },
+              "workspace": {
+                "kind": "instance",
+                "instance": "repo"
+              }
+            }
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "domain",
+          "name": "substrate.workspaces"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.workspaces.EntryKind"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.workspaces.Origin"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.workspaces.RootName"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.workspaces.Subject"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.workspaces.Workspace.State"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.workspaces.WorkspaceId"
+        },
+        {
+          "kind": "entity",
+          "name": "substrate.workspaces.RootEntry"
+        },
+        {
+          "kind": "entity",
+          "name": "substrate.workspaces.Workspace"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.workspaces.Adopt"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "adopted"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "held-elsewhere"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "kind": "error",
+          "name": "substrate.workspaces.NotFound"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.workspaces.Workspaces"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.workspaces.AllowedSubject"
+        }
+      ]
+    },
+    "substrate.workspaces/authored/adopt-twice-same-subject": {
+      "purpose": "A subject adopting a root name it already holds is refused as workspace.already-exists, and its row is unchanged.",
+      "steps": [
+        {
+          "step": "establish_entity",
+          "instance": "dir",
+          "entity": "substrate.workspaces.RootEntry",
+          "identity": "adopted-repo",
+          "fields": {
+            "kind": "directory"
+          },
+          "state": "Present"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Adopt",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "local:1000"
+          },
+          "input": {
+            "labels": {
+              "kind": "literal",
+              "value": {}
+            },
+            "root_name": {
+              "kind": "literal",
+              "value": "adopted-repo"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "adopted"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "repo",
+          "entity": "substrate.workspaces.Workspace",
+          "event": "substrate.workspaces.WorkspaceAdopted",
+          "field": "workspace"
+        },
+        {
+          "step": "configure_external_outcome",
+          "force": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "held"
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Adopt",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "local:1000"
+          },
+          "input": {
+            "labels": {
+              "kind": "literal",
+              "value": {}
+            },
+            "root_name": {
+              "kind": "literal",
+              "value": "adopted-repo"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "held"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.workspaces.AlreadyExists",
+          "fields": {
+            "root_name": "adopted-repo"
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.workspaces.Workspaces",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "origin": {
+                "kind": "literal",
+                "value": "adopted"
+              },
+              "owner": {
+                "kind": "literal",
+                "value": "local:1000"
+              },
+              "root_name": {
+                "kind": "literal",
+                "value": "adopted-repo"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Ready"
+              },
+              "workspace": {
+                "kind": "instance",
+                "instance": "repo"
+              }
+            }
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "domain",
+          "name": "substrate.workspaces"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.workspaces.EntryKind"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.workspaces.Origin"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.workspaces.RootName"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.workspaces.Subject"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.workspaces.Workspace.State"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.workspaces.WorkspaceId"
+        },
+        {
+          "kind": "entity",
+          "name": "substrate.workspaces.RootEntry"
+        },
+        {
+          "kind": "entity",
+          "name": "substrate.workspaces.Workspace"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.workspaces.Adopt"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "adopted"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "held"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "kind": "error",
+          "name": "substrate.workspaces.AlreadyExists"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.workspaces.Workspaces"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.workspaces.AllowedSubject"
+        }
+      ]
+    },
+    "substrate.workspaces/authored/destroy-adopted-leaves-directory": {
+      "purpose": "Destroying an adopted workspace removes the row and leaves the directory under the workspace root.",
+      "steps": [
+        {
+          "step": "establish_entity",
+          "instance": "dir",
+          "entity": "substrate.workspaces.RootEntry",
+          "identity": "adopted-repo",
+          "fields": {
+            "kind": "directory"
+          },
+          "state": "Present"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Adopt",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "local:1000"
+          },
+          "input": {
+            "labels": {
+              "kind": "literal",
+              "value": {}
+            },
+            "root_name": {
+              "kind": "literal",
+              "value": "adopted-repo"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "adopted"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "repo",
+          "entity": "substrate.workspaces.Workspace",
+          "event": "substrate.workspaces.WorkspaceAdopted",
+          "field": "workspace"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Destroy",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "local:1000"
+          },
+          "input": {
+            "workspace": {
+              "kind": "instance",
+              "instance": "repo"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Destroy",
+            "outcome": "forgotten"
+          }
+        },
+        {
+          "step": "expect_event_values",
+          "event": "substrate.workspaces.WorkspaceForgotten",
+          "payload": {
+            "workspace": {
+              "kind": "instance",
+              "instance": "repo"
+            }
+          },
+          "shape": {
+            "workspace": {
+              "holds": "primitive",
+              "kind": "string"
+            }
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.RootEntries"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.workspaces.RootEntries",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "kind": {
+                "kind": "literal",
+                "value": "directory"
+              },
+              "root_name": {
+                "kind": "literal",
+                "value": "adopted-repo"
+              }
+            }
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "domain",
+          "name": "substrate.workspaces"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.workspaces.EntryKind"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.workspaces.RootName"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.workspaces.Subject"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.workspaces.WorkspaceId"
+        },
+        {
+          "kind": "entity",
+          "name": "substrate.workspaces.RootEntry"
+        },
+        {
+          "kind": "entity",
+          "name": "substrate.workspaces.Workspace"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.workspaces.Adopt"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.workspaces.Destroy"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "adopted"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.workspaces.Destroy",
+            "outcome": "forgotten"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.DestroyStarted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceAdopted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.workspaces.WorkspaceForgotten"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.workspaces.RootEntries"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.workspaces.AllowedSubject"
+        }
+      ]
+    }
+  }
+}
