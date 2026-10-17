@@ -1,0 +1,6 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.20.0:result:process-get",
+  "$ref": "../resource.json#/$defs/process",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "process-get operation result"
+}

@@ -1,0 +1,22 @@
+{
+  "$schema": "schemas/compatibility.json",
+  "contract": "substrate-wire",
+  "development_constraints": [
+    "This development bundle is contract-execution-ready but cannot satisfy a stable dependency.",
+    "Passing the bundle gate proves bundle integrity; it does not claim producer or host-driver conformance.",
+    "No compatibility promise begins before a signed stable release."
+  ],
+  "request_policy": "closed",
+  "response_policy": "closed-route-selected-envelopes",
+  "status": "development",
+  "supported_api_majors": [
+    1,
+    2
+  ],
+  "version": "0.20.0",
+  "client_visible_changes": [
+    "0.20.0 adds the host-process family of ADR 0036 S1 to S7 and S11: seven routes under /v1/processes (process.start, process.list, process.get, process.stop, process.stop-by-owner, process.lease.renew, process.logs.get) beside the 37 routes it preserves from 0.19.0, and no existing route, request or result changes meaning.",
+    "The capability facts object (schemas/capability.json) and the observed resource union (schemas/resource.json) are closed, and 0.20.0 adds the optional process.host fact to the one and the process resource to the other. A client that validates capability snapshots or resources against predecessor 0.19.0 rejects a snapshot that publishes process.host, or a process record, until it moves to 0.20.0.",
+    "A host process is unconfined: every process record, listing entry and log tail carries profile host and confinement none. The operation registry admits the new required_scope process, which the hosted admission profile does not grant, so no hosted, static-bearer or network-session posture reaches these routes (process.host-posture-refused)."
+  ]
+}

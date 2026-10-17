@@ -140,7 +140,15 @@ across retry. Resource and operation lookup stays within the authenticated subje
 Read [operations and observations](../concepts/operations.md) for retry semantics and
 [status](../status.md) for the implementation boundary.
 
-Development source now advertises `substrate-wire/0.19.0`. It adds the explicit `workspace.adopt`
+Development source now advertises `substrate-wire/0.20.0`. It adds the host-process family
+(ADR 0036): seven routes under `/v1/processes` to start, list, read, stop, stop by owner session,
+renew the lease of and tail the log of an unconfined process the daemon supervises in a cgroup of
+its own. Every record says `profile: host` and `confinement: none`. A daemon publishes the optional
+`process.host` fact only when its delegated cgroup subtree can hold process cgroups, and serves
+these routes only on the personal Unix socket to a peer of its own uid. A client that validates
+capability snapshots or resources against `0.19.0` must move to `0.20.0` to accept the new fact
+and record.
+`0.19.0` added the explicit `workspace.adopt`
 operation at `POST /v1/workspaces/adopt`, which serves a directory the operator placed under the
 workspace root, and two required read-only members on the workspace resource: `origin` and
 `root_name`. Workspace ids keep their `ws_` form. A client that validates workspaces against

@@ -1,0 +1,46 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.20.0:input:process-list",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Lists the subject's records in id order, filtered by owner session, name and state, one bounded page at a time (ADR 0036 S6).",
+  "properties": {
+    "cursor": {
+      "description": "The previous page's next_cursor, opaque.",
+      "type": "string"
+    },
+    "limit": {
+      "maximum": 256,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "name": {
+      "type": "string"
+    },
+    "owner_session": {
+      "type": "string"
+    },
+    "state": {
+      "enum": [
+        "starting",
+        "running",
+        "stopping",
+        "ended"
+      ]
+    }
+  },
+  "required": [],
+  "title": "process-list operation input",
+  "type": "object",
+  "x-b10x-refusals": [
+    {
+      "class": "refused",
+      "code": "process.host-posture-refused",
+      "status": 403
+    },
+    {
+      "class": "refused",
+      "code": "process.host-subject-mismatch",
+      "status": 403
+    }
+  ]
+}
