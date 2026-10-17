@@ -1,0 +1,38 @@
+# S1, S2: the named refusals of start. Each request differs from an admitted one in one input, and
+# nothing is listed afterwards. The hosted/TCP posture refusal is decided by the daemon's posture,
+# not by an input, and is the native suite's obligation.
+type: ess-scenario/1
+domain: substrate.host_processes
+scenario: start-refusals
+summary: Owner absent, empty argv, relative cwd and an unrequested profile are each refused by name, and nothing is listed.
+
+timeline:
+  - at: 2026-10-16T09:00:00Z
+    command: substrate.host_processes.StartProcess
+    input: {name: dev-server, owner_session_name: worker, reason: serve the preview, env_passthrough: [], argv: [vite], cwd: /srv/app, profile: host, lease_ttl_seconds: 60, keep: false}
+    outcome: owner-absent
+    error: {name: substrate.host_processes.OwnerRequired}
+  - at: 2026-10-16T09:00:01Z
+    command: substrate.host_processes.StartProcess
+    input: {name: dev-server, owner_session_id: s-1, owner_session_name: worker, reason: serve the preview, env_passthrough: [], argv: [], cwd: /srv/app, profile: host, lease_ttl_seconds: 60, keep: false}
+    outcome: argv-empty
+    error: {name: substrate.host_processes.ArgvEmpty}
+  - at: 2026-10-16T09:00:02Z
+    command: substrate.host_processes.StartProcess
+    input: {name: dev-server, owner_session_id: s-1, owner_session_name: worker, reason: serve the preview, env_passthrough: [], argv: [vite], cwd: srv/app, profile: host, lease_ttl_seconds: 60, keep: false}
+    outcome: cwd-not-absolute
+    error: {name: substrate.host_processes.CwdNotAbsolute, fields: {cwd: srv/app}}
+  - at: 2026-10-16T09:00:03Z
+    command: substrate.host_processes.StartProcess
+    input: {name: dev-server, owner_session_id: s-1, owner_session_name: worker, reason: serve the preview, env_passthrough: [], argv: [vite], cwd: /srv/app, lease_ttl_seconds: 60, keep: false}
+    outcome: profile-not-requested
+    error: {name: substrate.host_processes.ProfileNotRequested}
+  - at: 2026-10-16T09:00:04Z
+    command: substrate.host_processes.StartProcess
+    input: {name: dev-server, owner_session_id: s-1, owner_session_name: worker, reason: serve the preview, env_passthrough: [], argv: [vite], cwd: /srv/app, profile: host, lease_ttl_seconds: 0, keep: false}
+    outcome: lease-not-positive
+    error: {name: substrate.host_processes.LeaseNotPositive}
+
+assert:
+  - view: substrate.host_processes.HostProcesses
+    counts: {at_most: 0}

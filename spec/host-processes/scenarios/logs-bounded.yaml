@@ -1,0 +1,45 @@
+# S7: `logs` reads output lines a bounded page at a time, oldest first, and an output-line event
+# without a line is refused.
+type: ess-scenario/1
+domain: substrate.host_processes
+scenario: logs-bounded
+summary: Logs return at most one page of output lines, oldest first; a line-less output event is refused.
+
+arrange:
+  - instance: dev
+    entity: substrate.host_processes.HostProcess
+
+timeline:
+  - at: 2026-10-16T09:00:00Z
+    command: substrate.host_processes.StartProcess
+    input: {name: dev-server, owner_session_id: s-1, owner_session_name: worker, reason: serve the preview, argv: [vite], cwd: /srv/app, env_passthrough: [], profile: host, lease_ttl_seconds: 3600, keep: false}
+    outcome: started
+    capture: {instance: dev, event: substrate.host_processes.ProcessStarted, field: process}
+  - at: 2026-10-16T09:00:01Z
+    command: substrate.host_processes.AppendStreamEvent
+    input: {process: {$instance: dev}, kind: output-line, line: one}
+    outcome: appended
+  - at: 2026-10-16T09:00:02Z
+    command: substrate.host_processes.AppendStreamEvent
+    input: {process: {$instance: dev}, kind: output-line, line: two}
+    outcome: appended
+  - at: 2026-10-16T09:00:03Z
+    command: substrate.host_processes.AppendStreamEvent
+    input: {process: {$instance: dev}, kind: output-line, line: three}
+    outcome: appended
+  - at: 2026-10-16T09:00:04Z
+    command: substrate.host_processes.AppendStreamEvent
+    input: {process: {$instance: dev}, kind: output-line}
+    outcome: line-missing
+    error: {name: substrate.host_processes.OutputLineMissing}
+
+assert:
+  - view: substrate.host_processes.ProcessLogs
+    params: {process: {$instance: dev}, page: 0, size: 2}
+    counts: {at_most: 2}
+  - view: substrate.host_processes.ProcessLogs
+    params: {process: {$instance: dev}, page: 0, size: 2}
+    at: {row: first, fields: {line: one}}
+  - view: substrate.host_processes.ProcessLogs
+    params: {process: {$instance: dev}, page: 1, size: 2}
+    at: {row: first, fields: {line: three}}
