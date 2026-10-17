@@ -1,6 +1,6 @@
 ---
-status: proposed
-date: 2026-10-16
+status: accepted
+date: 2026-10-17
 ---
 
 # ADR 0036: host processes are a supervised resource family

@@ -1,10 +1,10 @@
-# S3, S4: an expired lease stops the record; it ends with cause lease-expired once its cgroup is
+# S3, S4: an expired lease stops the record; it ends with ended_by lease-expiry once its cgroup is
 # empty. That the kernel tree is gone is the native cgroup suite's obligation; here the record's
 # Ended state is reached only through the supervisor's empty-cgroup report.
 type: ess-scenario/1
 domain: substrate.host_processes
 scenario: lease-expiry-stops
-summary: Lease expiry stops the record, and it ends with cause lease-expired once its tree is gone.
+summary: Lease expiry stops the record, and it ends with ended_by lease-expiry once its tree is gone.
 
 arrange:
   - instance: dev
@@ -13,7 +13,7 @@ arrange:
 timeline:
   - at: 2026-10-16T09:00:00Z
     command: substrate.host_processes.StartProcess
-    input: {name: dev-server, owner_session_id: s-1, owner_session_name: worker, reason: serve the preview, argv: [npm, run, dev], cwd: /srv/app, env_passthrough: [], profile: host, lease_ttl_seconds: 60, keep: false}
+    input: {name: dev-server, owner_session_id: s-1, owner_session_name: worker, reason: serve the preview, argv: [npm, run, dev], cwd: /srv/app, env_passthrough: [], profile: host, lease_ttl_ms: 60000, keep: false}
     outcome: started
     capture: {instance: dev, event: substrate.host_processes.ProcessStarted, field: process}
   - at: 2026-10-16T09:00:01Z
@@ -26,14 +26,14 @@ timeline:
     outcome: expired
     events:
       - event: substrate.host_processes.StopRequested
-        payload: {end_cause: lease-expired}
+        payload: {ended_by: lease-expiry}
   - at: 2026-10-16T09:01:01Z
     command: substrate.host_processes.RecordExit
     input: {process: {$instance: dev}, exit_signal: SIGKILL}
     outcome: stopped
   - at: 2026-10-16T09:01:02Z
     command: substrate.host_processes.RenewLease
-    input: {process: {$instance: dev}, lease_ttl_seconds: 60}
+    input: {process: {$instance: dev}, lease_ttl_ms: 60000}
     outcome: not-live
     error: {name: substrate.host_processes.NotLive}
 
@@ -42,5 +42,17 @@ assert:
     contains:
       process: {$instance: dev}
       state: Ended
-      end_cause: lease-expired
+      ended_by: lease-expiry
       exit_signal: SIGKILL
+  - view: substrate.host_processes.ProcessEvents
+    params: {process: {$instance: dev}, after: -1}
+    counts: {at_least: 4, at_most: 4}
+  - view: substrate.host_processes.ProcessEvents
+    params: {process: {$instance: dev}, after: -1}
+    at: {row: 1, fields: {kind: lease-expired, ended_by: lease-expiry}}
+  - view: substrate.host_processes.ProcessEvents
+    params: {process: {$instance: dev}, after: -1}
+    at: {row: 2, fields: {kind: stopped, ended_by: lease-expiry, exit_signal: SIGKILL}}
+  - view: substrate.host_processes.ProcessEvents
+    params: {process: {$instance: dev}, after: -1}
+    at: {row: last, fields: {kind: ended, ended_by: lease-expiry}}

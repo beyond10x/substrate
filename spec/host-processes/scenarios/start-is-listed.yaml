@@ -21,7 +21,7 @@ timeline:
       cwd: /srv/app
       env_passthrough: [PATH, HOME]
       profile: host
-      lease_ttl_seconds: 3600
+      lease_ttl_ms: 3600000
       keep: false
     outcome: started
     capture: {instance: dev, event: substrate.host_processes.ProcessStarted, field: process}
@@ -43,5 +43,5 @@ assert:
       argv: [npm, run, dev]
       cwd: /srv/app
       confinement: none
-      lease_ttl_seconds: 3600
+      lease_ttl_ms: 3600000
       keep: false

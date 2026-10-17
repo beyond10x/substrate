@@ -11,7 +11,7 @@ arrange:
 timeline:
   - at: 2026-10-16T09:00:00Z
     command: substrate.host_processes.StartContainer
-    input: {name: preview-db, owner_session_id: s-1, owner_session_name: worker, reason: database for the preview, kind: docker, argv: [run, postgres:17], lease_ttl_seconds: 600, keep: false}
+    input: {name: preview-db, owner_session_id: s-1, owner_session_name: worker, reason: database for the preview, kind: docker, argv: [run, postgres:17], lease_ttl_ms: 600000, keep: false}
     outcome: started
     capture: {instance: db, event: substrate.host_processes.ProcessStarted, field: process}
   - at: 2026-10-16T09:00:01Z
@@ -25,4 +25,4 @@ timeline:
 
 assert:
   - view: substrate.host_processes.HostProcesses
-    contains: {process: {$instance: db}, state: Stopping, container_kind: docker, restart: "no", owner_session_id: s-1, end_cause: lease-expired}
+    contains: {process: {$instance: db}, state: Stopping, container_kind: docker, restart: "no", owner_session_id: s-1, ended_by: lease-expiry}

@@ -2,7 +2,7 @@
 type: ess-scenario/1
 domain: substrate.host_processes
 scenario: adopt-is-ownerless
-summary: Adopting a pid yields a Running ownerless record that a stop by owner leaves alone.
+summary: Adopting a pid yields a Running ownerless record with no lease to renew, which a stop by owner leaves alone.
 
 arrange:
   - instance: survivor
@@ -15,11 +15,16 @@ timeline:
     outcome: adopted
     capture: {instance: survivor, event: substrate.host_processes.ProcessAdopted, field: process}
   - at: 2026-10-16T09:00:01Z
+    command: substrate.host_processes.RenewLease
+    input: {process: {$instance: survivor}, lease_ttl_ms: 60000}
+    outcome: no-lease
+    error: {name: substrate.host_processes.NoLease}
+  - at: 2026-10-16T09:00:02Z
     command: substrate.host_processes.AdoptProcess
     input: {name: nothing, reason: empty reference, source: unit, source_ref: ""}
     outcome: source-ref-empty
     error: {name: substrate.host_processes.AdoptSourceEmpty}
-  - at: 2026-10-16T09:00:02Z
+  - at: 2026-10-16T09:00:03Z
     command: substrate.host_processes.StopByOwner
     input: {owner_session_id: s-1}
     outcome: stopping

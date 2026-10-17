@@ -1,8 +1,9 @@
-# S4: a keep needs a reason and carries no lease; a kept record has no lease to expire.
+# S4: a keep needs a reason and carries no lease; a kept record has no lease to expire until a
+# renewal changes its keep to a TTL lease, which then expires as any lease does.
 type: ess-scenario/1
 domain: substrate.host_processes
 scenario: keep-needs-reason
-summary: A keep without a reason is refused; a reasoned keep starts without a lease and cannot be expired.
+summary: A keep without a reason is refused; a reasoned keep starts without a lease, cannot be expired, and a renewal turns it into a TTL lease.
 
 arrange:
   - instance: kept
@@ -16,7 +17,7 @@ timeline:
     error: {name: substrate.host_processes.KeepNeedsReason}
   - at: 2026-10-16T09:00:01Z
     command: substrate.host_processes.StartProcess
-    input: {name: db, owner_session_id: s-1, owner_session_name: worker, reason: shared database, argv: [postgres], cwd: /srv/db, env_passthrough: [], profile: host, keep: true, keep_reason: the operator's fixture, lease_ttl_seconds: 60}
+    input: {name: db, owner_session_id: s-1, owner_session_name: worker, reason: shared database, argv: [postgres], cwd: /srv/db, env_passthrough: [], profile: host, keep: true, keep_reason: the operator's fixture, lease_ttl_ms: 60000}
     outcome: keep-with-lease
     error: {name: substrate.host_processes.KeepHasNoLease}
   - at: 2026-10-16T09:00:02Z
@@ -34,6 +35,13 @@ timeline:
     input: {process: {$instance: kept}}
     outcome: no-lease
     error: {name: substrate.host_processes.NoLease}
+  - at: 2026-10-16T09:00:05Z
+    command: substrate.host_processes.RenewLease
+    input: {process: {$instance: kept}, lease_ttl_ms: 60000}
+    outcome: keep-to-lease
+    events:
+      - event: substrate.host_processes.LeaseRenewed
+        payload: {lease_ttl_ms: 60000}
 
 assert:
   - view: substrate.host_processes.HostProcesses
@@ -42,5 +50,7 @@ assert:
     contains:
       process: {$instance: kept}
       state: Starting
-      keep: true
-      keep_reason: the operator's fixture
+      keep: false
+      lease_ttl_ms: 60000
+  - view: substrate.host_processes.HostProcesses
+    excludes: {process: {$instance: kept}, keep_reason: the operator's fixture}
