@@ -43,9 +43,12 @@ Each is a claim that can be checked. Breaking one is a design change, not a refa
 5. **Operations are durable before driver dispatch**
    (`adr/0005-operations-are-durable-before-driver-dispatch.md`).
 6. **Every released contract bundle directory is immutable.** `contracts/substrate-wire/0.1.0`
-   through `0.18.0` exist; `0.18.0` makes `exec.resource-usage.block_io` a published boolean and
+   through `0.19.0` exist; `0.19.0` adds the explicit `workspace.adopt` route at
+   `POST /v1/workspaces/adopt` and two required read-only members, `origin` and `root_name`, on the
+   closed workspace resource, with `workspace-id` unchanged and still `ws_`-prefixed (ADR 0035; its compatibility block
+   records that client-visible change); `0.18.0` made `exec.resource-usage.block_io` a published boolean and
    the block I/O usage counters optional, absent on a host without the io controller (ADR 0032),
-   and adds the optional `read_only_files` start field, the `exec.read-only-files` fact and nine
+   and added the optional `read_only_files` start field, the `exec.read-only-files` fact and nine
    named refusals for binding a single host file read-only (ADR 0033);
    `0.17.0` added policy-controlled unrecorded terminal streaming (design 23). `0.16.0` added
    Connector-authorized
@@ -64,7 +67,7 @@ Each is a claim that can be checked. Breaking one is a design change, not a refa
    context and grant attribution (ADR 0011); `0.6.0` added destination-bound egress
    apertures (ADR 0013), and **every earlier directory is frozen** (`STATUS.md:36`,
    `xtask/src/json.rs:152`, `contracts/substrate-wire/0.2.0/README.md:13`).
-   The daemon and Rust SDK advertise `substrate-wire/0.18.0` with the SHA-256 of that bundle's
+   The daemon and Rust SDK advertise `substrate-wire/0.19.0` with the SHA-256 of that bundle's
    inner `bundle.json` (`crates/substrate-wire/src/lib.rs`); design 21 records the Git source and
    observation additions, ADR 0028 records the preceding route promotion, and the gate retains the
    one additional 0.11.0-to-0.12.0 lineage bridge. Moving this
@@ -126,9 +129,13 @@ Substrate is confinement. Everything below is the reason it can be trusted with 
   keeps the default rule set (`useDefault = true`) and adds exactly one exception: the `jwt` rule is
   allowed in the delegated-context conformance vectors, and nowhere else. Those vectors are JWTs by
   definition — ADR 0011 fixes the document as a compact JWS, so a vector proving substrate verifies
-  one has to contain one — and they carry no credential: each is signed by a key whose seed is the
-  SHA-256 of a sentence published in this repository
-  (`delegated_signing_key` in `crates/substrate-daemon/tests/runtime_vectors.rs`). The exception is scoped by rule
+  one has to contain one — and they carry no credential. Each is a pre-signed EdDSA compact JWS
+  (`kid` `vector-key-1`, issuer `https://issuer.invalid`) that verifies only with the **public**
+  key the vector itself carries in its setup (`delegated-context-key`); the signing seed is
+  deliberately not committed (`docs/design/09-delegated-context-and-grant-attribution.md` § 6), so
+  the vectors are verify-only. They do **not** verify with `delegated_signing_key` in
+  `crates/substrate-daemon/tests/runtime_vectors.rs`, whose published seed signs only the
+  documents that runner mints at run time. This holds for bundles `0.17.0` through `0.19.0`. The exception is scoped by rule
   **and** by path; a JWT anywhere else, including any other vector, is still a finding. Proven, not
   asserted: the same token in `contracts/substrate-wire/0.7.0/vectors/http/delegated-context-*.json`
   is allowed and in `crates/substrate-daemon/src/` is caught. **Widening this allowlist is a
@@ -161,7 +168,7 @@ In order: `cargo test --workspace --release --locked`, `cargo fmt --all --check`
 `cargo xtask check-licenses`, `cargo xtask check-packages`, `cargo xtask check-mcp-boundary`,
 `check-contract-bundle.py`, `check-contract-bundle-0.2.0.py`,
 `-0.3.0.py`, `-0.4.0.py`, one bounded
-`cargo xtask check-bundles 0.5.0 ... 0.18.0`,
+`cargo xtask check-bundles 0.5.0 ... 0.19.0`,
 `cargo xtask check-json` and `cargo xtask check-toolchain`.
 Green here is the bar for `main`.
 The former brand is fenced org-wide by `scripts/check-org-brand.sh` in the **atlas** repo, not here.
@@ -185,8 +192,8 @@ bundles' reproducibility proof (invariant 6), not as tooling.
 | `package-bundle <version> --out <dir>` | produces a released bundle as a deterministic OCI image layout | no — under `cargo test` |
 | `render-bundle <version> --out <dir>` | produces a bundle tree from `substrate-wire` and `xtask/bundle-source/<version>/`; refuses to write anywhere under `contracts/` | no — under `cargo test` |
 | `check-bundle <version>` | a released bundle whose bytes are not the fixed point of `xtask/bundle-source/<version>/` | no — focused form of the batched gate check |
-| `check-bundles <version>...` | the same checks with a bounded worker count and deterministic version-order reporting | yes, `0.5.0` through `0.18.0` in one invocation |
-| `check-json [<version>...]` | JSON beneath a released bundle that no bundled schema classifies, that its schema rejects, or that is not in deterministic source form | yes, all eighteen |
+| `check-bundles <version>...` | the same checks with a bounded worker count and deterministic version-order reporting | yes, `0.5.0` through `0.19.0` in one invocation |
+| `check-json [<version>...]` | JSON beneath a released bundle that no bundled schema classifies, that its schema rejects, or that is not in deterministic source form | yes, all nineteen |
 
 **`cargo xtask package-bundle <version> --out <dir>`** packages a released bundle as a
 deterministic OCI image layout. It is not a gate step of its own: its cases run under
@@ -227,8 +234,8 @@ hand-written HTTP/1.1 and WebSocket client, so it links no implementation and as
 the wire; `cargo test --workspace --release --locked` runs it. Its portable lane asserts three named
 refusals — `exec.sandbox-unavailable` (501), `exec.secret-slots-unserved` (501) and
 `exec.secret-slot-descriptor-invalid` (422) — plus `session.pty-unserved` (501), the five lexical
-`exec.read-only-file*` refusals (422) and `exec.read-only-files-unserved` (501) — across 76 cases,
-and its delegated lane 106. Both totals include one route/refusal probe for every operation in the
+`exec.read-only-file*` refusals (422) and `exec.read-only-files-unserved` (501) — across 77 cases,
+and its delegated lane 107. Both totals include one route/refusal probe for every operation in the
 promoted registry; the delegated cases also include an interactive shell driven through a `pty` session
 (`crates/substrate-daemon/tests/runtime_vectors.rs`, `PORTABLE_CASES` and `DELEGATED_CASES`). Its delegated lane runs only when
 `SUBSTRATE_VECTORS_CGROUP_ROOT` names a delegated cgroup v2 subtree the test process is inside;
@@ -282,8 +289,8 @@ condition has ever asserted them; treat kernel project-quota enforcement as prov
 **The gate verifies every released bundle, not just `0.1.0`.** The four
 `run python3 scripts/check-contract-bundle*.py` lines in `scripts/gate.sh` run the
 four frozen Python checkers, and the line after them runs `cargo xtask check-bundles` for `0.5.0`
-through `0.18.0`, so
-a green gate *is* evidence that all eighteen still hold. Cutting a successor bundle therefore means
+through `0.19.0`, so
+a green gate *is* evidence that all nineteen still hold. Cutting a successor bundle therefore means
 **adding its check to `scripts/gate.sh`** — a bundle whose check is not in the gate is unverified
 from the next commit onward.
 

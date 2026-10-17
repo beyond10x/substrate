@@ -1,0 +1,46 @@
+# Point 14 of the wave decision, ADR 0036 S7: at the byte bound the oldest log bytes are discarded
+# and the record states how many, cumulatively; the count never falls.
+type: ess-scenario/1
+domain: substrate.host_processes
+scenario: log-discard-counted
+summary: A record starts with nothing discarded, each discard raises the cumulative count, and a report that does not raise it is refused.
+
+arrange:
+  - instance: chatty
+    entity: substrate.host_processes.HostProcess
+
+timeline:
+  - at: 2026-10-16T09:00:00Z
+    command: substrate.host_processes.StartProcess
+    input: {name: chatty, owner_session_id: s-1, owner_session_name: worker, reason: verbose build, argv: [make, V=1], cwd: /srv/app, env_passthrough: [], profile: host, lease_ttl_ms: 3600000, keep: false}
+    outcome: started
+    capture: {instance: chatty, event: substrate.host_processes.ProcessStarted, field: process}
+  - at: 2026-10-16T09:00:01Z
+    command: substrate.host_processes.ConfirmRunning
+    input: {process: {$instance: chatty}}
+    outcome: running
+  - at: 2026-10-16T09:05:00Z
+    command: substrate.host_processes.RecordLogDiscard
+    input: {process: {$instance: chatty}, discarded_bytes: 4096}
+    outcome: discarded
+    events:
+      - event: substrate.host_processes.LogDiscarded
+        payload: {discarded_bytes: 4096}
+  - at: 2026-10-16T09:05:01Z
+    command: substrate.host_processes.RecordLogDiscard
+    input: {process: {$instance: chatty}, discarded_bytes: 4096}
+    outcome: discard-not-growing
+    error: {name: substrate.host_processes.LogDiscardNotGrowing}
+  - at: 2026-10-16T09:10:00Z
+    command: substrate.host_processes.RecordLogDiscard
+    input: {process: {$instance: chatty}, discarded_bytes: 12288}
+    outcome: discarded
+  - at: 2026-10-16T09:10:01Z
+    command: substrate.host_processes.AppendStreamEvent
+    input: {process: p-none, kind: output-line, line: orphan}
+    outcome: unknown-process
+    error: {name: substrate.host_processes.UnknownProcess}
+
+assert:
+  - view: substrate.host_processes.HostProcesses
+    contains: {process: {$instance: chatty}, state: Running, log_discarded_bytes: 12288}

@@ -1,0 +1,64 @@
+# S12: a record's stream interleaves its lifecycle events and its output lines in seq order:
+# `started`, two lines, `lease-renewed`, `exited` with the code, then the terminal `ended` naming
+# `ended_by`. The lifecycle items arrive through the stream bindings; the lines from the log.
+type: ess-scenario/1
+domain: substrate.host_processes
+scenario: stream-order
+summary: The stream reads started, the output lines, lease-renewed, exited, then ended with ended_by exit, in seq order.
+
+arrange:
+  - instance: dev
+    entity: substrate.host_processes.HostProcess
+
+timeline:
+  - at: 2026-10-16T09:00:00Z
+    command: substrate.host_processes.StartProcess
+    input: {name: dev-server, owner_session_id: s-1, owner_session_name: worker, reason: serve the preview, argv: [vite], cwd: /srv/app, env_passthrough: [], profile: host, lease_ttl_ms: 3600000, keep: false}
+    outcome: started
+    capture: {instance: dev, event: substrate.host_processes.ProcessStarted, field: process}
+  - at: 2026-10-16T09:00:01Z
+    command: substrate.host_processes.ConfirmRunning
+    input: {process: {$instance: dev}}
+    outcome: running
+  - at: 2026-10-16T09:00:02Z
+    command: substrate.host_processes.AppendStreamEvent
+    input: {process: {$instance: dev}, kind: output-line, line: ready in 300 ms}
+    outcome: appended
+  - at: 2026-10-16T09:00:03Z
+    command: substrate.host_processes.AppendStreamEvent
+    input: {process: {$instance: dev}, kind: output-line, line: listening on 5173}
+    outcome: appended
+  - at: 2026-10-16T09:00:04Z
+    command: substrate.host_processes.RenewLease
+    input: {process: {$instance: dev}, lease_ttl_ms: 3600000}
+    outcome: renewed
+  - at: 2026-10-16T09:00:05Z
+    command: substrate.host_processes.RecordExit
+    input: {process: {$instance: dev}, exit_code: 0}
+    outcome: exited
+
+assert:
+  - view: substrate.host_processes.ProcessEvents
+    params: {process: {$instance: dev}, after: -1}
+    ranked: true
+  - view: substrate.host_processes.ProcessEvents
+    params: {process: {$instance: dev}, after: -1}
+    counts: {at_least: 6, at_most: 6}
+  - view: substrate.host_processes.ProcessEvents
+    params: {process: {$instance: dev}, after: -1}
+    at: {row: first, fields: {kind: started}}
+  - view: substrate.host_processes.ProcessEvents
+    params: {process: {$instance: dev}, after: -1}
+    at: {row: 1, fields: {kind: output-line, line: ready in 300 ms}}
+  - view: substrate.host_processes.ProcessEvents
+    params: {process: {$instance: dev}, after: -1}
+    at: {row: 2, fields: {kind: output-line, line: listening on 5173}}
+  - view: substrate.host_processes.ProcessEvents
+    params: {process: {$instance: dev}, after: -1}
+    at: {row: 3, fields: {kind: lease-renewed}}
+  - view: substrate.host_processes.ProcessEvents
+    params: {process: {$instance: dev}, after: -1}
+    at: {row: 4, fields: {kind: exited, ended_by: exit, exit_code: 0}}
+  - view: substrate.host_processes.ProcessEvents
+    params: {process: {$instance: dev}, after: -1}
+    at: {row: last, fields: {kind: ended, ended_by: exit, exit_code: 0}}

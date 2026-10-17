@@ -1,0 +1,161 @@
+# The daemon owns the host-process domain (ADR 0036). No route, CLI surface or wire bundle is
+# derived from it yet; `reached_by` stays the in-process default until the successor bundle that
+# carries this family is cut.
+components:
+  - component: substrate-daemon
+    summary: Supervises host processes and container records in cgroups under its delegated root.
+    owns:
+      domains: [substrate.host_processes]
+    accepts:
+      commands:
+        - substrate.host_processes.StartProcess
+        - substrate.host_processes.StartContainer
+        - substrate.host_processes.AdoptProcess
+        - substrate.host_processes.RenewLease
+        - substrate.host_processes.StopProcess
+        - substrate.host_processes.StopByOwner
+        - substrate.host_processes.ConfirmRunning
+        - substrate.host_processes.ExpireLease
+        - substrate.host_processes.EnforceDeadline
+        - substrate.host_processes.RecordExit
+        - substrate.host_processes.RecordVanished
+        - substrate.host_processes.RecordObservation
+        - substrate.host_processes.AppendStreamEvent
+        - substrate.host_processes.RecordLogDiscard
+    publishes:
+      events:
+        - substrate.host_processes.ProcessStarted
+        - substrate.host_processes.ProcessRunning
+        - substrate.host_processes.ProcessAdopted
+        - substrate.host_processes.LeaseRenewed
+        - substrate.host_processes.StopRequested
+        - substrate.host_processes.OwnerStopped
+        - substrate.host_processes.ProcessEnded
+        - substrate.host_processes.ProcessObserved
+        - substrate.host_processes.StreamEventAppended
+        - substrate.host_processes.LogDiscarded
+
+# S12: the per-process stream interleaves every lifecycle event the event log records for the
+# process with its output lines, and ends with exactly one `ended` item naming `ended_by`. Output
+# lines are appended by the supervisor directly from the bounded log; the lifecycle items arrive
+# through the bindings below, one per event:
+#   process.started        ProcessRunning                                  -> started
+#   process.lease-renewed  LeaseRenewed                                    -> lease-renewed
+#   process.lease-expired  StopRequested, ended_by lease-expiry            -> lease-expired
+#   process.timed-out      StopRequested, ended_by timeout or expires-at   -> timed-out
+#   process.stopped        ProcessEnded, ended_by stop, lease-expiry,
+#                          timeout or expires-at                           -> stopped
+#   process.exited         ProcessEnded, ended_by exit                     -> exited
+#   process.vanished       ProcessEnded, ended_by vanished                 -> vanished
+# `process.stopped` is the end of a stop of any cause, so stop by owner, which emits no per-process
+# event, reaches every stream it ends. The terminal `ended` item is appended from the appended
+# end item (exited, stopped or vanished), never from ProcessEnded directly, so it always follows
+# it: two bindings on one event would leave their order undecided, and an end item appended after
+# `ended` would be refused as StreamClosed and dropped.
+# DECIDED (point 1): delivery is at least once. Each stream item carries its per-process `seq`
+# (ADR 0036 S12), strictly increasing, beside its opaque cursor, and a reader drops an item whose
+# seq it has already seen. Exactly once is not an ESS delivery and adds nothing the seq does not
+# give.
+# DECIDED (point 2): a refused append is dropped. The only refusal these bindings can reach is
+# StreamClosed, an append after `ended`; a later failure policy is additive.
+# S3, S11: a record that ends from Stopping reports the cause its stop recorded. Every move into
+# Stopping (StopProcess, StopByOwner, ExpireLease, EnforceDeadline) sets `ended_by` in the same
+# outcome, so the stored optional always holds a value when RecordExit or RecordVanished reads it.
+conversions:
+  - from: Optional<substrate.host_processes.EndedBy>
+    to: substrate.host_processes.EndedBy
+    because: >-
+      A record in Stopping always holds ended_by: each outcome that moves it into Stopping sets the
+      cause in the same step, and the cause is never cleared.
+
+bindings:
+  - id: stream-started
+    summary: A record whose cgroup is populated has a `started` stream item.
+    when: {event: substrate.host_processes.ProcessRunning}
+    invoke: {command: substrate.host_processes.AppendStreamEvent}
+    mapping: {process: event.process, kind: started}
+    delivery: at_least_once
+    on_failure: drop
+
+  - id: stream-lease-renewed
+    summary: A lease renewal, or a keep changed to a TTL lease, has a `lease-renewed` stream item.
+    when: {event: substrate.host_processes.LeaseRenewed}
+    invoke: {command: substrate.host_processes.AppendStreamEvent}
+    mapping: {process: event.process, kind: lease-renewed}
+    delivery: at_least_once
+    on_failure: drop
+
+  - id: stream-lease-expired
+    summary: A lease expiry has a `lease-expired` stream item.
+    when:
+      event: substrate.host_processes.StopRequested
+      where: event.ended_by == lease-expiry
+    invoke: {command: substrate.host_processes.AppendStreamEvent}
+    mapping: {process: event.process, kind: lease-expired, ended_by: event.ended_by}
+    delivery: at_least_once
+    on_failure: drop
+
+  - id: stream-timed-out
+    summary: A reached timeout or expires_at has a `timed-out` stream item whose ended_by says which.
+    when:
+      event: substrate.host_processes.StopRequested
+      where: {any: [event.ended_by == timeout, event.ended_by == expires-at]}
+    invoke: {command: substrate.host_processes.AppendStreamEvent}
+    mapping: {process: event.process, kind: timed-out, ended_by: event.ended_by}
+    delivery: at_least_once
+    on_failure: drop
+
+  - id: stream-stopped
+    summary: A record whose stop of any cause has completed has a `stopped` stream item, with its code or signal when observed.
+    when:
+      event: substrate.host_processes.ProcessEnded
+      where: {any: [event.ended_by == stop, event.ended_by == lease-expiry, event.ended_by == timeout, event.ended_by == expires-at]}
+    invoke: {command: substrate.host_processes.AppendStreamEvent}
+    mapping:
+      process: event.process
+      kind: stopped
+      ended_by: event.ended_by
+      exit_code: event.exit_code
+      exit_signal: event.exit_signal
+    delivery: at_least_once
+    on_failure: drop
+
+  - id: stream-exited
+    summary: A record whose main process exited has an `exited` stream item with the code or the signal.
+    when:
+      event: substrate.host_processes.ProcessEnded
+      where: event.ended_by == exit
+    invoke: {command: substrate.host_processes.AppendStreamEvent}
+    mapping:
+      process: event.process
+      kind: exited
+      ended_by: event.ended_by
+      exit_code: event.exit_code
+      exit_signal: event.exit_signal
+    delivery: at_least_once
+    on_failure: drop
+
+  - id: stream-vanished
+    summary: A record whose cgroup was gone on reconciliation has a `vanished` stream item.
+    when:
+      event: substrate.host_processes.ProcessEnded
+      where: event.ended_by == vanished
+    invoke: {command: substrate.host_processes.AppendStreamEvent}
+    mapping: {process: event.process, kind: vanished, ended_by: event.ended_by}
+    delivery: at_least_once
+    on_failure: drop
+
+  - id: stream-ended
+    summary: The end item of a record's stream is followed by its terminal `ended` item, naming ended_by, with its code or signal when observed.
+    when:
+      event: substrate.host_processes.StreamEventAppended
+      where: {any: [event.kind == stopped, event.kind == exited, event.kind == vanished]}
+    invoke: {command: substrate.host_processes.AppendStreamEvent}
+    mapping:
+      process: event.process
+      kind: ended
+      ended_by: event.ended_by
+      exit_code: event.exit_code
+      exit_signal: event.exit_signal
+    delivery: at_least_once
+    on_failure: drop

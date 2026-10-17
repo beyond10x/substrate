@@ -1,0 +1,21 @@
+{
+  "$schema": "schemas/compatibility.json",
+  "contract": "substrate-wire",
+  "development_constraints": [
+    "This development bundle is contract-execution-ready but cannot satisfy a stable dependency.",
+    "Passing the bundle gate proves bundle integrity; it does not claim producer or host-driver conformance.",
+    "No compatibility promise begins before a signed stable release."
+  ],
+  "request_policy": "closed",
+  "response_policy": "closed-route-selected-envelopes",
+  "status": "development",
+  "supported_api_majors": [
+    1,
+    2
+  ],
+  "version": "0.19.0",
+  "client_visible_changes": [
+    "The workspace resource (schemas/resource.json) is closed, and 0.19.0 adds two required, read-only members to it: origin (created or adopted) and root_name. A client that validates workspace resources, events or listings against predecessor 0.18.0 rejects every workspace a 0.19.0 daemon reports, minted ones included, until it moves to 0.19.0 (ADR 0035).",
+    "Request shapes and workspace-id (ws_...) are unchanged; 0.19.0 adds one route, workspace.adopt at POST /v1/workspaces/adopt, beside the 36 routes it preserves from 0.18.0."
+  ]
+}

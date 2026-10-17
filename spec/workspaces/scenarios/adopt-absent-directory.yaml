@@ -1,0 +1,16 @@
+# Nothing is placed at the name. The host observation answers ENOENT, so the
+# adopt is refused as resource.not-found and no row is written.
+type: ess-scenario/5
+domain: substrate.workspaces
+scenario: adopt-absent-directory
+summary: Adopting a root name with no directory under the workspace root is refused as not found, and writes no row.
+
+timeline:
+  - at: 2026-10-15T09:00:00Z
+    command: substrate.workspaces.Adopt
+    actor: substrate.workspaces.AllowedSubject
+    caller: {subject: "local:1000"}
+    input: {root_name: never-placed, labels: {}}
+    outcome: absent
+    error: {name: substrate.workspaces.NotFound}
+    no_events: [substrate.workspaces.WorkspaceAdopted]

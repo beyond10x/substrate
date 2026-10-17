@@ -2,7 +2,8 @@ use crate::events::{append_event, commit_effect};
 use crate::leases::{freeze_workspace_lease_if_due, upsert_lease};
 use crate::operations::{
     existing_reservation, finalize_operation_accounting, insert_accepted_operation,
-    insert_refused_operation, operation_identity, resource_partition_at_capacity,
+    insert_refused_operation, insert_unbound_refusal, operation_identity,
+    resource_partition_at_capacity,
 };
 use crate::{
     LeaseClock, NewLease, NewOperation, OperationCapacity, Reservation, ResourceCapacity, Scope,
@@ -14,7 +15,7 @@ use serde::Serialize;
 use serde_json::Value;
 use substrate_wire::{
     ErrorClass, ErrorDetail, Exec, ExecState, LeaseState, OperationOutcome, Workspace,
-    WorkspaceState,
+    WorkspaceOrigin, WorkspaceState,
 };
 
 pub(crate) const WORKSPACE_CLEANUP_INITIAL_BACKOFF_MS: i64 = 250;
@@ -59,11 +60,32 @@ pub enum WorkspaceDestroyReservation {
     },
 }
 
+/// Who holds a root name in the caller's deployment (ADR 0035 decision 5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorkspaceRootHolder {
+    /// No row holds the name.
+    Free,
+    /// A row of the calling subject holds it.
+    Caller,
+    /// A row of another subject holds it; the caller is answered as if nothing were there.
+    Elsewhere,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum WorkspaceAdoptReservation {
+    /// The row was written Ready and the operation is terminal, in one transaction.
+    Adopted(Workspace),
+    /// A replay, a recorded refusal, a pending or conflicting operation, or ledger capacity.
+    Answered(Reservation),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PendingWorkspaceDestroy {
     pub scope: Scope,
     pub id: String,
     pub root_name: String,
+    /// An adopted row is forgotten, never removed from disk (ADR 0035 decision 7).
+    pub origin: WorkspaceOrigin,
     pub operation: String,
     pub attempt_count: u32,
 }
@@ -132,6 +154,169 @@ impl Store {
         drop(connection);
         self.report_committed(&[commit_effect(&new.scope, &event)]);
         Ok(Reservation::Accepted)
+    }
+
+    /// Which row, if any, holds `root_name` in the caller's deployment, across subjects: the
+    /// root name is unique per deployment (`UNIQUE (deployment, root_name)`).
+    pub fn workspace_root_holder(
+        &self,
+        scope: &Scope,
+        root_name: &str,
+    ) -> Result<WorkspaceRootHolder, StoreError> {
+        let connection = self.connection.lock();
+        root_holder(&connection, scope, root_name)
+    }
+
+    /// Admit a `workspace.adopt` (ADR 0035 decision 3): one Ready row with `origin: adopted`, the
+    /// operation terminal with a 201 result, and the `workspace.created` event, in one
+    /// transaction. A name held by the caller's own row is `workspace.already-exists`; one held by
+    /// another subject's row is `resource.not-found`, recorded exactly as an absent directory is
+    /// (no resource, an `operation.refused` event on the operation). Every refusal is recorded so
+    /// a retry replays it.
+    ///
+    /// `read_holder` is what [`Store::workspace_root_holder`] answered before the host was asked
+    /// anything, and `observed` is the host's observation of the directory, which exists only when
+    /// that read found the name free. A name that was held at the read and is free now (its
+    /// holder destroyed in between) is answered from the read: a row is never written for a
+    /// directory the host did not observe.
+    #[allow(clippy::too_many_lines)]
+    pub fn reserve_workspace_adopt(
+        &self,
+        new: &NewOperation,
+        root_name: &str,
+        read_holder: WorkspaceRootHolder,
+        observed: &Workspace,
+        terminal_at: &str,
+    ) -> Result<WorkspaceAdoptReservation, StoreError> {
+        let mut connection = self.connection.lock();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        if let Some(reservation) = existing_reservation(&transaction, new)? {
+            transaction.commit()?;
+            return Ok(WorkspaceAdoptReservation::Answered(reservation));
+        }
+        let holder = match root_holder(&transaction, &new.scope, root_name)? {
+            WorkspaceRootHolder::Free => read_holder,
+            current => current,
+        };
+        let held = match holder {
+            WorkspaceRootHolder::Free => None,
+            WorkspaceRootHolder::Caller => Some((
+                409,
+                ErrorDetail {
+                    class: ErrorClass::Conflict,
+                    code: "workspace.already-exists".to_owned(),
+                    message: "Workspace identity already exists.".to_owned(),
+                    retriable: false,
+                    address: Some("workspace".to_owned()),
+                    operation: Some(new.operation.clone()),
+                },
+            )),
+            WorkspaceRootHolder::Elsewhere => Some((404, adopt_not_found(&new.operation))),
+        };
+        if let Some((status, detail)) = held {
+            let (answer, event) = match insert_unbound_refusal(
+                &transaction,
+                self.event_retention,
+                self.config,
+                new,
+                terminal_at,
+                status,
+                &detail,
+            ) {
+                Ok(value) => value,
+                Err(StoreError::OperationCapacity(capacity)) => {
+                    transaction.rollback()?;
+                    return Ok(WorkspaceAdoptReservation::Answered(Reservation::Capacity(
+                        capacity,
+                    )));
+                }
+                Err(error) => return Err(error),
+            };
+            transaction.commit()?;
+            drop(connection);
+            self.report_committed(&[commit_effect(&new.scope, &event)]);
+            return Ok(WorkspaceAdoptReservation::Answered(Reservation::Replay(
+                answer,
+            )));
+        }
+        if resource_partition_at_capacity(
+            &transaction,
+            &new.scope,
+            "workspaces",
+            self.config.snapshot_max_workspaces,
+        )? {
+            let (reservation, event) = self.persist_resource_capacity_refusal(
+                transaction,
+                new,
+                ResourceCapacity::Workspaces,
+            )?;
+            drop(connection);
+            if let Some(event) = event {
+                self.report_committed(&[commit_effect(&new.scope, &event)]);
+            }
+            return Ok(WorkspaceAdoptReservation::Answered(reservation));
+        }
+        let accepted =
+            match insert_accepted_operation(&transaction, self.event_retention, self.config, new) {
+                Ok(event) => event,
+                Err(StoreError::OperationCapacity(capacity)) => {
+                    transaction.rollback()?;
+                    return Ok(WorkspaceAdoptReservation::Answered(Reservation::Capacity(
+                        capacity,
+                    )));
+                }
+                Err(error) => return Err(error),
+            };
+        let mut resource = observed.clone();
+        resource.origin = WorkspaceOrigin::Adopted;
+        resource.state = WorkspaceState::Ready;
+        resource.root_name = root_name.into();
+        resource.lease = None;
+        resource.storage = None;
+        let result = serde_json::to_value(&resource)?;
+        let outcome = OperationOutcome::Success {
+            result: result.clone(),
+        };
+        let changed = transaction.execute(
+            "UPDATE operations
+             SET state = 'terminal', terminal_at = ?4, resource = ?5, outcome_json = ?6,
+                 response_status = 201
+             WHERE deployment = ?1 AND subject = ?2 AND operation = ?3 AND state = 'accepted'",
+            params![
+                new.scope.deployment,
+                new.scope.subject,
+                new.operation,
+                terminal_at,
+                resource.id,
+                serde_json::to_string(&outcome)?,
+            ],
+        )?;
+        if changed != 1 {
+            return Err(StoreError::NotAccepted(new.operation.clone()));
+        }
+        finalize_operation_accounting(&transaction, self.config, &new.scope, &new.operation)?;
+        upsert_workspace(&transaction, &new.scope, root_name, &resource)?;
+        let (actor, principal) = operation_identity(&transaction, &new.scope, &new.operation)?;
+        let created = append_event(
+            &transaction,
+            self.event_retention,
+            &new.scope,
+            &resource.id,
+            "workspace",
+            "workspace.created",
+            terminal_at,
+            &actor,
+            principal.as_deref(),
+            &new.operation,
+            Some(result),
+        )?;
+        transaction.commit()?;
+        drop(connection);
+        self.report_committed(&[
+            commit_effect(&new.scope, &accepted),
+            commit_effect(&new.scope, &created),
+        ]);
+        Ok(WorkspaceAdoptReservation::Adopted(resource))
     }
 
     pub fn complete_workspace(
@@ -750,6 +935,7 @@ impl Store {
                 },
                 id,
                 root_name,
+                origin: resource.origin,
                 operation,
                 attempt_count: u32::try_from(attempt_count)
                     .map_err(|_| StoreError::IntegerRange)?,
@@ -933,17 +1119,62 @@ pub(crate) fn upsert_workspace(
     workspace: &Workspace,
 ) -> Result<(), StoreError> {
     connection.execute(
-        "INSERT INTO workspaces (deployment, subject, id, root_name, resource_json)
-         VALUES (?1, ?2, ?3, ?4, ?5)
+        "INSERT INTO workspaces (deployment, subject, id, root_name, resource_json, origin)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)
          ON CONFLICT (deployment, subject, id) DO UPDATE SET
-             root_name = excluded.root_name, resource_json = excluded.resource_json",
+             root_name = excluded.root_name, resource_json = excluded.resource_json,
+             origin = excluded.origin",
         params![
             scope.deployment,
             scope.subject,
             workspace.id,
             root_name,
             serde_json::to_string(workspace)?,
+            workspace.origin.as_str(),
         ],
     )?;
     Ok(())
+}
+
+fn root_holder(
+    connection: &Connection,
+    scope: &Scope,
+    root_name: &str,
+) -> Result<WorkspaceRootHolder, StoreError> {
+    let subject: Option<String> = connection
+        .query_row(
+            "SELECT subject FROM workspaces WHERE deployment = ?1 AND root_name = ?2",
+            params![scope.deployment, root_name],
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(match subject {
+        None => WorkspaceRootHolder::Free,
+        Some(subject) if subject == scope.subject => WorkspaceRootHolder::Caller,
+        Some(_) => WorkspaceRootHolder::Elsewhere,
+    })
+}
+
+/// The one `resource.not-found` an adopt answers, whether the directory is absent or another
+/// subject's row holds the name, so the two are indistinguishable (ADR 0035 decision 5).
+#[must_use]
+pub fn adopt_not_found(operation: &str) -> ErrorDetail {
+    ErrorDetail {
+        class: ErrorClass::Refused,
+        code: "resource.not-found".to_owned(),
+        message: "Resource was not found.".to_owned(),
+        retriable: false,
+        address: Some("resource".to_owned()),
+        operation: Some(operation.to_owned()),
+    }
+}
+
+/// The store spelling of an origin. Anything but `created` reads as adopted, so an unexpected
+/// value never authorizes removing a directory.
+pub(crate) fn origin_from_column(value: &str) -> WorkspaceOrigin {
+    if value == "created" {
+        WorkspaceOrigin::Created
+    } else {
+        WorkspaceOrigin::Adopted
+    }
 }

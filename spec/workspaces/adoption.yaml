@@ -1,0 +1,307 @@
+domain: substrate.workspaces
+# ADR 0035: the store row that lets the daemon serve a
+# workspace, as far as `workspace.adopt` and `workspace.destroy` need it.
+# Source of the row: crates/substrate-store/src/schema.rs, table `workspaces`
+# (deployment, subject, id, root_name, resource_json; PRIMARY KEY (deployment,
+# subject, id); UNIQUE (deployment, root_name)). One deployment is modelled;
+# `owner` is the `subject` column.
+types:
+  # The authenticated subject, `local:<uid>` from kernel peer credentials
+  # (AGENTS.md, safety envelope). Never read from a request.
+  - name: substrate.workspaces.Subject
+    kind: newtype
+    of: String
+  # The store column `origin` (rows written before it migrate as `created`):
+  # how the row came to exist. It decides what destroy does to the directory.
+  # The 0.19.0 wire workspace resource publishes `origin` and `root_name`,
+  # read-only (no input sets either), so a client can tell before destroying
+  # whether the directory will be removed.
+  - name: substrate.workspaces.Origin
+    kind: enum
+    variants: [created, adopted]
+  # What the operator placed under the workspace root at a name. `other` is
+  # anything that is not a directory (a regular file, a symlink, a device);
+  # `observe_workspace` refuses each of them (crates/substrate-host/src/fs.rs).
+  - name: substrate.workspaces.EntryKind
+    kind: enum
+    variants: [directory, other]
+entities:
+  - name: substrate.workspaces.Workspace
+    naming:
+      summary: A store row the daemon serves a workspace from; its directory is `<workspace_root>/<root_name>`.
+    identity: {name: workspace, type: substrate.workspaces.WorkspaceId}
+    fields:
+      - {name: root_name, type: substrate.workspaces.RootName}
+      - {name: labels, type: "Map<String, String>"}
+      - {name: origin, type: substrate.workspaces.Origin}
+      - {name: owner, type: substrate.workspaces.Subject}
+    # The row serves the directory at <workspace_root>/<root_name>. An adopted
+    # directory exists before its row and outlives it, so the link is a
+    # reference; what destroy does to a created workspace's directory is an
+    # outcome, not this relation.
+    relations:
+      - {name: directory, kind: references, target: substrate.workspaces.RootEntry, cardinality: one, via: root_name}
+    # WorkspaceState (crates/substrate-wire/src/lib.rs) is ready, destroying,
+    # destroyed, expired, unknown. Only the two adoption reads are modelled:
+    # Ready, and Destroying for a created workspace whose directory removal is
+    # under way. Removal completion, Expired, Unknown and lease freezing stay in
+    # the native store and runtime suites.
+    lifecycle:
+      initial: Ready
+      states: [Ready, Destroying]
+      terminal: [Destroying]
+      transitions:
+        - {name: begin_destroy, from: [Ready], to: Destroying}
+  # The filesystem entry at `<workspace_root>/<root_name>`. It is not a store
+  # row and not a wire resource: it is what the operator places (outside the
+  # daemon, so no command creates it; a scenario establishes it with a setup
+  # row and a target with mkdir). It exists here so that what adoption
+  # observed, and destroy's "leaves the directory", are observable on a target.
+  - name: substrate.workspaces.RootEntry
+    naming:
+      summary: An entry directly under the workspace root, named by a root name.
+    identity: {name: root_name, type: substrate.workspaces.RootName}
+    fields:
+      - {name: kind, type: substrate.workspaces.EntryKind}
+    lifecycle:
+      initial: Present
+      states: [Present]
+      terminal: [Present]
+views:
+  # The store's scoped identity read (Store::workspace returns root_name and the
+  # resource; the owner is the subject partition). origin is the `origin` column. In
+  # 0.19.0 the wire workspace resource publishes root_name, labels and origin
+  # read-only; the owner stays implicit in the subject partition.
+  - name: substrate.workspaces.Workspaces
+    source: substrate.workspaces.Workspace
+    consistency: read_your_writes
+    fields:
+      - {name: workspace, type: substrate.workspaces.WorkspaceId}
+      - {name: state, type: substrate.workspaces.Workspace.State}
+      - {name: root_name, type: substrate.workspaces.RootName}
+      - {name: labels, type: "Map<String, String>"}
+      - {name: origin, type: substrate.workspaces.Origin}
+      - {name: owner, type: substrate.workspaces.Subject}
+  # What a directory listing of the workspace root shows. No wire route
+  # publishes it; a conformance target reads the filesystem.
+  - name: substrate.workspaces.RootEntries
+    source: substrate.workspaces.RootEntry
+    consistency: read_your_writes
+    fields:
+      - {name: root_name, type: substrate.workspaces.RootName}
+      - {name: kind, type: substrate.workspaces.EntryKind}
+actors:
+  # A subject named by `--allow-uid`. Its subject is derived from kernel peer
+  # credentials (`local:<uid>`), never from the request.
+  - name: substrate.workspaces.AllowedSubject
+    attributes:
+      - {name: subject, type: substrate.workspaces.Subject}
+    may:
+      - substrate.workspaces.Create
+      - substrate.workspaces.Adopt
+      - substrate.workspaces.Destroy
+errors:
+  # Each error is one existing wire refusal; the code and status are the wire's.
+  - name: substrate.workspaces.NotFound
+    summary: "`resource.not-found`, 404. The name or id addresses nothing this subject may see, including a root name or workspace another subject holds."
+    fields: []
+  - name: substrate.workspaces.AlreadyExists
+    summary: "`workspace.already-exists`, 409 conflict. The caller already holds a row with the root name."
+    fields:
+      - {name: root_name, type: substrate.workspaces.RootName}
+  - name: substrate.workspaces.PathEscape
+    summary: "`workspace.path-escape`, 422 refused, address `path` (the host's path_escape()). The entry is not a directory, or the daemon's uid does not own it."
+    fields:
+      - {name: root_name, type: substrate.workspaces.RootName}
+  - name: substrate.workspaces.NotReady
+    summary: "`workspace.not-ready`, 409 conflict. The workspace is not Ready (or its lease is not active)."
+    fields:
+      - {name: workspace, type: substrate.workspaces.WorkspaceId}
+  - name: substrate.workspaces.ExecsActive
+    summary: "`workspace.execs-active`, 409 conflict. The workspace has a nonterminal exec."
+    fields:
+      - {name: workspace, type: substrate.workspaces.WorkspaceId}
+  - name: substrate.workspaces.Capacity
+    summary: "`workspace.capacity`, 507 exhausted. The subject's workspace partition is full (snapshot_max_workspaces)."
+    fields: []
+commands:
+  # workspace.create, only as far as adoption depends on it: a created row
+  # holds a root name (the host derives it from the minted id,
+  # `workspace_root_identity`, crates/substrate-host/src/lib.rs), so adoption
+  # can collide with it. Source, storage and lease inputs, and the
+  # directory the driver makes, are outside this projection.
+  # The directory Create makes is not a RootEntry here: no outcome can create
+  # a second record keyed by a value it mints. A projection limit only.
+  - name: substrate.workspaces.Create
+    input:
+      - {name: labels, type: "Map<String, String>"}
+    outcomes:
+      - name: full
+        external: the subject's workspace partition is at snapshot_max_workspaces
+        error: substrate.workspaces.Capacity
+      - name: created
+        creates: substrate.workspaces.Workspace
+        instance: workspace
+        sets:
+          root_name: {generated: true}
+          labels: input.labels
+          origin: created
+          owner: {caller: subject}
+        emits: [substrate.workspaces.WorkspaceCreated]
+        payload:
+          substrate.workspaces.WorkspaceCreated:
+            workspace: {generated: true}
+            owner: {caller: subject}
+
+  # workspace.adopt, POST /v1/workspaces/adopt (ADR 0035).
+  # Every refusal is answered before dispatch and recorded as a refused
+  # operation through record_bound_refusal
+  # (crates/substrate-daemon/src/app/operations.rs), so a retry replays it.
+  # A root name outside RootName is refused by the bundle's input schema as
+  # `request.schema-invalid` (422, address `root_name`), recorded the same way;
+  # ESS cannot declare a refusal for an input outside its own type, so that
+  # case is a runtime vector, not an outcome here.
+  - name: substrate.workspaces.Adopt
+    input:
+      - {name: root_name, type: substrate.workspaces.RootName, example: "adopted-repo"}
+      # Decided: labels only. No lease_ttl_ms and no storage limit: the
+      # directory belongs to the operator, so the daemon neither expires it nor
+      # applies a project quota to it.
+      - {name: labels, type: "Map<String, String>"}
+    outcomes:
+      # Checked first, in the store transaction: UNIQUE (deployment, root_name)
+      # holds across subjects, so another subject's row, and every minted
+      # `ws_…` directory, is found here too. Decided: a name another subject
+      # holds answers resource.not-found, exactly as an absent directory does,
+      # so adopt is no cross-subject existence oracle; a name the caller already
+      # holds answers workspace.already-exists.
+      # ESS 0.60.0 refuses `caller` inside a row-set selector
+      # (ESS-COMMAND-003, unobservable_fact), so the store's split by owner
+      # cannot be a when_related guard. Both halves are declared external, in
+      # the decided order. Cost: synthesis no longer witnesses root-name
+      # uniqueness; the authored double-adopt scenarios carry it.
+      # Revisit when an ESS release fixes beyond10x/ess#580 (fresh values
+      # in the swapped-caller half).
+      - name: held-elsewhere
+        external: another subject's row holds root_name
+        error: substrate.workspaces.NotFound
+      - name: held
+        external: the caller's own row holds root_name
+        error: substrate.workspaces.AlreadyExists
+        payload:
+          substrate.workspaces.AlreadyExists: {root_name: input.root_name}
+      # The directory checks are the host driver's observation of
+      # <workspace_root>/<root_name> through the confined root fd, not a store
+      # read: ENOENT is resource.not-found (classify_open_error), and an entry
+      # that is not a directory is workspace.path-escape, as observe_workspace
+      # answers today (crates/substrate-host/src/fs.rs). They are external
+      # here; RootEntry is where a target shows what it observed.
+      # Decided: adoption keeps the daemon-uid ownership check with the code
+      # create uses: create_workspace calls observe_workspace
+      # (crates/substrate-host/src/fs.rs:133), which refuses st_uid !=
+      # effective_uid at fs.rs:139 with path_escape() (fs.rs:1381-1387):
+      # workspace.path-escape, address `path`.
+      - name: absent
+        external: no entry exists at <workspace_root>/<root_name>
+        error: substrate.workspaces.NotFound
+      - name: not-a-directory
+        external: the entry at <workspace_root>/<root_name> is not a directory
+        error: substrate.workspaces.PathEscape
+        payload:
+          substrate.workspaces.PathEscape: {root_name: input.root_name}
+      - name: not-owned
+        external: the directory at <workspace_root>/<root_name> is not owned by the daemon's effective uid
+        error: substrate.workspaces.PathEscape
+        payload:
+          substrate.workspaces.PathEscape: {root_name: input.root_name}
+      - name: full
+        external: the subject's workspace partition is at snapshot_max_workspaces
+        error: substrate.workspaces.Capacity
+      - name: adopted
+        creates: substrate.workspaces.Workspace
+        instance: workspace
+        sets:
+          root_name: input.root_name
+          labels: input.labels
+          origin: adopted
+          owner: {caller: subject}
+        emits: [substrate.workspaces.WorkspaceAdopted]
+        payload:
+          substrate.workspaces.WorkspaceAdopted:
+            workspace: {generated: true}
+            root_name: input.root_name
+            owner: {caller: subject}
+
+  # workspace.destroy, DELETE /v1/workspaces/{workspace}. Rows are scoped by
+  # subject, so another subject's workspace is resource.not-found, as an absent
+  # one is (crates/substrate-store/src/workspaces.rs, reserve_workspace_destroy).
+  - name: substrate.workspaces.Destroy
+    input:
+      - {name: workspace, type: substrate.workspaces.WorkspaceId}
+    outcomes:
+      # The store refuses active execs for both origins, before it reads the
+      # origin (reserve_workspace_destroy: frozen, then nonterminal execs, then
+      # accept). ESS answers a branch the stored row selects before an unguarded
+      # external one, and refuses `external:` beside `when_subject:`, so this
+      # refusal is declared `before_row`. That is not literally true: the store
+      # reads the exec table for the addressed workspace. It is observably the
+      # same order, because the exec read is subject-scoped, so an absent or
+      # another subject's workspace has no exec to find, and exec.start refuses
+      # a workspace that is not Ready, so a Destroying row with a live exec is
+      # not reachable through these commands.
+      - name: execs-active
+        external: the workspace has a nonterminal exec
+        before_row: true
+        error: substrate.workspaces.ExecsActive
+        payload:
+          substrate.workspaces.ExecsActive: {workspace: input.workspace}
+      - name: not-yours
+        when_subject: {predicate: owner != caller.subject}
+        error: substrate.workspaces.NotFound
+      - name: absent
+        unknown_instance: true
+        error: substrate.workspaces.NotFound
+      - name: not-ready
+        wrong_state: true
+        error: substrate.workspaces.NotReady
+        payload:
+          substrate.workspaces.NotReady: {workspace: input.workspace}
+      # Decided: an adopted row is forgotten. The row, its cleanup entry and
+      # any lease go; the directory and its contents stay. The same holds on
+      # every removal path, not only this synchronous one: restart cleanup
+      # (due_destroying_workspaces), lease expiry and reconciliation forget an
+      # adopted record and never delete operator-owned files. Those paths are
+      # outside this projection; the native store and runtime suites own them.
+      - name: forgotten
+        when_subject: {predicate: origin == adopted}
+        deletes: substrate.workspaces.Workspace
+        instance: workspace
+        emits: [substrate.workspaces.WorkspaceForgotten]
+        payload:
+          substrate.workspaces.WorkspaceForgotten: {workspace: input.workspace}
+      # As today for a created row: Destroying, then the driver removes the
+      # directory tree and the row is deleted (complete_workspace_absence).
+      - name: destroying
+        moves: substrate.workspaces.Workspace.begin_destroy
+        instance: workspace
+        emits: [substrate.workspaces.DestroyStarted]
+        payload:
+          substrate.workspaces.DestroyStarted: {workspace: input.workspace}
+events:
+  # Projections of the operation ledger's accepted/terminal events for each
+  # operation; no new wire event is implied.
+  - name: substrate.workspaces.WorkspaceCreated
+    fields:
+      - {name: workspace, type: substrate.workspaces.WorkspaceId}
+      - {name: owner, type: substrate.workspaces.Subject}
+  - name: substrate.workspaces.WorkspaceAdopted
+    fields:
+      - {name: workspace, type: substrate.workspaces.WorkspaceId}
+      - {name: root_name, type: substrate.workspaces.RootName}
+      - {name: owner, type: substrate.workspaces.Subject}
+  - name: substrate.workspaces.WorkspaceForgotten
+    fields:
+      - {name: workspace, type: substrate.workspaces.WorkspaceId}
+  - name: substrate.workspaces.DestroyStarted
+    fields:
+      - {name: workspace, type: substrate.workspaces.WorkspaceId}

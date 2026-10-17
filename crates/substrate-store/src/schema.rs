@@ -96,6 +96,7 @@ impl Store {
                 id TEXT NOT NULL,
                 root_name TEXT NOT NULL,
                 resource_json TEXT NOT NULL,
+                origin TEXT NOT NULL DEFAULT 'created',
                 PRIMARY KEY (deployment, subject, id),
                 UNIQUE (deployment, root_name)
             ) WITHOUT ROWID;
@@ -276,8 +277,10 @@ impl Store {
         migrate_lease_authority(&connection)?;
         migrate_exec_physical_absence(&connection)?;
         migrate_workspace_cleanup_progress(&connection)?;
+        migrate_workspace_origin(&connection)?;
         migrate_operation_ledger_accounting(&mut connection, config)?;
         migrate_operation_grant_attribution(&connection)?;
+        crate::host_processes::migrate_host_processes(&connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
             event_retention: config.event_retention,
@@ -772,5 +775,30 @@ fn validate_durable_operation_occupancy(
             OperationCapacity::GlobalBytes,
         ));
     }
+    Ok(())
+}
+
+/// ADR 0035: every row written before `workspace.adopt` existed is one `workspace.create` wrote,
+/// so the column defaults to `created`, and the stored resource gains the two members the wire
+/// resource now requires, from the row itself.
+fn migrate_workspace_origin(connection: &Connection) -> Result<(), StoreError> {
+    let mut statement = connection.prepare("PRAGMA table_info(workspaces)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    if !columns.iter().any(|column| column == "origin") {
+        connection.execute(
+            "ALTER TABLE workspaces ADD COLUMN origin TEXT NOT NULL DEFAULT 'created'",
+            [],
+        )?;
+    }
+    connection.execute(
+        "UPDATE workspaces
+         SET resource_json = json_set(resource_json, '$.origin', origin, '$.root_name', root_name)
+         WHERE json_type(resource_json, '$.origin') IS NULL
+            OR json_type(resource_json, '$.root_name') IS NULL",
+        [],
+    )?;
     Ok(())
 }

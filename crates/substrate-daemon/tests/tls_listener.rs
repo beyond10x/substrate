@@ -399,6 +399,8 @@ fn seed_ready_pipe_session(state_path: &Path, origin: &str) {
         labels: BTreeMap::default(),
         observed_at: now,
         state: WorkspaceState::Ready,
+        origin: substrate_wire::WorkspaceOrigin::Created,
+        root_name: substrate_wire::RootName::from("ws_network_authority"),
         storage: None,
         lease: None,
     };
@@ -812,7 +814,7 @@ async fn production_tls_refuses_unverified_routes_and_rotates_atomically() {
     assert!(
         response
             .to_ascii_lowercase()
-            .contains("x-b10x-contract: substrate-wire/0.18.0"),
+            .contains("x-b10x-contract: substrate-wire/0.19.0"),
         "{response}"
     );
 

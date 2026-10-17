@@ -888,6 +888,10 @@ fn check_classification(version: &str, released: &Tree, failures: &mut Vec<Strin
 /// A successor that rendered, verified and preserved everything while adding nothing is the failure
 /// this catches; the entries are the acceptance list of the story that cut the bundle.
 fn check_additions(version: &str, released: &Tree, failures: &mut Vec<String>) {
+    if version == "0.19.0" {
+        check_workspace_adopt_additions(released, failures);
+        return;
+    }
     if version == "0.18.0" {
         check_block_io_relaxation_additions(released, failures);
         check_read_only_file_additions(released, failures);
@@ -939,6 +943,343 @@ fn check_additions(version: &str, released: &Tree, failures: &mut Vec<String>) {
     }
     if version == "0.5.0" {
         check_secret_slot_additions(released, failures);
+    }
+}
+
+/// Largest root name, in bytes: Linux `NAME_MAX`, the bound of the single path component a root
+/// name is (ADR 0035). Bound here rather than through a `{"$wire": …}` marker, because
+/// `render_v2.rs` is hashed by every bundle it rendered and cannot gain a binding.
+const ROOT_NAME_MAX_BYTES: u64 = 255;
+/// The root-name set (ADR 0035, decision 1): exactly the host's `validate_root_name` set — ASCII
+/// alphanumerics, `_` and `-`, no leading `-` — so it holds no `.`, no hidden name and no
+/// `.substrate-*` service directory.
+const ROOT_NAME_PATTERN: &str = "^[A-Za-z0-9_][A-Za-z0-9_-]*$";
+/// The minted workspace id, which ADR 0035 decision 2 keeps unchanged.
+const MINTED_WORKSPACE_ID_PATTERN: &str = "^ws_[A-Za-z0-9]+$";
+/// Every code ADR 0035 decision 5 names for `workspace.adopt` that only the adopt route decides.
+/// `workspace.capacity` and `operation.ledger-capacity` are shared with `workspace.create` and
+/// already named by the predecessor's vectors.
+const ADOPT_REFUSAL_CODES: [&str; 4] = [
+    "request.schema-invalid",
+    "resource.not-found",
+    "workspace.already-exists",
+    "workspace.path-escape",
+];
+
+fn root_name_schema() -> Value {
+    json!({
+        "maxLength": ROOT_NAME_MAX_BYTES,
+        "minLength": 1,
+        "pattern": ROOT_NAME_PATTERN,
+        "type": "string"
+    })
+}
+
+/// What `0.19.0` exists for (ADR 0035): an operator's directory is served after an explicit
+/// `workspace.adopt`, and the workspace resource says where it came from.
+fn check_workspace_adopt_additions(released: &Tree, failures: &mut Vec<String>) {
+    check_adopt_route(released, failures);
+    check_adopt_input(released, failures);
+    check_adopt_result(released, failures);
+    check_workspace_origin_members(released, failures);
+    check_minted_workspace_id(released, failures);
+    check_client_visible_change(released, failures);
+    check_adopt_vectors(released, failures);
+    check_vector_workspace_resources(released, failures);
+}
+
+fn check_adopt_route(released: &Tree, failures: &mut Vec<String>) {
+    let Some(registry) = json_at(released, "operations.json", failures) else {
+        return;
+    };
+    let adopt: Vec<&Value> = registry
+        .get("operations")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|operation| operation.get("id") == Some(&json!("workspace.adopt")))
+        .collect();
+    let [adopt] = adopt.as_slice() else {
+        failures.push(format!(
+            "operations.json: workspace.adopt must be declared exactly once, found {}",
+            adopt.len()
+        ));
+        return;
+    };
+    for (member, expected) in [
+        ("method", json!("POST")),
+        ("path", json!("/v1/workspaces/adopt")),
+        ("api_major", json!(1)),
+        ("idempotency", json!("keyed")),
+        ("risk", json!("write")),
+        ("required_scope", json!("workspaces")),
+        ("input_binding", json!("body.input")),
+        ("input_schema", json!("schemas/inputs/workspace-adopt.json")),
+        (
+            "result_schema",
+            json!("schemas/results/workspace-adopt.json"),
+        ),
+    ] {
+        if adopt.get(member) != Some(&expected) {
+            failures.push(format!(
+                "operations.json: workspace.adopt {member} must be {expected}"
+            ));
+        }
+    }
+}
+
+fn check_adopt_input(released: &Tree, failures: &mut Vec<String>) {
+    let path = "schemas/inputs/workspace-adopt.json";
+    let Some(input) = json_at(released, path, failures) else {
+        return;
+    };
+    if input.get("additionalProperties") != Some(&json!(false)) {
+        failures.push(format!("{path}: the adopt input must be closed"));
+    }
+    if input.get("required") != Some(&json!(["root_name", "labels"])) {
+        failures.push(format!(
+            "{path}: required must be exactly root_name and labels"
+        ));
+    }
+    let expected = json!({
+        "labels": { "$ref": "../common.json#/$defs/labels" },
+        "root_name": root_name_schema()
+    });
+    if input.get("properties") != Some(&expected) {
+        failures.push(format!(
+            "{path}: properties must be exactly {expected}; adopt takes no lease and no storage"
+        ));
+    }
+}
+
+fn check_adopt_result(released: &Tree, failures: &mut Vec<String>) {
+    let path = "schemas/results/workspace-adopt.json";
+    let Some(result) = json_at(released, path, failures) else {
+        return;
+    };
+    let expected = json!({
+        "allOf": [
+            { "$ref": "../resource.json#/$defs/workspace" },
+            {
+                "properties": {
+                    "origin": { "const": "adopted" },
+                    "state": { "const": "ready" }
+                }
+            }
+        ]
+    });
+    if result.get("allOf") != expected.get("allOf") {
+        failures.push(format!(
+            "{path}: the adopt result must be the ready, adopted workspace resource"
+        ));
+    }
+}
+
+fn check_workspace_origin_members(released: &Tree, failures: &mut Vec<String>) {
+    let path = "schemas/resource.json";
+    let Some(resource) = json_at(released, path, failures) else {
+        return;
+    };
+    let Some(workspace) = resource.pointer("/$defs/workspace") else {
+        failures.push(format!("{path}: no workspace resource"));
+        return;
+    };
+    if workspace.get("additionalProperties") != Some(&json!(false)) {
+        failures.push(format!("{path}: the workspace resource must stay closed"));
+    }
+    if workspace.pointer("/properties/origin") != Some(&json!({ "enum": ["created", "adopted"] })) {
+        failures.push(format!(
+            "{path}: workspace origin must be exactly created or adopted"
+        ));
+    }
+    if workspace.pointer("/properties/root_name") != Some(&root_name_schema()) {
+        failures.push(format!(
+            "{path}: workspace root_name must be exactly the root-name set"
+        ));
+    }
+    let required = workspace
+        .get("required")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    for member in ["origin", "root_name"] {
+        if !required.contains(&json!(member)) {
+            failures.push(format!("{path}: workspace {member} must be required"));
+        }
+    }
+}
+
+fn check_minted_workspace_id(released: &Tree, failures: &mut Vec<String>) {
+    let Some(common) = json_at(released, "schemas/common.json", failures) else {
+        return;
+    };
+    if common.pointer("/$defs/workspace-id/pattern") != Some(&json!(MINTED_WORKSPACE_ID_PATTERN)) {
+        failures.push(format!(
+            "schemas/common.json: workspace-id must stay {MINTED_WORKSPACE_ID_PATTERN}"
+        ));
+    }
+}
+
+fn check_client_visible_change(released: &Tree, failures: &mut Vec<String>) {
+    let path = "compatibility.json";
+    let Some(compatibility) = json_at(released, path, failures) else {
+        return;
+    };
+    let changes: Vec<&str> = compatibility
+        .get("client_visible_changes")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    for named in ["origin", "root_name", "0.18.0"] {
+        if !changes.iter().any(|change| change.contains(named)) {
+            failures.push(format!(
+                "{path}: client_visible_changes must state the closed workspace resource's new \
+                 member or predecessor {named}"
+            ));
+        }
+    }
+}
+
+/// The adopt vectors: one success that publishes `origin` and `root_name`, an out-of-set name
+/// refused before dispatch, and every adopt-decided code named by a vector, so no reader of the
+/// contract meets an adopt refusal the bundle never names.
+fn check_adopt_vectors(released: &Tree, failures: &mut Vec<String>) {
+    let mut succeeded = false;
+    let mut out_of_set = false;
+    let mut named = BTreeSet::new();
+    for (path, bytes) in released {
+        if !path.starts_with("vectors/") {
+            continue;
+        }
+        let Ok(vector) = serde_json::from_slice::<Value>(bytes) else {
+            continue;
+        };
+        if vector.pointer("/action/operation") != Some(&json!("workspace.adopt")) {
+            continue;
+        }
+        let mut pairs = Vec::new();
+        if let Some(request) = vector.pointer("/action/request")
+            && let Some(response) = vector.pointer("/expected/response")
+        {
+            pairs.push((request, response));
+        }
+        if let (Some(steps), Some(responses)) = (
+            vector.pointer("/action/steps").and_then(Value::as_array),
+            vector
+                .pointer("/expected/responses")
+                .and_then(Value::as_array),
+        ) {
+            for (step, response) in steps.iter().zip(responses) {
+                if let Some(request) = step.get("request") {
+                    pairs.push((request, response));
+                }
+            }
+        }
+        for (request, response) in pairs {
+            let root_name = request.pointer("/body/input/root_name");
+            if let Some(code) = response.pointer("/body/error/code").and_then(Value::as_str) {
+                named.insert(code.to_owned());
+                let outside = root_name
+                    .and_then(Value::as_str)
+                    .is_some_and(|name| !is_root_name(name));
+                if outside
+                    && code == "request.schema-invalid"
+                    && response.get("status") == Some(&json!(422))
+                    && response.pointer("/body/error/operation").is_some()
+                {
+                    out_of_set = true;
+                }
+            } else if let Some(result) = response.pointer("/body/result")
+                && result.get("origin") == Some(&json!("adopted"))
+                && root_name.is_some()
+                && result.get("root_name") == root_name
+                && result
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| id.starts_with("ws_"))
+            {
+                succeeded = true;
+            }
+        }
+    }
+    if !succeeded {
+        failures.push(
+            "vectors: no workspace.adopt vector answers a minted ws_ id with origin adopted and \
+             the requested root_name"
+                .to_owned(),
+        );
+    }
+    if !out_of_set {
+        failures.push(
+            "vectors: no workspace.adopt vector refuses an out-of-set root_name with a recorded \
+             request.schema-invalid"
+                .to_owned(),
+        );
+    }
+    for code in ADOPT_REFUSAL_CODES {
+        if !named.contains(code) {
+            failures.push(format!("vectors: no workspace.adopt vector names {code}"));
+        }
+    }
+}
+
+/// The root-name set, written out rather than matched with the published pattern, so the check
+/// does not read the published pattern back at itself.
+fn is_root_name(name: &str) -> bool {
+    !name.is_empty()
+        && name.len() as u64 <= ROOT_NAME_MAX_BYTES
+        && !name.starts_with('-')
+        && name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+}
+
+/// The class, not the instance: every workspace resource a vector or fixture shows a client
+/// carries the two members the closed `0.19.0` resource requires. Stored setup rows are not wire.
+fn check_vector_workspace_resources(released: &Tree, failures: &mut Vec<String>) {
+    for (path, bytes) in released {
+        if !(path.starts_with("vectors/") || path.starts_with("fixtures/")) {
+            continue;
+        }
+        let Ok(document) = serde_json::from_slice::<Value>(bytes) else {
+            continue;
+        };
+        let mut found = Vec::new();
+        for root in ["/expected", "/valid", "/invalid"] {
+            if let Some(value) = document.pointer(root) {
+                workspace_resources_lacking_origin(value, root, &mut found);
+            }
+        }
+        for pointer in found {
+            failures.push(format!(
+                "{path}: {pointer} is a workspace resource without origin and root_name"
+            ));
+        }
+    }
+}
+
+fn workspace_resources_lacking_origin(value: &Value, pointer: &str, found: &mut Vec<String>) {
+    match value {
+        Value::Object(members) => {
+            let resource = members.get("kind") == Some(&json!("workspace"))
+                && members.contains_key("labels")
+                && members.contains_key("state");
+            if resource && !(members.contains_key("origin") && members.contains_key("root_name")) {
+                found.push(pointer.to_owned());
+            }
+            for (key, member) in members {
+                let here = format!("{pointer}/{}", key.replace('~', "~0").replace('/', "~1"));
+                workspace_resources_lacking_origin(member, &here, found);
+            }
+        }
+        Value::Array(items) => {
+            for (index, item) in items.iter().enumerate() {
+                workspace_resources_lacking_origin(item, &format!("{pointer}/{index}"), found);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -5525,7 +5866,7 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{}: {error}", bundle.display()));
             checked += 1;
         }
-        assert_eq!(checked, 18, "every released bundle must be checked");
+        assert_eq!(checked, 19, "every released bundle must be checked");
     }
 
     /// Class, the other half: if a parameter's name is not a discriminator, then renaming one is
@@ -7147,6 +7488,88 @@ mod block_io_relaxation {
                 failures.iter().any(|failure| failure.contains(named)),
                 "0.17.0 was not reported for {named}: {failures:?}"
             );
+        }
+    }
+}
+
+/// `0.19.0`'s addition (ADR 0035): an operator's directory is served after an explicit adopt.
+#[cfg(test)]
+mod workspace_adopt {
+    use crate::repo;
+
+    fn released(version: &str) -> super::Tree {
+        super::tree_of(
+            &repo::root()
+                .expect("root")
+                .join("contracts/substrate-wire")
+                .join(version),
+        )
+        .expect("the bundle reads")
+    }
+
+    #[test]
+    fn the_successor_carries_the_adopt_route_and_the_origin_members() {
+        let mut failures = Vec::new();
+        super::check_additions("0.19.0", &released("0.19.0"), &mut failures);
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    /// A check that passes on the tree that predates the change proves nothing about the tree
+    /// that carries it: `0.18.0` has no adopt route and a workspace resource without either
+    /// member, while its minted `workspace-id` already holds.
+    #[test]
+    fn the_predecessor_carries_none_of_it() {
+        let mut failures = Vec::new();
+        super::check_additions("0.19.0", &released("0.18.0"), &mut failures);
+        for named in [
+            "workspace.adopt must be declared exactly once",
+            "schemas/inputs/workspace-adopt.json: absent",
+            "schemas/results/workspace-adopt.json: absent",
+            "workspace origin must be exactly",
+            "workspace root_name must be exactly",
+            "client_visible_changes",
+            "no workspace.adopt vector answers",
+            "no workspace.adopt vector refuses",
+            "no workspace.adopt vector names workspace.already-exists",
+            "vectors/http/workspace-create.json: /expected/response/body/result is a workspace",
+        ] {
+            assert!(
+                failures.iter().any(|failure| failure.contains(named)),
+                "0.18.0 was not reported for {named}: {failures:?}"
+            );
+        }
+        assert!(
+            !failures
+                .iter()
+                .any(|failure| failure.contains("workspace-id must stay")),
+            "0.18.0's minted workspace-id was reported: {failures:?}"
+        );
+    }
+
+    /// The written-out set is the host's `validate_root_name` set within `NAME_MAX`, and the
+    /// published pattern agrees with it on both sides of the boundary.
+    #[test]
+    fn the_published_root_name_set_is_the_host_set_within_name_max() {
+        let pattern = fancy_regex::Regex::new(super::ROOT_NAME_PATTERN).expect("compiles");
+        let longest = "a".repeat(255);
+        let too_long = "a".repeat(256);
+        for admitted in ["ws_0123abc", "checkout", "_build", "a-b_c", "0", &longest] {
+            assert!(super::is_root_name(admitted), "{admitted}");
+            assert!(pattern.is_match(admitted).expect("matches"), "{admitted}");
+        }
+        assert!(!super::is_root_name(&too_long));
+        for refused in [
+            "",
+            ".",
+            "..",
+            ".substrate-apertures",
+            "-x",
+            "a/b",
+            "a.b",
+            "a b",
+        ] {
+            assert!(!super::is_root_name(refused), "{refused:?}");
+            assert!(!pattern.is_match(refused).expect("matches"), "{refused:?}");
         }
     }
 }

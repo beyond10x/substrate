@@ -24,8 +24,8 @@ use super::sessions::{
     pipe_session_lease_renew, pipe_session_retire, pipe_session_signal, pipe_session_start,
 };
 use super::workspaces::{
-    workspace_create, workspace_destroy, workspace_file_delete, workspace_file_edit_v2,
-    workspace_file_patch_v2, workspace_file_read, workspace_file_read_v2,
+    workspace_adopt, workspace_create, workspace_destroy, workspace_file_delete,
+    workspace_file_edit_v2, workspace_file_patch_v2, workspace_file_read, workspace_file_read_v2,
     workspace_file_replace_v2, workspace_file_write, workspace_get,
     workspace_git_baseline_file_read_v2, workspace_git_changes_read_v2, workspace_lease_renew,
     workspace_tree_read_v2,
@@ -54,6 +54,7 @@ fn router_for(app: Arc<App>, transport: SessionTransport) -> Router {
         .route("/v1/metrics", get(metrics_get))
         .route("/v1/metrics/stream", get(metrics_stream))
         .route("/v1/workspaces", post(workspace_create))
+        .route("/v1/workspaces/adopt", post(workspace_adopt))
         .route(
             "/v1/workspaces/{workspace_id}",
             get(workspace_get).delete(workspace_destroy),

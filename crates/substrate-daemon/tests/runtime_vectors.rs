@@ -43,9 +43,9 @@ const DAEMON: &str = env!("CARGO_BIN_EXE_substrate-daemon");
 const CGROUP_EXEC: &str = env!("CARGO_BIN_EXE_substrate-cgroup-exec");
 const DAEMON_OVERRIDE_VARIABLE: &str = "SUBSTRATE_VECTORS_DAEMON";
 /// Pinned independently of the daemon implementation: the clean-room client verifies what ships.
-const ADVERTISED_CONTRACT: &str = "substrate-wire/0.18.0";
+const ADVERTISED_CONTRACT: &str = "substrate-wire/0.19.0";
 const ADVERTISED_CONTRACT_SHA256: &str =
-    "3fe64bf0873e07b1cda16a05ca641d976513306f2626e99b98954750fb605d1e";
+    "2590ccad60fb25df236426254005aeb874b8a08f7d38ec173dc864bb48aeeddd";
 
 fn daemon_binary() -> PathBuf {
     std::env::var_os(DAEMON_OVERRIDE_VARIABLE).map_or_else(|| PathBuf::from(DAEMON), PathBuf::from)
@@ -2064,6 +2064,14 @@ async fn check_promoted_route_inventory(daemon: &Daemon, workspace: &str) -> usi
             "request.schema-invalid",
         ),
         (
+            "workspace.adopt",
+            "POST",
+            "/v1/workspaces/adopt".to_owned(),
+            Some(invalid_body),
+            422,
+            "request.schema-invalid",
+        ),
+        (
             "workspace.get",
             "GET",
             format!("/v1/workspaces/{workspace}?unexpected=1"),
@@ -2330,7 +2338,7 @@ async fn check_promoted_route_inventory(daemon: &Daemon, workspace: &str) -> usi
     let expected: BTreeSet<String> = {
         let registry = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
-            .join("contracts/substrate-wire/0.18.0/operations.json");
+            .join("contracts/substrate-wire/0.19.0/operations.json");
         let document: Value = serde_json::from_slice(
             &std::fs::read(&registry).expect("promoted operation registry bytes"),
         )
@@ -4238,8 +4246,8 @@ async fn check_read_only_file_host_refusals(
 // ---------------------------------------------------------------------------------------------
 
 /// The predecessor printed its case count; the port asserts it, so a case cannot vanish quietly.
-const PORTABLE_CASES: usize = 76;
-const DELEGATED_CASES: usize = 106;
+const PORTABLE_CASES: usize = 77;
+const DELEGATED_CASES: usize = 107;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {

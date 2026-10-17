@@ -1,0 +1,39 @@
+# Another allowed subject adopting a root name already held is refused as
+# resource.not-found, the answer an absent directory gets, so adopt is no
+# cross-subject existence oracle. The holder keeps its row.
+type: ess-scenario/5
+domain: substrate.workspaces
+scenario: adopt-twice-other-subject
+summary: A second subject adopting a root name another subject holds is refused as resource.not-found, and the first row is unchanged.
+
+arrange:
+  - instance: dir
+    entity: substrate.workspaces.RootEntry
+    setup:
+      identity: adopted-repo
+      fields: {kind: directory}
+      state: Present
+  - instance: repo
+    entity: substrate.workspaces.Workspace
+
+timeline:
+  - at: 2026-10-15T09:00:00Z
+    command: substrate.workspaces.Adopt
+    actor: substrate.workspaces.AllowedSubject
+    caller: {subject: "local:1000"}
+    input: {root_name: adopted-repo, labels: {}}
+    outcome: adopted
+    capture: {instance: repo, event: substrate.workspaces.WorkspaceAdopted, field: workspace}
+
+  - at: 2026-10-15T09:00:01Z
+    command: substrate.workspaces.Adopt
+    actor: substrate.workspaces.AllowedSubject
+    caller: {subject: "local:1001"}
+    input: {root_name: adopted-repo, labels: {}}
+    outcome: held-elsewhere
+    error: {name: substrate.workspaces.NotFound}
+    no_events: [substrate.workspaces.WorkspaceAdopted]
+
+assert:
+  - view: substrate.workspaces.Workspaces
+    contains: {workspace: {$instance: repo}, state: Ready, root_name: adopted-repo, origin: adopted, owner: "local:1000"}

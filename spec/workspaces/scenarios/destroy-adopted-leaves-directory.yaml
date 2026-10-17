@@ -1,0 +1,41 @@
+# Destroying an adopted workspace forgets its row and leaves the directory and
+# its contents where the operator put them.
+type: ess-scenario/5
+domain: substrate.workspaces
+scenario: destroy-adopted-leaves-directory
+summary: Destroying an adopted workspace removes the row and leaves the directory under the workspace root.
+
+arrange:
+  - instance: dir
+    entity: substrate.workspaces.RootEntry
+    setup:
+      identity: adopted-repo
+      fields: {kind: directory}
+      state: Present
+  - instance: repo
+    entity: substrate.workspaces.Workspace
+
+timeline:
+  - at: 2026-10-15T09:00:00Z
+    command: substrate.workspaces.Adopt
+    actor: substrate.workspaces.AllowedSubject
+    caller: {subject: "local:1000"}
+    input: {root_name: adopted-repo, labels: {}}
+    outcome: adopted
+    capture: {instance: repo, event: substrate.workspaces.WorkspaceAdopted, field: workspace}
+
+  - at: 2026-10-15T09:00:01Z
+    command: substrate.workspaces.Destroy
+    actor: substrate.workspaces.AllowedSubject
+    caller: {subject: "local:1000"}
+    input: {workspace: {$instance: repo}}
+    outcome: forgotten
+    events:
+      - event: substrate.workspaces.WorkspaceForgotten
+        payload:
+          workspace: {$instance: repo}
+    no_events: [substrate.workspaces.DestroyStarted]
+
+assert:
+  - view: substrate.workspaces.RootEntries
+    contains: {root_name: adopted-repo, kind: directory}
