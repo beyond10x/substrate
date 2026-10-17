@@ -15,9 +15,9 @@ pub const API_VERSION: &str = "v1";
 ///
 /// This is the SHA-256 of the inner immutable `bundle.json`, not the outer OCI manifest digest.
 /// Moving either member is an explicit coordinated promotion (Atlas ADR 0019).
-pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.19.0";
+pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.20.0";
 pub const ADVERTISED_CONTRACT_BUNDLE_SHA256: &str =
-    "2590ccad60fb25df236426254005aeb874b8a08f7d38ec173dc864bb48aeeddd";
+    "b55af25f3a6fcb591a1c3f64f050e4b24f0ba9296043ec1339b808d32c1179d8";
 pub const MAX_FILE_BYTES: u64 = 1_048_576;
 pub const MAX_IO_BYTES: u64 = 1_048_576;
 pub const MAX_LIST_ITEMS: u32 = 1_000;
@@ -2218,6 +2218,10 @@ impl<T> From<Option<T>> for ProcessPresence<T> {
 /// process cgroups, on the personal Unix socket of a daemon whose uid is the caller's (ADR 0036
 /// S2). Absent, every `process.start` is `process.host-unserved` and nothing runs.
 pub const PROCESS_HOST_FACT: &str = "process.host";
+
+/// The prefix of every host-process record id: `proc_` and the minted identifier, ASCII
+/// alphanumerics only, as `ws_`, `ex_` and `ses_` are for theirs (bundle `0.20.0`, `process-id`).
+pub const PROCESS_ID_PREFIX: &str = "proc_";
 
 /// Most `argv` items a start admits (S1); beyond it, `process.argv-invalid`.
 pub const MAX_PROCESS_ARGV_ITEMS: usize = 256;
@@ -4817,8 +4821,8 @@ mod tests {
         let version = ADVERTISED_CONTRACT_BUNDLE
             .strip_prefix("substrate-wire/")
             .expect("advertised contract prefix");
-        assert_eq!(version, "0.19.0", "the reviewed promotion target moved");
-        let bytes = include_bytes!("../../../contracts/substrate-wire/0.19.0/bundle.json");
+        assert_eq!(version, "0.20.0", "the reviewed promotion target moved");
+        let bytes = include_bytes!("../../../contracts/substrate-wire/0.20.0/bundle.json");
         assert_eq!(
             hex::encode(Sha256::digest(bytes)),
             ADVERTISED_CONTRACT_BUNDLE_SHA256
