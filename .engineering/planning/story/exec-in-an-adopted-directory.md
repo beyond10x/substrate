@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:exec-in-an-adopted-directory
 kind: story
-status: draft
+status: active
 title: An exec runs in an adopted existing directory
 relations:
 - decomposes: epic:remote-serving
@@ -13,7 +13,10 @@ scope:
   path: crates/substrate-daemon/src/app/operations.rs
 - confidence: cited
   path: xtask/bundle-source
-revision: 2
+revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-17T05:05:36Z", actor: "human:timo", revision: 3}
+- {from: "proposed", to: "active", at: "2026-10-17T05:05:36Z", actor: "human:timo", revision: 4}
 ---
 # Story: An exec runs in an adopted existing directory
 

@@ -2,11 +2,13 @@
 format: aep.planning-md/3
 id: decision-blocker:exec-in-adopted-directory-contract-route
 kind: decision-blocker
-status: open
+status: cleared
 title: Contract route for an exec in an adopted directory
 relations:
 - blocks: story:exec-in-an-adopted-directory
-revision: 1
+revision: 3
+transitions:
+- {from: "open", to: "cleared", at: "2026-10-17T05:05:47Z", actor: "human:timo", revision: 3}
 ---
 ## Question
 
@@ -32,3 +34,6 @@ successor bundle under invariant 6 and an ADR before code under invariant 8.
 
 A, unless a durable adoption record is wanted for audit, in which case B. Either is an ADR-level
 change and is not decided here.
+
+## Cleared
+Route A was chosen on 2026-10-17, as an explicit `workspace.adopt` route: the store row is owned by the caller and a `ws_` id is minted, `root_name` is the directory, destroy forgets the row and leaves the directory, `workspace-id` stays `ws_`, bundle `0.19.0` is re-cut, and name refusals are recorded like every other pre-dispatch refusal. Decided in ADR 0035, which supersedes ADR 0034.

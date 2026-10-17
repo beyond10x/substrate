@@ -2,12 +2,15 @@
 format: aep.planning-md/3
 id: story:host-process-start
 kind: story
-status: draft
+status: active
 title: Start a host process under the explicit host profile
 relations:
 - decomposes: epic:host-process-supervision
 - informed_by: architecture-decision-record:host-processes-are-a-supervised-resource-family
-revision: 1
+revision: 3
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-17T05:05:36Z", actor: "human:timo", revision: 2}
+- {from: "proposed", to: "active", at: "2026-10-17T05:05:36Z", actor: "human:timo", revision: 3}
 ---
 # Story: start a host process under the explicit host profile
 
