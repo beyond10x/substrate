@@ -15,3 +15,7 @@ scenarios:
   - scenarios/stream-order.yaml
   - scenarios/stream-terminal.yaml
   - scenarios/logs-bounded.yaml
+  - scenarios/subject-is-the-authority.yaml
+  - scenarios/name-unique-per-owner.yaml
+  - scenarios/log-discard-counted.yaml
+  - scenarios/expires-at-reached.yaml

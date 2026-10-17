@@ -1,5 +1,6 @@
-# The daemon owns the host-process domain. A draft pending ADR 0036: no route, CLI surface or
-# wire bundle is derived from it, and `reached_by` stays the in-process default on purpose.
+# The daemon owns the host-process domain (ADR 0036). No route, CLI surface or wire bundle is
+# derived from it yet; `reached_by` stays the in-process default until the successor bundle that
+# carries this family is cut.
 components:
   - component: substrate-daemon
     summary: Supervises host processes and container records in cgroups under its delegated root.
@@ -19,6 +20,7 @@ components:
         - substrate.host_processes.RecordExit
         - substrate.host_processes.RecordObservation
         - substrate.host_processes.AppendStreamEvent
+        - substrate.host_processes.RecordLogDiscard
     publishes:
       events:
         - substrate.host_processes.ProcessStarted
@@ -30,14 +32,15 @@ components:
         - substrate.host_processes.ProcessEnded
         - substrate.host_processes.ProcessObserved
         - substrate.host_processes.StreamEventAppended
+        - substrate.host_processes.LogDiscarded
 
 # S12: the lifecycle events that appear in a record's stream. Output lines are appended by the
 # supervisor directly from the bounded log.
-# UNMAPPED: the plan needs each of these in the stream exactly once and in lifecycle order. ESS
-# bindings deliver at_least_once or at_most_once, so neither states it; at_least_once is drafted,
-# and a duplicate is a defect the ordering scenario does not catch.
-# UNMAPPED: what the daemon does when an append is refused is not in the plan; `drop` is drafted
-# because the only refusal reachable from these bindings is StreamClosed after `exited`.
+# DECIDED (point 1): delivery is at least once. Each stream item carries its per-process cursor
+# (the `seq` of ADR 0036 S12), strictly increasing, and a reader drops an item whose cursor it has
+# already seen. Exactly once is not an ESS delivery and adds nothing the cursor does not give.
+# DECIDED (point 2): a refused append is dropped. The only refusal these bindings can reach is
+# StreamClosed, an append after `exited`; a later failure policy is additive.
 bindings:
   - id: stream-started
     summary: A record whose cgroup is populated has a `started` stream event.

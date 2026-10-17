@@ -42,6 +42,7 @@ pub fn check(root: &Path) -> Result<Report> {
         fs::read(suite)? == fs::read(root.join("spec/operations-suite.json"))?,
         "ESS suite drift: regenerate spec/operations-suite.json with the pinned ESS release"
     );
+    check_host_processes(root, dir.path())?;
     run(
         root,
         &[
@@ -120,4 +121,60 @@ pub fn check(root: &Path) -> Result<Report> {
     Ok(Report::passed(
         "ESS specification, committed suite and CLI contract are current; production execution runs in the substrate-store test suite",
     ))
+}
+
+/// The host-process domain (ADR 0036) and its authored acceptance scenarios.
+const HOST_PROCESSES: &str = "spec/host-processes";
+/// The suite `ess verify conform synthesize` derives from [`HOST_PROCESSES`], committed.
+const HOST_PROCESSES_SUITE: &str = "spec/host-processes-suite.json";
+
+/// Validates the host-process specification, checks its committed suite for drift and runs the
+/// synthesized and authored scenarios against the ESS interpreted reference. That checks the model
+/// only; it is not evidence that the daemon conforms.
+fn check_host_processes(root: &Path, scratch: &Path) -> Result<()> {
+    run(
+        root,
+        &[
+            "specify",
+            "validate",
+            "--path",
+            HOST_PROCESSES,
+            "--strict-requires",
+        ],
+    )?;
+    let suite = scratch.join("host-processes-suite.json");
+    run(
+        root,
+        &[
+            "verify",
+            "conform",
+            "synthesize",
+            "--path",
+            HOST_PROCESSES,
+            "--strict-requires",
+            "--out",
+            suite.to_str().context("UTF-8 output path")?,
+        ],
+    )?;
+    ensure!(
+        fs::read(suite)? == fs::read(root.join(HOST_PROCESSES_SUITE))?,
+        "ESS suite drift: regenerate {HOST_PROCESSES_SUITE} from {HOST_PROCESSES} with the pinned ESS release"
+    );
+    run(
+        root,
+        &[
+            "verify",
+            "conform",
+            "run",
+            "--path",
+            HOST_PROCESSES,
+            "--scenarios",
+            HOST_PROCESSES,
+            "--target",
+            "interpreted",
+            "--report-format",
+            "2",
+            "--strict-requires",
+        ],
+    )
 }

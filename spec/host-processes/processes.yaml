@@ -2,10 +2,14 @@ domain: substrate.host_processes
 summary: >-
   Supervised host processes: long-lived processes and containers a session starts through the
   daemon, each with an owner, a reason, a lease or a reasoned keep, one cgroup, observations and a
-  bounded log. A draft pending ADR 0036; nothing is generated from it.
-# Source: Part S of the host-process plan (S1-S9, S11, S12). No shipped code, contract or wire
-# bundle carries this family yet; every declaration below is read from that plan, and every rule
-# the plan does not settle is an UNMAPPED marker.
+  bounded log. Specified by ADR 0036 (accepted 2026-10-17).
+# Source: ADR 0036 (adr/0036-host-processes-are-a-supervised-resource-family.md), S1-S9, S11 and
+# S12. Each point the ADR left open is settled by the wave decision of 2026-10-17 (approval record
+# wave-2026-10-17-adopt-hostproc, "Spec points design 26 left unmapped") and marked here as
+# `DECIDED (point n)`, modelled where ESS 0.60.0 can state it. Points 3, 10, 11 and 12 concern the
+# S8 container and S9 adoption records: those declarations stay drafted and are marked
+# `DEFERRED (point n)`; they are decided in the S8/S9 wave and nothing built in this wave commits
+# to them.
 types:
   - name: substrate.host_processes.ConfinementProfile
     kind: enum
@@ -21,15 +25,15 @@ types:
     variants: [exited, stopped, lease-expired, timed-out, deadline-reached]
   - name: substrate.host_processes.ContainerKind
     kind: enum
-    # S8: the two container record kinds.
+    # S8, deferred to the S8 wave: the two container record kinds.
     variants: [docker, k3d]
   - name: substrate.host_processes.RestartPolicy
     kind: enum
-    # S8: a container record is started with --restart=no and nothing else.
+    # S8, deferred to the S8 wave: a container record is started with --restart=no and nothing else.
     variants: ["no"]
   - name: substrate.host_processes.AdoptSource
     kind: enum
-    # S9: what an adopted record was picked up from.
+    # S9, deferred to the S9 wave: what an adopted record was picked up from.
     variants: [pid, unit, container]
 
   - name: substrate.host_processes.StreamEventKind
@@ -54,15 +58,18 @@ entities:
       # S1: names of the caller's variables passed through; never their values.
       - {name: env_passthrough, type: List<String>}
       # S2: requested profile and the reported confinement. Absent on container and adopted records.
-      # UNMAPPED: the plan names no profile or confinement report for container (S8) or adopted
-      # (S9) records. Open question for the owner.
+      # DEFERRED (point 3): the profile and confinement of a container (S8) or adopted (S9) record
+      # are decided in the S8/S9 wave; until then neither record sets them, and nothing built in
+      # this wave commits to an answer.
       - {name: profile, type: Optional<substrate.host_processes.ConfinementProfile>}
       - {name: confinement, type: Optional<substrate.host_processes.Confinement>}
       # S4: a lease (renewable TTL) or a keep (no TTL, with a reason); never both, never neither,
       # except on an adopted record.
       - {name: lease_ttl_seconds, type: Optional<Integer>}
-      # UNMAPPED: expiry is started_at (or the renewal instant) plus the TTL. ESS cannot compute an
-      # instant from a stored instant and a duration in `sets:`, so the implementation supplies it.
+      # DECIDED (point 4): the daemon computes the expiry as the start or renewal instant plus the
+      # TTL. ESS 0.60.0 cannot add a duration to an instant in `sets:` (an offset is admitted only
+      # on the right of a comparison), so the value is generated: it is an observation of the
+      # daemon's arithmetic and commits no format.
       - {name: lease_expires_at, type: Optional<Timestamp>}
       - {name: keep, type: Boolean}
       - {name: keep_reason, type: Optional<String>}
@@ -77,16 +84,20 @@ entities:
       - {name: cpu_usec, type: Optional<Integer>}
       - {name: rss_bytes, type: Optional<Integer>}
       - {name: listening_ports, type: List<Integer>}
-      # S8: present only on a container record.
+      # S7: oldest log bytes discarded at the byte bound, cumulative; 0 until the first discard.
+      - {name: log_discarded_bytes, type: Integer}
+      # S8, deferred to the S8 wave: present only on a container record.
       - {name: container_kind, type: Optional<substrate.host_processes.ContainerKind>}
       - {name: restart, type: Optional<substrate.host_processes.RestartPolicy>}
-      # S9: present only on an adopted record.
+      # S9, deferred to the S9 wave: present only on an adopted record.
       - {name: adopted_from, type: Optional<substrate.host_processes.AdoptSource>}
       - {name: adopted_ref, type: Optional<String>}
     relations:
       # S12: a stream event has no meaning without its record.
-      # UNMAPPED: whether removing a record removes its stream (owns says it cannot outlive it)
-      # is not in the plan; no record removal is drafted at all.
+      # DECIDED (point 5): there is no removal operation. Ended records are retained for a bounded
+      # time and count (ADR 0036 S7) and their stream goes with them, which `owns` states. The
+      # retention sweep is time-driven, which ESS 0.60.0 cannot model, so it is the daemon's; a
+      # removal command is additive.
       - {name: events, kind: owns, target: substrate.host_processes.ProcessEvent, cardinality: many, via: process}
     # Lifecycle: the plan's starting/running/stopping/exited/expired. Expiry, timeout, deadline,
     # stop and exit all end in Ended; end_cause says which.
@@ -156,6 +167,10 @@ errors:
     summary: The requested expires_at is not in the future.
     fields: []
 
+  - name: substrate.host_processes.NameConflict
+    summary: A non-terminal record of the same owner session already carries this name.
+    fields: [{name: name, type: String}]
+
   - name: substrate.host_processes.UnknownProcess
     summary: No record carries this process.
     fields: []
@@ -179,14 +194,52 @@ errors:
   - name: substrate.host_processes.OutputLineMissing
     summary: An output-line event carries no line.
     fields: []
+  - name: substrate.host_processes.LogDiscardNotGrowing
+    summary: The reported cumulative discarded byte count is not above the recorded one.
+    fields: []
   - name: substrate.host_processes.StreamClosed
     summary: The stream already holds its terminal exited event.
     fields: []
 
-# UNMAPPED: who may invoke what. The plan names sessions (start, renew, stop, logs), a SessionEnd
-# hook (stop by owner), a one-time operator pickup (adopt) and the daemon itself (the supervisor
-# commands), and says nothing on whether a session may stop, renew or read another owner's
-# records. No actors are drafted, so every command is ungranted.
+# DECIDED (point 6): the subject is the only authority (ADR 0036 S5). The owner session is a label
+# on the record beneath the subject, never an actor, so any session of one subject may renew, stop
+# or read another session's records; narrowing that to the owner session later is additive. The
+# supervisor commands are the daemon's own actor (ADR 0036 S4: an operation the daemon originates),
+# which no caller holds.
+# The subject partition itself is not modelled: the subject is `local:<uid>` from kernel peer
+# credentials, and the model describes the records of one subject, as `spec/domains/operations.yaml`
+# does. A caller attribute could carry it (`{caller: subject}`), but an ESS 0.60.0 authored
+# scenario act carries no caller values, so every authored scenario here would be refused
+# (ESS-AUTHOR-014); the per-subject scoping of reads, stops and stop by owner is the daemon's, and
+# its cross-subject cases belong to the daemon's runtime suite.
+actors:
+  - name: substrate.host_processes.Subject
+    naming:
+      display: Subject
+      summary: The authenticated local subject; the only authority over its records.
+    may:
+      - substrate.host_processes.StartProcess
+      - substrate.host_processes.StartContainer
+      - substrate.host_processes.AdoptProcess
+      - substrate.host_processes.RenewLease
+      - substrate.host_processes.StopProcess
+      - substrate.host_processes.StopByOwner
+      - substrate.host_processes.HostProcesses
+      - substrate.host_processes.ProcessEvents
+      - substrate.host_processes.ProcessLogs
+  - name: substrate.host_processes.Supervisor
+    naming:
+      display: Supervisor
+      summary: The daemon's own actor; it reports what it observed and originates expiry and deadline stops.
+    may:
+      - substrate.host_processes.ConfirmRunning
+      - substrate.host_processes.ExpireLease
+      - substrate.host_processes.EnforceDeadline
+      - substrate.host_processes.RecordExit
+      - substrate.host_processes.RecordObservation
+      - substrate.host_processes.RecordLogDiscard
+      - substrate.host_processes.AppendStreamEvent
+
 commands:
   - name: substrate.host_processes.StartProcess
     naming:
@@ -246,9 +299,21 @@ commands:
       - name: deadline-past
         when: {all: [defined(expires_at), expires_at <= now]}
         error: substrate.host_processes.DeadlinePast
-      # UNMAPPED: the plan addresses records by name (`logs <name>`, unknown-name refusal) and
-      # says nothing on whether a name is unique, among live records or ever, or reusable after a
-      # record has Ended. No uniqueness refusal is drafted; addressing here is by `process`.
+      # DECIDED (point 7): the name is unique among the subject's non-terminal records of the same
+      # owner session (ADR 0036 S1, `process.name-conflict`). A record that has ended frees its
+      # name, and records are addressed by `process`, never by name.
+      - name: name-conflict
+        when_related:
+          entity: substrate.host_processes.HostProcess
+          where:
+            all:
+              - owner_session_id == input.owner_session_id
+              - name == input.name
+              - {state: [Starting, Running, Stopping]}
+          exists: true
+        error: substrate.host_processes.NameConflict
+        payload:
+          substrate.host_processes.NameConflict: {name: input.name}
       - name: hosted-posture
         external: the daemon serves a hosted or static-bearer TCP posture, which never admits the host profile
         error: substrate.host_processes.HostProfileRefused
@@ -275,6 +340,7 @@ commands:
           # Empty until the first observation; ESS admits no list literal in `sets:`, so the
           # implementation supplies the empty list.
           listening_ports: {generated: true}
+          log_discarded_bytes: 0
         emits: [substrate.host_processes.ProcessStarted]
         payload:
           substrate.host_processes.ProcessStarted:
@@ -364,9 +430,9 @@ commands:
     naming:
       wire: expire-lease
       summary: S4 — the supervisor found the lease past its expiry; the record stops.
-    # UNMAPPED: the trigger is the daemon's clock passing lease_expires_at. ESS has no clock-driven
-    # transition and lease_expires_at is implementation-supplied, so the instant comparison is not
-    # in this guard; the supervisor invokes the command when it holds.
+    # DECIDED (point 8): the daemon's supervisor clock invokes this command when lease_expires_at
+    # has passed. ESS 0.60.0 has no clock-driven transition, and lease_expires_at is generated
+    # (point 4), so the instant comparison is the implementation's, not this guard's.
     input: [{name: process, type: String}]
     outcomes:
       - name: no-lease
@@ -392,8 +458,9 @@ commands:
     naming:
       wire: enforce-deadline
       summary: S11 — the supervisor reached the hard wall-clock bound; the record stops.
-    # UNMAPPED: the trigger is the daemon's clock reaching started_at + timeout_seconds or
-    # expires_at; as for ExpireLease, the instant comparison is not expressible here.
+    # DECIDED (point 9): the same supervisor clock invokes this command when started_at plus
+    # timeout_seconds, or expires_at, is reached; the end cause names which deadline. As for
+    # ExpireLease, ESS 0.60.0 has no clock-driven transition, so the trigger is implementation-side.
     input: [{name: process, type: String}]
     outcomes:
       - name: no-deadline
@@ -481,11 +548,12 @@ commands:
   - name: substrate.host_processes.AdoptProcess
     naming:
       wire: adopt
-      summary: S9 — import an existing pid, unit or container as an ownerless record.
-    # UNMAPPED: how an adopted record is supervised is not in the plan: whether its tree is moved
-    # into a daemon cgroup (a pid may not be movable; a unit or container is not a cgroup the daemon
-    # owns), whether it gets a lease, and where argv and cwd come from for a unit or container.
-    # Drafted as: Running at once, no owner, no lease, no keep, argv and cwd read by the daemon.
+      summary: S9, deferred to the S9 wave — import an existing pid, unit or container as an ownerless record.
+    # DEFERRED (point 10): S9 is not built in this wave. How an adopted record is supervised
+    # (cgroup move or `process.adopt-unmovable`, its lease, where argv and cwd come from for a unit
+    # or container) is brought back before S9 is built if no undoable option exists. The draft
+    # below stays as it was: Running at once, no owner, no lease, no keep, argv and cwd read by the
+    # daemon. Nothing in this wave implements it.
     input:
       - {name: name, type: String, example: legacy-vite}
       - {name: reason, type: String, example: survivor of the host review}
@@ -514,6 +582,7 @@ commands:
           keep: false
           started_at: {generated: true}
           listening_ports: {generated: true}
+          log_discarded_bytes: 0
           adopted_from: input.source
           adopted_ref: input.source_ref
         emits: [substrate.host_processes.ProcessAdopted]
@@ -527,11 +596,13 @@ commands:
   - name: substrate.host_processes.StartContainer
     naming:
       wire: start-container
-      summary: S8 — start a docker container or k3d cluster with --restart=no and owner/lease labels.
-    # UNMAPPED: the label keys and values that carry owner and lease on the container are not in
-    # the plan. The record carries them as fields; the label bytes wait for the ADR.
-    # UNMAPPED: whether a container record takes an S11 timeout or expires_at is not in the plan;
-    # not drafted.
+      summary: S8, deferred to the S8 wave — start a docker container or k3d cluster with --restart=no and owner/lease labels.
+    # DEFERRED (S8 wave): S8 is not built in this wave; this declaration stays drafted.
+    # DEFERRED (point 11): the container carries the three labels ADR 0036 S8 names (the record
+    # id, the owner and the lease's renew-by) under Substrate's label prefix. Label bytes are not
+    # ESS facts; the record carries the same values as fields, and the keys are fixed in the S8 wave.
+    # DEFERRED (point 12): a container record takes no timeout and no expires_at; adding one is
+    # additive.
     input:
       - {name: name, type: String, example: preview-db}
       - {name: owner_session_id, type: Optional<String>, example: s-1}
@@ -582,6 +653,7 @@ commands:
           keep_reason: input.keep_reason
           started_at: {generated: true}
           listening_ports: {generated: true}
+          log_discarded_bytes: 0
           container_kind: input.kind
           restart: "no"
         emits: [substrate.host_processes.ProcessStarted]
@@ -596,8 +668,8 @@ commands:
     naming:
       wire: record-observation
       summary: S6 — the supervisor's observation of the cgroup's CPU, RSS and listening sockets.
-    # UNMAPPED: the observation cadence, and whether CPU is cumulative or a rate, are not in the
-    # plan; drafted as cumulative microseconds, as exec usage reports elsewhere in Substrate.
+    # DECIDED (point 13): CPU is cumulative microseconds read from the cgroup at observation time,
+    # as exec usage reports; there is no background sampling, so no cadence. Sampling is additive.
     input:
       - {name: process, type: String}
       - {name: cpu_usec, type: Integer}
@@ -624,12 +696,13 @@ commands:
     naming:
       wire: append-stream-event
       summary: S12, S7 — the supervisor appends one event to a record's stream; output lines come from the bounded log.
-    # UNMAPPED: the log bound (bytes or lines), its value and what happens at the bound (drop the
-    # oldest, stop capturing, or rotate) are not in the plan. The stream's reads are bounded by the
-    # ProcessLogs page size; the file bound itself is not modelled.
-    # UNMAPPED: an append for a process no record carries. The ESS reference records an
-    # identity-addressed existence guard beside a row-set guard (stream-closed) as refused; it was
-    # not tried here and is not drafted.
+    # DECIDED (point 14): the log bound is in bytes; at the bound the oldest bytes are discarded
+    # and the record states how many (RecordLogDiscard, `log_discarded_bytes`). The log file format
+    # stays internal, so which lines the discarded bytes held is not modelled here. The bound's
+    # value is one wire constant of the successor bundle that carries this family; ESS 0.60.0
+    # declares no constants, so the value is not stated in this model.
+    # DECIDED (point 15): an append for a process no record carries is refused inside the daemon
+    # (unknown-process). No caller holds this command, so the refusal is not on the wire.
     input:
       - {name: process, type: String, example: p-1}
       - {name: kind, type: substrate.host_processes.StreamEventKind, example: output-line}
@@ -640,6 +713,12 @@ commands:
       - name: line-missing
         when: {all: [kind == output-line, not defined(line)]}
         error: substrate.host_processes.OutputLineMissing
+      - name: unknown-process
+        when_related:
+          entity: substrate.host_processes.HostProcess
+          where: process == input.process
+          exists: false
+        error: substrate.host_processes.UnknownProcess
       - name: stream-closed
         # `exited` is the terminal event: nothing follows it in a stream.
         when_related:
@@ -656,8 +735,10 @@ commands:
           line: input.line
           exit_code: input.exit_code
           exit_signal: input.exit_signal
-          # UNMAPPED: the cursor is assigned by the daemon, strictly increasing per process. ESS
-          # cannot state monotonicity of a generated value; the ordering scenario checks it.
+          # DECIDED (point 16): the daemon assigns the cursor, the per-process `seq`, strictly
+          # increasing; on the wire the cursor is opaque. ESS 0.60.0 cannot state monotonicity of a
+          # generated value, so it is implementation-side, and the ordering scenarios
+          # (stream-order, `ranked`) check it.
           cursor: {generated: true}
         emits: [substrate.host_processes.StreamEventAppended]
         payload:
@@ -665,6 +746,29 @@ commands:
             event: {generated: true}
             process: input.process
             kind: input.kind
+
+  - name: substrate.host_processes.RecordLogDiscard
+    naming:
+      wire: record-log-discard
+      summary: S7 — the log reached its byte bound; the supervisor discards the oldest output and records how many bytes it has discarded in all.
+    input:
+      - {name: process, type: String, example: p-1}
+      # The record's cumulative discarded byte count after this discard.
+      - {name: discarded_bytes, type: Integer, example: 4096}
+    outcomes:
+      - name: discard-not-growing
+        when_subject: {predicate: input.discarded_bytes <= log_discarded_bytes}
+        error: substrate.host_processes.LogDiscardNotGrowing
+      - name: discarded
+        updates: substrate.host_processes.HostProcess
+        instance: process
+        sets: {log_discarded_bytes: input.discarded_bytes}
+        emits: [substrate.host_processes.LogDiscarded]
+        payload:
+          substrate.host_processes.LogDiscarded: {process: input.process, discarded_bytes: input.discarded_bytes}
+      - name: unknown
+        unknown_instance: true
+        error: substrate.host_processes.UnknownProcess
 
 events:
   - name: substrate.host_processes.ProcessStarted
@@ -707,6 +811,11 @@ events:
       - {name: rss_bytes, type: Integer}
       - {name: listening_ports, type: List<Integer>}
 
+  - name: substrate.host_processes.LogDiscarded
+    fields:
+      - {name: process, type: String}
+      - {name: discarded_bytes, type: Integer}
+
   - name: substrate.host_processes.StreamEventAppended
     fields:
       - {name: event, type: String}
@@ -744,6 +853,7 @@ views:
       - {name: cpu_usec, type: Optional<Integer>}
       - {name: rss_bytes, type: Optional<Integer>}
       - {name: listening_ports, type: List<Integer>}
+      - {name: log_discarded_bytes, type: Integer}
       - {name: container_kind, type: Optional<substrate.host_processes.ContainerKind>}
       - {name: restart, type: Optional<substrate.host_processes.RestartPolicy>}
       - {name: adopted_from, type: Optional<substrate.host_processes.AdoptSource>}

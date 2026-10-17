@@ -109,3 +109,35 @@ During adoption, the production SQL in `Store::mark_dispatch_unknown` was tempor
 keep `state = 'accepted'`. The same suite failed at `AcceptedOperation/state/Unknown/refuses/MarkDispatchUnknown`: the corrupted row admitted a second dispatch-unknown transition instead of refusing it. The SQL
 was restored, and the suite rerun. This proves the adapter reads production state rather than simply
 repeating the expected outcome. The full adoption report records the command and result.
+
+## Host-process projection
+
+`host-processes/processes.yaml` (domain `substrate.host_processes`) specifies the resource family of
+ADR 0036 before its implementation. No shipped code, route or wire bundle carries it yet. What the
+green check establishes:
+
+- `ess specify validate --path spec/host-processes` resolves the model, its actors and its 17
+  authored scenarios.
+- `spec/host-processes-suite.json` is the exact `ess verify conform synthesize` output;
+  `cargo xtask check-ess` fails on drift. It holds 65 synthesized scenarios and records 28
+  refusals: 14 for the four stream bindings, whose invocations synthesis does not follow
+  (ESS-SYNTH-010 and -001); 13 for branches, states and transitions whose arrangement passes
+  through a row-set guard (`name-conflict` makes every `StartProcess` step one), among them
+  `StartProcess/started`, `name-conflict`, `stream-closed`, `unknown-process`, the deadline moves
+  and stop by owner (ESS-SYNTH-001); and one unwitnessed connective child of
+  `StartContainer/started` (ESS-SYNTH-022). An authored scenario exercises each of those branches
+  except `StartProcess/hosted-posture`, whose cause is the daemon's posture and belongs to the
+  runtime suite.
+- `ess verify conform run --target interpreted` passes all 82 scenarios, synthesized and
+  authored, against the ESS reference. That checks the model only.
+
+What it does not establish:
+
+- **No implementation conformance.** Nothing runs these scenarios against the daemon or the store;
+  the S2, S3, S7 and S11 kernel claims belong to the delegated runtime lane.
+- **No subject partition.** The model describes one subject's records. An ESS 0.60.0 authored act
+  carries no caller attribute values, so a `{caller: subject}` model would refuse every authored
+  scenario; cross-subject refusals stay the daemon's runtime cases.
+- **No clock.** Lease expiry, deadlines and retention are supervisor commands or daemon behaviour;
+  the expiry instant and the cursor's order are generated values (points 4, 8, 9 and 16).
+- **No S8 or S9.** `StartContainer` and `AdoptProcess` are drafted and deferred to their wave.

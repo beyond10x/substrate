@@ -39,3 +39,4 @@ with YAML frontmatter containing `date` and `status`. Draft design questions rem
 | [0031](0031-live-output-backpressure-has-a-stall-deadline.md) | Live output backpressure has a stall deadline | accepted |
 | [0032](0032-exec-usage-without-block-io.md) | Exec usage is served without block I/O | accepted |
 | [0033](0033-a-single-host-file-is-admitted-read-only.md) | A single host file is admitted read-only | accepted |
+| [0036](0036-host-processes-are-a-supervised-resource-family.md) | Host processes are a supervised resource family | accepted |

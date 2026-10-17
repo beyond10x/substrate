@@ -27,3 +27,8 @@ reference implementation or infer observations from the expected outcome.
 The `b10x-substrate` client CLI has its own projection in [`client/`](client/README.md): a
 presentation domain and an `ess-cli/2` binding, whose generated contract package is committed in
 `generated/cli` and drift-checked by `cargo xtask check-ess`. It runs no conformance suite.
+
+The host-process resource family of ADR 0036 is specified in [`host-processes/`](host-processes/README.md)
+(domain `substrate.host_processes`). `cargo xtask check-ess` validates it, compares its committed
+synthesized suite `host-processes-suite.json` byte for byte, and runs the synthesized and authored
+scenarios against the ESS interpreted reference, which checks the model and not the daemon.

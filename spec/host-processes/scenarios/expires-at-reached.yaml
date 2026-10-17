@@ -1,0 +1,46 @@
+# S11: reaching expires_at stops the record with cause deadline-reached; a deadline is enforced
+# once, so a later enforcement on the stopping or ended record is refused and changes nothing.
+type: ess-scenario/1
+domain: substrate.host_processes
+scenario: expires-at-reached
+summary: Reaching expires_at stops the record once with cause deadline-reached; enforcing it again while stopping or after the end is refused.
+
+arrange:
+  - instance: soak
+    entity: substrate.host_processes.HostProcess
+
+timeline:
+  - at: 2026-10-16T09:00:00Z
+    command: substrate.host_processes.StartProcess
+    input: {name: soak, owner_session_id: s-1, owner_session_name: worker, reason: soak run, env_passthrough: [], argv: [soak], cwd: /srv/app, profile: host, lease_ttl_seconds: 600, keep: false, expires_at: 2100-01-01T00:00:00Z}
+    outcome: started
+    capture: {instance: soak, event: substrate.host_processes.ProcessStarted, field: process}
+  - at: 2026-10-16T09:00:01Z
+    command: substrate.host_processes.ConfirmRunning
+    input: {process: {$instance: soak}}
+    outcome: running
+  - at: 2026-10-16T09:00:02Z
+    command: substrate.host_processes.EnforceDeadline
+    input: {process: {$instance: soak}}
+    outcome: deadline-reached
+    events:
+      - event: substrate.host_processes.StopRequested
+        payload: {end_cause: deadline-reached}
+  - at: 2026-10-16T09:00:03Z
+    command: substrate.host_processes.EnforceDeadline
+    input: {process: {$instance: soak}}
+    outcome: not-live
+    error: {name: substrate.host_processes.NotLive, fields: {state: Stopping}}
+  - at: 2026-10-16T09:00:04Z
+    command: substrate.host_processes.RecordExit
+    input: {process: {$instance: soak}, exit_signal: SIGTERM}
+    outcome: stopped
+  - at: 2026-10-16T09:00:05Z
+    command: substrate.host_processes.EnforceDeadline
+    input: {process: {$instance: soak}}
+    outcome: not-live
+    error: {name: substrate.host_processes.NotLive, fields: {state: Ended}}
+
+assert:
+  - view: substrate.host_processes.HostProcesses
+    contains: {process: {$instance: soak}, state: Ended, end_cause: deadline-reached, exit_signal: SIGTERM, expires_at: 2100-01-01T00:00:00Z}
