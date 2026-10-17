@@ -2874,3 +2874,372 @@ async fn host_process_stop_the_driver_failed_to_begin_is_retried() {
     assert_eq!(record["state"], "ended", "{record}");
     assert_eq!(record["ended_by"], "stop", "{record}");
 }
+
+// ---------------------------------------------------------------------------------------------
+// Security re-review, pass 2: interleavings around `starting` and `stopping`.
+// ---------------------------------------------------------------------------------------------
+
+/// Invariant 5 and ADR 0036 § Consequences: a start whose record was stopped while it was in
+/// flight, left `stopping` by a crash, must have its start operation concluded by the restarted
+/// daemon's reconciliation, not left open forever beside an ended record.
+#[tokio::test(flavor = "multi_thread")]
+async fn host_process_restart_concludes_the_start_of_a_record_stopped_while_starting() {
+    let strict = StrictSupervisor::new(false, None);
+    let mut harness = Harness::portable();
+    Arc::get_mut(&mut harness.app)
+        .expect("unshared application")
+        .host_processes = Some(Arc::clone(&strict) as Arc<dyn ProcessSupervisor>);
+    let cwd = harness.workdir("stopped-starting");
+    // The start is durable as `starting`; its dispatch has not happened when the stop lands.
+    reserve_start_only(
+        &harness,
+        "op_stopped_starting_st",
+        "proc_stoppedstarting",
+        &cwd,
+    );
+    let (status, stopped) = harness
+        .stop("op_stopped_starting_sp", "proc_stoppedstarting")
+        .await;
+    assert_eq!(status, StatusCode::OK, "{stopped}");
+    assert_eq!(stopped["result"]["state"], "stopping", "{stopped}");
+    // The daemon crashes before the start dispatches; a fresh run re-attaches a live cgroup.
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    harness.restart();
+    let fake = Arc::new(FakeSupervisor::default());
+    Arc::get_mut(&mut harness.app)
+        .expect("unshared application")
+        .host_processes = Some(Arc::clone(&fake) as Arc<dyn ProcessSupervisor>);
+    let record = harness.ended("proc_stoppedstarting").await;
+    assert_eq!(record["ended_by"], "stop", "{record}");
+    let (status, operation) = harness
+        .call(SUBJECT, Method::GET, "/v1/ops/op_stopped_starting_st", None)
+        .await;
+    assert_eq!(status, StatusCode::OK, "{operation}");
+    assert_eq!(
+        operation["result"]["state"], "terminal",
+        "the start operation of an ended record is still open after reconciliation: {operation}"
+    );
+}
+
+/// S4 and invariant 3: a `starting` record this run will never dispatch (its start handler was
+/// dropped after the durable reservation, as a client disconnect or the connection lifetime bound
+/// drops it) holds no process. Its lease expiry must still end it, rather than leave it
+/// `stopping` for the rest of the run with its live slot, its owner name and its stop open.
+#[tokio::test(flavor = "multi_thread")]
+async fn host_process_lease_expiry_ends_a_start_this_run_never_dispatches() {
+    let strict = StrictSupervisor::new(false, None);
+    let mut harness = Harness::portable();
+    Arc::get_mut(&mut harness.app)
+        .expect("unshared application")
+        .host_processes = Some(Arc::clone(&strict) as Arc<dyn ProcessSupervisor>);
+    let cwd = harness.workdir("dropped-start");
+    // Exactly what a start handler dropped after its reservation committed leaves behind.
+    reserve_start_only(
+        &harness,
+        "op_dropped_start_00001",
+        "proc_droppedstart",
+        &cwd,
+    );
+    harness.authority.advance(61_000);
+    for _ in 0..5 {
+        harness.sweep().await;
+    }
+    let record = harness.get("proc_droppedstart").await;
+    assert!(
+        !strict.runs("proc_droppedstart"),
+        "nothing was dispatched for this record"
+    );
+    assert_eq!(
+        record["state"], "ended",
+        "a lease-expired record the driver never held, and never will in this run, stays \
+         stopping: {record}"
+    );
+}
+
+/// A driver whose `start` is held at its entry and then refused, as a spawn the kernel refused.
+struct FailingStart {
+    entered: parking_lot::Mutex<std::sync::mpsc::Sender<()>>,
+    proceed: parking_lot::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl ProcessLogs for FailingStart {
+    fn log_tail(
+        &self,
+        _id: &str,
+        _selection: LogStreamSelection,
+        _max_bytes: u64,
+    ) -> Result<LogTail, DriverError> {
+        Err(DriverError::not_found())
+    }
+}
+
+impl ProcessSupervisor for FailingStart {
+    fn start(
+        self: Arc<Self>,
+        _id: &str,
+        _spec: &HostProcessSpec,
+    ) -> Result<HostProcessStarted, DriverError> {
+        let _ = self.entered.lock().send(());
+        let _ = self.proceed.lock().recv();
+        Err(DriverError::failed(
+            "process.spawn-failed",
+            "the program could not be started",
+        ))
+    }
+
+    fn reattach(self: Arc<Self>, _id: &str) -> Result<Reattached, DriverError> {
+        Ok(Reattached::Gone)
+    }
+
+    fn begin_stop(&self, _id: &str, _cause: StopCause) -> Result<(), DriverError> {
+        Err(DriverError::not_found())
+    }
+
+    fn ended(&self, _id: &str) -> Result<Option<HostProcessEnd>, DriverError> {
+        Err(DriverError::not_found())
+    }
+
+    fn observe(&self, _id: &str) -> Result<HostProcessObservation, DriverError> {
+        Err(DriverError::not_found())
+    }
+
+    fn forget(&self, _id: &str) -> Result<(), DriverError> {
+        Ok(())
+    }
+}
+
+/// S1 and S3: a stop accepted while a start is in flight, whose dispatch the driver then refuses,
+/// ends the record (nothing ran) and concludes the start with the driver's refusal.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn host_process_stop_during_a_start_the_driver_refuses_ends_the_record() {
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (proceed_tx, proceed_rx) = std::sync::mpsc::channel();
+    let failing = Arc::new(FailingStart {
+        entered: parking_lot::Mutex::new(entered_tx),
+        proceed: parking_lot::Mutex::new(proceed_rx),
+    });
+    let mut harness = Harness::portable();
+    Arc::get_mut(&mut harness.app)
+        .expect("unshared application")
+        .host_processes = Some(Arc::clone(&failing) as Arc<dyn ProcessSupervisor>);
+    let cwd = harness.workdir("refused-start");
+    let harness = Arc::new(harness);
+    let racer = Arc::clone(&harness);
+    let start_input = input(&["/bin/sleep", "300"], &cwd, "s-refused", "dev");
+    let start =
+        tokio::spawn(async move { racer.start("op_refused_start_00001", start_input).await });
+    tokio::task::spawn_blocking(move || entered_rx.recv_timeout(Duration::from_secs(10)))
+        .await
+        .expect("join")
+        .expect("the start reached the driver");
+    let (status, stopped) = harness
+        .call(
+            SUBJECT,
+            Method::POST,
+            "/v1/processes/stop",
+            Some(json!({ "owner_session": "s-refused" })),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{stopped}");
+    let id = text(&stopped["result"]["stopped"][0]["process"]).to_owned();
+    proceed_tx.send(()).expect("release the start");
+    let (status, started) = start.await.expect("start task");
+    assert_ne!(status, StatusCode::OK, "{started}");
+    for _ in 0..3 {
+        harness.sweep().await;
+    }
+    let record = harness.get(&id).await;
+    assert_eq!(record["state"], "ended", "{record}");
+    assert_eq!(record["ended_by"], "stop", "{record}");
+    let (_, operation) = harness
+        .call(SUBJECT, Method::GET, "/v1/ops/op_refused_start_00001", None)
+        .await;
+    assert_eq!(operation["result"]["state"], "terminal", "{operation}");
+}
+
+/// A driver whose `reattach` is held at its entry and then answers that the cgroup is gone, so a
+/// test can land a stop between reconciliation's read of a `starting` record and its abandonment.
+struct GatedReattach {
+    entered: parking_lot::Mutex<std::sync::mpsc::Sender<()>>,
+    proceed: parking_lot::Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl ProcessLogs for GatedReattach {
+    fn log_tail(
+        &self,
+        _id: &str,
+        _selection: LogStreamSelection,
+        _max_bytes: u64,
+    ) -> Result<LogTail, DriverError> {
+        Err(DriverError::not_found())
+    }
+}
+
+impl ProcessSupervisor for GatedReattach {
+    fn start(
+        self: Arc<Self>,
+        _id: &str,
+        _spec: &HostProcessSpec,
+    ) -> Result<HostProcessStarted, DriverError> {
+        Err(DriverError::failed(
+            "process.spawn-failed",
+            "the program could not be started",
+        ))
+    }
+
+    fn reattach(self: Arc<Self>, _id: &str) -> Result<Reattached, DriverError> {
+        let _ = self.entered.lock().send(());
+        let _ = self.proceed.lock().recv();
+        Ok(Reattached::Gone)
+    }
+
+    fn begin_stop(&self, _id: &str, _cause: StopCause) -> Result<(), DriverError> {
+        Err(DriverError::not_found())
+    }
+
+    fn ended(&self, _id: &str) -> Result<Option<HostProcessEnd>, DriverError> {
+        Err(DriverError::not_found())
+    }
+
+    fn observe(&self, _id: &str) -> Result<HostProcessObservation, DriverError> {
+        Err(DriverError::not_found())
+    }
+
+    fn forget(&self, _id: &str) -> Result<(), DriverError> {
+        Ok(())
+    }
+}
+
+/// S3 and invariant 5: a stop that lands while reconciliation is deciding a `starting` record an
+/// earlier run left (after its read, before its abandonment) is not lost. The cgroup is gone, so
+/// the record ends under the stop's cause, and both the start and the stop are concluded.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn host_process_stop_during_reconciliation_of_a_starting_record_ends_it() {
+    let mut harness = Harness::portable();
+    let cwd = harness.workdir("reconcile-race");
+    reserve_start_only(
+        &harness,
+        "op_reconcile_race_st1",
+        "proc_reconcilerace",
+        &cwd,
+    );
+    tokio::time::sleep(Duration::from_millis(5)).await;
+    harness.restart();
+    let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+    let (proceed_tx, proceed_rx) = std::sync::mpsc::channel();
+    let gated = Arc::new(GatedReattach {
+        entered: parking_lot::Mutex::new(entered_tx),
+        proceed: parking_lot::Mutex::new(proceed_rx),
+    });
+    Arc::get_mut(&mut harness.app)
+        .expect("unshared application")
+        .host_processes = Some(Arc::clone(&gated) as Arc<dyn ProcessSupervisor>);
+    let harness = Arc::new(harness);
+    let sweeper = Arc::clone(&harness);
+    let sweep = tokio::spawn(async move { sweeper.sweep().await });
+    tokio::task::spawn_blocking(move || entered_rx.recv_timeout(Duration::from_secs(10)))
+        .await
+        .expect("join")
+        .expect("reconciliation reached the driver");
+    let (status, stopped) = harness
+        .stop("op_reconcile_race_sp1", "proc_reconcilerace")
+        .await;
+    assert_eq!(status, StatusCode::OK, "{stopped}");
+    assert_eq!(stopped["result"]["state"], "stopping", "{stopped}");
+    proceed_tx.send(()).expect("release the re-attachment");
+    sweep.await.expect("sweep task");
+    for _ in 0..3 {
+        harness.sweep().await;
+    }
+    let record = harness.get("proc_reconcilerace").await;
+    assert_eq!(
+        record["state"], "ended",
+        "a stop landing during reconciliation leaves the record stopping: {record}"
+    );
+    assert_eq!(record["ended_by"], "stop", "{record}");
+    for operation in ["op_reconcile_race_st1", "op_reconcile_race_sp1"] {
+        let (_, answer) = harness
+            .call(SUBJECT, Method::GET, &format!("/v1/ops/{operation}"), None)
+            .await;
+        assert_eq!(answer["result"]["state"], "terminal", "{answer}");
+    }
+}
+
+/// Records, without any daemon, a start and a stop accepted while it was starting: what a daemon
+/// that crashed before the start dispatched leaves behind.
+fn reserve_stopped_while_starting(harness: &Harness, prefix: &str, id: &str, cwd: &Path) {
+    let scope = reserve_start_only(harness, &format!("{prefix}_st"), id, cwd);
+    let stop = substrate_store::NewOperation {
+        scope,
+        operation: format!("{prefix}_sp"),
+        operation_kind: substrate_store::HOST_PROCESS_STOP_KIND.to_owned(),
+        request_hash: format!("sha256:{}", "d".repeat(64)),
+        accepted_at: harness.authority.now().to_rfc3339(),
+        capability_snapshot: None,
+        actor: "process-test".to_owned(),
+        principal: None,
+        grant_ref: None,
+        platform_principal: None,
+        resource: Some(id.to_owned()),
+    };
+    assert!(matches!(
+        harness
+            .store
+            .reserve_host_process_stop(&stop, id, substrate_store::HostProcessEndedBy::Stop)
+            .expect("reserve stop"),
+        substrate_store::HostProcessStopReservation::Accepted(_)
+    ));
+}
+
+/// Invariant 5: reconciliation of a record an earlier run left `stopping` before its start
+/// concluded concludes that start too, whether its cgroup is found live or gone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn host_process_restart_concludes_the_start_of_a_record_left_stopping() {
+    for live in [true, false] {
+        let mut harness = Harness::portable();
+        let cwd = harness.workdir("left-stopping");
+        let prefix = if live {
+            "op_left_live_000"
+        } else {
+            "op_left_gone_000"
+        };
+        let id = if live {
+            "proc_leftlive"
+        } else {
+            "proc_leftgone"
+        };
+        reserve_stopped_while_starting(&harness, prefix, id, &cwd);
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        harness.restart();
+        let supervisor: Arc<dyn ProcessSupervisor> = if live {
+            Arc::new(FakeSupervisor::default())
+        } else {
+            // Both channel ends dropped: `reattach` answers `Gone` at once.
+            let (entered, _) = std::sync::mpsc::channel();
+            let (_, proceed) = std::sync::mpsc::channel();
+            Arc::new(GatedReattach {
+                entered: parking_lot::Mutex::new(entered),
+                proceed: parking_lot::Mutex::new(proceed),
+            })
+        };
+        Arc::get_mut(&mut harness.app)
+            .expect("unshared application")
+            .host_processes = Some(supervisor);
+        let record = harness.ended(id).await;
+        assert_eq!(record["ended_by"], "stop", "live {live}: {record}");
+        for suffix in ["st", "sp"] {
+            let (_, answer) = harness
+                .call(
+                    SUBJECT,
+                    Method::GET,
+                    &format!("/v1/ops/{prefix}_{suffix}"),
+                    None,
+                )
+                .await;
+            assert_eq!(
+                answer["result"]["state"], "terminal",
+                "live {live}: {answer}"
+            );
+        }
+    }
+}
