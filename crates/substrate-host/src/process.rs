@@ -432,18 +432,26 @@ pub struct ProcessRuntime {
     reservations: Arc<Mutex<HashSet<String>>>,
     active: Arc<AtomicUsize>,
     quotas: Option<Arc<crate::quota::ProjectQuotas>>,
+    /// The workspaces-root descriptor the driver pinned at open: every exec resolves its
+    /// workspace beneath it, as the file routes do, never by re-opening the root's path. `None`
+    /// only when no root could be opened, which no workspace can then be resolved beneath.
+    workspace_root: Option<Arc<OwnedFd>>,
 }
 
 impl ProcessRuntime {
     #[cfg(test)]
     pub fn new(config: HostConfig, capability: CapabilitySnapshot) -> Result<Self, DriverError> {
-        Self::new_with_quotas(config, capability, None)
+        let root = File::open(&config.workspace_root)
+            .ok()
+            .map(|root| Arc::new(OwnedFd::from(root)));
+        Self::new_with_quotas(config, capability, None, root)
     }
 
     pub(crate) fn new_with_quotas(
         config: HostConfig,
         capability: CapabilitySnapshot,
         quotas: Option<Arc<crate::quota::ProjectQuotas>>,
+        workspace_root: Option<Arc<OwnedFd>>,
     ) -> Result<Self, DriverError> {
         let backend_binding = crate::probe::probe_backend(&config);
         let runtime = Self {
@@ -454,6 +462,7 @@ impl ProcessRuntime {
             reservations: Arc::new(Mutex::new(HashSet::new())),
             active: Arc::new(AtomicUsize::new(0)),
             quotas,
+            workspace_root,
         };
         let process_trees_reconciled = runtime.reconcile_orphans()?;
         runtime.reconcile_capsules(process_trees_reconciled)?;
@@ -1665,7 +1674,6 @@ impl ProcessRuntime {
 
     /// Validates both the wire shape and the live workspace objects ADR 0023 will mount.
     fn admit_workspace_access(
-        workspace: &Path,
         access: &substrate_wire::WorkspaceAccess,
         published: Option<bool>,
     ) -> Result<(), DriverError> {
@@ -1686,34 +1694,65 @@ impl ProcessRuntime {
                 "workspace_access",
             ));
         }
+        Ok(())
+    }
+
+    /// Checks each writable subtree beneath the pinned workspace directory, one component at a
+    /// time with `openat2` (beneath, no symlinks), so the answer is about the object that will be
+    /// bound and never about whatever a swapped path leads to.
+    fn admit_writable_subtrees(
+        pinned: &OwnedFd,
+        access: &substrate_wire::WorkspaceAccess,
+    ) -> Result<(), DriverError> {
         let Some(subtrees) = access.writable_subtrees() else {
             return Ok(());
         };
         for subtree in subtrees {
-            let mut current = workspace.to_path_buf();
+            let refuse = |code: &'static str, what: &str| {
+                DriverError::refused(
+                    code,
+                    format!("Writable workspace subtree {subtree} {what}."),
+                    "workspace_access.writable_subtrees",
+                )
+            };
+            let mut current: Option<OwnedFd> = None;
             for component in subtree.split('/') {
-                current.push(component);
-                let metadata = std::fs::symlink_metadata(&current).map_err(|_| {
-                    DriverError::refused(
-                        "exec.workspace-subtree-absent",
-                        format!("Writable workspace subtree {subtree} is absent."),
-                        "workspace_access.writable_subtrees",
-                    )
-                })?;
-                if metadata.file_type().is_symlink() {
-                    return Err(DriverError::refused(
-                        "exec.workspace-subtree-symlink",
-                        format!("Writable workspace subtree {subtree} crosses a symlink."),
-                        "workspace_access.writable_subtrees",
-                    ));
-                }
-                if !metadata.is_dir() {
-                    return Err(DriverError::refused(
+                let directory = current.as_ref().unwrap_or(pinned);
+                let next =
+                    crate::fs::open_component_beneath(directory, component).map_err(|error| {
+                        match error.code {
+                            "resource.not-found" => {
+                                refuse("exec.workspace-subtree-absent", "is absent")
+                            }
+                            "workspace.path-escape" => {
+                                refuse("exec.workspace-subtree-symlink", "crosses a symlink")
+                            }
+                            _ => error,
+                        }
+                    })?;
+                // SAFETY: `fstat` fills the zeroed struct for a live descriptor.
+                let mut status: libc::stat = unsafe { std::mem::zeroed() };
+                // SAFETY: as above; `next` is live and `status` is a valid out pointer.
+                if unsafe { libc::fstat(next.as_raw_fd(), &raw mut status) } != 0 {
+                    return Err(refuse(
                         "exec.workspace-subtree-not-directory",
-                        format!("Writable workspace subtree {subtree} is not a directory."),
-                        "workspace_access.writable_subtrees",
+                        "is not a directory",
                     ));
                 }
+                // `O_PATH | O_NOFOLLOW` opens a final symlink itself rather than refusing it.
+                if status.st_mode & libc::S_IFMT == libc::S_IFLNK {
+                    return Err(refuse(
+                        "exec.workspace-subtree-symlink",
+                        "crosses a symlink",
+                    ));
+                }
+                if status.st_mode & libc::S_IFMT != libc::S_IFDIR {
+                    return Err(refuse(
+                        "exec.workspace-subtree-not-directory",
+                        "is not a directory",
+                    ));
+                }
+                current = Some(next);
             }
         }
         Ok(())
@@ -1936,7 +1975,6 @@ impl ProcessRuntime {
             self.capability.facts.exec_read_only_files.as_ref(),
         )?;
         Self::admit_workspace_access(
-            workspace,
             &input.workspace_access,
             self.capability.facts.exec_workspace_scoped_write,
         )?;
@@ -1953,8 +1991,14 @@ impl ProcessRuntime {
             ));
         }
         // Where `workspace.is_dir()` stood, which followed a link. The pinned directory is the one
-        // bubblewrap binds, so an entry replaced after adopt is refused by name before any mount.
-        let pinned = crate::fs::pin_workspace_directory(workspace)?;
+        // bubblewrap binds, so an entry replaced after adopt is refused by name before any mount,
+        // and the writable subtrees are checked beneath it, never by walking the path.
+        let root = self
+            .workspace_root
+            .as_deref()
+            .ok_or_else(DriverError::not_found)?;
+        let pinned = crate::fs::pin_workspace_directory_beneath(root, workspace)?;
+        Self::admit_writable_subtrees(&pinned, &input.workspace_access)?;
         if !input.sandbox.required || input.sandbox.profile != SandboxProfile::Workspace {
             return Err(DriverError::refused(
                 "exec.sandbox-invalid",
@@ -3842,25 +3886,25 @@ mod tests {
         let scoped = |path: &str| substrate_wire::WorkspaceAccess::Scoped {
             writable_subtrees: vec![path.to_owned()],
         };
-        ProcessRuntime::admit_workspace_access(root.path(), &scoped("allowed"), Some(true))
+        let pinned = crate::fs::pin_workspace_directory(root.path()).expect("pinned");
+        ProcessRuntime::admit_workspace_access(&scoped("allowed"), Some(true))
+            .expect("shape admitted");
+        ProcessRuntime::admit_writable_subtrees(&pinned, &scoped("allowed"))
             .expect("real directory admitted");
         for (path, code) in [
             ("missing", "exec.workspace-subtree-absent"),
             ("file", "exec.workspace-subtree-not-directory"),
             ("link", "exec.workspace-subtree-symlink"),
         ] {
-            let error =
-                ProcessRuntime::admit_workspace_access(root.path(), &scoped(path), Some(true))
-                    .expect_err("refused");
+            let error = ProcessRuntime::admit_writable_subtrees(&pinned, &scoped(path))
+                .expect_err("refused");
             assert_eq!(error.code, code);
         }
     }
 
     #[test]
     fn narrower_workspace_access_never_degrades_when_the_fact_is_absent() {
-        let root = tempfile::tempdir().expect("workspace");
         let error = ProcessRuntime::admit_workspace_access(
-            root.path(),
             &substrate_wire::WorkspaceAccess::ReadOnly,
             None,
         )

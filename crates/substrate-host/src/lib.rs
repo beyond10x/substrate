@@ -827,6 +827,7 @@ impl HostDriver {
             config.clone(),
             capability.clone(),
             quotas.clone(),
+            Some(Arc::new(filesystem.root_descriptor()?)),
         )?;
         let workspace_destroy_namespace = filesystem.root_identity()?;
         Ok(Arc::new(Self {
