@@ -697,7 +697,10 @@ async fn a_driver_failure_during_adopt_is_recorded_replayed_and_leaves_no_row() 
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{failed}");
     assert_eq!(failed["error"]["code"], "workspace.io-failed");
     let record = harness.operation(SUBJECT, "01JADVFAULT0000000001").await;
-    assert_eq!(record["result"]["kind"], "workspace.adopt", "{record}");
+    assert_eq!(
+        record["result"]["operation_kind"], "workspace.adopt",
+        "{record}"
+    );
     assert_eq!(
         record["result"]["outcome"]["error"]["code"], "workspace.io-failed",
         "{record}"

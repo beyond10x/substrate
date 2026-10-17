@@ -501,7 +501,10 @@ async fn adopt_refuses_a_name_outside_the_set_before_dispatch_and_replays_it() {
         assert_eq!(replayed["error"], refused["error"], "{name:?}");
         let record = harness.operation(SUBJECT, &operation).await;
         assert_eq!(record["result"]["state"], "refused", "{name:?} {record}");
-        assert_eq!(record["result"]["kind"], "workspace.adopt", "{name:?}");
+        assert_eq!(
+            record["result"]["operation_kind"], "workspace.adopt",
+            "{name:?}"
+        );
     }
     assert!(
         harness
