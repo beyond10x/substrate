@@ -28,10 +28,25 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   the optional `process.host` capability fact, the closed `process` record and log tail, their
   bounds, the seventeen named refusals and the shared `lease.expired` (409) on lease renewal, each
   held to its `substrate_wire` constant by `cargo xtask check-bundle 0.20.0`. The daemon and Rust
-  SDK advertise it; the daemon routes land separately.
+  SDK advertise it.
 - `substrate_wire`: the host-process wire types generated from `spec/host-processes/wire.yaml`,
   their bounds, refusals, `PROCESS_SHARED_REFUSALS` (`LEASE_EXPIRED`), `PROCESS_HOST_FACT` and
   `PROCESS_ID_PREFIX`.
+- The daemon serves the host-process routes (ADR 0036 S1 to S7 and S11) on a local Unix socket
+  only: `proc_` ids, the `process` scope, `process.host` published only with a delegated cgroup,
+  one cgroup per process with whole-tree stop, renewable leases and hard deadlines on a supervisor
+  clock, bounded owner-private logs, and restart re-attachment by cgroup membership. The daemon
+  holds the supervisor through the `ProcessSupervisor` and `ProcessLogs` port traits. A stop that
+  lands while a process starts never leaves it running unsupervised, a failed re-attachment is
+  retried, and every start operation is concluded after a restart.
+
+### Fixed
+
+- Exec binds a workspace by a descriptor opened beneath the workspaces root without following
+  symlinks (`--bind-fd`), so an adopted directory swapped for a symlink after adoption never mounts
+  the link's target: a swapped symlink or file is `workspace.path-escape` and a removed entry
+  `resource.not-found`, before any mount. Scoped access walks its writable subtrees beneath that
+  descriptor, and exec pins the workspace beneath the driver's own root descriptor.
 
 ## [0.7.17] — 2026-10-17
 
