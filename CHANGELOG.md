@@ -7,6 +7,32 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.7.17] — 2026-10-17
+
+### Added
+
+- `workspace.adopt` at `POST /v1/workspaces/adopt` (ADR 0035): serves a directory the operator
+  placed under the workspace root, named by `root_name` (ASCII alphanumerics, `_` and `-`, at most
+  255 bytes, no leading `-`). The row is Ready, owned by the caller, and gets a minted `ws_…` id;
+  the wire `workspace-id` pattern is unchanged. An adopted workspace has no lease expiry and no
+  project quota, and `workspace.destroy` forgets its row and leaves the directory. Refusals use
+  existing codes and are recorded before any driver dispatch.
+- Development contract bundle `substrate-wire/0.19.0`, the additive successor of `0.18.0`: the
+  `workspace.adopt` operation and route, and the read-only `origin` (`created` or `adopted`) and
+  `root_name` fields on the workspace resource. The daemon and Rust SDK advertise it.
+- `spec/host-processes`: the ESS domain of the host-process family (ADR 0036) with its scenarios
+  and generated suite, and the store and host groundwork for it in `substrate-store` and
+  `substrate-host`: process records with owner, reason, lease and wall-clock deadline, one cgroup
+  per process with whole-tree stop, bounded per-process logs and observed listening ports. No
+  daemon route serves host processes yet.
+
+### Changed
+
+- ADR 0034 (a workspace addressed by its root name) is superseded by ADR 0035; its widening of
+  `workspace-id` never shipped.
+- `cargo xtask check-secrets` expects Gitleaks to count every reachable commit that emits a patch,
+  roots included, and names each commit that carries none instead of counting it.
+
 ## [0.7.16] — 2026-10-16
 
 Published by [release run 38931900566](https://github.com/beyond10x/substrate/actions/runs/38931900566)
