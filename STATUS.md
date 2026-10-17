@@ -141,13 +141,15 @@ trust this page.
   (`destroying_workspace_refuses_exec_after_restart_and_replays_stably` and
   `crash_after_destroying_resumes_cleanup_and_terminalizes_original_operation` in
   `crates/substrate-daemon/tests/contract_vectors.rs`).
-- A workspace root may be a directory the operator already owns: `validate_root_name`
-  (`crates/substrate-host/src/fs.rs`) requires a single non-escaping path component and no
-  longer a `ws_` prefix, while `create_workspace` still mints `ws_…`. Adoption is half done —
-  the `starts_with("ws_")` predicate in `crates/substrate-daemon/src/app/operations.rs` still gates
-  `exec.start` on the `ws_` prefix,
-  so over the socket an adopted directory can be read and written but cannot run an exec. Widening
-  that predicate is wire-contract-adjacent and is not done.
+- A workspace root may be a directory the operator already owns, served after an explicit
+  `workspace.adopt` (ADR 0035, bundle `0.19.0`): the adopted row gets a minted `ws_…` id and
+  records the directory's `root_name` and `origin: adopted`, so `exec.start` keeps its `ws_`
+  predicate and addresses the adopted workspace by that id. The clean-room runner
+  (`crates/substrate-daemon/tests/runtime_vectors.rs`, `check_adopted_workspace`) adopts a
+  directory without the `ws_` prefix through the shipped daemon, refuses out-of-set names before
+  dispatch, and destroys it leaving its files; on the delegated lane it runs an exec in it and
+  runs the isolation cases (`check_confined_isolation`) against it as well as against a created
+  workspace.
 - Outside its composition root the daemon names nothing from `substrate_host` except the `Driver`
   trait (`pub trait Driver` in `crates/substrate-host/src/lib.rs`) and the types that trait's
   signature forces on a

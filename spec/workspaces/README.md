@@ -89,7 +89,12 @@ ESS 0.60.0's `interpreted` target, which checks the model, not the daemon.
   is unique across subjects (beyond10x/ess#580). Revisit the external declarations when an ESS
   release fixes it.
 - The out-of-set name has no authored scenario: every Adopt refusal is external, so an act that
-  names no outcome may claim nothing (`ESS-AUTHOR-037`). The daemon test asserts it.
+  names no outcome may claim nothing (`ESS-AUTHOR-037`). The daemon test asserts it, and so does
+  the clean-room runner against the shipped binary
+  (`crates/substrate-daemon/tests/runtime_vectors.rs`, `check_adopted_workspace`).
+- Exec is outside this projection. That an exec runs in an adopted workspace, and that the
+  confinement floor around it is the created workspace's, are runtime claims: the clean-room
+  runner's delegated lane runs an exec and its isolation cases against an adopted workspace.
 - `RootName` and `WorkspaceId` stay unscenarioed (`ESS-SYNTH-013`): a view row does not assert
   `.count` in this suite format.
 - Lease freezing, Expired and Unknown states, and destroy completion are not modelled. They stay in

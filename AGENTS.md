@@ -234,9 +234,13 @@ hand-written HTTP/1.1 and WebSocket client, so it links no implementation and as
 the wire; `cargo test --workspace --release --locked` runs it. Its portable lane asserts three named
 refusals — `exec.sandbox-unavailable` (501), `exec.secret-slots-unserved` (501) and
 `exec.secret-slot-descriptor-invalid` (422) — plus `session.pty-unserved` (501), the five lexical
-`exec.read-only-file*` refusals (422) and `exec.read-only-files-unserved` (501) — across 77 cases,
-and its delegated lane 107. Both totals include one route/refusal probe for every operation in the
-promoted registry; the delegated cases also include an interactive shell driven through a `pty` session
+`exec.read-only-file*` refusals (422) and `exec.read-only-files-unserved` (501) — across 83 cases,
+and its delegated lane 125. Both totals include one route/refusal probe for every operation in the
+promoted registry, and an operator's directory adopted through `workspace.adopt` (ADR 0035): its
+out-of-set neighbour refused as `request.schema-invalid` before dispatch, an exec addressing it by
+root name refused, a destroy that leaves its files, and, delegated, an exec run in it plus every
+`check_confined_isolation` case run again against it (portable: `exec.sandbox-unavailable`
+instead); the delegated cases also include an interactive shell driven through a `pty` session
 (`crates/substrate-daemon/tests/runtime_vectors.rs`, `PORTABLE_CASES` and `DELEGATED_CASES`). Its delegated lane runs only when
 `SUBSTRATE_VECTORS_CGROUP_ROOT` names a delegated cgroup v2 subtree the test process is inside;
 unset, those cases are **absent, never reported as passed** (invariant 3). **`bash scripts/delegated-lane.sh`
