@@ -162,6 +162,8 @@ pub fn probe(config: &HostConfig, openat2: bool) -> CapabilitySnapshot {
         sessions_pty,
         sessions_unrecorded: exec.then_some(true),
         snapshot_provenance_events: Some(config.snapshot_provenance_events),
+        // ADR 0036 S2: published once the host-process supervisor proves its cgroups usable.
+        process_host: None,
     };
     let driver_version = env!("CARGO_PKG_VERSION");
     let serialized = serde_json::to_vec(&SnapshotMaterial {

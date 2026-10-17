@@ -1,6 +1,6 @@
 format: ess-inputs/2
 requires: ess 0.60.0
-specification: [system.yaml, components.yaml, processes.yaml]
+specification: [system.yaml, components.yaml, processes.yaml, wire.yaml]
 scenarios:
   - scenarios/start-is-listed.yaml
   - scenarios/start-refusals.yaml

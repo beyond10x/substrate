@@ -1,0 +1,219 @@
+domain: substrate.host_processes
+# The wire shapes of ADR 0036 S1-S7 and S11: what `POST /v1/processes`, `GET /v1/processes`,
+# `GET /v1/processes/{process_id}`, `POST /v1/processes/{process_id}/stop`,
+# `POST /v1/processes/stop` and `GET /v1/processes/{process_id}/logs` carry inside the existing
+# `{op, input}` mutation and `{api_version, request_id, operation?, result}` success envelopes.
+# `POST /v1/processes/{process_id}/lease/renew` takes the existing `LeaseRenewInput` (`ttl_ms`),
+# as exec and session renewals do, and a single stop takes the existing empty input; neither needs
+# a type here. S8 (containers), S9 (adoption) and S12 (the per-process stream) are not on this
+# surface and add their shapes when they are built.
+#
+# `cargo xtask check-ess` regenerates these roots into
+# crates/substrate-wire/src/generated/host_process.rs and compares bytes. ESS generates the
+# structure only: every bound below is a runtime obligation, stated as a wire constant in
+# crates/substrate-wire/src/lib.rs, because ESS 0.60.0 declares no constants.
+types:
+  # S3: the record's state as the wire spells it. The lifecycle of HostProcess has the same four
+  # states, but ESS requires a lifecycle state name to start with an upper-case letter, and the wire
+  # spells every resource state in lower case (as `WorkspaceState` and `ExecState` do), so the
+  # published spelling is its own enum.
+  - name: substrate.host_processes.ProcessState
+    kind: enum
+    variants: [starting, running, stopping, ended]
+  # The resource kind every record carries, as `workspace` and `exec` resources do.
+  - name: substrate.host_processes.ProcessKind
+    kind: enum
+    variants: [process]
+  # S4, S6: the state of a TTL lease, with the spelling of the existing lease observation.
+  - name: substrate.host_processes.ProcessLeaseState
+    kind: enum
+    variants: [active, expiring, expired]
+  # S7: which standard stream a log line came from.
+  - name: substrate.host_processes.LogStream
+    kind: enum
+    variants: [stdout, stderr]
+  # S7: which stream, or both, a log tail returns.
+  - name: substrate.host_processes.LogStreamSelection
+    kind: enum
+    variants: [stdout, stderr, both]
+  # S6: the transport of a listening socket.
+  - name: substrate.host_processes.SocketProtocol
+    kind: enum
+    variants: [tcp, udp]
+
+  # S1: `{ "session": <opaque id>, "name": <name> }`. Both bounded and non-empty, else
+  # `process.owner-invalid`. The session is a label beneath the subject, never an identity.
+  - name: substrate.host_processes.ProcessOwner
+    kind: struct
+    fields:
+      - {name: session, type: String}
+      - {name: name, type: String}
+
+  # S4: `{ "ttl_ms": <n> }` or `{ "keep": true, "keep_reason": <text> }`. ESS 0.60.0 realizes a
+  # union with an explicit tag member, which the ADR's shape does not have, so the request is one
+  # struct whose members say which: exactly one of a TTL and `keep: true` is admitted
+  # (`process.lease-invalid`), and a keep without `keep_reason` is `process.keep-reason-required`.
+  - name: substrate.host_processes.ProcessLeaseRequest
+    kind: struct
+    fields:
+      - {name: ttl_ms, type: Optional<Integer>}
+      - {name: keep, type: Optional<Boolean>}
+      - {name: keep_reason, type: Optional<String>}
+
+  # S1, S2, S4, S11: the `process.start` input. Every member that has a named refusal is optional
+  # here, so a request that omits it reaches that refusal (`process.profile-required`,
+  # `process.argv-invalid`, `process.cwd-invalid`, `process.env-invalid`, `process.owner-invalid`,
+  # `process.reason-required`, `process.lease-invalid`) instead of the generic schema refusal.
+  # `profile` and `expires_at` are text for the same reason: any profile other than `host` is
+  # `process.profile-unknown`, and an `expires_at` that is not an RFC 3339 UTC instant is
+  # `process.expires-at-invalid`. `env` is the complete environment of the process; the ledger
+  # keeps its names and one digest of the map, never a value.
+  - name: substrate.host_processes.ProcessStartInput
+    kind: struct
+    fields:
+      - {name: profile, type: Optional<String>}
+      - {name: argv, type: Optional<List<String>>}
+      - {name: cwd, type: Optional<String>}
+      - {name: env, type: "Optional<Map<String, String>>"}
+      - {name: owner, type: Optional<substrate.host_processes.ProcessOwner>}
+      - {name: reason, type: Optional<String>}
+      - {name: lease, type: Optional<substrate.host_processes.ProcessLeaseRequest>}
+      - {name: timeout_ms, type: Optional<Integer>}
+      - {name: expires_at, type: Optional<String>}
+
+  # S4, S6: the record's lease. A TTL lease carries `ttl_ms`, `renew_by` and `state`; a keep
+  # carries `keep: true` and its `keep_reason`, and no TTL.
+  - name: substrate.host_processes.ProcessLease
+    kind: struct
+    fields:
+      - {name: keep, type: Boolean}
+      - {name: keep_reason, type: Optional<String>}
+      - {name: ttl_ms, type: Optional<Integer>}
+      - {name: renew_by, type: Optional<Timestamp>}
+      - {name: state, type: Optional<substrate.host_processes.ProcessLeaseState>}
+
+  # S11, S6: the effective deadline as one absolute instant, and which start field set it.
+  - name: substrate.host_processes.ProcessDeadline
+    kind: struct
+    fields:
+      - {name: at, type: Timestamp}
+      - {name: set_by, type: substrate.host_processes.Deadline}
+
+  # S3: the main process's exit, as a code or as the terminating signal, never both.
+  - name: substrate.host_processes.ProcessExit
+    kind: struct
+    fields:
+      - {name: code, type: Optional<Integer>}
+      - {name: signal, type: Optional<String>}
+
+  # S6: cumulative CPU from the cgroup's `cpu.stat` `usage_usec`, with its own instant.
+  - name: substrate.host_processes.ProcessCpu
+    kind: struct
+    fields:
+      - {name: usage_usec, type: Integer}
+      - {name: observed_at, type: Timestamp}
+  # S6: the cgroup's `memory.current`, page cache included; named for what it is, not RSS.
+  - name: substrate.host_processes.ProcessMemory
+    kind: struct
+    fields:
+      - {name: memory_bytes, type: Integer}
+      - {name: observed_at, type: Timestamp}
+  # S6: one TCP or UDP socket in a listening state whose inode a member of the cgroup holds.
+  - name: substrate.host_processes.ListeningSocket
+    kind: struct
+    fields:
+      - {name: protocol, type: substrate.host_processes.SocketProtocol}
+      - {name: address, type: String}
+      - {name: port, type: Integer}
+  # S6: the listening sockets, observed at listing time.
+  - name: substrate.host_processes.ProcessListening
+    kind: struct
+    fields:
+      - {name: sockets, type: List<substrate.host_processes.ListeningSocket>}
+      - {name: observed_at, type: Timestamp}
+
+  # S1-S4, S6, S11: one host-process record, as start, read, stop, renewal and the listing return
+  # it. `profile: host` and `confinement: none` are on every record (S2). An observation the
+  # daemon could not make (`cpu`, `memory`, `listening`) is absent, never zero; an ended record has
+  # no cgroup and so carries none. Environment values are never on a record.
+  # `owner` is absent only on an adopted record (S9, not on this surface).
+  - name: substrate.host_processes.ProcessRecord
+    kind: struct
+    fields:
+      - {name: id, type: String}
+      - {name: kind, type: substrate.host_processes.ProcessKind}
+      - {name: owner, type: Optional<substrate.host_processes.ProcessOwner>}
+      - {name: reason, type: String}
+      - {name: profile, type: substrate.host_processes.ConfinementProfile}
+      - {name: confinement, type: substrate.host_processes.Confinement}
+      - {name: argv, type: List<String>}
+      - {name: cwd, type: String}
+      - {name: env_names, type: List<String>}
+      - {name: env_digest, type: substrate.host_processes.EnvDigest}
+      - {name: state, type: substrate.host_processes.ProcessState}
+      - {name: started_at, type: Timestamp}
+      - {name: observed_at, type: Timestamp}
+      - {name: lease, type: substrate.host_processes.ProcessLease}
+      - {name: timeout_ms, type: Optional<Integer>}
+      - {name: expires_at, type: Optional<Timestamp>}
+      - {name: deadline, type: Optional<substrate.host_processes.ProcessDeadline>}
+      - {name: ended_by, type: Optional<substrate.host_processes.EndedBy>}
+      - {name: exit, type: Optional<substrate.host_processes.ProcessExit>}
+      - {name: cpu, type: Optional<substrate.host_processes.ProcessCpu>}
+      - {name: memory, type: Optional<substrate.host_processes.ProcessMemory>}
+      - {name: listening, type: Optional<substrate.host_processes.ProcessListening>}
+
+  # S6: one bounded page of the subject's records in id order; `next_cursor` is present when there
+  # is a next page.
+  - name: substrate.host_processes.ProcessPage
+    kind: struct
+    fields:
+      - {name: items, type: List<substrate.host_processes.ProcessRecord>}
+      - {name: next_cursor, type: Optional<String>}
+      - {name: observed_at, type: Timestamp}
+
+  # S5: `{ "owner_session": <id> }`, and `except_keep: true` to leave keep records running.
+  - name: substrate.host_processes.ProcessStopByOwnerInput
+    kind: struct
+    fields:
+      - {name: owner_session, type: String}
+      - {name: except_keep, type: Optional<Boolean>}
+  # S5: one stopped record and the stop operation recorded for it.
+  - name: substrate.host_processes.ProcessStopped
+    kind: struct
+    fields:
+      - {name: process, type: String}
+      - {name: operation, type: String}
+  # S5: every record the call stopped, one operation each. No live record is an empty list, never a
+  # refusal.
+  - name: substrate.host_processes.ProcessStopByOwnerResult
+    kind: struct
+    fields:
+      - {name: owner_session, type: String}
+      - {name: stopped, type: List<substrate.host_processes.ProcessStopped>}
+
+  # S7: one retained line, without its newline. `text` is the line as UTF-8; bytes that are not
+  # UTF-8 are replaced and `lossy` is true (the log keeps the bytes). `truncated` says the line is
+  # shorter than the program wrote, and `full_bytes` is the length it wrote.
+  - name: substrate.host_processes.ProcessLogLine
+    kind: struct
+    fields:
+      - {name: stream, type: substrate.host_processes.LogStream}
+      - {name: text, type: String}
+      - {name: lossy, type: Boolean}
+      - {name: truncated, type: Boolean}
+      - {name: full_bytes, type: Integer}
+  # S7: a bounded tail, by bytes, of one stream or both, oldest line first. `discarded_bytes` is
+  # what the log bound has discarded since the log was created; the header repeats the record's
+  # `profile` and `confinement`.
+  - name: substrate.host_processes.ProcessLogTail
+    kind: struct
+    fields:
+      - {name: process, type: String}
+      - {name: profile, type: substrate.host_processes.ConfinementProfile}
+      - {name: confinement, type: substrate.host_processes.Confinement}
+      - {name: stream, type: substrate.host_processes.LogStreamSelection}
+      - {name: lines, type: List<substrate.host_processes.ProcessLogLine>}
+      - {name: discarded_bytes, type: Integer}
+      - {name: retained_bytes, type: Integer}
+      - {name: observed_at, type: Timestamp}

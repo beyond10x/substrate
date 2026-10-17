@@ -217,10 +217,23 @@ fn check_capture_types(root: &Path, dir: &Path) -> Result<()> {
 const HOST_PROCESSES: &str = "spec/host-processes";
 /// The suite `ess verify conform synthesize` derives from [`HOST_PROCESSES`], committed.
 const HOST_PROCESSES_SUITE: &str = "spec/host-processes-suite.json";
+/// The host-process wire types (ADR 0036 S1-S7, S11) generated from [`HOST_PROCESSES`], committed.
+const HOST_PROCESS_TYPES: &str = "crates/substrate-wire/src/generated/host_process.rs";
+/// The roots of [`HOST_PROCESS_TYPES`]: every request, record, page and tail of the surface. Their
+/// transitive closure brings the closed vocabularies (state, `ended_by`, profile, confinement).
+const HOST_PROCESS_TYPE_ROOTS: [&str; 6] = [
+    "substrate.host_processes.ProcessStartInput",
+    "substrate.host_processes.ProcessRecord",
+    "substrate.host_processes.ProcessPage",
+    "substrate.host_processes.ProcessStopByOwnerInput",
+    "substrate.host_processes.ProcessStopByOwnerResult",
+    "substrate.host_processes.ProcessLogTail",
+];
 
 /// Validates the host-process specification, checks its committed suite for drift and runs the
-/// synthesized and authored scenarios against the ESS interpreted reference. That checks the model
-/// only; it is not evidence that the daemon conforms.
+/// synthesized and authored scenarios against the ESS interpreted reference, then regenerates the
+/// host-process wire types and compares them with [`HOST_PROCESS_TYPES`]. The interpreted run
+/// checks the model only; it is not evidence that the daemon conforms.
 fn check_host_processes(root: &Path, scratch: &Path) -> Result<()> {
     run(
         root,
@@ -266,5 +279,27 @@ fn check_host_processes(root: &Path, scratch: &Path) -> Result<()> {
             "2",
             "--strict-requires",
         ],
-    )
+    )?;
+    let types = scratch.join("host-process-types");
+    let mut args = vec!["generate", "types", "--path", HOST_PROCESSES];
+    for root in HOST_PROCESS_TYPE_ROOTS {
+        args.extend(["--root", root]);
+    }
+    args.extend([
+        "--names",
+        "short",
+        "--target",
+        "rust",
+        "--package",
+        "b10x-substrate-host-process-types",
+        "--out",
+        types.to_str().context("UTF-8 type output")?,
+        "--strict-requires",
+    ]);
+    run(root, &args)?;
+    ensure!(
+        fs::read(types.join("types.rs"))? == fs::read(root.join(HOST_PROCESS_TYPES))?,
+        "ESS host-process type drift: regenerate {HOST_PROCESS_TYPES} from {HOST_PROCESSES} with the pinned ESS release"
+    );
+    Ok(())
 }
