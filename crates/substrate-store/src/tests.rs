@@ -6,9 +6,8 @@ use rusqlite::params;
 use substrate_wire::{
     ConfinementRequest, ErrorClass, ErrorDetail, EventCause, Exec, ExecKind, ExecState, ExecUsage,
     LeaseObservation, LeaseState, NetworkMode, OperationOutcome, OperationState, PipeSession,
-    PipeSessionLimits, SandboxProfile, SessionAttachmentState, SessionKind, SessionMode,
-    RootName, SessionState, SnapshotItemKind, Workspace, WorkspaceKind, WorkspaceOrigin,
-    WorkspaceState,
+    PipeSessionLimits, RootName, SandboxProfile, SessionAttachmentState, SessionKind, SessionMode,
+    SessionState, SnapshotItemKind, Workspace, WorkspaceKind, WorkspaceOrigin, WorkspaceState,
 };
 use tempfile::tempdir;
 
@@ -4202,7 +4201,11 @@ fn origin_column_migrates_existing_rows_as_created() {
 fn root_name_holder_is_split_by_subject() {
     let store = Store::open(":memory:").expect("open store");
     store
-        .put_workspace(&scope("local:1000"), "adopted-repo", &adopted("ws_a", "adopted-repo"))
+        .put_workspace(
+            &scope("local:1000"),
+            "adopted-repo",
+            &adopted("ws_a", "adopted-repo"),
+        )
         .expect("seed");
     assert_eq!(
         store
@@ -4264,7 +4267,11 @@ fn adopt_reservation_records_a_held_name_by_owner() {
     // answers by owner, and records the refusal so a retry replays it.
     let store = Store::open(":memory:").expect("open store");
     store
-        .put_workspace(&scope("local:1000"), "adopted-repo", &adopted("ws_a", "adopted-repo"))
+        .put_workspace(
+            &scope("local:1000"),
+            "adopted-repo",
+            &adopted("ws_a", "adopted-repo"),
+        )
         .expect("seed");
     for (subject, status, code) in [
         ("local:1000", 409, "workspace.already-exists"),
@@ -4296,7 +4303,12 @@ fn adopt_reservation_records_a_held_name_by_owner() {
             OperationState::Refused
         );
     }
-    assert!(store.workspace(&scope("local:1001"), "ws_b").expect("read").is_none());
+    assert!(
+        store
+            .workspace(&scope("local:1001"), "ws_b")
+            .expect("read")
+            .is_none()
+    );
 }
 
 #[test]
@@ -4334,7 +4346,11 @@ fn every_removal_path_reader_carries_the_adopted_origin() {
     let store = Store::open(":memory:").expect("open store");
     let scope = scope("local:1000");
     store
-        .put_workspace(&scope, "adopted-repo", &adopted("ws_adopted", "adopted-repo"))
+        .put_workspace(
+            &scope,
+            "adopted-repo",
+            &adopted("ws_adopted", "adopted-repo"),
+        )
         .expect("seed adopted");
     let destroy = operation_named(
         "local:1000",

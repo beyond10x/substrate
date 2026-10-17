@@ -6,29 +6,31 @@ use axum::extract::{Path, RawQuery, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use base64::Engine as _;
-use substrate_host::{DispatchOutcome, DriverError, WorkspaceDestroyProgress};
+use substrate_host::{DispatchOutcome, DriverError, DriverErrorClass, WorkspaceDestroyProgress};
 use substrate_store::{
-    NewLease, WorkspaceAdmission, WorkspaceDestroyReservation, WorkspaceObservationWrite,
+    NewLease, WorkspaceAdmission, WorkspaceAdoptReservation, WorkspaceDestroyReservation,
+    WorkspaceObservationWrite, WorkspaceRootHolder, adopt_not_found,
 };
 use substrate_wire::{
     EmptyInput, ErrorClass, FileEditInput, FilePatchInput, FileReadQuery, FileReplaceInput,
     FileWriteInput, GitBaselineFileQuery, GitChangesQuery, LeaseRenewInput, MAX_LEASE_TTL_MS,
-    MIN_LEASE_TTL_MS, Success, WorkspaceCreateInput, WorkspaceKind, WorkspaceState,
-    WorkspaceTreeQuery, validate_relative_path,
+    MIN_LEASE_TTL_MS, Success, WorkspaceAdoptInput, WorkspaceCreateInput, WorkspaceKind,
+    WorkspaceOrigin, WorkspaceState, WorkspaceTreeQuery, validate_relative_path,
 };
 
 use super::operations::{
     BoundMutation, begin, decode_mutation, driver_failure, finish_dispatch_absence,
     finish_dispatch_unknown, finish_driver_error, finish_lease_store_error, finish_success,
-    new_lease, new_operation, refuse_before_dispatch, refuse_before_dispatch_response,
-    refuse_workspace_mutation, replay, reservation_response, validate_workspace_input,
+    labels_within_bounds, new_lease, new_operation, refuse_before_dispatch,
+    refuse_before_dispatch_response, refuse_workspace_mutation, replay, reservation_response,
+    validate_workspace_input,
 };
 use super::responses::{
-    failure, normalized_file_address, not_found, not_found_with_operation,
+    failure, failure_detail, normalized_file_address, not_found, not_found_with_operation,
     operation_ledger_capacity, outcome_unknown, path_refusal, query_is_empty, request_id,
     schema_invalid, store_failure, success, workspace_frozen_refusal, workspace_missing_refusal,
 };
-use super::service::run_maintenance_driver;
+use super::service::{end_workspace, run_maintenance_driver};
 use super::{App, Identity};
 
 #[allow(clippy::too_many_lines)] // Durable admission and driver dispatch stay auditable together.
@@ -170,6 +172,8 @@ pub(super) async fn workspace_create(
         labels: mutation.input.labels.clone(),
         observed_at: app.authority.now(),
         state: WorkspaceState::Unknown,
+        origin: WorkspaceOrigin::Created,
+        root_name: root_name.as_str().into(),
         storage: None,
         lease: lease.as_ref().map(NewLease::observation),
     };
@@ -241,6 +245,158 @@ pub(super) async fn workspace_create(
             )
             .await
         }
+    }
+}
+
+/// `workspace.adopt` (ADR 0035): serve a directory the operator placed under the workspace root.
+///
+/// Refusals run in the decided order and every one is a recorded ledger row a retry replays:
+/// an out-of-set name, a name another subject's row holds (answered exactly as an absent
+/// directory), a name the caller's own row holds, the host observation (absent, not a directory,
+/// or not owned by the daemon's effective uid), then the workspace partition and the ledger. The
+/// held-name and capacity checks run again inside the reservation transaction, so a row written
+/// between the read and the reservation is still refused by owner.
+#[allow(clippy::too_many_lines)] // Admission order and recording stay auditable together.
+pub(super) async fn workspace_adopt(
+    State(app): State<Arc<App>>,
+    Extension(identity): Extension<Identity>,
+    headers: HeaderMap,
+    RawQuery(raw_query): RawQuery,
+    body: Body,
+) -> Response {
+    const KIND: &str = "workspace.adopt";
+    const ADDRESS: &str = "/v1/workspaces/adopt";
+    let request_id = request_id(&app, &headers);
+    let mutation = match decode_mutation::<WorkspaceAdoptInput>(
+        &app,
+        &identity,
+        KIND,
+        "POST",
+        ADDRESS,
+        raw_query.as_deref(),
+        body,
+        &request_id,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let refusal = if mutation.input.root_name.is_valid() {
+        (!labels_within_bounds(&mutation.input.labels))
+            .then(|| schema_invalid(&request_id, Some(&mutation.op), "input"))
+    } else {
+        Some(schema_invalid(&request_id, Some(&mutation.op), "root_name"))
+    };
+    if let Some(response) = refusal {
+        return refuse_before_dispatch_response(
+            &app,
+            &identity,
+            &request_id,
+            KIND,
+            "POST",
+            ADDRESS,
+            &mutation,
+            response,
+        )
+        .await;
+    }
+    let root_name = mutation.input.root_name.as_str().to_owned();
+    let id = app.authority.workspace_id();
+    let scope = app.scope(&identity);
+    let _workspace_guard = app.lock_workspace(&scope, &id).await;
+    let new = new_operation(
+        &app,
+        &identity,
+        KIND,
+        "POST",
+        ADDRESS,
+        &mutation,
+        None,
+        Some(id.clone()),
+    );
+    let provisional = substrate_wire::Workspace {
+        id: id.clone(),
+        kind: WorkspaceKind::Workspace,
+        labels: mutation.input.labels.clone(),
+        observed_at: app.authority.now(),
+        state: WorkspaceState::Ready,
+        origin: WorkspaceOrigin::Adopted,
+        root_name: mutation.input.root_name.clone(),
+        storage: None,
+        lease: None,
+    };
+    let holder = match app
+        .store_io(|| app.store.workspace_root_holder(&scope, &root_name))
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => return store_failure(&request_id, Some(&mutation.op), &error),
+    };
+    // A held name is refused by the reservation without asking the host anything, so the answer
+    // to another subject's name is decided before, and independently of, the directory's state.
+    let observed = if holder == WorkspaceRootHolder::Free {
+        match app
+            .driver
+            .observe_workspace(&id, &root_name, &provisional)
+            .await
+        {
+            Ok(mut observed) => {
+                observed.storage = None;
+                observed.lease = None;
+                observed
+            }
+            Err(error) if error.class == DriverErrorClass::NotFound => {
+                return refuse_before_dispatch_response(
+                    &app,
+                    &identity,
+                    &request_id,
+                    KIND,
+                    "POST",
+                    ADDRESS,
+                    &mutation,
+                    failure_detail(
+                        StatusCode::NOT_FOUND,
+                        &request_id,
+                        adopt_not_found(&mutation.op),
+                    ),
+                )
+                .await;
+            }
+            Err(error) => {
+                return refuse_before_dispatch(
+                    &app,
+                    &identity,
+                    &request_id,
+                    KIND,
+                    "POST",
+                    ADDRESS,
+                    &mutation,
+                    &error,
+                )
+                .await;
+            }
+        }
+    } else {
+        provisional
+    };
+    let terminal_at = app.authority.now().to_rfc3339();
+    match app
+        .store_io(|| {
+            app.store
+                .reserve_workspace_adopt(&new, &root_name, &observed, &terminal_at)
+        })
+        .await
+    {
+        Ok(WorkspaceAdoptReservation::Adopted(workspace)) => success(
+            StatusCode::CREATED,
+            Success::mutation(request_id, mutation.op, workspace),
+        ),
+        Ok(WorkspaceAdoptReservation::Answered(reservation)) => {
+            reservation_response(Ok(reservation), &request_id, &mutation.op)
+                .unwrap_or_else(|| outcome_unknown(&request_id, &mutation.op))
+        }
+        Err(error) => store_failure(&request_id, Some(&mutation.op), &error),
     }
 }
 
@@ -1071,7 +1227,7 @@ pub(super) async fn workspace_destroy(
         Some(workspace_id.clone()),
     );
     let clock = app.lease_clock().ok();
-    let root_name = match app
+    let (root_name, origin) = match app
         .store_io(|| app.store.reserve_workspace_destroy(&new, clock.as_ref()))
         .await
     {
@@ -1107,10 +1263,20 @@ pub(super) async fn workspace_destroy(
         Ok(WorkspaceDestroyReservation::Frozen { .. }) => {
             unreachable!("atomic destroy reservation returns durable refusal")
         }
-        Ok(WorkspaceDestroyReservation::Admitted { root_name, .. }) => root_name,
+        Ok(WorkspaceDestroyReservation::Admitted {
+            root_name,
+            resource,
+        }) => (root_name, resource.origin),
         Err(error) => return store_failure(&request_id, Some(&operation), &error),
     };
-    match run_maintenance_driver(app.driver.destroy_workspace(&workspace_id, &root_name)).await {
+    match run_maintenance_driver(end_workspace(
+        app.driver.as_ref(),
+        &workspace_id,
+        &root_name,
+        origin,
+    ))
+    .await
+    {
         Ok(WorkspaceDestroyProgress::Absent(absence)) => {
             if let Err(error) = app
                 .store_io(|| {

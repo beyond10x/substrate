@@ -79,6 +79,17 @@ impl From<substrate_wire::WorkspaceState> for WorkspaceState {
     }
 }
 
+/// Whether `workspace.create` or `workspace.adopt` wrote the workspace (ADR 0035).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum WorkspaceOrigin {
+    /// Destroy removes the directory the daemon made.
+    Created,
+    /// Destroy forgets the record and leaves the operator's directory.
+    Adopted,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 pub struct Lease {
@@ -106,6 +117,11 @@ pub struct WorkspaceObservation {
     pub labels: BTreeMap<String, String>,
     pub observed_at: DateTime<Utc>,
     pub state: WorkspaceState,
+    /// How the workspace came to exist (ADR 0035): destroy of an adopted one forgets it and leaves
+    /// the operator's directory in place.
+    pub origin: WorkspaceOrigin,
+    /// The directory under the workspace root the workspace is served from.
+    pub root_name: String,
     pub lease: Option<Lease>,
 }
 
@@ -116,6 +132,12 @@ impl From<substrate_wire::Workspace> for WorkspaceObservation {
             labels: value.labels,
             observed_at: value.observed_at,
             state: value.state.into(),
+            origin: if value.origin.is_adopted() {
+                WorkspaceOrigin::Adopted
+            } else {
+                WorkspaceOrigin::Created
+            },
+            root_name: value.root_name.as_str().to_owned(),
             lease: value.lease.map(Into::into),
         }
     }

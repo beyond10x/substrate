@@ -34,7 +34,8 @@ pub use model::{
     ExecExit, ExecObservation, ExecState, ExecutionPolicy, ExecutionPolicyBuilder, FileContents,
     FileObservation, Lease, Machine, MetricsObservation, MetricsSample, ObservedRefusal, Operation,
     OperationState, OutputPage, OutputStream, PipeFrame, PipeSessionObservation, PipeSessionState,
-    Refusal, RefusalClass, RunOutput, Signal, WorkspaceObservation, WorkspaceState,
+    Refusal, RefusalClass, RunOutput, Signal, WorkspaceObservation, WorkspaceOrigin,
+    WorkspaceState,
 };
 pub use substrate_wire::{
     AppliedConfinement, DigestedFileSlice, DirectoryEntry, DirectoryEntryKind, DirectoryPage,
@@ -206,6 +207,39 @@ impl Client {
             operation_id: None,
             source_authorization: None,
         }
+    }
+
+    /// Adopt a directory the operator placed under the daemon's workspace root (ADR 0035,
+    /// `workspace.adopt`). The workspace gets a minted `ws_…` id and has no lease and no storage
+    /// limit; destroying it forgets the record and leaves the directory and its contents.
+    ///
+    /// # Errors
+    ///
+    /// A root name outside the published set is refused here without a request; every other
+    /// refusal is the daemon's, recorded under the operation id.
+    pub async fn adopt_workspace(
+        &self,
+        root_name: impl AsRef<str>,
+        labels: BTreeMap<String, String>,
+        operation_id: Option<String>,
+    ) -> Result<Workspace, SdkError> {
+        let root_name = root_name.as_ref();
+        if !substrate_wire::is_root_name(root_name) {
+            return Err(SdkError::Protocol(
+                "workspace root name is outside the published root-name set".to_owned(),
+            ));
+        }
+        let input = substrate_wire::WorkspaceAdoptInput {
+            root_name: root_name.into(),
+            labels,
+        };
+        let (_, observed): (_, substrate_wire::Workspace) = self
+            .mutation("POST", "/v1/workspaces/adopt", &input, operation_id)
+            .await?;
+        Ok(Workspace {
+            client: self.clone(),
+            observed: observed.into(),
+        })
     }
 
     pub async fn get_workspace(&self, id: impl AsRef<str>) -> Result<Workspace, SdkError> {

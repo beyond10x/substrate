@@ -35,8 +35,8 @@ pub use sessions::{
 };
 pub use snapshots::SnapshotReadError;
 pub use workspaces::{
-    PendingWorkspaceDestroy, Tombstone, WorkspaceAdmission, WorkspaceDestroyReservation,
-    WorkspaceObservationWrite,
+    PendingWorkspaceDestroy, Tombstone, WorkspaceAdmission, WorkspaceAdoptReservation,
+    WorkspaceDestroyReservation, WorkspaceObservationWrite, WorkspaceRootHolder, adopt_not_found,
 };
 
 pub const DEFAULT_OPERATION_SUBJECT_MAX_ROWS: u64 = OPERATION_LEDGER_SUBJECT_MAX_ROWS;

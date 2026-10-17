@@ -813,7 +813,7 @@ pub(crate) fn terminal_transition(
         return "operation.failed";
     }
     match operation_kind {
-        "workspace.create" => "workspace.created",
+        "workspace.create" | "workspace.adopt" => "workspace.created",
         "workspace.file.write" => "workspace.file-written",
         "workspace.file.delete" => "workspace.file-deleted",
         "workspace.destroy" => "workspace.destroyed",

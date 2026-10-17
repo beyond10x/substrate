@@ -15,7 +15,8 @@ use substrate_store::{
     WorkspaceAdmission,
 };
 use substrate_wire::{
-    ExecSignalInput, ExecState, OperationState, WorkspaceAbsence, WorkspaceKind, WorkspaceState,
+    ExecSignalInput, ExecState, OperationState, WorkspaceAbsence, WorkspaceKind, WorkspaceOrigin,
+    WorkspaceState,
 };
 use tokio::sync::{Mutex, Notify, OwnedMutexGuard, Semaphore};
 use ulid::Ulid;
@@ -533,10 +534,12 @@ impl App {
             if !still_destroying {
                 continue;
             }
-            let absence = match run_maintenance_driver(
-                self.driver
-                    .destroy_workspace(&pending.id, &pending.root_name),
-            )
+            let absence = match run_maintenance_driver(end_workspace(
+                self.driver.as_ref(),
+                &pending.id,
+                &pending.root_name,
+                pending.origin,
+            ))
             .await
             {
                 Ok(WorkspaceDestroyProgress::Absent(value)) => value,
@@ -698,7 +701,7 @@ impl App {
                     .await
                 }
             }
-            LeaseResource::Workspace { root_name } => {
+            LeaseResource::Workspace { root_name, origin } => {
                 let mut child_failure = None;
                 if let Ok(execs) = self
                     .store_io(|| self.store.execs_for_workspace(&expired.scope, &expired.id))
@@ -759,9 +762,12 @@ impl App {
                 if let Some(error) = child_failure {
                     Err(error)
                 } else {
-                    match run_maintenance_driver(
-                        self.driver.destroy_workspace(&expired.id, root_name),
-                    )
+                    match run_maintenance_driver(end_workspace(
+                        self.driver.as_ref(),
+                        &expired.id,
+                        root_name,
+                        *origin,
+                    ))
                     .await
                     {
                         Ok(WorkspaceDestroyProgress::Absent(_)) => {
@@ -829,4 +835,23 @@ where
     let result = tokio::task::block_in_place(operation);
     drop(permit);
     result
+}
+
+/// End a workspace on disk by its origin (ADR 0035 decision 7), on every removal path: a created
+/// workspace's tree is removed in batches; an adopted one is forgotten, and the driver removes only
+/// what it made outside the operator's directory.
+pub(super) async fn end_workspace(
+    driver: &dyn Driver,
+    workspace_id: &str,
+    root_name: &str,
+    origin: WorkspaceOrigin,
+) -> Result<WorkspaceDestroyProgress, DriverError> {
+    if origin.is_adopted() {
+        driver
+            .forget_workspace(workspace_id, root_name)
+            .await
+            .map(WorkspaceDestroyProgress::Absent)
+    } else {
+        driver.destroy_workspace(workspace_id, root_name).await
+    }
 }

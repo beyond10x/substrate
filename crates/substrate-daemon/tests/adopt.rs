@@ -285,7 +285,13 @@ impl Harness {
         path
     }
 
-    async fn call(&self, subject: &str, method: Method, uri: &str, body: Body) -> (StatusCode, Value) {
+    async fn call(
+        &self,
+        subject: &str,
+        method: Method,
+        uri: &str,
+        body: Body,
+    ) -> (StatusCode, Value) {
         let request = Request::builder()
             .method(method)
             .uri(uri)
@@ -307,7 +313,10 @@ impl Harness {
         let bytes = to_bytes(response.into_body(), 2_097_152)
             .await
             .expect("response body");
-        (status, serde_json::from_slice(&bytes).expect("JSON response"))
+        (
+            status,
+            serde_json::from_slice(&bytes).expect("JSON response"),
+        )
     }
 
     async fn adopt(&self, subject: &str, operation: &str, root_name: &str) -> (StatusCode, Value) {
@@ -320,7 +329,12 @@ impl Harness {
         .await
     }
 
-    async fn destroy(&self, subject: &str, operation: &str, workspace: &str) -> (StatusCode, Value) {
+    async fn destroy(
+        &self,
+        subject: &str,
+        operation: &str,
+        workspace: &str,
+    ) -> (StatusCode, Value) {
         self.call(
             subject,
             Method::DELETE,
@@ -332,7 +346,12 @@ impl Harness {
 
     async fn operation(&self, subject: &str, operation: &str) -> Value {
         let (status, body) = self
-            .call(subject, Method::GET, &format!("/v1/ops/{operation}"), Body::empty())
+            .call(
+                subject,
+                Method::GET,
+                &format!("/v1/ops/{operation}"),
+                Body::empty(),
+            )
             .await;
         assert_eq!(status, StatusCode::OK, "{body}");
         body
@@ -391,7 +410,12 @@ async fn adopt_then_exec_runs_in_the_operator_directory() {
     assert!(adopted["result"].get("storage").is_none());
 
     let (status, observed) = harness
-        .call(SUBJECT, Method::GET, &format!("/v1/workspaces/{workspace}"), Body::empty())
+        .call(
+            SUBJECT,
+            Method::GET,
+            &format!("/v1/workspaces/{workspace}"),
+            Body::empty(),
+        )
         .await;
     assert_eq!(status, StatusCode::OK, "{observed}");
     assert_eq!(observed["result"]["origin"], "adopted");
@@ -413,7 +437,12 @@ async fn adopt_then_exec_runs_in_the_operator_directory() {
     assert_eq!(started["result"]["state"], "exited");
     assert_eq!(started["result"]["exit"]["code"], 3);
     assert_eq!(
-        harness.driver.started_in.lock().expect("fixture lock").as_slice(),
+        harness
+            .driver
+            .started_in
+            .lock()
+            .expect("fixture lock")
+            .as_slice(),
         ["adopted-repo".to_owned()]
     );
 
@@ -454,8 +483,15 @@ async fn adopt_refuses_a_name_outside_the_set_before_dispatch_and_replays_it() {
     {
         let operation = format!("01JADOPTOUTOFSET{index:04}X");
         let (status, refused) = harness.adopt(SUBJECT, &operation, name).await;
-        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{name:?} {refused}");
-        assert_eq!(refused["error"]["code"], "request.schema-invalid", "{name:?}");
+        assert_eq!(
+            status,
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "{name:?} {refused}"
+        );
+        assert_eq!(
+            refused["error"]["code"], "request.schema-invalid",
+            "{name:?}"
+        );
         assert_eq!(refused["error"]["address"], "root_name", "{name:?}");
         let (replay_status, replayed) = harness.adopt(SUBJECT, &operation, name).await;
         assert_eq!(replay_status, status, "{name:?}");
@@ -464,7 +500,14 @@ async fn adopt_refuses_a_name_outside_the_set_before_dispatch_and_replays_it() {
         assert_eq!(record["result"]["state"], "refused", "{name:?} {record}");
         assert_eq!(record["result"]["kind"], "workspace.adopt", "{name:?}");
     }
-    assert!(harness.driver.started_in.lock().expect("fixture lock").is_empty());
+    assert!(
+        harness
+            .driver
+            .started_in
+            .lock()
+            .expect("fixture lock")
+            .is_empty()
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -474,18 +517,53 @@ async fn adopt_refusals_follow_the_decided_order_and_are_recorded() {
     let harness = Harness::open();
     harness.place("adopted-repo", &[]);
     std::fs::write(harness.root().join("plain-file"), "not a directory").expect("file");
-    std::os::unix::fs::symlink(harness.root().join("adopted-repo"), harness.root().join("link"))
-        .expect("symlink");
+    std::os::unix::fs::symlink(
+        harness.root().join("adopted-repo"),
+        harness.root().join("link"),
+    )
+    .expect("symlink");
 
-    let (status, first) = harness.adopt(SUBJECT, "01JADOPTORDER000000001", "adopted-repo").await;
+    let (status, first) = harness
+        .adopt(SUBJECT, "01JADOPTORDER000000001", "adopted-repo")
+        .await;
     assert_eq!(status, StatusCode::CREATED, "{first}");
 
     let cases = [
-        (SUBJECT, "01JADOPTORDER000000002", "adopted-repo", StatusCode::CONFLICT, "workspace.already-exists"),
-        (OTHER, "01JADOPTORDER000000003", "adopted-repo", StatusCode::NOT_FOUND, "resource.not-found"),
-        (OTHER, "01JADOPTORDER000000004", "never-placed", StatusCode::NOT_FOUND, "resource.not-found"),
-        (SUBJECT, "01JADOPTORDER000000005", "plain-file", StatusCode::UNPROCESSABLE_ENTITY, "workspace.path-escape"),
-        (SUBJECT, "01JADOPTORDER000000006", "link", StatusCode::UNPROCESSABLE_ENTITY, "workspace.path-escape"),
+        (
+            SUBJECT,
+            "01JADOPTORDER000000002",
+            "adopted-repo",
+            StatusCode::CONFLICT,
+            "workspace.already-exists",
+        ),
+        (
+            OTHER,
+            "01JADOPTORDER000000003",
+            "adopted-repo",
+            StatusCode::NOT_FOUND,
+            "resource.not-found",
+        ),
+        (
+            OTHER,
+            "01JADOPTORDER000000004",
+            "never-placed",
+            StatusCode::NOT_FOUND,
+            "resource.not-found",
+        ),
+        (
+            SUBJECT,
+            "01JADOPTORDER000000005",
+            "plain-file",
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "workspace.path-escape",
+        ),
+        (
+            SUBJECT,
+            "01JADOPTORDER000000006",
+            "link",
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "workspace.path-escape",
+        ),
     ];
     let mut not_found_bodies = Vec::new();
     for (subject, operation, name, expected_status, code) in cases {
@@ -512,14 +590,19 @@ async fn adopt_refusals_follow_the_decided_order_and_are_recorded() {
             OTHER,
             Method::POST,
             "/v1/workspaces",
-            mutation("01JADOPTORDER000000007", json!({ "source": "empty", "labels": {} })),
+            mutation(
+                "01JADOPTORDER000000007",
+                json!({ "source": "empty", "labels": {} }),
+            ),
         )
         .await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
     assert_eq!(created["result"]["origin"], "created");
     let minted = text(&created["result"]["root_name"]).to_owned();
     assert_eq!(minted, text(&created["result"]["id"]));
-    let (status, refused) = harness.adopt(SUBJECT, "01JADOPTORDER000000008", &minted).await;
+    let (status, refused) = harness
+        .adopt(SUBJECT, "01JADOPTORDER000000008", &minted)
+        .await;
     assert_eq!(status, StatusCode::NOT_FOUND, "{refused}");
 }
 
@@ -531,21 +614,38 @@ async fn destroy_of_an_adopted_workspace_forgets_it_and_leaves_the_files() {
     let path = harness.place("adopted-repo", &[("keep.txt", "keep me")]);
     std::fs::create_dir(path.join("nested")).expect("nested");
     std::fs::write(path.join("nested/deep.txt"), "deep").expect("deep");
-    let (status, adopted) = harness.adopt(SUBJECT, "01JADOPTDESTROY0000001", "adopted-repo").await;
+    let (status, adopted) = harness
+        .adopt(SUBJECT, "01JADOPTDESTROY0000001", "adopted-repo")
+        .await;
     assert_eq!(status, StatusCode::CREATED, "{adopted}");
     let workspace = text(&adopted["result"]["id"]).to_owned();
 
-    let (status, absent) = harness.destroy(SUBJECT, "01JADOPTDESTROY0000002", &workspace).await;
+    let (status, absent) = harness
+        .destroy(SUBJECT, "01JADOPTDESTROY0000002", &workspace)
+        .await;
     assert_eq!(status, StatusCode::OK, "{absent}");
     assert_eq!(absent["result"]["absent"], true);
-    assert_eq!(std::fs::read_to_string(path.join("keep.txt")).expect("kept"), "keep me");
-    assert_eq!(std::fs::read_to_string(path.join("nested/deep.txt")).expect("kept"), "deep");
+    assert_eq!(
+        std::fs::read_to_string(path.join("keep.txt")).expect("kept"),
+        "keep me"
+    );
+    assert_eq!(
+        std::fs::read_to_string(path.join("nested/deep.txt")).expect("kept"),
+        "deep"
+    );
 
     let (status, _) = harness
-        .call(SUBJECT, Method::GET, &format!("/v1/workspaces/{workspace}"), Body::empty())
+        .call(
+            SUBJECT,
+            Method::GET,
+            &format!("/v1/workspaces/{workspace}"),
+            Body::empty(),
+        )
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
-    let (status, again) = harness.adopt(SUBJECT, "01JADOPTDESTROY0000003", "adopted-repo").await;
+    let (status, again) = harness
+        .adopt(SUBJECT, "01JADOPTDESTROY0000003", "adopted-repo")
+        .await;
     assert_eq!(status, StatusCode::CREATED, "{again}");
     assert_ne!(again["result"]["id"], adopted["result"]["id"]);
 
@@ -555,13 +655,18 @@ async fn destroy_of_an_adopted_workspace_forgets_it_and_leaves_the_files() {
             SUBJECT,
             Method::POST,
             "/v1/workspaces",
-            mutation("01JADOPTDESTROY0000004", json!({ "source": "empty", "labels": {} })),
+            mutation(
+                "01JADOPTDESTROY0000004",
+                json!({ "source": "empty", "labels": {} }),
+            ),
         )
         .await;
     assert_eq!(status, StatusCode::CREATED, "{created}");
     let minted = text(&created["result"]["id"]).to_owned();
     assert!(harness.root().join(&minted).is_dir());
-    let (status, _) = harness.destroy(SUBJECT, "01JADOPTDESTROY0000005", &minted).await;
+    let (status, _) = harness
+        .destroy(SUBJECT, "01JADOPTDESTROY0000005", &minted)
+        .await;
     assert_eq!(status, StatusCode::OK);
     assert!(!harness.root().join(&minted).exists());
 }
@@ -572,7 +677,9 @@ async fn restart_cleanup_of_an_adopted_workspace_forgets_it_and_leaves_the_files
     // destroy accepted before a crash completes, on restart, as a forget.
     let harness = Harness::open();
     let path = harness.place("adopted-repo", &[("keep.txt", "keep me")]);
-    let (status, adopted) = harness.adopt(SUBJECT, "01JADOPTRESTART0000001", "adopted-repo").await;
+    let (status, adopted) = harness
+        .adopt(SUBJECT, "01JADOPTRESTART0000001", "adopted-repo")
+        .await;
     assert_eq!(status, StatusCode::CREATED, "{adopted}");
     let workspace = text(&adopted["result"]["id"]).to_owned();
 
@@ -597,18 +704,28 @@ async fn restart_cleanup_of_an_adopted_workspace_forgets_it_and_leaves_the_files
         resource: Some(workspace.clone()),
     };
     assert!(matches!(
-        store.reserve_workspace_destroy(&destroy, None).expect("reserve"),
+        store
+            .reserve_workspace_destroy(&destroy, None)
+            .expect("reserve"),
         substrate_store::WorkspaceDestroyReservation::Admitted { .. }
     ));
     drop(store);
 
     harness.app.reconcile_destroying_workspaces().await;
 
-    assert_eq!(std::fs::read_to_string(path.join("keep.txt")).expect("kept"), "keep me");
+    assert_eq!(
+        std::fs::read_to_string(path.join("keep.txt")).expect("kept"),
+        "keep me"
+    );
     let record = harness.operation(SUBJECT, "01JADOPTRESTART0000002").await;
     assert_eq!(record["result"]["state"], "terminal", "{record}");
     let (status, _) = harness
-        .call(SUBJECT, Method::GET, &format!("/v1/workspaces/{workspace}"), Body::empty())
+        .call(
+            SUBJECT,
+            Method::GET,
+            &format!("/v1/workspaces/{workspace}"),
+            Body::empty(),
+        )
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }

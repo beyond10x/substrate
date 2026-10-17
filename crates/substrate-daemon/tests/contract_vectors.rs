@@ -255,6 +255,8 @@ impl Driver for VectorDriver {
                 labels: input.labels.clone(),
                 observed_at: FIXED_TIME.parse().expect("fixed time"),
                 state: WorkspaceState::Ready,
+                origin: substrate_wire::WorkspaceOrigin::Created,
+                root_name: substrate_wire::RootName::from(id),
                 storage: None,
                 lease: None,
             };
@@ -281,6 +283,8 @@ impl Driver for VectorDriver {
                     labels: input.labels.clone(),
                     observed_at: FIXED_TIME.parse().expect("fixed time"),
                     state: WorkspaceState::Ready,
+                    origin: substrate_wire::WorkspaceOrigin::Created,
+                    root_name: substrate_wire::RootName::from(id),
                     storage: None,
                     lease: None,
                 };
@@ -1481,6 +1485,8 @@ fn seed_workspace_named(store: &Store, id: &str, operation_id: &str, actor: &str
         labels: BTreeMap::default(),
         observed_at: FIXED_TIME.parse().expect("fixed time"),
         state: WorkspaceState::Unknown,
+        origin: substrate_wire::WorkspaceOrigin::Created,
+        root_name: substrate_wire::RootName::from(id),
         storage: None,
         lease: None,
     };
@@ -1525,6 +1531,8 @@ fn seed_workspace_state(store: &Store, state: WorkspaceState) {
         labels: BTreeMap::default(),
         observed_at: FIXED_TIME.parse().expect("fixed time"),
         state: WorkspaceState::Unknown,
+        origin: substrate_wire::WorkspaceOrigin::Created,
+        root_name: substrate_wire::RootName::from("ws_vector"),
         storage: None,
         lease: None,
     };

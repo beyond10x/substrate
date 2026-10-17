@@ -2027,7 +2027,6 @@ impl CaptureMode {
     }
 }
 
-
 // The root-name set and the workspace origin are generated from spec/workspaces, not transcribed
 // (ADR 0035). ESS generates them structurally only: the alphabet, the length bound and the
 // leading-`-` rule are runtime obligations [`is_root_name`] enforces (spec/workspaces/README.md).

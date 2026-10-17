@@ -663,6 +663,8 @@ mod tests {
             labels: std::collections::BTreeMap::new(),
             observed_at: Utc::now(),
             state: WorkspaceState::Ready,
+            origin: substrate_wire::WorkspaceOrigin::Created,
+            root_name: substrate_wire::RootName::from(WORKSPACE_ID),
             storage: None,
             lease: None,
         };

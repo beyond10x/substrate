@@ -317,16 +317,7 @@ pub(super) fn validate_workspace_input(
     mutation: &BoundMutation<WorkspaceCreateInput>,
     request_id: &str,
 ) -> Result<(), Response> {
-    if mutation.input.labels().len() > 64
-        || mutation.input.labels().iter().any(|(key, value)| {
-            key.is_empty()
-                || key.len() > 128
-                || value.len() > 256
-                || !key
-                    .bytes()
-                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
-        })
-    {
+    if !labels_within_bounds(mutation.input.labels()) {
         return Err(schema_invalid(request_id, Some(&mutation.op), "input"));
     }
     if mutation
@@ -1689,4 +1680,17 @@ pub(super) fn linux_lease_clock() -> Result<LeaseClock, String> {
             .and_then(|value| value.checked_add(milliseconds))
             .ok_or_else(|| "boot-relative clock overflow".to_owned())?,
     })
+}
+
+/// The workspace label bounds `workspace.create` and `workspace.adopt` share.
+pub(super) fn labels_within_bounds(labels: &substrate_wire::Labels) -> bool {
+    labels.len() <= 64
+        && labels.iter().all(|(key, value)| {
+            !key.is_empty()
+                && key.len() <= 128
+                && value.len() <= 256
+                && key
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'-'))
+        })
 }
