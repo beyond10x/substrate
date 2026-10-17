@@ -4246,8 +4246,8 @@ async fn check_read_only_file_host_refusals(
 // ---------------------------------------------------------------------------------------------
 
 /// The predecessor printed its case count; the port asserts it, so a case cannot vanish quietly.
-const PORTABLE_CASES: usize = 76;
-const DELEGATED_CASES: usize = 106;
+const PORTABLE_CASES: usize = 77;
+const DELEGATED_CASES: usize = 107;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {
