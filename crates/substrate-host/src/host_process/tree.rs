@@ -125,6 +125,14 @@ pub(super) fn signal_members(top: &Path, signal: i32) -> Result<BTreeSet<u32>, D
 ///
 /// `process.cgroup-failed` when any cgroup in the subtree cannot be removed.
 pub(super) fn remove(top: &Path) -> Result<(), DriverError> {
+    // Already gone is removed: the kernel removes no cgroup that has a member, so another remover
+    // (a restarted daemon re-attaching while the run that started the record still drains) can
+    // only have left it empty. A removal that races a walk fails once and its caller retries.
+    if let Err(error) = std::fs::symlink_metadata(top)
+        && error.kind() == std::io::ErrorKind::NotFound
+    {
+        return Ok(());
+    }
     for cgroup in cgroups(top)?.iter().rev() {
         match std::fs::remove_dir(cgroup) {
             Ok(()) => {}

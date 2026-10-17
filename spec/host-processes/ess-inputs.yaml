@@ -20,3 +20,4 @@ scenarios:
   - scenarios/log-discard-counted.yaml
   - scenarios/expires-at-reached.yaml
   - scenarios/vanished-on-reconcile.yaml
+  - scenarios/stop-while-starting.yaml

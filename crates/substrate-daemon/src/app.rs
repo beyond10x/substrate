@@ -19,6 +19,7 @@ mod events;
 mod execs;
 mod metrics;
 mod operations;
+mod processes;
 mod responses;
 mod routes;
 mod service;

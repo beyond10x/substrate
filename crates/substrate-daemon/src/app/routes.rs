@@ -16,6 +16,10 @@ use super::execs::{
     exec_get, exec_lease_renew, exec_output_get, exec_retire, exec_signal, exec_start,
 };
 use super::metrics::{metrics_get, metrics_stream};
+use super::processes::{
+    process_get, process_lease_renew, process_list, process_logs, process_start, process_stop,
+    process_stop_by_owner,
+};
 use super::responses::{
     not_found, not_found_at, query_is_empty, request_id, schema_invalid, store_failure, success,
 };
@@ -103,6 +107,17 @@ fn router_for(app: Arc<App>, transport: SessionTransport) -> Router {
             post(workspace_lease_renew),
         )
         .route("/v1/execs/{exec_id}/lease/renew", post(exec_lease_renew))
+        // ADR 0036: served on every listener, so a request over any listener but the personal
+        // Unix socket meets its named refusal, never a missing route.
+        .route("/v1/processes", get(process_list).post(process_start))
+        .route("/v1/processes/stop", post(process_stop_by_owner))
+        .route("/v1/processes/{process_id}", get(process_get))
+        .route("/v1/processes/{process_id}/stop", post(process_stop))
+        .route(
+            "/v1/processes/{process_id}/lease/renew",
+            post(process_lease_renew),
+        )
+        .route("/v1/processes/{process_id}/logs", get(process_logs))
         .route("/v1/events", get(event_list))
         .route("/v1/events/stream", get(event_stream))
         .route(

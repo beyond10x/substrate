@@ -21,11 +21,11 @@ use super::{Confinement, HostProfile};
 
 /// The byte bound of one process's retained log: at most this many record bytes are kept, and
 /// the oldest are discarded and counted beyond it (design 26 § S7, wave point 14).
-pub const MAX_PROCESS_LOG_BYTES: u64 = 8 * 1024 * 1024;
+pub const MAX_PROCESS_LOG_BYTES: u64 = substrate_wire::MAX_PROCESS_LOG_BYTES;
 
 /// The longest line stored whole. A longer line is stored cut at this bound, marked truncated,
 /// with its full length; it is never split into two lines (design 26 § S12).
-pub const MAX_PROCESS_LOG_LINE_BYTES: usize = 16 * 1024;
+pub const MAX_PROCESS_LOG_LINE_BYTES: usize = substrate_wire::MAX_PROCESS_LOG_LINE_BYTES;
 
 const MAGIC: &[u8; 8] = b"SHPLOG1\0";
 const HEADER_BYTES: u64 = 32;

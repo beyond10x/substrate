@@ -847,6 +847,19 @@ async fn production_tls_refuses_unverified_routes_and_rotates_atomically() {
     assert!(response.starts_with("HTTP/1.1 403"), "{response}");
     assert!(response.contains("auth.scope-denied"), "{response}");
 
+    // Bundle 0.20.0: the host-process routes require scope `process`, which the hosted admission
+    // profile does not grant, so a hosted caller meets admission's own refusal (compatibility.json).
+    let process_body = r#"{"owner_session":"s-1"}"#;
+    let denied_process = format!(
+        "POST /v1/processes/stop HTTP/1.1\r\nHost: substrate.test\r\nAuthorization: Bearer {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{process_body}",
+        authority.observe,
+        process_body.len()
+    );
+    let response = request(&mut https, denied_process.as_bytes()).await;
+    let response = String::from_utf8(response).expect("process scope refusal text");
+    assert!(response.starts_with("HTTP/1.1 403"), "{response}");
+    assert!(response.contains("auth.scope-denied"), "{response}");
+
     let invalid = access_credential('x');
     let invalid_request = format!(
         "GET /v1/machine HTTP/1.1\r\nHost: substrate.test\r\nAuthorization: Bearer {invalid}\r\nConnection: keep-alive\r\n\r\n"

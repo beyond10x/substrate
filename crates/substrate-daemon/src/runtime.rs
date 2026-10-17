@@ -623,6 +623,26 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
     host_config.egress_apertures = egress_apertures;
     host_config.aperture_root = aperture_state_root(&config.state);
     host_config.ca_bundle = config.ca_bundle;
+    // ADR 0036 S2: host processes are served only by a daemon whose one listener is the personal
+    // Unix socket, and only once the driver proved the delegated cgroup root usable for process
+    // cgroups. Any other daemon opens no driver and publishes no `process.host`; every start it
+    // receives is a named refusal, and nothing degrades into a weaker profile.
+    let unix_only = config.tcp.is_none() && config.tls.is_none();
+    let host_processes = if unix_only {
+        match substrate_host::host_process::HostProcessSupervisor::open(
+            host_config.cgroup_root.as_deref(),
+            &process_state_root(&config.state),
+        ) {
+            Ok(supervisor) => Some(supervisor as Arc<dyn substrate_host::ProcessSupervisor>),
+            Err(error) => {
+                info!(code = error.code, "host processes are not served");
+                None
+            }
+        }
+    } else {
+        None
+    };
+    host_config.host_processes = host_processes.is_some();
     let driver = HostDriver::open(host_config).context("open host driver")?;
     let mut app = App::with_delegated_context(
         store,
@@ -634,6 +654,20 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
     Arc::get_mut(&mut app)
         .context("configure capture policy before sharing the application")?
         .allow_unrecorded_sessions = config.allow_unrecorded_sessions;
+    // S7: without a driver, the logs an earlier run left are still read from the state
+    // directory; nothing is created there and nothing runs.
+    let host_process_logs = if host_processes.is_none() {
+        Some(
+            substrate_host::StoredProcessLogs::open(&process_state_root(&config.state))
+                as Arc<dyn substrate_host::ProcessLogs>,
+        )
+    } else {
+        None
+    };
+    let configured = Arc::get_mut(&mut app)
+        .context("configure host processes before sharing the application")?;
+    configured.host_processes = host_processes;
+    configured.host_process_logs = host_process_logs;
     app.sweep_expired().await;
     let maintenance = MaintenanceTasks::start(&app);
     if let Some(tcp) = config.tcp.as_ref() {
@@ -1364,6 +1398,12 @@ fn owner_only(mode: u32) -> bool {
 /// Never in the workspace root, which may hold an embedder's own checkouts.
 fn aperture_state_root(state: &Path) -> PathBuf {
     state.with_extension("apertures")
+}
+
+/// The owner-private directory holding one bounded log per host process (ADR 0036 S7): beside the
+/// durable state, never in a caller's working directory and never in a temporary directory.
+fn process_state_root(state: &Path) -> PathBuf {
+    state.with_extension("processes")
 }
 
 fn lock_state_identity(state: &Path) -> anyhow::Result<InstanceLock> {

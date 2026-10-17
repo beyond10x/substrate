@@ -91,7 +91,7 @@ async fn delegated_a_nested_cgroup_a_member_creates_does_not_keep_a_clean_exit_f
     request
         .env
         .insert("INNER".to_owned(), inner.display().to_string());
-    supervisor.spawn(id, &request).expect("spawn");
+    supervisor.start(id, &request).expect("spawn");
     let end = tokio::time::timeout(Duration::from_secs(30), supervisor.wait(id))
         .await
         .expect("the record ends within its bounds");
@@ -137,7 +137,7 @@ wait"#;
     request
         .env
         .insert("MARK".to_owned(), mark.display().to_string());
-    supervisor.spawn(id, &request).expect("spawn");
+    supervisor.start(id, &request).expect("spawn");
     let moved = wait_for_line(&supervisor, id, "moved").await;
     let stopped = tokio::time::timeout(
         Duration::from_secs(30),
@@ -187,7 +187,7 @@ async fn delegated_stop_ends_a_main_process_that_left_its_cgroup_and_returns() {
     request
         .env
         .insert("ELSEWHERE".to_owned(), elsewhere.display().to_string());
-    let started = supervisor.spawn(id, &request).expect("spawn");
+    let started = supervisor.start(id, &request).expect("spawn");
     let left = wait_for_line(&supervisor, id, "left").await;
     let stopped = tokio::time::timeout(
         Duration::from_secs(20),

@@ -7,7 +7,9 @@ use std::sync::{Arc, Weak};
 use axum::http::StatusCode;
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex as ParkingMutex;
-use substrate_host::{Driver, DriverError, DriverErrorClass, WorkspaceDestroyProgress};
+use substrate_host::{
+    Driver, DriverError, DriverErrorClass, ProcessLogs, ProcessSupervisor, WorkspaceDestroyProgress,
+};
 #[cfg(test)]
 use substrate_store::NewOperation;
 use substrate_store::{
@@ -107,6 +109,11 @@ pub trait Authority: Send + Sync {
     fn exec_id(&self) -> String;
     fn session_id(&self) -> String;
     fn snapshot_id(&self) -> String;
+    /// A fresh host-process id (ADR 0036): `proc_` and ASCII alphanumerics, bundle `0.20.0`
+    /// `process-id`. Defaulted, so an authority written before the family existed still mints one.
+    fn process_id(&self) -> String {
+        format!("{}{}", substrate_wire::PROCESS_ID_PREFIX, Ulid::generate())
+    }
     /// Returns durable wall and boot-relative evidence for lease accounting.
     ///
     /// # Errors
@@ -160,7 +167,7 @@ pub struct App {
     /// trust anchor a request could move is not a trust anchor (ADR 0011).
     pub(super) delegated_context: DelegatedContextPolicy,
     pub(super) authority: Arc<dyn Authority>,
-    restart_cutoff: DateTime<Utc>,
+    pub(super) restart_cutoff: DateTime<Utc>,
     pub(super) event_wakeups: Arc<EventWakeups>,
     pub(super) event_stream_limits: Arc<EventStreamLimits>,
     pub(super) event_stream_policy: EventStreamPolicy,
@@ -171,6 +178,23 @@ pub struct App {
     pub(super) pipe_attachment_limits: Arc<PipeAttachmentLimits>,
     pub(super) pipe_session_policy: PipeSessionPolicy,
     pub allow_unrecorded_sessions: bool,
+    /// The host-process driver (ADR 0036), present only when the composition root opened it over
+    /// a usable delegated cgroup root for a daemon whose one listener is the personal Unix socket.
+    /// Absent, every start is `process.host-unserved` and nothing runs; nothing selects a
+    /// confined profile instead.
+    pub host_processes: Option<Arc<dyn ProcessSupervisor>>,
+    /// The stored host-process logs, read when this run opened no host-process driver: the logs an
+    /// earlier run left beside their records stay readable, because `process.logs.get` carries no
+    /// capability predicate (S7). With a driver present its own reader answers instead.
+    pub host_process_logs: Option<Arc<dyn ProcessLogs>>,
+    /// The uid a host-process peer must have: the daemon's own effective uid (S2). A peer of any
+    /// other uid is `process.host-subject-mismatch`, because a host process runs as this uid.
+    pub host_process_uid: u32,
+    /// Whether this run reconciled the host-process records an earlier run left (S3). A pass with a
+    /// failed re-attachment leaves it false, so the next sweep retries.
+    pub(super) host_process_reconciled: Mutex<bool>,
+    /// What this run's host-process driver is known to hold, and the stops it has begun.
+    pub(super) host_process_run: Arc<super::processes::DriverRun>,
     lease_sweep: Mutex<()>,
     workspace_recovery: Mutex<()>,
     provisional_recovery: Mutex<()>,
@@ -178,7 +202,7 @@ pub struct App {
     maintenance_nudge: Notify,
     /// Claimed sessions whose containment kill is unproven, retried by `contain_pending`.
     pub(super) containments: PendingContainments,
-    blocking_store_slots: Arc<Semaphore>,
+    pub(super) blocking_store_slots: Arc<Semaphore>,
     #[cfg(test)]
     pub(super) refusal_before_record: ParkingMutex<Option<RefusalBeforeRecordHook>>,
 }
@@ -250,6 +274,11 @@ impl App {
             ),
             pipe_session_policy,
             allow_unrecorded_sessions: false,
+            host_processes: None,
+            host_process_logs: None,
+            host_process_uid: nix::unistd::geteuid().as_raw(),
+            host_process_reconciled: Mutex::new(false),
+            host_process_run: Arc::default(),
             lease_sweep: Mutex::new(()),
             workspace_recovery: Mutex::new(()),
             provisional_recovery: Mutex::new(()),
@@ -325,6 +354,10 @@ impl App {
 
     pub async fn sweep_expired(&self) {
         let _guard = self.lease_sweep.lock().await;
+        // First: a restarted daemon's host-process stops and starts are concluded by their own
+        // family's rules (ADR 0036 S1, S3) before the generic restart pass marks every open
+        // operation unknown. Then the supervisor clock fires due leases and deadlines.
+        self.supervise_host_processes().await;
         let observed_at = self.authority.now();
         let _ = self
             .store_io(|| {
