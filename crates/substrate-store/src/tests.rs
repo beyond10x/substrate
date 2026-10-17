@@ -4147,9 +4147,10 @@ fn workspace_lease_cleanup_reads_no_output_column_at_the_maximum_exec_count() {
     assert_eq!(states, expected);
 }
 
+/// As the daemon binds it: the id the adopt would mint, which a refusal must not record.
 fn adopt_operation(subject: &str, operation: &str) -> NewOperation {
     NewOperation {
-        resource: None,
+        resource: Some("ws_minted".to_owned()),
         ..operation_named(subject, operation, "workspace.adopt", "", &"a".repeat(64))
     }
 }
@@ -4233,7 +4234,13 @@ fn adopt_reservation_writes_one_terminal_ready_row_and_replays() {
     let new = adopt_operation("local:1000", "01JADOPTSTORE000000001");
     let observed = adopted("ws_adopted", "adopted-repo");
     let WorkspaceAdoptReservation::Adopted(resource) = store
-        .reserve_workspace_adopt(&new, "adopted-repo", &observed, "2026-08-13T12:00:02Z")
+        .reserve_workspace_adopt(
+            &new,
+            "adopted-repo",
+            WorkspaceRootHolder::Free,
+            &observed,
+            "2026-08-13T12:00:02Z",
+        )
         .expect("adopt")
     else {
         panic!("adopt must be accepted");
@@ -4253,7 +4260,13 @@ fn adopt_reservation_writes_one_terminal_ready_row_and_replays() {
     assert_eq!(root_name, "adopted-repo");
     assert_eq!(stored.origin, WorkspaceOrigin::Adopted);
     let WorkspaceAdoptReservation::Answered(Reservation::Replay(answer)) = store
-        .reserve_workspace_adopt(&new, "adopted-repo", &observed, "2026-08-13T12:00:03Z")
+        .reserve_workspace_adopt(
+            &new,
+            "adopted-repo",
+            WorkspaceRootHolder::Free,
+            &observed,
+            "2026-08-13T12:00:03Z",
+        )
         .expect("replay")
     else {
         panic!("a retry replays");
@@ -4282,6 +4295,7 @@ fn adopt_reservation_records_a_held_name_by_owner() {
             .reserve_workspace_adopt(
                 &new,
                 "adopted-repo",
+                WorkspaceRootHolder::Free,
                 &adopted("ws_b", "adopted-repo"),
                 "2026-08-13T12:00:02Z",
             )
@@ -4294,14 +4308,14 @@ fn adopt_reservation_records_a_held_name_by_owner() {
             panic!("refusal");
         };
         assert_eq!(error.code, code);
-        assert_eq!(
-            store
-                .operation(&new.scope, &new.operation)
-                .expect("operation")
-                .expect("record")
-                .state,
-            OperationState::Refused
-        );
+        let record = store
+            .operation(&new.scope, &new.operation)
+            .expect("operation")
+            .expect("record");
+        assert_eq!(record.state, OperationState::Refused);
+        // The record names no resource, as the absent-directory refusal's does (ADR 0035
+        // decision 5): the minted id must not reach the ledger of a refused adopt.
+        assert_eq!(record.resource, None, "{subject}");
     }
     assert!(
         store
@@ -4309,6 +4323,43 @@ fn adopt_reservation_records_a_held_name_by_owner() {
             .expect("read")
             .is_none()
     );
+}
+
+#[test]
+fn adopt_reservation_answers_a_name_freed_after_the_holder_read_from_that_read() {
+    // The handler skips the host observation for a name held at its read. If the holder is gone
+    // by the reservation, the unobserved resource must not become a Ready row: the answer is the
+    // one the read decided, and nothing is written.
+    let store = Store::open(":memory:").expect("open store");
+    for (holder, status, code) in [
+        (WorkspaceRootHolder::Elsewhere, 404, "resource.not-found"),
+        (WorkspaceRootHolder::Caller, 409, "workspace.already-exists"),
+    ] {
+        let new = adopt_operation("local:1001", &format!("01JADOPTSTOREFREED{status}X"));
+        let WorkspaceAdoptReservation::Answered(Reservation::Replay(answer)) = store
+            .reserve_workspace_adopt(
+                &new,
+                "adopted-repo",
+                holder,
+                &adopted("ws_unobserved", "adopted-repo"),
+                "2026-08-13T12:00:02Z",
+            )
+            .expect("freed")
+        else {
+            panic!("a name held at the read is refused");
+        };
+        assert_eq!(answer.status, status);
+        let OperationOutcome::Error { error } = answer.outcome else {
+            panic!("refusal");
+        };
+        assert_eq!(error.code, code);
+        assert_eq!(
+            store
+                .workspace_root_holder(&scope("local:1001"), "adopted-repo")
+                .expect("holder"),
+            WorkspaceRootHolder::Free
+        );
+    }
 }
 
 #[test]
@@ -4329,6 +4380,7 @@ fn adopt_reservation_respects_the_workspace_partition() {
         .reserve_workspace_adopt(
             &new,
             "adopted-repo",
+            WorkspaceRootHolder::Free,
             &adopted("ws_b", "adopted-repo"),
             "2026-08-13T12:00:02Z",
         )

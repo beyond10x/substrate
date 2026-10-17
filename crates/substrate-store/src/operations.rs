@@ -172,60 +172,26 @@ impl Store {
             transaction.commit()?;
             return Ok(result);
         }
-        let outcome = OperationOutcome::Error {
-            error: error.clone(),
-        };
-        transaction.execute(
-            "INSERT INTO operations (
-                deployment, subject, operation, operation_kind, request_hash, state, accepted_at,
-                terminal_at, capability_snapshot, actor, principal, grant_ref, platform_principal,
-                resource, outcome_json, response_status
-             ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, 'refused', NULL, ?6, NULL, ?7, ?8, ?9, ?10, NULL, ?11, ?12
-             )",
-            params![
-                new.scope.deployment,
-                new.scope.subject,
-                new.operation,
-                new.operation_kind,
-                new.request_hash,
-                terminal_at,
-                new.actor,
-                new.principal,
-                new.grant_ref,
-                new.platform_principal,
-                serde_json::to_string(&outcome)?,
-                i64::from(status),
-            ],
-        )?;
-        if let Err(error) =
-            charge_new_operation(&transaction, self.config, &new.scope, &new.operation, false)
-        {
-            return match error {
-                StoreError::OperationCapacity(capacity) => {
-                    transaction.rollback()?;
-                    Ok(Reservation::Capacity(capacity))
-                }
-                error => Err(error),
-            };
-        }
-        let event = append_event(
+        let (answer, event) = match insert_unbound_refusal(
             &transaction,
             self.event_retention,
-            &new.scope,
-            &new.operation,
-            "operation",
-            "operation.refused",
+            self.config,
+            new,
             terminal_at,
-            &new.actor,
-            new.principal.as_deref(),
-            &new.operation,
-            Some(serde_json::to_value(&outcome)?),
-        )?;
+            status,
+            error,
+        ) {
+            Ok(value) => value,
+            Err(StoreError::OperationCapacity(capacity)) => {
+                transaction.rollback()?;
+                return Ok(Reservation::Capacity(capacity));
+            }
+            Err(error) => return Err(error),
+        };
         transaction.commit()?;
         drop(connection);
         self.report_committed(&[commit_effect(&new.scope, &event)]);
-        Ok(Reservation::Replay(StoredAnswer { status, outcome }))
+        Ok(Reservation::Replay(answer))
     }
 
     pub fn complete_success<T: Serialize>(
@@ -781,6 +747,64 @@ pub(crate) fn insert_refused_operation(
         &new.scope,
         new.resource.as_deref().unwrap_or(&new.operation),
         operation_resource_kind(&new.operation_kind),
+        "operation.refused",
+        terminal_at,
+        &new.actor,
+        new.principal.as_deref(),
+        &new.operation,
+        Some(serde_json::to_value(&outcome)?),
+    )?;
+    Ok((StoredAnswer { status, outcome }, event))
+}
+
+/// Record a refusal decided before any resource was bound: no resource, no capability snapshot,
+/// and an `operation.refused` event on the operation itself.
+///
+/// Every refusal that must not reveal a resource shares this one shape, so two refusals with the
+/// same answer leave the same record whichever check decided them (`workspace.adopt`: a root
+/// name another subject holds and an absent directory, ADR 0035 decision 5).
+pub(crate) fn insert_unbound_refusal(
+    connection: &Connection,
+    retention: u64,
+    config: StoreConfig,
+    new: &NewOperation,
+    terminal_at: &str,
+    status: u16,
+    error: &ErrorDetail,
+) -> Result<(StoredAnswer, Event), StoreError> {
+    let outcome = OperationOutcome::Error {
+        error: error.clone(),
+    };
+    connection.execute(
+        "INSERT INTO operations (
+            deployment, subject, operation, operation_kind, request_hash, state, accepted_at,
+            terminal_at, capability_snapshot, actor, principal, grant_ref, platform_principal,
+            resource, outcome_json, response_status
+         ) VALUES (
+            ?1, ?2, ?3, ?4, ?5, 'refused', NULL, ?6, NULL, ?7, ?8, ?9, ?10, NULL, ?11, ?12
+         )",
+        params![
+            new.scope.deployment,
+            new.scope.subject,
+            new.operation,
+            new.operation_kind,
+            new.request_hash,
+            terminal_at,
+            new.actor,
+            new.principal,
+            new.grant_ref,
+            new.platform_principal,
+            serde_json::to_string(&outcome)?,
+            i64::from(status),
+        ],
+    )?;
+    charge_new_operation(connection, config, &new.scope, &new.operation, false)?;
+    let event = append_event(
+        connection,
+        retention,
+        &new.scope,
+        &new.operation,
+        "operation",
         "operation.refused",
         terminal_at,
         &new.actor,

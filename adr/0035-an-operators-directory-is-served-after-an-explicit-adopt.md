@@ -76,7 +76,8 @@ is recorded as a `refused` operation that a retry with the same operation id rep
 
    | condition | code | status | decided by |
    |---|---|---|---|
-   | `root_name` outside the set | `request.schema-invalid` (address `root_name`) | 422 | bundle input schema |
+   | `root_name` absent or not a JSON string | `request.schema-invalid` (address `input`) | 422 | request decoding, as for any undecodable input |
+   | `root_name` a string outside the set | `request.schema-invalid` (address `root_name`) | 422 | bundle input schema |
    | another subject's row holds `root_name` | `resource.not-found` | 404 | store, `UNIQUE (deployment, root_name)` |
    | the caller's own row holds `root_name` | `workspace.already-exists` | 409 | store |
    | no entry at `<workspace_root>/<root_name>` | `resource.not-found` | 404 | host observation, `ENOENT` |
@@ -87,7 +88,14 @@ is recorded as a `refused` operation that a retry with the same operation id rep
    - **Another subject's row** answers exactly as an absent directory does, so adopt is no
      cross-subject existence oracle. Because the check spans subjects, adopting the directory of
      another subject's minted `ws_…` workspace is also refused, as not found: adoption cannot take
-     over a workspace.
+     over a workspace. "Exactly" covers the ledger too: both refusals leave a record that names
+     no resource and an `operation.refused` event on the operation, so `GET /v1/ops/{id}` and
+     the event stream cannot tell them apart either.
+   - **A held name is answered without asking the host**, so the answer to another subject's
+     name never depends on the directory. The reservation re-reads the holder in its
+     transaction; a name held at the first read and free at the second (its holder destroyed in
+     between) is answered from the first read. A row is never written for a directory the host
+     did not observe.
    - **The ownership check** is the one `workspace.create` already makes. `create_workspace` calls
      `observe_workspace` (`crates/substrate-host/src/fs.rs:133`). That refuses
      `st_uid != effective_uid()` or a non-directory at `crates/substrate-host/src/fs.rs:139`, with

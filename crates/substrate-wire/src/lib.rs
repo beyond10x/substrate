@@ -2045,11 +2045,11 @@ impl WorkspaceOrigin {
     /// The row was written by `workspace.create`; destroy removes the directory it made.
     #[allow(non_upper_case_globals)]
     pub const Created: Self = Self::V1;
-    pub fn is_adopted(&self) -> bool {
-        *self == Self::Adopted
+    pub fn is_adopted(self) -> bool {
+        self == Self::Adopted
     }
     /// The store column spelling, identical to the wire spelling.
-    pub fn as_str(&self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         if self.is_adopted() {
             "adopted"
         } else {

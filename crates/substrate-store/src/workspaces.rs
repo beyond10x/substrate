@@ -2,7 +2,8 @@ use crate::events::{append_event, commit_effect};
 use crate::leases::{freeze_workspace_lease_if_due, upsert_lease};
 use crate::operations::{
     existing_reservation, finalize_operation_accounting, insert_accepted_operation,
-    insert_refused_operation, operation_identity, resource_partition_at_capacity,
+    insert_refused_operation, insert_unbound_refusal, operation_identity,
+    resource_partition_at_capacity,
 };
 use crate::{
     LeaseClock, NewLease, NewOperation, OperationCapacity, Reservation, ResourceCapacity, Scope,
@@ -166,16 +167,24 @@ impl Store {
         root_holder(&connection, scope, root_name)
     }
 
-    /// Admit a `workspace.adopt` the host has already observed (ADR 0035 decision 3): one Ready
-    /// row with `origin: adopted`, the operation terminal with a 201 result, and the
-    /// `workspace.created` event, in one transaction. A name held by the caller's own row is
-    /// `workspace.already-exists`; one held by another subject's row is `resource.not-found`,
-    /// exactly as an absent directory. Every refusal is recorded so a retry replays it.
+    /// Admit a `workspace.adopt` (ADR 0035 decision 3): one Ready row with `origin: adopted`, the
+    /// operation terminal with a 201 result, and the `workspace.created` event, in one
+    /// transaction. A name held by the caller's own row is `workspace.already-exists`; one held by
+    /// another subject's row is `resource.not-found`, recorded exactly as an absent directory is
+    /// (no resource, an `operation.refused` event on the operation). Every refusal is recorded so
+    /// a retry replays it.
+    ///
+    /// `read_holder` is what [`Store::workspace_root_holder`] answered before the host was asked
+    /// anything, and `observed` is the host's observation of the directory, which exists only when
+    /// that read found the name free. A name that was held at the read and is free now (its
+    /// holder destroyed in between) is answered from the read: a row is never written for a
+    /// directory the host did not observe.
     #[allow(clippy::too_many_lines)]
     pub fn reserve_workspace_adopt(
         &self,
         new: &NewOperation,
         root_name: &str,
+        read_holder: WorkspaceRootHolder,
         observed: &Workspace,
         terminal_at: &str,
     ) -> Result<WorkspaceAdoptReservation, StoreError> {
@@ -185,7 +194,11 @@ impl Store {
             transaction.commit()?;
             return Ok(WorkspaceAdoptReservation::Answered(reservation));
         }
-        let held = match root_holder(&transaction, &new.scope, root_name)? {
+        let holder = match root_holder(&transaction, &new.scope, root_name)? {
+            WorkspaceRootHolder::Free => read_holder,
+            current => current,
+        };
+        let held = match holder {
             WorkspaceRootHolder::Free => None,
             WorkspaceRootHolder::Caller => Some((
                 409,
@@ -201,12 +214,12 @@ impl Store {
             WorkspaceRootHolder::Elsewhere => Some((404, adopt_not_found(&new.operation))),
         };
         if let Some((status, detail)) = held {
-            let (answer, event) = match insert_refused_operation(
+            let (answer, event) = match insert_unbound_refusal(
                 &transaction,
                 self.event_retention,
                 self.config,
                 new,
-                &new.accepted_at,
+                terminal_at,
                 status,
                 &detail,
             ) {

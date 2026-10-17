@@ -255,7 +255,8 @@ pub(super) async fn workspace_create(
 /// directory), a name the caller's own row holds, the host observation (absent, not a directory,
 /// or not owned by the daemon's effective uid), then the workspace partition and the ledger. The
 /// held-name and capacity checks run again inside the reservation transaction, so a row written
-/// between the read and the reservation is still refused by owner.
+/// between the read and the reservation is still refused by owner, and a name held at the read
+/// but freed before the reservation is answered from the read, never admitted unobserved.
 #[allow(clippy::too_many_lines)] // Admission order and recording stay auditable together.
 pub(super) async fn workspace_adopt(
     State(app): State<Arc<App>>,
@@ -335,6 +336,8 @@ pub(super) async fn workspace_adopt(
     };
     // A held name is refused by the reservation without asking the host anything, so the answer
     // to another subject's name is decided before, and independently of, the directory's state.
+    // The reservation is handed the holder this read found, so a name freed in between is still
+    // answered from it: the provisional resource below is never written as an observed row.
     let observed = if holder == WorkspaceRootHolder::Free {
         match app
             .driver
@@ -384,7 +387,7 @@ pub(super) async fn workspace_adopt(
     match app
         .store_io(|| {
             app.store
-                .reserve_workspace_adopt(&new, &root_name, &observed, &terminal_at)
+                .reserve_workspace_adopt(&new, &root_name, holder, &observed, &terminal_at)
         })
         .await
     {
@@ -1303,6 +1306,7 @@ pub(super) async fn workspace_destroy(
                 scope: scope.clone(),
                 id: workspace_id.clone(),
                 root_name,
+                origin,
                 operation: operation.clone(),
                 attempt_count: 0,
             };
@@ -1323,6 +1327,7 @@ pub(super) async fn workspace_destroy(
                 scope: scope.clone(),
                 id: workspace_id.clone(),
                 root_name,
+                origin,
                 operation: operation.clone(),
                 attempt_count: 0,
             };

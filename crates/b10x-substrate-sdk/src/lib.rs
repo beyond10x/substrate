@@ -2210,7 +2210,9 @@ mod tests {
                     "kind": "workspace",
                     "labels": {},
                     "observed_at": "2026-09-01T00:00:00Z",
-                    "state": "ready"
+                    "state": "ready",
+                    "origin": "created",
+                    "root_name": "ws_recovered"
                 }
             }))
             .expect("workspace response JSON");

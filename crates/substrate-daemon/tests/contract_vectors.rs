@@ -256,7 +256,7 @@ impl Driver for VectorDriver {
                 observed_at: FIXED_TIME.parse().expect("fixed time"),
                 state: WorkspaceState::Ready,
                 origin: substrate_wire::WorkspaceOrigin::Created,
-                root_name: substrate_wire::RootName::from(id),
+                root_name: substrate_wire::RootName::from(root_name),
                 storage: None,
                 lease: None,
             };
@@ -284,7 +284,7 @@ impl Driver for VectorDriver {
                     observed_at: FIXED_TIME.parse().expect("fixed time"),
                     state: WorkspaceState::Ready,
                     origin: substrate_wire::WorkspaceOrigin::Created,
-                    root_name: substrate_wire::RootName::from(id),
+                    root_name: substrate_wire::RootName::from(root_name),
                     storage: None,
                     lease: None,
                 };
