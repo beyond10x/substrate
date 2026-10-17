@@ -16,18 +16,23 @@
 //! no path on which a host process starts outside a cgroup of its own (invariant 3).
 //!
 //! Exec, sessions and their isolation floor are untouched: nothing here is reachable from
-//! `ProcessRuntime`, and nothing there from here, except the shared cgroup kill, signal, CPU and
-//! removal primitives this module reuses.
+//! `ProcessRuntime`, and nothing there from here, except the shared `cgroup.kill`, CPU and
+//! empty-cgroup removal primitives this module reuses. Its `SIGTERM` and its removal walk the
+//! record's whole cgroup subtree, which exec's primitives do not (`tree`).
 
 mod log;
+mod pidfd;
 mod ports;
 #[cfg(test)]
+mod security_tests;
+#[cfg(test)]
 mod tests;
+mod tree;
 
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::CString;
 use std::fs::OpenOptions;
-use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+use std::os::fd::{AsFd as _, AsRawFd as _, FromRawFd as _, OwnedFd};
 use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
 use std::os::unix::process::ExitStatusExt as _;
@@ -38,7 +43,7 @@ use std::time::Duration;
 
 use chrono::{DateTime, TimeDelta, Utc};
 use parking_lot::Mutex;
-use substrate_wire::{MIN_LEASE_TTL_MS, Signal};
+use substrate_wire::MIN_LEASE_TTL_MS;
 use tokio::io::{AsyncRead, AsyncReadExt as _};
 use tokio::sync::watch;
 
@@ -254,7 +259,10 @@ pub struct HostProcessEnd {
 }
 
 /// What to run. `env` is the complete environment: nothing of the daemon's own is inherited.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Its `Debug` form names the environment's variables and never their values (S1): a value is a
+/// secret in practice, and `{:?}` is the form a log line or an error message takes.
+#[derive(Clone, PartialEq, Eq)]
 pub struct HostProcessSpec {
     /// The program and its arguments, executed directly with no shell.
     pub argv: Vec<String>,
@@ -263,6 +271,25 @@ pub struct HostProcessSpec {
     pub env: BTreeMap<String, String>,
     /// The effective deadline, from [`Deadline::effective`].
     pub deadline: Option<Deadline>,
+}
+
+impl std::fmt::Debug for HostProcessSpec {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("HostProcessSpec")
+            .field("argv", &self.argv)
+            .field("cwd", &self.cwd)
+            .field(
+                "env",
+                &self
+                    .env
+                    .keys()
+                    .map(|name| (name, "<redacted>"))
+                    .collect::<BTreeMap<_, _>>(),
+            )
+            .field("deadline", &self.deadline)
+            .finish()
+    }
 }
 
 impl HostProcessSpec {
@@ -484,6 +511,11 @@ enum Termination {
 struct Entry {
     cgroup: Cgroup,
     cgroup_path: PathBuf,
+    /// The main process's pid and a pidfd on it, opened while it was still the driver's unreaped
+    /// child. A main process can leave its cgroup (same uid, `exec systemd-run --scope …`); the
+    /// pidfd still reaches it, and never a process that reused its number.
+    main_pid: u32,
+    main: OwnedFd,
     log: Arc<ProcessLog>,
     /// The first recorded end cause; never overwritten.
     claim: Mutex<Option<EndedBy>>,
@@ -507,10 +539,21 @@ impl Entry {
             .ok_or_else(|| cgroup_failed("cgroup.events omitted populated"))
     }
 
-    async fn wait_empty(&self, limit: Duration) -> Result<bool, DriverError> {
+    /// Whether the main process has exited, reaped or not, wherever its cgroup is.
+    fn main_exited(&self) -> bool {
+        pidfd::exited(self.main.as_fd())
+    }
+
+    /// Whether anything of the record is left: a member anywhere in its cgroup subtree, or the
+    /// main process, which may have left that subtree.
+    fn alive(&self) -> Result<bool, DriverError> {
+        Ok(self.populated()? || !self.main_exited())
+    }
+
+    async fn wait_gone(&self, limit: Duration) -> Result<bool, DriverError> {
         let deadline = tokio::time::Instant::now() + limit;
         loop {
-            if !self.populated()? {
+            if !self.alive()? {
                 return Ok(true);
             }
             if tokio::time::Instant::now() >= deadline {
@@ -520,22 +563,38 @@ impl Entry {
         }
     }
 
+    /// `signal` to every member of the cgroup subtree, and to the main process once if it is
+    /// no longer a member.
+    fn signal_record(&self, signal: i32) -> Result<(), DriverError> {
+        let reached = tree::signal_members(&self.cgroup_path, signal)?;
+        if !reached.contains(&self.main_pid) {
+            pidfd::send(self.main.as_fd(), signal)
+                .map_err(|error| cgroup_failed(format!("signal {signal} failed: {error}")))?;
+        }
+        Ok(())
+    }
+
     /// S3's stop: `SIGTERM` to every member, the bounded grace, then `cgroup.kill`, then wait
-    /// until the cgroup is empty. Run once; a later caller gets the recorded step.
+    /// until the cgroup is empty. Members of cgroups nested beneath the record's are members,
+    /// and the main process is ended even when it left the cgroup. Run once; a later caller gets
+    /// the recorded step.
     async fn terminate(&self, grace: Duration) -> Result<Option<StopStep>, DriverError> {
         let mut done = self.termination.lock().await;
         if let Termination::Ran(step) = *done {
             return Ok(step);
         }
-        let step = if self.populated()? {
-            self.cgroup
-                .signal_all(Signal::Term, None)
-                .map_err(as_process)?;
-            if self.wait_empty(grace).await? {
+        let step = if self.alive()? {
+            // A `SIGTERM` that cannot be delivered skips the grace: the stop goes straight to
+            // `cgroup.kill`, never leaves the record running.
+            let termed = self.signal_record(libc::SIGTERM).is_ok();
+            if termed && self.wait_gone(grace).await? {
                 Some(StopStep::Term)
             } else {
                 self.cgroup.kill_all().map_err(as_process)?;
-                if !self.wait_empty(KILL_SETTLE).await? {
+                pidfd::send(self.main.as_fd(), libc::SIGKILL).map_err(|error| {
+                    cgroup_failed(format!("signal {} failed: {error}", libc::SIGKILL))
+                })?;
+                if !self.wait_gone(KILL_SETTLE).await? {
                     return Err(cgroup_failed(
                         "The host-process cgroup did not empty after cgroup.kill.",
                     ));
@@ -683,23 +742,7 @@ impl HostProcessSupervisor {
             .open(cgroup_path.join("cgroup.procs"))
             .map_err(|error| undo(cgroup_failed(format!("cgroup.procs: {error}"))))?;
 
-        let mut command = tokio::process::Command::new(&spec.argv[0]);
-        command
-            .args(&spec.argv[1..])
-            .env_clear()
-            .envs(&spec.env)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(false);
-        let procs_fd = procs.as_raw_fd();
-        let cwd_fd = cwd.as_raw_fd();
-        // SAFETY: the closure runs in the forked child before exec and calls only
-        // async-signal-safe entry points (setsid, write, fchdir, close_range) on descriptor
-        // numbers the parent holds open across the fork; it allocates nothing.
-        unsafe {
-            command.pre_exec(move || child_setup(procs_fd, cwd_fd));
-        }
+        let mut command = host_command(spec, procs.as_raw_fd(), cwd.as_raw_fd());
         let started_at = Utc::now();
         let spawned = command.spawn();
         drop(procs);
@@ -714,10 +757,24 @@ impl HostProcessSupervisor {
             }
         };
         let pid = child.id().unwrap_or(0);
+        // The child is unreaped here, so its pid is still its own: the pidfd names exactly it.
+        let main = match pidfd::open(pid) {
+            Ok(Some(main)) => main,
+            failed => {
+                let reason = match failed {
+                    Err(error) => format!("{error}"),
+                    Ok(_) => "the main process has no pid".to_owned(),
+                };
+                let _ = std::fs::remove_file(&log_path);
+                return Err(abandon(&cgroup, cgroup_path, child, &reason));
+            }
+        };
         let (end, _) = watch::channel(None);
         let entry = Arc::new(Entry {
             cgroup,
             cgroup_path,
+            main_pid: pid,
+            main,
             log: Arc::clone(&log),
             claim: Mutex::new(None),
             termination: tokio::sync::Mutex::new(Termination::NotRun),
@@ -812,17 +869,10 @@ impl HostProcessSupervisor {
         let observed_at = Utc::now();
         let live = entry.current_end().is_none() && entry.cgroup_path.is_dir();
         let (cpu_usec, memory_bytes, listening) = if live {
-            let pids = std::fs::read_to_string(entry.cgroup_path.join("cgroup.procs"))
-                .ok()
-                .map(|text| {
-                    text.lines()
-                        .filter_map(|line| line.trim().parse::<u32>().ok())
-                        .collect::<Vec<_>>()
-                });
             (
                 entry.cgroup.cpu_usage_micros().ok(),
                 read_decimal_counter(&entry.cgroup_path.join("memory.current")).ok(),
-                pids.as_deref().and_then(ports::observe),
+                ports::observe(&entry.cgroup_path),
             )
         } else {
             (None, None, None)
@@ -910,6 +960,52 @@ fn state_failed(error: &std::io::Error) -> DriverError {
         "process.log-failed",
         format!("host-process state directory: {error}"),
     )
+}
+
+/// The command for `spec`: `argv` with no shell, exactly `env`, standard input from `/dev/null`,
+/// both outputs piped, and [`child_setup`] between fork and exec. `procs_fd` and `cwd_fd` must
+/// stay open until the spawn returns.
+fn host_command(spec: &HostProcessSpec, procs_fd: i32, cwd_fd: i32) -> tokio::process::Command {
+    let mut command = tokio::process::Command::new(&spec.argv[0]);
+    command
+        .args(&spec.argv[1..])
+        .env_clear()
+        .envs(&spec.env)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(false);
+    // SAFETY: the closure runs in the forked child before exec and calls only
+    // async-signal-safe entry points (setsid, write, fchdir, close_range) on descriptor
+    // numbers the parent holds open across the fork; it allocates nothing.
+    unsafe {
+        command.pre_exec(move || child_setup(procs_fd, cwd_fd));
+    }
+    command
+}
+
+/// Ends a started process the driver cannot supervise: nothing may be left running. Kills the
+/// whole cgroup and the child, reaps the child, and removes the cgroup once it is empty.
+fn abandon(
+    cgroup: &Cgroup,
+    cgroup_path: PathBuf,
+    mut child: tokio::process::Child,
+    reason: &str,
+) -> DriverError {
+    let _ = cgroup.kill_all();
+    let _ = child.start_kill();
+    tokio::spawn(async move {
+        let _ = child.wait().await;
+        for _ in 0..100 {
+            if tree::remove(&cgroup_path).is_ok() {
+                break;
+            }
+            tokio::time::sleep(EMPTY_POLL).await;
+        }
+    });
+    cgroup_failed(format!(
+        "The host process could not be pinned by a pidfd: {reason}"
+    ))
 }
 
 /// The child's setup between fork and exec. Async-signal-safe only.
@@ -1088,7 +1184,15 @@ async fn supervise(
             "The host-process cgroup could not be removed.",
         ));
         for _ in 0..100 {
-            removed = entry.cgroup.prove_empty_and_remove().map_err(as_process);
+            // Members may have created cgroups beneath the record's; once the subtree is
+            // unpopulated they are removed with it, children first.
+            removed = if entry.populated()? {
+                Err(cgroup_failed(
+                    "The host-process cgroup still has members after its stop.",
+                ))
+            } else {
+                tree::remove(&entry.cgroup_path)
+            };
             if removed.is_ok() {
                 break;
             }

@@ -6,8 +6,11 @@
 //! nothing is sampled in the background (wave point 13). Ownership is by descriptor, not by who
 //! created the socket.
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
+use std::io::Read as _;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use std::os::fd::AsFd as _;
+use std::path::{Path, PathBuf};
 
 /// The transport of a listening socket.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -109,54 +112,154 @@ pub(crate) fn sockets_for_inodes(
     found.into_iter().collect()
 }
 
-/// Reads the listening sockets the given pids hold, now.
-///
-/// A pid that exits during the read is skipped. Any other failure to read makes the whole
-/// observation absent (`None`), never an empty list that would read as "no ports".
-pub(crate) fn observe(pids: &[u32]) -> Option<Vec<ListeningSocket>> {
-    let mut held = HashSet::new();
-    let mut tables = Vec::new();
-    let mut namespaces = HashSet::new();
-    for pid in pids {
-        let directory = match std::fs::read_dir(format!("/proc/{pid}/fd")) {
-            Ok(directory) => directory,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(_) => return None,
-        };
-        for entry in directory {
-            let Ok(entry) = entry else { continue };
-            let Ok(link) = std::fs::read_link(entry.path()) else {
-                continue;
-            };
-            if let Some(inode) = link.to_str().and_then(socket_inode) {
-                held.insert(inode);
-            }
+/// The most members one observation reads; a record with more has no port observation.
+pub(crate) const MAX_OBSERVED_MEMBERS: usize = 4_096;
+/// The most descriptors one member's `/proc/<pid>/fd` is read for.
+pub(crate) const MAX_OBSERVED_FDS: usize = 65_536;
+/// The most bytes one `/proc/<pid>/net/*` table is read for.
+pub(crate) const MAX_SOCKET_TABLE_BYTES: u64 = 16 * 1_048_576;
+
+/// What a read of `/proc` decided for one member.
+enum Read<T> {
+    Done(T),
+    /// The process exited during the read; it has nothing to report.
+    Gone,
+    /// The read failed or passed its bound: the whole observation is absent.
+    Absent,
+}
+
+fn read_bounded(path: &str) -> Read<String> {
+    let file = match std::fs::File::open(path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Read::Gone,
+        Err(_) => return Read::Absent,
+    };
+    let mut text = String::new();
+    match file
+        .take(MAX_SOCKET_TABLE_BYTES + 1)
+        .read_to_string(&mut text)
+    {
+        Ok(read) if u64::try_from(read).is_ok_and(|read| read <= MAX_SOCKET_TABLE_BYTES) => {
+            Read::Done(text)
         }
-        // One set of tables per network namespace the members live in.
-        let namespace = match std::fs::read_link(format!("/proc/{pid}/ns/net")) {
-            Ok(namespace) => namespace,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(_) => return None,
-        };
-        if !namespaces.insert(namespace) {
+        _ => Read::Absent,
+    }
+}
+
+/// The socket inodes `pid` holds, at most [`MAX_OBSERVED_FDS`] descriptors read.
+fn held_inodes(pid: u32, held: &mut HashSet<u64>) -> Read<()> {
+    let directory = match std::fs::read_dir(format!("/proc/{pid}/fd")) {
+        Ok(directory) => directory,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Read::Gone,
+        Err(_) => return Read::Absent,
+    };
+    for (index, entry) in directory.enumerate() {
+        if index >= MAX_OBSERVED_FDS {
+            return Read::Absent;
+        }
+        let Ok(entry) = entry else { continue };
+        let Ok(link) = std::fs::read_link(entry.path()) else {
             continue;
-        }
-        for (name, protocol) in [
-            ("tcp", SocketProtocol::Tcp),
-            ("tcp6", SocketProtocol::Tcp),
-            ("udp", SocketProtocol::Udp),
-            ("udp6", SocketProtocol::Udp),
-        ] {
-            match std::fs::read_to_string(format!("/proc/{pid}/net/{name}")) {
-                Ok(text) => tables.push((text, protocol)),
-                // A kernel without IPv6 has no `tcp6`/`udp6`; there is nothing to list there.
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(_) => return None,
-            }
+        };
+        if let Some(inode) = link.to_str().and_then(socket_inode) {
+            held.insert(inode);
         }
     }
-    let borrowed = tables
+    Read::Done(())
+}
+
+/// The network namespace `pid` lives in.
+fn namespace_of(pid: u32) -> Read<PathBuf> {
+    match std::fs::read_link(format!("/proc/{pid}/ns/net")) {
+        Ok(namespace) => Read::Done(namespace),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Read::Gone,
+        Err(_) => Read::Absent,
+    }
+}
+
+/// The four socket tables as `pid` sees them.
+fn socket_tables(pid: u32) -> Read<Vec<(String, SocketProtocol)>> {
+    let mut tables = Vec::new();
+    for (name, protocol) in [
+        ("tcp", SocketProtocol::Tcp),
+        ("tcp6", SocketProtocol::Tcp),
+        ("udp", SocketProtocol::Udp),
+        ("udp6", SocketProtocol::Udp),
+    ] {
+        match read_bounded(&format!("/proc/{pid}/net/{name}")) {
+            Read::Done(text) => tables.push((text, protocol)),
+            // A kernel without IPv6 has no `tcp6`/`udp6`; there is nothing to list there.
+            Read::Gone => {}
+            Read::Absent => return Read::Absent,
+        }
+    }
+    Read::Done(tables)
+}
+
+/// Reads the listening sockets the members of the cgroup subtree at `top` hold, now.
+///
+/// Each member is pinned by a pidfd before its `/proc` entries are read and counts only when that
+/// pidfd still names a live process after the read and the subtree still lists its pid afterwards:
+/// a live process keeps its number, so a recycled pid's descriptors are not attributed to the
+/// record. A member that exits during the read is skipped. The tables are read once per network
+/// namespace. A record with more than [`MAX_OBSERVED_MEMBERS`] members, a member with more than
+/// [`MAX_OBSERVED_FDS`] descriptors, a table above [`MAX_SOCKET_TABLE_BYTES`], or any other failure
+/// to read makes the whole observation absent (`None`), never a partial list that would read as
+/// complete.
+pub(crate) fn observe(top: &Path) -> Option<Vec<ListeningSocket>> {
+    let pids = super::tree::members(top).ok()?;
+    if pids.len() > MAX_OBSERVED_MEMBERS {
+        return None;
+    }
+    let mut counted = Vec::new();
+    let mut tables = HashMap::new();
+    for pid in pids {
+        let Some(pin) = super::pidfd::open(pid).ok()? else {
+            continue;
+        };
+        let mut held = HashSet::new();
+        match held_inodes(pid, &mut held) {
+            Read::Done(()) => {}
+            Read::Gone => continue,
+            Read::Absent => return None,
+        }
+        let namespace = match namespace_of(pid) {
+            Read::Done(namespace) => namespace,
+            Read::Gone => continue,
+            Read::Absent => return None,
+        };
+        let fresh = if tables.contains_key(&namespace) {
+            None
+        } else {
+            match socket_tables(pid) {
+                Read::Done(read) => Some(read),
+                Read::Gone => continue,
+                Read::Absent => return None,
+            }
+        };
+        // Gone during the read: its number may already name another process, so nothing read
+        // through it is kept.
+        if !super::pidfd::send(pin.as_fd(), 0).ok()? {
+            continue;
+        }
+        if let Some(read) = fresh {
+            tables.insert(namespace.clone(), read);
+        }
+        counted.push((pid, held, namespace));
+    }
+    let still = super::tree::members(top).ok()?;
+    let mut held = HashSet::new();
+    let mut namespaces = HashSet::new();
+    for (pid, own, namespace) in counted {
+        if still.contains(&pid) {
+            held.extend(own);
+            namespaces.insert(namespace);
+        }
+    }
+    let borrowed = namespaces
         .iter()
+        .filter_map(|namespace| tables.get(namespace))
+        .flatten()
         .map(|(text, protocol)| (text.as_str(), *protocol))
         .collect::<Vec<_>>();
     Some(sockets_for_inodes(&held, &borrowed))

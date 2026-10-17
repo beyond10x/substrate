@@ -3302,8 +3302,9 @@ impl Cgroup {
     /// A handle on a cgroup another resource family created and named itself.
     ///
     /// The host-process driver (design 26 § S3) creates one cgroup per process under its own
-    /// `substrate-hp_` prefix and reuses this type's kill, signal, CPU and removal operations, so
-    /// whole-tree termination has one implementation. It never reaches `existing`, whose prefix
+    /// `substrate-hp_` prefix and reuses this type's `cgroup.kill`, CPU read and the removal of a
+    /// cgroup no process ran in; its `SIGTERM` and its removal walk the record's nested cgroups,
+    /// which these do not. It never reaches `existing`, whose prefix
     /// check is exec's own.
     pub(crate) const fn at(path: PathBuf, name: String) -> Self {
         Self { path, name }
