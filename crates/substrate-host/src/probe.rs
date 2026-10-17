@@ -162,8 +162,9 @@ pub fn probe(config: &HostConfig, openat2: bool) -> CapabilitySnapshot {
         sessions_pty,
         sessions_unrecorded: exec.then_some(true),
         snapshot_provenance_events: Some(config.snapshot_provenance_events),
-        // ADR 0036 S2: published once the host-process supervisor proves its cgroups usable.
-        process_host: None,
+        // ADR 0036 S2: published only when the composition root proved the host-process
+        // supervisor's cgroups usable and serves the personal Unix socket alone.
+        process_host: config.host_processes.then_some(true),
     };
     let driver_version = env!("CARGO_PKG_VERSION");
     let serialized = serde_json::to_vec(&SnapshotMaterial {
@@ -1065,6 +1066,19 @@ mod tests {
         let mut real = HostConfig::minimum(directory.path());
         real.cgroup_root = None;
         assert_eq!(probe(&real, true).facts.sessions_pty, None);
+    }
+
+    /// ADR 0036 S2: `process.host` is what the composition root decided it serves, and nothing
+    /// else. Unset it is absent — never `Some(false)` — and it moves the snapshot with it, so a
+    /// snapshot taken without it cannot vouch for a daemon that serves host processes.
+    #[test]
+    fn process_host_is_published_only_when_the_daemon_serves_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let unserved = HostConfig::minimum(directory.path());
+        assert_eq!(probe(&unserved, false).facts.process_host, None);
+        let mut served = HostConfig::minimum(directory.path());
+        served.host_processes = true;
+        assert_eq!(probe(&served, false).facts.process_host, Some(true));
     }
 
     /// The published fact and the mechanism are the same claim, so they cannot disagree.

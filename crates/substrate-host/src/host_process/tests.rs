@@ -21,8 +21,8 @@ use super::{
     ARGV_INVALID, CWD_INVALID, Confinement, Deadline, DeadlineCause, ENV_INVALID,
     EXPIRES_AT_INVALID, EndedBy, HOST_UNSERVED, HostProcessSpec, HostProcessSupervisor,
     HostProfile, MAX_PROCESS_ARGV_BYTES, MAX_PROCESS_ARGV_ITEMS, MAX_PROCESS_ENV_BYTES,
-    MAX_PROCESS_ENV_ITEMS, MAX_PROCESS_TIMEOUT_MS, NOT_FOUND, ProcessExit, StopCause, StopStep,
-    TIMEOUT_INVALID, open_cwd,
+    MAX_PROCESS_ENV_ITEMS, MAX_PROCESS_TIMEOUT_MS, NOT_FOUND, ProcessExit, ProcessLogs, StopCause,
+    StopStep, StoredProcessLogs, TIMEOUT_INVALID, open_cwd,
 };
 use crate::DriverErrorClass;
 
@@ -303,6 +303,67 @@ fn log_lines_are_tagged_by_stream_and_read_back_in_order() {
 }
 
 #[test]
+fn stored_logs_are_read_without_a_supervisor_and_absent_ones_are_not_found() {
+    let directory = tempfile::tempdir().expect("dir");
+    let state = directory.path().join("state.processes");
+    let reader = StoredProcessLogs::open(&state);
+    // No directory yet: absent, and reading creates nothing.
+    let absent = reader
+        .log_tail("proc_absent", LogStreamSelection::Both, 1_024)
+        .expect_err("no log");
+    assert_eq!(absent.code, NOT_FOUND);
+    assert_eq!(absent.class, DriverErrorClass::NotFound);
+    assert!(
+        !state.exists(),
+        "a stored-log read created the state directory"
+    );
+
+    std::fs::create_dir(&state).expect("state directory");
+    let log = ProcessLog::create(&state.join("proc_known.log")).expect("log");
+    log.append_line(LogStream::Stdout, b"left by an earlier run", None)
+        .expect("append");
+    log.append_line(LogStream::Stderr, b"and its error", None)
+        .expect("append");
+    drop(log);
+
+    let tail = reader
+        .log_tail("proc_known", LogStreamSelection::Both, 1_024)
+        .expect("stored tail");
+    let lines = tail
+        .lines
+        .iter()
+        .map(|line| (line.stream, line.bytes.as_slice()))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        lines,
+        [
+            (LogStream::Stdout, b"left by an earlier run".as_slice()),
+            (LogStream::Stderr, b"and its error".as_slice()),
+        ]
+    );
+    assert_eq!(tail.profile, HostProfile::Host);
+    assert_eq!(tail.confinement, Confinement::None);
+    assert_eq!(
+        reader
+            .log_tail("proc_other", LogStreamSelection::Stdout, 1_024)
+            .expect_err("another id")
+            .code,
+        NOT_FOUND
+    );
+    // The same id and budget checks as the supervisor's own reader.
+    for (id, budget) in [("../proc_known", 1_024), ("proc_known", 0)] {
+        assert_eq!(
+            reader
+                .log_tail(id, LogStreamSelection::Both, budget)
+                .expect_err("refused")
+                .class,
+            DriverErrorClass::Refused,
+            "{id} {budget}"
+        );
+    }
+}
+
+#[test]
 fn at_the_byte_bound_the_oldest_bytes_are_discarded_and_counted() {
     let directory = tempfile::tempdir().expect("dir");
     let bound = 256;
@@ -542,7 +603,7 @@ async fn delegated_main_exit_records_its_code_its_tagged_log_and_an_empty_remove
         return;
     };
     let started = supervisor
-        .spawn(
+        .start(
             "hp_exit",
             &spec(
                 &[
@@ -590,7 +651,7 @@ async fn delegated_environment_is_exactly_the_request_env() {
     };
     let mut request = spec(&["/usr/bin/env"], &workdir());
     request.env.insert("ONLY_THIS".to_owned(), "1".to_owned());
-    supervisor.spawn("hp_env", &request).expect("spawn");
+    supervisor.start("hp_env", &request).expect("spawn");
     supervisor.wait("hp_env").await.expect("end");
     let tail = supervisor
         .log_tail("hp_env", LogStreamSelection::Stdout, 65_536)
@@ -610,7 +671,7 @@ async fn delegated_a_missing_program_is_a_named_spawn_failure_and_leaves_no_cgro
         return;
     };
     let error = supervisor
-        .spawn("hp_missing", &spec(&["/nonexistent/program"], &workdir()))
+        .start("hp_missing", &spec(&["/nonexistent/program"], &workdir()))
         .expect_err("absent program");
     assert_eq!(error.code, super::SPAWN_FAILED);
     assert!(!cgroup_dir(&root, "hp_missing").exists());
@@ -622,7 +683,7 @@ async fn delegated_stop_ends_a_cooperative_tree_at_sigterm() {
         return;
     };
     supervisor
-        .spawn("hp_term", &spec(&["/bin/sleep", "300"], &workdir()))
+        .start("hp_term", &spec(&["/bin/sleep", "300"], &workdir()))
         .expect("spawn");
     assert!(cgroup_dir(&root, "hp_term").is_dir());
     let end = supervisor
@@ -644,7 +705,7 @@ async fn delegated_stop_kills_a_detached_term_ignoring_tree_with_cgroup_kill() {
     // from the main process; membership, not the process tree, defines what stop ends.
     let script = "trap '' TERM; setsid sleep 300 </dev/null >/dev/null 2>&1 & echo $! ; sleep 300";
     supervisor
-        .spawn("hp_kill", &spec(&["/bin/sh", "-c", script], &workdir()))
+        .start("hp_kill", &spec(&["/bin/sh", "-c", script], &workdir()))
         .expect("spawn");
     tokio::time::sleep(Duration::from_millis(300)).await;
     let grandchild = supervisor
@@ -674,7 +735,7 @@ async fn delegated_main_exit_with_remaining_members_stops_them_and_keeps_exit() 
     };
     let script = "setsid sleep 300 </dev/null >/dev/null 2>&1 & exit 0";
     supervisor
-        .spawn("hp_orphans", &spec(&["/bin/sh", "-c", script], &workdir()))
+        .start("hp_orphans", &spec(&["/bin/sh", "-c", script], &workdir()))
         .expect("spawn");
     let end = supervisor.wait("hp_orphans").await.expect("end");
     assert_eq!(end.ended_by, EndedBy::Exit);
@@ -690,7 +751,7 @@ async fn delegated_timeout_ends_the_process_as_timeout_not_stop() {
     };
     let mut request = spec(&["/bin/sleep", "300"], &workdir());
     request.deadline = Deadline::effective(Some(1_000), None, Utc::now()).expect("deadline");
-    supervisor.spawn("hp_timeout", &request).expect("spawn");
+    supervisor.start("hp_timeout", &request).expect("spawn");
     let end = tokio::time::timeout(Duration::from_secs(20), supervisor.wait("hp_timeout"))
         .await
         .expect("the deadline fires")
@@ -714,7 +775,7 @@ async fn delegated_expires_at_ends_the_process_as_expires_at() {
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let mut request = spec(&["/bin/sleep", "300"], &workdir());
     request.deadline = Deadline::effective(None, Some(&at), Utc::now()).expect("deadline");
-    supervisor.spawn("hp_expires", &request).expect("spawn");
+    supervisor.start("hp_expires", &request).expect("spawn");
     let end = tokio::time::timeout(Duration::from_secs(20), supervisor.wait("hp_expires"))
         .await
         .expect("the deadline fires")
@@ -728,7 +789,7 @@ async fn delegated_lease_expiry_stop_is_recorded_as_lease_expiry() {
         return;
     };
     supervisor
-        .spawn("hp_lease", &spec(&["/bin/sleep", "300"], &workdir()))
+        .start("hp_lease", &spec(&["/bin/sleep", "300"], &workdir()))
         .expect("spawn");
     let end = supervisor
         .stop("hp_lease", StopCause::LeaseExpiry, Duration::from_secs(5))
@@ -761,7 +822,7 @@ async fn delegated_observation_reads_cpu_memory_and_a_listening_port_a_member_ho
     request
         .env
         .insert(LISTENING_HELPER_ENV.to_owned(), "1".to_owned());
-    supervisor.spawn("hp_observe", &request).expect("spawn");
+    supervisor.start("hp_observe", &request).expect("spawn");
     let mut port = None;
     for _ in 0..100 {
         tokio::time::sleep(Duration::from_millis(100)).await;

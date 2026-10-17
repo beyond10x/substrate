@@ -2219,6 +2219,10 @@ impl<T> From<Option<T>> for ProcessPresence<T> {
 /// S2). Absent, every `process.start` is `process.host-unserved` and nothing runs.
 pub const PROCESS_HOST_FACT: &str = "process.host";
 
+/// The prefix of every host-process record id: `proc_` and the minted identifier, ASCII
+/// alphanumerics only, as `ws_`, `ex_` and `ses_` are for theirs (bundle `0.20.0`, `process-id`).
+pub const PROCESS_ID_PREFIX: &str = "proc_";
+
 /// Most `argv` items a start admits (S1); beyond it, `process.argv-invalid`.
 pub const MAX_PROCESS_ARGV_ITEMS: usize = 256;
 /// Most bytes of all `argv` items together (S1); beyond it, `process.argv-invalid`.

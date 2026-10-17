@@ -58,32 +58,35 @@ pub use ports::{ListeningSocket, SocketProtocol};
 
 use log::ProcessLog;
 
+// The bounds below are the wire's (ADR 0036 § named refusals: every bound is a wire constant of
+// the successor bundle); the driver re-exports them so its own checks cannot drift from them.
+
 /// The most `argv` items a host process may be started with.
-pub const MAX_PROCESS_ARGV_ITEMS: usize = 256;
+pub const MAX_PROCESS_ARGV_ITEMS: usize = substrate_wire::MAX_PROCESS_ARGV_ITEMS;
 /// The most `argv` bytes, all items together.
-pub const MAX_PROCESS_ARGV_BYTES: usize = 131_072;
+pub const MAX_PROCESS_ARGV_BYTES: usize = substrate_wire::MAX_PROCESS_ARGV_BYTES;
 /// The most environment entries.
-pub const MAX_PROCESS_ENV_ITEMS: usize = 256;
+pub const MAX_PROCESS_ENV_ITEMS: usize = substrate_wire::MAX_PROCESS_ENV_ITEMS;
 /// The most environment bytes, every name and value together.
-pub const MAX_PROCESS_ENV_BYTES: usize = 131_072;
+pub const MAX_PROCESS_ENV_BYTES: usize = substrate_wire::MAX_PROCESS_ENV_BYTES;
 /// The longest `timeout_ms`, and the furthest an `expires_at` may lie ahead (S11).
-pub const MAX_PROCESS_TIMEOUT_MS: u64 = 86_400_000;
-/// The grace between `SIGTERM` and `cgroup.kill` when the driver stops a process on its own: a
-/// deadline, or the members left behind by a main process that exited.
-pub const DEFAULT_PROCESS_STOP_GRACE: Duration = Duration::from_secs(10);
+pub const MAX_PROCESS_TIMEOUT_MS: u64 = substrate_wire::MAX_PROCESS_TIMEOUT_MS;
+/// The grace between `SIGTERM` and `cgroup.kill` on every stop (S3).
+pub const DEFAULT_PROCESS_STOP_GRACE: Duration =
+    Duration::from_millis(substrate_wire::PROCESS_STOP_GRACE_MS);
 /// The longest grace a stop may ask for.
 pub const MAX_PROCESS_STOP_GRACE: Duration = Duration::from_mins(1);
 /// The largest tail one log read returns.
-pub const MAX_PROCESS_LOG_TAIL_BYTES: u64 = 1_048_576;
+pub const MAX_PROCESS_LOG_TAIL_BYTES: u64 = substrate_wire::MAX_PROCESS_LOG_TAIL_BYTES;
 
 /// Delegated cgroup v2 root absent or unusable for process cgroups (S2).
-pub const HOST_UNSERVED: &str = "process.host-unserved";
-pub const ARGV_INVALID: &str = "process.argv-invalid";
-pub const CWD_INVALID: &str = "process.cwd-invalid";
-pub const ENV_INVALID: &str = "process.env-invalid";
-pub const TIMEOUT_INVALID: &str = "process.timeout-invalid";
-pub const EXPIRES_AT_INVALID: &str = "process.expires-at-invalid";
-pub const NOT_FOUND: &str = "process.not-found";
+pub const HOST_UNSERVED: &str = substrate_wire::PROCESS_HOST_UNSERVED;
+pub const ARGV_INVALID: &str = substrate_wire::PROCESS_ARGV_INVALID;
+pub const CWD_INVALID: &str = substrate_wire::PROCESS_CWD_INVALID;
+pub const ENV_INVALID: &str = substrate_wire::PROCESS_ENV_INVALID;
+pub const TIMEOUT_INVALID: &str = substrate_wire::PROCESS_TIMEOUT_INVALID;
+pub const EXPIRES_AT_INVALID: &str = substrate_wire::PROCESS_EXPIRES_AT_INVALID;
+pub const NOT_FOUND: &str = substrate_wire::PROCESS_NOT_FOUND;
 /// The program could not be executed: absent, not executable, or refused by the kernel.
 pub const SPAWN_FAILED: &str = "process.spawn-failed";
 /// Driver-internal: an identity the daemon passed in is malformed or already held.
@@ -213,13 +216,21 @@ pub enum EndedBy {
     ExpiresAt,
 }
 
-/// Which caller-originated stop this is. Deadlines are the driver's own and not listed here.
+/// Which stop this is. The daemon records each durably before it calls in (invariant 5).
+///
+/// The daemon's supervisor clock fires lease expiry and both deadlines, so a daemon passes no
+/// [`HostProcessSpec::deadline`] and the driver runs no second clock of its own; the deadline
+/// causes are listed here for that clock to name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopCause {
     /// An explicit stop (S5).
     Stop,
     /// The daemon's lease clock found the lease expired (S4).
     LeaseExpiry,
+    /// The daemon's clock reached the `timeout_ms` deadline (S11).
+    Timeout,
+    /// The daemon's clock reached the `expires_at` deadline (S11).
+    ExpiresAt,
 }
 
 impl StopCause {
@@ -227,6 +238,8 @@ impl StopCause {
         match self {
             Self::Stop => EndedBy::Stop,
             Self::LeaseExpiry => EndedBy::LeaseExpiry,
+            Self::Timeout => EndedBy::Timeout,
+            Self::ExpiresAt => EndedBy::ExpiresAt,
         }
     }
 }
@@ -293,6 +306,23 @@ impl std::fmt::Debug for HostProcessSpec {
 }
 
 impl HostProcessSpec {
+    /// [`env_name_is_valid`], as the rule a spec's `env` names must meet: a client checks a
+    /// request against the same rule [`HostProcessSpec::validate`] applies, through the type the
+    /// port's `start` takes.
+    #[must_use]
+    pub fn env_name_is_valid(name: &str) -> bool {
+        env_name_is_valid(name)
+    }
+
+    /// [`check_cwd`], as the rule a spec's `cwd` must meet when the driver opens it.
+    ///
+    /// # Errors
+    ///
+    /// `process.cwd-invalid`.
+    pub fn check_cwd(cwd: &Path) -> Result<(), DriverError> {
+        check_cwd(cwd)
+    }
+
     /// The lexical checks of S1 for `argv`, `env` and `cwd`. Whether `cwd` exists and is reached
     /// without a symlink is decided when it is opened at spawn.
     ///
@@ -343,6 +373,23 @@ impl HostProcessSpec {
         }
         Ok(())
     }
+}
+
+/// Whether `name` is an environment name a host process admits: `[A-Za-z_][A-Za-z0-9_]*` (S1).
+pub fn env_name_is_valid(name: &str) -> bool {
+    valid_env_name(name)
+}
+
+/// Whether `cwd` is admitted as a working directory now: absolute, lexically canonical, and an
+/// existing directory the kernel reaches without following a symlink (S1). The daemon calls this
+/// before it records a start, so a refusal costs no record; [`HostProcessSupervisor::start`]
+/// opens the directory again and refuses the same way if it changed in between.
+///
+/// # Errors
+///
+/// `process.cwd-invalid`.
+pub fn check_cwd(cwd: &Path) -> Result<(), DriverError> {
+    open_cwd(cwd).map(drop)
 }
 
 fn valid_env_name(name: &str) -> bool {
@@ -514,8 +561,12 @@ struct Entry {
     /// The main process's pid and a pidfd on it, opened while it was still the driver's unreaped
     /// child. A main process can leave its cgroup (same uid, `exec systemd-run --scope …`); the
     /// pidfd still reaches it, and never a process that reused its number.
-    main_pid: u32,
-    main: OwnedFd,
+    ///
+    /// `None` for a record a restarted daemon re-attached by its cgroup
+    /// ([`HostProcessSupervisor::reattach`]): its main process was never this run's child, and a
+    /// pid read back from anywhere could name another process by now. Membership alone defines
+    /// such a record.
+    main: Option<(u32, OwnedFd)>,
     log: Arc<ProcessLog>,
     /// The first recorded end cause; never overwritten.
     claim: Mutex<Option<EndedBy>>,
@@ -530,18 +581,15 @@ impl Entry {
     }
 
     fn populated(&self) -> Result<bool, DriverError> {
-        let events = std::fs::read_to_string(self.cgroup_path.join("cgroup.events"))
-            .map_err(|error| cgroup_failed(format!("cgroup.events: {error}")))?;
-        events
-            .lines()
-            .find_map(|line| line.strip_prefix("populated "))
-            .map(|value| value.trim() != "0")
-            .ok_or_else(|| cgroup_failed("cgroup.events omitted populated"))
+        cgroup_populated(&self.cgroup_path)
     }
 
-    /// Whether the main process has exited, reaped or not, wherever its cgroup is.
+    /// Whether the main process has exited, reaped or not, wherever its cgroup is. A re-attached
+    /// record has no main process of its own to wait for.
     fn main_exited(&self) -> bool {
-        pidfd::exited(self.main.as_fd())
+        self.main
+            .as_ref()
+            .is_none_or(|(_, main)| pidfd::exited(main.as_fd()))
     }
 
     /// Whether anything of the record is left: a member anywhere in its cgroup subtree, or the
@@ -567,8 +615,10 @@ impl Entry {
     /// no longer a member.
     fn signal_record(&self, signal: i32) -> Result<(), DriverError> {
         let reached = tree::signal_members(&self.cgroup_path, signal)?;
-        if !reached.contains(&self.main_pid) {
-            pidfd::send(self.main.as_fd(), signal)
+        if let Some((pid, main)) = &self.main
+            && !reached.contains(pid)
+        {
+            pidfd::send(main.as_fd(), signal)
                 .map_err(|error| cgroup_failed(format!("signal {signal} failed: {error}")))?;
         }
         Ok(())
@@ -590,10 +640,17 @@ impl Entry {
             if termed && self.wait_gone(grace).await? {
                 Some(StopStep::Term)
             } else {
-                self.cgroup.kill_all().map_err(as_process)?;
-                pidfd::send(self.main.as_fd(), libc::SIGKILL).map_err(|error| {
-                    cgroup_failed(format!("signal {} failed: {error}", libc::SIGKILL))
-                })?;
+                // A cgroup removed meanwhile had no member left to kill.
+                if let Err(error) = self.cgroup.kill_all()
+                    && self.cgroup_path.exists()
+                {
+                    return Err(as_process(error));
+                }
+                if let Some((_, main)) = &self.main {
+                    pidfd::send(main.as_fd(), libc::SIGKILL).map_err(|error| {
+                        cgroup_failed(format!("signal {} failed: {error}", libc::SIGKILL))
+                    })?;
+                }
                 if !self.wait_gone(KILL_SETTLE).await? {
                     return Err(cgroup_failed(
                         "The host-process cgroup did not empty after cgroup.kill.",
@@ -627,6 +684,32 @@ impl Entry {
             Some(Err(error)) => Some(Err(copy_error(error))),
         }
     }
+}
+
+/// Whether the cgroup at `path`, or any cgroup beneath it, has a member. A cgroup already removed
+/// has none: the kernel refuses to remove one that still has a member.
+fn cgroup_populated(path: &Path) -> Result<bool, DriverError> {
+    let events = match std::fs::read_to_string(path.join("cgroup.events")) {
+        Ok(events) => events,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !path.exists() => {
+            return Ok(false);
+        }
+        Err(error) => return Err(cgroup_failed(format!("cgroup.events: {error}"))),
+    };
+    events
+        .lines()
+        .find_map(|line| line.strip_prefix("populated "))
+        .map(|value| value.trim() != "0")
+        .ok_or_else(|| cgroup_failed("cgroup.events omitted populated"))
+}
+
+/// What a restarted daemon finds for a record it holds (S3 § restart reconciliation).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reattached {
+    /// The record's cgroup still has members; the driver supervises it again, by membership.
+    Live,
+    /// The record's cgroup is gone, or was left empty and is now removed: nothing of it runs.
+    Gone,
 }
 
 /// The host-process driver over one delegated cgroup root and one owner-private state directory.
@@ -704,7 +787,7 @@ impl HostProcessSupervisor {
     /// `process.id-invalid` for a malformed or already held id, `process.spawn-failed` when the
     /// program cannot be executed (nothing is left running and the cgroup is removed), and
     /// `process.cgroup-failed` or `process.log-failed` when the host cannot set it up.
-    pub fn spawn(
+    pub fn start(
         self: &Arc<Self>,
         id: &str,
         spec: &HostProcessSpec,
@@ -773,8 +856,7 @@ impl HostProcessSupervisor {
         let entry = Arc::new(Entry {
             cgroup,
             cgroup_path,
-            main_pid: pid,
-            main,
+            main: Some((pid, main)),
             log: Arc::clone(&log),
             claim: Mutex::new(None),
             termination: tokio::sync::Mutex::new(Termination::NotRun),
@@ -809,6 +891,63 @@ impl HostProcessSupervisor {
         })
     }
 
+    /// Re-attaches a record a restarted daemon still holds (S3: "a record whose cgroup still has
+    /// members is observed again; a record whose cgroup is gone ends vanished").
+    ///
+    /// A record this driver already holds answers [`Reattached::Live`] unchanged. Otherwise the
+    /// record's cgroup decides: absent, or present and empty (it is then removed), is
+    /// [`Reattached::Gone`]; populated, the driver supervises it again by membership alone, with
+    /// no main process of its own, and its retained log is reopened. Such a record ends when its
+    /// cgroup empties, with no exit status: nobody observed one. Its output pipes did not survive
+    /// the restart, so nothing further is logged for it.
+    ///
+    /// # Errors
+    ///
+    /// `process.id-invalid`, `process.cgroup-failed` when the cgroup cannot be read or removed,
+    /// `process.log-failed` when the retained log cannot be reopened or recreated.
+    pub fn reattach(self: &Arc<Self>, id: &str) -> Result<Reattached, DriverError> {
+        validate_id(id)?;
+        if self.entries.lock().contains_key(id) {
+            return Ok(Reattached::Live);
+        }
+        let name = format!("{CGROUP_PREFIX}{id}");
+        let cgroup_path = self.cgroup_root.join(&name);
+        match std::fs::symlink_metadata(&cgroup_path) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => return Err(cgroup_failed("A host-process cgroup is not a directory.")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(Reattached::Gone);
+            }
+            Err(error) => return Err(cgroup_failed(format!("cgroup read: {error}"))),
+        }
+        if !cgroup_populated(&cgroup_path)? {
+            tree::remove(&cgroup_path)?;
+            return Ok(Reattached::Gone);
+        }
+        let log_path = self.log_path(id);
+        let log = match std::fs::symlink_metadata(&log_path) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                ProcessLog::create(&log_path)?
+            }
+            _ => ProcessLog::open_existing(&log_path)?,
+        };
+        let (end, _) = watch::channel(None);
+        let entry = Arc::new(Entry {
+            cgroup: Cgroup::at(cgroup_path.clone(), name),
+            cgroup_path,
+            main: None,
+            log: Arc::new(log),
+            claim: Mutex::new(None),
+            termination: tokio::sync::Mutex::new(Termination::NotRun),
+            end,
+        });
+        self.entries
+            .lock()
+            .insert(id.to_owned(), Arc::clone(&entry));
+        tokio::spawn(supervise_reattached(entry));
+        Ok(Reattached::Live)
+    }
+
     /// Stops one process as S3 stops it and waits for its end. The daemon calls this with
     /// [`StopCause::LeaseExpiry`] when its lease clock fires (S4). On a record that already
     /// ended, or whose end was already claimed by an exit or a deadline, it returns that end
@@ -838,6 +977,40 @@ impl HostProcessSupervisor {
         entry.claim(cause.ended_by());
         entry.terminate(grace).await?;
         entry.ended().await
+    }
+
+    /// Begins S3's stop of one process and returns at once: the cause is claimed now (the first
+    /// recorded cause stands), and the stop sequence runs in a task this driver owns, as its
+    /// supervision does. [`HostProcessSupervisor::ended`] reads the end once it is published. The
+    /// daemon's supervisor clock uses this, so a process that ignores `SIGTERM` holds no sweep
+    /// for its grace.
+    ///
+    /// # Errors
+    ///
+    /// `process.not-found`, or `process.bound-invalid` for a grace above
+    /// [`MAX_PROCESS_STOP_GRACE`].
+    pub fn begin_stop(
+        &self,
+        id: &str,
+        cause: StopCause,
+        grace: Duration,
+    ) -> Result<(), DriverError> {
+        if grace > MAX_PROCESS_STOP_GRACE {
+            return Err(DriverError::refused(
+                BOUND_INVALID,
+                "The stop grace exceeds its bound.",
+                "grace",
+            ));
+        }
+        let entry = self.entry(id)?;
+        if entry.current_end().is_some() {
+            return Ok(());
+        }
+        entry.claim(cause.ended_by());
+        tokio::spawn(async move {
+            let _ = entry.terminate(grace).await;
+        });
+        Ok(())
     }
 
     /// Waits for a process's end, however it comes.
@@ -901,14 +1074,7 @@ impl HostProcessSupervisor {
         selection: LogStreamSelection,
         max_bytes: u64,
     ) -> Result<LogTail, DriverError> {
-        validate_id(id)?;
-        if max_bytes == 0 || max_bytes > MAX_PROCESS_LOG_TAIL_BYTES {
-            return Err(DriverError::refused(
-                BOUND_INVALID,
-                format!("A log tail is 1..={MAX_PROCESS_LOG_TAIL_BYTES} bytes."),
-                "max_bytes",
-            ));
-        }
+        check_tail(id, max_bytes)?;
         let tracked = self
             .entries
             .lock()
@@ -917,11 +1083,7 @@ impl HostProcessSupervisor {
         if let Some(log) = tracked {
             return log.tail(selection, max_bytes);
         }
-        let path = self.log_path(id);
-        if std::fs::symlink_metadata(&path).is_err() {
-            return Err(not_found());
-        }
-        ProcessLog::open_existing(&path)?.tail(selection, max_bytes)
+        stored_log_tail(&self.state_dir, id, selection, max_bytes)
     }
 
     /// Forgets an ended record and removes its log (S7: a log is removed with its record).
@@ -952,6 +1114,188 @@ impl HostProcessSupervisor {
                 format!("process log remove: {error}"),
             )),
         }
+    }
+}
+
+/// The id and budget checks every log read makes, before any file is touched.
+fn check_tail(id: &str, max_bytes: u64) -> Result<(), DriverError> {
+    validate_id(id)?;
+    if max_bytes == 0 || max_bytes > MAX_PROCESS_LOG_TAIL_BYTES {
+        return Err(DriverError::refused(
+            BOUND_INVALID,
+            format!("A log tail is 1..={MAX_PROCESS_LOG_TAIL_BYTES} bytes."),
+            "max_bytes",
+        ));
+    }
+    Ok(())
+}
+
+/// The tail of a log as the state directory holds it: `process.not-found` when there is none.
+/// An existing log is opened without following a symlink; nothing is created.
+fn stored_log_tail(
+    state_dir: &Path,
+    id: &str,
+    selection: LogStreamSelection,
+    max_bytes: u64,
+) -> Result<LogTail, DriverError> {
+    let path = state_dir.join(format!("{id}.log"));
+    if std::fs::symlink_metadata(&path).is_err() {
+        return Err(not_found());
+    }
+    ProcessLog::open_existing(&path)?.tail(selection, max_bytes)
+}
+
+/// The stored logs of one host-process state directory, read without supervising anything (S7).
+///
+/// A daemon that serves no host process this run still holds the logs an earlier run left beside
+/// their records, and `process.logs.get` carries no capability predicate: this reader serves
+/// them. It never creates the directory or a log, and runs nothing.
+#[derive(Debug)]
+pub struct StoredProcessLogs {
+    state_dir: PathBuf,
+}
+
+impl StoredProcessLogs {
+    /// A reader over `state_dir`, which may not exist: then every read is `process.not-found`.
+    #[must_use]
+    pub fn open(state_dir: &Path) -> Arc<Self> {
+        Arc::new(Self {
+            state_dir: state_dir.to_path_buf(),
+        })
+    }
+}
+
+/// The host-process log port (ADR 0036 S7; `AGENTS.md` invariant 4): the one thing the daemon
+/// asks of whatever holds host-process logs. [`ProcessSupervisor`] extends it, and
+/// [`StoredProcessLogs`] implements it alone, for a daemon that serves no host process.
+pub trait ProcessLogs: Send + Sync {
+    /// A bounded tail of one record's log, by bytes, of one stream or both
+    /// ([`HostProcessSupervisor::log_tail`]).
+    ///
+    /// # Errors
+    ///
+    /// `process.not-found`, `process.id-invalid`, `process.bound-invalid` or
+    /// `process.log-failed`.
+    fn log_tail(
+        &self,
+        id: &str,
+        selection: LogStreamSelection,
+        max_bytes: u64,
+    ) -> Result<LogTail, DriverError>;
+}
+
+impl ProcessLogs for StoredProcessLogs {
+    fn log_tail(
+        &self,
+        id: &str,
+        selection: LogStreamSelection,
+        max_bytes: u64,
+    ) -> Result<LogTail, DriverError> {
+        check_tail(id, max_bytes)?;
+        stored_log_tail(&self.state_dir, id, selection, max_bytes)
+    }
+}
+
+/// The host-process driver port (ADR 0036; `AGENTS.md` invariant 4): everything the daemon asks
+/// of a host-process driver, and nothing of how one is built.
+///
+/// [`HostProcessSupervisor`] implements it over a delegated cgroup v2 root; only the composition
+/// root names that type. A client holds an `Arc<dyn ProcessSupervisor>` and names nothing but
+/// this trait and the types its signatures force. Its logs are read through [`ProcessLogs`].
+///
+/// Every stop runs the driver's bounded default grace, [`DEFAULT_PROCESS_STOP_GRACE`], between
+/// `SIGTERM` and `cgroup.kill`; a client chooses no grace of its own, and no call waits for a
+/// stop's end: [`ProcessSupervisor::begin_stop`] begins it and [`ProcessSupervisor::ended`]
+/// reads it.
+pub trait ProcessSupervisor: ProcessLogs {
+    /// Starts `spec` as the record `id` ([`HostProcessSupervisor::start`]).
+    ///
+    /// # Errors
+    ///
+    /// The S1 refusals, `process.id-invalid`, `process.spawn-failed`, `process.cgroup-failed` or
+    /// `process.log-failed`.
+    fn start(
+        self: Arc<Self>,
+        id: &str,
+        spec: &HostProcessSpec,
+    ) -> Result<HostProcessStarted, DriverError>;
+
+    /// Supervises a record an earlier daemon run left again, by its cgroup
+    /// ([`HostProcessSupervisor::reattach`]).
+    ///
+    /// # Errors
+    ///
+    /// `process.id-invalid`, `process.cgroup-failed` or `process.log-failed`.
+    fn reattach(self: Arc<Self>, id: &str) -> Result<Reattached, DriverError>;
+
+    /// Claims `cause` and begins the stop sequence, returning at once
+    /// ([`HostProcessSupervisor::begin_stop`]); [`ProcessSupervisor::ended`] reads the end.
+    ///
+    /// # Errors
+    ///
+    /// `process.not-found`.
+    fn begin_stop(&self, id: &str, cause: StopCause) -> Result<(), DriverError>;
+
+    /// The end of a record, once published ([`HostProcessSupervisor::ended`]).
+    ///
+    /// # Errors
+    ///
+    /// `process.not-found`.
+    fn ended(&self, id: &str) -> Result<Option<HostProcessEnd>, DriverError>;
+
+    /// CPU, memory and listening sockets read now ([`HostProcessSupervisor::observe`]).
+    ///
+    /// # Errors
+    ///
+    /// `process.not-found`.
+    fn observe(&self, id: &str) -> Result<HostProcessObservation, DriverError>;
+
+    /// Forgets an ended record and removes its log ([`HostProcessSupervisor::forget`]).
+    ///
+    /// # Errors
+    ///
+    /// `process.not-ended` or `process.log-failed`.
+    fn forget(&self, id: &str) -> Result<(), DriverError>;
+}
+
+impl ProcessLogs for HostProcessSupervisor {
+    fn log_tail(
+        &self,
+        id: &str,
+        selection: LogStreamSelection,
+        max_bytes: u64,
+    ) -> Result<LogTail, DriverError> {
+        Self::log_tail(self, id, selection, max_bytes)
+    }
+}
+
+impl ProcessSupervisor for HostProcessSupervisor {
+    fn start(
+        self: Arc<Self>,
+        id: &str,
+        spec: &HostProcessSpec,
+    ) -> Result<HostProcessStarted, DriverError> {
+        Self::start(&self, id, spec)
+    }
+
+    fn reattach(self: Arc<Self>, id: &str) -> Result<Reattached, DriverError> {
+        Self::reattach(&self, id)
+    }
+
+    fn begin_stop(&self, id: &str, cause: StopCause) -> Result<(), DriverError> {
+        Self::begin_stop(self, id, cause, DEFAULT_PROCESS_STOP_GRACE)
+    }
+
+    fn ended(&self, id: &str) -> Result<Option<HostProcessEnd>, DriverError> {
+        Self::ended(self, id)
+    }
+
+    fn observe(&self, id: &str) -> Result<HostProcessObservation, DriverError> {
+        Self::observe(self, id)
+    }
+
+    fn forget(&self, id: &str) -> Result<(), DriverError> {
+        Self::forget(self, id)
     }
 }
 
@@ -1202,6 +1546,48 @@ async fn supervise(
         Ok(HostProcessEnd {
             ended_by,
             exit,
+            stop_step,
+            ended_at: Utc::now(),
+        })
+    }
+    .await;
+    entry.end.send_replace(Some(result));
+}
+
+/// How often a re-attached record's cgroup is read for its emptying: it has no main process
+/// whose exit could wake the driver.
+const REATTACHED_POLL: Duration = Duration::from_millis(100);
+
+/// Owns a re-attached record: waits for its cgroup to empty, by its own exit or by a stop, then
+/// removes the cgroup and publishes the end with no exit status (nobody observed one).
+async fn supervise_reattached(entry: Arc<Entry>) {
+    let result = async {
+        while entry.populated()? {
+            tokio::time::sleep(REATTACHED_POLL).await;
+        }
+        let ended_by = entry.claim(EndedBy::Exit);
+        // A stop that emptied the cgroup holds the step; otherwise none ran.
+        let stop_step = entry.terminate(DEFAULT_PROCESS_STOP_GRACE).await?;
+        let mut removed = Err(cgroup_failed(
+            "The host-process cgroup could not be removed.",
+        ));
+        for _ in 0..100 {
+            removed = if entry.populated()? {
+                Err(cgroup_failed(
+                    "The host-process cgroup still has members after its stop.",
+                ))
+            } else {
+                tree::remove(&entry.cgroup_path)
+            };
+            if removed.is_ok() {
+                break;
+            }
+            tokio::time::sleep(EMPTY_POLL).await;
+        }
+        removed?;
+        Ok(HostProcessEnd {
+            ended_by,
+            exit: None,
             stop_step,
             ended_at: Utc::now(),
         })

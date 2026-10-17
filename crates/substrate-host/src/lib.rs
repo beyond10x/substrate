@@ -35,6 +35,13 @@ use zeroize::Zeroizing;
 
 pub use egress::EgressAperture;
 pub use process::{ExecObservation, PipeFrame, PipeStream};
+// The host-process port and the vocabulary its signatures force, at the crate root as `Driver`'s
+// is: a client names these, and never `host_process::HostProcessSupervisor`.
+pub use host_process::{
+    Deadline, HostProcessEnd, HostProcessObservation, HostProcessSpec, LogStream,
+    LogStreamSelection, LogTail, ProcessExit, ProcessLogs, ProcessSupervisor, Reattached,
+    SocketProtocol, StopCause, StoredProcessLogs,
+};
 
 /// One deployment-owned Git source aperture. The URL is a non-secret HTTPS prefix; request
 /// authority arrives separately and is never retained in this configuration.
@@ -175,6 +182,13 @@ pub struct HostConfig {
     /// sets 1, the historical one-core clamp. `HostDriver::open` refuses 0 and any value above the
     /// CPUs this process may run on as `config.exec-cpu-cores-invalid`, never clamping it.
     pub exec_cpu_cores: u32,
+    /// Whether this daemon serves host processes (ADR 0036 S2), which publishes `process.host`.
+    ///
+    /// The composition root sets it **only** after `HostProcessSupervisor::open` proved the
+    /// delegated cgroup root usable for process cgroups, and only for a daemon whose one listener
+    /// is the personal Unix socket. [`HostConfig::minimum`] sets `false`: the fact is absent, and
+    /// every start is `process.host-unserved`.
+    pub host_processes: bool,
 }
 
 /// Refuses an exec CPU ceiling the host cannot honour, before the host opens.
@@ -252,6 +266,7 @@ impl HostConfig {
             project_quota_ids: None,
             git_sources: Vec::new(),
             exec_cpu_cores: 1,
+            host_processes: false,
         }
     }
 

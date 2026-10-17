@@ -4,7 +4,7 @@
 //! contain no host library types".
 //!
 //! The port trait is `substrate_host::Driver`, and it is declared inside the host crate itself
-//! (`crates/substrate-host/src/lib.rs:171`). The criterion therefore cannot be read literally as
+//! (`crates/substrate-host/src/lib.rs:370`). The criterion therefore cannot be read literally as
 //! "no `substrate_host` name reaches the daemon": the port's own vocabulary — `DriverError`,
 //! `DispatchOutcome`, `ExecObservation` — is declared in that same crate, and every caller of the
 //! trait is forced to name it. The checkable claim that carries the invariant is narrower:
@@ -28,21 +28,29 @@ use std::path::{Path, PathBuf};
 const HOST_CRATE: &str = "substrate_host::";
 
 /// Files allowed to name anything from `substrate_host`, each with the reason it is a
-/// composition root. Two entries is one more than the invariant wants: `src/app/tests.rs` is an
-/// in-crate test harness, not a second production wiring point.
+/// composition root. Three entries is two more than the invariant wants: `src/app/tests.rs` and
+/// `src/app/processes/tests.rs` are in-crate test harnesses, not further production wiring points.
 const COMPOSITION_ROOTS: &[(&str, &str)] = &[
     (
         // The composition root: the only production code that picks a driver, at
-        // `HostConfig::minimum` (src/runtime.rs:355) and `HostDriver::open` (src/runtime.rs:360).
+        // `HostConfig::minimum` (src/runtime.rs:607) and `HostDriver::open` (src/runtime.rs:646).
         "src/runtime.rs",
-        "the composition root: builds HostConfig and opens HostDriver (src/runtime.rs:355, :360)",
+        "the composition root: builds HostConfig and opens HostDriver (src/runtime.rs:607, :646)",
     ),
     (
-        // The in-crate `#[cfg(test)]` harness declared at src/app.rs:28-29. It builds its own
-        // HostDriver (src/app/tests.rs:8) and names DriverError (src/app/tests.rs:393), so it is
+        // The in-crate `#[cfg(test)]` harness declared at src/app.rs:29-30. It builds its own
+        // HostDriver (src/app/tests.rs:8) and names DriverError (src/app/tests.rs:482), so it is
         // a test composition root rather than a client of the port.
         "src/app/tests.rs",
-        "the in-crate #[cfg(test)] harness (src/app.rs:28) builds its own HostDriver",
+        "the in-crate #[cfg(test)] harness (src/app.rs:29) builds its own HostDriver",
+    ),
+    (
+        // The host-process routes' in-crate `#[cfg(test)]` harness, declared at
+        // src/app/processes.rs:1807-1808. It builds its own HostConfig and HostDriver
+        // (src/app/processes/tests.rs:13, :21) for the posture routers only the crate can
+        // build, so it is a test composition root rather than a client of either port.
+        "src/app/processes/tests.rs",
+        "the host-process routes' in-crate #[cfg(test)] harness builds its own HostDriver",
     ),
 ];
 
@@ -51,43 +59,105 @@ const COMPOSITION_ROOTS: &[(&str, &str)] = &[
 ///
 /// This is exactly what HEAD needs and no more. An item that falls out of use is a line to
 /// delete; an item the port starts forcing is a line to add together with its citation.
-/// `PipeFrame` (`crates/substrate-host/src/lib.rs:26`, returned by `Driver::read_pipe_session` at
-/// `crates/substrate-host/src/lib.rs:325`) is forced by the port but is not named in
+/// `PipeFrame` (`crates/substrate-host/src/lib.rs:37`, returned by `Driver::read_pipe_session` at
+/// `crates/substrate-host/src/lib.rs:584`) is forced by the port but is not named in
 /// `substrate-daemon/src` at HEAD, so it is deliberately absent.
 const PORT_ITEMS: &[(&str, &str)] = &[
     (
         "Driver",
-        "the port trait itself (crates/substrate-host/src/lib.rs:171)",
+        "the port trait itself (crates/substrate-host/src/lib.rs:370)",
     ),
     (
         "DispatchOutcome",
-        "the port's dispatch result (crates/substrate-host/src/lib.rs:103), returned by \
-         Driver::create_workspace (crates/substrate-host/src/lib.rs:186)",
+        "the port's dispatch result (crates/substrate-host/src/lib.rs:302), returned by \
+         Driver::create_workspace (crates/substrate-host/src/lib.rs:383)",
     ),
     (
         "DriverError",
-        "the port's error type (crates/substrate-host/src/lib.rs:95), in the Result of \
-         Driver::workspace_root_identity (crates/substrate-host/src/lib.rs:179)",
+        "the port's error type (crates/substrate-host/src/lib.rs:294), in the Result of \
+         Driver::workspace_root_identity (crates/substrate-host/src/lib.rs:381)",
     ),
     (
         "DriverErrorClass",
-        "the public field DriverError::class (crates/substrate-host/src/lib.rs:84, :96), so \
+        "the public field DriverError::class (crates/substrate-host/src/lib.rs:283, :295), so \
          reading a refusal's class forces it",
     ),
     (
         "WorkspaceDestroyProgress",
-        "returned by Driver::destroy_workspace (crates/substrate-host/src/lib.rs:111, :287)",
+        "returned by Driver::destroy_workspace (crates/substrate-host/src/lib.rs:310, :528)",
     ),
     (
         "ExecObservation",
         "returned by Driver::start_exec and Driver::observe_exec \
-         (crates/substrate-host/src/lib.rs:26, :293, :346)",
+         (crates/substrate-host/src/lib.rs:37, :552, :618)",
     ),
     (
         "PipeStream",
-        "the public field PipeFrame::stream (crates/substrate-host/src/process.rs:34, :41); \
+        "the public field PipeFrame::stream (crates/substrate-host/src/process.rs:175, :182); \
          PipeFrame is returned by Driver::read_pipe_session \
-         (crates/substrate-host/src/lib.rs:325)",
+         (crates/substrate-host/src/lib.rs:584)",
+    ),
+    (
+        "ProcessSupervisor",
+        "the host-process port trait itself (crates/substrate-host/src/host_process/mod.rs:1210)",
+    ),
+    (
+        "ProcessLogs",
+        "the host-process log port, ProcessSupervisor's supertrait \
+         (crates/substrate-host/src/host_process/mod.rs:1171, :1210), so holding a reader of \
+         stored logs forces it",
+    ),
+    (
+        "HostProcessSpec",
+        "the parameter of ProcessSupervisor::start \
+         (crates/substrate-host/src/host_process/mod.rs:279, :1220)",
+    ),
+    (
+        "Deadline",
+        "the public field HostProcessSpec::deadline \
+         (crates/substrate-host/src/host_process/mod.rs:130, :286), so building a spec forces it",
+    ),
+    (
+        "StopCause",
+        "the parameter of ProcessSupervisor::begin_stop \
+         (crates/substrate-host/src/host_process/mod.rs:225, :1237)",
+    ),
+    (
+        "HostProcessEnd",
+        "returned by ProcessSupervisor::ended \
+         (crates/substrate-host/src/host_process/mod.rs:265, :1244)",
+    ),
+    (
+        "ProcessExit",
+        "the public field HostProcessEnd::exit \
+         (crates/substrate-host/src/host_process/mod.rs:258, :268)",
+    ),
+    (
+        "HostProcessObservation",
+        "returned by ProcessSupervisor::observe \
+         (crates/substrate-host/src/host_process/mod.rs:486, :1251)",
+    ),
+    (
+        "SocketProtocol",
+        "the public field ListeningSocket::protocol (crates/substrate-host/src/host_process/ports.rs:17, \
+         :25); ListeningSocket is HostProcessObservation::listening \
+         (crates/substrate-host/src/host_process/mod.rs:493)",
+    ),
+    (
+        "Reattached",
+        "returned by ProcessSupervisor::reattach \
+         (crates/substrate-host/src/host_process/mod.rs:708, :1229)",
+    ),
+    (
+        "LogStreamSelection",
+        "the parameter of ProcessLogs::log_tail \
+         (crates/substrate-host/src/host_process/log.rs:44, mod.rs:1179)",
+    ),
+    (
+        "LogStream",
+        "the public field LogLine::stream (crates/substrate-host/src/host_process/log.rs:37, :62); \
+         LogLine is LogTail::lines (log.rs:75), returned by ProcessLogs::log_tail \
+         (crates/substrate-host/src/host_process/mod.rs:1179)",
     ),
 ];
 
