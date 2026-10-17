@@ -45,7 +45,7 @@ Each is a claim that can be checked. Breaking one is a design change, not a refa
 6. **Every released contract bundle directory is immutable.** `contracts/substrate-wire/0.1.0`
    through `0.19.0` exist; `0.19.0` adds the explicit `workspace.adopt` route at
    `POST /v1/workspaces/adopt` and two required read-only members, `origin` and `root_name`, on the
-   closed workspace resource, with `workspace-id` unchanged (ADR 0035; its compatibility block
+   closed workspace resource, with `workspace-id` unchanged and still `ws_`-prefixed (ADR 0035; its compatibility block
    records that client-visible change); `0.18.0` made `exec.resource-usage.block_io` a published boolean and
    the block I/O usage counters optional, absent on a host without the io controller (ADR 0032),
    and added the optional `read_only_files` start field, the `exec.read-only-files` fact and nine
@@ -129,9 +129,13 @@ Substrate is confinement. Everything below is the reason it can be trusted with 
   keeps the default rule set (`useDefault = true`) and adds exactly one exception: the `jwt` rule is
   allowed in the delegated-context conformance vectors, and nowhere else. Those vectors are JWTs by
   definition — ADR 0011 fixes the document as a compact JWS, so a vector proving substrate verifies
-  one has to contain one — and they carry no credential: each is signed by a key whose seed is the
-  SHA-256 of a sentence published in this repository
-  (`delegated_signing_key` in `crates/substrate-daemon/tests/runtime_vectors.rs`). The exception is scoped by rule
+  one has to contain one — and they carry no credential. Each is a pre-signed EdDSA compact JWS
+  (`kid` `vector-key-1`, issuer `https://issuer.invalid`) that verifies only with the **public**
+  key the vector itself carries in its setup (`delegated-context-key`); the signing seed is
+  deliberately not committed (`docs/design/09-delegated-context-and-grant-attribution.md` § 6), so
+  the vectors are verify-only. They do **not** verify with `delegated_signing_key` in
+  `crates/substrate-daemon/tests/runtime_vectors.rs`, whose published seed signs only the
+  documents that runner mints at run time. This holds for bundles `0.17.0` through `0.19.0`. The exception is scoped by rule
   **and** by path; a JWT anywhere else, including any other vector, is still a finding. Proven, not
   asserted: the same token in `contracts/substrate-wire/0.7.0/vectors/http/delegated-context-*.json`
   is allowed and in `crates/substrate-daemon/src/` is caught. **Widening this allowlist is a

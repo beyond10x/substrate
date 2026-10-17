@@ -15,9 +15,9 @@ pub const API_VERSION: &str = "v1";
 ///
 /// This is the SHA-256 of the inner immutable `bundle.json`, not the outer OCI manifest digest.
 /// Moving either member is an explicit coordinated promotion (Atlas ADR 0019).
-pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.18.0";
+pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.19.0";
 pub const ADVERTISED_CONTRACT_BUNDLE_SHA256: &str =
-    "3fe64bf0873e07b1cda16a05ca641d976513306f2626e99b98954750fb605d1e";
+    "ad97591c3302e4c0f92ed665cf14d5df678dfd65b7fdff5a129fdca5a751b19d";
 pub const MAX_FILE_BYTES: u64 = 1_048_576;
 pub const MAX_IO_BYTES: u64 = 1_048_576;
 pub const MAX_LIST_ITEMS: u32 = 1_000;
@@ -4429,8 +4429,8 @@ mod tests {
         let version = ADVERTISED_CONTRACT_BUNDLE
             .strip_prefix("substrate-wire/")
             .expect("advertised contract prefix");
-        assert_eq!(version, "0.18.0", "the reviewed promotion target moved");
-        let bytes = include_bytes!("../../../contracts/substrate-wire/0.18.0/bundle.json");
+        assert_eq!(version, "0.19.0", "the reviewed promotion target moved");
+        let bytes = include_bytes!("../../../contracts/substrate-wire/0.19.0/bundle.json");
         assert_eq!(
             hex::encode(Sha256::digest(bytes)),
             ADVERTISED_CONTRACT_BUNDLE_SHA256

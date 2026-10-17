@@ -319,6 +319,10 @@ log.
 **Invariant 7.** Every new request, record, observation, log-tail and refusal document has exactly
 one schema in the successor bundle and validates under `cargo xtask check-json`.
 
+**S3's limit.** A same-uid member can move itself out of its record's cgroup, so S3's "dies with
+its record" holds only for members that do not move themselves. The driver still ends its own main
+process through a pidfd, whichever cgroup that process sits in by then.
+
 **Subject.** The subject is derived from kernel peer credentials and never from the request. The
 owner session is caller-supplied data scoped beneath that subject, and grants no authority.
 
