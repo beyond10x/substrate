@@ -433,11 +433,13 @@ fn other_bounds() -> [(&'static str, &'static str, Value); 13] {
 }
 
 /// The class, not the instance: the refusals the family's inputs declare are exactly the codes,
-/// statuses and classes `substrate_wire::PROCESS_REFUSALS` holds, so no code the crate can emit is
-/// missing from the contract and the contract names none the crate cannot.
+/// statuses and classes `substrate_wire::PROCESS_REFUSALS` and `PROCESS_SHARED_REFUSALS` hold, so
+/// no code the crate can emit is missing from the contract and the contract names none the crate
+/// cannot.
 fn check_refusal_annotations(released: &Tree, failures: &mut Vec<String>) {
     let expected: BTreeSet<(String, u64, String)> = wire::PROCESS_REFUSALS
         .iter()
+        .chain(wire::PROCESS_SHARED_REFUSALS.iter())
         .map(|refusal| {
             (
                 refusal.code.to_owned(),
@@ -747,6 +749,14 @@ mod tests {
         assert_reported(
             &failures,
             "process.container-restart-refused (422, refused) is not a refusal the wire crate emits",
+        );
+        let tree = edited("schemas/inputs/process-lease-renew.json", |document| {
+            let refusals = document["x-b10x-refusals"].as_array_mut().expect("array");
+            refusals.retain(|refusal| refusal["code"] != "lease.expired");
+        });
+        assert_reported(
+            &failures_of(&tree),
+            "no input declares lease.expired (409, conflict)",
         );
     }
 

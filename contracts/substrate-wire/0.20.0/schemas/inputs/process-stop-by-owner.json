@@ -18,6 +18,11 @@
   "type": "object",
   "x-b10x-refusals": [
     {
+      "class": "unserved",
+      "code": "process.host-unserved",
+      "status": 501
+    },
+    {
       "class": "refused",
       "code": "process.host-posture-refused",
       "status": 403

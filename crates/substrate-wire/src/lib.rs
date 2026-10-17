@@ -17,7 +17,7 @@ pub const API_VERSION: &str = "v1";
 /// Moving either member is an explicit coordinated promotion (Atlas ADR 0019).
 pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.20.0";
 pub const ADVERTISED_CONTRACT_BUNDLE_SHA256: &str =
-    "b55af25f3a6fcb591a1c3f64f050e4b24f0ba9296043ec1339b808d32c1179d8";
+    "52f72530cecf1b0e5d70fdca47abd27b844b89f65e6da2827c70fbf10d97a6d5";
 pub const MAX_FILE_BYTES: u64 = 1_048_576;
 pub const MAX_IO_BYTES: u64 = 1_048_576;
 pub const MAX_LIST_ITEMS: u32 = 1_000;
@@ -2413,6 +2413,19 @@ pub const PROCESS_REFUSALS: [ProcessRefusal; 17] = [
         "expires_at must be an RFC 3339 UTC instant at least the minimum lease TTL ahead and within the process timeout bound.",
     ),
 ];
+
+/// Renewing a lease the daemon's lease clock has already expired, on every renewable resource: a
+/// workspace, an exec and (S4) a host process.
+pub const LEASE_EXPIRED: &str = "lease.expired";
+
+/// The refusals the host-process inputs declare that are not the family's own: codes shared with
+/// the other leased resources, with the status, class and message they already answer there.
+/// `process.lease.renew` declares [`LEASE_EXPIRED`] beside its `process.*` refusals.
+pub const PROCESS_SHARED_REFUSALS: [ProcessRefusal; 1] = [process_refusal_entry(
+    LEASE_EXPIRED,
+    409,
+    "An expired lease cannot be renewed.",
+)];
 
 /// The named refusal of this surface with `code`, if it is one.
 pub fn process_refusal(code: &str) -> Option<ProcessRefusal> {

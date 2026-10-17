@@ -16,15 +16,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   delegated lane an exec runs confined in the adopted directory with its output and exit observed,
   and the isolation cases run against the adopted workspace as well as a created one; on the
   portable lane the adopted exec is `exec.sandbox-unavailable`. A no-nested-user-namespace case
-  joins the isolation cases. The runtime vectors grow to 83 portable and 125 delegated cases.
+  joins the isolation cases.
+- The clean-room route inventory reads the `0.20.0` operation registry and probes the seven
+  host-process routes through the shipped daemon. Without a delegated cgroup `process.host` is not
+  published, a start, stop, stop by owner and lease renewal answer `process.host-unserved` (501),
+  the list is empty and an unknown record is `process.not-found`; with one, `process.host` is
+  published, a start without a profile is `process.profile-required` and nothing runs. The runtime
+  vectors grow to 90 portable and 132 delegated cases.
 - Development contract bundle `substrate-wire/0.20.0`, the additive successor of `0.19.0` (ADR 0036
   S1 to S7 and S11): the seven host-process routes under `/v1/processes` with the `process` scope,
   the optional `process.host` capability fact, the closed `process` record and log tail, their
-  bounds and the seventeen named refusals, each held to its `substrate_wire` constant by
-  `cargo xtask check-bundle 0.20.0`. The daemon and Rust SDK advertise it; the daemon routes land
-  separately.
+  bounds, the seventeen named refusals and the shared `lease.expired` (409) on lease renewal, each
+  held to its `substrate_wire` constant by `cargo xtask check-bundle 0.20.0`. The daemon and Rust
+  SDK advertise it; the daemon routes land separately.
 - `substrate_wire`: the host-process wire types generated from `spec/host-processes/wire.yaml`,
-  their bounds, refusals, `PROCESS_HOST_FACT` and `PROCESS_ID_PREFIX`.
+  their bounds, refusals, `PROCESS_SHARED_REFUSALS` (`LEASE_EXPIRED`), `PROCESS_HOST_FACT` and
+  `PROCESS_ID_PREFIX`.
 
 ## [0.7.17] — 2026-10-17
 

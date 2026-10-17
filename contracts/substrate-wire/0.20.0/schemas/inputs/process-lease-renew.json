@@ -17,6 +17,11 @@
   "type": "object",
   "x-b10x-refusals": [
     {
+      "class": "unserved",
+      "code": "process.host-unserved",
+      "status": 501
+    },
+    {
       "class": "refused",
       "code": "process.host-posture-refused",
       "status": 403
@@ -30,6 +35,11 @@
       "class": "refused",
       "code": "process.not-found",
       "status": 404
+    },
+    {
+      "class": "conflict",
+      "code": "lease.expired",
+      "status": 409
     }
   ]
 }

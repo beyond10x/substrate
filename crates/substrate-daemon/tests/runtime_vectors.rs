@@ -43,9 +43,9 @@ const DAEMON: &str = env!("CARGO_BIN_EXE_substrate-daemon");
 const CGROUP_EXEC: &str = env!("CARGO_BIN_EXE_substrate-cgroup-exec");
 const DAEMON_OVERRIDE_VARIABLE: &str = "SUBSTRATE_VECTORS_DAEMON";
 /// Pinned independently of the daemon implementation: the clean-room client verifies what ships.
-const ADVERTISED_CONTRACT: &str = "substrate-wire/0.19.0";
+const ADVERTISED_CONTRACT: &str = "substrate-wire/0.20.0";
 const ADVERTISED_CONTRACT_SHA256: &str =
-    "2590ccad60fb25df236426254005aeb874b8a08f7d38ec173dc864bb48aeeddd";
+    "52f72530cecf1b0e5d70fdca47abd27b844b89f65e6da2827c70fbf10d97a6d5";
 
 fn daemon_binary() -> PathBuf {
     std::env::var_os(DAEMON_OVERRIDE_VARIABLE).map_or_else(|| PathBuf::from(DAEMON), PathBuf::from)
@@ -2209,7 +2209,11 @@ async fn check_exec_lease(daemon: &Daemon, workspace: &str, snapshot: &str, cgro
 /// reaches every address declared by the promoted bundle and carries the promoted identity on the
 /// HTTP response or WebSocket handshake path.
 #[allow(clippy::too_many_lines)] // Keeping the complete declarative inventory together makes drift reviewable.
-async fn check_promoted_route_inventory(daemon: &Daemon, workspace: &str) -> usize {
+async fn check_promoted_route_inventory(
+    daemon: &Daemon,
+    workspace: &str,
+    process_host: bool,
+) -> usize {
     type Probe<'a> = (&'a str, &'a str, String, Option<&'a [u8]>, u16, &'a str);
     let invalid_body = b"{}".as_slice();
     let probes: Vec<Probe<'_>> = vec![
@@ -2500,11 +2504,104 @@ async fn check_promoted_route_inventory(daemon: &Daemon, workspace: &str) -> usi
             "request.schema-invalid",
         ),
     ];
+    // The host-process family (ADR 0036): no probe may start a program. Without a delegated
+    // cgroup the daemon serves no host process, so a well-formed start and every mutation of a
+    // record answer `process.host-unserved` (501), never a degraded start; the reads still answer,
+    // an unknown id is `process.not-found`. With one, the start omits its profile (refused before
+    // anything runs) and the mutations name a record that does not exist.
+    let process_absent = "proc_01JPROBEABSENT0000000001";
+    let process_start = serde_json::to_vec(&json!({
+        "op": "01JPROBEPROCESSSTART00001",
+        "input": {
+            "argv": ["/usr/bin/true"],
+            "cwd": "/",
+            "env": {},
+            "lease": { "ttl_ms": 60_000 },
+            "owner": { "name": "probe", "session": "sess-probe" },
+            "profile": "host",
+            "reason": "Route inventory probe.",
+        },
+    }))
+    .expect("process start JSON");
+    let process_start_unprofiled = serde_json::to_vec(&json!({
+        "op": "01JPROBEPROCESSSTART00002",
+        "input": {
+            "argv": ["/usr/bin/true"],
+            "cwd": "/",
+            "env": {},
+            "lease": { "ttl_ms": 60_000 },
+            "owner": { "name": "probe", "session": "sess-probe" },
+            "reason": "Route inventory probe.",
+        },
+    }))
+    .expect("process start JSON");
+    let process_stop = mutation("01JPROBEPROCESSSTOP000001", &json!({}));
+    let process_stop_by_owner = br#"{"owner_session":"sess-probe-absent"}"#.as_slice();
+    let process_renew = mutation("01JPROBEPROCESSRENEW00001", &json!({ "ttl_ms": 60_000 }));
+    let (start_body, start_status, start_code, mutation_status, mutation_code) = if process_host {
+        (
+            process_start_unprofiled.as_slice(),
+            422,
+            "process.profile-required",
+            404,
+            "process.not-found",
+        )
+    } else {
+        (
+            process_start.as_slice(),
+            501,
+            "process.host-unserved",
+            501,
+            "process.host-unserved",
+        )
+    };
+    let process_probes: Vec<Probe<'_>> = vec![
+        (
+            "process.start",
+            "POST",
+            "/v1/processes".to_owned(),
+            Some(start_body),
+            start_status,
+            start_code,
+        ),
+        (
+            "process.get",
+            "GET",
+            format!("/v1/processes/{process_absent}"),
+            None,
+            404,
+            "process.not-found",
+        ),
+        (
+            "process.stop",
+            "POST",
+            format!("/v1/processes/{process_absent}/stop"),
+            Some(process_stop.as_slice()),
+            mutation_status,
+            mutation_code,
+        ),
+        (
+            "process.lease.renew",
+            "POST",
+            format!("/v1/processes/{process_absent}/lease/renew"),
+            Some(process_renew.as_slice()),
+            mutation_status,
+            mutation_code,
+        ),
+        (
+            "process.logs.get",
+            "GET",
+            format!("/v1/processes/{process_absent}/logs"),
+            None,
+            404,
+            "process.not-found",
+        ),
+    ];
 
     let expected: BTreeSet<String> = {
         let registry = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
-            .join("contracts/substrate-wire/0.19.0/operations.json");
+            .join("contracts/substrate-wire/0.20.0/operations.json");
         let document: Value = serde_json::from_slice(
             &std::fs::read(&registry).expect("promoted operation registry bytes"),
         )
@@ -2524,6 +2621,8 @@ async fn check_promoted_route_inventory(daemon: &Daemon, workspace: &str) -> usi
         .iter()
         .map(|(id, ..)| (*id).to_owned())
         .chain(upgrade_probes.iter().map(|(id, ..)| (*id).to_owned()))
+        .chain(process_probes.iter().map(|(id, ..)| (*id).to_owned()))
+        .chain(["process.list", "process.stop-by-owner"].map(str::to_owned))
         .collect();
     assert_eq!(covered, expected, "shipped-binary route probes drifted");
 
@@ -2538,6 +2637,64 @@ async fn check_promoted_route_inventory(daemon: &Daemon, workspace: &str) -> usi
         let observed = upgrade_refusal(&daemon.socket, path, &request_id).await;
         expect_error(&observed, *status, code);
         assert!(observed.1["error"].is_object(), "{id}: {}", observed.1);
+    }
+
+    let (status, machine) = daemon
+        .call("GET", "/v1/machine", "req_promoted_process_fact", None)
+        .await;
+    assert_eq!(status, 200, "{machine}");
+    let published = &machine["result"]["facts"]["process.host"];
+    if process_host {
+        assert_eq!(
+            published,
+            &json!(true),
+            "process.host on the delegated lane"
+        );
+    } else {
+        assert!(
+            published.is_null(),
+            "process.host published without a delegated cgroup"
+        );
+    }
+    for (index, (id, method, path, body, status, code)) in process_probes.iter().enumerate() {
+        let request_id = format!("req_promoted_process_{index:02}");
+        let observed = daemon.call(method, path, &request_id, *body).await;
+        expect_error(&observed, *status, code);
+        assert_eq!(observed.1["error"]["code"], *code, "{id}: {}", observed.1);
+    }
+    // The reads answer on both lanes: no record of this subject exists yet.
+    let (status, listed) = daemon
+        .call(
+            "GET",
+            "/v1/processes?owner_session=sess-probe",
+            "req_promoted_process_list",
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "process.list: {listed}");
+    assert_eq!(
+        listed["result"]["items"],
+        json!([]),
+        "process.list: {listed}"
+    );
+    let stopped_by_owner = daemon
+        .call(
+            "POST",
+            "/v1/processes/stop",
+            "req_promoted_process_stop_by_owner",
+            Some(process_stop_by_owner),
+        )
+        .await;
+    if process_host {
+        assert_eq!(stopped_by_owner.0, 200, "{}", stopped_by_owner.1);
+        assert_eq!(
+            stopped_by_owner.1["result"],
+            json!({ "owner_session": "sess-probe-absent", "stopped": [] }),
+            "process.stop-by-owner: {}",
+            stopped_by_owner.1
+        );
+    } else {
+        expect_error(&stopped_by_owner, 501, "process.host-unserved");
     }
     covered.len()
 }
@@ -2575,7 +2732,7 @@ async fn check_http_journey(
     assert!(workspace.starts_with("ws_"));
     passed += 1;
 
-    passed += check_promoted_route_inventory(daemon, &workspace).await;
+    passed += check_promoted_route_inventory(daemon, &workspace, cgroup_root.is_some()).await;
 
     let (status, replay) = daemon
         .call(
@@ -4679,8 +4836,8 @@ async fn check_read_only_file_host_refusals(
 // ---------------------------------------------------------------------------------------------
 
 /// The predecessor printed its case count; the port asserts it, so a case cannot vanish quietly.
-const PORTABLE_CASES: usize = 83;
-const DELEGATED_CASES: usize = 125;
+const PORTABLE_CASES: usize = 90;
+const DELEGATED_CASES: usize = 132;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {

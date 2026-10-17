@@ -4,11 +4,12 @@
 use serde_json::{Value, json};
 
 use super::{
-    CapabilityFacts, MAX_LEASE_TTL_MS, MAX_PROCESS_ARGV_BYTES, MAX_PROCESS_ARGV_ITEMS,
-    MAX_PROCESS_ENV_BYTES, MAX_PROCESS_ENV_ITEMS, MAX_PROCESS_LIST_ITEMS, MAX_PROCESS_LOG_BYTES,
-    MAX_PROCESS_LOG_LINE_BYTES, MAX_PROCESS_LOG_TAIL_BYTES, MAX_PROCESS_OWNER_BYTES,
-    MAX_PROCESS_REASON_BYTES, MAX_PROCESS_TIMEOUT_MS, MAX_PROCESSES_PER_SUBJECT, MIN_LEASE_TTL_MS,
-    PROCESS_HOST_FACT, PROCESS_REFUSALS, PROCESS_RETAIN_ENDED_COUNT, PROCESS_RETAIN_ENDED_MS,
+    CapabilityFacts, LEASE_EXPIRED, MAX_LEASE_TTL_MS, MAX_PROCESS_ARGV_BYTES,
+    MAX_PROCESS_ARGV_ITEMS, MAX_PROCESS_ENV_BYTES, MAX_PROCESS_ENV_ITEMS, MAX_PROCESS_LIST_ITEMS,
+    MAX_PROCESS_LOG_BYTES, MAX_PROCESS_LOG_LINE_BYTES, MAX_PROCESS_LOG_TAIL_BYTES,
+    MAX_PROCESS_OWNER_BYTES, MAX_PROCESS_REASON_BYTES, MAX_PROCESS_TIMEOUT_MS,
+    MAX_PROCESSES_PER_SUBJECT, MIN_LEASE_TTL_MS, PROCESS_HOST_FACT, PROCESS_REFUSALS,
+    PROCESS_RETAIN_ENDED_COUNT, PROCESS_RETAIN_ENDED_MS, PROCESS_SHARED_REFUSALS,
     PROCESS_STOP_GRACE_MS, ProcessConfinement, ProcessCpu, ProcessDeadline, ProcessDeadlineSource,
     ProcessEndedBy, ProcessEnvDigest, ProcessExit, ProcessKind, ProcessLease, ProcessLeaseState,
     ProcessListQuery, ProcessLogLine, ProcessLogStream, ProcessLogStreamSelection, ProcessLogTail,
@@ -317,6 +318,29 @@ fn process_refusals_are_the_adr_table_for_this_surface() {
     ] {
         assert_eq!(process_refusal(deferred), None, "{deferred}");
     }
+}
+
+/// `process.lease.renew` declares the shared `lease.expired` with the status, class and message the
+/// workspace and exec lease renewals already answer; it is not a `process.*` code.
+#[test]
+fn process_shared_refusals_are_the_lease_renewal_codes() {
+    let table: Vec<(&str, u16, Value)> = PROCESS_SHARED_REFUSALS
+        .iter()
+        .map(|refusal| {
+            (
+                refusal.code,
+                refusal.status,
+                serde_json::to_value(refusal.class).expect("class"),
+            )
+        })
+        .collect();
+    assert_eq!(table, [(LEASE_EXPIRED, 409, json!("conflict"))]);
+    assert_eq!(LEASE_EXPIRED, "lease.expired");
+    assert_eq!(
+        PROCESS_SHARED_REFUSALS[0].message,
+        "An expired lease cannot be renewed."
+    );
+    assert_eq!(process_refusal(LEASE_EXPIRED), None);
 }
 
 #[test]

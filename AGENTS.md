@@ -45,8 +45,9 @@ Each is a claim that can be checked. Breaking one is a design change, not a refa
 6. **Every released contract bundle directory is immutable.** `contracts/substrate-wire/0.1.0`
    through `0.20.0` exist; `0.20.0` adds the host-process family of ADR 0036 S1 to S7 and S11: seven
    `/v1/processes` routes under the new `process` scope, the optional `process.host` fact, the
-   closed `process` record (always `profile: host`, `confinement: none`), its bounds and seventeen
-   named refusals, each held to its `substrate_wire` constant by `cargo xtask check-bundle 0.20.0`;
+   closed `process` record (always `profile: host`, `confinement: none`), its bounds, seventeen
+   named refusals and the shared `lease.expired` on renewal, each held to its `substrate_wire`
+   constant by `cargo xtask check-bundle 0.20.0`;
    `0.19.0` added the explicit `workspace.adopt` route at
    `POST /v1/workspaces/adopt` and two required read-only members, `origin` and `root_name`, on the
    closed workspace resource, with `workspace-id` unchanged and still `ws_`-prefixed (ADR 0035; its compatibility block
@@ -238,9 +239,11 @@ hand-written HTTP/1.1 and WebSocket client, so it links no implementation and as
 the wire; `cargo test --workspace --release --locked` runs it. Its portable lane asserts three named
 refusals — `exec.sandbox-unavailable` (501), `exec.secret-slots-unserved` (501) and
 `exec.secret-slot-descriptor-invalid` (422) — plus `session.pty-unserved` (501), the five lexical
-`exec.read-only-file*` refusals (422) and `exec.read-only-files-unserved` (501) — across 83 cases,
-and its delegated lane 125. Both totals include one route/refusal probe for every operation in the
-promoted registry, and an operator's directory adopted through `workspace.adopt` (ADR 0035): its
+`exec.read-only-file*` refusals (422), `exec.read-only-files-unserved` (501) and
+`process.host-unserved` (501) — across 90 cases, and its delegated lane 132. Both totals include
+one route/refusal probe for every operation in the promoted registry (the seven host-process routes
+of `0.20.0` among them: unserved on the portable lane, served and refused before anything runs on
+the delegated one), and an operator's directory adopted through `workspace.adopt` (ADR 0035): its
 out-of-set neighbour refused as `request.schema-invalid` before dispatch, an exec addressing it by
 root name refused, a destroy that leaves its files, and, delegated, an exec run in it plus every
 `check_confined_isolation` case run again against it (portable: `exec.sandbox-unavailable`

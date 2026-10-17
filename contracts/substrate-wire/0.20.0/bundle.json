@@ -693,10 +693,10 @@
       "sha256": "3f856e0cfedd1ebf65d5517689c6e2afdaef7a500e32fb54f7bf41d20567ebaf"
     },
     {
-      "byte_length": 844,
+      "byte_length": 1034,
       "media_type": "application/json",
       "path": "schemas/inputs/process-lease-renew.json",
-      "sha256": "2981eb3819761ef91cb7f28b94c85f904e2015e5fbe5ffca3b166d5a4a9ad1dc"
+      "sha256": "de30228d6df4bf738630b159a5b358120bdee9e3bc1e3f2b33f08eef6b309ab2"
     },
     {
       "byte_length": 1063,
@@ -717,16 +717,16 @@
       "sha256": "edc7f9711b46db4a3e70dd229b42873855675a359243eda7c54086cf43178049"
     },
     {
-      "byte_length": 935,
+      "byte_length": 1034,
       "media_type": "application/json",
       "path": "schemas/inputs/process-stop-by-owner.json",
-      "sha256": "5d20436ec5e7d0d4c58beb5962d75805a151e63a316d725a925cc1baeadfc139"
+      "sha256": "852267f8c4bed9472cfe4ecc43337aa54bec56c889aa265e2d1fae35082cddd8"
     },
     {
-      "byte_length": 764,
+      "byte_length": 863,
       "media_type": "application/json",
       "path": "schemas/inputs/process-stop.json",
-      "sha256": "d0bbc0d347689279c5641d23d5cbe78e66f580d385ced7e1671123a3988c637b"
+      "sha256": "d5f6cab79f853cbaab26a9da19a78ba3f6950afbcda6ee2b609fb62e8ba36c8d"
     },
     {
       "byte_length": 296,
