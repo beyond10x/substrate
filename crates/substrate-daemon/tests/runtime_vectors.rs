@@ -45,7 +45,7 @@ const DAEMON_OVERRIDE_VARIABLE: &str = "SUBSTRATE_VECTORS_DAEMON";
 /// Pinned independently of the daemon implementation: the clean-room client verifies what ships.
 const ADVERTISED_CONTRACT: &str = "substrate-wire/0.19.0";
 const ADVERTISED_CONTRACT_SHA256: &str =
-    "ad97591c3302e4c0f92ed665cf14d5df678dfd65b7fdff5a129fdca5a751b19d";
+    "2590ccad60fb25df236426254005aeb874b8a08f7d38ec173dc864bb48aeeddd";
 
 fn daemon_binary() -> PathBuf {
     std::env::var_os(DAEMON_OVERRIDE_VARIABLE).map_or_else(|| PathBuf::from(DAEMON), PathBuf::from)

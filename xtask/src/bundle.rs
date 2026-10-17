@@ -1015,7 +1015,10 @@ fn check_adopt_route(released: &Tree, failures: &mut Vec<String>) {
         ("required_scope", json!("workspaces")),
         ("input_binding", json!("body.input")),
         ("input_schema", json!("schemas/inputs/workspace-adopt.json")),
-        ("result_schema", json!("schemas/results/workspace-adopt.json")),
+        (
+            "result_schema",
+            json!("schemas/results/workspace-adopt.json"),
+        ),
     ] {
         if adopt.get(member) != Some(&expected) {
             failures.push(format!(
@@ -1034,7 +1037,9 @@ fn check_adopt_input(released: &Tree, failures: &mut Vec<String>) {
         failures.push(format!("{path}: the adopt input must be closed"));
     }
     if input.get("required") != Some(&json!(["root_name", "labels"])) {
-        failures.push(format!("{path}: required must be exactly root_name and labels"));
+        failures.push(format!(
+            "{path}: required must be exactly root_name and labels"
+        ));
     }
     let expected = json!({
         "labels": { "$ref": "../common.json#/$defs/labels" },
@@ -1108,8 +1113,7 @@ fn check_minted_workspace_id(released: &Tree, failures: &mut Vec<String>) {
     let Some(common) = json_at(released, "schemas/common.json", failures) else {
         return;
     };
-    if common.pointer("/$defs/workspace-id/pattern") != Some(&json!(MINTED_WORKSPACE_ID_PATTERN))
-    {
+    if common.pointer("/$defs/workspace-id/pattern") != Some(&json!(MINTED_WORKSPACE_ID_PATTERN)) {
         failures.push(format!(
             "schemas/common.json: workspace-id must stay {MINTED_WORKSPACE_ID_PATTERN}"
         ));
@@ -1156,14 +1160,16 @@ fn check_adopt_vectors(released: &Tree, failures: &mut Vec<String>) {
             continue;
         }
         let mut pairs = Vec::new();
-        if let Some(request) = vector.pointer("/action/request") {
-            if let Some(response) = vector.pointer("/expected/response") {
-                pairs.push((request, response));
-            }
+        if let Some(request) = vector.pointer("/action/request")
+            && let Some(response) = vector.pointer("/expected/response")
+        {
+            pairs.push((request, response));
         }
         if let (Some(steps), Some(responses)) = (
             vector.pointer("/action/steps").and_then(Value::as_array),
-            vector.pointer("/expected/responses").and_then(Value::as_array),
+            vector
+                .pointer("/expected/responses")
+                .and_then(Value::as_array),
         ) {
             for (step, response) in steps.iter().zip(responses) {
                 if let Some(request) = step.get("request") {
@@ -1185,17 +1191,16 @@ fn check_adopt_vectors(released: &Tree, failures: &mut Vec<String>) {
                 {
                     out_of_set = true;
                 }
-            } else if let Some(result) = response.pointer("/body/result") {
-                if result.get("origin") == Some(&json!("adopted"))
-                    && root_name.is_some()
-                    && result.get("root_name") == root_name
-                    && result
-                        .get("id")
-                        .and_then(Value::as_str)
-                        .is_some_and(|id| id.starts_with("ws_"))
-                {
-                    succeeded = true;
-                }
+            } else if let Some(result) = response.pointer("/body/result")
+                && result.get("origin") == Some(&json!("adopted"))
+                && root_name.is_some()
+                && result.get("root_name") == root_name
+                && result
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .is_some_and(|id| id.starts_with("ws_"))
+            {
+                succeeded = true;
             }
         }
     }

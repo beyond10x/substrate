@@ -17,7 +17,7 @@ pub const API_VERSION: &str = "v1";
 /// Moving either member is an explicit coordinated promotion (Atlas ADR 0019).
 pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.19.0";
 pub const ADVERTISED_CONTRACT_BUNDLE_SHA256: &str =
-    "ad97591c3302e4c0f92ed665cf14d5df678dfd65b7fdff5a129fdca5a751b19d";
+    "2590ccad60fb25df236426254005aeb874b8a08f7d38ec173dc864bb48aeeddd";
 pub const MAX_FILE_BYTES: u64 = 1_048_576;
 pub const MAX_IO_BYTES: u64 = 1_048_576;
 pub const MAX_LIST_ITEMS: u32 = 1_000;

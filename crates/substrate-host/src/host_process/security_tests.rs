@@ -59,12 +59,11 @@ async fn wait_for_line(supervisor: &HostProcessSupervisor, id: &str, wanted: &st
     for _ in 0..100 {
         let seen = supervisor
             .log_tail(id, LogStreamSelection::Stdout, 4_096)
-            .map(|tail| {
+            .is_ok_and(|tail| {
                 tail.lines
                     .iter()
                     .any(|line| line.bytes == wanted.as_bytes())
-            })
-            .unwrap_or(false);
+            });
         if seen {
             return true;
         }

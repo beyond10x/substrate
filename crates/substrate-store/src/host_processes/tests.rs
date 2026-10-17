@@ -308,11 +308,18 @@ fn lease_ttl_outside_the_lease_bounds_is_refused_and_the_bounds_are_admitted() {
     );
 }
 
+/// One lexical case: its name, the edit that breaks the start, and the refusal it must earn.
+type LexicalCase = (
+    &'static str,
+    Box<dyn Fn(&mut NewHostProcess)>,
+    HostProcessRefusal,
+);
+
 #[test]
 fn lexical_start_fields_are_named_refusals() {
     let (_dir, store) = open();
     let alice = scope("local:1000");
-    let cases: Vec<(&str, Box<dyn Fn(&mut NewHostProcess)>, HostProcessRefusal)> = vec![
+    let cases: Vec<LexicalCase> = vec![
         (
             "owner-session",
             Box::new(|p| p.owner_session.clear()),

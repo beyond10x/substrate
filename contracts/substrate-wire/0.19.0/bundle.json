@@ -1791,10 +1791,10 @@
       "sha256": "7c277ed63fe9d194152f2f0cd697021098d73e9ff53475592918df77fc691ee4"
     },
     {
-      "byte_length": 5094,
+      "byte_length": 3954,
       "media_type": "application/json",
       "path": "vectors/http/workspace-adopt-root-name-out-of-set.json",
-      "sha256": "2b35dd497157dccf207407890cbad01bee1775b1da3a762cf32c28bea922090c"
+      "sha256": "1946655ef22fa2a664887edfe3985cafde88923b57aab1204bc4146edb904748"
     },
     {
       "byte_length": 4130,

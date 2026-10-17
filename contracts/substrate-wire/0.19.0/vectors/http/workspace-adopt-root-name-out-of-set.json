@@ -1,50 +1,27 @@
 {
   "$schema": "../../schemas/vector.json",
   "action": {
-    "kind": "http-sequence",
+    "kind": "http",
     "operation": "workspace.adopt",
-    "steps": [
-      {
-        "request": {
-          "body": {
-            "input": {
-              "labels": {
-                "vector": "workspace-adopt-of-an-out-of-set-name-is-refused-and-recorded"
-              },
-              "root_name": ".substrate-apertures"
-            },
-            "op": "01JADOPTWORKSPACEOUTSET1"
+    "request": {
+      "body": {
+        "input": {
+          "labels": {
+            "vector": "workspace-adopt-of-an-out-of-set-name-is-refused-and-recorded"
           },
-          "headers": {
-            "x-request-id": "req_adopt_outset1"
-          },
-          "method": "POST",
-          "path": "/v1/workspaces/adopt",
-          "query": {}
+          "root_name": ".substrate-apertures"
         },
-        "valid_input": false
+        "op": "01JADOPTWORKSPACEOUTSET1"
       },
-      {
-        "request": {
-          "body": {
-            "input": {
-              "labels": {
-                "vector": "workspace-adopt-of-an-out-of-set-name-is-refused-and-recorded"
-              },
-              "root_name": ".substrate-apertures"
-            },
-            "op": "01JADOPTWORKSPACEOUTSET1"
-          },
-          "headers": {
-            "x-request-id": "req_adopt_outset2"
-          },
-          "method": "POST",
-          "path": "/v1/workspaces/adopt",
-          "query": {}
-        },
-        "valid_input": false
-      }
-    ]
+      "headers": {
+        "x-request-id": "req_adopt_outset1"
+      },
+      "method": "POST",
+      "path": "/v1/workspaces/adopt",
+      "query": {}
+    },
+    "valid_address": true,
+    "valid_input": false
   },
   "context": {
     "actor": "vector-client",
@@ -62,39 +39,22 @@
     "workspace.adopt.root-name-set"
   ],
   "expected": {
-    "kind": "http-sequence",
-    "responses": [
-      {
-        "body": {
-          "api_version": "v1",
-          "error": {
-            "address": "root_name",
-            "class": "refused",
-            "code": "request.schema-invalid",
-            "message": "Request does not match the closed operation schema.",
-            "operation": "01JADOPTWORKSPACEOUTSET1",
-            "retriable": false
-          },
-          "request_id": "req_adopt_outset1"
+    "kind": "http-response",
+    "response": {
+      "body": {
+        "api_version": "v1",
+        "error": {
+          "address": "root_name",
+          "class": "refused",
+          "code": "request.schema-invalid",
+          "message": "Request does not match the closed operation schema.",
+          "operation": "01JADOPTWORKSPACEOUTSET1",
+          "retriable": false
         },
-        "status": 422
+        "request_id": "req_adopt_outset1"
       },
-      {
-        "body": {
-          "api_version": "v1",
-          "error": {
-            "address": "root_name",
-            "class": "refused",
-            "code": "request.schema-invalid",
-            "message": "Request does not match the closed operation schema.",
-            "operation": "01JADOPTWORKSPACEOUTSET1",
-            "retriable": false
-          },
-          "request_id": "req_adopt_outset2"
-        },
-        "status": 422
-      }
-    ]
+      "status": 422
+    }
   },
   "id": "workspace-adopt-of-an-out-of-set-name-is-refused-and-recorded",
   "layer": "http",

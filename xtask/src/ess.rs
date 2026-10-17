@@ -126,40 +126,7 @@ pub fn check(root: &Path) -> Result<Report> {
         "ESS suite drift: regenerate spec/operations-suite.json with the pinned ESS release"
     );
     check_host_processes(root, dir.path())?;
-    run(
-        root,
-        &[
-            "specify",
-            "validate",
-            "--path",
-            "spec/sessions",
-            "--strict-requires",
-        ],
-    )?;
-    let types = dir.path().join("capture-types");
-    run(
-        root,
-        &[
-            "generate",
-            "types",
-            "--path",
-            "spec/sessions",
-            "--root",
-            "substrate.sessions.CaptureMode",
-            "--target",
-            "rust",
-            "--package",
-            "b10x-substrate-capture-types",
-            "--out",
-            types.to_str().context("UTF-8 type output")?,
-            "--strict-requires",
-        ],
-    )?;
-    ensure!(
-        fs::read(types.join("types.rs"))?
-            == fs::read(root.join("crates/substrate-wire/src/generated/capture.rs"))?,
-        "ESS capture type drift: regenerate the selected type with the pinned ESS release"
-    );
+    check_capture_types(root, dir.path())?;
     check_workspaces(root, dir.path())?;
     run(
         root,
@@ -205,6 +172,45 @@ pub fn check(root: &Path) -> Result<Report> {
     Ok(Report::passed(
         "ESS specification, committed suite and CLI contract are current; production execution runs in the substrate-store test suite",
     ))
+}
+
+/// The sessions domain and the one capture type generated from it.
+fn check_capture_types(root: &Path, dir: &Path) -> Result<()> {
+    run(
+        root,
+        &[
+            "specify",
+            "validate",
+            "--path",
+            "spec/sessions",
+            "--strict-requires",
+        ],
+    )?;
+    let types = dir.join("capture-types");
+    run(
+        root,
+        &[
+            "generate",
+            "types",
+            "--path",
+            "spec/sessions",
+            "--root",
+            "substrate.sessions.CaptureMode",
+            "--target",
+            "rust",
+            "--package",
+            "b10x-substrate-capture-types",
+            "--out",
+            types.to_str().context("UTF-8 type output")?,
+            "--strict-requires",
+        ],
+    )?;
+    ensure!(
+        fs::read(types.join("types.rs"))?
+            == fs::read(root.join("crates/substrate-wire/src/generated/capture.rs"))?,
+        "ESS capture type drift: regenerate the selected type with the pinned ESS release"
+    );
+    Ok(())
 }
 
 /// The host-process domain (ADR 0036) and its authored acceptance scenarios.
