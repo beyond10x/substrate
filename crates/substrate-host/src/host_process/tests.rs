@@ -388,12 +388,12 @@ fn a_tail_is_bounded_by_bytes_and_keeps_the_newest_lines() {
 fn a_line_longer_than_the_line_bound_is_stored_cut_with_its_full_length() {
     let directory = tempfile::tempdir().expect("dir");
     let log = log_with_bound(directory.path(), 4_096);
-    let long = vec![b'x'; 64];
-    log.append_line(LogStream::Stdout, &long, Some(1_000))
+    let overlong = vec![b'x'; 64];
+    log.append_line(LogStream::Stdout, &overlong, Some(1_000))
         .expect("append");
     let tail = log.tail(LogStreamSelection::Both, 4_096).expect("tail");
     assert_eq!(tail.lines.len(), 1);
-    assert_eq!(tail.lines[0].bytes, long);
+    assert_eq!(tail.lines[0].bytes, overlong);
     assert!(tail.lines[0].truncated);
     assert_eq!(tail.lines[0].full_len, 1_000);
 }
@@ -544,7 +544,7 @@ async fn delegated_main_exit_records_its_code_its_tagged_log_and_an_empty_remove
     let started = supervisor
         .spawn(
             "hp_exit",
-            spec(
+            &spec(
                 &[
                     "/bin/sh",
                     "-c",
@@ -553,7 +553,6 @@ async fn delegated_main_exit_records_its_code_its_tagged_log_and_an_empty_remove
                 &workdir(),
             ),
         )
-        .await
         .expect("spawn");
     assert_eq!(started.profile, HostProfile::Host);
     assert_eq!(started.confinement, Confinement::None);
@@ -591,7 +590,7 @@ async fn delegated_environment_is_exactly_the_request_env() {
     };
     let mut request = spec(&["/usr/bin/env"], &workdir());
     request.env.insert("ONLY_THIS".to_owned(), "1".to_owned());
-    supervisor.spawn("hp_env", request).await.expect("spawn");
+    supervisor.spawn("hp_env", &request).expect("spawn");
     supervisor.wait("hp_env").await.expect("end");
     let tail = supervisor
         .log_tail("hp_env", LogStreamSelection::Stdout, 65_536)
@@ -611,8 +610,7 @@ async fn delegated_a_missing_program_is_a_named_spawn_failure_and_leaves_no_cgro
         return;
     };
     let error = supervisor
-        .spawn("hp_missing", spec(&["/nonexistent/program"], &workdir()))
-        .await
+        .spawn("hp_missing", &spec(&["/nonexistent/program"], &workdir()))
         .expect_err("absent program");
     assert_eq!(error.code, super::SPAWN_FAILED);
     assert!(!cgroup_dir(&root, "hp_missing").exists());
@@ -624,8 +622,7 @@ async fn delegated_stop_ends_a_cooperative_tree_at_sigterm() {
         return;
     };
     supervisor
-        .spawn("hp_term", spec(&["/bin/sleep", "300"], &workdir()))
-        .await
+        .spawn("hp_term", &spec(&["/bin/sleep", "300"], &workdir()))
         .expect("spawn");
     assert!(cgroup_dir(&root, "hp_term").is_dir());
     let end = supervisor
@@ -647,8 +644,7 @@ async fn delegated_stop_kills_a_detached_term_ignoring_tree_with_cgroup_kill() {
     // from the main process; membership, not the process tree, defines what stop ends.
     let script = "trap '' TERM; setsid sleep 300 </dev/null >/dev/null 2>&1 & echo $! ; sleep 300";
     supervisor
-        .spawn("hp_kill", spec(&["/bin/sh", "-c", script], &workdir()))
-        .await
+        .spawn("hp_kill", &spec(&["/bin/sh", "-c", script], &workdir()))
         .expect("spawn");
     tokio::time::sleep(Duration::from_millis(300)).await;
     let grandchild = supervisor
@@ -678,8 +674,7 @@ async fn delegated_main_exit_with_remaining_members_stops_them_and_keeps_exit() 
     };
     let script = "setsid sleep 300 </dev/null >/dev/null 2>&1 & exit 0";
     supervisor
-        .spawn("hp_orphans", spec(&["/bin/sh", "-c", script], &workdir()))
-        .await
+        .spawn("hp_orphans", &spec(&["/bin/sh", "-c", script], &workdir()))
         .expect("spawn");
     let end = supervisor.wait("hp_orphans").await.expect("end");
     assert_eq!(end.ended_by, EndedBy::Exit);
@@ -695,10 +690,7 @@ async fn delegated_timeout_ends_the_process_as_timeout_not_stop() {
     };
     let mut request = spec(&["/bin/sleep", "300"], &workdir());
     request.deadline = Deadline::effective(Some(1_000), None, Utc::now()).expect("deadline");
-    supervisor
-        .spawn("hp_timeout", request)
-        .await
-        .expect("spawn");
+    supervisor.spawn("hp_timeout", &request).expect("spawn");
     let end = tokio::time::timeout(Duration::from_secs(20), supervisor.wait("hp_timeout"))
         .await
         .expect("the deadline fires")
@@ -722,10 +714,7 @@ async fn delegated_expires_at_ends_the_process_as_expires_at() {
         .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let mut request = spec(&["/bin/sleep", "300"], &workdir());
     request.deadline = Deadline::effective(None, Some(&at), Utc::now()).expect("deadline");
-    supervisor
-        .spawn("hp_expires", request)
-        .await
-        .expect("spawn");
+    supervisor.spawn("hp_expires", &request).expect("spawn");
     let end = tokio::time::timeout(Duration::from_secs(20), supervisor.wait("hp_expires"))
         .await
         .expect("the deadline fires")
@@ -739,8 +728,7 @@ async fn delegated_lease_expiry_stop_is_recorded_as_lease_expiry() {
         return;
     };
     supervisor
-        .spawn("hp_lease", spec(&["/bin/sleep", "300"], &workdir()))
-        .await
+        .spawn("hp_lease", &spec(&["/bin/sleep", "300"], &workdir()))
         .expect("spawn");
     let end = supervisor
         .stop("hp_lease", StopCause::LeaseExpiry, Duration::from_secs(5))
@@ -773,10 +761,7 @@ async fn delegated_observation_reads_cpu_memory_and_a_listening_port_a_member_ho
     request
         .env
         .insert(LISTENING_HELPER_ENV.to_owned(), "1".to_owned());
-    supervisor
-        .spawn("hp_observe", request)
-        .await
-        .expect("spawn");
+    supervisor.spawn("hp_observe", &request).expect("spawn");
     let mut port = None;
     for _ in 0..100 {
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -837,5 +822,5 @@ fn listening_helper() {
         "LISTENING {}",
         listener.local_addr().expect("address").port()
     );
-    std::thread::sleep(Duration::from_secs(300));
+    std::thread::sleep(Duration::from_mins(5));
 }

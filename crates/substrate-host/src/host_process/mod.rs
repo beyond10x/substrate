@@ -67,7 +67,7 @@ pub const MAX_PROCESS_TIMEOUT_MS: u64 = 86_400_000;
 /// deadline, or the members left behind by a main process that exited.
 pub const DEFAULT_PROCESS_STOP_GRACE: Duration = Duration::from_secs(10);
 /// The longest grace a stop may ask for.
-pub const MAX_PROCESS_STOP_GRACE: Duration = Duration::from_secs(60);
+pub const MAX_PROCESS_STOP_GRACE: Duration = Duration::from_mins(1);
 /// The largest tail one log read returns.
 pub const MAX_PROCESS_LOG_TAIL_BYTES: u64 = 1_048_576;
 
@@ -472,6 +472,15 @@ fn validate_id(id: &str) -> Result<(), DriverError> {
 
 type EndState = Option<Result<HostProcessEnd, DriverError>>;
 
+/// Whether the stop sequence has run, and if so the step that emptied the cgroup.
+#[derive(Clone, Copy)]
+enum Termination {
+    /// The stop sequence has not completed.
+    NotRun,
+    /// It ran to completion; `None` when the cgroup was already empty.
+    Ran(Option<StopStep>),
+}
+
 struct Entry {
     cgroup: Cgroup,
     cgroup_path: PathBuf,
@@ -479,7 +488,7 @@ struct Entry {
     /// The first recorded end cause; never overwritten.
     claim: Mutex<Option<EndedBy>>,
     /// The stop sequence, run at most once to completion; holds the step that emptied the cgroup.
-    termination: tokio::sync::Mutex<Option<Option<StopStep>>>,
+    termination: tokio::sync::Mutex<Termination>,
     end: watch::Sender<EndState>,
 }
 
@@ -515,7 +524,7 @@ impl Entry {
     /// until the cgroup is empty. Run once; a later caller gets the recorded step.
     async fn terminate(&self, grace: Duration) -> Result<Option<StopStep>, DriverError> {
         let mut done = self.termination.lock().await;
-        if let Some(step) = *done {
+        if let Termination::Ran(step) = *done {
             return Ok(step);
         }
         let step = if self.populated()? {
@@ -536,7 +545,7 @@ impl Entry {
         } else {
             None
         };
-        *done = Some(step);
+        *done = Termination::Ran(step);
         Ok(step)
     }
 
@@ -636,10 +645,10 @@ impl HostProcessSupervisor {
     /// `process.id-invalid` for a malformed or already held id, `process.spawn-failed` when the
     /// program cannot be executed (nothing is left running and the cgroup is removed), and
     /// `process.cgroup-failed` or `process.log-failed` when the host cannot set it up.
-    pub async fn spawn(
+    pub fn spawn(
         self: &Arc<Self>,
         id: &str,
-        spec: HostProcessSpec,
+        spec: &HostProcessSpec,
     ) -> Result<HostProcessStarted, DriverError> {
         validate_id(id)?;
         spec.validate()?;
@@ -711,7 +720,7 @@ impl HostProcessSupervisor {
             cgroup_path,
             log: Arc::clone(&log),
             claim: Mutex::new(None),
-            termination: tokio::sync::Mutex::new(None),
+            termination: tokio::sync::Mutex::new(Termination::NotRun),
             end,
         });
         self.entries
