@@ -771,9 +771,12 @@ async fn delegated_observation_reads_cpu_memory_and_a_listening_port_a_member_ho
             .lines
             .iter()
             .find_map(|line| {
+                // libtest prints `test <name> ... ` without a newline before the helper runs, so
+                // with one test thread the marker follows it on the same line.
                 std::str::from_utf8(&line.bytes)
                     .ok()?
-                    .strip_prefix("LISTENING ")?
+                    .split_once("LISTENING ")?
+                    .1
                     .trim()
                     .parse::<u16>()
                     .ok()
@@ -782,7 +785,20 @@ async fn delegated_observation_reads_cpu_memory_and_a_listening_port_a_member_ho
             break;
         }
     }
-    let port = port.expect("the helper reported its port");
+    let Some(port) = port else {
+        let tail = supervisor
+            .log_tail("hp_observe", LogStreamSelection::Both, 65_536)
+            .expect("tail");
+        let text: Vec<String> = tail
+            .lines
+            .iter()
+            .map(|line| String::from_utf8_lossy(&line.bytes).into_owned())
+            .collect();
+        panic!(
+            "the helper reported no port; observed {:?}; log {text:?}",
+            supervisor.observe("hp_observe")
+        );
+    };
     let observed = supervisor.observe("hp_observe").expect("observe");
     assert_eq!(observed.confinement, Confinement::None);
     assert!(observed.cpu_usec.expect("cpu observed") > 0);
