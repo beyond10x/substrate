@@ -13,7 +13,7 @@ relations:
 - decides: story:host-process-listing
 - decides: story:host-process-logs
 - decides: story:host-process-deadlines
-revision: 2
+revision: 3
 transitions:
 - {from: "draft", to: "active", at: "2026-10-17T05:05:39Z", actor: "human:timo", revision: 2}
 ---
@@ -65,3 +65,22 @@ format committed. Where design 26 recommends one, it is taken.
 | 14 | log bound | bytes; at the bound the oldest bytes are discarded and the log states how many (design 26 § logs); one wire constant holds the value | the design's recommendation; the log file format stays internal |
 | 15 | append for an unknown process | refused inside the daemon; not on the wire | no caller can append; no surface |
 | 16 | cursor monotonicity | the daemon assigns the per-process `seq`; the cursor is opaque on the wire; the ordering scenario checks it | design 26 § event stream; an opaque cursor commits no format |
+
+## Specification choices made in the host-process unit (each can be undone)
+
+Taken while aligning `spec/host-processes/` with ADR 0036; none commits a persisted format.
+
+| choice | why |
+|---|---|
+| `EnforceDeadline` takes a `deadline` input (`timeout` or `expires-at`) and refuses one the record does not carry | ESS cannot pick the earlier of two instants; the daemon computes `deadline_at` and names which one fired |
+| changing a keep to a TTL lease clears `keep_reason` | a TTL record has no keep to justify |
+| a vanished record's end carries its stored, empty exit code and signal | nothing was observed |
+| `EndedByMissing` refuses an `ended` stream item with no cause | every stream ends with exactly one named cause |
+| `stopped` is emitted when a stop of any cause finishes, before `ended` | the ADR does not say which moment; finishing is the observable one |
+| the S12 `gap` item and cursor decoding stay in the implementation | the model cannot express a log byte offset |
+| `env_digest` is set by the daemon at start, not sent by the client | S1: environment values are never recorded |
+
+## Reviews
+
+- `review-result:adversary-adopt-u1-pass-1`: two blockers and a race, fixed.
+- `review-result:security-hostproc-u4-pass-1`: one blocker and three warnings, fixed.
