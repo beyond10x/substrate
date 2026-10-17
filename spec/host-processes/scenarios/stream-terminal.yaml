@@ -1,9 +1,10 @@
-# S12: `ended` is terminal and names ended_by; a timed-out record's stream holds started, then
-# ended with ended_by timeout, and nothing is appended after it.
+# S12: `ended` is terminal and names ended_by; a timed-out record's stream holds started,
+# timed-out, stopped once the tree is gone, then ended with ended_by timeout, and nothing is
+# appended after it.
 type: ess-scenario/1
 domain: substrate.host_processes
 scenario: stream-terminal
-summary: A timed-out record's stream ends with one ended item naming timeout, and an append after it is refused.
+summary: A timed-out record's stream holds started, timed-out, stopped and one ended item naming timeout; an append after it is refused.
 
 arrange:
   - instance: build
@@ -36,10 +37,16 @@ timeline:
 assert:
   - view: substrate.host_processes.ProcessEvents
     params: {process: {$instance: build}, after: -1}
-    counts: {at_least: 2, at_most: 2}
+    counts: {at_least: 4, at_most: 4}
   - view: substrate.host_processes.ProcessEvents
     params: {process: {$instance: build}, after: -1}
     at: {row: first, fields: {kind: started}}
+  - view: substrate.host_processes.ProcessEvents
+    params: {process: {$instance: build}, after: -1}
+    at: {row: 1, fields: {kind: timed-out, ended_by: timeout}}
+  - view: substrate.host_processes.ProcessEvents
+    params: {process: {$instance: build}, after: -1}
+    at: {row: 2, fields: {kind: stopped, ended_by: timeout, exit_signal: SIGKILL}}
   - view: substrate.host_processes.ProcessEvents
     params: {process: {$instance: build}, after: -1}
     at: {row: last, fields: {kind: ended, ended_by: timeout, exit_signal: SIGKILL}}

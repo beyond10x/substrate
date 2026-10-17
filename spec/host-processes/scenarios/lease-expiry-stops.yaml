@@ -44,3 +44,15 @@ assert:
       state: Ended
       ended_by: lease-expiry
       exit_signal: SIGKILL
+  - view: substrate.host_processes.ProcessEvents
+    params: {process: {$instance: dev}, after: -1}
+    counts: {at_least: 4, at_most: 4}
+  - view: substrate.host_processes.ProcessEvents
+    params: {process: {$instance: dev}, after: -1}
+    at: {row: 1, fields: {kind: lease-expired, ended_by: lease-expiry}}
+  - view: substrate.host_processes.ProcessEvents
+    params: {process: {$instance: dev}, after: -1}
+    at: {row: 2, fields: {kind: stopped, ended_by: lease-expiry, exit_signal: SIGKILL}}
+  - view: substrate.host_processes.ProcessEvents
+    params: {process: {$instance: dev}, after: -1}
+    at: {row: last, fields: {kind: ended, ended_by: lease-expiry}}

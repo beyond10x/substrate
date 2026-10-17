@@ -119,16 +119,18 @@ green check establishes:
 - `ess specify validate --path spec/host-processes` resolves the model, its actors and its 18
   authored scenarios.
 - `spec/host-processes-suite.json` is the exact `ess verify conform synthesize` output;
-  `cargo xtask check-ess` fails on drift. It holds 71 synthesized scenarios and records 21
-  refusals: 6 for the two stream bindings, whose invocation synthesis cannot force and whose
-  `drop` publishes nothing (ESS-SYNTH-010); 14 for branches, states and transitions whose
-  arrangement passes through a row-set guard (`name-conflict` makes every `StartProcess` step
-  one), among them `StartProcess/started`, `name-conflict`, `hosted-posture`, `stream-closed`,
-  `unknown-process`, both deadline moves and both stop-by-owner branches (ESS-SYNTH-001); and one
-  unwitnessed connective child of `StartContainer/started` (ESS-SYNTH-022). An authored scenario
-  exercises each of those branches except `StartProcess/hosted-posture`, whose cause is the
-  daemon's posture and belongs to the runtime suite.
-- `ess verify conform run --target interpreted` passes all 89 scenarios, synthesized and
+  `cargo xtask check-ess` fails on drift. It holds 77 synthesized scenarios and records 41
+  refusals: 23 for seven of the eight stream bindings, whose invocation synthesis cannot force
+  and whose `drop` publishes nothing (ESS-SYNTH-010); 17 for branches, states, transitions and
+  bindings whose arrangement passes through a row-set guard (`name-conflict` makes every
+  `StartProcess` step one), among them `StartProcess/started`, `name-conflict`,
+  `hosted-posture`, `stream-closed`, `unknown-process`, both deadline moves, both stop-by-owner
+  branches, the chained `stream-ended` binding and two cases of the lease-expired and timed-out
+  bindings (ESS-SYNTH-001); and one unwitnessed connective child of `StartContainer/started`
+  (ESS-SYNTH-022). An authored scenario exercises each of those branches and bindings except
+  `StartProcess/hosted-posture`, whose cause is the daemon's posture and belongs to the runtime
+  suite.
+- `ess verify conform run --target interpreted` passes all 95 scenarios, synthesized and
   authored, against the ESS reference. That checks the model only.
 
 What it does not establish:

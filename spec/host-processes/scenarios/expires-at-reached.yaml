@@ -60,3 +60,12 @@ assert:
     contains: {process: {$instance: soak}, state: Ended, ended_by: expires-at, exit_signal: SIGTERM, timeout_ms: 86400000, expires_at: 2100-01-01T00:00:00Z}
   - view: substrate.host_processes.HostProcesses
     contains: {process: {$instance: plain}, state: Starting}
+  - view: substrate.host_processes.ProcessEvents
+    params: {process: {$instance: soak}, after: -1}
+    counts: {at_least: 4, at_most: 4}
+  - view: substrate.host_processes.ProcessEvents
+    params: {process: {$instance: soak}, after: -1}
+    at: {row: 1, fields: {kind: timed-out, ended_by: expires-at}}
+  - view: substrate.host_processes.ProcessEvents
+    params: {process: {$instance: soak}, after: -1}
+    at: {row: last, fields: {kind: ended, ended_by: expires-at, exit_signal: SIGTERM}}

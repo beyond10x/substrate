@@ -1,15 +1,209 @@
 {
   "provenance": {
-    "suite_version": "ess-conformance/34",
+    "suite_version": "ess-conformance/36",
     "system": "substrate",
     "specification_version": "v1",
-    "spec_digest": "c3c46c574633e8aa91a56aac9c87c0208742c999e0cbe1c78e69186a666de5a4",
-    "contract_digest": "2744e87e613043d57bd7fe50155f08f374ed0692572c7a5f3364c102d3ff7d0d",
+    "spec_digest": "1737c19d0515820696ce66e8a685749c69f698b2319823344097b89a5c3aff45",
+    "contract_digest": "2ca60f901d6d8b5ce74730552e414122168d96595b1cd3b48501edeff9e394e2",
     "scenario_initial_state": "empty"
   },
   "scenarios": {
-    "stream-ended/binding/mapping": {
-      "purpose": "`stream-ended` fills `substrate.host_processes.AppendStreamEvent` from `substrate.host_processes.ProcessEnded` as it is mapped",
+    "stream-exited/binding/condition-false": {
+      "purpose": "`stream-exited` invokes `substrate.host_processes.AppendStreamEvent` no times for a `substrate.host_processes.ProcessEnded` its condition does not hold for",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.AdoptProcess",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "name": {
+              "kind": "literal",
+              "value": "legacy-vite"
+            },
+            "reason": {
+              "kind": "literal",
+              "value": "survivor of the host review"
+            },
+            "source": {
+              "kind": "literal",
+              "value": "pid"
+            },
+            "source_ref": {
+              "kind": "literal",
+              "value": "4242"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.AdoptProcess",
+            "outcome": "adopted"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "host-process",
+          "entity": "substrate.host_processes.HostProcess",
+          "event": "substrate.host_processes.ProcessAdopted",
+          "field": "process"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "process": {
+                "kind": "instance",
+                "instance": "host-process"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Running"
+              }
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.RecordVanished",
+          "actor": "substrate.host_processes.Supervisor",
+          "input": {
+            "process": {
+              "kind": "instance",
+              "instance": "host-process"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.RecordVanished",
+            "outcome": "vanished"
+          }
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "process": {
+                "kind": "instance",
+                "instance": "host-process"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Ended"
+              }
+            }
+          }
+        },
+        {
+          "step": "expect_event",
+          "event": "substrate.host_processes.ProcessEnded",
+          "shape": {
+            "ended_by": {
+              "holds": "enum",
+              "variants": [
+                "exit",
+                "stop",
+                "lease-expiry",
+                "timeout",
+                "expires-at",
+                "vanished"
+              ]
+            },
+            "exit_code": {
+              "holds": "primitive",
+              "kind": "integer",
+              "optional": true
+            },
+            "exit_signal": {
+              "holds": "primitive",
+              "kind": "string",
+              "optional": true
+            },
+            "process": {
+              "holds": "primitive",
+              "kind": "string"
+            }
+          }
+        },
+        {
+          "step": "expect_no_invocation",
+          "binding": "stream-exited",
+          "command": "substrate.host_processes.AppendStreamEvent"
+        }
+      ],
+      "source": [
+        {
+          "kind": "entity",
+          "name": "substrate.host_processes.HostProcess"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.AdoptProcess"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.AppendStreamEvent"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.RecordVanished"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.AdoptProcess",
+            "outcome": "adopted"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.RecordVanished",
+            "outcome": "vanished"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessAdopted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessEnded"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.host_processes.Supervisor"
+        },
+        {
+          "kind": "binding",
+          "name": "stream-exited"
+        },
+        {
+          "kind": "component",
+          "name": "substrate-daemon"
+        }
+      ]
+    },
+    "stream-exited/binding/mapping": {
+      "purpose": "`stream-exited` fills `substrate.host_processes.AppendStreamEvent` from `substrate.host_processes.ProcessEnded` as it is mapped",
       "steps": [
         {
           "step": "execute_command",
@@ -149,7 +343,7 @@
         },
         {
           "step": "expect_invocation",
-          "binding": "stream-ended",
+          "binding": "stream-exited",
           "command": "substrate.host_processes.AppendStreamEvent",
           "input": {
             "ended_by": {
@@ -169,7 +363,7 @@
             },
             "kind": {
               "kind": "literal",
-              "value": "ended"
+              "value": "exited"
             },
             "process": {
               "kind": "observed",
@@ -236,7 +430,431 @@
         },
         {
           "kind": "binding",
-          "name": "stream-ended"
+          "name": "stream-exited"
+        },
+        {
+          "kind": "component",
+          "name": "substrate-daemon"
+        }
+      ]
+    },
+    "stream-lease-expired/binding/mapping": {
+      "purpose": "`stream-lease-expired` fills `substrate.host_processes.AppendStreamEvent` from `substrate.host_processes.StopRequested` as it is mapped",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.StartContainer",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "argv": {
+              "kind": "literal",
+              "value": [
+                "argv.0"
+              ]
+            },
+            "keep": {
+              "kind": "literal",
+              "value": false
+            },
+            "keep_reason": {
+              "kind": "literal",
+              "value": "keep_reason"
+            },
+            "kind": {
+              "kind": "literal",
+              "value": "docker"
+            },
+            "lease_ttl_ms": {
+              "kind": "literal",
+              "value": 3600000.0
+            },
+            "name": {
+              "kind": "literal",
+              "value": "preview-db"
+            },
+            "owner_session_id": {
+              "kind": "literal",
+              "value": "s-1"
+            },
+            "owner_session_name": {
+              "kind": "literal",
+              "value": "worker"
+            },
+            "reason": {
+              "kind": "literal",
+              "value": "database for the preview"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.StartContainer",
+            "outcome": "started"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "host-process",
+          "entity": "substrate.host_processes.HostProcess",
+          "event": "substrate.host_processes.ProcessStarted",
+          "field": "process"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "lease_ttl_ms": {
+                "kind": "literal",
+                "value": 3600000.0
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Starting"
+              }
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.ExpireLease",
+          "actor": "substrate.host_processes.Supervisor",
+          "input": {
+            "process": {
+              "kind": "instance",
+              "instance": "host-process"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.ExpireLease",
+            "outcome": "expired"
+          }
+        },
+        {
+          "step": "expect_no_error"
+        },
+        {
+          "step": "expect_event",
+          "event": "substrate.host_processes.StopRequested",
+          "shape": {
+            "ended_by": {
+              "holds": "enum",
+              "variants": [
+                "exit",
+                "stop",
+                "lease-expiry",
+                "timeout",
+                "expires-at",
+                "vanished"
+              ]
+            },
+            "process": {
+              "holds": "primitive",
+              "kind": "string"
+            }
+          }
+        },
+        {
+          "step": "expect_invocation",
+          "binding": "stream-lease-expired",
+          "command": "substrate.host_processes.AppendStreamEvent",
+          "input": {
+            "ended_by": {
+              "kind": "observed",
+              "event": "substrate.host_processes.StopRequested",
+              "field": "ended_by"
+            },
+            "kind": {
+              "kind": "literal",
+              "value": "lease-expired"
+            },
+            "process": {
+              "kind": "observed",
+              "event": "substrate.host_processes.StopRequested",
+              "field": "process"
+            }
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "type",
+          "name": "substrate.host_processes.EndedBy"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.host_processes.StreamEventKind"
+        },
+        {
+          "kind": "entity",
+          "name": "substrate.host_processes.HostProcess"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.AppendStreamEvent"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.ExpireLease"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.StartContainer"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.ExpireLease",
+            "outcome": "expired"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.StartContainer",
+            "outcome": "started"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessStarted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.StopRequested"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.host_processes.Supervisor"
+        },
+        {
+          "kind": "binding",
+          "name": "stream-lease-expired"
+        },
+        {
+          "kind": "component",
+          "name": "substrate-daemon"
+        }
+      ]
+    },
+    "stream-lease-renewed/binding/mapping": {
+      "purpose": "`stream-lease-renewed` fills `substrate.host_processes.AppendStreamEvent` from `substrate.host_processes.LeaseRenewed` as it is mapped",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.StartContainer",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "argv": {
+              "kind": "literal",
+              "value": [
+                "argv.0"
+              ]
+            },
+            "keep": {
+              "kind": "literal",
+              "value": true
+            },
+            "keep_reason": {
+              "kind": "literal",
+              "value": "keep_reason"
+            },
+            "kind": {
+              "kind": "literal",
+              "value": "docker"
+            },
+            "name": {
+              "kind": "literal",
+              "value": "preview-db"
+            },
+            "owner_session_id": {
+              "kind": "literal",
+              "value": "s-1"
+            },
+            "owner_session_name": {
+              "kind": "literal",
+              "value": "worker"
+            },
+            "reason": {
+              "kind": "literal",
+              "value": "database for the preview"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.StartContainer",
+            "outcome": "started"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "host-process",
+          "entity": "substrate.host_processes.HostProcess",
+          "event": "substrate.host_processes.ProcessStarted",
+          "field": "process"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "keep": {
+                "kind": "literal",
+                "value": true
+              },
+              "lease_ttl_ms": {
+                "kind": "literal",
+                "value": null
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Starting"
+              }
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.RenewLease",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "lease_ttl_ms": {
+              "kind": "literal",
+              "value": 1.0
+            },
+            "process": {
+              "kind": "instance",
+              "instance": "host-process"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.RenewLease",
+            "outcome": "keep-to-lease"
+          }
+        },
+        {
+          "step": "expect_no_error"
+        },
+        {
+          "step": "expect_event",
+          "event": "substrate.host_processes.LeaseRenewed",
+          "shape": {
+            "lease_ttl_ms": {
+              "holds": "primitive",
+              "kind": "integer"
+            },
+            "process": {
+              "holds": "primitive",
+              "kind": "string"
+            }
+          }
+        },
+        {
+          "step": "expect_invocation",
+          "binding": "stream-lease-renewed",
+          "command": "substrate.host_processes.AppendStreamEvent",
+          "input": {
+            "kind": {
+              "kind": "literal",
+              "value": "lease-renewed"
+            },
+            "process": {
+              "kind": "observed",
+              "event": "substrate.host_processes.LeaseRenewed",
+              "field": "process"
+            }
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "type",
+          "name": "substrate.host_processes.EndedBy"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.host_processes.StreamEventKind"
+        },
+        {
+          "kind": "entity",
+          "name": "substrate.host_processes.HostProcess"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.AppendStreamEvent"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.RenewLease"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.StartContainer"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.RenewLease",
+            "outcome": "keep-to-lease"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.StartContainer",
+            "outcome": "started"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.LeaseRenewed"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessStarted"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.host_processes.Subject"
+        },
+        {
+          "kind": "binding",
+          "name": "stream-lease-renewed"
         },
         {
           "kind": "component",
@@ -405,6 +1023,618 @@
         {
           "kind": "binding",
           "name": "stream-started"
+        },
+        {
+          "kind": "component",
+          "name": "substrate-daemon"
+        }
+      ]
+    },
+    "stream-timed-out/binding/condition-false": {
+      "purpose": "`stream-timed-out` invokes `substrate.host_processes.AppendStreamEvent` no times for a `substrate.host_processes.StopRequested` its condition does not hold for",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.StartContainer",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "argv": {
+              "kind": "literal",
+              "value": [
+                "argv.0"
+              ]
+            },
+            "keep": {
+              "kind": "literal",
+              "value": false
+            },
+            "keep_reason": {
+              "kind": "literal",
+              "value": "keep_reason"
+            },
+            "kind": {
+              "kind": "literal",
+              "value": "docker"
+            },
+            "lease_ttl_ms": {
+              "kind": "literal",
+              "value": 3600000.0
+            },
+            "name": {
+              "kind": "literal",
+              "value": "preview-db"
+            },
+            "owner_session_id": {
+              "kind": "literal",
+              "value": "s-1"
+            },
+            "owner_session_name": {
+              "kind": "literal",
+              "value": "worker"
+            },
+            "reason": {
+              "kind": "literal",
+              "value": "database for the preview"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.StartContainer",
+            "outcome": "started"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "host-process",
+          "entity": "substrate.host_processes.HostProcess",
+          "event": "substrate.host_processes.ProcessStarted",
+          "field": "process"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "lease_ttl_ms": {
+                "kind": "literal",
+                "value": 3600000.0
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Starting"
+              }
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.ExpireLease",
+          "actor": "substrate.host_processes.Supervisor",
+          "input": {
+            "process": {
+              "kind": "instance",
+              "instance": "host-process"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.ExpireLease",
+            "outcome": "expired"
+          }
+        },
+        {
+          "step": "expect_no_error"
+        },
+        {
+          "step": "expect_event",
+          "event": "substrate.host_processes.StopRequested",
+          "shape": {
+            "ended_by": {
+              "holds": "enum",
+              "variants": [
+                "exit",
+                "stop",
+                "lease-expiry",
+                "timeout",
+                "expires-at",
+                "vanished"
+              ]
+            },
+            "process": {
+              "holds": "primitive",
+              "kind": "string"
+            }
+          }
+        },
+        {
+          "step": "expect_no_invocation",
+          "binding": "stream-timed-out",
+          "command": "substrate.host_processes.AppendStreamEvent"
+        }
+      ],
+      "source": [
+        {
+          "kind": "entity",
+          "name": "substrate.host_processes.HostProcess"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.AppendStreamEvent"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.ExpireLease"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.StartContainer"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.ExpireLease",
+            "outcome": "expired"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.StartContainer",
+            "outcome": "started"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessStarted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.StopRequested"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.host_processes.Supervisor"
+        },
+        {
+          "kind": "binding",
+          "name": "stream-timed-out"
+        },
+        {
+          "kind": "component",
+          "name": "substrate-daemon"
+        }
+      ]
+    },
+    "stream-vanished/binding/condition-false": {
+      "purpose": "`stream-vanished` invokes `substrate.host_processes.AppendStreamEvent` no times for a `substrate.host_processes.ProcessEnded` its condition does not hold for",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.AdoptProcess",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "name": {
+              "kind": "literal",
+              "value": "legacy-vite"
+            },
+            "reason": {
+              "kind": "literal",
+              "value": "survivor of the host review"
+            },
+            "source": {
+              "kind": "literal",
+              "value": "pid"
+            },
+            "source_ref": {
+              "kind": "literal",
+              "value": "4242"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.AdoptProcess",
+            "outcome": "adopted"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "host-process",
+          "entity": "substrate.host_processes.HostProcess",
+          "event": "substrate.host_processes.ProcessAdopted",
+          "field": "process"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "process": {
+                "kind": "instance",
+                "instance": "host-process"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Running"
+              }
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.RecordExit",
+          "actor": "substrate.host_processes.Supervisor",
+          "input": {
+            "exit_code": {
+              "kind": "literal",
+              "value": 1.0
+            },
+            "exit_signal": {
+              "kind": "literal",
+              "value": "exit_signal"
+            },
+            "process": {
+              "kind": "instance",
+              "instance": "host-process"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.RecordExit",
+            "outcome": "exited"
+          }
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "process": {
+                "kind": "instance",
+                "instance": "host-process"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Ended"
+              }
+            }
+          }
+        },
+        {
+          "step": "expect_event",
+          "event": "substrate.host_processes.ProcessEnded",
+          "shape": {
+            "ended_by": {
+              "holds": "enum",
+              "variants": [
+                "exit",
+                "stop",
+                "lease-expiry",
+                "timeout",
+                "expires-at",
+                "vanished"
+              ]
+            },
+            "exit_code": {
+              "holds": "primitive",
+              "kind": "integer",
+              "optional": true
+            },
+            "exit_signal": {
+              "holds": "primitive",
+              "kind": "string",
+              "optional": true
+            },
+            "process": {
+              "holds": "primitive",
+              "kind": "string"
+            }
+          }
+        },
+        {
+          "step": "expect_no_invocation",
+          "binding": "stream-vanished",
+          "command": "substrate.host_processes.AppendStreamEvent"
+        }
+      ],
+      "source": [
+        {
+          "kind": "entity",
+          "name": "substrate.host_processes.HostProcess"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.AdoptProcess"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.AppendStreamEvent"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.RecordExit"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.AdoptProcess",
+            "outcome": "adopted"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.RecordExit",
+            "outcome": "exited"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessAdopted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessEnded"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.host_processes.Supervisor"
+        },
+        {
+          "kind": "binding",
+          "name": "stream-vanished"
+        },
+        {
+          "kind": "component",
+          "name": "substrate-daemon"
+        }
+      ]
+    },
+    "stream-vanished/binding/mapping": {
+      "purpose": "`stream-vanished` fills `substrate.host_processes.AppendStreamEvent` from `substrate.host_processes.ProcessEnded` as it is mapped",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.AdoptProcess",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "name": {
+              "kind": "literal",
+              "value": "legacy-vite"
+            },
+            "reason": {
+              "kind": "literal",
+              "value": "survivor of the host review"
+            },
+            "source": {
+              "kind": "literal",
+              "value": "pid"
+            },
+            "source_ref": {
+              "kind": "literal",
+              "value": "4242"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.AdoptProcess",
+            "outcome": "adopted"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "host-process",
+          "entity": "substrate.host_processes.HostProcess",
+          "event": "substrate.host_processes.ProcessAdopted",
+          "field": "process"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "process": {
+                "kind": "instance",
+                "instance": "host-process"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Running"
+              }
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.RecordVanished",
+          "actor": "substrate.host_processes.Supervisor",
+          "input": {
+            "process": {
+              "kind": "instance",
+              "instance": "host-process"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.RecordVanished",
+            "outcome": "vanished"
+          }
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "process": {
+                "kind": "instance",
+                "instance": "host-process"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Ended"
+              }
+            }
+          }
+        },
+        {
+          "step": "expect_event",
+          "event": "substrate.host_processes.ProcessEnded",
+          "shape": {
+            "ended_by": {
+              "holds": "enum",
+              "variants": [
+                "exit",
+                "stop",
+                "lease-expiry",
+                "timeout",
+                "expires-at",
+                "vanished"
+              ]
+            },
+            "exit_code": {
+              "holds": "primitive",
+              "kind": "integer",
+              "optional": true
+            },
+            "exit_signal": {
+              "holds": "primitive",
+              "kind": "string",
+              "optional": true
+            },
+            "process": {
+              "holds": "primitive",
+              "kind": "string"
+            }
+          }
+        },
+        {
+          "step": "expect_invocation",
+          "binding": "stream-vanished",
+          "command": "substrate.host_processes.AppendStreamEvent",
+          "input": {
+            "ended_by": {
+              "kind": "observed",
+              "event": "substrate.host_processes.ProcessEnded",
+              "field": "ended_by"
+            },
+            "kind": {
+              "kind": "literal",
+              "value": "vanished"
+            },
+            "process": {
+              "kind": "observed",
+              "event": "substrate.host_processes.ProcessEnded",
+              "field": "process"
+            }
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "type",
+          "name": "substrate.host_processes.EndedBy"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.host_processes.StreamEventKind"
+        },
+        {
+          "kind": "entity",
+          "name": "substrate.host_processes.HostProcess"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.AdoptProcess"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.AppendStreamEvent"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.RecordVanished"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.AdoptProcess",
+            "outcome": "adopted"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.RecordVanished",
+            "outcome": "vanished"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessAdopted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessEnded"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.host_processes.Supervisor"
+        },
+        {
+          "kind": "binding",
+          "name": "stream-vanished"
         },
         {
           "kind": "component",

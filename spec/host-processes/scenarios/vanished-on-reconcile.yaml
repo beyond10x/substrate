@@ -1,6 +1,7 @@
 # S3: on restart the daemon reconciles every non-terminal record; one whose cgroup is gone ends
 # `vanished`, with no exit status nobody observed. A record already stopping keeps the cause its
-# stop recorded first (S11). The stream's terminal item names the same ended_by.
+# stop recorded first (S11). The stream holds a `vanished` item, or `stopped` for the stopping
+# record, then the terminal item naming the same ended_by.
 type: ess-scenario/1
 domain: substrate.host_processes
 scenario: vanished-on-reconcile
@@ -58,4 +59,19 @@ assert:
     contains: {process: {$instance: stopping}, state: Ended, ended_by: stop}
   - view: substrate.host_processes.ProcessEvents
     params: {process: {$instance: dev}, after: -1}
+    counts: {at_least: 3, at_most: 3}
+  - view: substrate.host_processes.ProcessEvents
+    params: {process: {$instance: dev}, after: -1}
+    at: {row: 1, fields: {kind: vanished, ended_by: vanished}}
+  - view: substrate.host_processes.ProcessEvents
+    params: {process: {$instance: dev}, after: -1}
     at: {row: last, fields: {kind: ended, ended_by: vanished}}
+  - view: substrate.host_processes.ProcessEvents
+    params: {process: {$instance: stopping}, after: -1}
+    at: {row: last, fields: {kind: ended, ended_by: stop}}
+  - view: substrate.host_processes.ProcessEvents
+    params: {process: {$instance: stopping}, after: -1}
+    counts: {at_least: 2, at_most: 2}
+  - view: substrate.host_processes.ProcessEvents
+    params: {process: {$instance: stopping}, after: -1}
+    at: {row: first, fields: {kind: stopped, ended_by: stop}}

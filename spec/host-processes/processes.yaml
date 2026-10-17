@@ -50,10 +50,12 @@ types:
 
   - name: substrate.host_processes.StreamEventKind
     kind: enum
-    # S12: what a stream item says: the record started, one output line, or the terminal item
-    # naming `ended_by`. A lease expiry or a deadline is not an item of its own; it is the
-    # `ended_by` of the terminal item.
-    variants: [started, output-line, ended]
+    # S12: what a stream item says. The per-process stream interleaves every lifecycle event the
+    # event log records for the process (`process.started`, `process.lease-renewed`,
+    # `process.lease-expired`, `process.timed-out` for a timeout or an expires-at, `process.stopped`,
+    # `process.exited` with the code or the signal, `process.vanished`), its output lines, and
+    # exactly one terminal `ended` item naming `ended_by`, after which the stream closes.
+    variants: [started, lease-renewed, lease-expired, timed-out, stopped, exited, vanished, output-line, ended]
 
 entities:
   - name: substrate.host_processes.HostProcess
@@ -144,14 +146,21 @@ entities:
 
   - name: substrate.host_processes.ProcessEvent
     naming:
-      summary: S12 — one event in a record's stream, ordered by its cursor.
+      summary: S12 — one item in a record's stream, ordered by its per-process seq.
     identity: {name: event, type: String}
     fields:
       - {name: process, type: String}
-      - {name: cursor, type: Integer}
+      # S12: the per-process order of the stream, strictly increasing.
+      - {name: seq, type: Integer}
+      # S12: the opaque resume cursor delivered with the item. It encodes the last delivered event
+      # `seq` and the S7 log byte offset; its bytes are the daemon's and no reader parses them.
+      - {name: cursor, type: String}
       - {name: kind, type: substrate.host_processes.StreamEventKind}
       - {name: line, type: Optional<String>}
-      # S12: present on the terminal `ended` item only.
+      # S3, S11, S12: the cause, on the terminal `ended` item and on the lifecycle items that carry
+      # one: `lease-expired` (lease-expiry), `timed-out` (timeout or expires-at, which it
+      # distinguishes), `stopped`, `exited` and `vanished`. Absent on `started`, `lease-renewed`
+      # and `output-line`.
       - {name: ended_by, type: Optional<substrate.host_processes.EndedBy>}
       - {name: exit_code, type: Optional<Integer>}
       - {name: exit_signal, type: Optional<String>}
@@ -840,10 +849,11 @@ commands:
           exit_code: input.exit_code
           exit_signal: input.exit_signal
           ended_by: input.ended_by
-          # DECIDED (point 16): the daemon assigns the cursor, the per-process `seq`, strictly
-          # increasing; on the wire the cursor is opaque. ESS 0.60.0 cannot state monotonicity of a
-          # generated value, so it is implementation-side, and the ordering scenarios
-          # (stream-order, `ranked`) check it.
+          # DECIDED (point 16): the daemon assigns the per-process `seq`, strictly increasing, and
+          # the opaque cursor beside it. ESS 0.60.0 cannot state monotonicity of a generated value,
+          # so it is implementation-side, and the ordering scenarios (stream-order, `ranked`)
+          # check it.
+          seq: {generated: true}
           cursor: {generated: true}
         emits: [substrate.host_processes.StreamEventAppended]
         payload:
@@ -851,6 +861,9 @@ commands:
             event: {generated: true}
             process: input.process
             kind: input.kind
+            ended_by: input.ended_by
+            exit_code: input.exit_code
+            exit_signal: input.exit_signal
 
   - name: substrate.host_processes.RecordLogDiscard
     naming:
@@ -927,6 +940,9 @@ events:
       - {name: event, type: String}
       - {name: process, type: String}
       - {name: kind, type: substrate.host_processes.StreamEventKind}
+      - {name: ended_by, type: Optional<substrate.host_processes.EndedBy>}
+      - {name: exit_code, type: Optional<Integer>}
+      - {name: exit_signal, type: Optional<String>}
 
 views:
   # S6: `ls`. Unfiltered so every state and every published field is observable.
@@ -967,7 +983,8 @@ views:
       - {name: adopted_from, type: Optional<substrate.host_processes.AdoptSource>}
       - {name: adopted_ref, type: Optional<String>}
 
-  # S12: one record's event stream after a cursor, oldest first.
+  # S12: one record's stream after a seq, oldest first. On the wire a reader resumes from the
+  # opaque cursor, which the daemon decodes to that seq and a log offset (implementation-side).
   - name: substrate.host_processes.ProcessEvents
     source: substrate.host_processes.ProcessEvent
     consistency: read_your_writes
@@ -975,12 +992,13 @@ views:
     params:
       - {name: process, type: String}
       - {name: after, type: Integer}
-    filter: {all: [process == param.process, cursor > param.after]}
-    order_by: [cursor]
+    filter: {all: [process == param.process, seq > param.after]}
+    order_by: [seq]
     fields:
       - {name: event, type: String}
       - {name: process, type: String}
-      - {name: cursor, type: Integer}
+      - {name: seq, type: Integer}
+      - {name: cursor, type: String}
       - {name: kind, type: substrate.host_processes.StreamEventKind}
       - {name: line, type: Optional<String>}
       - {name: exit_code, type: Optional<Integer>}
@@ -997,8 +1015,8 @@ views:
       - {name: page, type: Integer}
       - {name: size, type: Integer}
     filter: {all: [process == param.process, kind == output-line]}
-    order_by: [cursor]
+    order_by: [seq]
     paging: {page: page, size: size}
     fields:
-      - {name: cursor, type: Integer}
+      - {name: seq, type: Integer}
       - {name: line, type: Optional<String>}
