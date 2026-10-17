@@ -17,17 +17,17 @@ arrange:
 timeline:
   - at: 2026-10-16T09:00:00Z
     command: substrate.host_processes.StartProcess
-    input: {name: dev-server, owner_session_id: s-1, owner_session_name: worker, reason: serve the preview, argv: [vite], cwd: /srv/app, env_passthrough: [], profile: host, lease_ttl_seconds: 3600, keep: false}
+    input: {name: dev-server, owner_session_id: s-1, owner_session_name: worker, reason: serve the preview, argv: [vite], cwd: /srv/app, env_passthrough: [], profile: host, lease_ttl_ms: 3600000, keep: false}
     outcome: started
     capture: {instance: first, event: substrate.host_processes.ProcessStarted, field: process}
   - at: 2026-10-16T09:00:01Z
     command: substrate.host_processes.StartProcess
-    input: {name: dev-server, owner_session_id: s-1, owner_session_name: worker, reason: a second preview, argv: [vite], cwd: /srv/app, env_passthrough: [], profile: host, lease_ttl_seconds: 3600, keep: false}
+    input: {name: dev-server, owner_session_id: s-1, owner_session_name: worker, reason: a second preview, argv: [vite], cwd: /srv/app, env_passthrough: [], profile: host, lease_ttl_ms: 3600000, keep: false}
     outcome: name-conflict
     error: {name: substrate.host_processes.NameConflict, fields: {name: dev-server}}
   - at: 2026-10-16T09:00:02Z
     command: substrate.host_processes.StartProcess
-    input: {name: dev-server, owner_session_id: s-2, owner_session_name: other, reason: their preview, argv: [vite], cwd: /srv/app, env_passthrough: [], profile: host, lease_ttl_seconds: 3600, keep: false}
+    input: {name: dev-server, owner_session_id: s-2, owner_session_name: other, reason: their preview, argv: [vite], cwd: /srv/app, env_passthrough: [], profile: host, lease_ttl_ms: 3600000, keep: false}
     outcome: started
     capture: {instance: other-session, event: substrate.host_processes.ProcessStarted, field: process}
   - at: 2026-10-16T09:00:03Z
@@ -36,7 +36,7 @@ timeline:
     outcome: stopping
   - at: 2026-10-16T09:00:04Z
     command: substrate.host_processes.StartProcess
-    input: {name: dev-server, owner_session_id: s-1, owner_session_name: worker, reason: still stopping, argv: [vite], cwd: /srv/app, env_passthrough: [], profile: host, lease_ttl_seconds: 3600, keep: false}
+    input: {name: dev-server, owner_session_id: s-1, owner_session_name: worker, reason: still stopping, argv: [vite], cwd: /srv/app, env_passthrough: [], profile: host, lease_ttl_ms: 3600000, keep: false}
     outcome: name-conflict
     error: {name: substrate.host_processes.NameConflict, fields: {name: dev-server}}
   - at: 2026-10-16T09:00:05Z
@@ -45,7 +45,7 @@ timeline:
     outcome: stopped
   - at: 2026-10-16T09:00:06Z
     command: substrate.host_processes.StartProcess
-    input: {name: dev-server, owner_session_id: s-1, owner_session_name: worker, reason: the next preview, argv: [vite], cwd: /srv/app, env_passthrough: [], profile: host, lease_ttl_seconds: 3600, keep: false}
+    input: {name: dev-server, owner_session_id: s-1, owner_session_name: worker, reason: the next preview, argv: [vite], cwd: /srv/app, env_passthrough: [], profile: host, lease_ttl_ms: 3600000, keep: false}
     outcome: started
     capture: {instance: reused, event: substrate.host_processes.ProcessStarted, field: process}
 

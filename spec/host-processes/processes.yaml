@@ -19,10 +19,15 @@ types:
     kind: enum
     # S2: a host process is declared and reported unconfined.
     variants: [none]
-  - name: substrate.host_processes.EndCause
+  - name: substrate.host_processes.EndedBy
     kind: enum
-    # S11: why a record left its live states.
-    variants: [exited, stopped, lease-expired, timed-out, deadline-reached]
+    # S3, S11: why a record left its live states. `vanished` is a record whose cgroup was gone
+    # when the daemon reconciled it.
+    variants: [exit, stop, lease-expiry, timeout, expires-at, vanished]
+  - name: substrate.host_processes.Deadline
+    kind: enum
+    # S11: which hard deadline a deadline stop enforced.
+    variants: [timeout, expires-at]
   - name: substrate.host_processes.ContainerKind
     kind: enum
     # S8, deferred to the S8 wave: the two container record kinds.
@@ -36,10 +41,19 @@ types:
     # S9, deferred to the S9 wave: what an adopted record was picked up from.
     variants: [pid, unit, container]
 
+  - name: substrate.host_processes.EnvDigest
+    kind: newtype
+    of: String
+    # S1: the digest of the whole request environment map, `sha256:` and the hex digest. The
+    # canonical byte form it is computed over is the daemon's; values never leave the request.
+    prefix: "sha256:"
+
   - name: substrate.host_processes.StreamEventKind
     kind: enum
-    # S12: what a stream event says.
-    variants: [started, output-line, exited, timed-out, lease-expired]
+    # S12: what a stream item says: the record started, one output line, or the terminal item
+    # naming `ended_by`. A lease expiry or a deadline is not an item of its own; it is the
+    # `ended_by` of the terminal item.
+    variants: [started, output-line, ended]
 
 entities:
   - name: substrate.host_processes.HostProcess
@@ -55,8 +69,13 @@ entities:
       - {name: argv, type: List<String>}
       # Absent on a container record, which has no host working directory.
       - {name: cwd, type: Optional<String>}
-      # S1: names of the caller's variables passed through; never their values.
+      # S1: the names of the request's `env` map, which is the process's complete environment (the
+      # client selects what it passes through); never their values.
       - {name: env_passthrough, type: List<String>}
+      # S1: the ledger records each name above and one digest of the whole env map, never a value.
+      # Computed by the daemon from the request it received, so the value is generated. Absent on a
+      # container or adopted record (deferred with point 3).
+      - {name: env_digest, type: Optional<substrate.host_processes.EnvDigest>}
       # S2: requested profile and the reported confinement. Absent on container and adopted records.
       # DEFERRED (point 3): the profile and confinement of a container (S8) or adopted (S9) record
       # are decided in the S8/S9 wave; until then neither record sets them, and nothing built in
@@ -65,7 +84,7 @@ entities:
       - {name: confinement, type: Optional<substrate.host_processes.Confinement>}
       # S4: a lease (renewable TTL) or a keep (no TTL, with a reason); never both, never neither,
       # except on an adopted record.
-      - {name: lease_ttl_seconds, type: Optional<Integer>}
+      - {name: lease_ttl_ms, type: Optional<Integer>}
       # DECIDED (point 4): the daemon computes the expiry as the start or renewal instant plus the
       # TTL. ESS 0.60.0 cannot add a duration to an instant in `sets:` (an offset is admitted only
       # on the right of a comparison), so the value is generated: it is an observation of the
@@ -73,16 +92,26 @@ entities:
       - {name: lease_expires_at, type: Optional<Timestamp>}
       - {name: keep, type: Boolean}
       - {name: keep_reason, type: Optional<String>}
-      # S11: a hard wall-clock bound, separate from the lease. At most one of the two.
-      - {name: timeout_seconds, type: Optional<Integer>}
+      # S11: hard wall-clock bounds, separate from the lease. Either, both or neither; with both,
+      # the earlier wins. Neither moves after start.
+      - {name: timeout_ms, type: Optional<Integer>}
       - {name: expires_at, type: Optional<Timestamp>}
+      # S11, S6: the effective deadline, one absolute instant recorded at start: started_at plus
+      # timeout_ms, or expires_at, whichever is earlier. Implementation-side: ESS 0.60.0 cannot add
+      # a duration to an instant in `sets:` nor take the earlier of two instants, so the value is
+      # generated and the daemon computes it. Which field set it is the `deadline` an
+      # EnforceDeadline names.
+      - {name: deadline_at, type: Optional<Timestamp>}
       - {name: started_at, type: Timestamp}
-      - {name: end_cause, type: Optional<substrate.host_processes.EndCause>}
+      # S3, S11: exactly one cause once the record leaves its live states; the first one recorded
+      # stands and a later one never overwrites it.
+      - {name: ended_by, type: Optional<substrate.host_processes.EndedBy>}
       - {name: exit_code, type: Optional<Integer>}
       - {name: exit_signal, type: Optional<String>}
       # S6: observed from the cgroup. Absent until the first observation.
+      # memory_bytes is the cgroup's memory.current, not RSS: it includes page cache.
       - {name: cpu_usec, type: Optional<Integer>}
-      - {name: rss_bytes, type: Optional<Integer>}
+      - {name: memory_bytes, type: Optional<Integer>}
       - {name: listening_ports, type: List<Integer>}
       # S7: oldest log bytes discarded at the byte bound, cumulative; 0 until the first discard.
       - {name: log_discarded_bytes, type: Integer}
@@ -100,7 +129,7 @@ entities:
       # removal command is additive.
       - {name: events, kind: owns, target: substrate.host_processes.ProcessEvent, cardinality: many, via: process}
     # Lifecycle: the plan's starting/running/stopping/exited/expired. Expiry, timeout, deadline,
-    # stop and exit all end in Ended; end_cause says which.
+    # stop, exit and a vanished cgroup all end in Ended; ended_by says which.
     lifecycle:
       initial: Starting
       states: [Starting, Running, Stopping, Ended]
@@ -122,6 +151,8 @@ entities:
       - {name: cursor, type: Integer}
       - {name: kind, type: substrate.host_processes.StreamEventKind}
       - {name: line, type: Optional<String>}
+      # S12: present on the terminal `ended` item only.
+      - {name: ended_by, type: Optional<substrate.host_processes.EndedBy>}
       - {name: exit_code, type: Optional<Integer>}
       - {name: exit_signal, type: Optional<String>}
     lifecycle:
@@ -155,14 +186,11 @@ errors:
     summary: A keep and a lease were requested together; a keep has no TTL.
     fields: []
   - name: substrate.host_processes.LeaseNotPositive
-    summary: The lease TTL is not a positive number of seconds.
-    fields: [{name: lease_ttl_seconds, type: Optional<Integer>}]
-  - name: substrate.host_processes.DeadlineConflict
-    summary: A timeout and an expires_at were requested together.
-    fields: []
+    summary: The lease TTL is not a positive number of milliseconds.
+    fields: [{name: lease_ttl_ms, type: Optional<Integer>}]
   - name: substrate.host_processes.TimeoutNotPositive
-    summary: The timeout is not a positive number of seconds.
-    fields: [{name: timeout_seconds, type: Optional<Integer>}]
+    summary: The timeout is not a positive number of milliseconds.
+    fields: [{name: timeout_ms, type: Optional<Integer>}]
   - name: substrate.host_processes.DeadlinePast
     summary: The requested expires_at is not in the future.
     fields: []
@@ -178,10 +206,10 @@ errors:
     summary: The record is not in a state this command acts from, so nothing changed.
     fields: [{name: state, type: Optional<substrate.host_processes.HostProcess.State>}]
   - name: substrate.host_processes.NoLease
-    summary: The record holds no lease (a keep or an adopted record), so there is nothing to renew or expire.
+    summary: The record holds no lease to renew or expire (an adopted record, or a keep for expiry).
     fields: []
   - name: substrate.host_processes.NoDeadline
-    summary: The record carries neither a timeout nor an expires_at.
+    summary: The record carries no deadline of the kind named.
     fields: []
 
   - name: substrate.host_processes.AdoptSourceEmpty
@@ -194,11 +222,14 @@ errors:
   - name: substrate.host_processes.OutputLineMissing
     summary: An output-line event carries no line.
     fields: []
+  - name: substrate.host_processes.EndedByMissing
+    summary: An ended item names no ended_by; the terminal item always names exactly one.
+    fields: []
   - name: substrate.host_processes.LogDiscardNotGrowing
     summary: The reported cumulative discarded byte count is not above the recorded one.
     fields: []
   - name: substrate.host_processes.StreamClosed
-    summary: The stream already holds its terminal exited event.
+    summary: The stream already holds its terminal ended item.
     fields: []
 
 # DECIDED (point 6): the subject is the only authority (ADR 0036 S5). The owner session is a label
@@ -236,6 +267,7 @@ actors:
       - substrate.host_processes.ExpireLease
       - substrate.host_processes.EnforceDeadline
       - substrate.host_processes.RecordExit
+      - substrate.host_processes.RecordVanished
       - substrate.host_processes.RecordObservation
       - substrate.host_processes.RecordLogDiscard
       - substrate.host_processes.AppendStreamEvent
@@ -254,10 +286,10 @@ commands:
       - {name: cwd, type: String, example: /srv/app}
       - {name: env_passthrough, type: List<String>}
       - {name: profile, type: Optional<substrate.host_processes.ConfinementProfile>, example: host}
-      - {name: lease_ttl_seconds, type: Optional<Integer>, example: 3600}
+      - {name: lease_ttl_ms, type: Optional<Integer>, example: 3600000}
       - {name: keep, type: Boolean, example: false}
       - {name: keep_reason, type: Optional<String>}
-      - {name: timeout_seconds, type: Optional<Integer>}
+      - {name: timeout_ms, type: Optional<Integer>}
       - {name: expires_at, type: Optional<Timestamp>}
     outcomes:
       - name: owner-absent
@@ -278,24 +310,25 @@ commands:
         when: {all: [keep == true, not defined(keep_reason)]}
         error: substrate.host_processes.KeepNeedsReason
       - name: keep-with-lease
-        when: {all: [keep == true, defined(lease_ttl_seconds)]}
+        when: {all: [keep == true, defined(lease_ttl_ms)]}
         error: substrate.host_processes.KeepHasNoLease
       - name: lease-missing
-        when: {all: [keep == false, not defined(lease_ttl_seconds)]}
+        when: {all: [keep == false, not defined(lease_ttl_ms)]}
         error: substrate.host_processes.LeaseRequired
       - name: lease-not-positive
-        when: {all: [defined(lease_ttl_seconds), lease_ttl_seconds <= 0]}
+        when: {all: [defined(lease_ttl_ms), lease_ttl_ms <= 0]}
         error: substrate.host_processes.LeaseNotPositive
         payload:
-          substrate.host_processes.LeaseNotPositive: {lease_ttl_seconds: input.lease_ttl_seconds}
-      - name: deadline-conflict
-        when: {all: [defined(timeout_seconds), defined(expires_at)]}
-        error: substrate.host_processes.DeadlineConflict
+          substrate.host_processes.LeaseNotPositive: {lease_ttl_ms: input.lease_ttl_ms}
+      # S11: a timeout and an expires_at together are admitted; the earlier wins (`deadline_at`).
+      # The upper bound MAX_PROCESS_TIMEOUT_MS and the MIN_LEASE_TTL_MS margin on expires_at are
+      # wire constants of the successor bundle; ESS 0.60.0 declares no constants, so those two
+      # bounds are the daemon's and this model refuses only zero, negative and past values.
       - name: timeout-not-positive
-        when: {all: [defined(timeout_seconds), timeout_seconds <= 0]}
+        when: {all: [defined(timeout_ms), timeout_ms <= 0]}
         error: substrate.host_processes.TimeoutNotPositive
         payload:
-          substrate.host_processes.TimeoutNotPositive: {timeout_seconds: input.timeout_seconds}
+          substrate.host_processes.TimeoutNotPositive: {timeout_ms: input.timeout_ms}
       - name: deadline-past
         when: {all: [defined(expires_at), expires_at <= now]}
         error: substrate.host_processes.DeadlinePast
@@ -328,14 +361,16 @@ commands:
           argv: input.argv
           cwd: input.cwd
           env_passthrough: input.env_passthrough
+          env_digest: {generated: true}
           profile: input.profile
           confinement: none
-          lease_ttl_seconds: input.lease_ttl_seconds
+          lease_ttl_ms: input.lease_ttl_ms
           lease_expires_at: {generated: true}
           keep: input.keep
           keep_reason: input.keep_reason
-          timeout_seconds: input.timeout_seconds
+          timeout_ms: input.timeout_ms
           expires_at: input.expires_at
+          deadline_at: {generated: true}
           started_at: {generated: true}
           # Empty until the first observation; ESS admits no list literal in `sets:`, so the
           # implementation supplies the empty list.
@@ -373,33 +408,50 @@ commands:
   - name: substrate.host_processes.RenewLease
     naming:
       wire: renew
-      summary: S4 — renew a live record's lease. The S11 deadline does not move.
+      summary: S4 — renew a live record's lease, or change a keep to a TTL lease. The S11 deadline does not move.
+    # S4: a lease may be renewed, or changed from `keep` to a TTL, but never changed to `keep` after
+    # start. The input carries only a TTL, so a renewal that asks for `keep` is not a request this
+    # command admits. An adopted record holds neither a lease nor a keep and stays NoLease.
+    # The MIN_LEASE_TTL_MS..MAX_LEASE_TTL_MS bounds are wire constants of the successor bundle;
+    # ESS 0.60.0 declares no constants, so this model refuses only a TTL that is not positive.
     input:
       - {name: process, type: String}
-      - {name: lease_ttl_seconds, type: Integer}
+      - {name: lease_ttl_ms, type: Integer}
     outcomes:
       - name: lease-not-positive
-        when: lease_ttl_seconds <= 0
+        when: lease_ttl_ms <= 0
         error: substrate.host_processes.LeaseNotPositive
         payload:
-          substrate.host_processes.LeaseNotPositive: {lease_ttl_seconds: input.lease_ttl_seconds}
+          substrate.host_processes.LeaseNotPositive: {lease_ttl_ms: input.lease_ttl_ms}
       - name: not-live
         when_subject: {predicate: {state: [Stopping, Ended]}}
         error: substrate.host_processes.NotLive
         payload:
           substrate.host_processes.NotLive: {state: {subject: state}}
       - name: no-lease
-        when_subject: {predicate: not defined(lease_ttl_seconds)}
+        when_subject: {predicate: {all: [keep == false, not defined(lease_ttl_ms)]}}
         error: substrate.host_processes.NoLease
+      - name: keep-to-lease
+        when_subject: {predicate: keep == true}
+        updates: substrate.host_processes.HostProcess
+        instance: process
+        sets:
+          keep: false
+          keep_reason: {cleared: true}
+          lease_ttl_ms: input.lease_ttl_ms
+          lease_expires_at: {generated: true}
+        emits: [substrate.host_processes.LeaseRenewed]
+        payload:
+          substrate.host_processes.LeaseRenewed: {process: input.process, lease_ttl_ms: input.lease_ttl_ms}
       - name: renewed
         updates: substrate.host_processes.HostProcess
         instance: process
         sets:
-          lease_ttl_seconds: input.lease_ttl_seconds
+          lease_ttl_ms: input.lease_ttl_ms
           lease_expires_at: {generated: true}
         emits: [substrate.host_processes.LeaseRenewed]
         payload:
-          substrate.host_processes.LeaseRenewed: {process: input.process, lease_ttl_seconds: input.lease_ttl_seconds}
+          substrate.host_processes.LeaseRenewed: {process: input.process, lease_ttl_ms: input.lease_ttl_ms}
       - name: unknown
         unknown_instance: true
         error: substrate.host_processes.UnknownProcess
@@ -413,10 +465,10 @@ commands:
       - name: stopping
         moves: substrate.host_processes.HostProcess.request_stop
         instance: process
-        sets: {end_cause: stopped}
+        sets: {ended_by: stop}
         emits: [substrate.host_processes.StopRequested]
         payload:
-          substrate.host_processes.StopRequested: {process: input.process, end_cause: stopped}
+          substrate.host_processes.StopRequested: {process: input.process, ended_by: stop}
       - name: not-live
         wrong_state: true
         error: substrate.host_processes.NotLive
@@ -436,15 +488,15 @@ commands:
     input: [{name: process, type: String}]
     outcomes:
       - name: no-lease
-        when_subject: {predicate: not defined(lease_ttl_seconds)}
+        when_subject: {predicate: not defined(lease_ttl_ms)}
         error: substrate.host_processes.NoLease
       - name: expired
         moves: substrate.host_processes.HostProcess.request_stop
         instance: process
-        sets: {end_cause: lease-expired}
+        sets: {ended_by: lease-expiry}
         emits: [substrate.host_processes.StopRequested]
         payload:
-          substrate.host_processes.StopRequested: {process: input.process, end_cause: lease-expired}
+          substrate.host_processes.StopRequested: {process: input.process, ended_by: lease-expiry}
       - name: not-live
         wrong_state: true
         error: substrate.host_processes.NotLive
@@ -457,30 +509,38 @@ commands:
   - name: substrate.host_processes.EnforceDeadline
     naming:
       wire: enforce-deadline
-      summary: S11 — the supervisor reached the hard wall-clock bound; the record stops.
-    # DECIDED (point 9): the same supervisor clock invokes this command when started_at plus
-    # timeout_seconds, or expires_at, is reached; the end cause names which deadline. As for
-    # ExpireLease, ESS 0.60.0 has no clock-driven transition, so the trigger is implementation-side.
-    input: [{name: process, type: String}]
+      summary: S11 — the supervisor reached the effective hard deadline; the record stops.
+    # DECIDED (point 9): the same supervisor clock invokes this command when `deadline_at` is
+    # reached, and names which field set it. With both a timeout and an expires_at, the earlier one
+    # is the deadline (S11); ESS 0.60.0 can neither compute started_at plus timeout_ms nor take the
+    # earlier of two instants, and has no clock-driven transition, so choosing the deadline and the
+    # trigger are implementation-side. The model refuses a named deadline the record does not carry.
+    input:
+      - {name: process, type: String}
+      - {name: deadline, type: substrate.host_processes.Deadline, example: timeout}
     outcomes:
       - name: no-deadline
-        when_subject: {predicate: {all: [not defined(timeout_seconds), not defined(expires_at)]}}
+        when_subject:
+          predicate:
+            any:
+              - {all: [input.deadline == timeout, not defined(timeout_ms)]}
+              - {all: [input.deadline == expires-at, not defined(expires_at)]}
         error: substrate.host_processes.NoDeadline
       - name: timed-out
-        when_subject: {predicate: defined(timeout_seconds)}
+        when: deadline == timeout
         moves: substrate.host_processes.HostProcess.request_stop
         instance: process
-        sets: {end_cause: timed-out}
+        sets: {ended_by: timeout}
         emits: [substrate.host_processes.StopRequested]
         payload:
-          substrate.host_processes.StopRequested: {process: input.process, end_cause: timed-out}
-      - name: deadline-reached
+          substrate.host_processes.StopRequested: {process: input.process, ended_by: timeout}
+      - name: expires-at-reached
         moves: substrate.host_processes.HostProcess.request_stop
         instance: process
-        sets: {end_cause: deadline-reached}
+        sets: {ended_by: expires-at}
         emits: [substrate.host_processes.StopRequested]
         payload:
-          substrate.host_processes.StopRequested: {process: input.process, end_cause: deadline-reached}
+          substrate.host_processes.StopRequested: {process: input.process, ended_by: expires-at}
       - name: not-live
         wrong_state: true
         error: substrate.host_processes.NotLive
@@ -503,10 +563,10 @@ commands:
         when_subject_state: [Starting, Running]
         moves: substrate.host_processes.HostProcess.end
         instance: process
-        sets: {end_cause: exited, exit_code: input.exit_code, exit_signal: input.exit_signal}
+        sets: {ended_by: exit, exit_code: input.exit_code, exit_signal: input.exit_signal}
         emits: [substrate.host_processes.ProcessEnded]
         payload:
-          substrate.host_processes.ProcessEnded: {process: input.process, exit_code: input.exit_code, exit_signal: input.exit_signal}
+          substrate.host_processes.ProcessEnded: {process: input.process, ended_by: exit, exit_code: input.exit_code, exit_signal: input.exit_signal}
       - name: stopped
         # The cause set when the stop was requested stands.
         when_subject_state: Stopping
@@ -515,32 +575,72 @@ commands:
         sets: {exit_code: input.exit_code, exit_signal: input.exit_signal}
         emits: [substrate.host_processes.ProcessEnded]
         payload:
-          substrate.host_processes.ProcessEnded: {process: input.process, exit_code: input.exit_code, exit_signal: input.exit_signal}
+          substrate.host_processes.ProcessEnded: {process: input.process, ended_by: {subject: ended_by}, exit_code: input.exit_code, exit_signal: input.exit_signal}
       - name: ended
         error: substrate.host_processes.NotLive
       - name: unknown
         unknown_instance: true
         error: substrate.host_processes.UnknownProcess
 
-
+  - name: substrate.host_processes.RecordVanished
+    naming:
+      wire: record-vanished
+      summary: S3 — on restart the daemon found a non-terminal record's cgroup gone; the record ends with no exit status.
+    # S3: a record whose cgroup is gone on reconciliation ends `vanished`, never `running` and never
+    # with an exit status nobody observed. A record already Stopping keeps the cause its stop
+    # recorded first (S11): a later cause never overwrites it.
+    input: [{name: process, type: String}]
+    outcomes:
+      - name: vanished
+        when_subject_state: [Starting, Running]
+        moves: substrate.host_processes.HostProcess.end
+        instance: process
+        sets: {ended_by: vanished}
+        emits: [substrate.host_processes.ProcessEnded]
+        payload:
+          substrate.host_processes.ProcessEnded: {process: input.process, ended_by: vanished, exit_code: {subject: exit_code}, exit_signal: {subject: exit_signal}}
+      - name: vanished-while-stopping
+        when_subject_state: Stopping
+        moves: substrate.host_processes.HostProcess.end
+        instance: process
+        emits: [substrate.host_processes.ProcessEnded]
+        payload:
+          substrate.host_processes.ProcessEnded: {process: input.process, ended_by: {subject: ended_by}, exit_code: {subject: exit_code}, exit_signal: {subject: exit_signal}}
+      - name: ended
+        error: substrate.host_processes.NotLive
+      - name: unknown
+        unknown_instance: true
+        error: substrate.host_processes.UnknownProcess
 
   - name: substrate.host_processes.StopByOwner
     naming:
       wire: stop-by-owner
-      summary: S5 — the SessionEnd stop; stops that owner's live records that are not kept.
+      summary: S5 — the session-end stop; stops that owner's live records, kept ones too unless except_keep is true.
     input:
       - {name: owner_session_id, type: String, example: s-1}
+      # S5: `{ "except_keep": true }` leaves records held under `keep` running. Absent or false,
+      # kept records are stopped by owner too.
+      - {name: except_keep, type: Optional<Boolean>, example: true}
     outcomes:
-      - name: stopping
+      # Only live rows move: request_stop starts from Starting and Running. A filter cannot read
+      # `state` (unobservable_fact), so the move's `from:` is what bounds it.
+      - name: stopping-except-keep
+        when: {all: [defined(except_keep), except_keep == true]}
         moves: substrate.host_processes.HostProcess.request_stop
         instances:
           where:
             all:
               - owner_session_id == input.owner_session_id
               - keep == false
-        # Only live rows move: request_stop starts from Starting and Running. A filter cannot read
-        # `state` (unobservable_fact), so the move's `from:` is what bounds it.
-        sets: {end_cause: stopped}
+        sets: {ended_by: stop}
+        emits: [substrate.host_processes.OwnerStopped]
+        payload:
+          substrate.host_processes.OwnerStopped: {owner_session_id: input.owner_session_id, stopped: {count: changed}}
+      - name: stopping
+        moves: substrate.host_processes.HostProcess.request_stop
+        instances:
+          where: owner_session_id == input.owner_session_id
+        sets: {ended_by: stop}
         emits: [substrate.host_processes.OwnerStopped]
         payload:
           substrate.host_processes.OwnerStopped: {owner_session_id: input.owner_session_id, stopped: {count: changed}}
@@ -610,7 +710,7 @@ commands:
       - {name: reason, type: String, example: database for the preview}
       - {name: kind, type: substrate.host_processes.ContainerKind, example: docker}
       - {name: argv, type: List<String>}
-      - {name: lease_ttl_seconds, type: Optional<Integer>, example: 3600}
+      - {name: lease_ttl_ms, type: Optional<Integer>, example: 3600000}
       - {name: keep, type: Boolean, example: false}
       - {name: keep_reason, type: Optional<String>}
     outcomes:
@@ -624,16 +724,16 @@ commands:
         when: {all: [keep == true, not defined(keep_reason)]}
         error: substrate.host_processes.KeepNeedsReason
       - name: keep-with-lease
-        when: {all: [keep == true, defined(lease_ttl_seconds)]}
+        when: {all: [keep == true, defined(lease_ttl_ms)]}
         error: substrate.host_processes.KeepHasNoLease
       - name: lease-missing
-        when: {all: [keep == false, not defined(lease_ttl_seconds)]}
+        when: {all: [keep == false, not defined(lease_ttl_ms)]}
         error: substrate.host_processes.LeaseRequired
       - name: lease-not-positive
-        when: {all: [defined(lease_ttl_seconds), lease_ttl_seconds <= 0]}
+        when: {all: [defined(lease_ttl_ms), lease_ttl_ms <= 0]}
         error: substrate.host_processes.LeaseNotPositive
         payload:
-          substrate.host_processes.LeaseNotPositive: {lease_ttl_seconds: input.lease_ttl_seconds}
+          substrate.host_processes.LeaseNotPositive: {lease_ttl_ms: input.lease_ttl_ms}
       - name: hosted-posture
         external: the daemon serves a hosted or static-bearer TCP posture, which never admits a host record
         error: substrate.host_processes.HostProfileRefused
@@ -647,7 +747,7 @@ commands:
           reason: input.reason
           argv: input.argv
           env_passthrough: {generated: true}
-          lease_ttl_seconds: input.lease_ttl_seconds
+          lease_ttl_ms: input.lease_ttl_ms
           lease_expires_at: {generated: true}
           keep: input.keep
           keep_reason: input.keep_reason
@@ -667,13 +767,13 @@ commands:
   - name: substrate.host_processes.RecordObservation
     naming:
       wire: record-observation
-      summary: S6 — the supervisor's observation of the cgroup's CPU, RSS and listening sockets.
+      summary: S6 — the supervisor's observation of the cgroup's CPU, memory (memory.current) and listening sockets.
     # DECIDED (point 13): CPU is cumulative microseconds read from the cgroup at observation time,
     # as exec usage reports; there is no background sampling, so no cadence. Sampling is additive.
     input:
       - {name: process, type: String}
       - {name: cpu_usec, type: Integer}
-      - {name: rss_bytes, type: Integer}
+      - {name: memory_bytes, type: Integer}
       - {name: listening_ports, type: List<Integer>}
     outcomes:
       - name: not-running
@@ -684,10 +784,10 @@ commands:
       - name: observed
         updates: substrate.host_processes.HostProcess
         instance: process
-        sets: {cpu_usec: input.cpu_usec, rss_bytes: input.rss_bytes, listening_ports: input.listening_ports}
+        sets: {cpu_usec: input.cpu_usec, memory_bytes: input.memory_bytes, listening_ports: input.listening_ports}
         emits: [substrate.host_processes.ProcessObserved]
         payload:
-          substrate.host_processes.ProcessObserved: {process: input.process, cpu_usec: input.cpu_usec, rss_bytes: input.rss_bytes, listening_ports: input.listening_ports}
+          substrate.host_processes.ProcessObserved: {process: input.process, cpu_usec: input.cpu_usec, memory_bytes: input.memory_bytes, listening_ports: input.listening_ports}
       - name: unknown
         unknown_instance: true
         error: substrate.host_processes.UnknownProcess
@@ -709,10 +809,14 @@ commands:
       - {name: line, type: Optional<String>, example: listening on 5173}
       - {name: exit_code, type: Optional<Integer>}
       - {name: exit_signal, type: Optional<String>}
+      - {name: ended_by, type: Optional<substrate.host_processes.EndedBy>}
     outcomes:
       - name: line-missing
         when: {all: [kind == output-line, not defined(line)]}
         error: substrate.host_processes.OutputLineMissing
+      - name: ended-by-missing
+        when: {all: [kind == ended, not defined(ended_by)]}
+        error: substrate.host_processes.EndedByMissing
       - name: unknown-process
         when_related:
           entity: substrate.host_processes.HostProcess
@@ -720,10 +824,10 @@ commands:
           exists: false
         error: substrate.host_processes.UnknownProcess
       - name: stream-closed
-        # `exited` is the terminal event: nothing follows it in a stream.
+        # `ended` is the terminal item: nothing follows it in a stream.
         when_related:
           entity: substrate.host_processes.ProcessEvent
-          where: {all: [process == input.process, kind == exited]}
+          where: {all: [process == input.process, kind == ended]}
           exists: true
         error: substrate.host_processes.StreamClosed
       - name: appended
@@ -735,6 +839,7 @@ commands:
           line: input.line
           exit_code: input.exit_code
           exit_signal: input.exit_signal
+          ended_by: input.ended_by
           # DECIDED (point 16): the daemon assigns the cursor, the per-process `seq`, strictly
           # increasing; on the wire the cursor is opaque. ESS 0.60.0 cannot state monotonicity of a
           # generated value, so it is implementation-side, and the ordering scenarios
@@ -782,14 +887,15 @@ events:
   - name: substrate.host_processes.StopRequested
     fields:
       - {name: process, type: String}
-      - {name: end_cause, type: substrate.host_processes.EndCause}
+      - {name: ended_by, type: substrate.host_processes.EndedBy}
   - name: substrate.host_processes.LeaseRenewed
     fields:
       - {name: process, type: String}
-      - {name: lease_ttl_seconds, type: Integer}
+      - {name: lease_ttl_ms, type: Integer}
   - name: substrate.host_processes.ProcessEnded
     fields:
       - {name: process, type: String}
+      - {name: ended_by, type: substrate.host_processes.EndedBy}
       - {name: exit_code, type: Optional<Integer>}
       - {name: exit_signal, type: Optional<String>}
 
@@ -808,7 +914,7 @@ events:
     fields:
       - {name: process, type: String}
       - {name: cpu_usec, type: Integer}
-      - {name: rss_bytes, type: Integer}
+      - {name: memory_bytes, type: Integer}
       - {name: listening_ports, type: List<Integer>}
 
   - name: substrate.host_processes.LogDiscarded
@@ -838,20 +944,22 @@ views:
       - {name: cwd, type: Optional<String>}
       - {name: argv, type: List<String>}
       - {name: env_passthrough, type: List<String>}
+      - {name: env_digest, type: Optional<substrate.host_processes.EnvDigest>}
       - {name: profile, type: Optional<substrate.host_processes.ConfinementProfile>}
       - {name: confinement, type: Optional<substrate.host_processes.Confinement>}
       - {name: started_at, type: Timestamp}
-      - {name: lease_ttl_seconds, type: Optional<Integer>}
+      - {name: lease_ttl_ms, type: Optional<Integer>}
       - {name: lease_expires_at, type: Optional<Timestamp>}
       - {name: keep, type: Boolean}
       - {name: keep_reason, type: Optional<String>}
-      - {name: timeout_seconds, type: Optional<Integer>}
+      - {name: timeout_ms, type: Optional<Integer>}
       - {name: expires_at, type: Optional<Timestamp>}
-      - {name: end_cause, type: Optional<substrate.host_processes.EndCause>}
+      - {name: deadline_at, type: Optional<Timestamp>}
+      - {name: ended_by, type: Optional<substrate.host_processes.EndedBy>}
       - {name: exit_code, type: Optional<Integer>}
       - {name: exit_signal, type: Optional<String>}
       - {name: cpu_usec, type: Optional<Integer>}
-      - {name: rss_bytes, type: Optional<Integer>}
+      - {name: memory_bytes, type: Optional<Integer>}
       - {name: listening_ports, type: List<Integer>}
       - {name: log_discarded_bytes, type: Integer}
       - {name: container_kind, type: Optional<substrate.host_processes.ContainerKind>}
@@ -877,6 +985,7 @@ views:
       - {name: line, type: Optional<String>}
       - {name: exit_code, type: Optional<Integer>}
       - {name: exit_signal, type: Optional<String>}
+      - {name: ended_by, type: Optional<substrate.host_processes.EndedBy>}
 
   # S7: `logs <name>`, the output lines of one record, a bounded page at a time.
   - name: substrate.host_processes.ProcessLogs

@@ -1,0 +1,61 @@
+# S3: on restart the daemon reconciles every non-terminal record; one whose cgroup is gone ends
+# `vanished`, with no exit status nobody observed. A record already stopping keeps the cause its
+# stop recorded first (S11). The stream's terminal item names the same ended_by.
+type: ess-scenario/1
+domain: substrate.host_processes
+scenario: vanished-on-reconcile
+summary: A running record whose cgroup is gone ends vanished; a stopping one ends keeping its stop cause; an ended record is refused.
+
+arrange:
+  - instance: dev
+    entity: substrate.host_processes.HostProcess
+  - instance: stopping
+    entity: substrate.host_processes.HostProcess
+
+timeline:
+  - at: 2026-10-16T09:00:00Z
+    command: substrate.host_processes.StartProcess
+    input: {name: dev-server, owner_session_id: s-1, owner_session_name: worker, reason: serve the preview, argv: [vite], cwd: /srv/app, env_passthrough: [PATH], profile: host, lease_ttl_ms: 3600000, keep: false}
+    outcome: started
+    capture: {instance: dev, event: substrate.host_processes.ProcessStarted, field: process}
+  - at: 2026-10-16T09:00:01Z
+    command: substrate.host_processes.ConfirmRunning
+    input: {process: {$instance: dev}}
+    outcome: running
+  - at: 2026-10-16T09:00:02Z
+    command: substrate.host_processes.StartProcess
+    input: {name: watcher, owner_session_id: s-1, owner_session_name: worker, reason: rebuild on change, argv: [watchexec, make], cwd: /srv/app, env_passthrough: [], profile: host, lease_ttl_ms: 3600000, keep: false}
+    outcome: started
+    capture: {instance: stopping, event: substrate.host_processes.ProcessStarted, field: process}
+  - at: 2026-10-16T09:00:03Z
+    command: substrate.host_processes.StopProcess
+    input: {process: {$instance: stopping}}
+    outcome: stopping
+  - at: 2026-10-16T09:05:00Z
+    command: substrate.host_processes.RecordVanished
+    input: {process: {$instance: dev}}
+    outcome: vanished
+    events:
+      - event: substrate.host_processes.ProcessEnded
+        payload: {ended_by: vanished}
+  - at: 2026-10-16T09:05:01Z
+    command: substrate.host_processes.RecordVanished
+    input: {process: {$instance: stopping}}
+    outcome: vanished-while-stopping
+    events:
+      - event: substrate.host_processes.ProcessEnded
+        payload: {ended_by: stop}
+  - at: 2026-10-16T09:05:02Z
+    command: substrate.host_processes.RecordVanished
+    input: {process: {$instance: dev}}
+    outcome: ended
+    error: {name: substrate.host_processes.NotLive}
+
+assert:
+  - view: substrate.host_processes.HostProcesses
+    contains: {process: {$instance: dev}, state: Ended, ended_by: vanished}
+  - view: substrate.host_processes.HostProcesses
+    contains: {process: {$instance: stopping}, state: Ended, ended_by: stop}
+  - view: substrate.host_processes.ProcessEvents
+    params: {process: {$instance: dev}, after: -1}
+    at: {row: last, fields: {kind: ended, ended_by: vanished}}

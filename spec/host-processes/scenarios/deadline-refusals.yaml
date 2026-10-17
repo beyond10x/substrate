@@ -1,24 +1,19 @@
-# S11: a timeout and an expires_at together, a timeout that is not positive and an expires_at in
-# the past are each refused by name; nothing is listed.
+# S11: a timeout that is not positive and an expires_at in the past are each refused by name;
+# nothing is listed. A timeout and an expires_at together are admitted (expires-at-reached).
 type: ess-scenario/1
 domain: substrate.host_processes
 scenario: deadline-refusals
-summary: Timeout with expires_at, a non-positive timeout and a past expires_at are each refused, and nothing is listed.
+summary: A non-positive timeout and a past expires_at are each refused, and nothing is listed.
 
 timeline:
-  - at: 2026-10-16T09:00:00Z
-    command: substrate.host_processes.StartProcess
-    input: {name: dev-server, owner_session_id: s-1, owner_session_name: worker, reason: serve the preview, env_passthrough: [], argv: [vite], cwd: /srv/app, profile: host, lease_ttl_seconds: 60, keep: false, timeout_seconds: 60, expires_at: 2100-01-01T00:00:00Z}
-    outcome: deadline-conflict
-    error: {name: substrate.host_processes.DeadlineConflict}
   - at: 2026-10-16T09:00:01Z
     command: substrate.host_processes.StartProcess
-    input: {name: dev-server, owner_session_id: s-1, owner_session_name: worker, reason: serve the preview, env_passthrough: [], argv: [vite], cwd: /srv/app, profile: host, lease_ttl_seconds: 60, keep: false, timeout_seconds: 0}
+    input: {name: dev-server, owner_session_id: s-1, owner_session_name: worker, reason: serve the preview, env_passthrough: [], argv: [vite], cwd: /srv/app, profile: host, lease_ttl_ms: 60000, keep: false, timeout_ms: 0}
     outcome: timeout-not-positive
-    error: {name: substrate.host_processes.TimeoutNotPositive, fields: {timeout_seconds: 0}}
+    error: {name: substrate.host_processes.TimeoutNotPositive, fields: {timeout_ms: 0}}
   - at: 2026-10-16T09:00:02Z
     command: substrate.host_processes.StartProcess
-    input: {name: dev-server, owner_session_id: s-1, owner_session_name: worker, reason: serve the preview, env_passthrough: [], argv: [vite], cwd: /srv/app, profile: host, lease_ttl_seconds: 60, keep: false, expires_at: 2000-01-01T00:00:00Z}
+    input: {name: dev-server, owner_session_id: s-1, owner_session_name: worker, reason: serve the preview, env_passthrough: [], argv: [vite], cwd: /srv/app, profile: host, lease_ttl_ms: 60000, keep: false, expires_at: 2000-01-01T00:00:00Z}
     outcome: deadline-past
     error: {name: substrate.host_processes.DeadlinePast}
 

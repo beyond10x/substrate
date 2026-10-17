@@ -19,3 +19,4 @@ scenarios:
   - scenarios/name-unique-per-owner.yaml
   - scenarios/log-discard-counted.yaml
   - scenarios/expires-at-reached.yaml
+  - scenarios/vanished-on-reconcile.yaml

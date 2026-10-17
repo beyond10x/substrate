@@ -37,7 +37,11 @@ place it governs:
   (14), and an append for an unknown process refused inside the daemon (15).
 - **Implementation-side, because ESS 0.60.0 cannot state it:** the lease expiry instant (4), the
   retention sweep that removes ended records (5), the supervisor clock that fires lease expiry and
-  deadlines (8, 9), and the cursor's monotonicity (16), which the ordering scenarios check.
+  deadlines (8, 9), and the cursor's monotonicity (16), which the ordering scenarios check. The
+  same holds for three values of ADR 0036 itself: the effective deadline `deadline_at`, the earlier
+  of `timeout_ms` and `expires_at` (S11), which the supervisor names when it enforces it; the
+  environment digest `env_digest` (S1); and the wire bounds `MIN_LEASE_TTL_MS`,
+  `MAX_LEASE_TTL_MS` and `MAX_PROCESS_TIMEOUT_MS`, which ESS 0.60.0 cannot declare as constants.
 - **Deferred to the S8/S9 wave:** the profile of container and adopted records (3), adopted
   supervision (10), the container label keys (11) and a container timeout (12). The `StartContainer`
   and `AdoptProcess` declarations stay drafted and are marked deferred; nothing in this wave builds
@@ -49,5 +53,6 @@ The kernel half of these claims belongs to a native suite. That covers killing t
 every stop, the process tree being gone before a record ends, the refusal of the `host` profile
 under a hosted or static-bearer TCP posture, the per-subject partition of records, and the byte
 bound on the log file. Here a record reaches `Ended` only through the supervisor's empty-cgroup
-report (`RecordExit`). Lease expiry and the hard deadline are supervisor commands, because ESS has
+report (`RecordExit`) or its reconciliation finding the cgroup gone (`RecordVanished`, which ends
+the record `vanished`). Lease expiry and the hard deadline are supervisor commands, because ESS has
 no clock-driven transition.

@@ -116,19 +116,19 @@ repeating the expected outcome. The full adoption report records the command and
 ADR 0036 before its implementation. No shipped code, route or wire bundle carries it yet. What the
 green check establishes:
 
-- `ess specify validate --path spec/host-processes` resolves the model, its actors and its 17
+- `ess specify validate --path spec/host-processes` resolves the model, its actors and its 18
   authored scenarios.
 - `spec/host-processes-suite.json` is the exact `ess verify conform synthesize` output;
-  `cargo xtask check-ess` fails on drift. It holds 65 synthesized scenarios and records 28
-  refusals: 14 for the four stream bindings, whose invocations synthesis does not follow
-  (ESS-SYNTH-010 and -001); 13 for branches, states and transitions whose arrangement passes
-  through a row-set guard (`name-conflict` makes every `StartProcess` step one), among them
-  `StartProcess/started`, `name-conflict`, `stream-closed`, `unknown-process`, the deadline moves
-  and stop by owner (ESS-SYNTH-001); and one unwitnessed connective child of
-  `StartContainer/started` (ESS-SYNTH-022). An authored scenario exercises each of those branches
-  except `StartProcess/hosted-posture`, whose cause is the daemon's posture and belongs to the
-  runtime suite.
-- `ess verify conform run --target interpreted` passes all 82 scenarios, synthesized and
+  `cargo xtask check-ess` fails on drift. It holds 71 synthesized scenarios and records 21
+  refusals: 6 for the two stream bindings, whose invocation synthesis cannot force and whose
+  `drop` publishes nothing (ESS-SYNTH-010); 14 for branches, states and transitions whose
+  arrangement passes through a row-set guard (`name-conflict` makes every `StartProcess` step
+  one), among them `StartProcess/started`, `name-conflict`, `hosted-posture`, `stream-closed`,
+  `unknown-process`, both deadline moves and both stop-by-owner branches (ESS-SYNTH-001); and one
+  unwitnessed connective child of `StartContainer/started` (ESS-SYNTH-022). An authored scenario
+  exercises each of those branches except `StartProcess/hosted-posture`, whose cause is the
+  daemon's posture and belongs to the runtime suite.
+- `ess verify conform run --target interpreted` passes all 89 scenarios, synthesized and
   authored, against the ESS reference. That checks the model only.
 
 What it does not establish:
@@ -139,5 +139,7 @@ What it does not establish:
   carries no caller attribute values, so a `{caller: subject}` model would refuse every authored
   scenario; cross-subject refusals stay the daemon's runtime cases.
 - **No clock.** Lease expiry, deadlines and retention are supervisor commands or daemon behaviour;
-  the expiry instant and the cursor's order are generated values (points 4, 8, 9 and 16).
+  the expiry instant, the effective deadline (the earlier of a timeout and an expires_at, ADR 0036
+  S11), the environment digest (S1) and the cursor's order are generated values (points 4, 8, 9
+  and 16). The supervisor names which deadline it enforced.
 - **No S8 or S9.** `StartContainer` and `AdoptProcess` are drafted and deferred to their wave.

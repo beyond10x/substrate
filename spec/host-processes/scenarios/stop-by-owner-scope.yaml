@@ -1,8 +1,9 @@
-# S5: the SessionEnd stop moves only that owner's records that are not kept.
+# S5: stop by owner moves only that owner's live records. With except_keep it leaves the kept
+# record running; without it, the kept record is stopped too. Another owner's record is untouched.
 type: ess-scenario/1
 domain: substrate.host_processes
 scenario: stop-by-owner-scope
-summary: Stop by owner stops only that owner's non-keep records; its kept record and another owner's stay Running.
+summary: Stop by owner with except_keep spares the kept record; a later stop without it stops the kept record; another owner's stays Running.
 
 arrange:
   - instance: mine
@@ -15,7 +16,7 @@ arrange:
 timeline:
   - at: 2026-10-16T09:00:00Z
     command: substrate.host_processes.StartProcess
-    input: {name: vite, owner_session_id: s-1, owner_session_name: worker, reason: preview, argv: [vite], cwd: /srv/app, env_passthrough: [], profile: host, lease_ttl_seconds: 3600, keep: false}
+    input: {name: vite, owner_session_id: s-1, owner_session_name: worker, reason: preview, argv: [vite], cwd: /srv/app, env_passthrough: [], profile: host, lease_ttl_ms: 3600000, keep: false}
     outcome: started
     capture: {instance: mine, event: substrate.host_processes.ProcessStarted, field: process}
   - at: 2026-10-16T09:00:01Z
@@ -25,7 +26,7 @@ timeline:
     capture: {instance: mine-kept, event: substrate.host_processes.ProcessStarted, field: process}
   - at: 2026-10-16T09:00:02Z
     command: substrate.host_processes.StartProcess
-    input: {name: chrome, owner_session_id: s-2, owner_session_name: other, reason: browser checks, argv: [chrome, --headless], cwd: /srv/app, env_passthrough: [], profile: host, lease_ttl_seconds: 3600, keep: false}
+    input: {name: chrome, owner_session_id: s-2, owner_session_name: other, reason: browser checks, argv: [chrome, --headless], cwd: /srv/app, env_passthrough: [], profile: host, lease_ttl_ms: 3600000, keep: false}
     outcome: started
     capture: {instance: theirs, event: substrate.host_processes.ProcessStarted, field: process}
   - at: 2026-10-16T09:00:03Z
@@ -42,6 +43,13 @@ timeline:
     outcome: running
   - at: 2026-10-16T09:10:00Z
     command: substrate.host_processes.StopByOwner
+    input: {owner_session_id: s-1, except_keep: true}
+    outcome: stopping-except-keep
+    events:
+      - event: substrate.host_processes.OwnerStopped
+        payload: {owner_session_id: s-1, stopped: 1}
+  - at: 2026-10-16T09:20:00Z
+    command: substrate.host_processes.StopByOwner
     input: {owner_session_id: s-1}
     outcome: stopping
     events:
@@ -50,8 +58,8 @@ timeline:
 
 assert:
   - view: substrate.host_processes.HostProcesses
-    contains: {process: {$instance: mine}, state: Stopping, end_cause: stopped}
+    contains: {process: {$instance: mine}, state: Stopping, ended_by: stop}
   - view: substrate.host_processes.HostProcesses
-    contains: {process: {$instance: mine-kept}, state: Running}
+    contains: {process: {$instance: mine-kept}, state: Stopping, ended_by: stop}
   - view: substrate.host_processes.HostProcesses
     contains: {process: {$instance: theirs}, state: Running}

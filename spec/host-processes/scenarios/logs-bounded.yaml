@@ -12,7 +12,7 @@ arrange:
 timeline:
   - at: 2026-10-16T09:00:00Z
     command: substrate.host_processes.StartProcess
-    input: {name: dev-server, owner_session_id: s-1, owner_session_name: worker, reason: serve the preview, argv: [vite], cwd: /srv/app, env_passthrough: [], profile: host, lease_ttl_seconds: 3600, keep: false}
+    input: {name: dev-server, owner_session_id: s-1, owner_session_name: worker, reason: serve the preview, argv: [vite], cwd: /srv/app, env_passthrough: [], profile: host, lease_ttl_ms: 3600000, keep: false}
     outcome: started
     capture: {instance: dev, event: substrate.host_processes.ProcessStarted, field: process}
   - at: 2026-10-16T09:00:01Z
