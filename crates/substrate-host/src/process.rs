@@ -3226,7 +3226,7 @@ fn exec_cpu_quota(cpu_millis: u64, timeout_ms: u64, cores: u32) -> u64 {
         .clamp(1_000, ceiling)
 }
 
-struct Cgroup {
+pub(crate) struct Cgroup {
     path: PathBuf,
     name: String,
 }
@@ -3299,6 +3299,16 @@ impl Cgroup {
         })
     }
 
+    /// A handle on a cgroup another resource family created and named itself.
+    ///
+    /// The host-process driver (design 26 § S3) creates one cgroup per process under its own
+    /// `substrate-hp_` prefix and reuses this type's kill, signal, CPU and removal operations, so
+    /// whole-tree termination has one implementation. It never reaches `existing`, whose prefix
+    /// check is exec's own.
+    pub(crate) const fn at(path: PathBuf, name: String) -> Self {
+        Self { path, name }
+    }
+
     fn name(&self) -> &str {
         &self.name
     }
@@ -3320,11 +3330,11 @@ impl Cgroup {
         self.path.join("cgroup.procs")
     }
 
-    fn kill_all(&self) -> Result<(), DriverError> {
+    pub(crate) fn kill_all(&self) -> Result<(), DriverError> {
         write_control(&self.path, "cgroup.kill", "1")
     }
 
-    fn cpu_usage_micros(&self) -> Result<u64, DriverError> {
+    pub(crate) fn cpu_usage_micros(&self) -> Result<u64, DriverError> {
         let stats = std::fs::read_to_string(self.path.join("cpu.stat")).map_err(|error| {
             DriverError::failed(
                 "exec.cgroup-read-failed",
@@ -3406,7 +3416,11 @@ impl Cgroup {
         })
     }
 
-    fn signal_all(&self, signal: Signal, excluded_pid: Option<u32>) -> Result<(), DriverError> {
+    pub(crate) fn signal_all(
+        &self,
+        signal: Signal,
+        excluded_pid: Option<u32>,
+    ) -> Result<(), DriverError> {
         let processes =
             std::fs::read_to_string(self.path.join("cgroup.procs")).map_err(|error| {
                 DriverError::failed(
@@ -3433,7 +3447,7 @@ impl Cgroup {
         Ok(())
     }
 
-    fn prove_empty_and_remove(&self) -> Result<(), DriverError> {
+    pub(crate) fn prove_empty_and_remove(&self) -> Result<(), DriverError> {
         let processes =
             std::fs::read_to_string(self.path.join("cgroup.procs")).map_err(|error| {
                 DriverError::failed(
@@ -3456,7 +3470,7 @@ impl Cgroup {
     }
 }
 
-fn read_decimal_counter(path: &Path) -> Result<u64, DriverError> {
+pub(crate) fn read_decimal_counter(path: &Path) -> Result<u64, DriverError> {
     std::fs::read_to_string(path)
         .map_err(|error| {
             DriverError::failed(
@@ -3528,7 +3542,7 @@ fn read_io_counters(path: &Path) -> Result<(u64, u64), DriverError> {
     Ok((read, written))
 }
 
-fn write_control(path: &Path, name: &str, value: &str) -> Result<(), DriverError> {
+pub(crate) fn write_control(path: &Path, name: &str, value: &str) -> Result<(), DriverError> {
     let mut file = OpenOptions::new()
         .write(true)
         .open(path.join(name))

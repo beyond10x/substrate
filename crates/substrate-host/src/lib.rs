@@ -4,6 +4,7 @@
 mod egress;
 mod fs;
 mod git;
+pub mod host_process;
 mod probe;
 mod process;
 mod pty;
