@@ -198,8 +198,11 @@ fn probe_workspace_scoped_write(config: &HostConfig) -> bool {
     if std::fs::create_dir_all(&allowed).is_err() || std::fs::create_dir_all(&blocked).is_err() {
         return false;
     }
-    let Ok(Some(pinned)) = crate::process::ProcessRuntime::prepare_workspace_access(
-        &workspace,
+    let Ok(root) = crate::fs::pin_workspace_directory(&workspace) else {
+        return false;
+    };
+    let Ok(pinned) = crate::process::ProcessRuntime::prepare_workspace_access(
+        &root,
         &substrate_wire::WorkspaceAccess::Scoped {
             writable_subtrees: vec!["allowed".to_owned()],
         },

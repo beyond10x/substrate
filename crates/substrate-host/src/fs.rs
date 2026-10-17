@@ -1349,6 +1349,39 @@ fn split_parent(path: &str) -> Result<(&str, &str), DriverError> {
 /// The set is `substrate_wire::is_root_name`, the one predicate the adopt admission also uses.
 /// It adds the `NAME_MAX` length bound, and refuses a leading `-` because such a name is
 /// indistinguishable from an option to any tool that is ever handed it as an argv element.
+/// Pins the directory an exec mounts at `/workspace`: the entry `workspace` names, opened from its
+/// parent (the configured workspace root) with `openat2` beneath that parent and without
+/// following any link, so bubblewrap binds this descriptor and never re-resolves the path.
+///
+/// An adopted directory belongs to the operator, who may replace it after adopt. The answers are
+/// the ones adoption and the file routes give for the same entry (`classify_open_error`): absent
+/// is `resource.not-found`; a symlink, a regular file or another mount in its place is
+/// `workspace.path-escape`; a kernel without `openat2` is `workspace.openat2-unavailable`.
+pub(crate) fn pin_workspace_directory(workspace: &Path) -> Result<OwnedFd, DriverError> {
+    let (Some(parent), Some(name)) = (workspace.parent(), workspace.file_name()) else {
+        return Err(path_escape());
+    };
+    let parent = CString::new(parent.as_os_str().as_bytes()).map_err(|_| path_escape())?;
+    let name = CString::new(name.as_bytes()).map_err(|_| path_escape())?;
+    // SAFETY: the C string is terminated and the successful descriptor is immediately owned.
+    let root = unsafe {
+        libc::open(
+            parent.as_ptr(),
+            libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    if root < 0 {
+        return Err(classify_open_error(std::io::Error::last_os_error()));
+    }
+    let root = owned_fd(root, "open")?;
+    openat2_cstr(
+        root.as_raw_fd(),
+        &name,
+        libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        0,
+    )
+}
+
 pub(crate) fn validate_root_name(name: &str) -> Result<(), DriverError> {
     if substrate_wire::is_root_name(name) {
         Ok(())

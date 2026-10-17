@@ -957,16 +957,19 @@ impl<'a> ExecInput<'a> {
 
 const NO_EGRESS_PROGRAM: &str = "import socket;socket.create_connection(('1.1.1.1',53),1)";
 
-/// Exits [`NESTED_USERNS_REFUSED`] only when the kernel refuses a nested user namespace, and 0 if
-/// one was created. Any other failure (no `os.unshare`, say) exits 1 with a traceback, so the case
-/// cannot pass on a program that never asked.
+/// Exits [`NESTED_USERNS_REFUSED`] only when the kernel refuses a nested user namespace with
+/// `ENOSPC`, the answer `--disable-userns` gives (bubblewrap sets the child namespace's
+/// `user.max_user_namespaces` to zero), and 0 if one was created. Any other refusal, such as an
+/// `EPERM` from a host-level user-namespace restriction, exits 1, so the case cannot pass on a
+/// host policy that would hold without `--disable-userns`; any other failure (no `os.unshare`,
+/// say) exits 1 with a traceback, so it cannot pass on a program that never asked.
 const NESTED_USERNS_PROGRAM: &str = concat!(
-    "import os,sys\n",
+    "import errno,os,sys\n",
     "try:\n",
     "    os.unshare(os.CLONE_NEWUSER)\n",
     "except OSError as error:\n",
     "    print(error.errno, flush=True)\n",
-    "    sys.exit(7)\n",
+    "    sys.exit(7 if error.errno == errno.ENOSPC else 1)\n",
     "sys.exit(0)\n",
 );
 const NESTED_USERNS_REFUSED: i64 = 7;
@@ -1070,7 +1073,6 @@ async fn wait_for_workspace_file(daemon: &Daemon, workspace: &str, path: &str, r
 // The delegated lane: confined execs
 // ---------------------------------------------------------------------------------------------
 
-#[allow(clippy::too_many_lines)] // One sequential journey; splitting it would lose the ordering.
 /// Guarded I/O: a file path that climbs out of the workspace is refused by name, never resolved
 /// (`openat2` beneath the workspace root). Runs for each [`WorkspaceOrigin`].
 async fn check_path_escape(daemon: &Daemon, workspace: &str, origin: WorkspaceOrigin) -> usize {
@@ -1203,6 +1205,10 @@ async fn check_confined_isolation(
     );
     passed += 1;
 
+    // The working directory is observed, not stated: the program prints its physical cwd
+    // (`getcwd`, so no `PWD` in the environment can answer for it) and writes a relative file,
+    // which must then be served by this workspace's own file route, so the cwd is the mount of
+    // the workspace this exec named, not merely a directory called `/workspace`.
     let (status, pwd_exec) = daemon
         .call(
             "POST",
@@ -1213,16 +1219,39 @@ async fn check_confined_isolation(
                 &ExecInput::new(
                     workspace,
                     snapshot,
-                    &["/usr/bin/test", "/workspace", "=", "/workspace"],
+                    &["/usr/bin/sh", "-c", "pwd -P && printf cwd > cwd-probe.txt"],
                     true,
                 )
-                .environment(json!({ "PWD": "/workspace" }))
                 .build(),
             )),
         )
         .await;
     assert_eq!(status, 200, "{pwd_exec}");
     assert_eq!(pwd_exec["result"]["exit"], EXITED_CLEANLY(), "{pwd_exec}");
+    let cwd = read_output(daemon, &text(&pwd_exec["result"]["id"]), "stdout").await;
+    assert_eq!(
+        decoded(&cwd),
+        b"/workspace\n",
+        "{}",
+        String::from_utf8_lossy(&decoded(&cwd))
+    );
+    let (status, probe) = daemon
+        .call(
+            "GET",
+            &format!(
+                "/v1/workspaces/{workspace}/files/cwd-probe.txt?mode=file&offset=0&limit_bytes=16"
+            ),
+            &origin.id("req_clean_pwd_probe"),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{probe}");
+    assert_eq!(
+        BASE64
+            .decode(text(&probe["result"]["content"]["data"]))
+            .expect("base64 file content"),
+        b"cwd"
+    );
     passed += 1;
 
     let (status, no_egress) = daemon
@@ -3208,6 +3237,30 @@ async fn check_adopted_workspace(
     } else {
         // No verified sandbox: the adopted workspace gets the same named refusal a created one
         // does, never an unconfined run in the operator's directory (invariant 3).
+        //
+        // This exec observes nothing about adoption, and cannot: the daemon decides
+        // `exec.sandbox-unavailable` in `validate_exec_input`, before `admit_workspace` reads the
+        // workspace row (`crates/substrate-daemon/src/app/execs.rs`), so no exec answer on this
+        // lane depends on which workspace it names. That ranking is asserted rather than assumed:
+        // an id no adopt ever minted gets the same refusal. What this lane does observe about
+        // adoption is the record above (minted `ws_` id, `origin`, `root_name`, the operator's
+        // file served) and destroy below; an exec in the adopted directory, and a changed
+        // directory refused before any mount, are the delegated lane's and the host crate's
+        // (`an_adopted_directory_changed_after_adopt_is_refused_at_exec_before_any_mount`).
+        let mut never_adopted = exec_input.clone();
+        never_adopted["workspace"] = json!("ws_neveradopted");
+        expect_error(
+            &daemon
+                .call(
+                    "POST",
+                    "/v1/execs",
+                    "req_clean_adopt_exec_unknown",
+                    Some(&mutation("01JADOPTCLEANEXECUNKNOWN", &never_adopted)),
+                )
+                .await,
+            501,
+            "exec.sandbox-unavailable",
+        );
         expect_error(
             &daemon
                 .call(
@@ -4896,5 +4949,144 @@ async fn a_non_ascii_aperture_name_is_refused_over_the_wire() {
         .call("GET", "/v1/machine", "req_adversarial_utf8_again", None)
         .await;
     assert_eq!(status, 200, "{again}");
+    daemon.close().await;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Adversarial: an adopted directory changed under the daemon after adopt (ADR 0035)
+// ---------------------------------------------------------------------------------------------
+
+/// Adopts `name` (already placed under the workspace root) and returns the minted id and the
+/// capability snapshot an exec start must carry.
+async fn adversarial_adopt(daemon: &Daemon, name: &str, tag: &str) -> (String, String) {
+    let (status, machine) = daemon
+        .call(
+            "GET",
+            "/v1/machine",
+            &format!("req_adv_{tag}_machine"),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{machine}");
+    let snapshot = text(&machine["result"]["snapshot"]);
+    let (status, adopted) = daemon
+        .call(
+            "POST",
+            "/v1/workspaces/adopt",
+            &format!("req_adv_{tag}_adopt"),
+            Some(&mutation(
+                &format!("01JADVADOPT{}ADOPT01", tag.to_uppercase()),
+                &json!({ "root_name": name, "labels": {} }),
+            )),
+        )
+        .await;
+    assert_eq!(status, 201, "{adopted}");
+    (text(&adopted["result"]["id"]), snapshot)
+}
+
+/// ADR 0035 decision 5 refuses to adopt an entry that is not a directory, and the host opens a
+/// root name with `O_NOFOLLOW` (`crates/substrate-host/src/fs.rs`), so a symlink is never
+/// adopted and never read through. An exec start pins the same entry the same way
+/// (`pin_workspace_directory`, `crates/substrate-host/src/fs.rs`) and bubblewrap binds that
+/// descriptor (`--bind-fd`), never the path: once bound by path (`--bind <path> /workspace`), an
+/// entry the operator replaced with a symlink after adopt mounted the link target read-write,
+/// outside the workspace root. The exec is now `workspace.path-escape` before any mount, the
+/// answer the file route gives for the same entry.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_adopted_directory_swapped_for_a_symlink_never_mounts_the_link_target() {
+    let Some(delegated) = DelegatedCgroup::acquire() else {
+        return;
+    };
+    let temporary = TempDir::with_prefix("substrate-adversarial-swap-").expect("clean-room");
+    let root = temporary.path();
+    std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))
+        .expect("owner-private clean-room directory");
+    let daemon = Daemon::start(root, Some(delegated.path()), &[], &[], &[], false).await;
+    let outside = root.join("outside-the-workspace-root");
+    std::fs::create_dir(&outside).expect("a directory outside the workspace root");
+    let adopted = daemon.workspaces.join("adopted-swap");
+    std::fs::create_dir(&adopted).expect("the operator directory");
+    let (workspace, snapshot) = adversarial_adopt(&daemon, "adopted-swap", "swap").await;
+
+    // The operator replaces the adopted entry with a link to a directory outside the root.
+    std::fs::rename(&adopted, daemon.workspaces.join("adopted-swap-before"))
+        .expect("move the adopted directory aside");
+    std::os::unix::fs::symlink(&outside, &adopted).expect("link in its place");
+
+    // The file route refuses the link (openat2, O_NOFOLLOW).
+    let (status, read) = daemon
+        .call(
+            "GET",
+            &format!("/v1/workspaces/{workspace}/files/probe.txt?mode=file&offset=0&limit_bytes=1"),
+            "req_adv_swap_list",
+            None,
+        )
+        .await;
+    expect_error(&(status, read), 422, "workspace.path-escape");
+
+    let (status, answered) = daemon
+        .call(
+            "POST",
+            "/v1/execs",
+            "req_adv_swap_exec",
+            Some(&mutation(
+                "01JADVADOPTSWAPEXEC00001",
+                &ExecInput::new(
+                    &workspace,
+                    &snapshot,
+                    &[
+                        "/usr/bin/sh",
+                        "-c",
+                        "printf escaped > /workspace/escaped.txt",
+                    ],
+                    true,
+                )
+                .build(),
+            )),
+        )
+        .await;
+    let escaped = outside.join("escaped.txt");
+    assert!(
+        !escaped.exists(),
+        "the confined exec wrote outside the workspace root through the swapped entry: \
+         {status} {answered}"
+    );
+    expect_error(&(status, answered), 422, "workspace.path-escape");
+    daemon.close().await;
+}
+
+/// The directory an adopted row names is the operator's, and the operator may remove it. An exec
+/// started afterwards must be a named refusal (invariant 3), never a run somewhere else.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_adopted_directory_removed_after_adopt_is_a_named_refusal_at_exec() {
+    let Some(delegated) = DelegatedCgroup::acquire() else {
+        return;
+    };
+    let temporary = TempDir::with_prefix("substrate-adversarial-gone-").expect("clean-room");
+    let root = temporary.path();
+    std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))
+        .expect("owner-private clean-room directory");
+    let daemon = Daemon::start(root, Some(delegated.path()), &[], &[], &[], false).await;
+    let adopted = daemon.workspaces.join("adopted-gone");
+    std::fs::create_dir(&adopted).expect("the operator directory");
+    let (workspace, snapshot) = adversarial_adopt(&daemon, "adopted-gone", "gone").await;
+    std::fs::remove_dir(&adopted).expect("the operator removes the directory");
+
+    let (status, answered) = daemon
+        .call(
+            "POST",
+            "/v1/execs",
+            "req_adv_gone_exec",
+            Some(&mutation(
+                "01JADVADOPTGONEEXEC00001",
+                &ExecInput::new(&workspace, &snapshot, &["/usr/bin/true"], true).build(),
+            )),
+        )
+        .await;
+    expect_error(&(status, answered), 404, "resource.not-found");
+    assert!(
+        !adopted.exists(),
+        "the exec recreated the operator's directory"
+    );
     daemon.close().await;
 }
