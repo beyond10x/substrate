@@ -1586,6 +1586,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn forgetting_an_adopted_workspace_leaves_the_operator_directory() {
+        // Prevents destroy of an adopted workspace from removing operator-owned files (ADR 0035
+        // decision 7): only what the daemon made outside the directory, a git baseline, goes.
+        let directory = tempdir().expect("tempdir");
+        let driver = HostDriver::open(HostConfig::minimum(directory.path())).expect("host driver");
+        let operator = directory.path().join("adopted-repo");
+        std::fs::create_dir_all(operator.join("nested")).expect("operator directory");
+        std::fs::write(operator.join("nested/keep.txt"), b"keep").expect("operator file");
+        let baselines = directory.path().join(".substrate-git-baselines");
+        std::fs::create_dir(&baselines).expect("baseline root");
+        std::fs::write(baselines.join("adopted-repo"), b"0".repeat(40)).expect("baseline");
+
+        let absence = driver
+            .forget_workspace("ws_adopted", "adopted-repo")
+            .await
+            .expect("forget");
+        assert!(absence.absent);
+        assert_eq!(absence.id, "ws_adopted");
+        assert_eq!(
+            std::fs::read(operator.join("nested/keep.txt")).expect("kept"),
+            b"keep"
+        );
+        assert!(!baselines.join("adopted-repo").exists());
+        let error = driver
+            .forget_workspace("ws_adopted", "../escape")
+            .await
+            .expect_err("a non-root-name is refused");
+        assert_eq!(error.code, "workspace.path-escape");
+    }
+
+    #[tokio::test]
     async fn destroy_driver_call_is_one_batch_then_eventually_absent() {
         let directory = tempdir().expect("tempdir");
         let driver = HostDriver::open(HostConfig::minimum(directory.path())).expect("host driver");

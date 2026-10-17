@@ -1684,6 +1684,11 @@ mod tests {
             let error = validate_root_name(name).expect_err(name);
             assert_eq!(error.code, "workspace.path-escape", "{name:?}");
         }
+        // One predicate with the wire (ADR 0035): Linux NAME_MAX bounds a root name.
+        let longest = "a".repeat(substrate_wire::MAX_ROOT_NAME_BYTES);
+        validate_root_name(&longest).expect("NAME_MAX bytes");
+        let error = validate_root_name(&format!("{longest}a")).expect_err("over NAME_MAX");
+        assert_eq!(error.code, "workspace.path-escape");
     }
 
     #[test]

@@ -83,6 +83,36 @@ twelve handler obligations):
 - Human tables. Human mode is the runtime's compact JSON; a table or one-line rendering is not
   expressible in the binding.
 
+## Workspace adoption projection
+
+`workspaces/` (domain `substrate.workspaces`, ADR 0035) models the store row a workspace is served
+from (id, root name, labels, origin, owner), the entry under the workspace root, and the commands
+`Create` (only as far as adoption collides with it), `Adopt` and `Destroy`. What the green check
+establishes:
+
+- The model validates under ESS 0.60.0, and `workspaces-suite.json` is its exact synthesized suite
+  (16 scenarios) plus the five authored scenarios under `workspaces/scenarios/`. Synthesis refuses
+  two obligations (`ESS-SYNTH-013`: no view row asserts `.count` of `RootName` or `WorkspaceId`).
+- All 21 scenarios pass against ESS's `interpreted` reference. That executes the model, not the
+  daemon.
+- `RootName` and `Origin` are generated into `crates/substrate-wire/src/generated/workspace.rs`
+  and used as the wire types of `WorkspaceAdoptInput::root_name`, `Workspace::root_name` and
+  `Workspace::origin`. The generated types are structural; the alphabet, length and leading-`-`
+  rule are enforced by `substrate_wire::is_root_name`, which the daemon's adopt admission and the
+  host's `validate_root_name` both call.
+
+What it does not establish, and where that evidence lives:
+
+| claim | evidence |
+|---|---|
+| refusal order, ledger record and replay of every adopt refusal, the out-of-set name included | daemon tests `adopt_*` in `crates/substrate-daemon/src/app/tests.rs` |
+| an exec runs in an adopted directory and its output and exit are observed | same, `adopt_then_exec_runs_in_the_operator_directory` |
+| no removal path deletes an adopted directory (sync destroy, restart cleanup, lease expiry, reconciliation) | daemon and store tests named `*adopted*` |
+| the `origin` column migration (existing rows are `created`) | `crates/substrate-store/src/tests.rs` |
+| wire bundle shapes for the adopt route and the two new resource members | the successor bundle `0.19.0` and its runtime vectors, cut separately |
+
+No production adapter executes `workspaces-suite.json` against the daemon yet.
+
 ## Explicitly outside this projection
 
 - Refused-before-admission operation rows, replay/conflict behavior, ledger capacity, crash recovery,

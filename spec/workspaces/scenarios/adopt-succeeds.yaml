@@ -1,0 +1,35 @@
+# A directory the operator placed under the workspace root is adopted by its
+# root name. The caller receives a minted `ws_…` id; the row records the root
+# name, origin `adopted` and the calling subject as owner.
+type: ess-scenario/5
+domain: substrate.workspaces
+scenario: adopt-succeeds
+summary: Adopting a placed directory writes a Ready row owned by the caller, with a minted id and origin adopted.
+
+arrange:
+  - instance: dir
+    entity: substrate.workspaces.RootEntry
+    setup:
+      identity: adopted-repo
+      fields: {kind: directory}
+      state: Present
+  - instance: repo
+    entity: substrate.workspaces.Workspace
+
+timeline:
+  - at: 2026-10-15T09:00:00Z
+    command: substrate.workspaces.Adopt
+    actor: substrate.workspaces.AllowedSubject
+    caller: {subject: "local:1000"}
+    input: {root_name: adopted-repo, labels: {}}
+    outcome: adopted
+    events:
+      - event: substrate.workspaces.WorkspaceAdopted
+        payload:
+          root_name: adopted-repo
+          owner: "local:1000"
+    capture: {instance: repo, event: substrate.workspaces.WorkspaceAdopted, field: workspace}
+
+assert:
+  - view: substrate.workspaces.Workspaces
+    contains: {workspace: {$instance: repo}, state: Ready, root_name: adopted-repo, origin: adopted, owner: "local:1000"}

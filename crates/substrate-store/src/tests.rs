@@ -7,7 +7,8 @@ use substrate_wire::{
     ConfinementRequest, ErrorClass, ErrorDetail, EventCause, Exec, ExecKind, ExecState, ExecUsage,
     LeaseObservation, LeaseState, NetworkMode, OperationOutcome, OperationState, PipeSession,
     PipeSessionLimits, SandboxProfile, SessionAttachmentState, SessionKind, SessionMode,
-    SessionState, SnapshotItemKind, Workspace, WorkspaceKind, WorkspaceState,
+    RootName, SessionState, SnapshotItemKind, Workspace, WorkspaceKind, WorkspaceOrigin,
+    WorkspaceState,
 };
 use tempfile::tempdir;
 
@@ -19,7 +20,8 @@ use crate::{
     ExpiredLease, LeaseClock, LeaseResource, NewLease, NewOperation, NewSessionAuthority,
     OperationCapacity, Reservation, Scope, SessionAttachmentClaim, SessionAuthorityLookup,
     SessionAuthorityMint, SnapshotReadError, Store, StoreConfig, StoreError, StoredExec,
-    WorkspaceAdmission, WorkspaceDestroyReservation, WorkspaceExecState, WorkspaceObservationWrite,
+    WorkspaceAdmission, WorkspaceAdoptReservation, WorkspaceDestroyReservation, WorkspaceExecState,
+    WorkspaceObservationWrite, WorkspaceRootHolder,
 };
 
 #[derive(Default)]
@@ -135,8 +137,18 @@ fn workspace(id: &str) -> Workspace {
         labels: BTreeMap::new(),
         observed_at: "2026-08-13T12:00:01Z".parse().expect("time"),
         state: WorkspaceState::Ready,
+        origin: WorkspaceOrigin::Created,
+        root_name: RootName::from(id),
         storage: None,
         lease: None,
+    }
+}
+
+fn adopted(id: &str, root_name: &str) -> Workspace {
+    Workspace {
+        origin: WorkspaceOrigin::Adopted,
+        root_name: RootName::from(root_name),
+        ..workspace(id)
     }
 }
 
@@ -4134,4 +4146,247 @@ fn workspace_lease_cleanup_reads_no_output_column_at_the_maximum_exec_count() {
 
     assert_eq!(states.len(), workspace_execs);
     assert_eq!(states, expected);
+}
+
+fn adopt_operation(subject: &str, operation: &str) -> NewOperation {
+    NewOperation {
+        resource: None,
+        ..operation_named(subject, operation, "workspace.adopt", "", &"a".repeat(64))
+    }
+}
+
+#[test]
+fn origin_column_migrates_existing_rows_as_created() {
+    // Prevents a store written before ADR 0035 from failing to read its workspaces, or reading
+    // them as adopted: every existing row is one `workspace.create` wrote.
+    let directory = tempdir().expect("tempdir");
+    let path = directory.path().join("state.db");
+    let store = Store::open(&path).expect("open store");
+    let scope = scope("local:1000");
+    store
+        .put_workspace(&scope, "ws_legacy", &workspace("ws_legacy"))
+        .expect("seed workspace");
+    {
+        let connection = store.connection.lock();
+        connection
+            .execute_batch(
+                "UPDATE workspaces SET resource_json =
+                     json_remove(resource_json, '$.origin', '$.root_name');
+                 ALTER TABLE workspaces DROP COLUMN origin;",
+            )
+            .expect("rewind to the pre-origin schema");
+    }
+    drop(store);
+
+    let reopened = Store::open(&path).expect("reopen migrates");
+    let (root_name, resource) = reopened
+        .workspace(&scope, "ws_legacy")
+        .expect("read")
+        .expect("legacy row");
+    assert_eq!(root_name, "ws_legacy");
+    assert_eq!(resource.origin, WorkspaceOrigin::Created);
+    assert_eq!(resource.root_name.as_str(), "ws_legacy");
+    let column: String = reopened
+        .connection
+        .lock()
+        .query_row(
+            "SELECT origin FROM workspaces WHERE id = 'ws_legacy'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("origin column");
+    assert_eq!(column, "created");
+}
+
+#[test]
+fn root_name_holder_is_split_by_subject() {
+    let store = Store::open(":memory:").expect("open store");
+    store
+        .put_workspace(&scope("local:1000"), "adopted-repo", &adopted("ws_a", "adopted-repo"))
+        .expect("seed");
+    assert_eq!(
+        store
+            .workspace_root_holder(&scope("local:1000"), "adopted-repo")
+            .expect("holder"),
+        WorkspaceRootHolder::Caller
+    );
+    assert_eq!(
+        store
+            .workspace_root_holder(&scope("local:1001"), "adopted-repo")
+            .expect("holder"),
+        WorkspaceRootHolder::Elsewhere
+    );
+    assert_eq!(
+        store
+            .workspace_root_holder(&scope("local:1000"), "other")
+            .expect("holder"),
+        WorkspaceRootHolder::Free
+    );
+}
+
+#[test]
+fn adopt_reservation_writes_one_terminal_ready_row_and_replays() {
+    let store = Store::open(":memory:").expect("open store");
+    let new = adopt_operation("local:1000", "01JADOPTSTORE000000001");
+    let observed = adopted("ws_adopted", "adopted-repo");
+    let WorkspaceAdoptReservation::Adopted(resource) = store
+        .reserve_workspace_adopt(&new, "adopted-repo", &observed, "2026-08-13T12:00:02Z")
+        .expect("adopt")
+    else {
+        panic!("adopt must be accepted");
+    };
+    assert_eq!(resource.origin, WorkspaceOrigin::Adopted);
+    assert_eq!(resource.state, WorkspaceState::Ready);
+    let record = store
+        .operation(&new.scope, &new.operation)
+        .expect("operation")
+        .expect("record");
+    assert_eq!(record.state, OperationState::Terminal);
+    assert_eq!(record.resource.as_deref(), Some("ws_adopted"));
+    let (root_name, stored) = store
+        .workspace(&new.scope, "ws_adopted")
+        .expect("read")
+        .expect("row");
+    assert_eq!(root_name, "adopted-repo");
+    assert_eq!(stored.origin, WorkspaceOrigin::Adopted);
+    let WorkspaceAdoptReservation::Answered(Reservation::Replay(answer)) = store
+        .reserve_workspace_adopt(&new, "adopted-repo", &observed, "2026-08-13T12:00:03Z")
+        .expect("replay")
+    else {
+        panic!("a retry replays");
+    };
+    assert_eq!(answer.status, 201);
+}
+
+#[test]
+fn adopt_reservation_records_a_held_name_by_owner() {
+    // The race path: a row appears between the holder read and the reservation. The store still
+    // answers by owner, and records the refusal so a retry replays it.
+    let store = Store::open(":memory:").expect("open store");
+    store
+        .put_workspace(&scope("local:1000"), "adopted-repo", &adopted("ws_a", "adopted-repo"))
+        .expect("seed");
+    for (subject, status, code) in [
+        ("local:1000", 409, "workspace.already-exists"),
+        ("local:1001", 404, "resource.not-found"),
+    ] {
+        let new = adopt_operation(subject, &format!("01JADOPTSTOREHELD{status}X"));
+        let WorkspaceAdoptReservation::Answered(Reservation::Replay(answer)) = store
+            .reserve_workspace_adopt(
+                &new,
+                "adopted-repo",
+                &adopted("ws_b", "adopted-repo"),
+                "2026-08-13T12:00:02Z",
+            )
+            .expect("held")
+        else {
+            panic!("a held name is refused");
+        };
+        assert_eq!(answer.status, status);
+        let OperationOutcome::Error { error } = answer.outcome else {
+            panic!("refusal");
+        };
+        assert_eq!(error.code, code);
+        assert_eq!(
+            store
+                .operation(&new.scope, &new.operation)
+                .expect("operation")
+                .expect("record")
+                .state,
+            OperationState::Refused
+        );
+    }
+    assert!(store.workspace(&scope("local:1001"), "ws_b").expect("read").is_none());
+}
+
+#[test]
+fn adopt_reservation_respects_the_workspace_partition() {
+    let store = Store::open_with_config(
+        ":memory:",
+        StoreConfig {
+            snapshot_max_workspaces: 1,
+            ..StoreConfig::default()
+        },
+    )
+    .expect("open store");
+    store
+        .put_workspace(&scope("local:1000"), "ws_full", &workspace("ws_full"))
+        .expect("seed");
+    let new = adopt_operation("local:1000", "01JADOPTSTOREFULL0001");
+    let WorkspaceAdoptReservation::Answered(Reservation::Replay(answer)) = store
+        .reserve_workspace_adopt(
+            &new,
+            "adopted-repo",
+            &adopted("ws_b", "adopted-repo"),
+            "2026-08-13T12:00:02Z",
+        )
+        .expect("full")
+    else {
+        panic!("a full partition is refused");
+    };
+    assert_eq!(answer.status, 507);
+}
+
+#[test]
+fn every_removal_path_reader_carries_the_adopted_origin() {
+    // Prevents a removal path from deleting an operator directory because the reader it starts
+    // from dropped the origin: restart cleanup and lease expiry both hand it to the daemon.
+    let store = Store::open(":memory:").expect("open store");
+    let scope = scope("local:1000");
+    store
+        .put_workspace(&scope, "adopted-repo", &adopted("ws_adopted", "adopted-repo"))
+        .expect("seed adopted");
+    let destroy = operation_named(
+        "local:1000",
+        "01JADOPTEDDESTROYPENDING",
+        "workspace.destroy",
+        "ws_adopted",
+        &"d".repeat(64),
+    );
+    let WorkspaceDestroyReservation::Admitted { resource, .. } = store
+        .reserve_workspace_destroy(&destroy, None)
+        .expect("reserve destroy")
+    else {
+        panic!("destroy must be admitted");
+    };
+    assert_eq!(resource.origin, WorkspaceOrigin::Adopted);
+    let now = chrono::Utc.with_ymd_and_hms(2026, 8, 13, 12, 0, 0).unwrap();
+    let pending = store
+        .due_destroying_workspaces("dep_test", now, 10)
+        .expect("due destroy");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].origin, WorkspaceOrigin::Adopted);
+
+    // Adopt never grants a lease; a lease on an adopted row is still read with its origin.
+    let lease = seed_leased_workspace(&store, "local:1001", "ws_leased_adopted", 1_000);
+    {
+        let connection = store.connection.lock();
+        connection
+            .execute(
+                "UPDATE workspaces SET origin = 'adopted',
+                     resource_json = json_set(resource_json, '$.origin', 'adopted')
+                 WHERE id = 'ws_leased_adopted'",
+                [],
+            )
+            .expect("mark adopted");
+    }
+    let due = LeaseClock {
+        wall: chrono::Utc.with_ymd_and_hms(2026, 8, 13, 12, 0, 1).unwrap(),
+        boot_id: "boot-test".to_owned(),
+        boottime_ms: 2_000,
+    };
+    let candidate = store
+        .lease_cleanup_candidates("dep_test", &due, 10)
+        .expect("lease candidates")
+        .into_iter()
+        .find(|candidate| candidate.id == "ws_leased_adopted")
+        .expect("lease candidate");
+    assert_eq!(candidate.scope, lease.scope);
+    assert_eq!(
+        candidate.resource,
+        LeaseResource::Workspace {
+            root_name: "ws_leased_adopted".to_owned(),
+            origin: WorkspaceOrigin::Adopted,
+        }
+    );
 }

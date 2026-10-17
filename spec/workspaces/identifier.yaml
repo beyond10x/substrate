@@ -1,0 +1,34 @@
+domain: substrate.workspaces
+summary: A workspace, the directory name it is served from, and how it came to be served.
+types:
+  # The single-component root-name set `validate_root_name` admits
+  # (crates/substrate-host/src/fs.rs): ASCII alphanumerics, `_` and `-`, not
+  # empty, no leading `-`. `.`, `..`, `/`, NUL and hidden names are outside the
+  # alphabet, so no root name can reach `.substrate-apertures` or any other
+  # `.substrate-*` service directory. 255 is Linux NAME_MAX, the wire constant
+  # MAX_ROOT_NAME_BYTES (crates/substrate-wire/src/lib.rs);
+  # every member is ASCII, so characters and bytes count alike.
+  # Renamed from WorkspaceId: the wire workspace id stays `ws_…`, so this set
+  # names the directory, not the workspace.
+  - name: substrate.workspaces.RootName
+    kind: newtype
+    of: String
+    alphabet: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-"
+    invariants:
+      - value.count >= 1
+      - value.count <= 255
+      - not: {value: {starts_with: "-"}}
+  # The wire `workspace-id`, unchanged from every released bundle:
+  # `^ws_[A-Za-z0-9]+$` (contracts/substrate-wire/0.18.0/schemas/common.json).
+  # The daemon mints it as `ws_` + a ULID (crates/substrate-daemon/src/app/service.rs,
+  # `workspace_id`). The schema publishes no length bound, so none is stated here.
+  - name: substrate.workspaces.WorkspaceId
+    kind: newtype
+    of: String
+    prefix: "ws_"
+    alphabet: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_"
+    # A limit of the model, not of the code: the alphabet must hold
+    # the prefix's `_`, so it also admits `_` after the prefix, which the wire
+    # pattern refuses. ESS states no per-position alphabet.
+    invariants:
+      - value.count >= 4
