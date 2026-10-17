@@ -192,7 +192,10 @@ impl Driver for AdoptFixtureDriver {
                     capsule: None,
                 }),
                 exit: Some(ExecExit {
-                    code: output.status.code(),
+                    code: output
+                        .status
+                        .code()
+                        .and_then(|code| u8::try_from(code).ok()),
                     signal: None,
                 }),
                 usage: None,

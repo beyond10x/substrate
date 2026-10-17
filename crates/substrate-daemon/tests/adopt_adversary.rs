@@ -834,9 +834,7 @@ async fn concurrent_adopts_of_one_name_admit_exactly_one_row() {
             "round {round}: {first:?} {second:?}"
         );
         assert!(
-            statuses
-                .iter()
-                .any(|status| *status == StatusCode::NOT_FOUND),
+            statuses.contains(&StatusCode::NOT_FOUND),
             "round {round}: {first:?} {second:?}"
         );
     }
