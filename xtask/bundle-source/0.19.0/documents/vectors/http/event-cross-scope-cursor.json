@@ -1,0 +1,78 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "kind": "http",
+    "operation": "event.list",
+    "request": {
+      "headers": {
+        "x-request-id": "req_event_cross_scope"
+      },
+      "method": "GET",
+      "path": "/v1/events",
+      "query": {
+        "cursor": "ev2.scope_other_subject.41.7",
+        "limit": 100
+      }
+    },
+    "valid_address": true,
+    "valid_input": true
+  },
+  "context": {
+    "actor": "vector-client",
+    "authority": "http-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000",
+    "transport": {
+      "authenticated": true,
+      "kind": "unix",
+      "reachable": false
+    }
+  },
+  "covers": [
+    "events.source-scope"
+  ],
+  "expected": {
+    "kind": "http-response",
+    "response": {
+      "body": {
+        "api_version": "v1",
+        "error": {
+          "address": "cursor",
+          "class": "conflict",
+          "code": "event.source-mismatch",
+          "message": "The cursor does not belong to the current event source; reconcile before resuming.",
+          "retriable": true
+        },
+        "request_id": "req_event_cross_scope"
+      },
+      "status": 409
+    }
+  },
+  "id": "event-cursor-from-another-source-scope-is-rejected",
+  "layer": "http",
+  "phase": 3,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/cursor_silently_rebound",
+      "expected": false,
+      "operator": "equals"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "event",
+      "name": "colliding-generation-other-scope",
+      "state": {
+        "generation": 41,
+        "source_scope": "scope_other_subject",
+        "through_seq": 7
+      }
+    }
+  ]
+}
