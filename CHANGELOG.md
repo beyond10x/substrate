@@ -7,6 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-10-22
+
 ### Added
 
 - The clean-room runtime vectors drive `workspace.adopt` through the shipped daemon: an operator's
@@ -38,7 +40,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   clock, bounded owner-private logs, and restart re-attachment by cgroup membership. The daemon
   holds the supervisor through the `ProcessSupervisor` and `ProcessLogs` port traits. A stop that
   lands while a process starts never leaves it running unsupervised, a failed re-attachment is
-  retried, and every start operation is concluded after a restart.
+  retried, and every start operation is concluded after a restart. Restart reconciliation tells
+  this run's records from an earlier run's by a per-run id stored on each record, so a wall-clock
+  step back across a restart neither orphans a running process nor abandons a dispatched start.
 - `b10x-substrate-host` gains `seatbelt`, the macOS confinement primitive of
   [ADR 0037](adr/0037-macos-confinement-is-the-platform-sandbox.md). A `SeatbeltPolicy` (one
   writable workspace, read-only roots, an exec allowlist, no network) renders a `(deny default)`
@@ -51,6 +55,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - The macOS workflow runs `crates/substrate-host/tests/seatbelt_adversary.rs` on `macos-15`: seven
   attacks on the profile, each paired with a control that succeeds where the profile allows it, and
   the step fails unless all seven ran.
+
+### Changed
+
+- The specification pins ESS 0.67.0, and its suites and generated wire types are regenerated with
+  it. The generated `RootName` decoder now checks the root-name alphabet and length; the adopt
+  input bypasses that check so an out-of-set name is still refused by the adopt admission with its
+  operation recorded.
+- `scripts/delegated-lane.sh` also runs the delegated cases of the daemon's host-process tests.
 
 ### Fixed
 
