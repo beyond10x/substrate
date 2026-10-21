@@ -17,6 +17,9 @@
 //! process is inside, or without bubblewrap and `/usr/bin/git`, these cases are **absent, never
 //! reported as passed** (invariant 3). `bash scripts/delegated-lane.sh` runs them.
 
+// Every case drives the Linux host driver, which refuses to open elsewhere.
+#![cfg(target_os = "linux")]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;

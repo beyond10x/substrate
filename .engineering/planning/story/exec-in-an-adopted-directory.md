@@ -13,7 +13,7 @@ scope:
   path: crates/substrate-daemon/src/app/operations.rs
 - confidence: cited
   path: xtask/bundle-source
-revision: 4
+revision: 5
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-17T05:05:36Z", actor: "human:timo", revision: 3}
 - {from: "proposed", to: "active", at: "2026-10-17T05:05:36Z", actor: "human:timo", revision: 4}
@@ -65,3 +65,18 @@ Shapes to weigh in the decision, none taken:
   minted `ws_` id, so the wire pattern does not change and the adoption is a durable record;
 - leave the predicate and serve adoption only to in-process embedders through the `Driver` trait,
   which is not the wire and gives a socket client nothing.
+
+## State after 0.7.17
+
+Shipped in 0.7.17 (ADR 0035, bundle `substrate-wire/0.19.0`): the explicit `workspace.adopt` route,
+the minted `ws_` id with `origin` and `root_name` on the resource, and its pre-dispatch refusals.
+`crates/substrate-daemon/tests/adopt.rs` proves adopt, exec, a name outside the set refused and
+recorded, and destroy forgetting the row, all through the in-process app and a fixture driver.
+
+Still open, so the story stays active:
+
+- the second acceptance line names the **shipped daemon**: no runtime vector in
+  `crates/substrate-daemon/tests/runtime_vectors.rs` adopts a directory and runs an exec in it; the
+  delegated lane counts only the `workspace.adopt` registry probe;
+- the third acceptance line: the delegated lane runs no isolation case against an adopted
+  workspace.

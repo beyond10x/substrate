@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-21T11:10:07Z",
+  "actor": "human:timo",
+  "artifact": "story:macos-host-compiles",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "macOS workflow on main, 17e0e969: check, clippy -D warnings, tests incl. both refusal tests passed",
+    "reference": "https://github.com/beyond10x/substrate/actions/runs/39578874470"
+  }
+}

@@ -42,3 +42,4 @@ with YAML frontmatter containing `date` and `status`. Draft design questions rem
 | [0034](0034-a-workspace-is-addressed-by-its-root-name.md) | A workspace is addressed by its single-component root name | superseded by 0035 |
 | [0035](0035-an-operators-directory-is-served-after-an-explicit-adopt.md) | An operator's directory is served after an explicit adopt | accepted |
 | [0036](0036-host-processes-are-a-supervised-resource-family.md) | Host processes are a supervised resource family | accepted |
+| [0037](0037-macos-confinement-is-the-platform-sandbox.md) | macOS confinement is the platform sandbox, with its own capability facts | accepted |

@@ -39,6 +39,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   holds the supervisor through the `ProcessSupervisor` and `ProcessLogs` port traits. A stop that
   lands while a process starts never leaves it running unsupervised, a failed re-attachment is
   retried, and every start operation is concluded after a restart.
+- `b10x-substrate-host` gains `seatbelt`, the macOS confinement primitive of
+  [ADR 0037](adr/0037-macos-confinement-is-the-platform-sandbox.md). A `SeatbeltPolicy` (one
+  writable workspace, read-only roots, an exec allowlist, no network) renders a `(deny default)`
+  SBPL profile; on macOS a command runs under it through `/usr/bin/sandbox-exec` with a cleared
+  environment, null stdin and its own process group. A path SBPL cannot carry as a plain literal
+  is refused as `exec.sandbox-path-unrepresentable`, a program outside the allowlist as
+  `exec.sandbox-program-unlisted`, and a missing `sandbox-exec` as `exec.sandbox-unavailable`,
+  each before anything runs. The profile allows reading the root directory listing because the
+  dynamic loader aborts without it. `HostDriver::open` still refuses on macOS; no wire change.
+- The macOS workflow runs `crates/substrate-host/tests/seatbelt_adversary.rs` on `macos-15`: seven
+  attacks on the profile, each paired with a control that succeeds where the profile allows it, and
+  the step fails unless all seven ran.
 
 ### Fixed
 
@@ -48,7 +60,51 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `resource.not-found`, before any mount. Scoped access walks its writable subtrees beneath that
   descriptor, and exec pins the workspace beneath the driver's own root descriptor.
 
+## [0.7.18] — 2026-10-21
+
+Published by [release run 39580183130](https://github.com/beyond10x/substrate/actions/runs/39580183130)
+from tagged commit `17e0e96946b9588c150298ac0f951211681b2043`. All three artifacts were
+keyless-signed and verified against `release.yml@refs/tags/0.7.18` by the release workflow, and
+each tag resolved anonymously to its released digest:
+
+- Image: `ghcr.io/beyond10x/b10x-substrate-daemon:0.7.18` at `sha256:b532d3c6aca309f606d551c02ea5b977292bfbee641337fece57145a51be41d8`.
+- Contract bundle: `ghcr.io/beyond10x/b10x-substrate-wire:0.19.0` at `sha256:5c392e33f56a24ac18ab50e4c86d5bfce4bbe1dbe1c122e102a2f7f2b00a8e91`, the byte-identical bundle first published by 0.7.17, signed again with this release's identity.
+- Disposable MCP image: `ghcr.io/beyond10x/b10x-substrate-mcp:0.7.18` at `sha256:9d5b43505dd6712c494789e8d3aba8bb047e54ae6252cf0c1c803db3e3108302`, development-only.
+
+The [release notes](https://github.com/beyond10x/substrate/releases/tag/0.7.18) provide exact
+signature verification commands and the successful 107-case delegated confinement record. Rust
+consumers pin the Git revision `17e0e96946b9588c150298ac0f951211681b2043` or the tag.
+
+### Changed
+
+- `b10x-substrate-host` compiles on macOS and every other non-Linux target. Its Linux modules are
+  gated on `target_os = "linux"`; elsewhere `HostDriver::open` refuses with
+  `host.platform-unserved` (class `unserved`, address `host.platform`) and
+  `HostProcessSupervisor::open` with `process.host-unserved`, both before touching the host. Linux
+  behaviour and the public paths of `EgressAperture`, `ExecObservation`, `PipeFrame` and
+  `PipeStream` are unchanged. 0.7.17 failed with 83 errors on `aarch64-apple-darwin`.
+- CI: a macOS job checks, lints and tests `b10x-substrate-host` on every pull request.
+
+### Security
+
+- `rustls-webpki` 0.103.15 → 0.103.16 for RUSTSEC-2026-0382 (certificate verification may accept
+  distrusted intermediates).
+
 ## [0.7.17] — 2026-10-17
+
+Published by [release run 39047185868](https://github.com/beyond10x/substrate/actions/runs/39047185868)
+from tagged commit `00fa634cb24eb307946bfe3bbe40142f4b7a469a`. All three artifacts were
+keyless-signed and verified against `release.yml@refs/tags/0.7.17` by the release workflow, and
+each tag resolved anonymously to its released digest:
+
+- Image: `ghcr.io/beyond10x/b10x-substrate-daemon:0.7.17` at `sha256:ce42397ecc80a2ee1c98d25f8341f9ebfb8ca6ef4f678d3b8552be05de5f8137`.
+- Contract bundle: `ghcr.io/beyond10x/b10x-substrate-wire:0.19.0` at `sha256:5c392e33f56a24ac18ab50e4c86d5bfce4bbe1dbe1c122e102a2f7f2b00a8e91`, annotated `development`, first published by this release.
+- Disposable MCP image: `ghcr.io/beyond10x/b10x-substrate-mcp:0.7.17` at `sha256:cda26e25cf3f09d6675c71242f540fee283ba38b008b95f35f3d02da95ace0d2`, development-only.
+
+The [release notes](https://github.com/beyond10x/substrate/releases/tag/0.7.17) provide exact
+signature verification commands and the successful 107-case delegated confinement record. The
+`b10x-substrate` client installs from the tag with
+`cargo install --git https://github.com/beyond10x/substrate --tag 0.7.17 b10x-substrate-cli --locked`.
 
 ### Added
 

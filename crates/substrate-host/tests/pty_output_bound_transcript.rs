@@ -17,6 +17,9 @@
 //! Delegated lane only: without `SUBSTRATE_VECTORS_CGROUP_ROOT` naming a cgroup v2 subtree this
 //! process is inside, the case is **absent, never reported as passed** (invariant 3).
 
+// Every case drives the Linux host driver, which refuses to open elsewhere.
+#![cfg(target_os = "linux")]
+
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;

@@ -1,3 +1,5 @@
+// Every case drives the Linux host driver, which refuses to open elsewhere.
+#![cfg(target_os = "linux")]
 #![forbid(unsafe_code)]
 //! **The class**: the documents that state the confinement floor this crate enforces, read as the
 //! specification they claim to be against the floor the crate now enforces.

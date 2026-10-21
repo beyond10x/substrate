@@ -1,3 +1,5 @@
+// Every case drives the Linux host driver, which refuses to open elsewhere.
+#![cfg(target_os = "linux")]
 #![forbid(unsafe_code)]
 //! **The class**: the four checks that exist at *both* session-start entry points, and their rank.
 //!

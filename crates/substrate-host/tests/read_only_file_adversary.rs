@@ -7,6 +7,9 @@
 //! process is inside, or without bubblewrap, these cases return early and are **absent, never
 //! passed**. `bash scripts/delegated-lane.sh` runs them.
 
+// Every case drives the Linux host driver, which refuses to open elsewhere.
+#![cfg(target_os = "linux")]
+
 use std::collections::{BTreeMap, BTreeSet};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};

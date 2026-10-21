@@ -1,17 +1,35 @@
 #![allow(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
+// Off Linux only the contract types and a refusing `HostDriver` are compiled, so the helpers that
+// serve the Linux driver alone are unused there.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
 
+mod aperture;
+#[cfg(target_os = "linux")]
 mod egress;
+#[cfg(target_os = "linux")]
 mod fs;
+#[cfg(target_os = "linux")]
 mod git;
 pub mod host_process;
+mod observation;
+#[cfg(target_os = "linux")]
 mod probe;
+#[cfg(target_os = "linux")]
 mod process;
+#[cfg(target_os = "linux")]
 mod pty;
+#[cfg(target_os = "linux")]
 mod quota;
+#[cfg(target_os = "linux")]
 mod read_only_files;
+pub mod seatbelt;
+#[cfg(target_os = "linux")]
 mod seccomp;
+#[cfg(target_os = "linux")]
 mod secrets;
+#[cfg(not(target_os = "linux"))]
+mod unsupported;
 
 use std::collections::HashSet;
 use std::os::unix::fs::PermissionsExt as _;
@@ -33,8 +51,8 @@ use thiserror::Error;
 use tokio::sync::Semaphore;
 use zeroize::Zeroizing;
 
-pub use egress::EgressAperture;
-pub use process::{ExecObservation, PipeFrame, PipeStream};
+pub use aperture::EgressAperture;
+pub use observation::{ExecObservation, PipeFrame, PipeStream};
 // The host-process port and the vocabulary its signatures force, at the crate root as `Driver`'s
 // is: a client names these, and never `host_process::HostProcessSupervisor`.
 pub use host_process::{
@@ -42,6 +60,15 @@ pub use host_process::{
     LogStreamSelection, LogTail, ProcessExit, ProcessLogs, ProcessSupervisor, Reattached,
     SocketProtocol, StopCause, StoredProcessLogs,
 };
+#[cfg(not(target_os = "linux"))]
+pub use unsupported::HostDriver;
+
+/// The named refusal `HostDriver::open` returns on an operating system other than Linux.
+///
+/// The driver's isolation floor is Linux kernel interfaces (`openat2`, namespaces, cgroup v2,
+/// seccomp, sealed memfds), and invariant 3 forbids serving a weaker one, so elsewhere the crate
+/// compiles and refuses at open rather than failing to build.
+pub const PLATFORM_UNSERVED: &str = "host.platform-unserved";
 
 /// One deployment-owned Git source aperture. The URL is a non-secret HTTPS prefix; request
 /// authority arrives separately and is never retained in this configuration.
@@ -634,6 +661,7 @@ pub trait Driver: Send + Sync {
     fn discard_superseded_exec(&self, id: &str);
 }
 
+#[cfg(target_os = "linux")]
 pub struct HostDriver {
     config: HostConfig,
     filesystem: Arc<fs::GuardedFilesystem>,
@@ -644,6 +672,7 @@ pub struct HostDriver {
     quotas: Option<Arc<quota::ProjectQuotas>>,
 }
 
+#[cfg(target_os = "linux")]
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct WorkspaceDestroyKey {
     device: libc::dev_t,
@@ -651,10 +680,12 @@ struct WorkspaceDestroyKey {
     name: String,
 }
 
+#[cfg(target_os = "linux")]
 struct WorkspaceDestroyOwnership {
     key: WorkspaceDestroyKey,
 }
 
+#[cfg(target_os = "linux")]
 impl WorkspaceDestroyOwnership {
     fn acquire(
         namespace: (libc::dev_t, libc::ino_t),
@@ -681,17 +712,20 @@ impl WorkspaceDestroyOwnership {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Drop for WorkspaceDestroyOwnership {
     fn drop(&mut self) {
         workspace_destroy_roots().lock().remove(&self.key);
     }
 }
 
+#[cfg(target_os = "linux")]
 fn workspace_destroy_roots() -> &'static Mutex<HashSet<WorkspaceDestroyKey>> {
     static ROOTS: OnceLock<Mutex<HashSet<WorkspaceDestroyKey>>> = OnceLock::new();
     ROOTS.get_or_init(|| Mutex::new(HashSet::new()))
 }
 
+#[cfg(target_os = "linux")]
 /// An uninstalled Git tree owns its quota until cleanup proves physical absence and zero usage.
 /// A blocking materialization worker retains this guard after its async caller is cancelled.
 struct GitWorkspaceStaging {
@@ -699,6 +733,7 @@ struct GitWorkspaceStaging {
     quotas: Option<Arc<quota::ProjectQuotas>>,
 }
 
+#[cfg(target_os = "linux")]
 impl GitWorkspaceStaging {
     fn path(&self) -> &Path {
         self.directory
@@ -747,6 +782,7 @@ impl GitWorkspaceStaging {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl Drop for GitWorkspaceStaging {
     fn drop(&mut self) {
         if let Err(error) = self.cleanup() {
@@ -757,6 +793,7 @@ impl Drop for GitWorkspaceStaging {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl HostDriver {
     /// Opens the guarded filesystem, probes the host, and reconciles orphaned exec cgroups.
     ///
@@ -964,6 +1001,7 @@ impl HostDriver {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[async_trait]
 impl Driver for HostDriver {
     async fn shutdown(&self) -> Result<(), DriverError> {
@@ -1574,6 +1612,7 @@ impl Driver for HostDriver {
     }
 }
 
+#[cfg(target_os = "linux")]
 #[cfg(test)]
 mod tests {
     use tempfile::tempdir;
