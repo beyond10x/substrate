@@ -397,8 +397,22 @@ pub fn env_name_is_valid(name: &str) -> bool {
 /// # Errors
 ///
 /// `process.cwd-invalid`.
+#[cfg(target_os = "linux")]
 pub fn check_cwd(cwd: &Path) -> Result<(), DriverError> {
     open_cwd(cwd).map(drop)
+}
+
+/// Off Linux no host process can start, so no working directory is admitted.
+///
+/// # Errors
+///
+/// Always `process.host-unserved`.
+#[cfg(not(target_os = "linux"))]
+pub fn check_cwd(_cwd: &Path) -> Result<(), DriverError> {
+    Err(unserved(format!(
+        "Host processes need a Linux cgroup v2 root; this host runs {}.",
+        std::env::consts::OS
+    )))
 }
 
 fn valid_env_name(name: &str) -> bool {
@@ -1586,10 +1600,12 @@ async fn supervise(
 
 /// How often a re-attached record's cgroup is read for its emptying: it has no main process
 /// whose exit could wake the driver.
+#[cfg(target_os = "linux")]
 const REATTACHED_POLL: Duration = Duration::from_millis(100);
 
 /// Owns a re-attached record: waits for its cgroup to empty, by its own exit or by a stop, then
 /// removes the cgroup and publishes the end with no exit status (nobody observed one).
+#[cfg(target_os = "linux")]
 async fn supervise_reattached(entry: Arc<Entry>) {
     let result = async {
         while entry.populated()? {
