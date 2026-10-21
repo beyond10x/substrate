@@ -195,6 +195,10 @@ pub struct App {
     pub(super) host_process_reconciled: Mutex<bool>,
     /// What this run's host-process driver is known to hold, and the stops it has begun.
     pub(super) host_process_run: Arc<super::processes::DriverRun>,
+    /// This daemon run's identity, minted at construction and stamped by the store on every
+    /// host-process record it starts: a record of any other run is reconciled as an earlier
+    /// run's (S3), whatever its wall-clock `started_at` says.
+    pub(super) host_process_run_id: String,
     lease_sweep: Mutex<()>,
     workspace_recovery: Mutex<()>,
     provisional_recovery: Mutex<()>,
@@ -245,6 +249,8 @@ impl App {
         delegated_context: DelegatedContextPolicy,
     ) -> Arc<Self> {
         let restart_cutoff = authority.now();
+        let host_process_run_id = format!("run_{}", Ulid::generate());
+        store.set_host_process_run(host_process_run_id.clone());
         let event_wakeups = Arc::new(EventWakeups::default());
         let event_stream_policy = EventStreamPolicy::production();
         let metrics_stream_policy = MetricsStreamPolicy::production();
@@ -279,6 +285,7 @@ impl App {
             host_process_uid: nix::unistd::geteuid().as_raw(),
             host_process_reconciled: Mutex::new(false),
             host_process_run: Arc::default(),
+            host_process_run_id,
             lease_sweep: Mutex::new(()),
             workspace_recovery: Mutex::new(()),
             provisional_recovery: Mutex::new(()),

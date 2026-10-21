@@ -189,15 +189,16 @@ pub(super) struct ProcessCtx {
     authority: Arc<dyn Authority>,
     slots: Arc<Semaphore>,
     deployment: String,
-    /// This run's restart cutoff: a record started before it is an earlier run's, which only
-    /// reconciliation decides ([`ProcessCtx::reconcile_after_restart`]).
-    cutoff: DateTime<Utc>,
+    /// This daemon run's identity: a record that names any other run is an earlier run's, which
+    /// only reconciliation decides ([`ProcessCtx::reconcile_after_restart`]). Never a wall instant,
+    /// because the wall clock can step back across a restart and inside a run.
+    run_id: String,
 }
 
 impl App {
     fn process_ctx(&self) -> Option<ProcessCtx> {
         self.host_processes.as_ref().map(|supervisor| ProcessCtx {
-            cutoff: self.restart_cutoff,
+            run_id: self.host_process_run_id.clone(),
             store: Arc::clone(&self.store),
             supervisor: Arc::clone(supervisor),
             run: Arc::clone(&self.host_process_run),
@@ -223,7 +224,7 @@ impl App {
         {
             let mut reconciled = self.host_process_reconciled.lock().await;
             if !*reconciled {
-                *reconciled = ctx.reconcile_after_restart(self.restart_cutoff).await;
+                *reconciled = ctx.reconcile_after_restart().await;
             }
         }
         ctx.stop_due().await;
@@ -453,10 +454,11 @@ impl ProcessCtx {
         }
     }
 
-    /// Whether `record` was started by this daemon run: the exact complement of what
-    /// reconciliation selects (`started_ms < cutoff`), so every record is decided by one of them.
+    /// Whether `record` was started by this daemon run: it names this run's identity. The exact
+    /// complement of what reconciliation selects (every other run, and no run), so every record
+    /// is decided by one of them.
     fn this_run(&self, record: &HostProcessRecord) -> bool {
-        record.started_at.timestamp_millis() >= self.cutoff.timestamp_millis()
+        record.run.as_deref() == Some(self.run_id.as_str())
     }
 
     /// Concludes the start operation still open on `record`, if any (invariant 5). A start the
@@ -597,11 +599,8 @@ impl ProcessCtx {
     async fn collect_ends(&self) {
         let Ok(live) = self
             .io(|| {
-                self.store.host_processes_to_reconcile(
-                    &self.deployment,
-                    DateTime::<Utc>::MAX_UTC,
-                    RECONCILE_LIMIT,
-                )
+                self.store
+                    .live_host_processes(&self.deployment, RECONCILE_LIMIT)
             })
             .await
         else {
@@ -679,11 +678,14 @@ impl ProcessCtx {
     /// incomplete, so the next sweep tries it again, and until one succeeds the driver does not
     /// hold it ([`DriverRun`]), so no lease expiry or deadline stop ends it on a not-found. A
     /// record re-attached by an earlier pass is not visited again.
-    async fn reconcile_after_restart(&self, cutoff: DateTime<Utc>) -> bool {
+    async fn reconcile_after_restart(&self) -> bool {
         let Ok(records) = self
             .io(|| {
-                self.store
-                    .host_processes_to_reconcile(&self.deployment, cutoff, RECONCILE_LIMIT)
+                self.store.host_processes_to_reconcile(
+                    &self.deployment,
+                    &self.run_id,
+                    RECONCILE_LIMIT,
+                )
             })
             .await
         else {

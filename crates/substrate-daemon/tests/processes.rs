@@ -3243,3 +3243,273 @@ async fn host_process_restart_concludes_the_start_of_a_record_left_stopping() {
         }
     }
 }
+
+// ---------------------------------------------------------------------------------------------
+// Adversary, wave 2026-10-17 (PR 143): the restart cutoff is a wall-clock instant, and the
+// record's `started_ms` is one too. A wall clock stepped back between a record's start and the
+// next run's cutoff puts an earlier run's record on this run's side of `this_run`.
+// ---------------------------------------------------------------------------------------------
+
+/// A host whose cgroups outlive a daemon run, as the delegated driver's do: `alive` is the
+/// cgroup tree every run's driver shares. Each run's driver holds only what it started or
+/// re-attached, and answers `process.not-found` for anything else, as `HostProcessSupervisor`
+/// does for an id missing from its entries (`HostProcessSupervisor::entry`).
+struct OutlivingCgroups {
+    alive: Arc<parking_lot::Mutex<std::collections::BTreeSet<String>>>,
+    held: parking_lot::Mutex<std::collections::BTreeSet<String>>,
+    stopping: parking_lot::Mutex<std::collections::BTreeSet<String>>,
+    reattached: std::sync::atomic::AtomicUsize,
+}
+
+type CgroupTree = Arc<parking_lot::Mutex<std::collections::BTreeSet<String>>>;
+
+impl OutlivingCgroups {
+    fn run(alive: &CgroupTree) -> Arc<Self> {
+        Arc::new(Self {
+            alive: Arc::clone(alive),
+            held: parking_lot::Mutex::default(),
+            stopping: parking_lot::Mutex::default(),
+            reattached: std::sync::atomic::AtomicUsize::new(0),
+        })
+    }
+
+    fn holds(&self, id: &str) -> Result<(), DriverError> {
+        if self.held.lock().contains(id) {
+            Ok(())
+        } else {
+            Err(DriverError::not_found())
+        }
+    }
+
+    fn reattach_calls(&self) -> usize {
+        self.reattached.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl ProcessLogs for OutlivingCgroups {
+    fn log_tail(
+        &self,
+        _id: &str,
+        _selection: LogStreamSelection,
+        _max_bytes: u64,
+    ) -> Result<LogTail, DriverError> {
+        Err(DriverError::not_found())
+    }
+}
+
+impl ProcessSupervisor for OutlivingCgroups {
+    fn start(
+        self: Arc<Self>,
+        id: &str,
+        spec: &HostProcessSpec,
+    ) -> Result<HostProcessStarted, DriverError> {
+        self.alive.lock().insert(id.to_owned());
+        self.held.lock().insert(id.to_owned());
+        Ok(HostProcessStarted {
+            id: id.to_owned(),
+            pid: 1,
+            cgroup: format!("outliving-{id}"),
+            started_at: Utc::now(),
+            deadline: spec.deadline,
+            profile: HostProfile::Host,
+            confinement: Confinement::None,
+        })
+    }
+
+    fn reattach(self: Arc<Self>, id: &str) -> Result<Reattached, DriverError> {
+        self.reattached
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self.alive.lock().contains(id) {
+            self.held.lock().insert(id.to_owned());
+            Ok(Reattached::Live)
+        } else {
+            Ok(Reattached::Gone)
+        }
+    }
+
+    fn begin_stop(&self, id: &str, _cause: StopCause) -> Result<(), DriverError> {
+        self.holds(id)?;
+        self.stopping.lock().insert(id.to_owned());
+        Ok(())
+    }
+
+    fn ended(&self, id: &str) -> Result<Option<HostProcessEnd>, DriverError> {
+        self.holds(id)?;
+        if !self.stopping.lock().contains(id) {
+            return Ok(None);
+        }
+        // The stop sequence ran: the cgroup is empty and removed.
+        self.alive.lock().remove(id);
+        Ok(Some(HostProcessEnd {
+            ended_by: EndedBy::Stop,
+            exit: Some(ProcessExit::Signal(15)),
+            stop_step: Some(StopStep::Term),
+            ended_at: Utc::now(),
+        }))
+    }
+
+    fn observe(&self, id: &str) -> Result<HostProcessObservation, DriverError> {
+        self.holds(id)?;
+        Ok(HostProcessObservation {
+            observed_at: Utc::now(),
+            cpu_usec: None,
+            memory_bytes: None,
+            listening: None,
+            profile: HostProfile::Host,
+            confinement: Confinement::None,
+        })
+    }
+
+    fn forget(&self, _id: &str) -> Result<(), DriverError> {
+        Ok(())
+    }
+}
+
+impl Harness {
+    /// A fresh daemon run over the same durable state, whose driver sees the same cgroup tree.
+    fn restart_over(&mut self, alive: &CgroupTree) -> Arc<OutlivingCgroups> {
+        self.restart();
+        let run = OutlivingCgroups::run(alive);
+        Arc::get_mut(&mut self.app)
+            .expect("unshared application")
+            .host_processes = Some(Arc::clone(&run) as Arc<dyn ProcessSupervisor>);
+        run
+    }
+}
+
+/// S3 and invariant 3: a record an earlier run started and whose cgroup is still live must be
+/// re-attached by the next run, and never recorded `ended` while its processes still run. The
+/// step `0` row is the control: the same driver and the same requests with a clock that does not
+/// step. The second row steps the wall clock back by two minutes across the restart (an NTP step
+/// or an operator `date -s`), so the record's `started_ms` is not below the new cutoff:
+/// reconciliation does not select it, `this_run` claims it, and the stop's `process.not-found`
+/// from a driver that never re-attached it ends it `vanished` with its cgroup alive.
+#[tokio::test(flavor = "multi_thread")]
+async fn adversary_clock_step_back_across_restart_never_orphans_a_running_process() {
+    for step_ms in [0_i64, -120_000] {
+        let alive = CgroupTree::default();
+        let mut harness = Harness::portable();
+        let first = OutlivingCgroups::run(&alive);
+        Arc::get_mut(&mut harness.app)
+            .expect("unshared application")
+            .host_processes = Some(Arc::clone(&first) as Arc<dyn ProcessSupervisor>);
+        let cwd = harness.workdir("clock-step");
+        let id = harness
+            .started(
+                &format!("op_clock_step_run_{}", step_ms.unsigned_abs()),
+                input(&["/bin/sleep", "300"], &cwd, "s-1", "dev"),
+            )
+            .await;
+        assert!(
+            alive.lock().contains(&id),
+            "the first run started the cgroup"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        harness.authority.advance(step_ms);
+        let second = harness.restart_over(&alive);
+        for _ in 0..3 {
+            harness.sweep().await;
+        }
+        let (status, stopped) = harness
+            .stop(
+                &format!("op_clock_step_stp_{}", step_ms.unsigned_abs()),
+                &id,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "step {step_ms}: {stopped}");
+        for _ in 0..5 {
+            harness.sweep().await;
+        }
+        let record = harness.get(&id).await;
+        let orphaned = record["state"] == "ended" && alive.lock().contains(&id);
+        assert!(
+            !orphaned,
+            "step {step_ms}: the record is ended {} while its cgroup still runs; the second run \
+             re-attached {} record(s): {record}",
+            record["ended_by"],
+            second.reattach_calls()
+        );
+    }
+}
+
+/// S3 and invariant 5: a start the earlier run dispatched (its cgroup has members) but whose
+/// record was still `starting` when the daemon stopped must be found running by the next run,
+/// not abandoned with its record and log removed while its processes run on. Row `0` is the
+/// control; row `-120_000` steps the wall clock back across the restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn adversary_clock_step_back_across_restart_never_abandons_a_dispatched_start() {
+    for step_ms in [0_i64, -120_000] {
+        let alive = CgroupTree::default();
+        let mut harness = Harness::portable();
+        let cwd = harness.workdir("clock-step-start");
+        let id = format!("proc_clockstep{}", step_ms.unsigned_abs());
+        reserve_start_only(
+            &harness,
+            &format!("op_clock_step_start_{}", step_ms.unsigned_abs()),
+            &id,
+            &cwd,
+        );
+        // The dispatch ran and the program is in its cgroup; the daemon stopped before it
+        // recorded `running`.
+        alive.lock().insert(id.clone());
+        tokio::time::sleep(Duration::from_millis(5)).await;
+        harness.authority.advance(step_ms);
+        let second = harness.restart_over(&alive);
+        for _ in 0..3 {
+            harness.sweep().await;
+        }
+        let (status, record) = harness
+            .call(SUBJECT, Method::GET, &format!("/v1/processes/{id}"), None)
+            .await;
+        let dropped = status == StatusCode::NOT_FOUND && alive.lock().contains(&id);
+        assert!(
+            !dropped,
+            "step {step_ms}: the record was abandoned and removed while its cgroup still runs; \
+             the second run re-attached {} record(s): {status} {record}",
+            second.reattach_calls()
+        );
+        assert_eq!(
+            record["result"]["state"], "running",
+            "step {step_ms}: {status} {record}"
+        );
+    }
+}
+
+/// S4 and invariant 3, inside one run: `this_run` and reconciliation partition the records by
+/// `started_ms` against the cutoff, so a wall clock stepped back below the cutoff after the one
+/// reconciliation pass leaves a start this run reserved, never dispatched and then lease-expired
+/// decided by neither: it stays `stopping` with its live slot, its owner name and its stop open.
+/// Compare `host_process_lease_expiry_ends_a_start_this_run_never_dispatches`, the same case on a
+/// clock that does not step.
+#[tokio::test(flavor = "multi_thread")]
+async fn adversary_clock_step_back_within_a_run_still_ends_a_dropped_start() {
+    let strict = StrictSupervisor::new(false, None);
+    let mut harness = Harness::portable();
+    Arc::get_mut(&mut harness.app)
+        .expect("unshared application")
+        .host_processes = Some(Arc::clone(&strict) as Arc<dyn ProcessSupervisor>);
+    // The run's one reconciliation pass completes over an empty store.
+    harness.sweep().await;
+    harness.authority.advance(-120_000);
+    let cwd = harness.workdir("clock-step-dropped");
+    reserve_start_only(
+        &harness,
+        "op_clock_step_dropped_1",
+        "proc_clockstepdropped",
+        &cwd,
+    );
+    harness.authority.advance(61_000);
+    for _ in 0..5 {
+        harness.sweep().await;
+    }
+    let record = harness.get("proc_clockstepdropped").await;
+    assert!(
+        !strict.runs("proc_clockstepdropped"),
+        "nothing was dispatched for this record"
+    );
+    assert_eq!(
+        record["state"], "ended",
+        "a lease-expired start this run never dispatched is left undecided after a clock step: \
+         {record}"
+    );
+}

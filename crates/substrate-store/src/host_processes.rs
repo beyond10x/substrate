@@ -260,6 +260,9 @@ pub struct HostProcessRecord {
     pub running_at: Option<DateTime<Utc>>,
     pub stopping_at: Option<DateTime<Utc>>,
     pub ended_at: Option<DateTime<Utc>>,
+    /// The daemon run that started this record ([`Store::set_host_process_run`]). Absent on a
+    /// record written before runs were recorded, which only an earlier run can have written.
+    pub run: Option<String>,
 }
 
 /// The answer to a start reservation.
@@ -419,12 +422,24 @@ impl HostProcessRefusal {
 const COLUMNS: &str = "subject, id, owner_session, owner_name, reason, argv_json, cwd,
     env_names_json, env_digest, profile, confinement, lease_ttl_ms, lease_issued_ms,
     lease_expires_ms, keep_reason, timeout_ms, expires_at_ms, deadline_ms, deadline_source, state,
-    ended_by, exit_code, exit_signal, start_operation, started_ms, running_ms, stopping_ms, ended_ms";
+    ended_by, exit_code, exit_signal, start_operation, started_ms, running_ms, stopping_ms, ended_ms,
+    run_id";
 
 /// Selected rows of a single subject are bounded by the live bound; this caps the owner query.
 const MAX_OWNER_SELECTION: i64 = 4_096;
 
 impl Store {
+    /// Names the daemon run every host-process record started from now on belongs to. The daemon
+    /// sets it once, when it is constructed, to an identity no earlier run used.
+    ///
+    /// Which run a record belongs to is decided by this identity and never by comparing wall
+    /// instants: a wall clock stepped back across a restart puts an earlier run's `started_at` at
+    /// or after the next run's start, and one stepped back inside a run puts this run's before it
+    /// (ADR 0036 S3).
+    pub fn set_host_process_run(&self, run: impl Into<String>) {
+        *self.host_process_run.write() = Some(run.into());
+    }
+
     /// Records a start durably before dispatch: either a refused operation naming the refusal,
     /// or an accepted operation together with a `starting` record, in one transaction.
     pub fn reserve_host_process_start(
@@ -494,16 +509,7 @@ impl Store {
                 }
                 Err(error) => return Err(error),
             };
-        let lease = match &process.lease {
-            HostProcessLeaseRequest::Ttl { ttl_ms } => HostProcessLease::Ttl {
-                ttl_ms: *ttl_ms,
-                issued_at: now,
-                expires_at: add_ms(now, *ttl_ms)?,
-            },
-            HostProcessLeaseRequest::Keep { reason } => HostProcessLease::Keep {
-                reason: reason.clone(),
-            },
-        };
+        let lease = issued_lease(&process.lease, now)?;
         let record = HostProcessRecord {
             id: process.id.clone(),
             owner_session: process.owner_session.clone(),
@@ -527,6 +533,7 @@ impl Store {
             running_at: None,
             stopping_at: None,
             ended_at: None,
+            run: self.host_process_run.read().clone(),
         };
         insert_record(&transaction, &new.scope, &record)?;
         transaction.commit()?;
@@ -1043,25 +1050,45 @@ impl Store {
         Ok(())
     }
 
-    /// The non-terminal records of one deployment started before `before`, oldest first, at most
-    /// `limit`: what a restarted daemon reconciles against the cgroup tree (ADR 0036 S3).
+    /// The non-terminal records of one deployment that any run other than `run` started, a
+    /// record that names no run included, oldest first, at most `limit`: what a restarted daemon
+    /// reconciles against the cgroup tree (ADR 0036 S3). The exact complement of the live records
+    /// `run` started ([`Store::set_host_process_run`]).
     pub fn host_processes_to_reconcile(
         &self,
         deployment: &str,
-        before: DateTime<Utc>,
+        run: &str,
+        limit: u64,
+    ) -> Result<Vec<(Scope, HostProcessRecord)>, StoreError> {
+        self.live_host_processes_except(deployment, Some(run), limit)
+    }
+
+    /// Every non-terminal record of one deployment, whichever run started it, oldest first, at
+    /// most `limit`.
+    pub fn live_host_processes(
+        &self,
+        deployment: &str,
+        limit: u64,
+    ) -> Result<Vec<(Scope, HostProcessRecord)>, StoreError> {
+        self.live_host_processes_except(deployment, None, limit)
+    }
+
+    fn live_host_processes_except(
+        &self,
+        deployment: &str,
+        run: Option<&str>,
         limit: u64,
     ) -> Result<Vec<(Scope, HostProcessRecord)>, StoreError> {
         let connection = self.connection.lock();
         let mut statement = connection.prepare(&format!(
             "SELECT {COLUMNS} FROM host_processes
-             WHERE deployment = ?1 AND state != 'ended' AND started_ms < ?2
+             WHERE deployment = ?1 AND state != 'ended' AND (?2 IS NULL OR run_id IS NOT ?2)
              ORDER BY started_ms, subject, id LIMIT ?3"
         ))?;
         let rows = statement
-            .query_map(
-                params![deployment, before.timestamp_millis(), to_i64(limit)?],
-                |row| Ok((row.get::<_, String>(0)?, RawRecord::read(row)?)),
-            )?
+            .query_map(params![deployment, run, to_i64(limit)?], |row| {
+                Ok((row.get::<_, String>(0)?, RawRecord::read(row)?))
+            })?
             .collect::<Result<Vec<_>, _>>()?;
         rows.into_iter()
             .map(|(subject, raw)| {
@@ -1135,6 +1162,7 @@ pub(crate) fn migrate_host_processes(connection: &Connection) -> Result<(), Stor
             running_ms INTEGER,
             stopping_ms INTEGER,
             ended_ms INTEGER,
+            run_id TEXT,
             PRIMARY KEY (deployment, subject, id),
             CHECK (
                 (keep_reason IS NULL AND lease_ttl_ms IS NOT NULL
@@ -1161,6 +1189,20 @@ pub(crate) fn migrate_host_processes(connection: &Connection) -> Result<(), Stor
             WHERE state = 'ended';
         ",
     )?;
+    migrate_host_process_run(connection)
+}
+
+/// A table written before records named their run gains the column, empty on every existing
+/// row: each of them was started by an earlier daemon run, and a restart reconciles it as one.
+fn migrate_host_process_run(connection: &Connection) -> Result<(), StoreError> {
+    let mut statement = connection.prepare("PRAGMA table_info(host_processes)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    if !columns.iter().any(|column| column == "run_id") {
+        connection.execute("ALTER TABLE host_processes ADD COLUMN run_id TEXT", [])?;
+    }
     Ok(())
 }
 
@@ -1331,10 +1373,10 @@ fn insert_record(
             deployment, subject, id, owner_session, owner_name, reason, argv_json, cwd,
             env_names_json, env_digest, profile, confinement, lease_ttl_ms, lease_issued_ms,
             lease_expires_ms, keep_reason, timeout_ms, expires_at_ms, deadline_ms,
-            deadline_source, state, start_operation, started_ms
+            deadline_source, state, start_operation, started_ms, run_id
          ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19,
-            ?20, ?21, ?22, ?23
+            ?20, ?21, ?22, ?23, ?24
          )",
         params![
             scope.deployment,
@@ -1369,6 +1411,7 @@ fn insert_record(
             record.state.as_str(),
             record.start_operation,
             record.started_at.timestamp_millis(),
+            record.run,
         ],
     )?;
     Ok(())
@@ -1458,6 +1501,23 @@ fn add_ms(at: DateTime<Utc>, ms: u64) -> Result<DateTime<Utc>, StoreError> {
         .ok_or(StoreError::IntegerRange)
 }
 
+/// The lease a start accepted at `now` holds: a TTL lease issued then, or a keep.
+fn issued_lease(
+    request: &HostProcessLeaseRequest,
+    now: DateTime<Utc>,
+) -> Result<HostProcessLease, StoreError> {
+    Ok(match request {
+        HostProcessLeaseRequest::Ttl { ttl_ms } => HostProcessLease::Ttl {
+            ttl_ms: *ttl_ms,
+            issued_at: now,
+            expires_at: add_ms(now, *ttl_ms)?,
+        },
+        HostProcessLeaseRequest::Keep { reason } => HostProcessLease::Keep {
+            reason: reason.clone(),
+        },
+    })
+}
+
 fn from_ms(ms: i64) -> Result<DateTime<Utc>, StoreError> {
     Utc.timestamp_millis_opt(ms)
         .single()
@@ -1504,6 +1564,7 @@ struct RawRecord {
     running_ms: Option<i64>,
     stopping_ms: Option<i64>,
     ended_ms: Option<i64>,
+    run_id: Option<String>,
 }
 
 impl RawRecord {
@@ -1537,6 +1598,7 @@ impl RawRecord {
             running_ms: row.get(25)?,
             stopping_ms: row.get(26)?,
             ended_ms: row.get(27)?,
+            run_id: row.get(28)?,
         })
     }
 
@@ -1614,6 +1676,7 @@ impl RawRecord {
             running_at: from_ms_opt(self.running_ms)?,
             stopping_at: from_ms_opt(self.stopping_ms)?,
             ended_at: from_ms_opt(self.ended_ms)?,
+            run: self.run_id,
         })
     }
 }
