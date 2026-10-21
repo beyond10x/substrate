@@ -2,13 +2,14 @@
 format: aep.planning-md/3
 id: story:macos-host-compiles
 kind: story
-status: active
+status: implemented
 title: substrate-host compiles on macOS; Linux-only host behaviour is gated and refuses by name elsewhere
 summary: b10x-substrate-host builds for aarch64-apple-darwin so loom and takt can ship macOS again; HostDriver and HostProcessSupervisor refuse at open off Linux.
-revision: 4
+revision: 5
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-21T08:57:23Z", actor: "human:timo", revision: 3}
 - {from: "proposed", to: "active", at: "2026-10-21T08:57:24Z", actor: "human:timo", revision: 4}
+- {from: "active", to: "implemented", at: "2026-10-21T11:10:08Z", actor: "human:timo", revision: 5, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Outcome
 `cargo check -p b10x-substrate-host --target aarch64-apple-darwin` succeeds. takt's release job "Build aarch64-apple-darwin" failed on substrate-host 0.7.17 with 83 errors (https://github.com/beyond10x/takt/actions/runs/39569846703), which held takt 0.7.0 to Linux.
