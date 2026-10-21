@@ -7,6 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.7.18] — 2026-10-21
+
 ### Changed
 
 - `b10x-substrate-host` compiles on macOS and every other non-Linux target. Its Linux modules are
@@ -16,6 +18,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   behaviour and the public paths of `EgressAperture`, `ExecObservation`, `PipeFrame` and
   `PipeStream` are unchanged. 0.7.17 failed with 83 errors on `aarch64-apple-darwin`.
 - CI: a macOS job checks, lints and tests `b10x-substrate-host` on every pull request.
+
+### Security
+
+- `rustls-webpki` 0.103.15 → 0.103.16 for RUSTSEC-2026-0382 (certificate verification may accept
+  distrusted intermediates).
 
 ## [0.7.17] — 2026-10-17
 
