@@ -141,6 +141,9 @@ impl SeatbeltPolicy {
         profile.push_str("(allow signal (target same-sandbox))\n");
         profile.push_str("(allow sysctl-read)\n");
         profile.push_str("(allow file-read-metadata)\n");
+        // The dynamic loader reads the root directory itself and aborts the process if it cannot;
+        // this grants the listing of `/`, not anything beneath it.
+        profile.push_str("(allow file-read-data (literal \"/\"))\n");
         for service in MACH_SERVICES {
             let _ = writeln!(profile, "(allow mach-lookup (global-name \"{service}\"))");
         }
@@ -328,6 +331,7 @@ mod tests {
             "(allow file-read* (subpath \"/r/one\"))",
             "(allow process-exec (literal \"/bin/bash\"))",
             "(allow signal (target same-sandbox))",
+            "(allow file-read-data (literal \"/\"))",
         ] {
             assert!(lines.contains(&line), "missing {line}");
         }
