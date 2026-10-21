@@ -18,7 +18,7 @@ name = "b10x-substrate"
 path = "src/main.rs"
 
 [dependencies]
-b10x-substrate-sdk = { path = "../b10x-substrate-sdk", version = "=0.7.17" }
+b10x-substrate-sdk = { path = "../b10x-substrate-sdk", version = "=0.7.18" }
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true

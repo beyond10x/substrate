@@ -15,6 +15,9 @@
 //! host whose `sessions.pty` fact is absent, which is exactly the deployment the ordering decision
 //! is about.
 
+// Every case drives the Linux host driver, which refuses to open elsewhere.
+#![cfg(target_os = "linux")]
+
 use std::collections::BTreeMap;
 
 use substrate_host::{DispatchOutcome, Driver as _, HostConfig, HostDriver};

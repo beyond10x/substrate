@@ -21,13 +21,19 @@
 //! record's whole cgroup subtree, which exec's primitives do not (`tree`).
 
 mod log;
+#[cfg(target_os = "linux")]
 mod pidfd;
 mod ports;
+#[cfg(target_os = "linux")]
 #[cfg(test)]
 mod security_tests;
+#[cfg(target_os = "linux")]
 #[cfg(test)]
 mod tests;
+#[cfg(target_os = "linux")]
 mod tree;
+#[cfg(not(target_os = "linux"))]
+mod unsupported;
 
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::CString;
@@ -47,6 +53,7 @@ use substrate_wire::MIN_LEASE_TTL_MS;
 use tokio::io::{AsyncRead, AsyncReadExt as _};
 use tokio::sync::watch;
 
+#[cfg(target_os = "linux")]
 use crate::process::{Cgroup, read_decimal_counter};
 use crate::{DriverError, DriverErrorClass};
 
@@ -55,6 +62,8 @@ pub use log::{
     MAX_PROCESS_LOG_LINE_BYTES,
 };
 pub use ports::{ListeningSocket, SocketProtocol};
+#[cfg(not(target_os = "linux"))]
+pub use unsupported::HostProcessSupervisor;
 
 use log::ProcessLog;
 
@@ -379,6 +388,7 @@ fn cwd_invalid() -> DriverError {
     )
 }
 
+#[cfg(target_os = "linux")]
 #[repr(C)]
 struct OpenHow {
     flags: u64,
@@ -392,6 +402,7 @@ const RESOLVE_NO_SYMLINKS: u64 = 0x04;
 /// Opens `path` as the working directory: a directory, reached by the kernel without following
 /// any symlink in any component (`openat2` with `RESOLVE_NO_SYMLINKS`). The child changes into
 /// this descriptor, so a path swapped after the check cannot redirect it.
+#[cfg(target_os = "linux")]
 pub(crate) fn open_cwd(path: &Path) -> Result<OwnedFd, DriverError> {
     if !lexically_canonical(path) {
         return Err(cwd_invalid());
@@ -497,9 +508,11 @@ fn validate_id(id: &str) -> Result<(), DriverError> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
 type EndState = Option<Result<HostProcessEnd, DriverError>>;
 
 /// Whether the stop sequence has run, and if so the step that emptied the cgroup.
+#[cfg(target_os = "linux")]
 #[derive(Clone, Copy)]
 enum Termination {
     /// The stop sequence has not completed.
@@ -508,6 +521,7 @@ enum Termination {
     Ran(Option<StopStep>),
 }
 
+#[cfg(target_os = "linux")]
 struct Entry {
     cgroup: Cgroup,
     cgroup_path: PathBuf,
@@ -524,6 +538,7 @@ struct Entry {
     end: watch::Sender<EndState>,
 }
 
+#[cfg(target_os = "linux")]
 impl Entry {
     fn claim(&self, cause: EndedBy) -> EndedBy {
         *self.claim.lock().get_or_insert(cause)
@@ -630,12 +645,14 @@ impl Entry {
 }
 
 /// The host-process driver over one delegated cgroup root and one owner-private state directory.
+#[cfg(target_os = "linux")]
 pub struct HostProcessSupervisor {
     cgroup_root: PathBuf,
     state_dir: PathBuf,
     entries: Mutex<HashMap<String, Arc<Entry>>>,
 }
 
+#[cfg(target_os = "linux")]
 impl std::fmt::Debug for HostProcessSupervisor {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter
@@ -646,6 +663,7 @@ impl std::fmt::Debug for HostProcessSupervisor {
     }
 }
 
+#[cfg(target_os = "linux")]
 impl HostProcessSupervisor {
     /// Opens the driver, proving the delegated root can hold process cgroups: a probe cgroup is
     /// created, a forked probe process joins it, and both are removed. `state_dir` is created
@@ -955,6 +973,7 @@ impl HostProcessSupervisor {
     }
 }
 
+#[cfg(target_os = "linux")]
 fn state_failed(error: &std::io::Error) -> DriverError {
     DriverError::failed(
         "process.log-failed",
@@ -965,6 +984,7 @@ fn state_failed(error: &std::io::Error) -> DriverError {
 /// The command for `spec`: `argv` with no shell, exactly `env`, standard input from `/dev/null`,
 /// both outputs piped, and [`child_setup`] between fork and exec. `procs_fd` and `cwd_fd` must
 /// stay open until the spawn returns.
+#[cfg(target_os = "linux")]
 fn host_command(spec: &HostProcessSpec, procs_fd: i32, cwd_fd: i32) -> tokio::process::Command {
     let mut command = tokio::process::Command::new(&spec.argv[0]);
     command
@@ -986,6 +1006,7 @@ fn host_command(spec: &HostProcessSpec, procs_fd: i32, cwd_fd: i32) -> tokio::pr
 
 /// Ends a started process the driver cannot supervise: nothing may be left running. Kills the
 /// whole cgroup and the child, reaps the child, and removes the cgroup once it is empty.
+#[cfg(target_os = "linux")]
 fn abandon(
     cgroup: &Cgroup,
     cgroup_path: PathBuf,
@@ -1009,6 +1030,7 @@ fn abandon(
 }
 
 /// The child's setup between fork and exec. Async-signal-safe only.
+#[cfg(target_os = "linux")]
 fn child_setup(procs_fd: i32, cwd_fd: i32) -> std::io::Result<()> {
     // SAFETY: each call takes plain integers or a static byte; none allocates.
     unsafe {
@@ -1039,6 +1061,7 @@ fn child_setup(procs_fd: i32, cwd_fd: i32) -> std::io::Result<()> {
 }
 
 /// Proves `root` can hold host-process cgroups, or refuses by name.
+#[cfg(target_os = "linux")]
 fn probe_root(root: &Path) -> Result<(), DriverError> {
     let statfs = nix::sys::statfs::statfs(root)
         .map_err(|error| unserved(format!("cgroup root: {error}")))?;
@@ -1084,6 +1107,7 @@ fn probe_root(root: &Path) -> Result<(), DriverError> {
 }
 
 /// Forks a child that only writes `0` to `procs_fd` and exits with whether it could.
+#[cfg(target_os = "linux")]
 fn join_from_forked_child(procs_fd: i32) -> bool {
     // SAFETY: the child calls only `write` and `_exit`, which are async-signal-safe, on a
     // descriptor the parent opened before the fork; it never returns into Rust code.
@@ -1114,6 +1138,7 @@ fn join_from_forked_child(procs_fd: i32) -> bool {
 
 /// Copies one standard stream into the log, a line at a time. A line longer than the log's line
 /// bound is stored cut at it with its full length; a final line without a newline is stored too.
+#[cfg(target_os = "linux")]
 async fn copy_lines<R: AsyncRead + Unpin>(mut reader: R, stream: LogStream, log: Arc<ProcessLog>) {
     let max_line = log.max_line();
     let mut chunk = vec![0_u8; 8_192];
@@ -1144,6 +1169,7 @@ async fn copy_lines<R: AsyncRead + Unpin>(mut reader: R, stream: LogStream, log:
 
 /// Fires the S11 deadline: claims its cause and runs the stop sequence, unless the record ended
 /// first.
+#[cfg(target_os = "linux")]
 async fn enforce_deadline(entry: Arc<Entry>, deadline: Deadline) {
     let wait = (deadline.at - Utc::now())
         .to_std()
@@ -1162,6 +1188,7 @@ async fn enforce_deadline(entry: Arc<Entry>, deadline: Deadline) {
 
 /// Owns the main process: reaps it, ends whatever members remain, drains the log, removes the
 /// cgroup and publishes the end. A record ends only with an empty, removed cgroup (S3).
+#[cfg(target_os = "linux")]
 async fn supervise(
     entry: Arc<Entry>,
     mut child: tokio::process::Child,

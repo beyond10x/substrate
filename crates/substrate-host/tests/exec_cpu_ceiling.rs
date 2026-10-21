@@ -5,6 +5,9 @@
 //! case needs a delegated cgroup; the quota each ceiling produces is unit-tested beside
 //! `exec_cpu_quota` in `src/process.rs`.
 
+// Every case drives the Linux host driver, which refuses to open elsewhere.
+#![cfg(target_os = "linux")]
+
 use substrate_host::{DriverErrorClass, HostConfig, HostDriver};
 use tempfile::TempDir;
 

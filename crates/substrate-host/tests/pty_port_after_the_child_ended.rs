@@ -1,3 +1,5 @@
+// Every case drives the Linux host driver, which refuses to open elsewhere.
+#![cfg(target_os = "linux")]
 #![forbid(unsafe_code)]
 //! **The class**, not the instance: every `Driver` port method that touches a pty session after its
 //! child can have exited, and what each one must do about it.

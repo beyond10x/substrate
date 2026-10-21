@@ -1,0 +1,55 @@
+name: macOS
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  host:
+    name: Host crate on macOS
+    runs-on: macos-15
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned Rust toolchain
+        run: |
+          channel=$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml | head -1)
+          test -n "$channel"
+          rustup toolchain install "$channel" --profile minimal --component clippy
+          rustup default "$channel"
+          rustc --version --verbose
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          cache-workspace-crates: "false"
+          cache-all-crates: "false"
+          cache-on-failure: "false"
+
+      - name: Check the host crate
+        run: cargo check -p b10x-substrate-host --all-targets --locked
+
+      - name: Lint the host crate
+        run: cargo clippy -p b10x-substrate-host --all-targets --locked -- -D warnings
+
+      - name: Test the host crate
+        run: cargo test -p b10x-substrate-host --locked
