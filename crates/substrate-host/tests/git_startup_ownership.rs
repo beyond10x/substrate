@@ -4,6 +4,9 @@
 //! repository checkout as a host root. Assertions cover Git inactivity; capsule/aperture startup
 //! outside the protected sentinel trees is permitted.
 
+// Every case drives the Linux host driver, which refuses to open elsewhere.
+#![cfg(target_os = "linux")]
+
 use std::collections::BTreeMap;
 use std::ffi::CString;
 use std::fs::{self, File};

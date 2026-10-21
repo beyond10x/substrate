@@ -8,6 +8,9 @@
 //! confinement backend and no case needs a delegated cgroup. The aperture exec itself is the
 //! delegated case beside the other aperture runtime cases in `src/process.rs`.
 
+// Every case drives the Linux host driver, which refuses to open elsewhere.
+#![cfg(target_os = "linux")]
+
 use std::net::{Ipv4Addr, SocketAddr};
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::Path;

@@ -7,6 +7,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- `b10x-substrate-host` compiles on macOS and every other non-Linux target. Its Linux modules are
+  gated on `target_os = "linux"`; elsewhere `HostDriver::open` refuses with
+  `host.platform-unserved` (class `unserved`, address `host.platform`) and
+  `HostProcessSupervisor::open` with `process.host-unserved`, both before touching the host. Linux
+  behaviour and the public paths of `EgressAperture`, `ExecObservation`, `PipeFrame` and
+  `PipeStream` are unchanged. 0.7.17 failed with 83 errors on `aarch64-apple-darwin`.
+- CI: a macOS job checks, lints and tests `b10x-substrate-host` on every pull request.
+
 ## [0.7.17] — 2026-10-17
 
 Published by [release run 39047185868](https://github.com/beyond10x/substrate/actions/runs/39047185868)

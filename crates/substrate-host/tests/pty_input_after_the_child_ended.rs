@@ -1,3 +1,5 @@
+// Every case drives the Linux host driver, which refuses to open elsewhere.
+#![cfg(target_os = "linux")]
 #![forbid(unsafe_code)]
 //! Writing to a pty session whose child has finished.
 //!

@@ -206,6 +206,7 @@ fn socket_tables(pid: u32) -> Read<Vec<(String, SocketProtocol)>> {
 /// [`MAX_OBSERVED_FDS`] descriptors, a table above [`MAX_SOCKET_TABLE_BYTES`], or any other failure
 /// to read makes the whole observation absent (`None`), never a partial list that would read as
 /// complete.
+#[cfg(target_os = "linux")]
 pub(crate) fn observe(top: &Path) -> Option<Vec<ListeningSocket>> {
     let pids = super::tree::members(top).ok()?;
     if pids.len() > MAX_OBSERVED_MEMBERS {

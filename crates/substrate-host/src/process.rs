@@ -26,6 +26,7 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{Notify, mpsc};
 
+pub use crate::observation::{ExecObservation, PipeFrame, PipeStream};
 use crate::{DispatchOutcome, DriverError, HostConfig};
 
 const TRUNCATION_MARKER: &[u8] = b"\n[substrate: output truncated]\n";
@@ -169,30 +170,6 @@ pub(crate) fn assert_recorded_posture(site: &str, sandboxes: &[Vec<String>], exp
             );
         }
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum PipeStream {
-    Stdout,
-    Stderr,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PipeFrame {
-    pub stream: PipeStream,
-    pub bytes: Vec<u8>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExecObservation {
-    pub resource: Exec,
-    pub stdout: Vec<u8>,
-    pub stderr: Vec<u8>,
-    pub stdout_truncated: bool,
-    pub stderr_truncated: bool,
-    pub output_complete: bool,
-    pub cgroup: Option<String>,
-    pub leader_pid: Option<u32>,
 }
 
 struct Execution {
