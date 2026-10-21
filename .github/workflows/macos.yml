@@ -53,3 +53,12 @@ jobs:
 
       - name: Test the host crate
         run: cargo test -p b10x-substrate-host --locked
+
+      - name: Run the Seatbelt adversary suite
+        run: |
+          cargo test -p b10x-substrate-host --locked --test seatbelt_adversary 2>&1 | tee "$RUNNER_TEMP/adversary.txt"
+          grep -q 'test result: ok. 7 passed; 0 failed' "$RUNNER_TEMP/adversary.txt"
+
+      - name: Show sandbox denials
+        if: failure()
+        run: log show --last 20m --style compact --predicate 'sender == "Sandbox"' | tail -n 300
