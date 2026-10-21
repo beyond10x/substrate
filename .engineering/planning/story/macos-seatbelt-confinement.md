@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:macos-seatbelt-confinement
 kind: story
-status: active
+status: implemented
 title: A Seatbelt profile confines a command on macOS, proven by an adversary suite on macos-15
 scope:
 - confidence: cited
@@ -17,10 +17,11 @@ scope:
   path: crates/substrate-host/src/seatbelt.rs
 - confidence: cited
   path: crates/substrate-host/tests/seatbelt_adversary.rs
-revision: 6
+revision: 7
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-21T17:13:15Z", actor: "human:timo", revision: 3}
 - {from: "proposed", to: "active", at: "2026-10-21T17:13:16Z", actor: "human:timo", revision: 4}
+- {from: "active", to: "implemented", at: "2026-10-21T18:59:38Z", actor: "human:timo", revision: 7, decided_on: {"recorded":{"test_result":2}}}
 ---
 ## Outcome
 `b10x-substrate-host` gains `seatbelt`, the macOS confinement primitive ADR 0037 decides: a policy (one writable workspace, read-only roots, an exec allowlist, no network) renders to an SBPL profile that starts with `(deny default)`, and on macOS a command runs under that profile through `/usr/bin/sandbox-exec` with a cleared environment.
