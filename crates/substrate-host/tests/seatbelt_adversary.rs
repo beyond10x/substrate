@@ -118,10 +118,11 @@ fn a_read_only_root_is_readable_and_not_writable() {
 fn an_undeclared_host_file_is_unreadable() {
     let host = host();
     let secret = host.outside.join("token");
-    fs::write(&secret, b"secret").expect("secret");
-    let script = "IFS= read -r line < \"$1\"; printf %s \"$line\"";
+    fs::write(&secret, b"secret\n").expect("secret");
+    let script = "IFS= read -r line < \"$1\" && printf %s \"$line\"";
 
     let control = unconfined_bash(script, &[text(&secret)]);
+    assert!(control.status.success(), "{}", report(&control));
     assert_eq!(control.stdout, b"secret", "{}", report(&control));
 
     let policy = SeatbeltPolicy::new(&host.workspace).executable(BASH);
