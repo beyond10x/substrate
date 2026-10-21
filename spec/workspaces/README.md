@@ -5,7 +5,7 @@ to serve a directory it did not create: `workspace.adopt` (ADR 0035, superseding
 separate from the accepted-operation ledger and the capture projections, so it changes neither
 suite's obligations.
 
-`cargo xtask check-ess` validates it, regenerates `../workspaces-suite.json` (16 synthesized and 5
+`cargo xtask check-ess` validates it, regenerates `../workspaces-suite.json` (18 synthesized and 5
 authored scenarios) and compares bytes, runs that suite against ESS's `interpreted` reference, and
 regenerates `RootName` and `Origin` into `crates/substrate-wire/src/generated/workspace.rs`, which
 `substrate-wire` exports as `RootName` and `WorkspaceOrigin`. The interpreted run checks the model,
@@ -25,8 +25,10 @@ not the daemon; the daemon's native tests (`crates/substrate-daemon/src/app/test
   The model's alphabet has to hold the prefix's `_`, so it also admits a `_` after the prefix,
   which the wire pattern refuses.
 
-As before, ESS reports the alphabet and the invariants as runtime obligations. Generated types do
-not enforce them, so the daemon's admission is the evidence for them, not this model.
+Under ESS 0.67.0 the generated `RootName` decoder checks the alphabet and the length bound; the
+leading-`-` rule and the other invariants stay runtime obligations. The adopt input decodes its
+root name without that check, so the daemon's admission refuses it and records the operation.
+The daemon's admission is the evidence for these rules, not this model.
 
 ## Adoption (`adoption.yaml`)
 
@@ -62,8 +64,8 @@ refusal is the daemon test's to assert.
 
 ## Scenarios
 
-Synthesis writes 16 scenarios. Five more are authored under `scenarios/`. All 21 pass against
-ESS 0.60.0's `interpreted` target, which checks the model, not the daemon.
+Synthesis writes 18 scenarios. Five more are authored under `scenarios/`. All 23 pass against
+ESS 0.67.0's `interpreted` target, which checks the model, not the daemon.
 
 | file | claim |
 |---|---|

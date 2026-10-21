@@ -1,4 +1,4 @@
 format: ess-inputs/2
-requires: ess 0.60.0
+requires: ess 0.67.0
 specification: [system.yaml, identifier.yaml, adoption.yaml]
 scenarios: [scenarios/adopt-succeeds.yaml, scenarios/adopt-absent-directory.yaml, scenarios/adopt-twice-same-subject.yaml, scenarios/adopt-twice-other-subject.yaml, scenarios/destroy-adopted-leaves-directory.yaml]

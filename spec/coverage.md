@@ -90,10 +90,10 @@ from (id, root name, labels, origin, owner), the entry under the workspace root,
 `Create` (only as far as adoption collides with it), `Adopt` and `Destroy`. What the green check
 establishes:
 
-- The model validates under ESS 0.60.0, and `workspaces-suite.json` is its exact synthesized suite
-  (16 scenarios) plus the five authored scenarios under `workspaces/scenarios/`. Synthesis refuses
-  two obligations (`ESS-SYNTH-013`: no view row asserts `.count` of `RootName` or `WorkspaceId`).
-- All 21 scenarios pass against ESS's `interpreted` reference. That executes the model, not the
+- The model validates under ESS 0.67.0, and `workspaces-suite.json` is its exact synthesized suite
+  (18 scenarios) plus the five authored scenarios under `workspaces/scenarios/`. Synthesis refuses
+  one obligation (`ESS-SYNTH-013`: no view row asserts `.count` of `RootName`).
+- All 23 scenarios pass against ESS's `interpreted` reference. That executes the model, not the
   daemon.
 - `RootName` and `Origin` are generated into `crates/substrate-wire/src/generated/workspace.rs`
   and used as the wire types of `WorkspaceAdoptInput::root_name`, `Workspace::root_name` and
@@ -146,21 +146,18 @@ repeating the expected outcome. The full adoption report records the command and
 ADR 0036 before its implementation. No shipped code, route or wire bundle carries it yet. What the
 green check establishes:
 
-- `ess specify validate --path spec/host-processes` resolves the model, its actors and its 18
+- `ess specify validate --path spec/host-processes` resolves the model, its actors and its 19
   authored scenarios.
 - `spec/host-processes-suite.json` is the exact `ess verify conform synthesize` output;
-  `cargo xtask check-ess` fails on drift. It holds 77 synthesized scenarios and records 41
-  refusals: 23 for seven of the eight stream bindings, whose invocation synthesis cannot force
-  and whose `drop` publishes nothing (ESS-SYNTH-010); 17 for branches, states, transitions and
-  bindings whose arrangement passes through a row-set guard (`name-conflict` makes every
-  `StartProcess` step one), among them `StartProcess/started`, `name-conflict`,
-  `hosted-posture`, `stream-closed`, `unknown-process`, both deadline moves, both stop-by-owner
-  branches, the chained `stream-ended` binding and two cases of the lease-expired and timed-out
-  bindings (ESS-SYNTH-001); and one unwitnessed connective child of `StartContainer/started`
-  (ESS-SYNTH-022). An authored scenario exercises each of those branches and bindings except
-  `StartProcess/hosted-posture`, whose cause is the daemon's posture and belongs to the runtime
-  suite.
-- `ess verify conform run --target interpreted` passes all 96 scenarios, synthesized and
+  `cargo xtask check-ess` fails on drift. Under ESS 0.67.0 it holds 88 synthesized scenarios
+  and records 31 refusals: 23 for seven of the eight stream bindings, whose invocation synthesis
+  cannot force and whose `drop` publishes nothing (ESS-SYNTH-010); 7 for branches and bindings
+  whose arrangement passes through a row-set guard: `StartProcess/name-conflict`, the
+  `AppendStreamEvent` branches `appended`, `stream-closed` and `unknown-process`, both
+  stop-by-owner branches and the chained `stream-ended` binding (ESS-SYNTH-001); and one
+  unwitnessed connective child of `StartContainer/started` (ESS-SYNTH-022). An authored scenario
+  exercises each of those branches and bindings.
+- `ess verify conform run --target interpreted` passes all 107 scenarios, synthesized and
   authored, against the ESS reference. That checks the model only.
 
 What it does not establish:

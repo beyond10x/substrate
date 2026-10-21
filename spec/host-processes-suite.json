@@ -1,6 +1,6 @@
 {
   "provenance": {
-    "suite_version": "ess-conformance/36",
+    "suite_version": "ess-conformance/50",
     "system": "substrate",
     "specification_version": "v1",
     "spec_digest": "9542fa7a33b8fbffebed1592a22a1a710a64d44c74ecf230bcd4c0a6e8f5b3e2",
@@ -270,7 +270,7 @@
           "input": {
             "exit_code": {
               "kind": "literal",
-              "value": 1.0
+              "value": 101.0
             },
             "exit_signal": {
               "kind": "literal",
@@ -431,6 +431,228 @@
         {
           "kind": "binding",
           "name": "stream-exited"
+        },
+        {
+          "kind": "component",
+          "name": "substrate-daemon"
+        }
+      ]
+    },
+    "stream-lease-expired/binding/condition-false": {
+      "purpose": "`stream-lease-expired` invokes `substrate.host_processes.AppendStreamEvent` no times for a `substrate.host_processes.StopRequested` its condition does not hold for",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.StartProcess",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "argv": {
+              "kind": "literal",
+              "value": [
+                "argv.0"
+              ]
+            },
+            "cwd": {
+              "kind": "literal",
+              "value": "/srv/app"
+            },
+            "env_passthrough": {
+              "kind": "literal",
+              "value": [
+                "env_passthrough.0"
+              ]
+            },
+            "expires_at": {
+              "kind": "now_offset",
+              "seconds": 97381
+            },
+            "keep": {
+              "kind": "literal",
+              "value": false
+            },
+            "keep_reason": {
+              "kind": "literal",
+              "value": "keep_reason"
+            },
+            "lease_ttl_ms": {
+              "kind": "literal",
+              "value": 3600000.0
+            },
+            "name": {
+              "kind": "literal",
+              "value": "dev-server"
+            },
+            "owner_session_id": {
+              "kind": "literal",
+              "value": "s-1"
+            },
+            "owner_session_name": {
+              "kind": "literal",
+              "value": "worker"
+            },
+            "profile": {
+              "kind": "literal",
+              "value": "host"
+            },
+            "reason": {
+              "kind": "literal",
+              "value": "serve the preview"
+            },
+            "timeout_ms": {
+              "kind": "literal",
+              "value": 201.0
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.StartProcess",
+            "outcome": "started"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "host-process",
+          "entity": "substrate.host_processes.HostProcess",
+          "event": "substrate.host_processes.ProcessStarted",
+          "field": "process"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "expires_at": {
+                "kind": "now_offset",
+                "seconds": 97381
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Starting"
+              },
+              "timeout_ms": {
+                "kind": "literal",
+                "value": 201.0
+              }
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.EnforceDeadline",
+          "actor": "substrate.host_processes.Supervisor",
+          "input": {
+            "deadline": {
+              "kind": "literal",
+              "value": "timeout"
+            },
+            "process": {
+              "kind": "instance",
+              "instance": "host-process"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.EnforceDeadline",
+            "outcome": "timed-out"
+          }
+        },
+        {
+          "step": "expect_no_error"
+        },
+        {
+          "step": "expect_event",
+          "event": "substrate.host_processes.StopRequested",
+          "shape": {
+            "ended_by": {
+              "holds": "enum",
+              "variants": [
+                "exit",
+                "stop",
+                "lease-expiry",
+                "timeout",
+                "expires-at",
+                "vanished"
+              ]
+            },
+            "process": {
+              "holds": "primitive",
+              "kind": "string"
+            }
+          }
+        },
+        {
+          "step": "expect_no_invocation",
+          "binding": "stream-lease-expired",
+          "command": "substrate.host_processes.AppendStreamEvent"
+        }
+      ],
+      "source": [
+        {
+          "kind": "type",
+          "name": "substrate.host_processes.Deadline"
+        },
+        {
+          "kind": "entity",
+          "name": "substrate.host_processes.HostProcess"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.AppendStreamEvent"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.EnforceDeadline"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.StartProcess"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.EnforceDeadline",
+            "outcome": "timed-out"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.StartProcess",
+            "outcome": "started"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessStarted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.StopRequested"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.host_processes.Supervisor"
+        },
+        {
+          "kind": "binding",
+          "name": "stream-lease-expired"
         },
         {
           "kind": "component",
@@ -1222,6 +1444,252 @@
         }
       ]
     },
+    "stream-timed-out/binding/mapping": {
+      "purpose": "`stream-timed-out` fills `substrate.host_processes.AppendStreamEvent` from `substrate.host_processes.StopRequested` as it is mapped",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.StartProcess",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "argv": {
+              "kind": "literal",
+              "value": [
+                "argv.0"
+              ]
+            },
+            "cwd": {
+              "kind": "literal",
+              "value": "/srv/app"
+            },
+            "env_passthrough": {
+              "kind": "literal",
+              "value": [
+                "env_passthrough.0"
+              ]
+            },
+            "expires_at": {
+              "kind": "now_offset",
+              "seconds": 97381
+            },
+            "keep": {
+              "kind": "literal",
+              "value": false
+            },
+            "keep_reason": {
+              "kind": "literal",
+              "value": "keep_reason"
+            },
+            "lease_ttl_ms": {
+              "kind": "literal",
+              "value": 3600000.0
+            },
+            "name": {
+              "kind": "literal",
+              "value": "dev-server"
+            },
+            "owner_session_id": {
+              "kind": "literal",
+              "value": "s-1"
+            },
+            "owner_session_name": {
+              "kind": "literal",
+              "value": "worker"
+            },
+            "profile": {
+              "kind": "literal",
+              "value": "host"
+            },
+            "reason": {
+              "kind": "literal",
+              "value": "serve the preview"
+            },
+            "timeout_ms": {
+              "kind": "literal",
+              "value": 201.0
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.StartProcess",
+            "outcome": "started"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "host-process",
+          "entity": "substrate.host_processes.HostProcess",
+          "event": "substrate.host_processes.ProcessStarted",
+          "field": "process"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "expires_at": {
+                "kind": "now_offset",
+                "seconds": 97381
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Starting"
+              },
+              "timeout_ms": {
+                "kind": "literal",
+                "value": 201.0
+              }
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.EnforceDeadline",
+          "actor": "substrate.host_processes.Supervisor",
+          "input": {
+            "deadline": {
+              "kind": "literal",
+              "value": "timeout"
+            },
+            "process": {
+              "kind": "instance",
+              "instance": "host-process"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.EnforceDeadline",
+            "outcome": "timed-out"
+          }
+        },
+        {
+          "step": "expect_no_error"
+        },
+        {
+          "step": "expect_event",
+          "event": "substrate.host_processes.StopRequested",
+          "shape": {
+            "ended_by": {
+              "holds": "enum",
+              "variants": [
+                "exit",
+                "stop",
+                "lease-expiry",
+                "timeout",
+                "expires-at",
+                "vanished"
+              ]
+            },
+            "process": {
+              "holds": "primitive",
+              "kind": "string"
+            }
+          }
+        },
+        {
+          "step": "expect_invocation",
+          "binding": "stream-timed-out",
+          "command": "substrate.host_processes.AppendStreamEvent",
+          "input": {
+            "ended_by": {
+              "kind": "observed",
+              "event": "substrate.host_processes.StopRequested",
+              "field": "ended_by"
+            },
+            "kind": {
+              "kind": "literal",
+              "value": "timed-out"
+            },
+            "process": {
+              "kind": "observed",
+              "event": "substrate.host_processes.StopRequested",
+              "field": "process"
+            }
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "type",
+          "name": "substrate.host_processes.Deadline"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.host_processes.EndedBy"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.host_processes.StreamEventKind"
+        },
+        {
+          "kind": "entity",
+          "name": "substrate.host_processes.HostProcess"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.AppendStreamEvent"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.EnforceDeadline"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.StartProcess"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.EnforceDeadline",
+            "outcome": "timed-out"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.StartProcess",
+            "outcome": "started"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessStarted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.StopRequested"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.host_processes.Supervisor"
+        },
+        {
+          "kind": "binding",
+          "name": "stream-timed-out"
+        },
+        {
+          "kind": "component",
+          "name": "substrate-daemon"
+        }
+      ]
+    },
     "stream-vanished/binding/condition-false": {
       "purpose": "`stream-vanished` invokes `substrate.host_processes.AppendStreamEvent` no times for a `substrate.host_processes.ProcessEnded` its condition does not hold for",
       "steps": [
@@ -1290,7 +1758,7 @@
           "input": {
             "exit_code": {
               "kind": "literal",
-              "value": 1.0
+              "value": 101.0
             },
             "exit_signal": {
               "kind": "literal",
@@ -2313,14 +2781,6 @@
           "command": "substrate.host_processes.AppendStreamEvent",
           "actor": "substrate.host_processes.Supervisor",
           "input": {
-            "exit_code": {
-              "kind": "literal",
-              "value": 1.0
-            },
-            "exit_signal": {
-              "kind": "literal",
-              "value": "exit_signal"
-            },
             "kind": {
               "kind": "literal",
               "value": "ended"
@@ -2468,14 +2928,6 @@
             "ended_by": {
               "kind": "literal",
               "value": "exit"
-            },
-            "exit_code": {
-              "kind": "literal",
-              "value": 1.0
-            },
-            "exit_signal": {
-              "kind": "literal",
-              "value": "exit_signal"
             },
             "kind": {
               "kind": "literal",
@@ -3015,6 +3467,415 @@
         {
           "kind": "error",
           "name": "substrate.host_processes.UnknownProcess"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.host_processes.Supervisor"
+        }
+      ]
+    },
+    "substrate.host_processes.EnforceDeadline/outcome/expires-at-reached": {
+      "purpose": "`substrate.host_processes.EnforceDeadline` answers `expires-at-reached` for an input no other branch's guard claims",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.StartProcess",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "argv": {
+              "kind": "literal",
+              "value": [
+                "argv.0"
+              ]
+            },
+            "cwd": {
+              "kind": "literal",
+              "value": "/srv/app"
+            },
+            "env_passthrough": {
+              "kind": "literal",
+              "value": [
+                "env_passthrough.0"
+              ]
+            },
+            "expires_at": {
+              "kind": "now_offset",
+              "seconds": 97381
+            },
+            "keep": {
+              "kind": "literal",
+              "value": false
+            },
+            "keep_reason": {
+              "kind": "literal",
+              "value": "keep_reason"
+            },
+            "lease_ttl_ms": {
+              "kind": "literal",
+              "value": 3600000.0
+            },
+            "name": {
+              "kind": "literal",
+              "value": "dev-server"
+            },
+            "owner_session_id": {
+              "kind": "literal",
+              "value": "s-1"
+            },
+            "owner_session_name": {
+              "kind": "literal",
+              "value": "worker"
+            },
+            "profile": {
+              "kind": "literal",
+              "value": "host"
+            },
+            "reason": {
+              "kind": "literal",
+              "value": "serve the preview"
+            },
+            "timeout_ms": {
+              "kind": "literal",
+              "value": 201.0
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.StartProcess",
+            "outcome": "started"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "host-process",
+          "entity": "substrate.host_processes.HostProcess",
+          "event": "substrate.host_processes.ProcessStarted",
+          "field": "process"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "expires_at": {
+                "kind": "now_offset",
+                "seconds": 97381
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Starting"
+              },
+              "timeout_ms": {
+                "kind": "literal",
+                "value": 201.0
+              }
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.EnforceDeadline",
+          "actor": "substrate.host_processes.Supervisor",
+          "input": {
+            "deadline": {
+              "kind": "literal",
+              "value": "expires-at"
+            },
+            "process": {
+              "kind": "instance",
+              "instance": "host-process"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.EnforceDeadline",
+            "outcome": "expires-at-reached"
+          }
+        },
+        {
+          "step": "expect_no_error"
+        },
+        {
+          "step": "expect_event_values",
+          "event": "substrate.host_processes.StopRequested",
+          "payload": {
+            "ended_by": {
+              "kind": "literal",
+              "value": "expires-at"
+            },
+            "process": {
+              "kind": "instance",
+              "instance": "host-process"
+            }
+          },
+          "shape": {
+            "ended_by": {
+              "holds": "enum",
+              "variants": [
+                "exit",
+                "stop",
+                "lease-expiry",
+                "timeout",
+                "expires-at",
+                "vanished"
+              ]
+            },
+            "process": {
+              "holds": "primitive",
+              "kind": "string"
+            }
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.LeaseRenewed"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.LogDiscarded"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.OwnerStopped"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessEnded"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessObserved"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessRunning"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.StreamEventAppended"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "expires_at": {
+                "kind": "now_offset",
+                "seconds": 97381
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Stopping"
+              },
+              "timeout_ms": {
+                "kind": "literal",
+                "value": 201.0
+              }
+            }
+          }
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "argv": {
+                "kind": "literal",
+                "value": [
+                  "argv.0"
+                ]
+              },
+              "confinement": {
+                "kind": "literal",
+                "value": "none"
+              },
+              "cwd": {
+                "kind": "literal",
+                "value": "/srv/app"
+              },
+              "ended_by": {
+                "kind": "literal",
+                "value": "expires-at"
+              },
+              "env_passthrough": {
+                "kind": "literal",
+                "value": [
+                  "env_passthrough.0"
+                ]
+              },
+              "expires_at": {
+                "kind": "now_offset",
+                "seconds": 97381
+              },
+              "keep": {
+                "kind": "literal",
+                "value": false
+              },
+              "keep_reason": {
+                "kind": "literal",
+                "value": "keep_reason"
+              },
+              "lease_ttl_ms": {
+                "kind": "literal",
+                "value": 3600000.0
+              },
+              "log_discarded_bytes": {
+                "kind": "literal",
+                "value": 0.0
+              },
+              "name": {
+                "kind": "literal",
+                "value": "dev-server"
+              },
+              "owner_session_id": {
+                "kind": "literal",
+                "value": "s-1"
+              },
+              "owner_session_name": {
+                "kind": "literal",
+                "value": "worker"
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process"
+              },
+              "profile": {
+                "kind": "literal",
+                "value": "host"
+              },
+              "reason": {
+                "kind": "literal",
+                "value": "serve the preview"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Stopping"
+              },
+              "timeout_ms": {
+                "kind": "literal",
+                "value": 201.0
+              }
+            }
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "type",
+          "name": "substrate.host_processes.Deadline"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.host_processes.EndedBy"
+        },
+        {
+          "kind": "entity",
+          "name": "substrate.host_processes.HostProcess"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.EnforceDeadline"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.StartProcess"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.EnforceDeadline",
+            "outcome": "expires-at-reached"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.StartProcess",
+            "outcome": "started"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.LeaseRenewed"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.LogDiscarded"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.OwnerStopped"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessAdopted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessEnded"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessObserved"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessRunning"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessStarted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.StopRequested"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.StreamEventAppended"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.host_processes.Subject"
         },
         {
           "kind": "actor",
@@ -3610,6 +4471,415 @@
         {
           "kind": "error",
           "name": "substrate.host_processes.NoDeadline"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.host_processes.Subject"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.host_processes.Supervisor"
+        }
+      ]
+    },
+    "substrate.host_processes.EnforceDeadline/outcome/timed-out": {
+      "purpose": "`substrate.host_processes.EnforceDeadline` answers `timed-out` for an input that satisfies that branch's guard",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.StartProcess",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "argv": {
+              "kind": "literal",
+              "value": [
+                "argv.0"
+              ]
+            },
+            "cwd": {
+              "kind": "literal",
+              "value": "/srv/app"
+            },
+            "env_passthrough": {
+              "kind": "literal",
+              "value": [
+                "env_passthrough.0"
+              ]
+            },
+            "expires_at": {
+              "kind": "now_offset",
+              "seconds": 97381
+            },
+            "keep": {
+              "kind": "literal",
+              "value": false
+            },
+            "keep_reason": {
+              "kind": "literal",
+              "value": "keep_reason"
+            },
+            "lease_ttl_ms": {
+              "kind": "literal",
+              "value": 3600000.0
+            },
+            "name": {
+              "kind": "literal",
+              "value": "dev-server"
+            },
+            "owner_session_id": {
+              "kind": "literal",
+              "value": "s-1"
+            },
+            "owner_session_name": {
+              "kind": "literal",
+              "value": "worker"
+            },
+            "profile": {
+              "kind": "literal",
+              "value": "host"
+            },
+            "reason": {
+              "kind": "literal",
+              "value": "serve the preview"
+            },
+            "timeout_ms": {
+              "kind": "literal",
+              "value": 201.0
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.StartProcess",
+            "outcome": "started"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "host-process",
+          "entity": "substrate.host_processes.HostProcess",
+          "event": "substrate.host_processes.ProcessStarted",
+          "field": "process"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "expires_at": {
+                "kind": "now_offset",
+                "seconds": 97381
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Starting"
+              },
+              "timeout_ms": {
+                "kind": "literal",
+                "value": 201.0
+              }
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.EnforceDeadline",
+          "actor": "substrate.host_processes.Supervisor",
+          "input": {
+            "deadline": {
+              "kind": "literal",
+              "value": "timeout"
+            },
+            "process": {
+              "kind": "instance",
+              "instance": "host-process"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.EnforceDeadline",
+            "outcome": "timed-out"
+          }
+        },
+        {
+          "step": "expect_no_error"
+        },
+        {
+          "step": "expect_event_values",
+          "event": "substrate.host_processes.StopRequested",
+          "payload": {
+            "ended_by": {
+              "kind": "literal",
+              "value": "timeout"
+            },
+            "process": {
+              "kind": "instance",
+              "instance": "host-process"
+            }
+          },
+          "shape": {
+            "ended_by": {
+              "holds": "enum",
+              "variants": [
+                "exit",
+                "stop",
+                "lease-expiry",
+                "timeout",
+                "expires-at",
+                "vanished"
+              ]
+            },
+            "process": {
+              "holds": "primitive",
+              "kind": "string"
+            }
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.LeaseRenewed"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.LogDiscarded"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.OwnerStopped"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessEnded"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessObserved"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessRunning"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.StreamEventAppended"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "expires_at": {
+                "kind": "now_offset",
+                "seconds": 97381
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Stopping"
+              },
+              "timeout_ms": {
+                "kind": "literal",
+                "value": 201.0
+              }
+            }
+          }
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "argv": {
+                "kind": "literal",
+                "value": [
+                  "argv.0"
+                ]
+              },
+              "confinement": {
+                "kind": "literal",
+                "value": "none"
+              },
+              "cwd": {
+                "kind": "literal",
+                "value": "/srv/app"
+              },
+              "ended_by": {
+                "kind": "literal",
+                "value": "timeout"
+              },
+              "env_passthrough": {
+                "kind": "literal",
+                "value": [
+                  "env_passthrough.0"
+                ]
+              },
+              "expires_at": {
+                "kind": "now_offset",
+                "seconds": 97381
+              },
+              "keep": {
+                "kind": "literal",
+                "value": false
+              },
+              "keep_reason": {
+                "kind": "literal",
+                "value": "keep_reason"
+              },
+              "lease_ttl_ms": {
+                "kind": "literal",
+                "value": 3600000.0
+              },
+              "log_discarded_bytes": {
+                "kind": "literal",
+                "value": 0.0
+              },
+              "name": {
+                "kind": "literal",
+                "value": "dev-server"
+              },
+              "owner_session_id": {
+                "kind": "literal",
+                "value": "s-1"
+              },
+              "owner_session_name": {
+                "kind": "literal",
+                "value": "worker"
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process"
+              },
+              "profile": {
+                "kind": "literal",
+                "value": "host"
+              },
+              "reason": {
+                "kind": "literal",
+                "value": "serve the preview"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Stopping"
+              },
+              "timeout_ms": {
+                "kind": "literal",
+                "value": 201.0
+              }
+            }
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "type",
+          "name": "substrate.host_processes.Deadline"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.host_processes.EndedBy"
+        },
+        {
+          "kind": "entity",
+          "name": "substrate.host_processes.HostProcess"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.EnforceDeadline"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.StartProcess"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.EnforceDeadline",
+            "outcome": "timed-out"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.StartProcess",
+            "outcome": "started"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.LeaseRenewed"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.LogDiscarded"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.OwnerStopped"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessAdopted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessEnded"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessObserved"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessRunning"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessStarted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.StopRequested"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.StreamEventAppended"
         },
         {
           "kind": "view",
@@ -4783,7 +6053,7 @@
           "input": {
             "exit_code": {
               "kind": "literal",
-              "value": 1.0
+              "value": 101.0
             },
             "exit_signal": {
               "kind": "literal",
@@ -5180,6 +6450,530 @@
         }
       ]
     },
+    "substrate.host_processes.HostProcess/state/Ended/refuses/substrate.host_processes.EnforceDeadline": {
+      "purpose": "`substrate.host_processes.EnforceDeadline` does not move a `substrate.host_processes.HostProcess` that is in `Ended`, and reports `substrate.host_processes.NotLive`",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.StartProcess",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "argv": {
+              "kind": "literal",
+              "value": [
+                "argv.0"
+              ]
+            },
+            "cwd": {
+              "kind": "literal",
+              "value": "/srv/app"
+            },
+            "env_passthrough": {
+              "kind": "literal",
+              "value": [
+                "env_passthrough.0"
+              ]
+            },
+            "expires_at": {
+              "kind": "now_offset",
+              "seconds": 97381
+            },
+            "keep": {
+              "kind": "literal",
+              "value": false
+            },
+            "keep_reason": {
+              "kind": "literal",
+              "value": "keep_reason"
+            },
+            "lease_ttl_ms": {
+              "kind": "literal",
+              "value": 3600000.0
+            },
+            "name": {
+              "kind": "literal",
+              "value": "dev-server"
+            },
+            "owner_session_id": {
+              "kind": "literal",
+              "value": "s-1"
+            },
+            "owner_session_name": {
+              "kind": "literal",
+              "value": "worker"
+            },
+            "profile": {
+              "kind": "literal",
+              "value": "host"
+            },
+            "reason": {
+              "kind": "literal",
+              "value": "serve the preview"
+            },
+            "timeout_ms": {
+              "kind": "literal",
+              "value": 201.0
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.StartProcess",
+            "outcome": "started"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "host-process",
+          "entity": "substrate.host_processes.HostProcess",
+          "event": "substrate.host_processes.ProcessStarted",
+          "field": "process"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.RecordExit",
+          "actor": "substrate.host_processes.Supervisor",
+          "input": {
+            "exit_code": {
+              "kind": "literal",
+              "value": 101.0
+            },
+            "exit_signal": {
+              "kind": "literal",
+              "value": "exit_signal"
+            },
+            "process": {
+              "kind": "instance",
+              "instance": "host-process"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.RecordExit",
+            "outcome": "exited"
+          }
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "expires_at": {
+                "kind": "now_offset",
+                "seconds": 97381
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Ended"
+              },
+              "timeout_ms": {
+                "kind": "literal",
+                "value": 201.0
+              }
+            }
+          }
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "step": "snapshot_complete_subject",
+          "view": "substrate.host_processes.HostProcesses",
+          "subject": {
+            "process": {
+              "kind": "instance",
+              "instance": "host-process"
+            }
+          },
+          "shape": {
+            "identity_field": "process",
+            "fields": [
+              {
+                "name": "process",
+                "type": "String"
+              },
+              {
+                "name": "name",
+                "type": "String"
+              },
+              {
+                "name": "state",
+                "type": "substrate.host_processes.HostProcess.State"
+              },
+              {
+                "name": "owner_session_id",
+                "type": "Optional<String>"
+              },
+              {
+                "name": "owner_session_name",
+                "type": "Optional<String>"
+              },
+              {
+                "name": "reason",
+                "type": "String"
+              },
+              {
+                "name": "cwd",
+                "type": "Optional<String>"
+              },
+              {
+                "name": "argv",
+                "type": "List<String>"
+              },
+              {
+                "name": "env_passthrough",
+                "type": "List<String>"
+              },
+              {
+                "name": "env_digest",
+                "type": "Optional<substrate.host_processes.EnvDigest>"
+              },
+              {
+                "name": "profile",
+                "type": "Optional<substrate.host_processes.ConfinementProfile>"
+              },
+              {
+                "name": "confinement",
+                "type": "Optional<substrate.host_processes.Confinement>"
+              },
+              {
+                "name": "started_at",
+                "type": "Timestamp"
+              },
+              {
+                "name": "lease_ttl_ms",
+                "type": "Optional<Integer>"
+              },
+              {
+                "name": "lease_expires_at",
+                "type": "Optional<Timestamp>"
+              },
+              {
+                "name": "keep",
+                "type": "Boolean"
+              },
+              {
+                "name": "keep_reason",
+                "type": "Optional<String>"
+              },
+              {
+                "name": "timeout_ms",
+                "type": "Optional<Integer>"
+              },
+              {
+                "name": "expires_at",
+                "type": "Optional<Timestamp>"
+              },
+              {
+                "name": "deadline_at",
+                "type": "Optional<Timestamp>"
+              },
+              {
+                "name": "ended_by",
+                "type": "Optional<substrate.host_processes.EndedBy>"
+              },
+              {
+                "name": "exit_code",
+                "type": "Optional<Integer>"
+              },
+              {
+                "name": "exit_signal",
+                "type": "Optional<String>"
+              },
+              {
+                "name": "cpu_usec",
+                "type": "Optional<Integer>"
+              },
+              {
+                "name": "memory_bytes",
+                "type": "Optional<Integer>"
+              },
+              {
+                "name": "listening_ports",
+                "type": "List<Integer>"
+              },
+              {
+                "name": "log_discarded_bytes",
+                "type": "Integer"
+              },
+              {
+                "name": "container_kind",
+                "type": "Optional<substrate.host_processes.ContainerKind>"
+              },
+              {
+                "name": "restart",
+                "type": "Optional<substrate.host_processes.RestartPolicy>"
+              },
+              {
+                "name": "adopted_from",
+                "type": "Optional<substrate.host_processes.AdoptSource>"
+              },
+              {
+                "name": "adopted_ref",
+                "type": "Optional<String>"
+              }
+            ],
+            "declarations": {
+              "substrate.host_processes.AdoptSource": {
+                "kind": "enum",
+                "variants": [
+                  "pid",
+                  "unit",
+                  "container"
+                ]
+              },
+              "substrate.host_processes.Confinement": {
+                "kind": "enum",
+                "variants": [
+                  "none"
+                ]
+              },
+              "substrate.host_processes.ConfinementProfile": {
+                "kind": "enum",
+                "variants": [
+                  "host"
+                ]
+              },
+              "substrate.host_processes.ContainerKind": {
+                "kind": "enum",
+                "variants": [
+                  "docker",
+                  "k3d"
+                ]
+              },
+              "substrate.host_processes.EndedBy": {
+                "kind": "enum",
+                "variants": [
+                  "exit",
+                  "stop",
+                  "lease-expiry",
+                  "timeout",
+                  "expires-at",
+                  "vanished"
+                ]
+              },
+              "substrate.host_processes.EnvDigest": {
+                "kind": "newtype",
+                "of": "String"
+              },
+              "substrate.host_processes.HostProcess.State": {
+                "kind": "enum",
+                "variants": [
+                  "Ended",
+                  "Running",
+                  "Starting",
+                  "Stopping"
+                ]
+              },
+              "substrate.host_processes.RestartPolicy": {
+                "kind": "enum",
+                "variants": [
+                  "no"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.EnforceDeadline",
+          "actor": "substrate.host_processes.Supervisor",
+          "input": {
+            "deadline": {
+              "kind": "literal",
+              "value": "timeout"
+            },
+            "process": {
+              "kind": "instance",
+              "instance": "host-process"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.EnforceDeadline",
+            "outcome": "not-live"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.host_processes.NotLive",
+          "fields": {
+            "state": "Ended"
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.LeaseRenewed"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.LogDiscarded"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.OwnerStopped"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessEnded"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessObserved"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessRunning"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.StopRequested"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.StreamEventAppended"
+        },
+        {
+          "step": "expect_no_events"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "step": "expect_complete_subject_unchanged",
+          "view": "substrate.host_processes.HostProcesses"
+        }
+      ],
+      "source": [
+        {
+          "kind": "entity",
+          "name": "substrate.host_processes.HostProcess"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.EnforceDeadline"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.RecordExit"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.StartProcess"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.EnforceDeadline",
+            "outcome": "expires-at-reached"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.EnforceDeadline",
+            "outcome": "not-live"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.EnforceDeadline",
+            "outcome": "timed-out"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.RecordExit",
+            "outcome": "exited"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.StartProcess",
+            "outcome": "started"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.LeaseRenewed"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.LogDiscarded"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.OwnerStopped"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessAdopted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessEnded"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessObserved"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessRunning"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessStarted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.StopRequested"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.StreamEventAppended"
+        },
+        {
+          "kind": "error",
+          "name": "substrate.host_processes.NotLive"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.host_processes.Supervisor"
+        }
+      ]
+    },
     "substrate.host_processes.HostProcess/state/Ended/refuses/substrate.host_processes.ExpireLease": {
       "purpose": "`substrate.host_processes.ExpireLease` does not move a `substrate.host_processes.HostProcess` that is in `Ended`, and reports `substrate.host_processes.NotLive`",
       "steps": [
@@ -5249,7 +7043,7 @@
           "input": {
             "exit_code": {
               "kind": "literal",
-              "value": 1.0
+              "value": 101.0
             },
             "exit_signal": {
               "kind": "literal",
@@ -5718,7 +7512,7 @@
           "input": {
             "exit_code": {
               "kind": "literal",
-              "value": 1.0
+              "value": 101.0
             },
             "exit_signal": {
               "kind": "literal",
@@ -5967,7 +7761,7 @@
           "input": {
             "exit_code": {
               "kind": "literal",
-              "value": 1.0
+              "value": 101.0
             },
             "exit_signal": {
               "kind": "literal",
@@ -6097,7 +7891,7 @@
           "input": {
             "exit_code": {
               "kind": "literal",
-              "value": 1.0
+              "value": 101.0
             },
             "exit_signal": {
               "kind": "literal",
@@ -6460,7 +8254,7 @@
           "input": {
             "exit_code": {
               "kind": "literal",
-              "value": 1.0
+              "value": 101.0
             },
             "exit_signal": {
               "kind": "literal",
@@ -7708,6 +9502,551 @@
         }
       ]
     },
+    "substrate.host_processes.HostProcess/state/Stopping/refuses/substrate.host_processes.EnforceDeadline": {
+      "purpose": "`substrate.host_processes.EnforceDeadline` does not move a `substrate.host_processes.HostProcess` that is in `Stopping`, and reports `substrate.host_processes.NotLive`",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.StartProcess",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "argv": {
+              "kind": "literal",
+              "value": [
+                "argv.0"
+              ]
+            },
+            "cwd": {
+              "kind": "literal",
+              "value": "/srv/app"
+            },
+            "env_passthrough": {
+              "kind": "literal",
+              "value": [
+                "env_passthrough.0"
+              ]
+            },
+            "expires_at": {
+              "kind": "now_offset",
+              "seconds": 97381
+            },
+            "keep": {
+              "kind": "literal",
+              "value": false
+            },
+            "keep_reason": {
+              "kind": "literal",
+              "value": "keep_reason"
+            },
+            "lease_ttl_ms": {
+              "kind": "literal",
+              "value": 3600000.0
+            },
+            "name": {
+              "kind": "literal",
+              "value": "dev-server"
+            },
+            "owner_session_id": {
+              "kind": "literal",
+              "value": "s-1"
+            },
+            "owner_session_name": {
+              "kind": "literal",
+              "value": "worker"
+            },
+            "profile": {
+              "kind": "literal",
+              "value": "host"
+            },
+            "reason": {
+              "kind": "literal",
+              "value": "serve the preview"
+            },
+            "timeout_ms": {
+              "kind": "literal",
+              "value": 201.0
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.StartProcess",
+            "outcome": "started"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "host-process",
+          "entity": "substrate.host_processes.HostProcess",
+          "event": "substrate.host_processes.ProcessStarted",
+          "field": "process"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "expires_at": {
+                "kind": "now_offset",
+                "seconds": 97381
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Starting"
+              },
+              "timeout_ms": {
+                "kind": "literal",
+                "value": 201.0
+              }
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.EnforceDeadline",
+          "actor": "substrate.host_processes.Supervisor",
+          "input": {
+            "deadline": {
+              "kind": "literal",
+              "value": "timeout"
+            },
+            "process": {
+              "kind": "instance",
+              "instance": "host-process"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.EnforceDeadline",
+            "outcome": "timed-out"
+          }
+        },
+        {
+          "step": "expect_no_error"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "expires_at": {
+                "kind": "now_offset",
+                "seconds": 97381
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Stopping"
+              },
+              "timeout_ms": {
+                "kind": "literal",
+                "value": 201.0
+              }
+            }
+          }
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "step": "snapshot_complete_subject",
+          "view": "substrate.host_processes.HostProcesses",
+          "subject": {
+            "process": {
+              "kind": "instance",
+              "instance": "host-process"
+            }
+          },
+          "shape": {
+            "identity_field": "process",
+            "fields": [
+              {
+                "name": "process",
+                "type": "String"
+              },
+              {
+                "name": "name",
+                "type": "String"
+              },
+              {
+                "name": "state",
+                "type": "substrate.host_processes.HostProcess.State"
+              },
+              {
+                "name": "owner_session_id",
+                "type": "Optional<String>"
+              },
+              {
+                "name": "owner_session_name",
+                "type": "Optional<String>"
+              },
+              {
+                "name": "reason",
+                "type": "String"
+              },
+              {
+                "name": "cwd",
+                "type": "Optional<String>"
+              },
+              {
+                "name": "argv",
+                "type": "List<String>"
+              },
+              {
+                "name": "env_passthrough",
+                "type": "List<String>"
+              },
+              {
+                "name": "env_digest",
+                "type": "Optional<substrate.host_processes.EnvDigest>"
+              },
+              {
+                "name": "profile",
+                "type": "Optional<substrate.host_processes.ConfinementProfile>"
+              },
+              {
+                "name": "confinement",
+                "type": "Optional<substrate.host_processes.Confinement>"
+              },
+              {
+                "name": "started_at",
+                "type": "Timestamp"
+              },
+              {
+                "name": "lease_ttl_ms",
+                "type": "Optional<Integer>"
+              },
+              {
+                "name": "lease_expires_at",
+                "type": "Optional<Timestamp>"
+              },
+              {
+                "name": "keep",
+                "type": "Boolean"
+              },
+              {
+                "name": "keep_reason",
+                "type": "Optional<String>"
+              },
+              {
+                "name": "timeout_ms",
+                "type": "Optional<Integer>"
+              },
+              {
+                "name": "expires_at",
+                "type": "Optional<Timestamp>"
+              },
+              {
+                "name": "deadline_at",
+                "type": "Optional<Timestamp>"
+              },
+              {
+                "name": "ended_by",
+                "type": "Optional<substrate.host_processes.EndedBy>"
+              },
+              {
+                "name": "exit_code",
+                "type": "Optional<Integer>"
+              },
+              {
+                "name": "exit_signal",
+                "type": "Optional<String>"
+              },
+              {
+                "name": "cpu_usec",
+                "type": "Optional<Integer>"
+              },
+              {
+                "name": "memory_bytes",
+                "type": "Optional<Integer>"
+              },
+              {
+                "name": "listening_ports",
+                "type": "List<Integer>"
+              },
+              {
+                "name": "log_discarded_bytes",
+                "type": "Integer"
+              },
+              {
+                "name": "container_kind",
+                "type": "Optional<substrate.host_processes.ContainerKind>"
+              },
+              {
+                "name": "restart",
+                "type": "Optional<substrate.host_processes.RestartPolicy>"
+              },
+              {
+                "name": "adopted_from",
+                "type": "Optional<substrate.host_processes.AdoptSource>"
+              },
+              {
+                "name": "adopted_ref",
+                "type": "Optional<String>"
+              }
+            ],
+            "declarations": {
+              "substrate.host_processes.AdoptSource": {
+                "kind": "enum",
+                "variants": [
+                  "pid",
+                  "unit",
+                  "container"
+                ]
+              },
+              "substrate.host_processes.Confinement": {
+                "kind": "enum",
+                "variants": [
+                  "none"
+                ]
+              },
+              "substrate.host_processes.ConfinementProfile": {
+                "kind": "enum",
+                "variants": [
+                  "host"
+                ]
+              },
+              "substrate.host_processes.ContainerKind": {
+                "kind": "enum",
+                "variants": [
+                  "docker",
+                  "k3d"
+                ]
+              },
+              "substrate.host_processes.EndedBy": {
+                "kind": "enum",
+                "variants": [
+                  "exit",
+                  "stop",
+                  "lease-expiry",
+                  "timeout",
+                  "expires-at",
+                  "vanished"
+                ]
+              },
+              "substrate.host_processes.EnvDigest": {
+                "kind": "newtype",
+                "of": "String"
+              },
+              "substrate.host_processes.HostProcess.State": {
+                "kind": "enum",
+                "variants": [
+                  "Ended",
+                  "Running",
+                  "Starting",
+                  "Stopping"
+                ]
+              },
+              "substrate.host_processes.RestartPolicy": {
+                "kind": "enum",
+                "variants": [
+                  "no"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.EnforceDeadline",
+          "actor": "substrate.host_processes.Supervisor",
+          "input": {
+            "deadline": {
+              "kind": "literal",
+              "value": "timeout"
+            },
+            "process": {
+              "kind": "instance",
+              "instance": "host-process"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.EnforceDeadline",
+            "outcome": "not-live"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.host_processes.NotLive",
+          "fields": {
+            "state": "Stopping"
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.LeaseRenewed"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.LogDiscarded"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.OwnerStopped"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessEnded"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessObserved"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessRunning"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.StopRequested"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.StreamEventAppended"
+        },
+        {
+          "step": "expect_no_events"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "step": "expect_complete_subject_unchanged",
+          "view": "substrate.host_processes.HostProcesses"
+        }
+      ],
+      "source": [
+        {
+          "kind": "entity",
+          "name": "substrate.host_processes.HostProcess"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.EnforceDeadline"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.StartProcess"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.EnforceDeadline",
+            "outcome": "expires-at-reached"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.EnforceDeadline",
+            "outcome": "not-live"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.EnforceDeadline",
+            "outcome": "timed-out"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.StartProcess",
+            "outcome": "started"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.LeaseRenewed"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.LogDiscarded"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.OwnerStopped"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessAdopted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessEnded"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessObserved"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessRunning"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessStarted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.StopRequested"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.StreamEventAppended"
+        },
+        {
+          "kind": "error",
+          "name": "substrate.host_processes.NotLive"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.host_processes.Subject"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.host_processes.Supervisor"
+        }
+      ]
+    },
     "substrate.host_processes.HostProcess/state/Stopping/refuses/substrate.host_processes.ExpireLease": {
       "purpose": "`substrate.host_processes.ExpireLease` does not move a `substrate.host_processes.HostProcess` that is in `Stopping`, and reports `substrate.host_processes.NotLive`",
       "steps": [
@@ -8705,7 +11044,7 @@
           "input": {
             "exit_code": {
               "kind": "literal",
-              "value": 1.0
+              "value": 101.0
             },
             "exit_signal": {
               "kind": "literal",
@@ -8755,7 +11094,7 @@
             },
             "exit_code": {
               "kind": "literal",
-              "value": 1.0
+              "value": 101.0
             },
             "exit_signal": {
               "kind": "literal",
@@ -8854,7 +11193,7 @@
               },
               "exit_code": {
                 "kind": "literal",
-                "value": 1.0
+                "value": 101.0
               },
               "exit_signal": {
                 "kind": "literal",
@@ -8912,7 +11251,7 @@
             },
             "lease_ttl_ms": {
               "kind": "literal",
-              "value": 2.0
+              "value": 102.0
             },
             "name": {
               "kind": "literal",
@@ -8974,7 +11313,7 @@
           "input": {
             "exit_code": {
               "kind": "literal",
-              "value": 1.0
+              "value": 101.0
             },
             "exit_signal": {
               "kind": "literal",
@@ -9003,7 +11342,7 @@
             },
             "exit_code": {
               "kind": "literal",
-              "value": 1.0
+              "value": 101.0
             },
             "exit_signal": {
               "kind": "literal",
@@ -9068,7 +11407,7 @@
               },
               "exit_code": {
                 "kind": "literal",
-                "value": 1.0
+                "value": 101.0
               },
               "exit_signal": {
                 "kind": "literal",
@@ -9084,7 +11423,7 @@
               },
               "lease_ttl_ms": {
                 "kind": "literal",
-                "value": 2.0
+                "value": 102.0
               },
               "log_discarded_bytes": {
                 "kind": "literal",
@@ -9304,7 +11643,7 @@
           "input": {
             "exit_code": {
               "kind": "literal",
-              "value": 1.0
+              "value": 101.0
             },
             "exit_signal": {
               "kind": "literal",
@@ -9354,7 +11693,7 @@
             },
             "exit_code": {
               "kind": "literal",
-              "value": 1.0
+              "value": 101.0
             },
             "exit_signal": {
               "kind": "literal",
@@ -9453,7 +11792,7 @@
               },
               "exit_code": {
                 "kind": "literal",
-                "value": 1.0
+                "value": 101.0
               },
               "exit_signal": {
                 "kind": "literal",
@@ -9834,7 +12173,7 @@
             },
             "lease_ttl_ms": {
               "kind": "literal",
-              "value": 2.0
+              "value": 102.0
             },
             "name": {
               "kind": "literal",
@@ -9982,7 +12321,7 @@
               },
               "lease_ttl_ms": {
                 "kind": "literal",
-                "value": 2.0
+                "value": 102.0
               },
               "log_discarded_bytes": {
                 "kind": "literal",
@@ -10401,6 +12740,824 @@
           "name": {
             "command": "substrate.host_processes.StopProcess",
             "outcome": "stopping"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.LeaseRenewed"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.LogDiscarded"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.OwnerStopped"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessAdopted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessEnded"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessObserved"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessRunning"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessStarted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.StopRequested"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.StreamEventAppended"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.host_processes.Subject"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.host_processes.Supervisor"
+        }
+      ]
+    },
+    "substrate.host_processes.HostProcess/transition/request_stop/by/substrate.host_processes.EnforceDeadline/expires-at-reached": {
+      "purpose": "`substrate.host_processes.EnforceDeadline` on `expires-at-reached` moves a `substrate.host_processes.HostProcess` to `Stopping` along `request_stop`",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.StartProcess",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "argv": {
+              "kind": "literal",
+              "value": [
+                "argv.0"
+              ]
+            },
+            "cwd": {
+              "kind": "literal",
+              "value": "/srv/app"
+            },
+            "env_passthrough": {
+              "kind": "literal",
+              "value": [
+                "env_passthrough.0"
+              ]
+            },
+            "expires_at": {
+              "kind": "now_offset",
+              "seconds": 97381
+            },
+            "keep": {
+              "kind": "literal",
+              "value": false
+            },
+            "keep_reason": {
+              "kind": "literal",
+              "value": "keep_reason"
+            },
+            "lease_ttl_ms": {
+              "kind": "literal",
+              "value": 3600000.0
+            },
+            "name": {
+              "kind": "literal",
+              "value": "dev-server"
+            },
+            "owner_session_id": {
+              "kind": "literal",
+              "value": "s-1"
+            },
+            "owner_session_name": {
+              "kind": "literal",
+              "value": "worker"
+            },
+            "profile": {
+              "kind": "literal",
+              "value": "host"
+            },
+            "reason": {
+              "kind": "literal",
+              "value": "serve the preview"
+            },
+            "timeout_ms": {
+              "kind": "literal",
+              "value": 201.0
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.StartProcess",
+            "outcome": "started"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "host-process",
+          "entity": "substrate.host_processes.HostProcess",
+          "event": "substrate.host_processes.ProcessStarted",
+          "field": "process"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "expires_at": {
+                "kind": "now_offset",
+                "seconds": 97381
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Starting"
+              },
+              "timeout_ms": {
+                "kind": "literal",
+                "value": 201.0
+              }
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.EnforceDeadline",
+          "actor": "substrate.host_processes.Supervisor",
+          "input": {
+            "deadline": {
+              "kind": "literal",
+              "value": "expires-at"
+            },
+            "process": {
+              "kind": "instance",
+              "instance": "host-process"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.EnforceDeadline",
+            "outcome": "expires-at-reached"
+          }
+        },
+        {
+          "step": "expect_no_error"
+        },
+        {
+          "step": "expect_event_values",
+          "event": "substrate.host_processes.StopRequested",
+          "payload": {
+            "ended_by": {
+              "kind": "literal",
+              "value": "expires-at"
+            },
+            "process": {
+              "kind": "instance",
+              "instance": "host-process"
+            }
+          },
+          "shape": {
+            "ended_by": {
+              "holds": "enum",
+              "variants": [
+                "exit",
+                "stop",
+                "lease-expiry",
+                "timeout",
+                "expires-at",
+                "vanished"
+              ]
+            },
+            "process": {
+              "holds": "primitive",
+              "kind": "string"
+            }
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.LeaseRenewed"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.LogDiscarded"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.OwnerStopped"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessEnded"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessObserved"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessRunning"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.StreamEventAppended"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "expires_at": {
+                "kind": "now_offset",
+                "seconds": 97381
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Stopping"
+              },
+              "timeout_ms": {
+                "kind": "literal",
+                "value": 201.0
+              }
+            }
+          }
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "argv": {
+                "kind": "literal",
+                "value": [
+                  "argv.0"
+                ]
+              },
+              "confinement": {
+                "kind": "literal",
+                "value": "none"
+              },
+              "cwd": {
+                "kind": "literal",
+                "value": "/srv/app"
+              },
+              "ended_by": {
+                "kind": "literal",
+                "value": "expires-at"
+              },
+              "env_passthrough": {
+                "kind": "literal",
+                "value": [
+                  "env_passthrough.0"
+                ]
+              },
+              "expires_at": {
+                "kind": "now_offset",
+                "seconds": 97381
+              },
+              "keep": {
+                "kind": "literal",
+                "value": false
+              },
+              "keep_reason": {
+                "kind": "literal",
+                "value": "keep_reason"
+              },
+              "lease_ttl_ms": {
+                "kind": "literal",
+                "value": 3600000.0
+              },
+              "log_discarded_bytes": {
+                "kind": "literal",
+                "value": 0.0
+              },
+              "name": {
+                "kind": "literal",
+                "value": "dev-server"
+              },
+              "owner_session_id": {
+                "kind": "literal",
+                "value": "s-1"
+              },
+              "owner_session_name": {
+                "kind": "literal",
+                "value": "worker"
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process"
+              },
+              "profile": {
+                "kind": "literal",
+                "value": "host"
+              },
+              "reason": {
+                "kind": "literal",
+                "value": "serve the preview"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Stopping"
+              },
+              "timeout_ms": {
+                "kind": "literal",
+                "value": 201.0
+              }
+            }
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "type",
+          "name": "substrate.host_processes.Deadline"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.host_processes.EndedBy"
+        },
+        {
+          "kind": "entity",
+          "name": "substrate.host_processes.HostProcess"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.EnforceDeadline"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.StartProcess"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.EnforceDeadline",
+            "outcome": "expires-at-reached"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.StartProcess",
+            "outcome": "started"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.LeaseRenewed"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.LogDiscarded"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.OwnerStopped"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessAdopted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessEnded"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessObserved"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessRunning"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessStarted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.StopRequested"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.StreamEventAppended"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.host_processes.Subject"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.host_processes.Supervisor"
+        }
+      ]
+    },
+    "substrate.host_processes.HostProcess/transition/request_stop/by/substrate.host_processes.EnforceDeadline/timed-out": {
+      "purpose": "`substrate.host_processes.EnforceDeadline` on `timed-out` moves a `substrate.host_processes.HostProcess` to `Stopping` along `request_stop`",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.StartProcess",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "argv": {
+              "kind": "literal",
+              "value": [
+                "argv.0"
+              ]
+            },
+            "cwd": {
+              "kind": "literal",
+              "value": "/srv/app"
+            },
+            "env_passthrough": {
+              "kind": "literal",
+              "value": [
+                "env_passthrough.0"
+              ]
+            },
+            "expires_at": {
+              "kind": "now_offset",
+              "seconds": 97381
+            },
+            "keep": {
+              "kind": "literal",
+              "value": false
+            },
+            "keep_reason": {
+              "kind": "literal",
+              "value": "keep_reason"
+            },
+            "lease_ttl_ms": {
+              "kind": "literal",
+              "value": 3600000.0
+            },
+            "name": {
+              "kind": "literal",
+              "value": "dev-server"
+            },
+            "owner_session_id": {
+              "kind": "literal",
+              "value": "s-1"
+            },
+            "owner_session_name": {
+              "kind": "literal",
+              "value": "worker"
+            },
+            "profile": {
+              "kind": "literal",
+              "value": "host"
+            },
+            "reason": {
+              "kind": "literal",
+              "value": "serve the preview"
+            },
+            "timeout_ms": {
+              "kind": "literal",
+              "value": 201.0
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.StartProcess",
+            "outcome": "started"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "host-process",
+          "entity": "substrate.host_processes.HostProcess",
+          "event": "substrate.host_processes.ProcessStarted",
+          "field": "process"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "expires_at": {
+                "kind": "now_offset",
+                "seconds": 97381
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Starting"
+              },
+              "timeout_ms": {
+                "kind": "literal",
+                "value": 201.0
+              }
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.EnforceDeadline",
+          "actor": "substrate.host_processes.Supervisor",
+          "input": {
+            "deadline": {
+              "kind": "literal",
+              "value": "timeout"
+            },
+            "process": {
+              "kind": "instance",
+              "instance": "host-process"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.EnforceDeadline",
+            "outcome": "timed-out"
+          }
+        },
+        {
+          "step": "expect_no_error"
+        },
+        {
+          "step": "expect_event_values",
+          "event": "substrate.host_processes.StopRequested",
+          "payload": {
+            "ended_by": {
+              "kind": "literal",
+              "value": "timeout"
+            },
+            "process": {
+              "kind": "instance",
+              "instance": "host-process"
+            }
+          },
+          "shape": {
+            "ended_by": {
+              "holds": "enum",
+              "variants": [
+                "exit",
+                "stop",
+                "lease-expiry",
+                "timeout",
+                "expires-at",
+                "vanished"
+              ]
+            },
+            "process": {
+              "holds": "primitive",
+              "kind": "string"
+            }
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.LeaseRenewed"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.LogDiscarded"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.OwnerStopped"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessEnded"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessObserved"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessRunning"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.StreamEventAppended"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "expires_at": {
+                "kind": "now_offset",
+                "seconds": 97381
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Stopping"
+              },
+              "timeout_ms": {
+                "kind": "literal",
+                "value": 201.0
+              }
+            }
+          }
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "argv": {
+                "kind": "literal",
+                "value": [
+                  "argv.0"
+                ]
+              },
+              "confinement": {
+                "kind": "literal",
+                "value": "none"
+              },
+              "cwd": {
+                "kind": "literal",
+                "value": "/srv/app"
+              },
+              "ended_by": {
+                "kind": "literal",
+                "value": "timeout"
+              },
+              "env_passthrough": {
+                "kind": "literal",
+                "value": [
+                  "env_passthrough.0"
+                ]
+              },
+              "expires_at": {
+                "kind": "now_offset",
+                "seconds": 97381
+              },
+              "keep": {
+                "kind": "literal",
+                "value": false
+              },
+              "keep_reason": {
+                "kind": "literal",
+                "value": "keep_reason"
+              },
+              "lease_ttl_ms": {
+                "kind": "literal",
+                "value": 3600000.0
+              },
+              "log_discarded_bytes": {
+                "kind": "literal",
+                "value": 0.0
+              },
+              "name": {
+                "kind": "literal",
+                "value": "dev-server"
+              },
+              "owner_session_id": {
+                "kind": "literal",
+                "value": "s-1"
+              },
+              "owner_session_name": {
+                "kind": "literal",
+                "value": "worker"
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process"
+              },
+              "profile": {
+                "kind": "literal",
+                "value": "host"
+              },
+              "reason": {
+                "kind": "literal",
+                "value": "serve the preview"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Stopping"
+              },
+              "timeout_ms": {
+                "kind": "literal",
+                "value": 201.0
+              }
+            }
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "type",
+          "name": "substrate.host_processes.Deadline"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.host_processes.EndedBy"
+        },
+        {
+          "kind": "entity",
+          "name": "substrate.host_processes.HostProcess"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.EnforceDeadline"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.StartProcess"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.EnforceDeadline",
+            "outcome": "timed-out"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.StartProcess",
+            "outcome": "started"
           }
         },
         {
@@ -11013,7 +14170,7 @@
             },
             "lease_ttl_ms": {
               "kind": "literal",
-              "value": 2.0
+              "value": 102.0
             },
             "name": {
               "kind": "literal",
@@ -11130,7 +14287,7 @@
               },
               "lease_ttl_ms": {
                 "kind": "literal",
-                "value": 2.0
+                "value": 102.0
               },
               "log_discarded_bytes": {
                 "kind": "literal",
@@ -11588,7 +14745,7 @@
           "input": {
             "exit_code": {
               "kind": "literal",
-              "value": 1.0
+              "value": 101.0
             },
             "exit_signal": {
               "kind": "literal",
@@ -11837,7 +14994,7 @@
           "input": {
             "exit_code": {
               "kind": "literal",
-              "value": 1.0
+              "value": 101.0
             },
             "exit_signal": {
               "kind": "literal",
@@ -12072,7 +15229,7 @@
           "input": {
             "exit_code": {
               "kind": "literal",
-              "value": 1.0
+              "value": 101.0
             },
             "exit_signal": {
               "kind": "literal",
@@ -12122,7 +15279,7 @@
             },
             "exit_code": {
               "kind": "literal",
-              "value": 1.0
+              "value": 101.0
             },
             "exit_signal": {
               "kind": "literal",
@@ -12221,7 +15378,7 @@
               },
               "exit_code": {
                 "kind": "literal",
-                "value": 1.0
+                "value": 101.0
               },
               "exit_signal": {
                 "kind": "literal",
@@ -12279,7 +15436,7 @@
             },
             "lease_ttl_ms": {
               "kind": "literal",
-              "value": 7.0
+              "value": 107.0
             },
             "name": {
               "kind": "literal",
@@ -12341,7 +15498,7 @@
           "input": {
             "exit_code": {
               "kind": "literal",
-              "value": 7.0
+              "value": 107.0
             },
             "exit_signal": {
               "kind": "literal",
@@ -12391,7 +15548,7 @@
             },
             "exit_code": {
               "kind": "literal",
-              "value": 7.0
+              "value": 107.0
             },
             "exit_signal": {
               "kind": "literal",
@@ -12492,7 +15649,7 @@
               },
               "exit_code": {
                 "kind": "literal",
-                "value": 7.0
+                "value": 107.0
               },
               "exit_signal": {
                 "kind": "literal",
@@ -12508,7 +15665,7 @@
               },
               "lease_ttl_ms": {
                 "kind": "literal",
-                "value": 7.0
+                "value": 107.0
               },
               "log_discarded_bytes": {
                 "kind": "literal",
@@ -12728,7 +15885,7 @@
           "input": {
             "exit_code": {
               "kind": "literal",
-              "value": 1.0
+              "value": 101.0
             },
             "exit_signal": {
               "kind": "literal",
@@ -12778,7 +15935,7 @@
             },
             "exit_code": {
               "kind": "literal",
-              "value": 1.0
+              "value": 101.0
             },
             "exit_signal": {
               "kind": "literal",
@@ -12877,7 +16034,7 @@
               },
               "exit_code": {
                 "kind": "literal",
-                "value": 1.0
+                "value": 101.0
               },
               "exit_signal": {
                 "kind": "literal",
@@ -13017,7 +16174,7 @@
           "input": {
             "exit_code": {
               "kind": "literal",
-              "value": 1.0
+              "value": 101.0
             },
             "exit_signal": {
               "kind": "literal",
@@ -14212,7 +17369,7 @@
           "input": {
             "exit_code": {
               "kind": "literal",
-              "value": 1.0
+              "value": 101.0
             },
             "exit_signal": {
               "kind": "literal",
@@ -14569,7 +17726,7 @@
             },
             "lease_ttl_ms": {
               "kind": "literal",
-              "value": 2.0
+              "value": 102.0
             },
             "name": {
               "kind": "literal",
@@ -15927,7 +19084,7 @@
           "input": {
             "exit_code": {
               "kind": "literal",
-              "value": 1.0
+              "value": 101.0
             },
             "exit_signal": {
               "kind": "literal",
@@ -16718,7 +19875,7 @@
             },
             "lease_ttl_ms": {
               "kind": "literal",
-              "value": 7.0
+              "value": 107.0
             },
             "name": {
               "kind": "literal",
@@ -16923,7 +20080,7 @@
               },
               "lease_ttl_ms": {
                 "kind": "literal",
-                "value": 7.0
+                "value": 107.0
               },
               "log_discarded_bytes": {
                 "kind": "literal",
@@ -19132,7 +22289,7 @@
             },
             "lease_ttl_ms": {
               "kind": "literal",
-              "value": 2.0
+              "value": 102.0
             },
             "name": {
               "kind": "literal",
@@ -19173,7 +22330,7 @@
           "input": {
             "exit_code": {
               "kind": "literal",
-              "value": 1.0
+              "value": 101.0
             },
             "exit_signal": {
               "kind": "literal",
@@ -22339,7 +25496,7 @@
             },
             "expires_at": {
               "kind": "now_offset",
-              "seconds": 86401
+              "seconds": 97381
             },
             "keep": {
               "kind": "literal",
@@ -22375,7 +25532,7 @@
             },
             "timeout_ms": {
               "kind": "literal",
-              "value": 1.0
+              "value": 201.0
             }
           }
         },
@@ -22451,7 +25608,7 @@
             },
             "expires_at": {
               "kind": "now_offset",
-              "seconds": 86401
+              "seconds": 97381
             },
             "keep": {
               "kind": "literal",
@@ -22487,7 +25644,7 @@
             },
             "timeout_ms": {
               "kind": "literal",
-              "value": 1.0
+              "value": 201.0
             }
           }
         },
@@ -22523,7 +25680,7 @@
             },
             "expires_at": {
               "kind": "now_offset",
-              "seconds": 86401
+              "seconds": 97381
             },
             "keep": {
               "kind": "literal",
@@ -22555,7 +25712,7 @@
             },
             "timeout_ms": {
               "kind": "literal",
-              "value": 1.0
+              "value": 201.0
             }
           }
         },
@@ -22591,7 +25748,7 @@
             },
             "expires_at": {
               "kind": "now_offset",
-              "seconds": 86401
+              "seconds": 97381
             },
             "keep": {
               "kind": "literal",
@@ -22623,7 +25780,7 @@
             },
             "timeout_ms": {
               "kind": "literal",
-              "value": 1.0
+              "value": 201.0
             }
           }
         },
@@ -22659,7 +25816,7 @@
             },
             "expires_at": {
               "kind": "now_offset",
-              "seconds": 86401
+              "seconds": 97381
             },
             "keep": {
               "kind": "literal",
@@ -22695,7 +25852,7 @@
             },
             "timeout_ms": {
               "kind": "literal",
-              "value": 1.0
+              "value": 201.0
             }
           }
         },
@@ -22731,7 +25888,7 @@
             },
             "expires_at": {
               "kind": "now_offset",
-              "seconds": 86401
+              "seconds": 97381
             },
             "keep": {
               "kind": "literal",
@@ -22763,7 +25920,7 @@
             },
             "timeout_ms": {
               "kind": "literal",
-              "value": 1.0
+              "value": 201.0
             }
           }
         },
@@ -22799,7 +25956,7 @@
             },
             "expires_at": {
               "kind": "now_offset",
-              "seconds": 86401
+              "seconds": 97381
             },
             "keep": {
               "kind": "literal",
@@ -22835,7 +25992,7 @@
             },
             "timeout_ms": {
               "kind": "literal",
-              "value": 1.0
+              "value": 201.0
             }
           }
         },
@@ -22871,7 +26028,7 @@
             },
             "expires_at": {
               "kind": "now_offset",
-              "seconds": 86401
+              "seconds": 97381
             },
             "keep": {
               "kind": "literal",
@@ -22979,7 +26136,7 @@
             },
             "timeout_ms": {
               "kind": "literal",
-              "value": 1.0
+              "value": 201.0
             }
           }
         },
@@ -23087,7 +26244,7 @@
             },
             "expires_at": {
               "kind": "now_offset",
-              "seconds": 86401
+              "seconds": 97381
             },
             "keep": {
               "kind": "literal",
@@ -23123,7 +26280,7 @@
             },
             "timeout_ms": {
               "kind": "literal",
-              "value": 1.0
+              "value": 201.0
             }
           }
         },
@@ -23204,7 +26361,7 @@
             },
             "expires_at": {
               "kind": "now_offset",
-              "seconds": 86401
+              "seconds": 97381
             },
             "keep": {
               "kind": "literal",
@@ -23236,7 +26393,7 @@
             },
             "timeout_ms": {
               "kind": "literal",
-              "value": 1.0
+              "value": 201.0
             }
           }
         },
@@ -23277,7 +26434,7 @@
             },
             "expires_at": {
               "kind": "now_offset",
-              "seconds": 86401
+              "seconds": 97381
             },
             "keep": {
               "kind": "literal",
@@ -23309,7 +26466,7 @@
             },
             "timeout_ms": {
               "kind": "literal",
-              "value": 1.0
+              "value": 201.0
             }
           }
         },
@@ -23350,7 +26507,7 @@
             },
             "expires_at": {
               "kind": "now_offset",
-              "seconds": 86401
+              "seconds": 97381
             },
             "keep": {
               "kind": "literal",
@@ -23386,7 +26543,7 @@
             },
             "timeout_ms": {
               "kind": "literal",
-              "value": 1.0
+              "value": 201.0
             }
           }
         },
@@ -23427,7 +26584,7 @@
             },
             "expires_at": {
               "kind": "now_offset",
-              "seconds": 86401
+              "seconds": 97381
             },
             "keep": {
               "kind": "literal",
@@ -23459,7 +26616,7 @@
             },
             "timeout_ms": {
               "kind": "literal",
-              "value": 1.0
+              "value": 201.0
             }
           }
         },
@@ -23500,7 +26657,7 @@
             },
             "expires_at": {
               "kind": "now_offset",
-              "seconds": 86401
+              "seconds": 97381
             },
             "keep": {
               "kind": "literal",
@@ -23536,7 +26693,7 @@
             },
             "timeout_ms": {
               "kind": "literal",
-              "value": 1.0
+              "value": 201.0
             }
           }
         },
@@ -23577,7 +26734,7 @@
             },
             "expires_at": {
               "kind": "now_offset",
-              "seconds": 86401
+              "seconds": 97381
             },
             "keep": {
               "kind": "literal",
@@ -23690,7 +26847,7 @@
             },
             "timeout_ms": {
               "kind": "literal",
-              "value": 1.0
+              "value": 201.0
             }
           }
         },
@@ -23837,7 +26994,7 @@
             },
             "timeout_ms": {
               "kind": "literal",
-              "value": 1.0
+              "value": 201.0
             }
           }
         },
@@ -23959,6 +27116,385 @@
         }
       ]
     },
+    "substrate.host_processes.StartProcess/outcome/deadline-past/held/expires_at/0": {
+      "purpose": "substrate.host_processes.StartProcess takes deadline-past with expires_at on its now boundary, decided at a held instant",
+      "steps": [
+        {
+          "step": "hold_now",
+          "seconds": 0
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.StartProcess",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "argv": {
+              "kind": "literal",
+              "value": [
+                "argv.0"
+              ]
+            },
+            "cwd": {
+              "kind": "literal",
+              "value": "/srv/app"
+            },
+            "env_passthrough": {
+              "kind": "literal",
+              "value": [
+                "env_passthrough.0"
+              ]
+            },
+            "expires_at": {
+              "kind": "now_offset",
+              "seconds": 0
+            },
+            "keep": {
+              "kind": "literal",
+              "value": false
+            },
+            "keep_reason": {
+              "kind": "literal",
+              "value": "keep_reason"
+            },
+            "lease_ttl_ms": {
+              "kind": "literal",
+              "value": 3600000.0
+            },
+            "name": {
+              "kind": "literal",
+              "value": "dev-server"
+            },
+            "owner_session_id": {
+              "kind": "literal",
+              "value": "s-1"
+            },
+            "owner_session_name": {
+              "kind": "literal",
+              "value": "worker"
+            },
+            "profile": {
+              "kind": "literal",
+              "value": "host"
+            },
+            "reason": {
+              "kind": "literal",
+              "value": "serve the preview"
+            },
+            "timeout_ms": {
+              "kind": "literal",
+              "value": 201.0
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.StartProcess",
+            "outcome": "deadline-past"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.host_processes.DeadlinePast"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.LeaseRenewed"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.LogDiscarded"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.OwnerStopped"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessEnded"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessObserved"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessRunning"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.StopRequested"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.StreamEventAppended"
+        }
+      ],
+      "source": [
+        {
+          "kind": "type",
+          "name": "substrate.host_processes.ConfinementProfile"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.StartProcess"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.StartProcess",
+            "outcome": "deadline-past"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.LeaseRenewed"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.LogDiscarded"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.OwnerStopped"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessAdopted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessEnded"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessObserved"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessRunning"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessStarted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.StopRequested"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.StreamEventAppended"
+        },
+        {
+          "kind": "error",
+          "name": "substrate.host_processes.DeadlinePast"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.host_processes.Subject"
+        }
+      ]
+    },
+    "substrate.host_processes.StartProcess/outcome/hosted-posture": {
+      "purpose": "`substrate.host_processes.StartProcess` answers `hosted-posture` for the cause it declares as external, injected",
+      "steps": [
+        {
+          "step": "configure_external_outcome",
+          "force": {
+            "command": "substrate.host_processes.StartProcess",
+            "outcome": "hosted-posture"
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.StartProcess",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "argv": {
+              "kind": "literal",
+              "value": [
+                "argv.0"
+              ]
+            },
+            "cwd": {
+              "kind": "literal",
+              "value": "/srv/app"
+            },
+            "env_passthrough": {
+              "kind": "literal",
+              "value": [
+                "env_passthrough.0"
+              ]
+            },
+            "expires_at": {
+              "kind": "now_offset",
+              "seconds": 97381
+            },
+            "keep": {
+              "kind": "literal",
+              "value": false
+            },
+            "keep_reason": {
+              "kind": "literal",
+              "value": "keep_reason"
+            },
+            "lease_ttl_ms": {
+              "kind": "literal",
+              "value": 3600000.0
+            },
+            "name": {
+              "kind": "literal",
+              "value": "dev-server"
+            },
+            "owner_session_id": {
+              "kind": "literal",
+              "value": "s-1"
+            },
+            "owner_session_name": {
+              "kind": "literal",
+              "value": "worker"
+            },
+            "profile": {
+              "kind": "literal",
+              "value": "host"
+            },
+            "reason": {
+              "kind": "literal",
+              "value": "serve the preview"
+            },
+            "timeout_ms": {
+              "kind": "literal",
+              "value": 201.0
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.StartProcess",
+            "outcome": "hosted-posture"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.host_processes.HostProfileRefused"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.LeaseRenewed"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.LogDiscarded"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.OwnerStopped"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessEnded"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessObserved"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessRunning"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.StopRequested"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.StreamEventAppended"
+        }
+      ],
+      "source": [
+        {
+          "kind": "type",
+          "name": "substrate.host_processes.ConfinementProfile"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.StartProcess"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.StartProcess",
+            "outcome": "hosted-posture"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.LeaseRenewed"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.LogDiscarded"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.OwnerStopped"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessAdopted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessEnded"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessObserved"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessRunning"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessStarted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.StopRequested"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.StreamEventAppended"
+        },
+        {
+          "kind": "error",
+          "name": "substrate.host_processes.HostProfileRefused"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.host_processes.Subject"
+        }
+      ]
+    },
     "substrate.host_processes.StartProcess/outcome/keep-with-lease": {
       "purpose": "`substrate.host_processes.StartProcess` answers `keep-with-lease` for an input that satisfies that branch's guard",
       "steps": [
@@ -23985,7 +27521,7 @@
             },
             "expires_at": {
               "kind": "now_offset",
-              "seconds": 86401
+              "seconds": 97381
             },
             "keep": {
               "kind": "literal",
@@ -24021,7 +27557,7 @@
             },
             "timeout_ms": {
               "kind": "literal",
-              "value": 1.0
+              "value": 201.0
             }
           }
         },
@@ -24099,7 +27635,7 @@
             },
             "expires_at": {
               "kind": "now_offset",
-              "seconds": 86401
+              "seconds": 97381
             },
             "keep": {
               "kind": "literal",
@@ -24135,7 +27671,7 @@
             },
             "timeout_ms": {
               "kind": "literal",
-              "value": 1.0
+              "value": 201.0
             }
           }
         },
@@ -24173,7 +27709,7 @@
             },
             "expires_at": {
               "kind": "now_offset",
-              "seconds": 86401
+              "seconds": 97381
             },
             "keep": {
               "kind": "literal",
@@ -24283,7 +27819,7 @@
             },
             "timeout_ms": {
               "kind": "literal",
-              "value": 1.0
+              "value": 201.0
             }
           }
         },
@@ -24489,7 +28025,7 @@
             },
             "expires_at": {
               "kind": "now_offset",
-              "seconds": 86401
+              "seconds": 97381
             },
             "keep": {
               "kind": "literal",
@@ -24521,77 +28057,7 @@
             },
             "timeout_ms": {
               "kind": "literal",
-              "value": 1.0
-            }
-          }
-        },
-        {
-          "step": "expect_outcome",
-          "outcome": {
-            "command": "substrate.host_processes.StartProcess",
-            "outcome": "keep-without-reason"
-          }
-        },
-        {
-          "step": "expect_error",
-          "error": "substrate.host_processes.KeepNeedsReason"
-        },
-        {
-          "step": "execute_command",
-          "command": "substrate.host_processes.StartProcess",
-          "actor": "substrate.host_processes.Subject",
-          "input": {
-            "argv": {
-              "kind": "literal",
-              "value": [
-                "argv.0"
-              ]
-            },
-            "cwd": {
-              "kind": "literal",
-              "value": "/srv/app"
-            },
-            "env_passthrough": {
-              "kind": "literal",
-              "value": [
-                "env_passthrough.0"
-              ]
-            },
-            "expires_at": {
-              "kind": "now_offset",
-              "seconds": 86401
-            },
-            "keep": {
-              "kind": "literal",
-              "value": true
-            },
-            "lease_ttl_ms": {
-              "kind": "literal",
-              "value": 3600000.0
-            },
-            "name": {
-              "kind": "literal",
-              "value": "dev-server"
-            },
-            "owner_session_id": {
-              "kind": "literal",
-              "value": "s-1"
-            },
-            "owner_session_name": {
-              "kind": "literal",
-              "value": "worker"
-            },
-            "profile": {
-              "kind": "literal",
-              "value": "host"
-            },
-            "reason": {
-              "kind": "literal",
-              "value": "serve the preview"
-            },
-            "timeout_ms": {
-              "kind": "literal",
-              "value": 0.0
+              "value": 201.0
             }
           }
         },
@@ -24699,7 +28165,7 @@
             },
             "expires_at": {
               "kind": "now_offset",
-              "seconds": 86401
+              "seconds": 97381
             },
             "keep": {
               "kind": "literal",
@@ -24731,7 +28197,7 @@
             },
             "timeout_ms": {
               "kind": "literal",
-              "value": 1.0
+              "value": 201.0
             }
           }
         },
@@ -24879,7 +28345,7 @@
             },
             "expires_at": {
               "kind": "now_offset",
-              "seconds": 86401
+              "seconds": 97381
             },
             "keep": {
               "kind": "literal",
@@ -24915,7 +28381,7 @@
             },
             "timeout_ms": {
               "kind": "literal",
-              "value": 1.0
+              "value": 201.0
             }
           }
         },
@@ -24972,83 +28438,6 @@
         {
           "step": "expect_no_event",
           "event": "substrate.host_processes.StreamEventAppended"
-        },
-        {
-          "step": "execute_command",
-          "command": "substrate.host_processes.StartProcess",
-          "actor": "substrate.host_processes.Subject",
-          "input": {
-            "argv": {
-              "kind": "literal",
-              "value": [
-                "argv.0"
-              ]
-            },
-            "cwd": {
-              "kind": "literal",
-              "value": "/srv/app"
-            },
-            "env_passthrough": {
-              "kind": "literal",
-              "value": [
-                "env_passthrough.0"
-              ]
-            },
-            "expires_at": {
-              "kind": "now_offset",
-              "seconds": -1
-            },
-            "keep": {
-              "kind": "literal",
-              "value": false
-            },
-            "keep_reason": {
-              "kind": "literal",
-              "value": "keep_reason"
-            },
-            "lease_ttl_ms": {
-              "kind": "literal",
-              "value": 0.0
-            },
-            "name": {
-              "kind": "literal",
-              "value": "dev-server"
-            },
-            "owner_session_id": {
-              "kind": "literal",
-              "value": "s-1"
-            },
-            "owner_session_name": {
-              "kind": "literal",
-              "value": "worker"
-            },
-            "profile": {
-              "kind": "literal",
-              "value": "host"
-            },
-            "reason": {
-              "kind": "literal",
-              "value": "serve the preview"
-            },
-            "timeout_ms": {
-              "kind": "literal",
-              "value": 1.0
-            }
-          }
-        },
-        {
-          "step": "expect_outcome",
-          "outcome": {
-            "command": "substrate.host_processes.StartProcess",
-            "outcome": "lease-not-positive"
-          }
-        },
-        {
-          "step": "expect_error",
-          "error": "substrate.host_processes.LeaseNotPositive",
-          "fields": {
-            "lease_ttl_ms": 0.0
-          }
         }
       ],
       "source": [
@@ -25143,7 +28532,7 @@
             },
             "expires_at": {
               "kind": "now_offset",
-              "seconds": 86401
+              "seconds": 97381
             },
             "keep": {
               "kind": "literal",
@@ -25175,7 +28564,7 @@
             },
             "timeout_ms": {
               "kind": "literal",
-              "value": 1.0
+              "value": 201.0
             }
           }
         },
@@ -25253,7 +28642,7 @@
             },
             "expires_at": {
               "kind": "now_offset",
-              "seconds": 86401
+              "seconds": 97381
             },
             "keep": {
               "kind": "literal",
@@ -25285,7 +28674,7 @@
             },
             "timeout_ms": {
               "kind": "literal",
-              "value": 1.0
+              "value": 201.0
             }
           }
         },
@@ -25321,7 +28710,7 @@
             },
             "expires_at": {
               "kind": "now_offset",
-              "seconds": 86401
+              "seconds": 97381
             },
             "keep": {
               "kind": "literal",
@@ -25353,7 +28742,7 @@
             },
             "timeout_ms": {
               "kind": "literal",
-              "value": 1.0
+              "value": 201.0
             }
           }
         },
@@ -25391,7 +28780,7 @@
             },
             "expires_at": {
               "kind": "now_offset",
-              "seconds": 86401
+              "seconds": 97381
             },
             "keep": {
               "kind": "literal",
@@ -25423,7 +28812,7 @@
             },
             "timeout_ms": {
               "kind": "literal",
-              "value": 1.0
+              "value": 201.0
             }
           }
         },
@@ -25461,7 +28850,7 @@
             },
             "expires_at": {
               "kind": "now_offset",
-              "seconds": 86401
+              "seconds": 97381
             },
             "keep": {
               "kind": "literal",
@@ -25489,7 +28878,7 @@
             },
             "timeout_ms": {
               "kind": "literal",
-              "value": 1.0
+              "value": 201.0
             }
           }
         },
@@ -25527,7 +28916,7 @@
             },
             "expires_at": {
               "kind": "now_offset",
-              "seconds": 86401
+              "seconds": 97381
             },
             "keep": {
               "kind": "literal",
@@ -25555,7 +28944,7 @@
             },
             "timeout_ms": {
               "kind": "literal",
-              "value": 1.0
+              "value": 201.0
             }
           }
         },
@@ -25593,7 +28982,7 @@
             },
             "expires_at": {
               "kind": "now_offset",
-              "seconds": 86401
+              "seconds": 97381
             },
             "keep": {
               "kind": "literal",
@@ -25625,7 +29014,7 @@
             },
             "timeout_ms": {
               "kind": "literal",
-              "value": 1.0
+              "value": 201.0
             }
           }
         },
@@ -25663,7 +29052,7 @@
             },
             "expires_at": {
               "kind": "now_offset",
-              "seconds": 86401
+              "seconds": 97381
             },
             "keep": {
               "kind": "literal",
@@ -25691,7 +29080,7 @@
             },
             "timeout_ms": {
               "kind": "literal",
-              "value": 1.0
+              "value": 201.0
             }
           }
         },
@@ -25729,7 +29118,7 @@
             },
             "expires_at": {
               "kind": "now_offset",
-              "seconds": 86401
+              "seconds": 97381
             },
             "keep": {
               "kind": "literal",
@@ -25761,7 +29150,7 @@
             },
             "timeout_ms": {
               "kind": "literal",
-              "value": 1.0
+              "value": 201.0
             }
           }
         },
@@ -25799,7 +29188,7 @@
             },
             "expires_at": {
               "kind": "now_offset",
-              "seconds": 86401
+              "seconds": 97381
             },
             "keep": {
               "kind": "literal",
@@ -25901,7 +29290,7 @@
             },
             "timeout_ms": {
               "kind": "literal",
-              "value": 1.0
+              "value": 201.0
             }
           }
         },
@@ -26009,7 +29398,7 @@
             },
             "expires_at": {
               "kind": "now_offset",
-              "seconds": 86401
+              "seconds": 97381
             },
             "keep": {
               "kind": "literal",
@@ -26041,7 +29430,7 @@
             },
             "timeout_ms": {
               "kind": "literal",
-              "value": 1.0
+              "value": 201.0
             }
           }
         },
@@ -26163,6 +29552,501 @@
         }
       ]
     },
+    "substrate.host_processes.StartProcess/outcome/started": {
+      "purpose": "`substrate.host_processes.StartProcess` answers `started` for an input no other branch's guard claims",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.StartContainer",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "argv": {
+              "kind": "literal",
+              "value": [
+                "argv.0-1"
+              ]
+            },
+            "keep": {
+              "kind": "literal",
+              "value": false
+            },
+            "keep_reason": {
+              "kind": "literal",
+              "value": "keep_reason-1"
+            },
+            "kind": {
+              "kind": "literal",
+              "value": "k3d"
+            },
+            "lease_ttl_ms": {
+              "kind": "literal",
+              "value": 102.0
+            },
+            "name": {
+              "kind": "literal",
+              "value": "dev-server"
+            },
+            "owner_session_id": {
+              "kind": "literal",
+              "value": "owner_session_id-1"
+            },
+            "owner_session_name": {
+              "kind": "literal",
+              "value": "owner_session_name-1"
+            },
+            "reason": {
+              "kind": "literal",
+              "value": "reason-1"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.StartContainer",
+            "outcome": "started"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "host-process-2",
+          "entity": "substrate.host_processes.HostProcess",
+          "event": "substrate.host_processes.ProcessStarted",
+          "field": "process"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.AdoptProcess",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "name": {
+              "kind": "literal",
+              "value": "name-2"
+            },
+            "reason": {
+              "kind": "literal",
+              "value": "reason-2"
+            },
+            "source": {
+              "kind": "literal",
+              "value": "container"
+            },
+            "source_ref": {
+              "kind": "literal",
+              "value": "source_ref-2"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.AdoptProcess",
+            "outcome": "adopted"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "host-process-3",
+          "entity": "substrate.host_processes.HostProcess",
+          "event": "substrate.host_processes.ProcessAdopted",
+          "field": "process"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.AdoptProcess",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "name": {
+              "kind": "literal",
+              "value": "dev-server"
+            },
+            "reason": {
+              "kind": "literal",
+              "value": "reason-3"
+            },
+            "source": {
+              "kind": "literal",
+              "value": "pid"
+            },
+            "source_ref": {
+              "kind": "literal",
+              "value": "source_ref-3"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.AdoptProcess",
+            "outcome": "adopted"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "host-process-4",
+          "entity": "substrate.host_processes.HostProcess",
+          "event": "substrate.host_processes.ProcessAdopted",
+          "field": "process"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.RecordExit",
+          "actor": "substrate.host_processes.Supervisor",
+          "input": {
+            "exit_code": {
+              "kind": "literal",
+              "value": 104.0
+            },
+            "exit_signal": {
+              "kind": "literal",
+              "value": "exit_signal-3"
+            },
+            "process": {
+              "kind": "instance",
+              "instance": "host-process-4"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.RecordExit",
+            "outcome": "exited"
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.StartProcess",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "argv": {
+              "kind": "literal",
+              "value": [
+                "argv.0"
+              ]
+            },
+            "cwd": {
+              "kind": "literal",
+              "value": "/srv/app"
+            },
+            "env_passthrough": {
+              "kind": "literal",
+              "value": [
+                "env_passthrough.0"
+              ]
+            },
+            "expires_at": {
+              "kind": "now_offset",
+              "seconds": 97381
+            },
+            "keep": {
+              "kind": "literal",
+              "value": false
+            },
+            "keep_reason": {
+              "kind": "literal",
+              "value": "keep_reason"
+            },
+            "lease_ttl_ms": {
+              "kind": "literal",
+              "value": 3600000.0
+            },
+            "name": {
+              "kind": "literal",
+              "value": "dev-server"
+            },
+            "owner_session_id": {
+              "kind": "literal",
+              "value": "s-1"
+            },
+            "owner_session_name": {
+              "kind": "literal",
+              "value": "worker"
+            },
+            "profile": {
+              "kind": "literal",
+              "value": "host"
+            },
+            "reason": {
+              "kind": "literal",
+              "value": "serve the preview"
+            },
+            "timeout_ms": {
+              "kind": "literal",
+              "value": 201.0
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.StartProcess",
+            "outcome": "started"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "host-process",
+          "entity": "substrate.host_processes.HostProcess",
+          "event": "substrate.host_processes.ProcessStarted",
+          "field": "process"
+        },
+        {
+          "step": "expect_no_error"
+        },
+        {
+          "step": "expect_event",
+          "event": "substrate.host_processes.ProcessStarted",
+          "payload": {
+            "name": "dev-server",
+            "owner_session_id": "s-1",
+            "reason": "serve the preview"
+          },
+          "shape": {
+            "name": {
+              "holds": "primitive",
+              "kind": "string"
+            },
+            "owner_session_id": {
+              "holds": "primitive",
+              "kind": "string",
+              "optional": true
+            },
+            "process": {
+              "holds": "primitive",
+              "kind": "string"
+            },
+            "reason": {
+              "holds": "primitive",
+              "kind": "string"
+            }
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.LeaseRenewed"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.LogDiscarded"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.OwnerStopped"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessEnded"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessObserved"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessRunning"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.StopRequested"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.StreamEventAppended"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "argv": {
+                "kind": "literal",
+                "value": [
+                  "argv.0"
+                ]
+              },
+              "confinement": {
+                "kind": "literal",
+                "value": "none"
+              },
+              "cwd": {
+                "kind": "literal",
+                "value": "/srv/app"
+              },
+              "env_passthrough": {
+                "kind": "literal",
+                "value": [
+                  "env_passthrough.0"
+                ]
+              },
+              "expires_at": {
+                "kind": "now_offset",
+                "seconds": 97381
+              },
+              "keep": {
+                "kind": "literal",
+                "value": false
+              },
+              "keep_reason": {
+                "kind": "literal",
+                "value": "keep_reason"
+              },
+              "lease_ttl_ms": {
+                "kind": "literal",
+                "value": 3600000.0
+              },
+              "log_discarded_bytes": {
+                "kind": "literal",
+                "value": 0.0
+              },
+              "name": {
+                "kind": "literal",
+                "value": "dev-server"
+              },
+              "owner_session_id": {
+                "kind": "literal",
+                "value": "s-1"
+              },
+              "owner_session_name": {
+                "kind": "literal",
+                "value": "worker"
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process"
+              },
+              "profile": {
+                "kind": "literal",
+                "value": "host"
+              },
+              "reason": {
+                "kind": "literal",
+                "value": "serve the preview"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Starting"
+              },
+              "timeout_ms": {
+                "kind": "literal",
+                "value": 201.0
+              }
+            }
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "type",
+          "name": "substrate.host_processes.ConfinementProfile"
+        },
+        {
+          "kind": "entity",
+          "name": "substrate.host_processes.HostProcess"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.AdoptProcess"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.RecordExit"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.StartContainer"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.StartProcess"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.AdoptProcess",
+            "outcome": "adopted"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.RecordExit",
+            "outcome": "exited"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.StartContainer",
+            "outcome": "started"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.StartProcess",
+            "outcome": "started"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.LeaseRenewed"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.LogDiscarded"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.OwnerStopped"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessAdopted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessEnded"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessObserved"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessRunning"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessStarted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.StopRequested"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.StreamEventAppended"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.host_processes.Subject"
+        }
+      ]
+    },
     "substrate.host_processes.StartProcess/outcome/timeout-not-positive": {
       "purpose": "`substrate.host_processes.StartProcess` answers `timeout-not-positive` for an input that satisfies that branch's guard",
       "steps": [
@@ -26189,7 +30073,7 @@
             },
             "expires_at": {
               "kind": "now_offset",
-              "seconds": 86401
+              "seconds": 97381
             },
             "keep": {
               "kind": "literal",

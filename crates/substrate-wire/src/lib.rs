@@ -675,6 +675,7 @@ impl Failure {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct WorkspaceAdoptInput {
+    #[serde(deserialize_with = "root_name_unchecked")]
     pub root_name: RootName,
     pub labels: Labels,
 }
@@ -2027,9 +2028,19 @@ impl CaptureMode {
     }
 }
 
+/// Decodes an adopt input's root name without the generated decoder's alphabet and length check,
+/// so a name outside the set reaches the adopt admission and is refused there at `root_name`
+/// with its operation recorded, as the released `workspace-adopt-root-name-out-of-set` vector
+/// requires.
+fn root_name_unchecked<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<RootName, D::Error> {
+    String::deserialize(deserializer).map(RootName)
+}
+
 // The root-name set and the workspace origin are generated from spec/workspaces, not transcribed
-// (ADR 0035). ESS generates them structurally only: the alphabet, the length bound and the
-// leading-`-` rule are runtime obligations [`is_root_name`] enforces (spec/workspaces/README.md).
+// (ADR 0035). The ESS 0.67.0 decoder checks the root name's alphabet and length bound but not
+// the leading-`-` rule, so [`is_root_name`] stays the full predicate (spec/workspaces/README.md).
 #[allow(dead_code, clippy::all, clippy::pedantic)]
 #[rustfmt::skip]
 #[path = "generated/workspace.rs"]
