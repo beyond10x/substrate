@@ -251,7 +251,7 @@ instead); the delegated cases also include an interactive shell driven through a
 (`crates/substrate-daemon/tests/runtime_vectors.rs`, `PORTABLE_CASES` and `DELEGATED_CASES`). Its delegated lane runs only when
 `SUBSTRATE_VECTORS_CGROUP_ROOT` names a delegated cgroup v2 subtree the test process is inside;
 unset, those cases are **absent, never reported as passed** (invariant 3). **`bash scripts/delegated-lane.sh`
-runs that lane plus the host, public-SDK and disposable-MCP delegated cases, and needs no privilege** — it asks
+runs that lane plus the host, host-process (`--test processes`), public-SDK and disposable-MCP delegated cases, and needs no privilege** — it asks
 systemd for a delegated scope, moves itself into a
 child group so the delegation root stays process-free, and sets the variable. Do not conclude the
 delegated lane cannot run here: a user session's own scope is root-owned, so `mkdir` in it fails,

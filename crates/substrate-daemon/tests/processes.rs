@@ -1740,7 +1740,9 @@ async fn host_process_keep_has_no_ttl_and_records_its_reason() {
         "running",
         "a keep never expires"
     );
-    // host-process-lease-cannot-become-keep-after-start: a TTL may not become a keep either.
+    // host-process-lease-cannot-become-keep-after-start: a TTL may not become a keep either. The
+    // renew input has no `keep` member (bundle 0.20.0 `process-lease-renew.json`), so the request
+    // is refused by its schema.
     let ttl = harness
         .started(
             "op_keep_ttl_start_01",
@@ -1761,7 +1763,7 @@ async fn host_process_keep_has_no_ttl_and_records_its_reason() {
     assert_refused(
         &observed,
         StatusCode::UNPROCESSABLE_ENTITY,
-        "process.lease-invalid",
+        "request.schema-invalid",
     );
     assert_eq!(harness.get(&ttl).await["lease"]["keep"], false);
     // A keep may still become a TTL.
