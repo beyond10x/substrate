@@ -9,6 +9,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [0.7.18] — 2026-10-21
 
+Published by [release run 39580183130](https://github.com/beyond10x/substrate/actions/runs/39580183130)
+from tagged commit `17e0e96946b9588c150298ac0f951211681b2043`. All three artifacts were
+keyless-signed and verified against `release.yml@refs/tags/0.7.18` by the release workflow, and
+each tag resolved anonymously to its released digest:
+
+- Image: `ghcr.io/beyond10x/b10x-substrate-daemon:0.7.18` at `sha256:b532d3c6aca309f606d551c02ea5b977292bfbee641337fece57145a51be41d8`.
+- Contract bundle: `ghcr.io/beyond10x/b10x-substrate-wire:0.19.0` at `sha256:5c392e33f56a24ac18ab50e4c86d5bfce4bbe1dbe1c122e102a2f7f2b00a8e91`, the byte-identical bundle first published by 0.7.17, signed again with this release's identity.
+- Disposable MCP image: `ghcr.io/beyond10x/b10x-substrate-mcp:0.7.18` at `sha256:9d5b43505dd6712c494789e8d3aba8bb047e54ae6252cf0c1c803db3e3108302`, development-only.
+
+The [release notes](https://github.com/beyond10x/substrate/releases/tag/0.7.18) provide exact
+signature verification commands and the successful 107-case delegated confinement record. Rust
+consumers pin the Git revision `17e0e96946b9588c150298ac0f951211681b2043` or the tag.
+
 ### Changed
 
 - `b10x-substrate-host` compiles on macOS and every other non-Linux target. Its Linux modules are
