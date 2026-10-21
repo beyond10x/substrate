@@ -16,7 +16,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   environment, null stdin and its own process group. A path SBPL cannot carry as a plain literal
   is refused as `exec.sandbox-path-unrepresentable`, a program outside the allowlist as
   `exec.sandbox-program-unlisted`, and a missing `sandbox-exec` as `exec.sandbox-unavailable`,
-  each before anything runs. `HostDriver::open` still refuses on macOS; no wire change.
+  each before anything runs. The profile allows reading the root directory listing because the
+  dynamic loader aborts without it. `HostDriver::open` still refuses on macOS; no wire change.
 - The macOS workflow runs `crates/substrate-host/tests/seatbelt_adversary.rs` on `macos-15`: seven
   attacks on the profile, each paired with a control that succeeds where the profile allows it, and
   the step fails unless all seven ran.

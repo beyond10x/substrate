@@ -49,19 +49,21 @@ profiles.
 
 ## What Seatbelt confines
 
-"Tested" names the case in `crates/substrate-host/tests/seatbelt_adversary.rs` that proves the
-row on the `macos-15` runner. "Untested" means no case proves it yet.
+"Tested" names the case that proves the row and the `macos-15` run it passed in: an adversary case
+in `crates/substrate-host/tests/seatbelt_adversary.rs`, or a unit test in
+`crates/substrate-host/src/seatbelt.rs`. Each adversary case pairs the attack with a control that
+succeeds where the profile allows it. "Untested" means no case proves the row yet.
 
 | Linux floor item | Seatbelt rule | State |
 |---|---|---|
-| Writes confined to the workspace | `(deny default)` plus `file-write*` on the workspace subpath only | untested |
-| Read-only roots | `file-read*` on each declared subpath, no `file-write*` there | untested |
-| No read of undeclared host paths | `(deny default)`; no `file-read-data` outside declared and system subpaths | untested |
-| No network | no `network*` allow rule | untested |
-| Exec of allowed binaries only | `process-exec` on each allowed literal path | untested |
-| No signal to a process outside the sandbox | `signal` allowed for `(target same-sandbox)` only | untested |
-| Cleared and shaped environment | the spawner clears the environment; not a sandbox rule | untested |
-| Fail closed | refusal when `sandbox-exec` is missing or a path is not representable | untested |
+| Writes confined to the workspace | `(deny default)` plus `file-write*` on the workspace subpath only | tested: `a_write_outside_the_workspace_is_refused`, run 39652219079 |
+| Read-only roots | `file-read*` on each declared subpath, no `file-write*` there | tested: `a_read_only_root_is_readable_and_not_writable`, run 39652219079 |
+| No read of undeclared host paths | `(deny default)`; no `file-read-data` outside declared and system subpaths | tested: `an_undeclared_host_file_is_unreadable`, run 39652219079 |
+| No network | no `network*` allow rule | tested: `an_outbound_connection_is_refused` (TCP to 127.0.0.1), run 39652219079 |
+| Exec of allowed binaries only | `process-exec` on each allowed literal path | tested: `an_unlisted_executable_is_refused`, run 39652219079 |
+| No signal to a process outside the sandbox | `signal` allowed for `(target same-sandbox)` only | tested: `a_signal_to_a_process_outside_the_sandbox_is_refused`, run 39652219079 |
+| Cleared and shaped environment | the spawner clears the environment; not a sandbox rule | tested: `the_environment_is_cleared` (`TMPDIR`), run 39652219079 |
+| Fail closed | refusal when `sandbox-exec` is missing or a path is not representable | tested: unit tests `a_missing_launcher_refuses_before_resolving_anything`, `unrepresentable_paths_are_refused_by_name` and `the_platform_sandbox_enforces_a_profile`, run 39652219079 |
 
 ## What Seatbelt cannot confine
 
@@ -78,6 +80,7 @@ row on the `macos-15` runner. "Untested" means no case proves it yet.
 | Metadata of undeclared paths | `file-read-metadata` is allowed so `stat` and path resolution work; existence of a path is observable | untested |
 | Destination-bound apertures (ADR 0013) | SBPL matches IP and port, not a hostname | untested; refused by name |
 | Mach service lookup | lookups the dynamic loader and libSystem need are allowed by name | untested |
+| Listing of `/` | `file-read-data` on the literal `/` is allowed: without it the dynamic loader aborts the process (SIGABRT, run 39643245714); the names of top-level entries are observable | untested |
 
 ## Consequences
 
