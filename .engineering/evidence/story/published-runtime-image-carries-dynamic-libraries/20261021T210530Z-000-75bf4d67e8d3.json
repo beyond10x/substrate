@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-21T21:05:30Z",
+  "actor": "human:timo",
+  "artifact": "story:published-runtime-image-carries-dynamic-libraries",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "Release run for 0.7.18: release.yml runs the published daemon image with --help before announcing; xtask/tests/release_workflow.rs mcp_image_is_stdio_only_and_its_exact_binary_is_smoke_tested fences the runtime-library copy (Dockerfile:22,80)",
+    "reference": "https://github.com/beyond10x/substrate/actions/runs/39580183130"
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-21T23:37:40Z",
+  "actor": "human:timo",
+  "artifact": "story:host-process-listing",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "Full gate on 330c0d69 (portable lane, check-ess 107/107 host processes) and scripts/delegated-lane.sh on the same tree, exit 0, --test processes 59 passed; acceptance scenarios mapped to tests in PR 143",
+    "reference": "https://github.com/beyond10x/substrate/actions/runs/39693298147"
+  }
+}
