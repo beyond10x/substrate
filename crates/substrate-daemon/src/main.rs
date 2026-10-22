@@ -8,7 +8,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64URL;
 use clap::Parser;
 use substrate_daemon::{
     DaemonConfig, DelegatedContextKey, EgressAperture, GitSourceConfig, HostedIdentityConfig,
-    SecretSlot, TcpDaemonConfig, TlsDaemonConfig, serve,
+    SecretSlot, TcpDaemonConfig, TlsDaemonConfig, WritableRootConfig, serve,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -27,6 +27,29 @@ fn parse_secret_slot(value: &str) -> Result<SecretSlot, String> {
         return Err(format!("secret slot {name} declares no file"));
     }
     Ok(SecretSlot {
+        name: name.to_owned(),
+        path: PathBuf::from(path),
+    })
+}
+
+/// Parses one `--writable-root name=path` (ADR 0038 kind 1).
+///
+/// Splits at the **first** `=`, so a path may contain one. The name shape is the wire's own
+/// root-name rule. Whether the path is a directory this daemon may bind is `serve`'s startup check.
+fn parse_writable_root(value: &str) -> Result<WritableRootConfig, String> {
+    let (name, path) = value
+        .split_once('=')
+        .ok_or_else(|| "a writable root is declared as name=path".to_owned())?;
+    if !substrate_wire::is_root_name(name) {
+        return Err(format!(
+            "writable root name {name:?} must be 1 to {} bytes of [A-Za-z0-9_-], not starting with -",
+            substrate_wire::MAX_ROOT_NAME_BYTES
+        ));
+    }
+    if path.is_empty() {
+        return Err(format!("writable root {name} declares no path"));
+    }
+    Ok(WritableRootConfig {
         name: name.to_owned(),
         path: PathBuf::from(path),
     })
@@ -296,6 +319,22 @@ struct Arguments {
     )]
     egress_apertures: Vec<EgressAperture>,
 
+    /// Declare a writable host root as `name=path` (repeatable). ADR 0038 kind 1.
+    ///
+    /// The only directories outside the workspace a confined program may write. A start names a
+    /// declared root and where to mount it, never a path. Startup refuses, naming the root, a path
+    /// that is not absolute and normal, not an existing directory reached through no symlink, not
+    /// owned by this daemon's uid, or that lies under or contains the workspace root or the state
+    /// directory. Published as `exec.writable-roots.host` only once a probe proves the bind.
+    #[arg(
+        long = "writable-root",
+        env = "SUBSTRATE_WRITABLE_ROOT",
+        value_name = "NAME=PATH",
+        value_delimiter = ',',
+        value_parser = parse_writable_root
+    )]
+    writable_roots: Vec<WritableRootConfig>,
+
     /// A certificate bundle a run with an aperture gets a private read-only snapshot of.
     ///
     /// Without it a sandbox has no trust anchor — it has no `/etc` at all — so TLS crosses the
@@ -452,6 +491,7 @@ impl From<Arguments> for DaemonConfig {
             event_retention: arguments.event_retention,
             secret_slots: arguments.secret_slots,
             egress_apertures: arguments.egress_apertures,
+            writable_roots: arguments.writable_roots,
             ca_bundle: arguments.ca_bundle,
             delegated_context_keys: arguments.delegated_context_keys,
             require_delegated_context: arguments.require_delegated_context,
@@ -497,7 +537,7 @@ async fn main() -> anyhow::Result<()> {
 mod tests {
     use clap::Parser as _;
 
-    use super::{Arguments, parse_egress_aperture, parse_project_quota_ids};
+    use super::{Arguments, parse_egress_aperture, parse_project_quota_ids, parse_writable_root};
 
     const REQUIRED: [&str; 9] = [
         "substrate-daemon",
@@ -525,6 +565,37 @@ mod tests {
                 .is_err(),
             "a negative core count is not a ceiling"
         );
+    }
+
+    #[test]
+    fn writable_roots_are_repeatable_name_path_pairs_split_at_the_first_equals() {
+        let none = Arguments::try_parse_from(REQUIRED).expect("default arguments");
+        assert!(none.writable_roots.is_empty());
+        let declared = Arguments::try_parse_from(REQUIRED.into_iter().chain([
+            "--writable-root",
+            "cache=/srv/cache",
+            "--writable-root",
+            "odd=/srv/a=b",
+        ]))
+        .expect("two declared roots");
+        let config = super::DaemonConfig::from(declared);
+        assert_eq!(
+            config
+                .writable_roots
+                .iter()
+                .map(|root| (root.name.as_str(), root.path.to_str().unwrap()))
+                .collect::<Vec<_>>(),
+            [("cache", "/srv/cache"), ("odd", "/srv/a=b")]
+        );
+        for refused in [
+            "cache",
+            "=/srv/cache",
+            "-cache=/srv/cache",
+            "ca/che=/srv",
+            "cache=",
+        ] {
+            assert!(parse_writable_root(refused).is_err(), "{refused}");
+        }
     }
 
     #[test]

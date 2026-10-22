@@ -34,6 +34,8 @@ mod secrets;
 mod unsupported;
 #[cfg(target_os = "linux")]
 mod workdir;
+#[cfg(target_os = "linux")]
+mod writable_roots;
 
 use std::collections::HashSet;
 use std::os::unix::fs::PermissionsExt as _;
@@ -165,6 +167,18 @@ pub struct SecretSlot {
     pub path: PathBuf,
 }
 
+/// One operator-declared writable host root: a name in the root-name set and an absolute host
+/// directory (ADR 0038 decision 2).
+///
+/// Daemon configuration and never request data: a start names the root and its mount, never the
+/// path. The composition root checks the path at startup; the driver opens it again, by
+/// descriptor and without following a symlink, at every start that names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclaredWritableRoot {
+    pub name: String,
+    pub path: PathBuf,
+}
+
 #[derive(Debug, Clone)]
 pub struct HostConfig {
     pub workspace_root: PathBuf,
@@ -220,6 +234,10 @@ pub struct HostConfig {
     /// is the personal Unix socket. [`HostConfig::minimum`] sets `false`: the fact is absent, and
     /// every start is `process.host-unserved`.
     pub host_processes: bool,
+    /// Every writable host root this operator declared (ADR 0038 kind 1). Empty means
+    /// `exec.writable-roots.host` is absent and every start naming a host root is
+    /// `exec.writable-roots-host-unserved`. [`HostConfig::minimum`] declares none.
+    pub writable_roots: Vec<DeclaredWritableRoot>,
 }
 
 /// Refuses an exec CPU ceiling the host cannot honour, before the host opens.
@@ -256,6 +274,43 @@ fn validate_exec_cpu_cores(
              are unknown."
         )),
     }
+}
+
+/// Refuses a writable-root declaration a start could not name unambiguously, before the host
+/// opens: a name outside the root-name set, a name declared twice, or a path that is not absolute.
+///
+/// What the path *is* (present, a directory, owned, clear of the workspace and state roots) is the
+/// composition root's startup check, and the driver checks it again by descriptor at every start.
+fn validate_writable_roots(roots: &[DeclaredWritableRoot]) -> Result<(), DriverError> {
+    let mut names = HashSet::new();
+    for root in roots {
+        let refuse = |reason: String| {
+            Err(DriverError::refused(
+                "config.writable-root-invalid",
+                reason,
+                "config.writable_roots",
+            ))
+        };
+        if !substrate_wire::is_root_name(&root.name) {
+            return refuse(format!(
+                "Writable host root {:?} is not a valid root name.",
+                root.name
+            ));
+        }
+        if !names.insert(root.name.as_str()) {
+            return refuse(format!(
+                "Writable host root {} is declared more than once.",
+                root.name
+            ));
+        }
+        if !root.path.is_absolute() {
+            return refuse(format!(
+                "Writable host root {} does not name an absolute path.",
+                root.name
+            ));
+        }
+    }
+    Ok(())
 }
 
 impl HostConfig {
@@ -298,6 +353,7 @@ impl HostConfig {
             git_sources: Vec::new(),
             exec_cpu_cores: 1,
             host_processes: false,
+            writable_roots: Vec::new(),
         }
     }
 
@@ -810,6 +866,7 @@ impl HostDriver {
             config.exec_cpu_cores,
             std::thread::available_parallelism().ok(),
         )?;
+        validate_writable_roots(&config.writable_roots)?;
         std::fs::create_dir_all(&config.workspace_root).map_err(|error| {
             DriverError::failed("workspace.root-failed", format!("workspace root: {error}"))
         })?;
@@ -1650,6 +1707,38 @@ mod tests {
             validate_exec_cpu_cores(1, None).is_ok(),
             "one core is admitted even when the usable CPU count is unknown"
         );
+    }
+
+    #[test]
+    fn a_writable_root_declaration_a_start_cannot_name_is_refused_before_open() {
+        let root = |name: &str, path: &str| super::DeclaredWritableRoot {
+            name: name.to_owned(),
+            path: path.into(),
+        };
+        assert!(super::validate_writable_roots(&[]).is_ok());
+        assert!(
+            super::validate_writable_roots(&[
+                root("cache", "/srv/cache"),
+                root("tools", "/srv/tools")
+            ])
+            .is_ok()
+        );
+        for (roots, needle) in [
+            (vec![root("-cache", "/srv/cache")], "-cache"),
+            (vec![root("ca/che", "/srv/cache")], "ca/che"),
+            (vec![root("", "/srv/cache")], "\"\""),
+            (
+                vec![root("cache", "/srv/a"), root("cache", "/srv/b")],
+                "more than once",
+            ),
+            (vec![root("cache", "srv/cache")], "absolute"),
+        ] {
+            let error = super::validate_writable_roots(&roots)
+                .expect_err("an unnameable declaration must be refused");
+            assert_eq!(error.code, "config.writable-root-invalid");
+            assert_eq!(error.class, super::DriverErrorClass::Refused);
+            assert!(error.message.contains(needle), "{}", error.message);
+        }
     }
 
     #[test]

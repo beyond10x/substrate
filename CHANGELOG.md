@@ -22,10 +22,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `exec.writable-root-mount-duplicate` and `exec.writable-root-mount-overlap` (422) before any
   capability is consulted, then `exec.writable-roots-host-unserved` and
   `exec.writable-roots-git-unserved` (501) with the root's name. No host publishes
-  `exec.writable-roots.host` or `exec.writable-roots.git` yet, so every start naming a writable
-  root is refused unserved; binding them is the work of the host and Git stories.
-- A `workdir` may lie at or beneath a writable root mount. The applied confinement record gains an
-  optional `writable_roots` list (kind, name or workspace id, host path, mount).
+  `exec.writable-roots.git` yet, so every start naming a Git root is refused unserved.
+- Writable host roots (ADR 0038 kind 1). `substrate-daemon --writable-root <name>=<path>`
+  (repeatable, `SUBSTRATE_WRITABLE_ROOT`) declares a host directory a start may name. Startup
+  refuses, naming the root, a name outside the root-name set or declared twice, and a path that is
+  not absolute and normal, does not exist, is not a directory, is reached through a symlink, is not
+  owned by the daemon's uid, or lies under or contains the workspace root or the state directory.
+  The host publishes `exec.writable-roots.host`, the declared names, only when roots are declared
+  and a throwaway sandbox proved a root bound by descriptor writable beneath a read-only parent,
+  with no descriptor left resolving to either; otherwise the fact is absent and every host root is
+  `exec.writable-roots-host-unserved` (501). An undeclared name stays unserved by name. At each
+  start the driver opens every named root once, `openat2` with `RESOLVE_NO_SYMLINKS`, checks on
+  that descriptor that it is a directory this uid owns, and bubblewrap mounts the descriptor with
+  `--bind-fd`, so a rename or symlink swap after admission cannot redirect the mount. A root that is
+  gone is `exec.writable-root-absent`, one that is not a directory or is reached through a symlink
+  is `exec.writable-root-not-a-directory`, and one this uid does not own is
+  `exec.writable-root-not-owned` (422), each naming the root. The declared roots and their paths
+  move the configuration generation; a daemon that declares none keeps its generation.
+- A `workdir` may lie at or beneath a writable root mount, and a host root's mount runs the program
+  there. The applied confinement record gains an optional `writable_roots` list (kind, name or
+  workspace id, host path, mount), filled from what was bound.
+- The clean-room runtime vectors declare one writable root: the portable lane refuses it unserved
+  (108 cases), and the delegated lane (159 cases) binds it, sees the write on the host with its
+  parent and sibling unchanged, runs a working directory beneath its mount, and refuses it by name
+  once its path is swapped for a symlink.
 
 ## [0.9.0] — 2026-10-22
 

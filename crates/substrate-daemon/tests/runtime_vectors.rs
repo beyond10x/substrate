@@ -542,6 +542,28 @@ impl Daemon {
         delegated_context_keys: &[String],
         require_delegated_context: bool,
     ) -> Self {
+        Self::start_declaring(
+            root,
+            cgroup_root,
+            apertures,
+            secret_slots,
+            delegated_context_keys,
+            require_delegated_context,
+            &[],
+        )
+        .await
+    }
+
+    /// [`Self::start`], also declaring each `name=path` in `writable_roots` (ADR 0038 kind 1).
+    async fn start_declaring(
+        root: &Path,
+        cgroup_root: Option<&Path>,
+        apertures: &[String],
+        secret_slots: &[String],
+        delegated_context_keys: &[String],
+        require_delegated_context: bool,
+        writable_roots: &[String],
+    ) -> Self {
         let socket = root.join("substrate.sock");
         let workspaces = root.join("workspaces");
         let mut command = vec![
@@ -581,6 +603,10 @@ impl Daemon {
         }
         if require_delegated_context {
             command.push("--require-delegated-context".to_owned());
+        }
+        for root in writable_roots {
+            command.push("--writable-root".to_owned());
+            command.push(root.clone());
         }
         if let Some(cgroup_root) = cgroup_root {
             let mut wrapped = vec![
@@ -2741,6 +2767,7 @@ async fn check_http_journey(
     inside: u16,
     outside: u16,
     firehose: u16,
+    writable: &WritableFixture,
 ) -> usize {
     let mut passed = 0;
     let (status, machine) = daemon
@@ -3029,9 +3056,11 @@ async fn check_http_journey(
 
     passed += check_read_only_file_shape(daemon, &workspace, &snapshot).await;
     passed += check_workdir_and_aperture_list_shape(daemon, &workspace, &snapshot).await;
-    passed += check_writable_roots_refused(daemon, &workspace, &snapshot).await;
+    passed +=
+        check_writable_roots_refused(daemon, &workspace, &snapshot, cgroup_root.is_some()).await;
 
     if let Some(cgroup_root) = cgroup_root {
+        passed += check_confined_writable_roots(daemon, &workspace, &snapshot, writable).await;
         passed += check_confined_execs(daemon, &workspace, &snapshot, cgroup_root).await;
         passed += check_confined_apertures(daemon, &workspace, &snapshot, inside, outside).await;
         passed += check_confined_aperture_ceiling(daemon, &workspace, &snapshot, firehose).await;
@@ -3044,6 +3073,7 @@ async fn check_http_journey(
     } else {
         passed += check_read_only_files_unserved(daemon, &workspace, &snapshot).await;
         passed += check_workdir_and_aperture_list_unserved(daemon, &workspace, &snapshot).await;
+        passed += check_writable_root_unserved(daemon, &workspace, &snapshot, writable).await;
         // No confinement means no verified mechanism, so the capability is absent and every
         // aperture request is `unserved` — never a run that quietly got no network instead.
         expect_error(
@@ -4987,20 +5017,40 @@ async fn check_workdir_and_aperture_list_shape(
 }
 
 /// Writable roots (ADR 0038), in both lanes: every lexical rule is answered before any fact is
-/// consulted, and because no host yet publishes `exec.writable-roots.host` or
-/// `exec.writable-roots.git`, a well-formed root of either kind is `unserved` with its name — never
-/// a run that quietly got no writable mount, and never one that got a different one.
-async fn check_writable_roots_refused(daemon: &Daemon, workspace: &str, snapshot: &str) -> usize {
+/// consulted. The daemon declares one host root, [`WRITABLE_ROOT_NAME`]; a delegated host
+/// publishes exactly that name in `exec.writable-roots.host` once its probe passes, and a portable
+/// one publishes nothing. No host publishes `exec.writable-roots.git` yet. Either way a root this
+/// daemon did not declare (`cache`), and every Git root, is `unserved` with its name — never a run
+/// that quietly got no writable mount, and never one that got a different one.
+async fn check_writable_roots_refused(
+    daemon: &Daemon,
+    workspace: &str,
+    snapshot: &str,
+    delegated: bool,
+) -> usize {
     let (status, machine) = daemon
         .call("GET", "/v1/machine", "req_clean_writable_facts", None)
         .await;
     assert_eq!(status, 200);
-    for fact in ["exec.writable-roots.host", "exec.writable-roots.git"] {
+    let host = machine["result"]["facts"].get("exec.writable-roots.host");
+    if delegated {
+        assert_eq!(
+            host,
+            Some(&json!([WRITABLE_ROOT_NAME])),
+            "a delegated host proves the bind and publishes the declared name: {machine}"
+        );
+    } else {
         assert!(
-            machine["result"]["facts"].get(fact).is_none(),
-            "no host publishes {fact} yet: {machine}"
+            host.is_none(),
+            "without confinement nothing is proved, so nothing is published: {machine}"
         );
     }
+    assert!(
+        machine["result"]["facts"]
+            .get("exec.writable-roots.git")
+            .is_none(),
+        "no host publishes exec.writable-roots.git yet: {machine}"
+    );
     let mut passed = 0;
     for (operation, request, roots, status, code, message) in writable_root_cases() {
         let response = daemon
@@ -5022,6 +5072,306 @@ async fn check_writable_roots_refused(daemon: &Daemon, workspace: &str, snapshot
         }
         passed += 1;
     }
+    passed
+}
+
+/// The name the clean-room daemon declares its one writable host root under.
+const WRITABLE_ROOT_NAME: &str = "shared";
+/// Where the delegated cases mount it, apart from the case that mounts it at its own host path.
+const WRITABLE_ROOT_MOUNT: &str = "/srv/substrate-shared";
+
+/// A declared writable root, `<parent>/shared`, beside an undeclared `<parent>/sibling`, under
+/// `CARGO_TARGET_TMPDIR` so it is neither the clean-room state directory nor beneath it. Every
+/// path is canonical: the daemon refuses a declared path reached through a symlink.
+struct WritableFixture {
+    _directory: TempDir,
+    parent: PathBuf,
+}
+
+impl WritableFixture {
+    fn new() -> Self {
+        let directory = tempfile::Builder::new()
+            .prefix("writable-cleanroom-")
+            .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
+            .expect("fixture under CARGO_TARGET_TMPDIR");
+        let parent = std::fs::canonicalize(directory.path()).expect("canonical fixture");
+        for child in [WRITABLE_ROOT_NAME, "sibling"] {
+            std::fs::create_dir(parent.join(child)).expect("fixture directory");
+        }
+        Self {
+            _directory: directory,
+            parent,
+        }
+    }
+
+    fn root(&self) -> PathBuf {
+        self.parent.join(WRITABLE_ROOT_NAME)
+    }
+
+    fn sibling(&self) -> PathBuf {
+        self.parent.join("sibling")
+    }
+
+    /// The `--writable-root` value the daemon starts with.
+    fn declaration(&self) -> String {
+        format!("{WRITABLE_ROOT_NAME}={}", self.root().display())
+    }
+
+    /// The names directly in `directory`, sorted.
+    fn entries(directory: &Path) -> Vec<String> {
+        let mut names = std::fs::read_dir(directory)
+            .expect("read fixture directory")
+            .map(|entry| {
+                entry
+                    .expect("fixture entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    }
+}
+
+/// Portable lane: the daemon declares [`WRITABLE_ROOT_NAME`], but without confinement no probe
+/// proves the bind, so the fact is absent and a start naming the declared root is `unserved` by
+/// name. It is not run without the mount, and nothing is written to the declared directory.
+async fn check_writable_root_unserved(
+    daemon: &Daemon,
+    workspace: &str,
+    snapshot: &str,
+    writable: &WritableFixture,
+) -> usize {
+    let response = daemon
+        .call(
+            "POST",
+            "/v1/execs",
+            "req_clean_writable_declared_unserved",
+            Some(&mutation(
+                "01JWRITABLECLEANUNSERVED3",
+                &ExecInput::new(
+                    workspace,
+                    snapshot,
+                    &[
+                        "/bin/sh",
+                        "-c",
+                        "echo written >/srv/substrate-shared/written",
+                    ],
+                    true,
+                )
+                .writable_roots(
+                    json!([{ "host": WRITABLE_ROOT_NAME, "mount": WRITABLE_ROOT_MOUNT }]),
+                )
+                .build(),
+            )),
+        )
+        .await;
+    expect_error_at(
+        &response,
+        501,
+        "exec.writable-roots-host-unserved",
+        "writable_roots",
+    );
+    assert_eq!(
+        response.1["error"]["message"], "Writable host root shared is not served by this host.",
+        "{}",
+        response.1
+    );
+    assert!(
+        WritableFixture::entries(&writable.root()).is_empty(),
+        "an unserved start wrote nothing to the declared root"
+    );
+    1
+}
+
+/// Delegated lane (ADR 0038 kind 1), four cases against the daemon's declared root:
+///
+/// 1. a write through the mount lands in the declared host directory, and the applied record
+///    names exactly what was bound — name, declared host path, mount;
+/// 2. mounted at its own host path, the program cannot reach its parent or its sibling: the
+///    sibling is not in the sandbox, and on the host neither directory changed;
+/// 3. a working directory at and beneath the mount starts the program there;
+/// 4. the declared path swapped for a symlink before a start is refused by name, and the
+///    symlink's target is not written.
+#[allow(clippy::too_many_lines)] // Four cases on one fixture, in order; the swap case restores what it changed.
+async fn check_confined_writable_roots(
+    daemon: &Daemon,
+    workspace: &str,
+    snapshot: &str,
+    writable: &WritableFixture,
+) -> usize {
+    let mut passed = 0;
+    let root = writable.root();
+    let host_path = root.to_str().expect("UTF-8 fixture");
+    let mounted = json!([{ "host": WRITABLE_ROOT_NAME, "mount": WRITABLE_ROOT_MOUNT }]);
+
+    let (status, written) = daemon
+        .call(
+            "POST",
+            "/v1/execs",
+            "req_clean_writable_writes",
+            Some(&mutation(
+                "01JWRITABLECLEANWRITES01",
+                &ExecInput::new(
+                    workspace,
+                    snapshot,
+                    &[
+                        "/bin/sh",
+                        "-c",
+                        "echo written >/srv/substrate-shared/written",
+                    ],
+                    true,
+                )
+                .writable_roots(mounted.clone())
+                .build(),
+            )),
+        )
+        .await;
+    assert_eq!(status, 200, "{written}");
+    assert_eq!(written["result"]["exit"], EXITED_CLEANLY(), "{written}");
+    assert_eq!(
+        std::fs::read_to_string(root.join("written")).expect("the write reached the host"),
+        "written\n"
+    );
+    assert_eq!(
+        written["result"]["applied"]["writable_roots"],
+        json!([{
+            "kind": "host",
+            "name": WRITABLE_ROOT_NAME,
+            "host_path": host_path,
+            "mount": WRITABLE_ROOT_MOUNT,
+        }]),
+        "{written}"
+    );
+    passed += 1;
+
+    let parent = writable.parent.to_str().expect("UTF-8 fixture");
+    let sibling = writable.sibling();
+    let sibling = sibling.to_str().expect("UTF-8 fixture");
+    let escape = format!(
+        "echo inside >'{host_path}/inside' && test ! -e '{sibling}' && \
+         {{ (echo escaped >'{parent}/escaped') 2>/dev/null; \
+         (mkdir -p '{sibling}' && echo escaped >'{sibling}/escaped') 2>/dev/null; true; }}"
+    );
+    let (status, contained) = daemon
+        .call(
+            "POST",
+            "/v1/execs",
+            "req_clean_writable_contained",
+            Some(&mutation(
+                "01JWRITABLECLEANCONTAIN1",
+                &ExecInput::new(workspace, snapshot, &["/bin/sh", "-c", &escape], true)
+                    .writable_roots(json!([{ "host": WRITABLE_ROOT_NAME, "mount": host_path }]))
+                    .build(),
+            )),
+        )
+        .await;
+    assert_eq!(status, 200, "{contained}");
+    assert_eq!(contained["result"]["exit"], EXITED_CLEANLY(), "{contained}");
+    assert_eq!(
+        WritableFixture::entries(&writable.parent),
+        [WRITABLE_ROOT_NAME, "sibling"],
+        "the parent of a writable root is unchanged on the host"
+    );
+    assert!(
+        WritableFixture::entries(&writable.sibling()).is_empty(),
+        "a sibling of a writable root is unchanged on the host"
+    );
+    assert!(root.join("inside").is_file(), "the root itself was written");
+    passed += 1;
+
+    std::fs::create_dir_all(root.join("sub")).expect("a directory beneath the root");
+    for (operation, request, workdir) in [
+        (
+            "01JWRITABLECLEANWORKDIR1",
+            "req_clean_writable_workdir",
+            WRITABLE_ROOT_MOUNT,
+        ),
+        (
+            "01JWRITABLECLEANWORKDIR2",
+            "req_clean_writable_workdir_sub",
+            "/srv/substrate-shared/sub",
+        ),
+    ] {
+        let (status, ran) = daemon
+            .call(
+                "POST",
+                "/v1/execs",
+                request,
+                Some(&mutation(
+                    operation,
+                    &ExecInput::new(
+                        workspace,
+                        snapshot,
+                        &["/bin/sh", "-c", "pwd -P && echo here >here"],
+                        true,
+                    )
+                    .writable_roots(mounted.clone())
+                    .workdir(workdir)
+                    .build(),
+                )),
+            )
+            .await;
+        assert_eq!(status, 200, "{ran}");
+        assert_eq!(ran["result"]["exit"], EXITED_CLEANLY(), "{ran}");
+        assert_eq!(ran["result"]["applied"]["workdir"], workdir, "{ran}");
+        let relative = workdir
+            .strip_prefix(WRITABLE_ROOT_MOUNT)
+            .expect("beneath the mount")
+            .trim_start_matches('/');
+        assert!(
+            root.join(relative).join("here").is_file(),
+            "the program ran in {workdir}: {ran}"
+        );
+    }
+    passed += 1;
+
+    let moved = writable.parent.join("moved");
+    std::fs::rename(&root, &moved).expect("move the declared root aside");
+    std::os::unix::fs::symlink(&moved, &root).expect("a symlink at the declared path");
+    let before = WritableFixture::entries(&moved);
+    let response = daemon
+        .call(
+            "POST",
+            "/v1/execs",
+            "req_clean_writable_swapped",
+            Some(&mutation(
+                "01JWRITABLECLEANSWAPPED1",
+                &ExecInput::new(
+                    workspace,
+                    snapshot,
+                    &[
+                        "/bin/sh",
+                        "-c",
+                        "echo swapped >/srv/substrate-shared/swapped",
+                    ],
+                    true,
+                )
+                .writable_roots(mounted)
+                .build(),
+            )),
+        )
+        .await;
+    std::fs::remove_file(&root).expect("remove the symlink");
+    std::fs::rename(&moved, &root).expect("restore the declared root");
+    expect_error_at(
+        &response,
+        422,
+        "exec.writable-root-not-a-directory",
+        "writable_roots",
+    );
+    assert!(
+        text(&response.1["error"]["message"]).contains(WRITABLE_ROOT_NAME),
+        "{}",
+        response.1
+    );
+    assert_eq!(
+        WritableFixture::entries(&root),
+        before,
+        "a refused start wrote nothing through the symlink"
+    );
+    passed += 1;
     passed
 }
 
@@ -5531,8 +5881,8 @@ async fn check_confined_aperture_list(
 // ---------------------------------------------------------------------------------------------
 
 /// The predecessor printed its case count; the port asserts it, so a case cannot vanish quietly.
-const PORTABLE_CASES: usize = 107;
-const DELEGATED_CASES: usize = 155;
+const PORTABLE_CASES: usize = 108;
+const DELEGATED_CASES: usize = 159;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {
@@ -5569,13 +5919,17 @@ async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {
     std::fs::set_permissions(&slot_file, std::fs::Permissions::from_mode(0o600))
         .expect("restrict the declared slot file");
     let slots = vec![format!("{SECRET_SLOT_NAME}={}", slot_file.display())];
-    let daemon = Daemon::start(
+    // The declared writable root and a sibling beside it, outside the clean-room root because that
+    // root is the daemon's state directory, which no writable root may lie under (ADR 0038).
+    let writable = WritableFixture::new();
+    let daemon = Daemon::start_declaring(
         root,
         delegated.as_ref().map(DelegatedCgroup::path),
         &declared,
         &slots,
         &[delegated_key_flag()],
         false,
+        &[writable.declaration()],
     )
     .await;
     check_dual_daemon_refusal(&daemon).await;
@@ -5585,6 +5939,7 @@ async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {
         inside.port(),
         outside.port(),
         firehose.port(),
+        &writable,
     )
     .await;
     // The daemon's own diagnostic stream, readable only once its pipe has closed. Uncounted on

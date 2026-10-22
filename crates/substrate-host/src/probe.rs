@@ -158,10 +158,23 @@ pub fn probe(config: &HostConfig, openat2: bool) -> CapabilitySnapshot {
             && workspace
             && crate::workdir::mechanism_is_provable(&config.bubblewrap))
         .then_some(true),
-        // ADR 0038 decision 5: neither kind is published until the throwaway-sandbox probe that
-        // proves a descriptor-bound root writable beside a read-only parent exists. Absent keeps
-        // every start that names one unserved, by name.
-        exec_writable_roots_host: None,
+        // ADR 0038 decision 5: the declared names, only when the operator declared any and a
+        // throwaway sandbox proved a descriptor-bound root writable beneath a read-only parent,
+        // with no descriptor left resolving to either. Gated on `exec`, the floor the bind rides.
+        // Absent keeps every start that names a host root unserved, by name. The Git kind stays
+        // absent: no probe for it exists yet.
+        exec_writable_roots_host: (exec
+            && !config.writable_roots.is_empty()
+            && crate::writable_roots::mechanism_is_provable(&config.bubblewrap))
+        .then(|| {
+            let mut names: Vec<String> = config
+                .writable_roots
+                .iter()
+                .map(|root| root.name.clone())
+                .collect();
+            names.sort();
+            names
+        }),
         exec_writable_roots_git: None,
         exec_resource_usage: resource_usage.filter(|_| exec),
         metrics_stream: (exec && resource_usage.is_some()).then_some(MetricsStreamFacts {

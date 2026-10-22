@@ -401,6 +401,13 @@ pub struct DaemonConfig {
     /// a start naming an aperture is `unserved`; the sandbox keeps `--unshare-net` and there is no
     /// weaker reach to fall back to.
     pub egress_apertures: Vec<EgressAperture>,
+    /// Operator-declared writable host roots (ADR 0038 kind 1), each a name and a host directory.
+    ///
+    /// Never request data: a start names a root and a mount, never a path. `serve` refuses, naming
+    /// the root, any declaration that is not an existing owned directory clear of the workspace
+    /// and state roots. An empty list means `exec.writable-roots.host` is absent and a start naming
+    /// a host root is `unserved`.
+    pub writable_roots: Vec<WritableRootConfig>,
     /// The certificate bundle a run with an aperture gets a private read-only snapshot of.
     ///
     /// `None` gives a sandbox no trust anchor. TLS still crosses the aperture byte for byte, and a
@@ -454,6 +461,17 @@ pub struct EgressAperture {
     /// composition root with the rest of the declaration. `None` is what every aperture declared
     /// before ADR 0014 is, and installs exactly what it installed then.
     pub max_bytes: Option<u64>,
+}
+
+/// One operator-declared writable host root: a name in the root-name set and the absolute host
+/// directory behind it (ADR 0038 decision 2).
+///
+/// The daemon's own configuration vocabulary, converted at the composition root as a secret slot
+/// is (invariant 4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WritableRootConfig {
+    pub name: String,
+    pub path: PathBuf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -511,6 +529,7 @@ impl DaemonConfig {
             event_retention: 10_000,
             secret_slots: Vec::new(),
             egress_apertures: Vec::new(),
+            writable_roots: Vec::new(),
             ca_bundle: None,
             delegated_context_keys: Vec::new(),
             require_delegated_context: false,
@@ -574,6 +593,12 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
     // Resolved once, here, and pinned for the process's lifetime: the sandbox gets no resolver, so
     // a name that only resolves later resolves nowhere at all (ADR 0013).
     let egress_apertures = resolve_egress_apertures(&config.egress_apertures)?;
+    check_writable_roots(
+        &config.writable_roots,
+        &config.workspaces,
+        state_directory(&config.state)?,
+        nix::unistd::Uid::effective().as_raw(),
+    )?;
     check_ca_bundle(config.ca_bundle.as_deref())?;
     // Resolved before any listener exists: a trust anchor that only becomes usable later would let
     // the daemon serve mutations it could not attribute (ADR 0011).
@@ -621,6 +646,14 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
         })
         .collect();
     host_config.egress_apertures = egress_apertures;
+    host_config.writable_roots = config
+        .writable_roots
+        .into_iter()
+        .map(|root| substrate_host::DeclaredWritableRoot {
+            name: root.name,
+            path: root.path,
+        })
+        .collect();
     host_config.aperture_root = aperture_state_root(&config.state);
     host_config.ca_bundle = config.ca_bundle;
     // ADR 0036 S2: host processes are served only by a daemon whose one listener is the personal
@@ -873,6 +906,121 @@ fn resolve_egress_apertures(
     Ok(resolved)
 }
 
+/// The directory holding the durable state database and everything keyed beside it: the
+/// aperture and host-process state roots and the instance lock.
+fn state_directory(state: &Path) -> anyhow::Result<&Path> {
+    state
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .context("durable state path requires a parent directory")
+}
+
+/// `path` with every symlink in its existing prefix resolved, and the part that does not exist yet
+/// appended as written: what a later `create_dir_all` would make.
+fn resolved_prefix(path: &Path) -> anyhow::Result<PathBuf> {
+    let absolute =
+        std::path::absolute(path).with_context(|| format!("make {} absolute", path.display()))?;
+    let mut existing = absolute.as_path();
+    let mut rest = Vec::new();
+    loop {
+        match std::fs::canonicalize(existing) {
+            Ok(resolved) => {
+                return Ok(rest
+                    .into_iter()
+                    .rev()
+                    .fold(resolved, |path: PathBuf, part| path.join(part)));
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                let (Some(parent), Some(name)) = (existing.parent(), existing.file_name()) else {
+                    return Err(error).with_context(|| format!("resolve {}", path.display()));
+                };
+                rest.push(name);
+                existing = parent;
+            }
+            Err(error) => return Err(error).with_context(|| format!("resolve {}", path.display())),
+        }
+    }
+}
+
+/// Refuses, naming the root and the condition, any writable host root the driver could not bind
+/// exactly as declared (ADR 0038 decision 2). Each must have a name in the root-name set declared
+/// once, and a path that is absolute and in normal form, exists as a directory reached through no
+/// symlink, is owned by `uid` (the daemon's own), and neither lies under nor contains the
+/// workspace root or the state directory: a program could otherwise write another workspace, or
+/// this daemon's own ledger.
+///
+/// The driver opens each root again, by descriptor, at every start that names it; this is the
+/// startup half, so a declaration that could never be served stops the daemon rather than turning
+/// into a refusal on every run.
+///
+/// # Errors
+///
+/// Returns the first rule broken, prefixed `config.writable-root-invalid`.
+fn check_writable_roots(
+    declared: &[WritableRootConfig],
+    workspaces: &Path,
+    state_directory: &Path,
+    uid: u32,
+) -> anyhow::Result<()> {
+    let workspaces = resolved_prefix(workspaces)?;
+    let state_directory = resolved_prefix(state_directory)?;
+    let mut names: BTreeSet<&str> = BTreeSet::new();
+    for root in declared {
+        let name = root.name.as_str();
+        let path = root.path.as_path();
+        let refuse = |condition: &str| {
+            anyhow!("config.writable-root-invalid: writable root {name:?} {condition}")
+        };
+        if !substrate_wire::is_root_name(name) {
+            return Err(refuse("is not a valid root name"));
+        }
+        if !names.insert(name) {
+            return Err(refuse("is declared more than once"));
+        }
+        if !path.is_absolute() {
+            return Err(refuse("does not name an absolute path"));
+        }
+        let normal = path
+            .components()
+            .skip(1)
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+            && path.components().collect::<PathBuf>().as_os_str() == path.as_os_str();
+        if !normal {
+            return Err(refuse("does not name a path in normal form"));
+        }
+        let metadata = match std::fs::symlink_metadata(path) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(refuse("does not exist"));
+            }
+            Err(error) => {
+                return Err(error).with_context(|| format!("inspect writable root {name:?}"));
+            }
+        };
+        if !metadata.is_dir() {
+            return Err(refuse("is not a directory"));
+        }
+        if std::fs::canonicalize(path).ok().as_deref() != Some(path) {
+            return Err(refuse("is reached through a symlink"));
+        }
+        if metadata.uid() != uid {
+            return Err(refuse(&format!("is not owned by the daemon's uid {uid}")));
+        }
+        for (reserved, what) in [
+            (&workspaces, "the workspace root"),
+            (&state_directory, "the state directory"),
+        ] {
+            if path.starts_with(reserved) {
+                return Err(refuse(&format!("lies under {what}")));
+            }
+            if reserved.starts_with(path) {
+                return Err(refuse(&format!("contains {what}")));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// The trust anchor must exist and be readable now, not on the first run that needs it.
 ///
 /// # Errors
@@ -971,6 +1119,24 @@ fn configuration_generation(config: &DaemonConfig) -> u64 {
     for aperture in apertures {
         material.extend_from_slice(&(aperture.len() as u64).to_be_bytes());
         material.extend_from_slice(aperture.as_bytes());
+    }
+    // Writable roots whole, name and path: the fact publishes the names, and the path is what a
+    // write lands in, so moving either must invalidate every snapshot. Nothing is added when none
+    // is declared, so a daemon without one keeps the generation it had (ADR 0038).
+    let mut writable_roots = config
+        .writable_roots
+        .iter()
+        .map(|root| {
+            let mut material = root.name.as_bytes().to_vec();
+            material.push(b'=');
+            material.extend_from_slice(root.path.as_os_str().as_encoded_bytes());
+            material
+        })
+        .collect::<Vec<_>>();
+    writable_roots.sort_unstable();
+    for root in writable_roots {
+        material.extend_from_slice(&(root.len() as u64).to_be_bytes());
+        material.extend_from_slice(&root);
     }
     let mut git_sources = config
         .git_sources
@@ -1863,6 +2029,204 @@ mod tests {
 
         std::os::unix::fs::symlink(&state, private.join("linked.db")).unwrap();
         assert!(prepare_private_state_path(&private.join("linked.db")).is_err());
+    }
+
+    /// A host tree for the writable-root startup checks: `workspaces`, `state` and two candidate
+    /// roots beside them, every path canonical.
+    fn writable_root_tree() -> (tempfile::TempDir, PathBuf) {
+        let directory = tempfile::tempdir().unwrap();
+        let base = std::fs::canonicalize(directory.path()).unwrap();
+        for child in ["workspaces/inner", "state", "cache", "other"] {
+            std::fs::create_dir_all(base.join(child)).unwrap();
+        }
+        (directory, base)
+    }
+
+    fn writable_root(name: &str, path: impl Into<PathBuf>) -> WritableRootConfig {
+        WritableRootConfig {
+            name: name.to_owned(),
+            path: path.into(),
+        }
+    }
+
+    fn writable_root_refusal(base: &Path, roots: &[WritableRootConfig], uid: u32) -> String {
+        check_writable_roots(roots, &base.join("workspaces"), &base.join("state"), uid)
+            .expect_err("a declaration the driver cannot bind stops startup")
+            .to_string()
+    }
+
+    #[test]
+    fn writable_roots_that_are_owned_directories_clear_of_both_roots_start() {
+        let (_directory, base) = writable_root_tree();
+        let uid = nix::unistd::Uid::effective().as_raw();
+        check_writable_roots(&[], &base.join("workspaces"), &base.join("state"), uid).unwrap();
+        check_writable_roots(
+            &[
+                writable_root("cache", base.join("cache")),
+                writable_root("other", base.join("other")),
+            ],
+            &base.join("workspaces"),
+            &base.join("state"),
+            uid,
+        )
+        .unwrap();
+        // A workspace root that does not exist yet is compared as it will be created.
+        check_writable_roots(
+            &[writable_root("cache", base.join("cache"))],
+            &base.join("later/workspaces"),
+            &base.join("state"),
+            uid,
+        )
+        .unwrap();
+    }
+
+    #[test]
+    #[allow(clippy::too_many_lines)] // One case per startup condition, each on its own fixture path.
+    fn each_writable_root_startup_condition_is_refused_naming_the_root() {
+        let (_directory, base) = writable_root_tree();
+        let uid = nix::unistd::Uid::effective().as_raw();
+        std::fs::write(base.join("file"), "x").unwrap();
+        std::os::unix::fs::symlink(base.join("cache"), base.join("linked")).unwrap();
+        std::os::unix::fs::symlink(&base, base.join("cache/up")).unwrap();
+        let cases: Vec<(Vec<WritableRootConfig>, u32, &str, &str)> = vec![
+            (
+                vec![writable_root("-cache", base.join("cache"))],
+                uid,
+                "\"-cache\"",
+                "is not a valid root name",
+            ),
+            (
+                vec![
+                    writable_root("cache", base.join("cache")),
+                    writable_root("cache", base.join("other")),
+                ],
+                uid,
+                "\"cache\"",
+                "is declared more than once",
+            ),
+            (
+                vec![writable_root("cache", "srv/cache")],
+                uid,
+                "\"cache\"",
+                "does not name an absolute path",
+            ),
+            (
+                vec![writable_root("cache", base.join("other/../cache"))],
+                uid,
+                "\"cache\"",
+                "does not name a path in normal form",
+            ),
+            (
+                vec![writable_root(
+                    "cache",
+                    format!("{}/./cache", base.display()),
+                )],
+                uid,
+                "\"cache\"",
+                "does not name a path in normal form",
+            ),
+            (
+                vec![writable_root("cache", format!("{}/cache/", base.display()))],
+                uid,
+                "\"cache\"",
+                "does not name a path in normal form",
+            ),
+            (
+                vec![writable_root("cache", base.join("absent"))],
+                uid,
+                "\"cache\"",
+                "does not exist",
+            ),
+            (
+                vec![writable_root("cache", base.join("file"))],
+                uid,
+                "\"cache\"",
+                "is not a directory",
+            ),
+            (
+                vec![writable_root("cache", base.join("linked"))],
+                uid,
+                "\"cache\"",
+                "is not a directory",
+            ),
+            (
+                vec![writable_root("cache", base.join("cache/up/other"))],
+                uid,
+                "\"cache\"",
+                "is reached through a symlink",
+            ),
+            (
+                vec![writable_root("cache", base.join("cache"))],
+                uid.wrapping_add(1),
+                "\"cache\"",
+                "is not owned by the daemon's uid",
+            ),
+            (
+                vec![writable_root("cache", base.join("workspaces/inner"))],
+                uid,
+                "\"cache\"",
+                "lies under the workspace root",
+            ),
+            (
+                vec![writable_root("cache", base.clone())],
+                uid,
+                "\"cache\"",
+                "contains the workspace root",
+            ),
+            (
+                vec![writable_root("cache", base.join("workspaces"))],
+                uid,
+                "\"cache\"",
+                "lies under the workspace root",
+            ),
+            (
+                vec![writable_root("cache", base.join("state"))],
+                uid,
+                "\"cache\"",
+                "lies under the state directory",
+            ),
+        ];
+        for (roots, uid, name, condition) in cases {
+            let refusal = writable_root_refusal(&base, &roots, uid);
+            assert!(
+                refusal.starts_with("config.writable-root-invalid: writable root "),
+                "{refusal}"
+            );
+            assert!(refusal.contains(name), "{refusal} names {name}");
+            assert!(refusal.contains(condition), "{refusal} states {condition}");
+        }
+        // The state directory contained by a root, apart from the workspace root.
+        let state = base.join("cache/state");
+        std::fs::create_dir_all(&state).unwrap();
+        let refusal = check_writable_roots(
+            &[writable_root("cache", base.join("cache"))],
+            &base.join("workspaces"),
+            &state,
+            uid,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            refusal.contains("contains the state directory"),
+            "{refusal}"
+        );
+    }
+
+    #[test]
+    fn writable_roots_move_the_configuration_generation_only_when_declared() {
+        let base = DaemonConfig::minimum("/srv/s.sock", "/srv/state/s.db", "/srv/ws", "d", vec![1]);
+        let mut declared = base.clone();
+        declared.writable_roots = vec![writable_root("cache", "/srv/cache")];
+        let mut moved = base.clone();
+        moved.writable_roots = vec![writable_root("cache", "/srv/elsewhere")];
+        let mut renamed = base.clone();
+        renamed.writable_roots = vec![writable_root("tools", "/srv/cache")];
+        let generations = [&base, &declared, &moved, &renamed].map(configuration_generation);
+        assert_eq!(
+            generations.iter().collect::<BTreeSet<_>>().len(),
+            4,
+            "{generations:?}"
+        );
     }
 
     /// `story:aperture-state-outside-workspace-root`: the daemon keeps aperture run state in its

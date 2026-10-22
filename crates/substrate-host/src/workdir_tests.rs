@@ -98,12 +98,21 @@ fn a_directory_beneath_the_pinned_workspace_is_present() {
     let pinned = directory(fixture.path());
     for workdir in ["/workspace", "/workspace/crates", "/workspace/crates/gate"] {
         assert_eq!(
-            code(check_present(&input(Some(workdir)), &pinned, None, &[])),
+            code(check_present(
+                &input(Some(workdir)),
+                &pinned,
+                None,
+                &[],
+                &[]
+            )),
             None,
             "{workdir}"
         );
     }
-    assert_eq!(code(check_present(&input(None), &pinned, None, &[])), None);
+    assert_eq!(
+        code(check_present(&input(None), &pinned, None, &[], &[])),
+        None
+    );
 }
 
 #[test]
@@ -119,7 +128,8 @@ fn a_missing_entry_a_file_or_a_symlink_at_any_component_is_missing() {
         "/workspace/escape",
         "/workspace/escape/usr",
     ] {
-        let error = check_present(&input(Some(workdir)), &pinned, None, &[]).expect_err("refused");
+        let error =
+            check_present(&input(Some(workdir)), &pinned, None, &[], &[]).expect_err("refused");
         assert_eq!(error.code, EXEC_WORKDIR_MISSING, "{workdir}");
         assert_eq!(error.class, DriverErrorClass::Refused);
         assert_eq!(error.address.as_deref(), Some("workdir"));
@@ -141,13 +151,19 @@ fn a_directory_beneath_a_declared_root_is_checked_beneath_that_root() {
         mount: "/opt/tool".to_owned(),
     }];
     let roots = crate::read_only_roots::pin(&start.read_only_roots).expect("pinned roots");
-    assert_eq!(code(check_present(&start, &pinned, None, &roots)), None);
+    assert_eq!(
+        code(check_present(&start, &pinned, None, &roots, &[])),
+        None
+    );
     start.workdir = Some("/opt/tool".to_owned());
-    assert_eq!(code(check_present(&start, &pinned, None, &roots)), None);
+    assert_eq!(
+        code(check_present(&start, &pinned, None, &roots, &[])),
+        None
+    );
     for workdir in ["/opt/tool/link", "/opt/tool/absent", "/opt/tool/Cargo.toml"] {
         start.workdir = Some(workdir.to_owned());
         assert_eq!(
-            code(check_present(&start, &pinned, None, &roots)),
+            code(check_present(&start, &pinned, None, &roots, &[])),
             Some(EXEC_WORKDIR_MISSING),
             "{workdir}"
         );
@@ -163,10 +179,10 @@ fn scratch_is_fresh_so_only_its_mount_point_exists() {
         max_bytes: 1_048_576,
         max_inodes: 16,
     });
-    assert_eq!(code(check_present(&start, &pinned, None, &[])), None);
+    assert_eq!(code(check_present(&start, &pinned, None, &[], &[])), None);
     start.workdir = Some("/scratch/build".to_owned());
     assert_eq!(
-        code(check_present(&start, &pinned, None, &[])),
+        code(check_present(&start, &pinned, None, &[], &[])),
         Some(EXEC_WORKDIR_MISSING)
     );
 }
@@ -183,12 +199,24 @@ fn a_directory_in_the_capsule_is_checked_beneath_the_materialized_capsule() {
         files: Vec::new(),
     });
     assert_eq!(
-        code(check_present(&start, &pinned, Some(capsule.path()), &[])),
+        code(check_present(
+            &start,
+            &pinned,
+            Some(capsule.path()),
+            &[],
+            &[]
+        )),
         None
     );
     start.workdir = Some("/runtime/link".to_owned());
     assert_eq!(
-        code(check_present(&start, &pinned, Some(capsule.path()), &[])),
+        code(check_present(
+            &start,
+            &pinned,
+            Some(capsule.path()),
+            &[],
+            &[]
+        )),
         Some(EXEC_WORKDIR_MISSING)
     );
 }
@@ -213,13 +241,13 @@ fn a_root_is_checked_beneath_the_directory_admission_pinned_not_its_path() {
     std::fs::create_dir_all(declared.join("swapped")).expect("swap another tree in");
 
     assert_eq!(
-        code(check_present(&start, &pinned, None, &roots)),
+        code(check_present(&start, &pinned, None, &roots, &[])),
         None,
         "the directory in the pinned tree was looked for at the declared path"
     );
     start.workdir = Some("/opt/tool/swapped".to_owned());
     assert_eq!(
-        code(check_present(&start, &pinned, None, &roots)),
+        code(check_present(&start, &pinned, None, &roots, &[])),
         Some(EXEC_WORKDIR_MISSING),
         "a directory swapped in after admission was found, though it is not what is mounted"
     );
@@ -234,7 +262,7 @@ fn a_start_without_a_workdir_is_never_checked() {
         host_path: "/nonexistent-substrate-root".to_owned(),
         mount: "/opt/tool".to_owned(),
     }];
-    assert_eq!(code(check_present(&start, &pinned, None, &[])), None);
+    assert_eq!(code(check_present(&start, &pinned, None, &[], &[])), None);
 }
 
 #[test]
