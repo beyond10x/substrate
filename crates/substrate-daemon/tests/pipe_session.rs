@@ -248,6 +248,7 @@ impl Driver for PipeFixtureDriver {
                 observed_at: Utc::now(),
                 requested: input.exec.sandbox.clone(),
                 applied: Some(AppliedConfinement {
+                    writable_roots: Vec::new(),
                     workspace_access: substrate_wire::WorkspaceAccess::ReadWrite,
                     read_only_roots: Vec::new(),
                     read_only_files: Vec::new(),
@@ -1675,6 +1676,7 @@ async fn the_two_entry_points_name_one_refusal_for_a_pty_start_that_earns_two() 
     let input = PipeSessionStartInput {
         capture: substrate_wire::CaptureMode::Recorded,
         exec: ExecStartInput {
+            writable_roots: Vec::new(),
             workspace: "ws_pty_order".to_owned(),
             argv: vec!["/bin/sh".to_owned()],
             env: substrate_wire::ExecEnvironment {

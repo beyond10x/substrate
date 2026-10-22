@@ -1,0 +1,9 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.22.0:address:process-stop-by-owner",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "properties": {},
+  "required": [],
+  "title": "process-stop-by-owner normalized route address",
+  "type": "object"
+}

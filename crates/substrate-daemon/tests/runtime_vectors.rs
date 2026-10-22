@@ -43,9 +43,9 @@ const DAEMON: &str = env!("CARGO_BIN_EXE_substrate-daemon");
 const CGROUP_EXEC: &str = env!("CARGO_BIN_EXE_substrate-cgroup-exec");
 const DAEMON_OVERRIDE_VARIABLE: &str = "SUBSTRATE_VECTORS_DAEMON";
 /// Pinned independently of the daemon implementation: the clean-room client verifies what ships.
-const ADVERTISED_CONTRACT: &str = "substrate-wire/0.21.0";
+const ADVERTISED_CONTRACT: &str = "substrate-wire/0.22.0";
 const ADVERTISED_CONTRACT_SHA256: &str =
-    "044b3099d8e5a1108cc75cf3b03f1ea4d250ee4e34266cf493276fe4a9a0fe15";
+    "5d551f08c3b680c144359b13ff99a7da2853003c4fcc9665a32b21ce85e146da";
 
 fn daemon_binary() -> PathBuf {
     std::env::var_os(DAEMON_OVERRIDE_VARIABLE).map_or_else(|| PathBuf::from(DAEMON), PathBuf::from)
@@ -857,6 +857,7 @@ struct ExecInput<'a> {
     read_only_roots: Option<Value>,
     workdir: Option<&'a str>,
     apertures: Option<&'a [&'a str]>,
+    writable_roots: Option<Value>,
 }
 
 impl<'a> ExecInput<'a> {
@@ -874,7 +875,14 @@ impl<'a> ExecInput<'a> {
             read_only_roots: None,
             workdir: None,
             apertures: None,
+            writable_roots: None,
         }
+    }
+
+    /// Declares writable roots (ADR 0038): `[{"host", "mount"}]` or `[{"workspace", "mount"}]`.
+    fn writable_roots(mut self, roots: Value) -> Self {
+        self.writable_roots = Some(roots);
+        self
     }
 
     /// Names the directory the program starts in (design 26 § 1).
@@ -974,6 +982,9 @@ impl<'a> ExecInput<'a> {
         }
         if let Some(workdir) = self.workdir {
             input["workdir"] = json!(workdir);
+        }
+        if let Some(roots) = &self.writable_roots {
+            input["writable_roots"] = roots.clone();
         }
         input
     }
@@ -2625,7 +2636,7 @@ async fn check_promoted_route_inventory(
     let expected: BTreeSet<String> = {
         let registry = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
-            .join("contracts/substrate-wire/0.21.0/operations.json");
+            .join("contracts/substrate-wire/0.22.0/operations.json");
         let document: Value = serde_json::from_slice(
             &std::fs::read(&registry).expect("promoted operation registry bytes"),
         )
@@ -3018,6 +3029,7 @@ async fn check_http_journey(
 
     passed += check_read_only_file_shape(daemon, &workspace, &snapshot).await;
     passed += check_workdir_and_aperture_list_shape(daemon, &workspace, &snapshot).await;
+    passed += check_writable_roots_refused(daemon, &workspace, &snapshot).await;
 
     if let Some(cgroup_root) = cgroup_root {
         passed += check_confined_execs(daemon, &workspace, &snapshot, cgroup_root).await;
@@ -4974,6 +4986,135 @@ async fn check_workdir_and_aperture_list_shape(
     passed
 }
 
+/// Writable roots (ADR 0038), in both lanes: every lexical rule is answered before any fact is
+/// consulted, and because no host yet publishes `exec.writable-roots.host` or
+/// `exec.writable-roots.git`, a well-formed root of either kind is `unserved` with its name — never
+/// a run that quietly got no writable mount, and never one that got a different one.
+async fn check_writable_roots_refused(daemon: &Daemon, workspace: &str, snapshot: &str) -> usize {
+    let (status, machine) = daemon
+        .call("GET", "/v1/machine", "req_clean_writable_facts", None)
+        .await;
+    assert_eq!(status, 200);
+    for fact in ["exec.writable-roots.host", "exec.writable-roots.git"] {
+        assert!(
+            machine["result"]["facts"].get(fact).is_none(),
+            "no host publishes {fact} yet: {machine}"
+        );
+    }
+    let mut passed = 0;
+    for (operation, request, roots, status, code, message) in writable_root_cases() {
+        let response = daemon
+            .call(
+                "POST",
+                "/v1/execs",
+                request,
+                Some(&mutation(
+                    operation,
+                    &ExecInput::new(workspace, snapshot, &["/usr/bin/true"], true)
+                        .writable_roots(roots)
+                        .build(),
+                )),
+            )
+            .await;
+        expect_error_at(&response, status, code, "writable_roots");
+        if let Some(message) = message {
+            assert_eq!(response.1["error"]["message"], message, "{}", response.1);
+        }
+        passed += 1;
+    }
+    passed
+}
+
+/// One refused start per writable-root refusal: (operation, request id, roots, status, code, and
+/// the exact message where it names the root).
+type WritableRootCase = (
+    &'static str,
+    &'static str,
+    Value,
+    u16,
+    &'static str,
+    Option<&'static str>,
+);
+
+/// The six lexical refusals (422) and both unserved kinds (501), in the wire table's order.
+fn writable_root_cases() -> [WritableRootCase; 8] {
+    let nine: Vec<Value> = (1..=9)
+        .map(|index| json!({ "host": format!("r{index}"), "mount": format!("/opt/r{index}") }))
+        .collect();
+    [
+        (
+            "01JWRITABLECLEANSHAPE01",
+            "req_clean_writable_exceeded",
+            json!(nine),
+            422,
+            "exec.writable-roots-exceeded",
+            None,
+        ),
+        (
+            "01JWRITABLECLEANSHAPE02",
+            "req_clean_writable_name",
+            json!([{ "host": "-cache", "mount": "/opt/cache" }]),
+            422,
+            "exec.writable-root-name-invalid",
+            None,
+        ),
+        (
+            "01JWRITABLECLEANSHAPE03",
+            "req_clean_writable_mount_form",
+            json!([{ "host": "cache", "mount": "/" }]),
+            422,
+            "exec.writable-root-mount-invalid",
+            None,
+        ),
+        (
+            "01JWRITABLECLEANSHAPE04",
+            "req_clean_writable_mount_reserved",
+            json!([{ "host": "cache", "mount": "/workspace/cache" }]),
+            422,
+            "exec.writable-root-mount-reserved",
+            None,
+        ),
+        (
+            "01JWRITABLECLEANSHAPE05",
+            "req_clean_writable_mount_duplicate",
+            json!([
+                { "host": "cache", "mount": "/opt/shared" },
+                { "workspace": "ws_checkout", "mount": "/opt/shared" }
+            ]),
+            422,
+            "exec.writable-root-mount-duplicate",
+            None,
+        ),
+        (
+            "01JWRITABLECLEANSHAPE06",
+            "req_clean_writable_mount_overlap",
+            json!([
+                { "host": "cache", "mount": "/opt/cache" },
+                { "workspace": "ws_checkout", "mount": "/opt/cache/checkout" }
+            ]),
+            422,
+            "exec.writable-root-mount-overlap",
+            None,
+        ),
+        (
+            "01JWRITABLECLEANUNSERVED1",
+            "req_clean_writable_host_unserved",
+            json!([{ "host": "cache", "mount": "/opt/cache" }]),
+            501,
+            "exec.writable-roots-host-unserved",
+            Some("Writable host root cache is not served by this host."),
+        ),
+        (
+            "01JWRITABLECLEANUNSERVED2",
+            "req_clean_writable_git_unserved",
+            json!([{ "workspace": "ws_checkout", "mount": "/opt/checkout" }]),
+            501,
+            "exec.writable-roots-git-unserved",
+            Some("Writable Git root ws_checkout is not served by this host."),
+        ),
+    ]
+}
+
 /// No proved mechanism, no fact: a well-formed working directory is `unserved` by name — never a
 /// run started somewhere else — and a well-formed list is `unserved` as one aperture is.
 async fn check_workdir_and_aperture_list_unserved(
@@ -5390,8 +5531,8 @@ async fn check_confined_aperture_list(
 // ---------------------------------------------------------------------------------------------
 
 /// The predecessor printed its case count; the port asserts it, so a case cannot vanish quietly.
-const PORTABLE_CASES: usize = 99;
-const DELEGATED_CASES: usize = 147;
+const PORTABLE_CASES: usize = 107;
+const DELEGATED_CASES: usize = 155;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {

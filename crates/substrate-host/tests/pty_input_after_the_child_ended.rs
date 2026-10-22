@@ -70,6 +70,7 @@ fn pty_start(snapshot: &str, argv: &[&str]) -> PipeSessionStartInput {
     PipeSessionStartInput {
         capture: substrate_wire::CaptureMode::Recorded,
         exec: ExecStartInput {
+            writable_roots: Vec::new(),
             workspace: "ws_test".to_owned(),
             argv: argv.iter().map(|part| (*part).to_owned()).collect(),
             env: ExecEnvironment {

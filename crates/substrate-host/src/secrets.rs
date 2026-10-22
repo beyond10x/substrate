@@ -516,6 +516,7 @@ mod tests {
 
     fn exec_input(slots: Vec<SecretSlotRequest>) -> ExecStartInput {
         ExecStartInput {
+            writable_roots: Vec::new(),
             workspace: "ws_test".to_owned(),
             argv: vec!["/usr/bin/true".to_owned()],
             env: ExecEnvironment {
@@ -731,6 +732,7 @@ mod tests {
         assert!(!hash.contains(SENTINEL));
 
         let applied = AppliedConfinement {
+            writable_roots: Vec::new(),
             workspace_access: substrate_wire::WorkspaceAccess::ReadWrite,
             capability_snapshot: format!("sha256:{}", "7".repeat(64)),
             cgroup: "substrate-ex_test".to_owned(),

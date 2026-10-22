@@ -1142,6 +1142,7 @@ impl ProcessRuntime {
 
         let applied_capsule = capsule.as_ref().map(|value| value.applied.clone());
         let applied = AppliedConfinement {
+            writable_roots: Vec::new(),
             capability_snapshot: self.capability.snapshot.clone(),
             cgroup: cgroup.name().to_owned(),
             filesystem: if applied_capsule.is_some() {
@@ -2089,6 +2090,10 @@ impl ProcessRuntime {
             self.capability.facts.exec_egress_apertures.as_ref(),
             &input.sandbox,
         )?;
+        // ADR 0038: every lexical rule, then the fact of each kind, in the daemon's order. No
+        // host publishes either fact yet, so a named root is refused by name here even when a
+        // caller reaches the driver without the daemon; it is never silently left unbound.
+        admit_writable_roots(input, &self.capability.facts)?;
         // Shape, then the fact: the daemon's order (design 26 § 1). Existence is asked in
         // `start_inner`, once the objects the mounts bind are pinned.
         crate::workdir::admit(input, self.capability.facts.exec_workdir)?;
@@ -3391,6 +3396,29 @@ fn sandbox_unavailable() -> DriverError {
     )
 }
 
+/// The driver's half of ADR 0038 admission: the wire crate's rule and refusal, as the daemon
+/// answers it.
+fn admit_writable_roots(
+    input: &ExecStartInput,
+    facts: &substrate_wire::CapabilityFacts,
+) -> Result<(), DriverError> {
+    let Err(error) = substrate_wire::admit_writable_roots(input, facts) else {
+        return Ok(());
+    };
+    let Some((refusal, message)) = substrate_wire::writable_root_refusal(&error) else {
+        return Err(DriverError::refused(
+            substrate_wire::EXEC_WRITABLE_ROOT_NAME_INVALID,
+            error.to_string(),
+            "writable_roots",
+        ));
+    };
+    Err(if refusal.class == substrate_wire::ErrorClass::Unserved {
+        DriverError::unserved(refusal.code, message, "writable_roots")
+    } else {
+        DriverError::refused(refusal.code, message, "writable_roots")
+    })
+}
+
 /// The `cpu.max` period every exec cgroup is written with, in microseconds.
 const CPU_PERIOD_MICROS: u64 = 100_000;
 
@@ -4032,6 +4060,7 @@ mod tests {
                 signal: None,
             });
             observation.resource.applied = Some(substrate_wire::AppliedConfinement {
+                writable_roots: Vec::new(),
                 capability_snapshot: format!("sha256:{}", "7".repeat(64)),
                 cgroup: "ex_workdir".to_owned(),
                 filesystem: substrate_wire::AppliedFilesystem::WorkspaceReadWriteSystemReadOnly,
@@ -4510,6 +4539,7 @@ mod tests {
         };
         let runtime = ProcessRuntime::new(config, capability).expect("runtime");
         let input = ExecStartInput {
+            writable_roots: Vec::new(),
             read_only_roots: Vec::new(),
             read_only_files: Vec::new(),
             secret_slots: Vec::new(),
@@ -4720,6 +4750,7 @@ mod tests {
         config.bubblewrap = std::env::current_exe().expect("test executable");
         let runtime = ProcessRuntime::new(config, capability).unwrap();
         let input = ExecStartInput {
+            writable_roots: Vec::new(),
             read_only_roots: Vec::new(),
             read_only_files: Vec::new(),
             secret_slots: Vec::new(),
@@ -5000,6 +5031,7 @@ mod tests {
 
     fn pty_exec_input(snapshot: &str) -> ExecStartInput {
         ExecStartInput {
+            writable_roots: Vec::new(),
             read_only_roots: Vec::new(),
             read_only_files: Vec::new(),
             secret_slots: Vec::new(),

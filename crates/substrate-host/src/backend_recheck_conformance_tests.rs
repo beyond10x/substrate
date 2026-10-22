@@ -116,6 +116,7 @@ fn runtime(host: &Host, configured_backend: &Path) -> ProcessRuntime {
 
 fn input() -> ExecStartInput {
     ExecStartInput {
+        writable_roots: Vec::new(),
         read_only_roots: Vec::new(),
         read_only_files: Vec::new(),
         secret_slots: Vec::new(),

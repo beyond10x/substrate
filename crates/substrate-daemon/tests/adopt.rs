@@ -180,6 +180,7 @@ impl Driver for AdoptFixtureDriver {
                 observed_at: Utc::now(),
                 requested: input.sandbox.clone(),
                 applied: Some(AppliedConfinement {
+                    writable_roots: Vec::new(),
                     workspace_access: substrate_wire::WorkspaceAccess::ReadWrite,
                     read_only_roots: Vec::new(),
                     read_only_files: Vec::new(),

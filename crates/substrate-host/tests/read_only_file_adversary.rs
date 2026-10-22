@@ -87,6 +87,7 @@ fn exec_input(
     workspace_access: WorkspaceAccess,
 ) -> ExecStartInput {
     ExecStartInput {
+        writable_roots: Vec::new(),
         read_only_roots: Vec::new(),
         read_only_files,
         secret_slots: Vec::new(),

@@ -170,6 +170,7 @@ impl VectorDriver {
                     required: true,
                 },
                 applied: Some(AppliedConfinement {
+                    writable_roots: Vec::new(),
                     workspace_access: substrate_wire::WorkspaceAccess::ReadWrite,
                     read_only_roots: Vec::new(),
                     read_only_files: Vec::new(),

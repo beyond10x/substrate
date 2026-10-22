@@ -158,6 +158,11 @@ pub fn probe(config: &HostConfig, openat2: bool) -> CapabilitySnapshot {
             && workspace
             && crate::workdir::mechanism_is_provable(&config.bubblewrap))
         .then_some(true),
+        // ADR 0038 decision 5: neither kind is published until the throwaway-sandbox probe that
+        // proves a descriptor-bound root writable beside a read-only parent exists. Absent keeps
+        // every start that names one unserved, by name.
+        exec_writable_roots_host: None,
+        exec_writable_roots_git: None,
         exec_resource_usage: resource_usage.filter(|_| exec),
         metrics_stream: (exec && resource_usage.is_some()).then_some(MetricsStreamFacts {
             sample_interval_ms: substrate_wire::RESOURCE_USAGE_SAMPLE_INTERVAL_MS,

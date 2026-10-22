@@ -1296,6 +1296,7 @@ impl PipeSessionBuilder {
             ));
         }
         let exec = substrate_wire::ExecStartInput {
+            writable_roots: Vec::new(),
             workspace: self.workspace.observed.id.clone(),
             argv: self.argv,
             env: substrate_wire::ExecEnvironment {
@@ -1738,6 +1739,7 @@ impl CommandBuilder {
         let policy = self.policy.ok_or(SdkError::Builder { field: "policy" })?;
         let capability_snapshot = self.workspace.client.machine().capability_snapshot;
         let input = substrate_wire::ExecStartInput {
+            writable_roots: Vec::new(),
             workspace: self.workspace.observed.id.clone(),
             argv: self.argv,
             env: substrate_wire::ExecEnvironment {
@@ -2090,6 +2092,7 @@ mod tests {
     #[test]
     fn command_bytes_do_not_claim_unadvertised_additions() {
         let input = substrate_wire::ExecStartInput {
+            writable_roots: Vec::new(),
             workspace: "ws_example".to_owned(),
             argv: vec!["/usr/bin/true".to_owned()],
             env: substrate_wire::ExecEnvironment {
@@ -2155,7 +2158,7 @@ mod tests {
         let socket = temporary.path().join("daemon.sock");
         let listener = UnixListener::bind(&socket).expect("bind fake daemon");
         let vector: Value = serde_json::from_str(include_str!(
-            "../../../contracts/substrate-wire/0.21.0/vectors/http/machine-probe.json"
+            "../../../contracts/substrate-wire/0.22.0/vectors/http/machine-probe.json"
         ))
         .expect("machine vector");
         let machine = serde_json::to_vec(

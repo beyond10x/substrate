@@ -7,6 +7,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- Development contract bundle `substrate-wire/0.22.0` (ADR 0038), additive over `0.21.0` with
+  its 44 routes unchanged. The daemon and SDK advertise it at inner `bundle.json` digest
+  `5d551f08c3b680c144359b13ff99a7da2853003c4fcc9665a32b21ce85e146da`. `cargo xtask check-bundle
+  0.22.0` holds its bound, reserved mounts, facts, refusals, vectors and compatibility text to the
+  wire constants, and the gate checks it beside every earlier bundle. Its `writable-roots` register
+  publishes the six host refusals beside the eight lexical and unserved ones, as `0.21.0` publishes
+  the read-only-file host codes: `exec.writable-root-absent`, `-not-a-directory`, `-not-owned`,
+  `-not-git`, `-own-workspace` and `-workspace-duplicate`, each 422 `refused`.
+- An exec or session start may name `writable_roots`, at most `MAX_WRITABLE_ROOTS` (8) entries,
+  each either `{host, mount}` naming an operator-declared host root or `{workspace, mount}` naming
+  a Git checkout workspace. A start that names none serializes and hashes as before. The daemon and
+  host refuse `exec.writable-roots-exceeded`, `exec.writable-root-name-invalid`,
+  `exec.writable-root-mount-invalid`, `exec.writable-root-mount-reserved`,
+  `exec.writable-root-mount-duplicate` and `exec.writable-root-mount-overlap` (422) before any
+  capability is consulted, then `exec.writable-roots-host-unserved` and
+  `exec.writable-roots-git-unserved` (501) with the root's name. No host publishes
+  `exec.writable-roots.host` or `exec.writable-roots.git` yet, so every start naming a writable
+  root is refused unserved; binding them is the work of the host and Git stories.
+- A `workdir` may lie at or beneath a writable root mount. The applied confinement record gains an
+  optional `writable_roots` list (kind, name or workspace id, host path, mount).
+
 ## [0.9.0] — 2026-10-22
 
 Published by [release run 39756033654](https://github.com/beyond10x/substrate/actions/runs/39756033654)
