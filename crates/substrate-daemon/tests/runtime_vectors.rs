@@ -43,7 +43,7 @@ const DAEMON: &str = env!("CARGO_BIN_EXE_substrate-daemon");
 const CGROUP_EXEC: &str = env!("CARGO_BIN_EXE_substrate-cgroup-exec");
 const DAEMON_OVERRIDE_VARIABLE: &str = "SUBSTRATE_VECTORS_DAEMON";
 /// Pinned independently of the daemon implementation: the clean-room client verifies what ships.
-const ADVERTISED_CONTRACT: &str = "substrate-wire/0.20.0";
+const ADVERTISED_CONTRACT: &str = "substrate-wire/0.21.0";
 const ADVERTISED_CONTRACT_SHA256: &str =
     "52f72530cecf1b0e5d70fdca47abd27b844b89f65e6da2827c70fbf10d97a6d5";
 
@@ -855,6 +855,8 @@ struct ExecInput<'a> {
     secret_slot: Option<(&'a str, u32)>,
     read_only_files: Option<Value>,
     read_only_roots: Option<Value>,
+    workdir: Option<&'a str>,
+    apertures: Option<&'a [&'a str]>,
 }
 
 impl<'a> ExecInput<'a> {
@@ -870,7 +872,22 @@ impl<'a> ExecInput<'a> {
             secret_slot: None,
             read_only_files: None,
             read_only_roots: None,
+            workdir: None,
+            apertures: None,
         }
+    }
+
+    /// Names the directory the program starts in (design 26 § 1).
+    fn workdir(mut self, workdir: &'a str) -> Self {
+        self.workdir = Some(workdir);
+        self
+    }
+
+    /// Selects several declared egress apertures by name (design 26 § 2). Beside [`Self::aperture`]
+    /// the request carries both, which is the mode mismatch a list refuses.
+    fn apertures(mut self, names: &'a [&'a str]) -> Self {
+        self.apertures = Some(names);
+        self
     }
 
     /// Declares single host files read-only (ADR 0033): `[{"host_path", "mount"}]`.
@@ -911,7 +928,7 @@ impl<'a> ExecInput<'a> {
     }
 
     fn build(&self) -> Value {
-        let sandbox = match self.aperture {
+        let mut sandbox = match self.aperture {
             Some(name) => json!({
                 "capability_snapshot": self.snapshot,
                 "network": "aperture",
@@ -926,6 +943,10 @@ impl<'a> ExecInput<'a> {
                 "require": true,
             }),
         };
+        if let Some(names) = self.apertures {
+            sandbox["network"] = json!("aperture");
+            sandbox["apertures"] = json!(names);
+        }
         let mut input = json!({
             "workspace": self.workspace,
             "argv": self.argv,
@@ -950,6 +971,9 @@ impl<'a> ExecInput<'a> {
         }
         if let Some(roots) = &self.read_only_roots {
             input["read_only_roots"] = roots.clone();
+        }
+        if let Some(workdir) = self.workdir {
+            input["workdir"] = json!(workdir);
         }
         input
     }
@@ -2601,7 +2625,7 @@ async fn check_promoted_route_inventory(
     let expected: BTreeSet<String> = {
         let registry = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
-            .join("contracts/substrate-wire/0.20.0/operations.json");
+            .join("contracts/substrate-wire/0.21.0/operations.json");
         let document: Value = serde_json::from_slice(
             &std::fs::read(&registry).expect("promoted operation registry bytes"),
         )
@@ -2993,6 +3017,7 @@ async fn check_http_journey(
     passed += 1;
 
     passed += check_read_only_file_shape(daemon, &workspace, &snapshot).await;
+    passed += check_workdir_and_aperture_list_shape(daemon, &workspace, &snapshot).await;
 
     if let Some(cgroup_root) = cgroup_root {
         passed += check_confined_execs(daemon, &workspace, &snapshot, cgroup_root).await;
@@ -3001,8 +3026,11 @@ async fn check_http_journey(
         passed += check_confined_secret_slots(daemon, &workspace, &snapshot).await;
         passed += check_confined_pty(daemon, &workspace, &snapshot).await;
         passed += check_confined_read_only_files(daemon, &workspace, &snapshot).await;
+        passed += check_confined_workdir(daemon, &workspace, &snapshot).await;
+        passed += check_confined_aperture_list(daemon, &workspace, &snapshot).await;
     } else {
         passed += check_read_only_files_unserved(daemon, &workspace, &snapshot).await;
+        passed += check_workdir_and_aperture_list_unserved(daemon, &workspace, &snapshot).await;
         // No confinement means no verified mechanism, so the capability is absent and every
         // aperture request is `unserved` — never a run that quietly got no network instead.
         expect_error(
@@ -4832,12 +4860,390 @@ async fn check_read_only_file_host_refusals(
 }
 
 // ---------------------------------------------------------------------------------------------
+// Working directory and several apertures (design 26)
+// ---------------------------------------------------------------------------------------------
+
+/// Asserts the refusal's code and the address it names.
+fn expect_error_at(response: &(u16, Value), status: u16, code: &str, address: &str) {
+    expect_error(response, status, code);
+    assert_eq!(response.1["error"]["address"], address, "{}", response.1);
+}
+
+/// Shape before capability, in both lanes: every lexical working-directory and aperture-list
+/// refusal is answered before any fact is consulted, so a portable host and a delegated one give
+/// the same answer (design 26 §§ 1–2).
+async fn check_workdir_and_aperture_list_shape(
+    daemon: &Daemon,
+    workspace: &str,
+    snapshot: &str,
+) -> usize {
+    let mut passed = 0;
+    for (operation, request, workdir, code) in [
+        (
+            "01JWORKDIRCLEANSHAPE001",
+            "req_clean_workdir_invalid",
+            "workspace/sub",
+            "exec.workdir-invalid",
+        ),
+        (
+            "01JWORKDIRCLEANSHAPE002",
+            "req_clean_workdir_outside",
+            "/tmp",
+            "exec.workdir-outside-mounts",
+        ),
+    ] {
+        expect_error_at(
+            &daemon
+                .call(
+                    "POST",
+                    "/v1/execs",
+                    request,
+                    Some(&mutation(
+                        operation,
+                        &ExecInput::new(workspace, snapshot, &["/usr/bin/true"], true)
+                            .workdir(workdir)
+                            .build(),
+                    )),
+                )
+                .await,
+            422,
+            code,
+            "workdir",
+        );
+        passed += 1;
+    }
+    let five = ["model", "capped", "uncapped", "fourth", "fifth"];
+    for (operation, request, names, code) in [
+        (
+            "01JAPERTURESCLEANSHAPE1",
+            "req_clean_apertures_too_few",
+            &five[..1],
+            "exec.apertures-too-few",
+        ),
+        (
+            "01JAPERTURESCLEANSHAPE2",
+            "req_clean_apertures_too_many",
+            &five[..],
+            "exec.apertures-too-many",
+        ),
+        (
+            "01JAPERTURESCLEANSHAPE3",
+            "req_clean_apertures_twice",
+            &["model", "capped", "model"][..],
+            "exec.aperture-listed-twice",
+        ),
+        (
+            "01JAPERTURESCLEANSHAPE4",
+            "req_clean_apertures_name",
+            &["model", "Not-A-Name"][..],
+            "exec.aperture-name-invalid",
+        ),
+    ] {
+        expect_error_at(
+            &daemon
+                .call(
+                    "POST",
+                    "/v1/execs",
+                    request,
+                    Some(&mutation(
+                        operation,
+                        &ExecInput::new(workspace, snapshot, &["/usr/bin/true"], true)
+                            .apertures(names)
+                            .build(),
+                    )),
+                )
+                .await,
+            422,
+            code,
+            "sandbox.apertures",
+        );
+        passed += 1;
+    }
+    // One aperture and a list are two selections, and neither is chosen for the caller.
+    expect_error_at(
+        &daemon
+            .call(
+                "POST",
+                "/v1/execs",
+                "req_clean_apertures_mismatch",
+                Some(&mutation(
+                    "01JAPERTURESCLEANSHAPE5",
+                    &ExecInput::new(workspace, snapshot, &["/usr/bin/true"], true)
+                        .aperture("model")
+                        .apertures(&["model", "capped"])
+                        .build(),
+                )),
+            )
+            .await,
+        422,
+        "exec.aperture-mode-mismatch",
+        "sandbox.apertures",
+    );
+    passed += 1;
+    passed
+}
+
+/// No proved mechanism, no fact: a well-formed working directory is `unserved` by name — never a
+/// run started somewhere else — and a well-formed list is `unserved` as one aperture is.
+async fn check_workdir_and_aperture_list_unserved(
+    daemon: &Daemon,
+    workspace: &str,
+    snapshot: &str,
+) -> usize {
+    let (status, machine) = daemon
+        .call("GET", "/v1/machine", "req_clean_workdir_fact_absent", None)
+        .await;
+    assert_eq!(status, 200);
+    assert!(
+        machine["result"]["facts"].get("exec.workdir").is_none(),
+        "a portable host publishes no working-directory fact: {machine}"
+    );
+    expect_error_at(
+        &daemon
+            .call(
+                "POST",
+                "/v1/execs",
+                "req_clean_workdir_unserved",
+                Some(&mutation(
+                    "01JWORKDIRCLEANUNSERVED1",
+                    &ExecInput::new(workspace, snapshot, &["/usr/bin/true"], true)
+                        .workdir("/workspace")
+                        .build(),
+                )),
+            )
+            .await,
+        501,
+        "exec.workdir-unserved",
+        "workdir",
+    );
+    expect_error(
+        &daemon
+            .call(
+                "POST",
+                "/v1/execs",
+                "req_clean_apertures_unserved",
+                Some(&mutation(
+                    "01JAPERTURESCLEANUNSERVED",
+                    &ExecInput::new(workspace, snapshot, &["/usr/bin/true"], true)
+                        .apertures(&["model", "capped"])
+                        .build(),
+                )),
+            )
+            .await,
+        501,
+        "exec.egress-apertures-unserved",
+    );
+    2
+}
+
+/// Runs `pwd -P` in `workdir` and returns the response, asserting nothing.
+async fn run_in(
+    daemon: &Daemon,
+    workspace: &str,
+    snapshot: &str,
+    (operation, request): (&str, &str),
+    workdir: &str,
+    roots: Option<Value>,
+) -> (u16, Value) {
+    let mut input =
+        ExecInput::new(workspace, snapshot, &["/bin/sh", "-c", "pwd -P"], true).workdir(workdir);
+    if let Some(roots) = roots {
+        input = input.read_only_roots(roots);
+    }
+    daemon
+        .call(
+            "POST",
+            "/v1/execs",
+            request,
+            Some(&mutation(operation, &input.build())),
+        )
+        .await
+}
+
+/// Asserts a run started in `workdir`, and that the applied record names it.
+async fn expect_started_in(daemon: &Daemon, response: &(u16, Value), workdir: &str) {
+    let (status, run) = response;
+    assert_eq!(*status, 200, "{run}");
+    assert_eq!(run["result"]["exit"], EXITED_CLEANLY(), "{run}");
+    let stdout = decoded(&read_output(daemon, &text(&run["result"]["id"]), "stdout").await);
+    assert_eq!(
+        String::from_utf8_lossy(&stdout),
+        format!("{workdir}\n"),
+        "the program starts in the requested directory: {run}"
+    );
+    assert_eq!(
+        run["result"]["applied"]["workdir"], workdir,
+        "the applied record names the directory: {run}"
+    );
+}
+
+/// The delegated journey: a directory beneath the workspace and one beneath a declared root are
+/// where the program starts, and an absent directory or a symlink — beneath the workspace or a
+/// root — is refused by name before dispatch.
+async fn check_confined_workdir(daemon: &Daemon, workspace: &str, snapshot: &str) -> usize {
+    let mut passed = 0;
+    let (status, machine) = daemon
+        .call("GET", "/v1/machine", "req_clean_workdir_fact", None)
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        machine["result"]["facts"]["exec.workdir"], true,
+        "a delegated host proves and publishes the working directory: {machine}"
+    );
+    let (status, prepared) = daemon
+        .call(
+            "POST",
+            "/v1/execs",
+            "req_clean_workdir_prepare",
+            Some(&mutation(
+                "01JWORKDIRCLEANPREPARE1",
+                &ExecInput::new(
+                    workspace,
+                    snapshot,
+                    &[
+                        "/bin/sh",
+                        "-c",
+                        "mkdir -p workdir-probe/sub && ln -s sub workdir-probe/link",
+                    ],
+                    true,
+                )
+                .build(),
+            )),
+        )
+        .await;
+    assert_eq!(status, 200, "{prepared}");
+    assert_eq!(prepared["result"]["exit"], EXITED_CLEANLY(), "{prepared}");
+    let sub = "/workspace/workdir-probe/sub";
+    let run = run_in(
+        daemon,
+        workspace,
+        snapshot,
+        ("01JWORKDIRCLEANRUNS0001", "req_clean_workdir_runs"),
+        sub,
+        None,
+    )
+    .await;
+    expect_started_in(daemon, &run, sub).await;
+    passed += 1;
+    for (operation, request, workdir) in [
+        (
+            "01JWORKDIRCLEANABSENT01",
+            "req_clean_workdir_absent",
+            "/workspace/workdir-probe/absent",
+        ),
+        (
+            "01JWORKDIRCLEANSYMLINK1",
+            "req_clean_workdir_symlink",
+            "/workspace/workdir-probe/link",
+        ),
+    ] {
+        expect_error_at(
+            &run_in(
+                daemon,
+                workspace,
+                snapshot,
+                (operation, request),
+                workdir,
+                None,
+            )
+            .await,
+            422,
+            "exec.workdir-missing",
+            "workdir",
+        );
+        passed += 1;
+    }
+
+    let fixture = tempfile::Builder::new()
+        .prefix("workdir-cleanroom-")
+        .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
+        .expect("fixture under CARGO_TARGET_TMPDIR");
+    let host = std::fs::canonicalize(fixture.path()).expect("canonical fixture");
+    std::fs::create_dir(host.join("tool")).expect("root directory");
+    std::os::unix::fs::symlink("tool", host.join("tool-link")).expect("root symlink");
+    let roots = json!([{
+        "host_path": host.to_str().expect("UTF-8 fixture"),
+        "mount": "/opt/workdir-root",
+    }]);
+    let tool = "/opt/workdir-root/tool";
+    let run = run_in(
+        daemon,
+        workspace,
+        snapshot,
+        ("01JWORKDIRCLEANROOTRUNS", "req_clean_workdir_root_runs"),
+        tool,
+        Some(roots.clone()),
+    )
+    .await;
+    expect_started_in(daemon, &run, tool).await;
+    passed += 1;
+    expect_error_at(
+        &run_in(
+            daemon,
+            workspace,
+            snapshot,
+            ("01JWORKDIRCLEANROOTLINK", "req_clean_workdir_root_symlink"),
+            "/opt/workdir-root/tool-link",
+            Some(roots),
+        )
+        .await,
+        422,
+        "exec.workdir-missing",
+        "workdir",
+    );
+    passed += 1;
+    passed
+}
+
+/// The delegated half of a list's admission: every name must be declared, and a list of declared
+/// names reaches the driver, which refuses it by name until several apertures per run are wired.
+async fn check_confined_aperture_list(daemon: &Daemon, workspace: &str, snapshot: &str) -> usize {
+    expect_error(
+        &daemon
+            .call(
+                "POST",
+                "/v1/execs",
+                "req_clean_apertures_undeclared",
+                Some(&mutation(
+                    "01JAPERTURESCLEANUNDECLARED",
+                    &ExecInput::new(workspace, snapshot, &["/usr/bin/true"], true)
+                        .apertures(&["model", "undeclared"])
+                        .build(),
+                )),
+            )
+            .await,
+        501,
+        "exec.aperture-undeclared",
+    );
+    // u2 plug point: this case becomes the several-apertures run once the driver serves it.
+    expect_error_at(
+        &daemon
+            .call(
+                "POST",
+                "/v1/execs",
+                "req_clean_apertures_declared",
+                Some(&mutation(
+                    "01JAPERTURESCLEANDECLARED",
+                    &ExecInput::new(workspace, snapshot, &["/usr/bin/true"], true)
+                        .apertures(&["model", CAPPED_APERTURE])
+                        .build(),
+                )),
+            )
+            .await,
+        501,
+        "exec.apertures-unserved",
+        "sandbox.apertures",
+    );
+    2
+}
+
+// ---------------------------------------------------------------------------------------------
 // The lane
 // ---------------------------------------------------------------------------------------------
 
 /// The predecessor printed its case count; the port asserts it, so a case cannot vanish quietly.
-const PORTABLE_CASES: usize = 90;
-const DELEGATED_CASES: usize = 132;
+const PORTABLE_CASES: usize = 99;
+const DELEGATED_CASES: usize = 146;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {

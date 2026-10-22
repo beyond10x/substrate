@@ -116,6 +116,7 @@ fn input(workspace: &str, access: WorkspaceAccess) -> ExecStartInput {
             capability_snapshot: SNAPSHOT.to_owned(),
             network: NetworkMode::None,
             aperture: None,
+            apertures: Vec::new(),
             profile: SandboxProfile::Workspace,
             required: true,
         },
@@ -132,6 +133,7 @@ fn input(workspace: &str, access: WorkspaceAccess) -> ExecStartInput {
         measurements: std::collections::BTreeSet::new(),
         capsule: None,
         lease_ttl_ms: None,
+        workdir: None,
     }
 }
 

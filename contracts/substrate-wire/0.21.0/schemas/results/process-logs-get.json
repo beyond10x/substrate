@@ -1,0 +1,6 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.21.0:result:process-logs-get",
+  "$ref": "../resource.json#/$defs/process-log-tail",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "process-logs-get operation result"
+}

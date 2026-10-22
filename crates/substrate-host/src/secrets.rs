@@ -526,6 +526,7 @@ mod tests {
                 capability_snapshot: format!("sha256:{}", "7".repeat(64)),
                 network: NetworkMode::None,
                 aperture: None,
+                apertures: Vec::new(),
                 profile: SandboxProfile::Workspace,
                 required: true,
             },
@@ -545,6 +546,7 @@ mod tests {
             secret_slots: slots,
             capsule: None,
             lease_ttl_ms: None,
+            workdir: None,
         }
     }
 
@@ -739,6 +741,7 @@ mod tests {
             read_only_roots: Vec::new(),
             read_only_files: Vec::new(),
             secret_slots: requests.clone(),
+            workdir: None,
         };
         let applied_json = serde_json::to_string(&applied).expect("applied record");
         assert!(

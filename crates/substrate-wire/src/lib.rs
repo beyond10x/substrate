@@ -15,9 +15,9 @@ pub const API_VERSION: &str = "v1";
 ///
 /// This is the SHA-256 of the inner immutable `bundle.json`, not the outer OCI manifest digest.
 /// Moving either member is an explicit coordinated promotion (Atlas ADR 0019).
-pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.20.0";
+pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.21.0";
 pub const ADVERTISED_CONTRACT_BUNDLE_SHA256: &str =
-    "52f72530cecf1b0e5d70fdca47abd27b844b89f65e6da2827c70fbf10d97a6d5";
+    "018478900be9f2ca1c8366de52bf22bd33189f3a01dda344cb233274d919faf6";
 pub const MAX_FILE_BYTES: u64 = 1_048_576;
 pub const MAX_IO_BYTES: u64 = 1_048_576;
 pub const MAX_LIST_ITEMS: u32 = 1_000;
@@ -36,6 +36,35 @@ pub const MIN_STORAGE_QUOTA_INODES: u64 = 16;
 pub const MAX_STORAGE_QUOTA_INODES: u64 = 1_048_576;
 pub const RESOURCE_USAGE_SAMPLE_INTERVAL_MS: u64 = 1_000;
 pub const EXEC_SCRATCH_MOUNT: &str = "/scratch";
+/// Where the workspace appears inside every confined run, and the working directory a start that
+/// names none begins in (design 26 § 1).
+pub const EXEC_WORKSPACE_MOUNT: &str = "/workspace";
+/// Longest working directory a start may name, in UTF-8 bytes (design 26 § 1).
+///
+/// The kernel's `PATH_MAX`. Bytes, not characters: the kernel counts bytes, and the bundle's
+/// `maxLength` counts characters, so the schema states the same number and this crate is the
+/// stricter of the two for a non-ASCII path.
+pub const MAX_WORKDIR_BYTES: usize = 4_096;
+/// The fact a host publishes when its driver applies a requested working directory (design 26).
+pub const EXEC_WORKDIR_FACT: &str = "exec.workdir";
+/// A working directory that is not absolute and lexically normal, or is too long (design 26).
+pub const EXEC_WORKDIR_INVALID: &str = "exec.workdir-invalid";
+/// A working directory at or beneath no mount this start places (design 26).
+pub const EXEC_WORKDIR_OUTSIDE_MOUNTS: &str = "exec.workdir-outside-mounts";
+/// A working directory that is not a directory in the sandbox, or is reached through a symlink
+/// (design 26).
+pub const EXEC_WORKDIR_MISSING: &str = "exec.workdir-missing";
+/// A working directory was named and this host publishes no [`EXEC_WORKDIR_FACT`] (design 26).
+pub const EXEC_WORKDIR_UNSERVED: &str = "exec.workdir-unserved";
+/// An aperture list naming fewer than two apertures (design 26 § 2).
+pub const EXEC_APERTURES_TOO_FEW: &str = "exec.apertures-too-few";
+/// An aperture list naming more than [`MAX_EGRESS_APERTURES`] apertures (design 26 § 2).
+pub const EXEC_APERTURES_TOO_MANY: &str = "exec.apertures-too-many";
+/// An aperture list naming one aperture twice (design 26 § 2).
+pub const EXEC_APERTURE_LISTED_TWICE: &str = "exec.aperture-listed-twice";
+/// An aperture list naming two apertures whose declared hosts are one host name, so the generated
+/// host mapping could reach only one of them by that name (design 26 § 2).
+pub const EXEC_APERTURE_HOST_LISTED_TWICE: &str = "exec.aperture-host-listed-twice";
 /// How many host directories one start may declare read-only (ADR 0010).
 ///
 /// Small on purpose. A closure that needs many roots is a closure that should be assembled rather
@@ -122,7 +151,9 @@ pub const SECRET_SLOTS_ENV: &str = "SUBSTRATE_SECRET_SLOTS";
 /// How many egress apertures one deployment may declare (ADR 0013).
 ///
 /// An aperture is outbound authority. A deployment that needs many of them is a deployment whose
-/// reach nobody reviewed, and design 10 § 9 decision 5 gives one run exactly one of them anyway.
+/// reach nobody reviewed. The same number bounds one run: design 10 § 9 decision 5 limited the
+/// first slice to one aperture per run, and design 26 § 2 lets a run select up to this many by
+/// listing them in `apertures`.
 pub const MAX_EGRESS_APERTURES: u32 = 4;
 /// The address the per-run forwarder listens on inside the run's own network namespace.
 ///
@@ -1329,6 +1360,14 @@ pub struct ConfinementRequest {
     /// the floor — `--unshare-net` and no interface.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub aperture: Option<String>,
+    /// Several operator-declared apertures this start selects, by name (design 26 § 2).
+    ///
+    /// Two to [`MAX_EGRESS_APERTURES`] distinct names, each under the rules `aperture` has; one
+    /// name is written as `aperture`, and naming both is refused. Empty on every existing
+    /// consumer, and skipped when empty, so an unchanged start hashes as it always did. An
+    /// explicit empty list therefore reads as an absent one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub apertures: Vec<String>,
     pub profile: SandboxProfile,
     #[serde(rename = "require")]
     pub required: bool,
@@ -1365,6 +1404,11 @@ pub struct AppliedConfinement {
     /// in it. Applied, not requested: this is the record of what the driver actually placed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub secret_slots: Vec<SecretSlotRequest>,
+    /// The working directory the program started in, when the start named one (design 26 § 1).
+    ///
+    /// Absent means `/workspace`, as for every run before the field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workdir: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1424,19 +1468,27 @@ pub struct AppliedExecutionCapsule {
 /// every run that used no aperture. An applied aperture is an object, because "which aperture, to
 /// what address, by what mechanism, and how many bytes" are four separate observations and a
 /// reader that only has the name cannot audit any of the other three.
+///
+/// A start that listed several apertures (design 26 § 2) gets the third form, an array with one
+/// applied aperture per listed name, in the order listed, each stating where it listened. A start
+/// that named one `aperture` keeps the single object, without `listen`, so no `0.20.0` reader's
+/// record changes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(from = "AppliedNetworkRepr", into = "AppliedNetworkRepr")]
 pub enum AppliedNetwork {
     None,
     Aperture(AppliedAperture),
+    Apertures(Vec<AppliedAperture>),
 }
 
-/// The serialized shape of [`AppliedNetwork`]: a bare `"none"`, or the applied-aperture object.
+/// The serialized shape of [`AppliedNetwork`]: a bare `"none"`, the applied-aperture object, or an
+/// array of them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 enum AppliedNetworkRepr {
     None(AppliedNoNetwork),
     Aperture(AppliedAperture),
+    Apertures(Vec<AppliedAperture>),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1450,6 +1502,7 @@ impl From<AppliedNetworkRepr> for AppliedNetwork {
         match value {
             AppliedNetworkRepr::None(AppliedNoNetwork::None) => Self::None,
             AppliedNetworkRepr::Aperture(aperture) => Self::Aperture(aperture),
+            AppliedNetworkRepr::Apertures(apertures) => Self::Apertures(apertures),
         }
     }
 }
@@ -1459,6 +1512,7 @@ impl From<AppliedNetwork> for AppliedNetworkRepr {
         match value {
             AppliedNetwork::None => Self::None(AppliedNoNetwork::None),
             AppliedNetwork::Aperture(aperture) => Self::Aperture(aperture),
+            AppliedNetwork::Apertures(apertures) => Self::Apertures(apertures),
         }
     }
 }
@@ -1487,6 +1541,12 @@ pub struct AppliedAperture {
     /// deployment's argv to know why it stopped.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_bytes: Option<u64>,
+    /// The loopback `address:port` the forwarder listened on inside the run (design 26 § 2).
+    ///
+    /// Present only on the elements of the array form: the n-th listed aperture listens on
+    /// `127.0.0.n`. A single `aperture` keeps the record it always had, without this member.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub listen: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1644,6 +1704,14 @@ pub struct ExecStartInput {
     pub capsule: Option<ExecutionCapsuleInput>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub lease_ttl_ms: Option<u64>,
+    /// The sandbox path the program starts in (design 26 § 1).
+    ///
+    /// Absent means `/workspace`, as every start before `0.21.0` ran. When present it is absolute,
+    /// lexically normal, at most [`MAX_WORKDIR_BYTES`] bytes, and at or beneath a mount this start
+    /// places ([`validate_workdir`]). Skipped when absent, so an unchanged start hashes as it
+    /// always did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workdir: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -3078,6 +3146,18 @@ pub struct CapabilityFacts {
         skip_serializing_if = "Option::is_none"
     )]
     pub exec_read_only_files: Option<ReadOnlyFileFacts>,
+    /// Whether this driver starts a run in a requested working directory ([`EXEC_WORKDIR_FACT`],
+    /// design 26 § 1).
+    ///
+    /// Published only by a driver that places the requested directory as the program's start
+    /// directory and refuses one that is missing by name. Absent leaves every start that names a
+    /// `workdir` `exec.workdir-unserved`; it never starts the program in `/workspace` instead.
+    #[serde(
+        rename = "exec.workdir",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub exec_workdir: Option<bool>,
     #[serde(
         rename = "exec.resource-usage",
         skip_serializing_if = "Option::is_none"
@@ -3171,6 +3251,7 @@ impl Default for CapabilityFacts {
             exec_inline_capsule: None,
             exec_scratch_quota: None,
             exec_read_only_files: None,
+            exec_workdir: None,
             exec_resource_usage: None,
             metrics_stream: None,
             exec_egress_apertures: None,
@@ -3389,6 +3470,16 @@ pub enum WireValidationError {
     CapsuleManifestMismatch,
     #[error("a session window is absent, unwanted, or outside the closed cell bounds")]
     InvalidSessionWindow,
+    #[error("the working directory is not an absolute, lexically normal path within its bound")]
+    WorkdirInvalid,
+    #[error("the working directory is not at or beneath a mount this start places")]
+    WorkdirOutsideMounts,
+    #[error("an aperture list names fewer than two apertures")]
+    AperturesTooFew,
+    #[error("an aperture list names more apertures than one run may select")]
+    AperturesTooMany,
+    #[error("an aperture list names one aperture twice")]
+    ApertureListedTwice,
 }
 
 fn valid_sha256(value: &str) -> bool {
@@ -3856,6 +3947,194 @@ pub fn validate_aperture_request(
             Ok(())
         }
     }
+}
+
+/// Checks the whole aperture selection of one sandbox request: one `aperture`, or an `apertures`
+/// list (design 26 § 2).
+///
+/// An empty list is the single-aperture request and keeps exactly the rules of
+/// [`validate_aperture_request`]. A list is checked in this order: it cannot be combined with
+/// `aperture` and needs `network: "aperture"` ([`WireValidationError::ApertureModeMismatch`]),
+/// then its length ([`WireValidationError::AperturesTooFew`] under two,
+/// [`WireValidationError::AperturesTooMany`] over [`MAX_EGRESS_APERTURES`]), then each name in
+/// order: the per-name rules a single `aperture` has, and then whether an earlier element already
+/// named it ([`WireValidationError::ApertureListedTwice`]). Shape only, as for one aperture:
+/// whether the deployment declared each name is the driver's question.
+///
+/// # Errors
+///
+/// Returns the first rule broken. Nothing is adjusted: a list is never shortened, deduplicated or
+/// reordered to make it admissible.
+pub fn validate_aperture_selection(
+    sandbox: &ConfinementRequest,
+) -> Result<(), WireValidationError> {
+    if sandbox.apertures.is_empty() {
+        return validate_aperture_request(sandbox.network, sandbox.aperture.as_deref());
+    }
+    if sandbox.aperture.is_some() || sandbox.network != NetworkMode::Aperture {
+        return Err(WireValidationError::ApertureModeMismatch);
+    }
+    if sandbox.apertures.len() < 2 {
+        return Err(WireValidationError::AperturesTooFew);
+    }
+    if sandbox.apertures.len() > MAX_EGRESS_APERTURES as usize {
+        return Err(WireValidationError::AperturesTooMany);
+    }
+    let mut seen: BTreeSet<&str> = BTreeSet::new();
+    for name in &sandbox.apertures {
+        validate_aperture_request(NetworkMode::Aperture, Some(name))?;
+        if !seen.insert(name.as_str()) {
+            return Err(WireValidationError::ApertureListedTwice);
+        }
+    }
+    Ok(())
+}
+
+/// Checks the working directory a start names (design 26 § 1).
+///
+/// Absent is `/workspace` and always admitted. A named directory must be absolute and lexically
+/// normal: it begins with `/`, has no empty, `.` or `..` component, no trailing `/` and no NUL,
+/// and is at most [`MAX_WORKDIR_BYTES`] bytes. Then it must be at or beneath a mount this start
+/// places: `/workspace`, the `mount` of one of its `read_only_roots`, `/scratch` when it asks for
+/// scratch, or `/runtime` when it carries a capsule. Whether the directory exists in the sandbox is
+/// the driver's question, answered with [`EXEC_WORKDIR_MISSING`] after the mounts are placed.
+///
+/// # Errors
+///
+/// [`WireValidationError::WorkdirInvalid`] for a path that is not absolute, normal and within its
+/// bound, checked first; [`WireValidationError::WorkdirOutsideMounts`] for a normal path no placed
+/// mount contains.
+pub fn validate_workdir(input: &ExecStartInput) -> Result<(), WireValidationError> {
+    let Some(workdir) = input.workdir.as_deref() else {
+        return Ok(());
+    };
+    if !lexically_normal_absolute(workdir) {
+        return Err(WireValidationError::WorkdirInvalid);
+    }
+    let at_or_beneath = |mount: &str| workdir == mount || is_path_beneath(workdir, mount);
+    let placed = at_or_beneath(EXEC_WORKSPACE_MOUNT)
+        || input
+            .read_only_roots
+            .iter()
+            .any(|root| at_or_beneath(&root.mount))
+        || (input.scratch.is_some() && at_or_beneath(EXEC_SCRATCH_MOUNT))
+        || (input.capsule.is_some() && at_or_beneath(EXECUTION_CAPSULE_MOUNT));
+    if placed {
+        Ok(())
+    } else {
+        Err(WireValidationError::WorkdirOutsideMounts)
+    }
+}
+
+fn lexically_normal_absolute(path: &str) -> bool {
+    if path.len() > MAX_WORKDIR_BYTES || path.contains('\0') {
+        return false;
+    }
+    if path == "/" {
+        return true;
+    }
+    let Some(rest) = path.strip_prefix('/') else {
+        return false;
+    };
+    rest.split('/')
+        .all(|component| !matches!(component, "" | "." | ".."))
+}
+
+/// One named start refusal a design states with its status and class.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExecStartRefusal {
+    /// The `error.code`.
+    pub code: &'static str,
+    /// The HTTP status the daemon answers with.
+    pub status: u16,
+    /// The `error.class`.
+    pub class: ErrorClass,
+    /// The `error.message`: it names the rule and never echoes the request's path or names.
+    pub message: &'static str,
+}
+
+/// The four working-directory refusals of design 26 § 1, in the design's order.
+pub const WORKDIR_REFUSALS: [ExecStartRefusal; 4] = [
+    ExecStartRefusal {
+        code: EXEC_WORKDIR_INVALID,
+        status: 422,
+        class: ErrorClass::Refused,
+        message: "The working directory must be an absolute, lexically normal path of at most 4096 bytes.",
+    },
+    ExecStartRefusal {
+        code: EXEC_WORKDIR_OUTSIDE_MOUNTS,
+        status: 422,
+        class: ErrorClass::Refused,
+        message: "The working directory must be at or beneath /workspace, a declared read-only root mount, /scratch when scratch is requested, or /runtime when a capsule is carried.",
+    },
+    ExecStartRefusal {
+        code: EXEC_WORKDIR_MISSING,
+        status: 422,
+        class: ErrorClass::Refused,
+        message: "The working directory is not a directory reached without a symlink in the sandbox.",
+    },
+    ExecStartRefusal {
+        code: EXEC_WORKDIR_UNSERVED,
+        status: 501,
+        class: ErrorClass::Unserved,
+        message: "A working directory is not served by this host.",
+    },
+];
+
+/// The four aperture-list refusals of design 26 § 2, in the design's order.
+///
+/// The first three are lexical and [`validate_aperture_selection`] decides them. The fourth needs
+/// the operator's declared hosts, which no published fact carries, so only the driver decides it.
+pub const APERTURE_LIST_REFUSALS: [ExecStartRefusal; 4] = [
+    ExecStartRefusal {
+        code: EXEC_APERTURES_TOO_FEW,
+        status: 422,
+        class: ErrorClass::Refused,
+        message: "An aperture list names at least two apertures; one aperture is selected with aperture.",
+    },
+    ExecStartRefusal {
+        code: EXEC_APERTURES_TOO_MANY,
+        status: 422,
+        class: ErrorClass::Refused,
+        message: "An aperture list names at most 4 apertures.",
+    },
+    ExecStartRefusal {
+        code: EXEC_APERTURE_LISTED_TWICE,
+        status: 422,
+        class: ErrorClass::Refused,
+        message: "An aperture list names each aperture once.",
+    },
+    ExecStartRefusal {
+        code: EXEC_APERTURE_HOST_LISTED_TWICE,
+        status: 422,
+        class: ErrorClass::Refused,
+        message: "Each aperture in a list declares a distinct host name; two for one name cannot both be reached.",
+    },
+];
+
+/// Looks up one of the design 26 start refusals by its code.
+pub fn exec_start_refusal(code: &str) -> Option<ExecStartRefusal> {
+    WORKDIR_REFUSALS
+        .iter()
+        .chain(APERTURE_LIST_REFUSALS.iter())
+        .find(|refusal| refusal.code == code)
+        .copied()
+}
+
+/// The design 26 start refusal a validation error names, if it is one of them.
+///
+/// `None` for every other error, the per-name aperture errors included: those keep the codes
+/// ADR 0013 and ADR 0014 gave them, whether the name came alone or in a list.
+pub fn exec_start_refusal_for(error: &WireValidationError) -> Option<ExecStartRefusal> {
+    let code = match error {
+        WireValidationError::WorkdirInvalid => EXEC_WORKDIR_INVALID,
+        WireValidationError::WorkdirOutsideMounts => EXEC_WORKDIR_OUTSIDE_MOUNTS,
+        WireValidationError::AperturesTooFew => EXEC_APERTURES_TOO_FEW,
+        WireValidationError::AperturesTooMany => EXEC_APERTURES_TOO_MANY,
+        WireValidationError::ApertureListedTwice => EXEC_APERTURE_LISTED_TWICE,
+        _ => return None,
+    };
+    exec_start_refusal(code)
 }
 
 /// Validates the initial window a session start declares against the mode it declared.
@@ -4845,8 +5124,8 @@ mod tests {
         let version = ADVERTISED_CONTRACT_BUNDLE
             .strip_prefix("substrate-wire/")
             .expect("advertised contract prefix");
-        assert_eq!(version, "0.20.0", "the reviewed promotion target moved");
-        let bytes = include_bytes!("../../../contracts/substrate-wire/0.20.0/bundle.json");
+        assert_eq!(version, "0.21.0", "the reviewed promotion target moved");
+        let bytes = include_bytes!("../../../contracts/substrate-wire/0.21.0/bundle.json");
         assert_eq!(
             hex::encode(Sha256::digest(bytes)),
             ADVERTISED_CONTRACT_BUNDLE_SHA256
@@ -5210,6 +5489,7 @@ mod egress_aperture_tests {
                 from_destination: 34,
             },
             max_bytes: None,
+            listen: None,
         });
         let rendered = serde_json::to_value(applied.clone()).unwrap();
         assert_eq!(rendered["mode"], "aperture");
@@ -5269,6 +5549,7 @@ mod egress_aperture_tests {
             capability_snapshot: format!("sha256:{}", "0".repeat(64)),
             network: NetworkMode::None,
             aperture: None,
+            apertures: Vec::new(),
             profile: super::SandboxProfile::Workspace,
             required: true,
         };
@@ -5316,6 +5597,7 @@ mod egress_aperture_tests {
                 from_destination: 34,
             },
             max_bytes: None,
+            listen: None,
         };
         let rendered = serde_json::to_value(&applied).unwrap();
         assert!(
@@ -5370,6 +5652,7 @@ mod egress_aperture_tests {
                 capability_snapshot: format!("sha256:{}", "0".repeat(64)),
                 network: NetworkMode::Aperture,
                 aperture: Some("model".to_owned()),
+                apertures: Vec::new(),
                 profile: super::SandboxProfile::Workspace,
                 required: true,
             },
@@ -5406,6 +5689,9 @@ mod egress_aperture_tests {
 
 #[cfg(test)]
 mod read_only_file_tests;
+
+#[cfg(test)]
+mod workdir_aperture_tests;
 
 #[cfg(test)]
 mod host_process_tests;

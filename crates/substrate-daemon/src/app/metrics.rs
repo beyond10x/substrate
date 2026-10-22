@@ -710,6 +710,7 @@ mod tests {
                 capability_snapshot: "cap_metrics_stream".to_owned(),
                 network: NetworkMode::None,
                 aperture: None,
+                apertures: Vec::new(),
                 profile: SandboxProfile::Workspace,
                 required: true,
             },

@@ -291,6 +291,7 @@ impl InstalledAperture {
             mechanism: ApertureMechanism::LoopbackForwarder,
             bytes: self.counters.read(),
             max_bytes: self.max_bytes,
+            listen: None,
         }
     }
 
@@ -1729,6 +1730,7 @@ mod tests {
             capability_snapshot: "sha256:".to_owned() + &"0".repeat(64),
             network,
             aperture: name.map(str::to_owned),
+            apertures: Vec::new(),
             profile: SandboxProfile::Workspace,
             required: true,
         }

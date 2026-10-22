@@ -1310,6 +1310,7 @@ impl PipeSessionBuilder {
                 capability_snapshot: self.workspace.client.machine().capability_snapshot,
                 network: self.network,
                 aperture: self.aperture,
+                apertures: Vec::new(),
                 profile: substrate_wire::SandboxProfile::Workspace,
                 required: true,
             },
@@ -1325,6 +1326,7 @@ impl PipeSessionBuilder {
             secret_slots: self.secret_slots,
             capsule: self.capsule,
             lease_ttl_ms: Some(required_duration_millis(lease_ttl)?),
+            workdir: None,
         };
         let input = substrate_wire::PipeSessionStartInput {
             capture: self.capture,
@@ -1750,6 +1752,7 @@ impl CommandBuilder {
                 capability_snapshot,
                 network: self.network,
                 aperture: self.aperture,
+                apertures: Vec::new(),
                 profile: substrate_wire::SandboxProfile::Workspace,
                 required: true,
             },
@@ -1765,6 +1768,7 @@ impl CommandBuilder {
             secret_slots: self.secret_slots,
             capsule: self.capsule,
             lease_ttl_ms: duration_millis(self.lease_ttl)?,
+            workdir: None,
         };
         let (_, observed): (_, substrate_wire::Exec) = self
             .workspace
@@ -2096,6 +2100,7 @@ mod tests {
                 capability_snapshot: format!("sha256:{}", "7".repeat(64)),
                 network: substrate_wire::NetworkMode::None,
                 aperture: None,
+                apertures: Vec::new(),
                 profile: substrate_wire::SandboxProfile::Workspace,
                 required: true,
             },
@@ -2115,6 +2120,7 @@ mod tests {
             secret_slots: Vec::new(),
             capsule: None,
             lease_ttl_ms: None,
+            workdir: None,
         };
         let mutation = substrate_wire::Mutation {
             op: ulid::Ulid::generate().to_string(),
@@ -2149,7 +2155,7 @@ mod tests {
         let socket = temporary.path().join("daemon.sock");
         let listener = UnixListener::bind(&socket).expect("bind fake daemon");
         let vector: Value = serde_json::from_str(include_str!(
-            "../../../contracts/substrate-wire/0.20.0/vectors/http/machine-probe.json"
+            "../../../contracts/substrate-wire/0.21.0/vectors/http/machine-probe.json"
         ))
         .expect("machine vector");
         let machine = serde_json::to_vec(

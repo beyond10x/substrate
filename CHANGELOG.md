@@ -7,6 +7,41 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- Development contract bundle `substrate-wire/0.21.0` (design 26), additive over `0.20.0` with
+  its 44 routes unchanged. The daemon and SDK advertise it at inner `bundle.json` digest
+  `018478900be9f2ca1c8366de52bf22bd33189f3a01dda344cb233274d919faf6`. `cargo xtask check-bundle
+  0.21.0` holds its bounds, refusals, vectors and compatibility text to the wire constants, and
+  the gate checks it beside every earlier bundle.
+- An exec or session start may name `workdir`, the directory the program starts in. It must be an
+  absolute, lexically normal path of at most `MAX_WORKDIR_BYTES` (4096) bytes at or beneath a
+  mount the start places: `/workspace`, a declared read-only root, `/scratch` with scratch, or
+  `/runtime` with a capsule. The daemon refuses `exec.workdir-invalid` and
+  `exec.workdir-outside-mounts` (422) before dispatch. The Linux host publishes the
+  `exec.workdir` fact only after a throwaway sandbox ran in a named directory and refused an absent
+  one; without it a start that names a directory is `exec.workdir-unserved` (501). The host walks
+  the directory beneath the object its mount binds with guarded `openat2` before anything runs,
+  refuses an absent, non-directory or symlinked one as `exec.workdir-missing` (422), names a
+  directory removed after that check by bubblewrap's exact `--chdir` diagnostic on the
+  observation, and reports the directory on the applied record.
+- A sandbox may name `apertures`, a list of two to `MAX_EGRESS_APERTURES` (4) distinct aperture
+  names, instead of one `aperture`. Every name follows the single-aperture rules, answered at
+  `sandbox.apertures`; a list of one is `exec.apertures-too-few`, more than four
+  `exec.apertures-too-many`, a repeated name `exec.aperture-listed-twice`, and a list beside
+  `aperture` or without network `aperture` `exec.aperture-mode-mismatch` (all 422). Each name must
+  be declared (`exec.aperture-undeclared`, 501). The applied network gains a third form, an array
+  whose elements carry the `listen` address; a single aperture keeps its `0.20.0` object.
+- The clean-room runtime vectors cover both: 99 portable cases (was 90) and 146 delegated cases
+  (was 132), including programs started beneath the workspace and a declared root and absent or
+  symlinked directories refused before dispatch.
+
+### Changed
+
+- The Linux host refuses a valid, fully declared aperture list as `exec.apertures-unserved` (501)
+  at `sandbox.apertures`, at one marked point in admission, until several apertures per run are
+  installed. It never runs a list with fewer apertures than it named.
+
 ## [0.8.0] — 2026-10-22
 
 Published by [release run 39699794271](https://github.com/beyond10x/substrate/actions/runs/39699794271)

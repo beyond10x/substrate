@@ -167,6 +167,7 @@ fn seed_streaming_exec(store: &Arc<Store>) {
             capability_snapshot: "cap_metrics_adversary".to_owned(),
             network: NetworkMode::None,
             aperture: None,
+            apertures: Vec::new(),
             profile: SandboxProfile::Workspace,
             required: true,
         },

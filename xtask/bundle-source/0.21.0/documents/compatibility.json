@@ -1,0 +1,23 @@
+{
+  "$schema": "schemas/compatibility.json",
+  "contract": "substrate-wire",
+  "development_constraints": [
+    "This development bundle is contract-execution-ready but cannot satisfy a stable dependency.",
+    "Passing the bundle gate proves bundle integrity; it does not claim producer or host-driver conformance.",
+    "No compatibility promise begins before a signed stable release."
+  ],
+  "request_policy": "closed",
+  "response_policy": "closed-route-selected-envelopes",
+  "status": "development",
+  "supported_api_majors": [
+    1,
+    2
+  ],
+  "version": "0.21.0",
+  "client_visible_changes": [
+    "0.21.0 adds no route and preserves the 44 routes of 0.20.0 (design 26). An exec or session start gains the optional workdir field, and a sandbox gains the optional apertures list beside aperture; a start that names neither serializes and hashes exactly as before.",
+    "The capability facts object (schemas/capability.json) and the observed resource union (schemas/resource.json) are closed, and 0.21.0 adds the optional exec.workdir fact to the one and, to an exec's applied confinement, an optional workdir member and a third applied-network form, an array of applied apertures each carrying listen. A start that names one aperture keeps reporting the single object without listen. A client that validates snapshots or resources against predecessor 0.20.0 rejects a snapshot that publishes exec.workdir, or a record of a start that used either new field, until it moves to 0.21.0.",
+    "Predecessor 0.20.0 described the applied aperture (applied-network) but no exec record referenced it: the requested sandbox had no aperture member, running, exited and cancelled records required network none, and every applied network was the floor, so no exec record of an aperture start validated. 0.21.0 admits the requested aperture or apertures and every applied-network form in each state; the observed bytes of a start that names no aperture are unchanged.",
+    "Eight refusals are new: exec.workdir-invalid, exec.workdir-outside-mounts and exec.workdir-missing (422), exec.workdir-unserved (501), and exec.apertures-too-few, exec.apertures-too-many, exec.aperture-listed-twice and exec.aperture-host-listed-twice (422). The last is the driver's, because the declared hosts it compares are in no published fact. A workdir is at most MAX_WORKDIR_BYTES (4096) bytes, and a list names two to MAX_EGRESS_APERTURES (4) apertures."
+  ]
+}

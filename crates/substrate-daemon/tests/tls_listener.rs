@@ -474,6 +474,7 @@ fn seed_ready_pipe_session(state_path: &Path, origin: &str) {
                 capability_snapshot: format!("sha256:{}", "7".repeat(64)),
                 network: NetworkMode::None,
                 aperture: None,
+                apertures: Vec::new(),
                 profile: SandboxProfile::Workspace,
                 required: true,
             },
@@ -814,7 +815,7 @@ async fn production_tls_refuses_unverified_routes_and_rotates_atomically() {
     assert!(
         response
             .to_ascii_lowercase()
-            .contains("x-b10x-contract: substrate-wire/0.20.0"),
+            .contains("x-b10x-contract: substrate-wire/0.21.0"),
         "{response}"
     );
 

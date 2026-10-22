@@ -140,7 +140,19 @@ across retry. Resource and operation lookup stays within the authenticated subje
 Read [operations and observations](../concepts/operations.md) for retry semantics and
 [status](../status.md) for the implementation boundary.
 
-Development source now advertises `substrate-wire/0.20.0`. It adds the host-process family
+Development source now advertises `substrate-wire/0.21.0`. It adds no route. An exec or session
+start may name `workdir`, the directory the program starts in: an absolute, lexically normal path
+of at most 4096 bytes at or beneath `/workspace`, a declared read-only root mount, `/scratch` when
+scratch is requested, or `/runtime` when a capsule is carried. A host that has proved it can apply
+one publishes the `exec.workdir` fact and refuses an absent or symlinked directory as
+`exec.workdir-missing` before anything runs; without the fact a start that names one is
+`exec.workdir-unserved`. A sandbox may name `apertures`, a list of two to four distinct declared
+apertures, instead of one `aperture`; an applied list is an array whose elements state the loopback
+address each aperture listens on. A Linux host that does not yet install several apertures in one
+sandbox refuses a valid list as `exec.apertures-unserved` rather than running it with fewer. A
+client that validates capability snapshots or resources against `0.20.0` must move to `0.21.0` to
+accept the new fact and record forms.
+`0.20.0` added the host-process family
 (ADR 0036): seven routes under `/v1/processes` to start, list, read, stop, stop by owner session,
 renew the lease of and tail the log of an unconfined process the daemon supervises in a cgroup of
 its own. Every record says `profile: host` and `confinement: none`. A daemon publishes the optional

@@ -817,6 +817,7 @@ mod tests {
                     capability_snapshot: format!("sha256:{}", "7".repeat(64)),
                     network: NetworkMode::None,
                     aperture: None,
+                    apertures: Vec::new(),
                     profile: SandboxProfile::Workspace,
                     required: true,
                 },

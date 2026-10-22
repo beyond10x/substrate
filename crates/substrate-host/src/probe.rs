@@ -151,6 +151,13 @@ pub fn probe(config: &HostConfig, openat2: bool) -> CapabilitySnapshot {
         exec_read_only_files: crate::read_only_files::fact(
             exec && crate::read_only_files::mechanism_is_provable(&config.bubblewrap),
         ),
+        // Design 26 § 1: a `--chdir` applied beneath the workspace mount and a missing directory
+        // ended by bubblewrap's own diagnostic, both in a throwaway sandbox. Gated on `exec`, the
+        // floor it rides, and on guarded I/O, which the pre-dispatch existence check walks with.
+        exec_workdir: (exec
+            && workspace
+            && crate::workdir::mechanism_is_provable(&config.bubblewrap))
+        .then_some(true),
         exec_resource_usage: resource_usage.filter(|_| exec),
         metrics_stream: (exec && resource_usage.is_some()).then_some(MetricsStreamFacts {
             sample_interval_ms: substrate_wire::RESOURCE_USAGE_SAMPLE_INTERVAL_MS,

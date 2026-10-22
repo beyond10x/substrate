@@ -107,6 +107,7 @@ fn exec_input(snapshot: &str, argv: &[&str]) -> ExecStartInput {
             capability_snapshot: snapshot.to_owned(),
             network: NetworkMode::None,
             aperture: None,
+            apertures: Vec::new(),
             profile: SandboxProfile::Workspace,
             required: true,
         },
@@ -123,6 +124,7 @@ fn exec_input(snapshot: &str, argv: &[&str]) -> ExecStartInput {
         measurements: BTreeSet::new(),
         capsule: None,
         lease_ttl_ms: Some(60_000),
+        workdir: None,
     }
 }
 

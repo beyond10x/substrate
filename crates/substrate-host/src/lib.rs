@@ -30,6 +30,8 @@ mod seccomp;
 mod secrets;
 #[cfg(not(target_os = "linux"))]
 mod unsupported;
+#[cfg(target_os = "linux")]
+mod workdir;
 
 use std::collections::HashSet;
 use std::os::unix::fs::PermissionsExt as _;
@@ -1730,6 +1732,7 @@ mod tests {
                 capability_snapshot: snapshot.to_owned(),
                 network: substrate_wire::NetworkMode::None,
                 aperture: None,
+                apertures: Vec::new(),
                 profile: substrate_wire::SandboxProfile::Workspace,
                 required: true,
             },
@@ -1746,6 +1749,7 @@ mod tests {
             measurements: std::collections::BTreeSet::new(),
             capsule: None,
             lease_ttl_ms: None,
+            workdir: None,
         }
     }
 
