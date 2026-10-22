@@ -9,6 +9,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [0.8.0] — 2026-10-22
 
+Published by [release run 39699794271](https://github.com/beyond10x/substrate/actions/runs/39699794271)
+from tagged commit `3798b86faafcb995c20b15749b6e97513037b5e9`; its first attempt failed on a GHCR
+`unknown blob` before any tag was written, and the re-run of that job published. All three
+artifacts were keyless-signed and verified against `release.yml@refs/tags/0.8.0` by the release
+workflow, and each digest resolved anonymously:
+
+- Image: `ghcr.io/beyond10x/b10x-substrate-daemon:0.8.0` at `sha256:180a5716366d7811a878aa1aaff23c41c3a52b7756f851a9f3d6df99bc2f146e`.
+- Contract bundle: `ghcr.io/beyond10x/b10x-substrate-wire:0.20.0` at `sha256:007a18088e2af6af70f02cbc951208f66d4310b00eaa6a2fda4991399670634c`, first published by this release.
+- Disposable MCP image: `ghcr.io/beyond10x/b10x-substrate-mcp:0.8.0` at `sha256:506e1c09e5a05d1864bbb202e70f73a72e5fd6ec21464c9124c09307c882e5ef`, development-only.
+
 ### Added
 
 - The clean-room runtime vectors drive `workspace.adopt` through the shipped daemon: an operator's
