@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:writable-host-roots
 kind: story
-status: active
+status: implemented
 title: A confined child writes a host directory the operator named physically
 relations:
 - depends_on: story:writable-roots-wire-0-22-0
@@ -13,10 +13,11 @@ scope:
   path: crates/substrate-daemon/tests/runtime_vectors.rs
 - confidence: cited
   path: crates/substrate-host/src
-revision: 7
+revision: 8
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-22T11:02:42Z", actor: "agent:b10x-chef-orchestrator", revision: 6}
 - {from: "proposed", to: "active", at: "2026-10-22T11:02:42Z", actor: "agent:b10x-chef-orchestrator", revision: 7}
+- {from: "active", to: "implemented", at: "2026-10-22T21:51:32Z", actor: "agent:b10x-chef-orchestrator", revision: 8, decided_on: {"recorded":{"test_result":1,"review_outcome":2}}}
 ---
 # A confined child writes a host directory the operator named physically
 

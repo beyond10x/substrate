@@ -7,6 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.10.0] — 2026-10-22
+
 ### Added
 
 - Development contract bundle `substrate-wire/0.22.0` (ADR 0038), additive over `0.21.0` with
@@ -76,6 +78,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   portable lane refuses its Git workspace as a Git root unserved (111 cases in all), and the
   delegated lane (167 cases) has a child commit in the mounted checkout, reads the commit on the
   host and in the change-set route, and refuses each named Git-root case before dispatch.
+
+### Changed
+
+- Every workspace package and its exact internal version edges move from 0.9.0 to 0.10.0. Minor:
+  `substrate-wire/0.22.0` adds `writable_roots` as new public surface.
 
 ## [0.9.0] — 2026-10-22
 
