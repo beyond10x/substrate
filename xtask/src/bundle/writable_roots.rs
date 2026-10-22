@@ -52,6 +52,11 @@ fn table() -> BTreeSet<(String, u64, String)> {
                 class_of(refusal.class),
             )
         })
+        .chain(
+            wire::WRITABLE_ROOT_HOST_REFUSAL_CODES
+                .iter()
+                .map(|code| ((*code).to_owned(), 422, class_of(wire::ErrorClass::Refused))),
+        )
         .collect()
 }
 
@@ -524,7 +529,8 @@ fn check_client_visible_changes(released: &Tree, failures: &mut Vec<String>) {
         wire::WRITABLE_ROOT_REFUSALS
             .iter()
             .map(|refusal| refusal.code),
-    );
+    )
+    .chain(wire::WRITABLE_ROOT_HOST_REFUSAL_CODES);
     for named in named {
         if !changes.iter().any(|change| change.contains(named)) {
             failures.push(format!("{path}: client_visible_changes must state {named}"));
@@ -596,6 +602,37 @@ mod tests {
             "client_visible_changes must state exec.writable-roots.git",
         ] {
             assert_reported(&failures, named);
+        }
+    }
+
+    /// A refusal the host raises at admission is a refusal the client sees: one the register or
+    /// the compatibility notes drop is reported by name, as a read-only-file host code would be.
+    #[test]
+    fn a_host_refusal_the_bundle_does_not_publish_is_reported() {
+        for code in super::wire::WRITABLE_ROOT_HOST_REFUSAL_CODES {
+            let tree = edited("schemas/common.json", |document| {
+                document["$defs"]["writable-roots"]["x-b10x-refusals"]
+                    .as_array_mut()
+                    .expect("array")
+                    .retain(|row| row["code"] != code);
+            });
+            assert_reported(
+                &failures_of(&tree),
+                &format!("writable-roots does not declare {code} (422, refused)"),
+            );
+            let tree = edited("compatibility.json", |document| {
+                for change in document["client_visible_changes"]
+                    .as_array_mut()
+                    .expect("array")
+                {
+                    let text = change.as_str().expect("string").replace(code, "elided");
+                    *change = text.into();
+                }
+            });
+            assert_reported(
+                &failures_of(&tree),
+                &format!("client_visible_changes must state {code}"),
+            );
         }
     }
 
