@@ -7,6 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.9.0] — 2026-10-22
+
 ### Added
 
 - Development contract bundle `substrate-wire/0.21.0` (design 26), additive over `0.20.0` with
@@ -50,6 +52,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - The host checks a working directory beneath a declared read-only root through the descriptor
   admission pinned for that root, not by resolving its path again, so a rename or swap after
   admission cannot change which directory is checked.
+- Declared read-only roots are opened once at admission and mounted by descriptor.
+- Every workspace package and its exact internal version edges move from 0.8.0 to 0.9.0. Minor:
+  `substrate-wire/0.21.0` adds `workdir` and `apertures` as new public surface.
+
+### Fixed
+
+- The host read bubblewrap's `--info-fd` report only up to the child pid and then closed the
+  pipe; bubblewrap's next write could take `SIGPIPE`, and an exec with apertures was refused
+  `exec.aperture-install-failed`. The host now reads the report to its closing brace.
 
 ## [0.8.0] — 2026-10-22
 

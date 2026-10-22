@@ -2,12 +2,13 @@
 format: aep.planning-md/3
 id: story:several-apertures-per-run
 kind: story
-status: active
+status: implemented
 title: One run reaches several declared egress apertures
-revision: 4
+revision: 5
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-22T04:37:18Z", actor: "agent:b10x-chef-orchestrator", revision: 3, executor: "agent:substrate-wave-20261022", correlation: "wave-2026-10-22-confinement-gaps"}
 - {from: "proposed", to: "active", at: "2026-10-22T04:37:18Z", actor: "agent:b10x-chef-orchestrator", revision: 4, executor: "agent:substrate-wave-20261022", correlation: "wave-2026-10-22-confinement-gaps"}
+- {from: "active", to: "implemented", at: "2026-10-22T08:41:43Z", actor: "agent:b10x-chef-orchestrator", revision: 5, decided_on: {"recorded":{"test_result":1,"review_outcome":1}}}
 ---
 # One run reaches several declared apertures
 

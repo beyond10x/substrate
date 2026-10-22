@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-22T08:23:53Z",
+  "actor": "agent:b10x-chef-orchestrator",
+  "artifact": "story:read-only-roots-bound-by-descriptor",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "https://github.com/beyond10x/substrate/actions/runs/39745363743 (Full gate, success, 92a7ce7b90926239fbec63bc499d8c31e7f3a8bd); bash scripts/delegated-lane.sh at 92a7ce7, exit 0, 147 delegated runtime vectors"
+  }
+}
