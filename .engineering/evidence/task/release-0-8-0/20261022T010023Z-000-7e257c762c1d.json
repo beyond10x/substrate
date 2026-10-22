@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-22T01:00:23Z",
+  "actor": "human:timo",
+  "artifact": "task:release-0-8-0",
+  "kind": "task",
+  "revision": 1,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "Release run 39699794271 for tag 0.8.0 concluded success on attempt 2 after a GHCR unknown-blob push failure on attempt 1: daemon, MCP and bundle signed and verified; each digest resolved anonymously",
+    "reference": "https://github.com/beyond10x/substrate/actions/runs/39699794271"
+  }
+}
