@@ -23,6 +23,8 @@ mod pty;
 mod quota;
 #[cfg(target_os = "linux")]
 mod read_only_files;
+#[cfg(target_os = "linux")]
+mod read_only_roots;
 pub mod seatbelt;
 #[cfg(target_os = "linux")]
 mod seccomp;
