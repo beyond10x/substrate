@@ -78,7 +78,15 @@ Two listed apertures whose declared hosts are the same name cannot both be reach
 `/etc/hosts` would map that name twice and the child's resolver answers with the first line, so the
 second aperture would be installed and unreachable by its name. The host refuses such a list as
 `exec.aperture-host-listed-twice` before anything is installed. Host names compare ASCII
-case-insensitively and without a trailing `.`, as a resolver compares them. The published
+case-insensitively and without a trailing `.`, as a resolver compares them. The generated file opens
+with `127.0.0.1 localhost`, the first listen address, so `localhost` is already one of its names: an
+aperture declaring `localhost` may be listed first, where its line and its listen address agree,
+and anywhere else is refused by the same code, because it would be answered by the first
+aperture's forwarder and its bytes would reach the first aperture's destination. The generated
+mapping holds the rule again where it is written and refuses such a set as
+`exec.aperture-install-failed`. A listed set that names nothing is refused wherever it reaches the
+host, not only by the wire's `exec.apertures-too-few`, so it can never run as a start with no
+network. The published
 `exec.egress-apertures` fact carries the pinned destination and not the declared host, so this is
 the driver's refusal at admission, not the daemon's. Two apertures declared with the same literal
 address are not refused: neither has a name to map, and each is reached at its own listen address.
@@ -99,7 +107,7 @@ only when the start named `apertures`. Each element is today's applied-aperture 
 | `apertures` with fewer than two names | `exec.apertures-too-few` | 422 |
 | more than `MAX_EGRESS_APERTURES` names | `exec.apertures-too-many` | 422 |
 | a name listed twice | `exec.aperture-listed-twice` | 422 |
-| two listed names whose declared hosts are one host name | `exec.aperture-host-listed-twice` | 422 |
+| two listed names whose declared hosts are one host name, or `localhost` declared by any but the first | `exec.aperture-host-listed-twice` | 422 |
 | a name that is invalid, a destination or a ceiling | the existing per-name codes | 422 |
 | a name the operator did not declare | the existing undeclared-aperture refusal, naming it | 501 |
 

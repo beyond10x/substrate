@@ -45,7 +45,7 @@ const DAEMON_OVERRIDE_VARIABLE: &str = "SUBSTRATE_VECTORS_DAEMON";
 /// Pinned independently of the daemon implementation: the clean-room client verifies what ships.
 const ADVERTISED_CONTRACT: &str = "substrate-wire/0.21.0";
 const ADVERTISED_CONTRACT_SHA256: &str =
-    "52f72530cecf1b0e5d70fdca47abd27b844b89f65e6da2827c70fbf10d97a6d5";
+    "044b3099d8e5a1108cc75cf3b03f1ea4d250ee4e34266cf493276fe4a9a0fe15";
 
 fn daemon_binary() -> PathBuf {
     std::env::var_os(DAEMON_OVERRIDE_VARIABLE).map_or_else(|| PathBuf::from(DAEMON), PathBuf::from)
@@ -3027,7 +3027,8 @@ async fn check_http_journey(
         passed += check_confined_pty(daemon, &workspace, &snapshot).await;
         passed += check_confined_read_only_files(daemon, &workspace, &snapshot).await;
         passed += check_confined_workdir(daemon, &workspace, &snapshot).await;
-        passed += check_confined_aperture_list(daemon, &workspace, &snapshot).await;
+        passed +=
+            check_confined_aperture_list(daemon, &workspace, &snapshot, inside, firehose).await;
     } else {
         passed += check_read_only_files_unserved(daemon, &workspace, &snapshot).await;
         passed += check_workdir_and_aperture_list_unserved(daemon, &workspace, &snapshot).await;
@@ -4913,44 +4914,55 @@ async fn check_workdir_and_aperture_list_shape(
         passed += 1;
     }
     let five = ["model", "capped", "uncapped", "fourth", "fifth"];
-    for (operation, request, names, code) in [
+    for (operation, request, single, names, code) in [
         (
             "01JAPERTURESCLEANSHAPE1",
             "req_clean_apertures_too_few",
+            None,
             &five[..1],
             "exec.apertures-too-few",
         ),
         (
             "01JAPERTURESCLEANSHAPE2",
             "req_clean_apertures_too_many",
+            None,
             &five[..],
             "exec.apertures-too-many",
         ),
         (
             "01JAPERTURESCLEANSHAPE3",
             "req_clean_apertures_twice",
+            None,
             &["model", "capped", "model"][..],
             "exec.aperture-listed-twice",
         ),
         (
             "01JAPERTURESCLEANSHAPE4",
             "req_clean_apertures_name",
+            None,
             &["model", "Not-A-Name"][..],
             "exec.aperture-name-invalid",
         ),
+        // One aperture and a list are two selections, and neither is chosen for the caller.
+        (
+            "01JAPERTURESCLEANSHAPE5",
+            "req_clean_apertures_mismatch",
+            Some("model"),
+            &["model", "capped"][..],
+            "exec.aperture-mode-mismatch",
+        ),
     ] {
+        let input = ExecInput {
+            aperture: single,
+            ..ExecInput::new(workspace, snapshot, &["/usr/bin/true"], true).apertures(names)
+        };
         expect_error_at(
             &daemon
                 .call(
                     "POST",
                     "/v1/execs",
                     request,
-                    Some(&mutation(
-                        operation,
-                        &ExecInput::new(workspace, snapshot, &["/usr/bin/true"], true)
-                            .apertures(names)
-                            .build(),
-                    )),
+                    Some(&mutation(operation, &input.build())),
                 )
                 .await,
             422,
@@ -4959,27 +4971,6 @@ async fn check_workdir_and_aperture_list_shape(
         );
         passed += 1;
     }
-    // One aperture and a list are two selections, and neither is chosen for the caller.
-    expect_error_at(
-        &daemon
-            .call(
-                "POST",
-                "/v1/execs",
-                "req_clean_apertures_mismatch",
-                Some(&mutation(
-                    "01JAPERTURESCLEANSHAPE5",
-                    &ExecInput::new(workspace, snapshot, &["/usr/bin/true"], true)
-                        .aperture("model")
-                        .apertures(&["model", "capped"])
-                        .build(),
-                )),
-            )
-            .await,
-        422,
-        "exec.aperture-mode-mismatch",
-        "sandbox.apertures",
-    );
-    passed += 1;
     passed
 }
 
@@ -5153,7 +5144,17 @@ async fn check_confined_workdir(daemon: &Daemon, workspace: &str, snapshot: &str
         );
         passed += 1;
     }
+    passed + check_confined_workdir_beneath_a_root(daemon, workspace, snapshot).await
+}
 
+/// The same journey beneath a declared read-only root: the program starts in a directory of the
+/// root, and a symlink inside the root is refused by name before dispatch.
+async fn check_confined_workdir_beneath_a_root(
+    daemon: &Daemon,
+    workspace: &str,
+    snapshot: &str,
+) -> usize {
+    let mut passed = 0;
     let fixture = tempfile::Builder::new()
         .prefix("workdir-cleanroom-")
         .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
@@ -5195,9 +5196,89 @@ async fn check_confined_workdir(daemon: &Daemon, workspace: &str, snapshot: &str
     passed
 }
 
-/// The delegated half of a list's admission: every name must be declared, and a list of declared
-/// names reaches the driver, which refuses it by name until several apertures per run are wired.
-async fn check_confined_aperture_list(daemon: &Daemon, workspace: &str, snapshot: &str) -> usize {
+/// The aperture this deployment declares for `localhost`, the one name the generated mapping
+/// already gives the first listen address (design 26 § 2). It is the fourth declaration, and
+/// `MAX_EGRESS_APERTURES` admits no fifth, so two apertures sharing a name other than `localhost`
+/// are held by the host's own tests rather than here.
+const LOCALHOST_APERTURE: &str = "local";
+
+/// One run through two listed apertures: `model` at the first listen address and the uncapped
+/// firehose at the second, each reached at its own address and each counted on its own record.
+fn aperture_list_program(inside: u16, firehose: u16) -> String {
+    format!(
+        "\nimport socket\n\
+         served = socket.create_connection(('127.0.0.1', {inside}), 3).recv(64)\n\
+         assert served == b'substrate-aperture-served', served\n\
+         link = socket.create_connection(('127.0.0.2', {firehose}), 3)\n\
+         total = 0\n\
+         while True:\n\
+         \x20   chunk = link.recv(65536)\n\
+         \x20   if not chunk:\n\
+         \x20       break\n\
+         \x20   total += len(chunk)\n\
+         assert total == {FIREHOSE_BYTES}, total\n\
+         print('served')\n"
+    )
+}
+
+/// The array form of a listed run, in list order: each aperture with the address it listened on,
+/// the destination it was pinned to and the bytes that crossed it, and nothing counted twice.
+fn expect_listed_run_applied(observed: &Value, inside: u16, firehose: u16) {
+    let applied = observed["result"]["applied"]["network"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a listed run did not record the array form: {observed}"));
+    let shape: Vec<[&Value; 4]> = applied
+        .iter()
+        .map(|one| {
+            [
+                &one["mode"],
+                &one["name"],
+                &one["listen"],
+                &one["destination"],
+            ]
+        })
+        .collect();
+    assert_eq!(
+        shape,
+        [
+            [
+                &json!("aperture"),
+                &json!("model"),
+                &json!(format!("127.0.0.1:{inside}")),
+                &json!(format!("127.0.0.1:{inside}")),
+            ],
+            [
+                &json!("aperture"),
+                &json!(UNCAPPED_APERTURE),
+                &json!(format!("127.0.0.2:{firehose}")),
+                &json!(format!("127.0.0.1:{firehose}")),
+            ],
+        ],
+        "{observed}"
+    );
+    assert_eq!(
+        applied[0]["bytes"]["from_destination"].as_u64(),
+        Some(APP_SERVER_BODY.len() as u64),
+        "{observed}"
+    );
+    assert_eq!(
+        applied[1]["bytes"]["from_destination"].as_u64(),
+        Some(FIREHOSE_BYTES),
+        "{observed}"
+    );
+}
+
+/// The delegated half of a list (design 26 § 2): every name must be declared; a list of declared
+/// names runs with every aperture, in list order, and records the array form; and a list whose
+/// hosts the generated mapping would hold twice is refused by name before anything is installed.
+async fn check_confined_aperture_list(
+    daemon: &Daemon,
+    workspace: &str,
+    snapshot: &str,
+    inside: u16,
+    firehose: u16,
+) -> usize {
+    let mut passed = 0;
     expect_error(
         &daemon
             .call(
@@ -5215,26 +5296,72 @@ async fn check_confined_aperture_list(daemon: &Daemon, workspace: &str, snapshot
         501,
         "exec.aperture-undeclared",
     );
-    // u2 plug point: this case becomes the several-apertures run once the driver serves it.
+    passed += 1;
+
+    let program = aperture_list_program(inside, firehose);
+    let (status, run) = daemon
+        .call(
+            "POST",
+            "/v1/execs",
+            "req_clean_apertures_declared",
+            Some(&mutation(
+                "01JAPERTURESCLEANDECLARED",
+                &ExecInput::new(
+                    workspace,
+                    snapshot,
+                    &["/usr/bin/python3", "-c", &program],
+                    true,
+                )
+                .apertures(&["model", UNCAPPED_APERTURE])
+                .build(),
+            )),
+        )
+        .await;
+    assert_eq!(status, 200, "{run}");
+    assert_eq!(run["result"]["state"], "exited", "{run}");
+    assert_eq!(
+        run["result"]["exit"]["code"], 0,
+        "a listed aperture was not reachable at its own listen address: {run}"
+    );
+    // The array form on the start's answer and on the record read back.
+    let id = text(&run["result"]["id"]);
+    let (status, recorded) = daemon
+        .call(
+            "GET",
+            &format!("/v1/execs/{id}"),
+            "req_clean_apertures_declared_get",
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{recorded}");
+    for observed in [&run, &recorded] {
+        expect_listed_run_applied(observed, inside, firehose);
+    }
+    passed += 1;
+
+    // `localhost` after the first: the generated mapping already gives that name to the first
+    // listen address, so the later aperture would be answered by the first one's forwarder and
+    // reach its destination; it is refused by name before anything is installed.
     expect_error_at(
         &daemon
             .call(
                 "POST",
                 "/v1/execs",
-                "req_clean_apertures_declared",
+                "req_clean_apertures_localhost_second",
                 Some(&mutation(
-                    "01JAPERTURESCLEANDECLARED",
+                    "01JAPERTURESCLEANLOCALHOST",
                     &ExecInput::new(workspace, snapshot, &["/usr/bin/true"], true)
-                        .apertures(&["model", CAPPED_APERTURE])
+                        .apertures(&["model", LOCALHOST_APERTURE])
                         .build(),
                 )),
             )
             .await,
-        501,
-        "exec.apertures-unserved",
+        422,
+        "exec.aperture-host-listed-twice",
         "sandbox.apertures",
     );
-    2
+    passed += 1;
+    passed
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -5243,7 +5370,7 @@ async fn check_confined_aperture_list(daemon: &Daemon, workspace: &str, snapshot
 
 /// The predecessor printed its case count; the port asserts it, so a case cannot vanish quietly.
 const PORTABLE_CASES: usize = 99;
-const DELEGATED_CASES: usize = 146;
+const DELEGATED_CASES: usize = 147;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {
@@ -5269,6 +5396,9 @@ async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {
             firehose.port()
         ),
         format!("{UNCAPPED_APERTURE}=127.0.0.1:{}/tcp", firehose.port()),
+        // The name the generated mapping gives the first listen address, which no list may name
+        // after its first aperture (design 26 § 2).
+        format!("{LOCALHOST_APERTURE}=localhost:{}/tcp", inside.port()),
     ];
     // The declared slot file: one bounded, owner-private regular file, written before the daemon
     // that must be able to read it exists. Its path is argv; its bytes never are.

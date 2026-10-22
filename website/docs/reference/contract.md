@@ -148,8 +148,9 @@ one publishes the `exec.workdir` fact and refuses an absent or symlinked directo
 `exec.workdir-missing` before anything runs; without the fact a start that names one is
 `exec.workdir-unserved`. A sandbox may name `apertures`, a list of two to four distinct declared
 apertures, instead of one `aperture`; an applied list is an array whose elements state the loopback
-address each aperture listens on. A Linux host that does not yet install several apertures in one
-sandbox refuses a valid list as `exec.apertures-unserved` rather than running it with fewer. A
+address each aperture listens on. A Linux host refuses a list in which two apertures declare one
+host name, or any but the first declares `localhost`, as `exec.aperture-host-listed-twice`, because
+the child could reach only one of them by that name. A
 client that validates capability snapshots or resources against `0.20.0` must move to `0.21.0` to
 accept the new fact and record forms.
 `0.20.0` added the host-process family

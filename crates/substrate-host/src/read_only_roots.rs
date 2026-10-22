@@ -37,6 +37,16 @@ impl PinnedRoot {
         self.descriptor.as_raw_fd()
     }
 
+    /// The pinned directory itself, which the mount binds.
+    pub(crate) fn descriptor(&self) -> &OwnedFd {
+        &self.descriptor
+    }
+
+    /// Where the pinned directory is mounted in the sandbox.
+    pub(crate) fn mount(&self) -> &str {
+        &self.mount
+    }
+
     /// The bubblewrap bind: the pinned directory, never the declared path, which bubblewrap would
     /// resolve again when it mounts.
     pub(crate) fn bind_args(&self) -> [String; 3] {

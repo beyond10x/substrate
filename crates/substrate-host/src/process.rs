@@ -413,11 +413,6 @@ pub struct ProcessRuntime {
     /// workspace beneath it, as the file routes do, never by re-opening the root's path. `None`
     /// only when no root could be opened, which no workspace can then be resolved beneath.
     workspace_root: Option<Arc<OwnedFd>>,
-    /// The aperture names a start lists, in list order, standing in for the several-apertures
-    /// request field the wire does not have yet (design 26 § 2). Test-only: no request can reach
-    /// it, so no production run holds more than one aperture until the wire carries the list.
-    #[cfg(test)]
-    requested_apertures: Option<Vec<String>>,
 }
 
 impl ProcessRuntime {
@@ -445,8 +440,6 @@ impl ProcessRuntime {
             active: Arc::new(AtomicUsize::new(0)),
             quotas,
             workspace_root,
-            #[cfg(test)]
-            requested_apertures: None,
         };
         let process_trees_reconciled = runtime.reconcile_orphans()?;
         runtime.reconcile_capsules(process_trees_reconciled)?;
@@ -863,6 +856,7 @@ impl ProcessRuntime {
             input,
             &workspace_access.root,
             capsule.as_ref().map(|capsule| capsule.directory.path()),
+            &read_only_roots,
         ) {
             return DispatchOutcome::NotDispatched(error);
         }
@@ -895,10 +889,10 @@ impl ProcessRuntime {
         // Selected again rather than carried out of `admit`, because it is a pure function of the
         // request and the configuration and re-asking is cheaper than threading a borrow through
         // every early return above.
-        #[cfg(test)]
-        let listed = self.requested_apertures.as_deref();
-        #[cfg(not(test))]
-        let listed = None;
+        // An absent list and an empty one are the same request on the wire; `Some(&[])` would be
+        // a list that selects nothing, which `select_apertures` refuses.
+        let listed =
+            (!input.sandbox.apertures.is_empty()).then_some(input.sandbox.apertures.as_slice());
         let apertures = match Self::select_apertures(
             &self.config,
             self.capability.facts.exec_egress_apertures.as_ref(),
@@ -1869,18 +1863,19 @@ impl ProcessRuntime {
         Ok(())
     }
 
-    /// Which declared aperture this start selected, if any, and why it may not have one
-    /// (ADR 0013).
+    /// Which declared apertures this start selected, in the order it named them, and why it may
+    /// not have them (ADR 0013; design 26 § 2). Empty for a start that names none.
     ///
     /// Shape, then capability, then declaration — the order `admit_secret_slots` uses, so a caller
-    /// hears the same answer whichever layer sees the request first. Nothing here reads a
-    /// destination out of the request, because there is no destination in a request: a name is the
-    /// only thing a caller may say, and configuration owns everything the name stands for.
+    /// hears the same answer whichever layer sees the request first — then, for a list, whether
+    /// every member can be reached by its own name. Nothing here reads a destination out of the
+    /// request, because there is no destination in a request: a name is the only thing a caller
+    /// may say, and configuration owns everything the name stands for.
     pub(crate) fn admit_egress_aperture<'a>(
         config: &'a HostConfig,
         published: Option<&Vec<substrate_wire::EgressApertureFact>>,
         sandbox: &substrate_wire::ConfinementRequest,
-    ) -> Result<Option<&'a crate::egress::EgressAperture>, DriverError> {
+    ) -> Result<Vec<&'a crate::egress::EgressAperture>, DriverError> {
         let listed = !sandbox.apertures.is_empty();
         // A list is held to the same per-name rules as one `aperture`, answered at the list's
         // address (design 26 § 2).
@@ -1936,7 +1931,7 @@ impl ProcessRuntime {
             sandbox.aperture.as_deref().into_iter().collect()
         };
         if names.is_empty() {
-            return Ok(None);
+            return Ok(Vec::new());
         }
         // Configured intent is not a fact. An unverified mechanism leaves the capability absent,
         // and every aperture request is then `unserved` rather than quietly getting no network.
@@ -1968,33 +1963,34 @@ impl ProcessRuntime {
                 "exec.network-aperture",
             )
         };
-        if let Some(name) = names.iter().find(|name| declared(name).is_none()) {
-            return Err(undeclared(name));
-        }
-        // ---- u2 plug point (story:several-apertures-per-run) -------------------------------
-        // Every name in the list is well formed, distinct and declared. Installing several
-        // apertures in one sandbox is u2's (`unit/2026-10-22-u2-apertures`); until it lands here,
-        // a valid list is refused by name and never run with fewer apertures than it asked for
-        // (invariant 3). This is the only place a list is refused for being a list.
-        if listed {
-            return Err(DriverError::unserved(
-                "exec.apertures-unserved",
-                "Several egress apertures per run are not served by this host yet.",
+        let selected = names
+            .iter()
+            .map(|name| declared(name).ok_or_else(|| undeclared(name)))
+            .collect::<Result<Vec<_>, _>>()?;
+        // A host the generated mapping would hold twice is reached by its first line only, so the
+        // later aperture would be installed and unreachable by its name: refused before anything
+        // exists. The published fact names destinations, not hosts, so this is the driver's.
+        if crate::egress::a_host_is_mapped_twice(selected.iter().copied()) {
+            let refusal =
+                substrate_wire::exec_start_refusal(substrate_wire::EXEC_APERTURE_HOST_LISTED_TWICE)
+                    .unwrap_or(substrate_wire::APERTURE_LIST_REFUSALS[3]);
+            return Err(DriverError::refused(
+                refusal.code,
+                refusal.message,
                 "sandbox.apertures",
             ));
         }
-        // ---- end u2 plug point --------------------------------------------------------------
-        let name = names[0];
-        declared(name).map(Some).ok_or_else(|| undeclared(name))
+        Ok(selected)
     }
 
     /// Every aperture this start runs with, in the order that gives each its listen address.
     ///
-    /// `listed` is a start's list of names (design 26 § 2). Each name is admitted alone, by
-    /// exactly the rules a single `aperture` is, so a listed name is refused for the same reasons
-    /// and with the same code; the first refusal refuses the start. Without a list, the start's own
-    /// `aperture` selects at most one, as it always has. What the list may hold as a whole — its
-    /// length, repeated names — is admission's to refuse before this is reached.
+    /// `listed` is a start's list of names (design 26 § 2), admitted as a list by exactly the
+    /// rules [`Self::admit_egress_aperture`] applies to `sandbox.apertures`, so a listed name is
+    /// refused for the same reasons and with the same code. Without a list, the start's own
+    /// `aperture` selects at most one, as it always has. A list that names nothing is refused
+    /// here as well as by the wire, because selecting nothing for it would run a start that asked
+    /// for network `aperture` with no network and no refusal (invariant 3).
     pub(crate) fn select_apertures(
         config: &HostConfig,
         published: Option<&Vec<substrate_wire::EgressApertureFact>>,
@@ -2003,28 +1999,30 @@ impl ProcessRuntime {
     ) -> Result<Vec<crate::egress::EgressAperture>, DriverError> {
         let Some(listed) = listed else {
             return Ok(Self::admit_egress_aperture(config, published, sandbox)?
-                .cloned()
                 .into_iter()
+                .cloned()
                 .collect());
         };
-        listed
-            .iter()
-            .map(|name| {
-                let one = substrate_wire::ConfinementRequest {
-                    network: substrate_wire::NetworkMode::Aperture,
-                    aperture: Some(name.clone()),
-                    ..sandbox.clone()
-                };
-                Self::admit_egress_aperture(config, published, &one)?
-                    .cloned()
-                    .ok_or_else(|| {
-                        DriverError::failed(
-                            "exec.aperture-install-failed",
-                            format!("Egress aperture {name} was admitted and selected nothing."),
-                        )
-                    })
-            })
-            .collect()
+        if listed.is_empty() {
+            let refusal =
+                substrate_wire::exec_start_refusal(substrate_wire::EXEC_APERTURES_TOO_FEW)
+                    .unwrap_or(substrate_wire::APERTURE_LIST_REFUSALS[0]);
+            return Err(DriverError::refused(
+                refusal.code,
+                refusal.message,
+                "sandbox.apertures",
+            ));
+        }
+        let request = substrate_wire::ConfinementRequest {
+            network: substrate_wire::NetworkMode::Aperture,
+            aperture: None,
+            apertures: listed.to_vec(),
+            ..sandbox.clone()
+        };
+        Ok(Self::admit_egress_aperture(config, published, &request)?
+            .into_iter()
+            .cloned()
+            .collect())
     }
 
     /// Admits a start and returns the pinned workspace directory and read-only roots it binds.
@@ -2822,14 +2820,30 @@ fn ceiling_reached(
 }
 
 /// The applied network record for the apertures a run was given.
-///
-/// One aperture is the single object a `0.20.0` run records, byte for byte. Several are reported
-/// by their first until the wire carries the array form (design 26 § 2), which no request can
-/// reach before then: only a test lists more than one.
 fn applied_network(installed: &crate::egress::InstalledApertures) -> AppliedNetwork {
-    match installed.apertures() {
-        [first, ..] => AppliedNetwork::Aperture(first.applied()),
-        [] => AppliedNetwork::None,
+    applied_network_of(
+        installed
+            .apertures()
+            .iter()
+            .map(crate::egress::InstalledAperture::applied)
+            .collect(),
+    )
+}
+
+/// The record's form for `applied`, in list order (design 26 § 2).
+///
+/// One aperture is the single object a `0.20.0` run records, byte for byte, so it states no listen
+/// address. Several only come from a start that named `apertures`, which always names at least two,
+/// and are the array form, every element with the address it listened on.
+fn applied_network_of(mut applied: Vec<substrate_wire::AppliedAperture>) -> AppliedNetwork {
+    match applied.len() {
+        0 => AppliedNetwork::None,
+        1 => {
+            let mut only = applied.remove(0);
+            only.listen = None;
+            AppliedNetwork::Aperture(only)
+        }
+        _ => AppliedNetwork::Apertures(applied),
     }
 }
 
@@ -4061,42 +4075,71 @@ mod tests {
         );
     }
 
-    /// Design 26 § 2 at the driver: a list is held to its shape and each name to its declaration,
-    /// in the daemon's order and at its addresses; a valid list of declared names is refused by
-    /// name at the u2 plug point, never run with fewer apertures than it asked for.
-    #[test]
-    fn an_aperture_list_is_admitted_then_refused_until_several_apertures_are_served() {
+    /// Six declared apertures whose host names collide in each way the generated mapping can,
+    /// and the fact a verified mechanism would publish for them.
+    fn listed_config() -> (HostConfig, Vec<substrate_wire::EgressApertureFact>) {
         let mut config = HostConfig::minimum("/does/not/exist");
-        config.egress_apertures = ["model", "search"]
-            .into_iter()
-            .zip(1_u8..)
-            .map(|(name, host)| crate::egress::EgressAperture {
-                name: name.to_owned(),
-                host: "app.example.invalid".to_owned(),
-                port: 443,
-                pinned: std::net::SocketAddr::from(([127, 0, 0, host], 443)),
-                max_bytes: None,
-            })
-            .collect();
-        let published: Vec<_> = config
+        config.egress_apertures = [
+            ("model", "model.example.invalid"),
+            ("search", "search.example.invalid"),
+            // The same name as `model`'s, in another case and fully qualified.
+            ("mirror", "MODEL.example.invalid."),
+            // The name the generated mapping already gives the first listen address.
+            ("local", "localhost"),
+            // Literal addresses get no mapping line, so a repeated one shadows nothing.
+            ("literal_a", "192.0.2.1"),
+            ("literal_b", "192.0.2.1"),
+        ]
+        .into_iter()
+        .zip(1_u8..)
+        .map(|((name, host), last)| crate::egress::EgressAperture {
+            name: name.to_owned(),
+            host: host.to_owned(),
+            port: 443,
+            pinned: std::net::SocketAddr::from(([127, 0, 0, last], 443)),
+            max_bytes: None,
+        })
+        .collect();
+        let published = config
             .egress_apertures
             .iter()
             .map(crate::egress::EgressAperture::fact)
             .collect();
-        let request =
-            |aperture: Option<&str>, apertures: &[&str]| substrate_wire::ConfinementRequest {
-                capability_snapshot: format!("sha256:{}", "0".repeat(64)),
-                network: NetworkMode::Aperture,
-                aperture: aperture.map(str::to_owned),
-                apertures: apertures.iter().map(|name| (*name).to_owned()).collect(),
-                profile: SandboxProfile::Workspace,
-                required: true,
-            };
-        let refusal = |published: Option<&Vec<_>>, sandbox| {
-            let error = ProcessRuntime::admit_egress_aperture(&config, published, &sandbox)
-                .expect_err("refused");
-            (error.class, error.code, error.address)
-        };
+        (config, published)
+    }
+
+    fn list_request(
+        aperture: Option<&str>,
+        apertures: &[&str],
+    ) -> substrate_wire::ConfinementRequest {
+        substrate_wire::ConfinementRequest {
+            capability_snapshot: format!("sha256:{}", "0".repeat(64)),
+            network: NetworkMode::Aperture,
+            aperture: aperture.map(str::to_owned),
+            apertures: apertures.iter().map(|name| (*name).to_owned()).collect(),
+            profile: SandboxProfile::Workspace,
+            required: true,
+        }
+    }
+
+    fn list_refusal(
+        config: &HostConfig,
+        published: Option<&Vec<substrate_wire::EgressApertureFact>>,
+        sandbox: &substrate_wire::ConfinementRequest,
+    ) -> (crate::DriverErrorClass, &'static str, Option<String>) {
+        let error =
+            ProcessRuntime::admit_egress_aperture(config, published, sandbox).expect_err("refused");
+        (error.class, error.code, error.address)
+    }
+
+    /// Design 26 § 2 at the driver: a list is held to its shape and each name to its declaration,
+    /// in the daemon's order and at its addresses.
+    #[test]
+    fn an_aperture_list_is_held_to_its_shape_and_declarations() {
+        let (config, published) = listed_config();
+        let refusal =
+            |published: Option<&Vec<_>>, sandbox| list_refusal(&config, published, &sandbox);
+        let request = list_request;
         let at = |address: &str| Some(address.to_owned());
         let refused = crate::DriverErrorClass::Refused;
         let unserved = crate::DriverErrorClass::Unserved;
@@ -4141,19 +4184,85 @@ mod tests {
                 at("exec.network-aperture")
             )
         );
-        assert_eq!(
-            refusal(Some(&published), request(None, &["model", "search"])),
-            (unserved, "exec.apertures-unserved", at("sandbox.apertures"))
-        );
+    }
+
+    /// Design 26 § 2 at the driver: a list is held to the host names the generated mapping gives
+    /// each aperture; a valid list selects every listed aperture, in list order.
+    #[test]
+    fn an_aperture_list_selects_every_listed_aperture_in_list_order() {
+        let (config, published) = listed_config();
+        let request = list_request;
+        // Two lines for one name in the generated mapping reach only the first, so the second
+        // aperture would be unreachable by its name, or reach the first one's destination.
+        for apertures in [&["model", "mirror"][..], &["model", "local"][..]] {
+            assert_eq!(
+                list_refusal(&config, Some(&published), &request(None, apertures)),
+                (
+                    crate::DriverErrorClass::Refused,
+                    substrate_wire::EXEC_APERTURE_HOST_LISTED_TWICE,
+                    Some("sandbox.apertures".to_owned())
+                ),
+                "{apertures:?}"
+            );
+        }
+        let selected = |sandbox: &substrate_wire::ConfinementRequest| -> Vec<String> {
+            ProcessRuntime::select_apertures(&config, Some(&published), sandbox, None)
+                .expect("admissible")
+                .into_iter()
+                .map(|aperture| aperture.name)
+                .collect()
+        };
+        for apertures in [
+            &["model", "search"][..],
+            &["search", "model"][..],
+            &["model", "search", "literal_a", "literal_b"][..],
+            // `localhost` first is the address the mapping already gives it.
+            &["local", "model"][..],
+        ] {
+            assert_eq!(
+                selected(&request(None, apertures)),
+                apertures,
+                "a valid list is not selected whole and in order"
+            );
+        }
         // One aperture is unchanged by the list.
-        let selected = ProcessRuntime::admit_egress_aperture(
-            &config,
-            Some(&published),
-            &request(Some("search"), &[]),
-        )
-        .expect("one declared aperture is admissible")
-        .expect("a name selects an aperture");
-        assert_eq!(selected.name, "search");
+        assert_eq!(selected(&request(Some("search"), &[])), ["search"]);
+    }
+
+    /// A listed set that names nothing selects nothing, and a start that asked for network
+    /// `aperture` would then run with no network and nothing refusing it; so it is refused by the
+    /// list's own code wherever the set reaches selection, not only by the wire's admission.
+    #[test]
+    fn an_empty_listed_set_is_refused_rather_than_run_without_network() {
+        let mut config = HostConfig::minimum("/does/not/exist");
+        config.egress_apertures = vec![crate::egress::EgressAperture {
+            name: "model".to_owned(),
+            host: "model.example.invalid".to_owned(),
+            port: 443,
+            pinned: std::net::SocketAddr::from(([127, 0, 0, 1], 9)),
+            max_bytes: None,
+        }];
+        let published = crate::egress::egress_apertures_fact(&config.egress_apertures, true)
+            .expect("a verified mechanism publishes");
+        let sandbox = substrate_wire::ConfinementRequest {
+            capability_snapshot: format!("sha256:{}", "7".repeat(64)),
+            network: NetworkMode::Aperture,
+            aperture: Some("model".to_owned()),
+            apertures: Vec::new(),
+            profile: SandboxProfile::Workspace,
+            required: true,
+        };
+        let error =
+            ProcessRuntime::select_apertures(&config, Some(&published), &sandbox, Some(&[]))
+                .expect_err("an empty listed set is refused");
+        assert_eq!(
+            (error.class, error.code, error.address.as_deref()),
+            (
+                crate::DriverErrorClass::Refused,
+                substrate_wire::EXEC_APERTURES_TOO_FEW,
+                Some("sandbox.apertures")
+            )
+        );
     }
 
     #[test]
@@ -4535,37 +4644,9 @@ mod tests {
         };
         let runtime = ProcessRuntime::new(config, capability).expect("runtime");
         let input = ExecStartInput {
-            read_only_roots: Vec::new(),
-            read_only_files: Vec::new(),
-            secret_slots: Vec::new(),
-            workspace: "ws_test".to_owned(),
             argv: vec!["/usr/bin/true".to_owned()],
-            env: ExecEnvironment {
-                allow: vec![],
-                set: BTreeMap::new(),
-            },
-            sandbox: substrate_wire::ConfinementRequest {
-                capability_snapshot: snapshot,
-                network: NetworkMode::None,
-                aperture: None,
-                apertures: Vec::new(),
-                profile: SandboxProfile::Workspace,
-                required: true,
-            },
-            limits: ExecLimits {
-                timeout_ms: 5_000,
-                output_bytes: 65_536,
-                processes: 16,
-                memory_bytes: 67_108_864,
-                cpu_millis: 1_000,
-            },
-            wait: false,
-            workspace_access: substrate_wire::WorkspaceAccess::ReadWrite,
-            scratch: None,
-            measurements: std::collections::BTreeSet::new(),
-            capsule: None,
             lease_ttl_ms: None,
-            workdir: None,
+            ..pty_exec_input(&snapshot)
         };
 
         let (admitted, opens) =
@@ -5742,6 +5823,40 @@ mod tests {
         }
     }
 
+    /// The applied record's form follows the count (design 26 § 2): no aperture is `none`; one is
+    /// the single object a `0.20.0` run records, without a listen address; several, which only a
+    /// start naming `apertures` gets, are the array, in list order, each with its listen address.
+    #[test]
+    fn the_applied_network_is_the_single_object_for_one_aperture_and_the_array_for_several() {
+        use super::applied_network_of;
+        use substrate_wire::AppliedNetwork;
+        let installed = |name: &str, listen: &str| substrate_wire::AppliedAperture {
+            mode: substrate_wire::ApertureMode::Aperture,
+            name: name.to_owned(),
+            destination: "192.0.2.1:443".to_owned(),
+            mechanism: substrate_wire::ApertureMechanism::LoopbackForwarder,
+            bytes: substrate_wire::ApertureBytes::default(),
+            max_bytes: None,
+            listen: Some(listen.to_owned()),
+        };
+        assert_eq!(applied_network_of(Vec::new()), AppliedNetwork::None);
+        assert_eq!(
+            applied_network_of(vec![installed("model", "127.0.0.1:443")]),
+            AppliedNetwork::Aperture(substrate_wire::AppliedAperture {
+                listen: None,
+                ..installed("model", "127.0.0.1:443")
+            })
+        );
+        let several = vec![
+            installed("model", "127.0.0.1:443"),
+            installed("audit", "127.0.0.2:443"),
+        ];
+        assert_eq!(
+            applied_network_of(several.clone()),
+            AppliedNetwork::Apertures(several)
+        );
+    }
+
     /// A host declaring `model` and `audit`, both listening on port 443 inside the run, with the
     /// published fact a verified mechanism gives it.
     fn two_aperture_runtime(
@@ -5778,10 +5893,14 @@ mod tests {
         let mut capability = confined_exec_capability(snapshot);
         capability.facts.exec_egress_apertures =
             crate::egress::egress_apertures_fact(&config.egress_apertures, true);
-        let mut runtime = ProcessRuntime::new(config, capability).expect("runtime");
-        // What `ConfinementRequest.apertures` will carry; the wire does not have it yet.
-        runtime.requested_apertures = Some(vec!["model".to_owned(), "audit".to_owned()]);
-        runtime
+        ProcessRuntime::new(config, capability).expect("runtime")
+    }
+
+    /// A start listing `model` then `audit`, the request's own list (design 26 § 2).
+    fn list_both(input: &mut ExecStartInput) {
+        input.sandbox.network = NetworkMode::Aperture;
+        input.sandbox.aperture = None;
+        input.sandbox.apertures = vec!["model".to_owned(), "audit".to_owned()];
     }
 
     /// The listed names, admitted one at a time with the single-name rules, in listed order —
@@ -5886,9 +6005,7 @@ mod tests {
              && exec 4<>/dev/tcp/127.0.0.2/443 && printf '\\nsecond:' && cat <&4 && exec 4<&-"
                 .to_owned(),
         ];
-        // Passes the single-name admission `admit` still applies; the listed set is what runs.
-        input.sandbox.network = NetworkMode::Aperture;
-        input.sandbox.aperture = Some("model".to_owned());
+        list_both(&mut input);
         input.wait = true;
         let observed = match runtime
             .start("ex_several_apertures", &workspace, &input)
@@ -5925,6 +6042,35 @@ mod tests {
             stdout.ends_with("first:model\nsecond:audit"),
             "a listen address did not reach its own destination: {stdout}"
         );
+        // The array form: every listed aperture, in list order, each with the address it listened
+        // on and the destination it reached.
+        let applied = &observed
+            .resource
+            .applied
+            .as_ref()
+            .expect("an observed run records its applied confinement")
+            .network;
+        let substrate_wire::AppliedNetwork::Apertures(listed) = applied else {
+            panic!("a listed run did not record every aperture: {applied:?}");
+        };
+        let recorded: Vec<(&str, Option<&str>, &str)> = listed
+            .iter()
+            .map(|aperture| {
+                (
+                    aperture.name.as_str(),
+                    aperture.listen.as_deref(),
+                    aperture.destination.as_str(),
+                )
+            })
+            .collect();
+        let (model, audit) = (model.address.to_string(), audit.address.to_string());
+        assert_eq!(
+            recorded,
+            [
+                ("model", Some("127.0.0.1:443"), model.as_str()),
+                ("audit", Some("127.0.0.2:443"), audit.as_str()),
+            ]
+        );
     }
 
     /// All or nothing through `start`: the second aperture cannot be installed, so the start is
@@ -5949,8 +6095,7 @@ mod tests {
 
         let mut input = pty_exec_input(&snapshot);
         input.argv = vec!["/bin/true".to_owned()];
-        input.sandbox.network = NetworkMode::Aperture;
-        input.sandbox.aperture = Some("model".to_owned());
+        list_both(&mut input);
         input.wait = true;
         match runtime
             .start("ex_several_apertures_refused", &workspace, &input)
@@ -6567,6 +6712,7 @@ mod tests {
                     None,
                     None,
                     &access,
+                    &[],
                     &[],
                 )
                 .expect("the exec argv builds");

@@ -347,7 +347,7 @@ fn the_eight_design_codes_carry_their_status_and_class() {
     let host = exec_start_refusal("exec.aperture-host-listed-twice").expect("named");
     assert_eq!(
         host.message,
-        "Each aperture in a list declares a distinct host name; two for one name cannot both be reached.",
+        "Each aperture in a list declares a distinct host name, and only the first may declare localhost; two for one name cannot both be reached.",
         "the message names the rule and never the request's names or the operator's hosts"
     );
     for (code, _, _) in expected {

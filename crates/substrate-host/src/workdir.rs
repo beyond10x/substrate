@@ -6,7 +6,8 @@
 //! directory exists in the object the placing mount binds, reached component by component beneath
 //! that object with no symlink followed; the mounts a start may place never overlap
 //! (`validate_read_only_roots`, `validate_read_only_files`), so exactly one of them contains the
-//! path. Bubblewrap's own `--chdir` follows symlinks and runs after the dispatch barrier, so it can
+//! path. A declared root is asked through the descriptor admission pinned and bubblewrap binds,
+//! never through its declared path again. Bubblewrap's own `--chdir` follows symlinks and runs after the dispatch barrier, so it can
 //! be neither the symlink check nor the pre-dispatch one; it is the backstop for a directory removed
 //! between the check and the start, recognised by its exact diagnostic in [`is_chdir_failure`].
 
@@ -23,6 +24,7 @@ use substrate_wire::{
 };
 
 use crate::DriverError;
+use crate::read_only_roots::PinnedRoot;
 
 const ADDRESS: &str = "workdir";
 
@@ -58,8 +60,9 @@ pub(crate) fn admit(input: &ExecStartInput, published: Option<bool>) -> Result<(
 }
 
 /// Whether the admitted directory exists, as a directory reached without a symlink, in the object
-/// its mount binds: beneath the pinned `workspace`, the materialized `capsule`, or a declared
-/// root's host directory. Fresh scratch is empty, so only its mount point exists.
+/// its mount binds: beneath the pinned `workspace`, the materialized `capsule`, or the directory
+/// admission pinned for a declared root (`roots`). Fresh scratch is empty, so only its mount point
+/// exists.
 ///
 /// # Errors
 ///
@@ -69,6 +72,7 @@ pub(crate) fn check_present(
     input: &ExecStartInput,
     workspace: &OwnedFd,
     capsule: Option<&Path>,
+    roots: &[PinnedRoot],
 ) -> Result<(), DriverError> {
     let Some(workdir) = input.workdir.as_deref() else {
         return Ok(());
@@ -95,9 +99,11 @@ pub(crate) fn check_present(
             Err(missing())
         };
     }
-    for root in &input.read_only_roots {
-        if let Some(rest) = beneath(&root.mount) {
-            return walk(&open_host_directory(Path::new(&root.host_path))?, &rest);
+    // The directory admission pinned is the one bubblewrap mounts (design 26 § 3), so that is the
+    // one asked, never the declared path, which may name another directory by now.
+    for root in roots {
+        if let Some(rest) = beneath(root.mount()) {
+            return walk(root.descriptor(), &rest);
         }
     }
     // `admit` refused a directory no placed mount contains, so this is a start that bypassed it.

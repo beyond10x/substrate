@@ -70,7 +70,7 @@
           "address": "sandbox.apertures",
           "class": "refused",
           "code": "exec.aperture-host-listed-twice",
-          "message": "Each aperture in a list declares a distinct host name; two for one name cannot both be reached.",
+          "message": "Each aperture in a list declares a distinct host name, and only the first may declare localhost; two for one name cannot both be reached.",
           "operation": "01JDESIGN26APERTURES008",
           "retriable": false
         },

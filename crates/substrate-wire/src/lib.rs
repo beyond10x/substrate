@@ -17,7 +17,7 @@ pub const API_VERSION: &str = "v1";
 /// Moving either member is an explicit coordinated promotion (Atlas ADR 0019).
 pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.21.0";
 pub const ADVERTISED_CONTRACT_BUNDLE_SHA256: &str =
-    "018478900be9f2ca1c8366de52bf22bd33189f3a01dda344cb233274d919faf6";
+    "044b3099d8e5a1108cc75cf3b03f1ea4d250ee4e34266cf493276fe4a9a0fe15";
 pub const MAX_FILE_BYTES: u64 = 1_048_576;
 pub const MAX_IO_BYTES: u64 = 1_048_576;
 pub const MAX_LIST_ITEMS: u32 = 1_000;
@@ -4108,7 +4108,7 @@ pub const APERTURE_LIST_REFUSALS: [ExecStartRefusal; 4] = [
         code: EXEC_APERTURE_HOST_LISTED_TWICE,
         status: 422,
         class: ErrorClass::Refused,
-        message: "Each aperture in a list declares a distinct host name; two for one name cannot both be reached.",
+        message: "Each aperture in a list declares a distinct host name, and only the first may declare localhost; two for one name cannot both be reached.",
     },
 ];
 

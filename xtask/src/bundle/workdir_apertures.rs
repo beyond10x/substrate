@@ -303,6 +303,29 @@ fn check_applied_record(released: &Tree, failures: &mut Vec<String>) {
         .and_then(Value::as_array)
         .cloned()
         .unwrap_or_default();
+    check_applied_forms(path, &forms, failures);
+    check_exec_branches(path, &resource, failures);
+    let missing = wire::WORKDIR_REFUSALS[2];
+    let admits_missing = resource
+        .pointer("/$defs/exec-refusal/oneOf")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .any(|form| {
+            form.pointer("/properties/code/const") == Some(&json!(missing.code))
+                && form.pointer("/properties/class/const") == Some(&json!(class_of(missing.class)))
+        });
+    if !admits_missing {
+        failures.push(format!(
+            "{path}: exec-refusal does not admit {} for a directory gone after admission",
+            missing.code
+        ));
+    }
+}
+
+/// The list form holds 2 to `MAX_EGRESS_APERTURES` apertures, each stating a loopback `listen`;
+/// the single form keeps its `0.20.0` shape.
+fn check_applied_forms(path: &str, forms: &[Value], failures: &mut Vec<String>) {
     let list = forms
         .iter()
         .find(|form| form.get("type") == Some(&json!("array")));
@@ -351,6 +374,11 @@ fn check_applied_record(released: &Tree, failures: &mut Vec<String>) {
             "{path}: the single applied aperture keeps its 0.20.0 shape, without listen"
         ));
     }
+}
+
+/// Every applied shape of every exec branch may name its working directory and carries every
+/// applied-network form, and every branch echoes a requested list.
+fn check_exec_branches(path: &str, resource: &Value, failures: &mut Vec<String>) {
     let mut applied_shapes = 0;
     for (index, branch) in resource
         .pointer("/$defs/exec/oneOf")
@@ -393,22 +421,6 @@ fn check_applied_record(released: &Tree, failures: &mut Vec<String>) {
     }
     if applied_shapes == 0 {
         failures.push(format!("{path}: no exec branch has an applied shape"));
-    }
-    let missing = wire::WORKDIR_REFUSALS[2];
-    let admits_missing = resource
-        .pointer("/$defs/exec-refusal/oneOf")
-        .and_then(Value::as_array)
-        .into_iter()
-        .flatten()
-        .any(|form| {
-            form.pointer("/properties/code/const") == Some(&json!(missing.code))
-                && form.pointer("/properties/class/const") == Some(&json!(class_of(missing.class)))
-        });
-    if !admits_missing {
-        failures.push(format!(
-            "{path}: exec-refusal does not admit {} for a directory gone after admission",
-            missing.code
-        ));
     }
 }
 

@@ -144,6 +144,42 @@ pub(crate) fn listen_address(index: usize) -> Option<Ipv4Addr> {
     ))
 }
 
+/// The lines every generated `/etc/hosts` opens with, before any aperture's own.
+const HOSTS_HEADER: &str = "127.0.0.1\tlocalhost\n::1\tlocalhost\n";
+
+/// The one name [`HOSTS_HEADER`] maps to an IPv4 address, and that address.
+const HEADER_NAME: (&str, Ipv4Addr) = ("localhost", Ipv4Addr::LOCALHOST);
+
+/// Whether the generated mapping would give one host name two addresses, so that every aperture
+/// after the first holding it is installed and never reached by its name (design 26 § 2).
+///
+/// A resolver answers with the first line for a name and compares names ASCII case-insensitively,
+/// with one trailing `.` ignored, so they are compared that way here. `localhost` is already
+/// mapped by [`HOSTS_HEADER`] to the first listen address, so only the first aperture may declare
+/// it. A host declared as a literal address gets no line and shadows nothing. A set longer than
+/// `MAX_EGRESS_APERTURES` is not this rule's to refuse.
+pub(crate) fn a_host_is_mapped_twice<'a>(
+    apertures: impl IntoIterator<Item = &'a EgressAperture>,
+) -> bool {
+    let mut mapped = vec![(HEADER_NAME.0.to_owned(), HEADER_NAME.1)];
+    for (index, aperture) in apertures.into_iter().enumerate() {
+        let Some(address) = listen_address(index) else {
+            return false;
+        };
+        if !aperture.host_is_a_name() {
+            continue;
+        }
+        let host = aperture.host.strip_suffix('.').unwrap_or(&aperture.host);
+        let name = host.to_ascii_lowercase();
+        match mapped.iter().find(|(held, _)| *held == name) {
+            Some((_, held)) if *held != address => return true,
+            Some(_) => {}
+            None => mapped.push((name, address)),
+        }
+    }
+    false
+}
+
 /// One listen address per aperture, in list order, or the refusal for a set no run may hold.
 ///
 /// Admission bounds the list before it gets here. The bound is held again where it is spent, so
@@ -184,20 +220,29 @@ impl GeneratedResolution {
     ///
     /// # Errors
     ///
-    /// `exec.aperture-install-failed` for an empty list or one longer than
-    /// `MAX_EGRESS_APERTURES`, before anything is created, and for a file that cannot be written.
+    /// `exec.aperture-install-failed` for an empty list, one longer than `MAX_EGRESS_APERTURES` or
+    /// one whose mapping would name a host twice ([`a_host_is_mapped_twice`]), before anything is
+    /// created, and for a file that cannot be written.
     pub(crate) fn prepare(
         apertures: &[EgressAperture],
         ca_source: Option<&Path>,
         root: &Path,
     ) -> Result<Self, DriverError> {
         let addresses = listen_addresses(apertures.len())?;
+        // Admission refuses this by name; held again where the mapping is written, so no set
+        // nobody admitted gets a mapping whose later lines are never read.
+        if a_host_is_mapped_twice(apertures) {
+            return Err(DriverError::failed(
+                "exec.aperture-install-failed",
+                "The egress apertures could not be installed exactly as declared: the generated host mapping would name one host for two apertures.",
+            ));
+        }
         let directory = tempfile::Builder::new()
             .prefix("aperture-")
             .tempdir_in(root)
             .map_err(|error| install_failed("private aperture directory", &error))?;
         let hosts = directory.path().join("hosts");
-        let mut text = String::from("127.0.0.1\tlocalhost\n::1\tlocalhost\n");
+        let mut text = String::from(HOSTS_HEADER);
         for (aperture, address) in apertures.iter().zip(addresses) {
             if aperture.host_is_a_name() {
                 text.push_str(&address.to_string());
@@ -338,15 +383,14 @@ pub(crate) struct InstalledAperture {
 
 impl InstalledAperture {
     /// The `address:port` this aperture listens on inside the run's namespace.
-    ///
-    /// Reported by the host, never by the record: `AppliedAperture` carries no listen address until
-    /// the wire gives the several-apertures form one, and a single aperture's record is unchanged.
-    #[cfg_attr(not(test), allow(dead_code))] // Read by the applied array form, which the wire adds.
     pub(crate) fn listen(&self) -> SocketAddrV4 {
         self.listen
     }
 
-    /// What was installed, with the bytes that have crossed so far.
+    /// What was installed, with the bytes that have crossed so far and the address it listens on.
+    ///
+    /// The listen address is always stated here; a run that named one `aperture` reports it
+    /// without, so that record is unchanged (design 26 § 2), and that is the caller's to drop.
     pub(crate) fn applied(&self) -> AppliedAperture {
         AppliedAperture {
             mode: ApertureMode::Aperture,
@@ -355,7 +399,7 @@ impl InstalledAperture {
             mechanism: ApertureMechanism::LoopbackForwarder,
             bytes: self.counters.read(),
             max_bytes: self.max_bytes,
-            listen: None,
+            listen: Some(self.listen().to_string()),
         }
     }
 
@@ -1943,7 +1987,7 @@ mod tests {
                 &sandbox_request(NetworkMode::None, None),
             )
             .expect("the default is admissible")
-            .is_none(),
+            .is_empty(),
             "a start naming no aperture selected one"
         );
         assert_eq!(
@@ -2075,9 +2119,9 @@ mod tests {
             Some(&published),
             &sandbox_request(NetworkMode::Aperture, Some("model")),
         )
-        .expect("a declared, verified aperture is admissible")
-        .expect("a name selects an aperture");
-        assert_eq!(selected.name, "model");
+        .expect("a declared, verified aperture is admissible");
+        let names: Vec<&str> = selected.iter().map(|one| one.name.as_str()).collect();
+        assert_eq!(names, ["model"], "a name selects exactly its aperture");
 
         let escalation = crate::process::ProcessRuntime::admit_egress_aperture(
             &config,
@@ -2304,6 +2348,49 @@ mod tests {
             Vec::<libc::pid_t>::new(),
             "a refused set forked a forwarder"
         );
+    }
+
+    /// A name the generated mapping would hold twice reaches only its first address, so the set is
+    /// not generated: admission refuses it by name (`exec.aperture-host-listed-twice`), and the
+    /// mechanism holds the rule again where the mapping is written. Names compare as a resolver
+    /// compares them, ignoring ASCII case and one trailing dot; `localhost` is already mapped to
+    /// the first listen address; a literal address gets no line and shadows nothing.
+    #[test]
+    fn a_name_the_mapping_would_hold_twice_is_never_generated() {
+        let root = tempfile::tempdir().unwrap();
+        let pinned = SocketAddr::from((Ipv4Addr::LOCALHOST, 9));
+        let model = named_aperture("model", "model.example.invalid", 443, pinned);
+        let mirror = named_aperture("mirror", "MODEL.example.invalid.", 443, pinned);
+        let local = named_aperture("local", "localhost", 443, pinned);
+        let literal = named_aperture("literal", "192.0.2.1", 443, pinned);
+        for set in [
+            [model.clone(), mirror.clone()],
+            [model.clone(), local.clone()],
+        ] {
+            let Err(refusal) = GeneratedResolution::prepare(&set, None, root.path()) else {
+                panic!("a mapping naming one host twice was generated");
+            };
+            assert_eq!(refusal.code, "exec.aperture-install-failed");
+        }
+        assert_eq!(
+            std::fs::read_dir(root.path()).unwrap().count(),
+            0,
+            "a refused set left generated state behind"
+        );
+
+        let generated = GeneratedResolution::prepare(&[local, model], None, root.path())
+            .expect("localhost first is the address the mapping already gives it");
+        assert_eq!(
+            std::fs::read_to_string(&generated.hosts).unwrap(),
+            "127.0.0.1\tlocalhost\n::1\tlocalhost\n\
+             127.0.0.1\tlocalhost\n\
+             127.0.0.2\tmodel.example.invalid\n"
+        );
+        assert!(generated.close());
+        let generated =
+            GeneratedResolution::prepare(&[literal.clone(), literal, mirror], None, root.path())
+                .expect("a repeated literal address shadows no name");
+        assert!(generated.close());
     }
 
     /// Two apertures on the same port: each reached from inside the sandbox on its own address,
@@ -2823,4 +2910,388 @@ mod tests {
     }
 
     fn _unused(_: PathBuf) {}
+
+    /// Several apertures observed from inside the sandbox (design 26 § 2): a script in the run's
+    /// namespace connects by name and by address, through the generated `/etc/hosts` bound where
+    /// a run binds it, while the host installs the apertures from outside. The sandbox is held at
+    /// `--block-fd` until the apertures exist, as `start_inner` orders it, and its child is bash
+    /// for `/dev/tcp`. Without bubblewrap a case returns without asserting, as the cases above
+    /// do: it is absent, not passed.
+    mod observed_inside {
+        use std::fs::File;
+        use std::io::{Read as _, Write as _};
+        use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+        use std::os::fd::{AsRawFd as _, FromRawFd as _, RawFd};
+        use std::os::unix::process::CommandExt as _;
+        use std::path::{Path, PathBuf};
+        use std::process::{Child, Command, Stdio};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::time::{Duration, Instant};
+
+        use substrate_wire::ApertureBytes;
+
+        use crate::egress::{
+            EgressAperture, GeneratedResolution, RELAY_BUFFER, install_all, read_sandbox_pid,
+        };
+
+        const BUBBLEWRAP: &str = "/usr/bin/bwrap";
+
+        /// A host-side destination answering every connection with `body`, then closing it.
+        struct Destination {
+            address: SocketAddr,
+            stop: Arc<AtomicBool>,
+            handle: Option<std::thread::JoinHandle<()>>,
+        }
+
+        impl Destination {
+            fn serving(body: Vec<u8>) -> Self {
+                let listener =
+                    TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("bind a destination");
+                let address = listener.local_addr().expect("destination address");
+                let stop = Arc::new(AtomicBool::new(false));
+                let serving = Arc::clone(&stop);
+                let handle = std::thread::spawn(move || {
+                    while let Ok((mut stream, _)) = listener.accept() {
+                        if serving.load(Ordering::Acquire) {
+                            break;
+                        }
+                        let body = body.clone();
+                        std::thread::spawn(move || {
+                            let _ = stream.write_all(&body);
+                        });
+                    }
+                });
+                Self {
+                    address,
+                    stop,
+                    handle: Some(handle),
+                }
+            }
+        }
+
+        impl Drop for Destination {
+            fn drop(&mut self) {
+                self.stop.store(true, Ordering::Release);
+                let _ = TcpStream::connect(self.address);
+                if let Some(handle) = self.handle.take() {
+                    let _ = handle.join();
+                }
+            }
+        }
+
+        fn aperture(
+            name: &str,
+            host: &str,
+            pinned: SocketAddr,
+            max_bytes: Option<u64>,
+        ) -> EgressAperture {
+            EgressAperture {
+                name: name.to_owned(),
+                host: host.to_owned(),
+                port: 443,
+                pinned,
+                max_bytes,
+            }
+        }
+
+        /// A pipe whose ends are close-on-exec; the sandbox's two ends are made inheritable in its
+        /// own `pre_exec`, so no concurrently spawned sandbox can hold them.
+        fn cloexec_pipe() -> (File, File) {
+            let mut descriptors = [-1; 2];
+            // SAFETY: two writable integers; `pipe2` initialises both on success.
+            assert_eq!(
+                unsafe { libc::pipe2(descriptors.as_mut_ptr(), libc::O_CLOEXEC) },
+                0,
+                "pipe2"
+            );
+            // SAFETY: two fresh descriptors owned here.
+            unsafe {
+                (
+                    File::from_raw_fd(descriptors[0]),
+                    File::from_raw_fd(descriptors[1]),
+                )
+            }
+        }
+
+        /// A sandbox shaped as a run's — no network, the generated resolution bound at
+        /// `/etc/hosts` — held until [`ScriptedSandbox::finish`] releases it.
+        struct ScriptedSandbox {
+            child: Child,
+            block: Option<File>,
+            pid: u32,
+            output: PathBuf,
+        }
+
+        impl ScriptedSandbox {
+            fn open(scratch: &Path, hosts: Option<&Path>, script: &str) -> Option<Self> {
+                if !Path::new(BUBBLEWRAP).is_file() {
+                    return None;
+                }
+                let (mut info_read, info_write) = cloexec_pipe();
+                let (block_read, block_write) = cloexec_pipe();
+                let output = scratch.join(format!("sandbox-{}.out", block_read.as_raw_fd()));
+                let stdout = File::create(&output).expect("sandbox output file");
+                let mut command = Command::new(BUBBLEWRAP);
+                command
+                    .env_clear()
+                    .args(crate::process::USER_NAMESPACE_ARGV)
+                    .args([
+                        "--unshare-ipc",
+                        "--unshare-pid",
+                        "--unshare-net",
+                        "--unshare-uts",
+                        "--new-session",
+                        "--die-with-parent",
+                        "--clearenv",
+                        "--ro-bind",
+                        "/usr",
+                        "/usr",
+                        "--ro-bind-try",
+                        "/lib",
+                        "/lib",
+                        "--ro-bind-try",
+                        "/lib64",
+                        "/lib64",
+                        "--proc",
+                        "/proc",
+                        "--dev",
+                        "/dev",
+                    ]);
+                if let Some(hosts) = hosts {
+                    command.arg("--ro-bind").arg(hosts).arg("/etc/hosts");
+                }
+                let inherited: [RawFd; 2] = [info_write.as_raw_fd(), block_read.as_raw_fd()];
+                command
+                    .arg("--info-fd")
+                    .arg(inherited[0].to_string())
+                    .arg("--block-fd")
+                    .arg(inherited[1].to_string())
+                    .args(["--", "/usr/bin/bash", "-c", script])
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::from(stdout))
+                    .stderr(Stdio::inherit());
+                // SAFETY: `inherit` is async-signal-safe `fcntl` over two descriptor numbers.
+                unsafe {
+                    command.pre_exec(move || crate::process::inherit(&inherited));
+                }
+                let child = command.spawn().expect("spawn the sandbox");
+                drop(info_write);
+                drop(block_read);
+                let pid = read_sandbox_pid(&mut info_read)
+                    .expect("bubblewrap reported no child-pid on its --info-fd");
+                Some(Self {
+                    child,
+                    block: Some(block_write),
+                    pid,
+                    output,
+                })
+            }
+
+            fn release(&mut self) {
+                if let Some(mut block) = self.block.take() {
+                    let _ = block.write_all(&[1]);
+                }
+            }
+
+            /// Releases the sandbox and returns what its script printed, killing it past
+            /// `deadline`.
+            fn finish(mut self, deadline: Duration) -> String {
+                self.release();
+                let started = Instant::now();
+                loop {
+                    if self
+                        .child
+                        .try_wait()
+                        .expect("wait for the sandbox")
+                        .is_some()
+                    {
+                        break;
+                    }
+                    if started.elapsed() > deadline {
+                        let _ = self.child.kill();
+                        let _ = self.child.wait();
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                let mut text = String::new();
+                File::open(&self.output)
+                    .expect("open sandbox output")
+                    .read_to_string(&mut text)
+                    .expect("read sandbox output");
+                text
+            }
+        }
+
+        impl Drop for ScriptedSandbox {
+            fn drop(&mut self) {
+                self.release();
+                if self.child.try_wait().ok().flatten().is_none() {
+                    let _ = self.child.kill();
+                    let _ = self.child.wait();
+                }
+            }
+        }
+
+        fn generated_hosts(resolution: &GeneratedResolution) -> PathBuf {
+            resolution
+                .binds()
+                .into_iter()
+                .find(|(_, mount)| *mount == substrate_wire::APERTURE_HOSTS_PATH)
+                .expect("the generated resolution binds /etc/hosts")
+                .0
+                .to_path_buf()
+        }
+
+        /// An aperture whose declared host is `localhost` is reached at that name by its own
+        /// destination, and so it may only be listed first.
+        ///
+        /// The generated file opens with `127.0.0.1\tlocalhost`, so a second aperture declaring
+        /// `localhost` would be answered by the first aperture's forwarder and its bytes would go
+        /// to the first aperture's destination, counted on the wrong aperture: that set is not
+        /// generated. Listed first, the name's line and its listen address agree, and a child
+        /// that connects to the declared `localhost:443` reaches that aperture's destination.
+        #[test]
+        fn a_listed_aperture_whose_host_is_localhost_reaches_its_own_destination() {
+            let scratch = tempfile::tempdir().unwrap();
+            let model = Destination::serving(b"model".to_vec());
+            let sidecar = Destination::serving(b"sidecar".to_vec());
+            let model_first = [
+                aperture("model", "model.example.invalid", model.address, None),
+                aperture("sidecar", "localhost", sidecar.address, None),
+            ];
+            let Err(refusal) = GeneratedResolution::prepare(&model_first, None, scratch.path())
+            else {
+                panic!("a second aperture declaring localhost was given a mapping");
+            };
+            assert_eq!(refusal.code, "exec.aperture-install-failed");
+
+            let declared = [model_first[1].clone(), model_first[0].clone()];
+            let resolution = GeneratedResolution::prepare(&declared, None, scratch.path())
+                .expect("generate the resolution for two apertures");
+            let hosts = generated_hosts(&resolution);
+            // The first connection is calibration: a name only the generated file knows resolves
+            // and is served, so the second connection's answer is about `localhost` alone.
+            let script = "exec 3<>/dev/tcp/model.example.invalid/443 \
+                          && printf 'model.example.invalid=' && cat <&3 && exec 3<&- \
+                          && exec 4<>/dev/tcp/localhost/443 && printf ' localhost=' && cat <&4";
+            let Some(sandbox) = ScriptedSandbox::open(scratch.path(), Some(&hosts), script) else {
+                return;
+            };
+            let installed =
+                install_all(&declared, sandbox.pid, None).expect("install both apertures");
+            let printed = sandbox.finish(Duration::from_secs(30));
+            let bytes: Vec<ApertureBytes> = installed
+                .apertures()
+                .iter()
+                .map(|one| one.applied().bytes)
+                .collect();
+            drop(installed);
+            assert!(resolution.close());
+            assert_eq!(
+                printed, "model.example.invalid=model localhost=sidecar",
+                "the declared host `localhost` was not answered by its own destination; bytes \
+                 per aperture: {bytes:?}"
+            );
+        }
+
+        /// All or nothing, after the second install: the third aperture fails (an IPv6
+        /// destination, refused after its listener is bound), and neither earlier forwarder still
+        /// answers inside. Observed from inside the namespace rather than from a pid list: a
+        /// forwarder that survived holds its listener, and a child connecting to its address
+        /// would be accepted.
+        #[test]
+        fn a_failed_third_install_leaves_no_earlier_listener_answering() {
+            let scratch = tempfile::tempdir().unwrap();
+            let model = Destination::serving(b"model".to_vec());
+            let audit = Destination::serving(b"audit".to_vec());
+            let declared = [
+                aperture("model", "model.example.invalid", model.address, None),
+                aperture("audit", "audit.example.invalid", audit.address, None),
+                aperture(
+                    "broken",
+                    "broken.example.invalid",
+                    "[::1]:9".parse().unwrap(),
+                    None,
+                ),
+            ];
+            let script = "for a in 127.0.0.1 127.0.0.2 127.0.0.3; do \
+                            if (exec 3<>/dev/tcp/$a/443) 2>/dev/null; then printf '%s=open ' $a; \
+                            else printf '%s=refused ' $a; fi; done";
+            let Some(sandbox) = ScriptedSandbox::open(scratch.path(), None, script) else {
+                return;
+            };
+            let Err(refusal) = install_all(&declared, sandbox.pid, None) else {
+                panic!("a set with an uninstallable third member was installed");
+            };
+            assert_eq!(refusal.code, "exec.aperture-install-failed");
+            let printed = sandbox.finish(Duration::from_secs(30));
+            assert_eq!(
+                printed, "127.0.0.1=refused 127.0.0.2=refused 127.0.0.3=refused ",
+                "a forwarder of a refused set still answers inside the namespace"
+            );
+        }
+
+        /// Each ceiling is independent under concurrent connections (ADR 0014 per aperture;
+        /// design 26 § 2): four relays at once through a capped aperture and four through an
+        /// uncapped one on the same port. The uncapped one passes every byte, and the capped one
+        /// stops within one relay buffer per live relay of its own ceiling — not of the sum of
+        /// both apertures' bytes.
+        #[test]
+        fn concurrent_relays_on_two_apertures_keep_independent_ceilings() {
+            const STREAM: usize = 1 << 20;
+            const CEILING: u64 = 64 * 1024;
+            const RELAYS: u64 = 4;
+            let scratch = tempfile::tempdir().unwrap();
+            let capped_hose = Destination::serving(vec![b'c'; STREAM]);
+            let open_hose = Destination::serving(vec![b'o'; STREAM]);
+            let declared = [
+                aperture(
+                    "capped",
+                    "capped.example.invalid",
+                    capped_hose.address,
+                    Some(CEILING),
+                ),
+                aperture("open", "open.example.invalid", open_hose.address, None),
+            ];
+            let script = "for i in 1 2 3 4; do \
+                            (exec 3<>/dev/tcp/127.0.0.1/443 && cat <&3 >/dev/null) 2>/dev/null & \
+                            (exec 4<>/dev/tcp/127.0.0.2/443 && cat <&4 >/dev/null) 2>/dev/null & \
+                          done; wait; printf done";
+            let Some(sandbox) = ScriptedSandbox::open(scratch.path(), None, script) else {
+                return;
+            };
+            let installed =
+                install_all(&declared, sandbox.pid, None).expect("install both apertures");
+            let printed = sandbox.finish(Duration::from_mins(1));
+            assert_eq!(printed, "done", "the concurrent clients did not all finish");
+            let [capped, open] = installed.apertures() else {
+                panic!("two apertures installed {}", installed.apertures().len());
+            };
+            let expected_open = RELAYS * STREAM as u64;
+            let settle = Instant::now();
+            while open.applied().bytes.from_destination < expected_open
+                && settle.elapsed() < Duration::from_secs(5)
+            {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let open_bytes = open.applied().bytes;
+            let capped_bytes = capped.applied().bytes;
+            assert_eq!(
+                open_bytes.from_destination, expected_open,
+                "the uncapped aperture lost bytes beside a capped one: {open_bytes:?}"
+            );
+            let capped_total = capped_bytes.to_destination + capped_bytes.from_destination;
+            let per_relay = RELAY_BUFFER as u64;
+            assert!(
+                (CEILING..=CEILING + RELAYS * per_relay).contains(&capped_total),
+                "the capped aperture's concurrent relays did not stop within one buffer each of \
+                 its ceiling: {capped_total}"
+            );
+            assert!(capped.ceiling_exceeded());
+            assert!(!open.ceiling_exceeded());
+            drop(installed);
+        }
+    }
 }

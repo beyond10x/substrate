@@ -337,6 +337,13 @@ the name in the message**; where the mechanism did not verify in a throwaway san
 capability fact `exec.egress-apertures` is absent and every aperture request is `unserved` — never a
 run that quietly got no network instead (invariant 3). ADR 0013.
 
+A run that needs two to four destinations names them as a list, `"apertures": ["model", "audit"]`,
+in place of `aperture`. Each keeps its own forwarder and ceiling; the n-th listens on `127.0.0.n`,
+and `applied.network` becomes an array whose elements add that `listen` address. Two listed
+apertures that declare one host name, or `localhost` listed anywhere but first, are refused
+`exec.aperture-host-listed-twice` before anything is installed, because the child could reach only
+one of them by that name. Design 26.
+
 The optional `/max=<size>` term bounds **how much** may cross, over both directions summed, for one
 run — `1048576`, `512KiB`, `64MiB`, `2GiB`, and never a decimal-power unit such as `MB`. An
 unrecognised term is a startup error, not an ignored one, and an aperture declared without the term

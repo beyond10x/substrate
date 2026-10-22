@@ -11,7 +11,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 - Development contract bundle `substrate-wire/0.21.0` (design 26), additive over `0.20.0` with
   its 44 routes unchanged. The daemon and SDK advertise it at inner `bundle.json` digest
-  `018478900be9f2ca1c8366de52bf22bd33189f3a01dda344cb233274d919faf6`. `cargo xtask check-bundle
+  `044b3099d8e5a1108cc75cf3b03f1ea4d250ee4e34266cf493276fe4a9a0fe15`. `cargo xtask check-bundle
   0.21.0` holds its bounds, refusals, vectors and compatibility text to the wire constants, and
   the gate checks it beside every earlier bundle.
 - An exec or session start may name `workdir`, the directory the program starts in. It must be an
@@ -32,15 +32,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `aperture` or without network `aperture` `exec.aperture-mode-mismatch` (all 422). Each name must
   be declared (`exec.aperture-undeclared`, 501). The applied network gains a third form, an array
   whose elements carry the `listen` address; a single aperture keeps its `0.20.0` object.
-- The clean-room runtime vectors cover both: 99 portable cases (was 90) and 146 delegated cases
-  (was 132), including programs started beneath the workspace and a declared root and absent or
-  symlinked directories refused before dispatch.
+- The Linux host installs every listed aperture in one sandbox, the n-th listening on
+  `127.0.0.n`, and reports each in the applied array with its `listen` address. Before anything is
+  installed it refuses `exec.aperture-host-listed-twice` (422) when two listed apertures declare
+  one host name (ASCII case-insensitive, without a trailing `.`), or when any but the first
+  declares `localhost`, which the generated `/etc/hosts` already gives to the first listen
+  address. The generated mapping refuses the same set again as `exec.aperture-install-failed`, and
+  a listed set that names nothing is refused as `exec.apertures-too-few` at the host as well as
+  the wire, so it never runs without a network.
+- The clean-room runtime vectors cover both: 99 portable cases (was 90) and 147 delegated cases
+  (was 132), including programs started beneath the workspace and a declared root, absent or
+  symlinked directories refused before dispatch, a run that reads from two apertures and reports
+  both, and a list refused `exec.aperture-host-listed-twice` for `localhost` listed second.
 
 ### Changed
 
-- The Linux host refuses a valid, fully declared aperture list as `exec.apertures-unserved` (501)
-  at `sandbox.apertures`, at one marked point in admission, until several apertures per run are
-  installed. It never runs a list with fewer apertures than it named.
+- The host checks a working directory beneath a declared read-only root through the descriptor
+  admission pinned for that root, not by resolving its path again, so a rename or swap after
+  admission cannot change which directory is checked.
 
 ## [0.8.0] — 2026-10-22
 

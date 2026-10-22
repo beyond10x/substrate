@@ -1633,10 +1633,10 @@
       "sha256": "12a0de106136309bf60bc784eb2397969c7defa10869138bc4d60f9b83c43c76"
     },
     {
-      "byte_length": 5033,
+      "byte_length": 5075,
       "media_type": "application/json",
       "path": "vectors/http/apertures-one-host-listed-twice-is-refused.json",
-      "sha256": "50d237426974c0240f1fe3a6f3bb746fa98f6c876970b5c6e64119c155a477db"
+      "sha256": "d5cb65b85898fb6794cd3e708c8ea2cd15f17b358f7d085fc75e3c30c06baef1"
     },
     {
       "byte_length": 4459,

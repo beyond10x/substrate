@@ -247,7 +247,7 @@ refusals — `exec.sandbox-unavailable` (501), `exec.secret-slots-unserved` (501
 `exec.read-only-file*` refusals (422), `exec.read-only-files-unserved` (501),
 `process.host-unserved` (501), the two lexical `exec.workdir-*` and five aperture-list refusals
 (422) of design 26, `exec.workdir-unserved` (501) and `exec.egress-apertures-unserved` (501) for
-a list — across 99 cases, and its delegated lane 146. Both totals include
+a list — across 99 cases, and its delegated lane 147. Both totals include
 one route/refusal probe for every operation in the promoted registry (the seven host-process routes
 of `0.20.0` among them: unserved on the portable lane, served and refused before anything runs on
 the delegated one), and an operator's directory adopted through `workspace.adopt` (ADR 0035): its
@@ -257,8 +257,8 @@ root name refused, a destroy that leaves its files, and, delegated, an exec run 
 instead); the delegated cases also include an interactive shell driven through a `pty` session,
 programs started in a working directory beneath the workspace and beneath a declared root, an
 absent and a symlinked one refused `exec.workdir-missing` before dispatch, and an aperture list
-refused `exec.aperture-undeclared` for an undeclared name and `exec.apertures-unserved` (501) for a
-valid one until several apertures per run are served
+refused `exec.aperture-undeclared` for an undeclared name, run with two apertures each reporting its
+`listen` address, and refused `exec.aperture-host-listed-twice` for `localhost` listed second
 (`crates/substrate-daemon/tests/runtime_vectors.rs`, `PORTABLE_CASES` and `DELEGATED_CASES`). Its delegated lane runs only when
 `SUBSTRATE_VECTORS_CGROUP_ROOT` names a delegated cgroup v2 subtree the test process is inside;
 unset, those cases are **absent, never reported as passed** (invariant 3). **`bash scripts/delegated-lane.sh`
