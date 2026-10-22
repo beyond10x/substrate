@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-22T21:51:25Z",
+  "actor": "agent:b10x-chef-orchestrator",
+  "artifact": "story:writable-roots-wire-0-22-0",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "https://github.com/beyond10x/substrate/actions/runs/39858691006 (Full gate, success, 7ad6c2ea731a04d5ec186dd629a463117f4619a5); bash scripts/delegated-lane.sh at 7ad6c2ea, exit 0, 167 delegated runtime vectors, 2026-10-22T21:43:05Z"
+  }
+}

@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:writable-git-roots
 kind: story
-status: active
+status: implemented
 title: A confined child writes a Git checkout mounted outside /workspace
 relations:
 - depends_on: story:writable-roots-wire-0-22-0
@@ -15,10 +15,11 @@ scope:
   path: crates/substrate-host/src
 - confidence: cited
   path: crates/substrate-store/src
-revision: 4
+revision: 5
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-22T11:02:42Z", actor: "agent:b10x-chef-orchestrator", revision: 3}
 - {from: "proposed", to: "active", at: "2026-10-22T11:02:42Z", actor: "agent:b10x-chef-orchestrator", revision: 4}
+- {from: "active", to: "implemented", at: "2026-10-22T21:51:32Z", actor: "agent:b10x-chef-orchestrator", revision: 5, decided_on: {"recorded":{"test_result":1,"review_outcome":2}}}
 ---
 # A confined child writes a Git checkout mounted outside /workspace
 
