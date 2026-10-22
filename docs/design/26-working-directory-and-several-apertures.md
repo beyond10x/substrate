@@ -74,6 +74,23 @@ apertures may share a port because they do not share an address. An aperture who
 is a literal address has no name to map; the child reaches it at its listen address, which the
 applied record states.
 
+Two listed apertures whose declared hosts are the same name cannot both be reached: the generated
+`/etc/hosts` would map that name twice and the child's resolver answers with the first line, so the
+second aperture would be installed and unreachable by its name. The host refuses such a list as
+`exec.aperture-host-listed-twice` before anything is installed. Host names compare ASCII
+case-insensitively and without a trailing `.`, as a resolver compares them. The generated file opens
+with `127.0.0.1 localhost`, the first listen address, so `localhost` is already one of its names: an
+aperture declaring `localhost` may be listed first, where its line and its listen address agree,
+and anywhere else is refused by the same code, because it would be answered by the first
+aperture's forwarder and its bytes would reach the first aperture's destination. The generated
+mapping holds the rule again where it is written and refuses such a set as
+`exec.aperture-install-failed`. A listed set that names nothing is refused wherever it reaches the
+host, not only by the wire's `exec.apertures-too-few`, so it can never run as a start with no
+network. The published
+`exec.egress-apertures` fact carries the pinned destination and not the declared host, so this is
+the driver's refusal at admission, not the daemon's. Two apertures declared with the same literal
+address are not refused: neither has a name to map, and each is reached at its own listen address.
+
 Installation stays all-or-nothing: if any one aperture cannot be installed exactly as declared, all
 forwarders already started for the run are killed and the dispatch refuses with
 `exec.aperture-install-failed` (ADR 0013). Exceeding any one aperture's ceiling ends the run as a
@@ -90,6 +107,7 @@ only when the start named `apertures`. Each element is today's applied-aperture 
 | `apertures` with fewer than two names | `exec.apertures-too-few` | 422 |
 | more than `MAX_EGRESS_APERTURES` names | `exec.apertures-too-many` | 422 |
 | a name listed twice | `exec.aperture-listed-twice` | 422 |
+| two listed names whose declared hosts are one host name, or `localhost` declared by any but the first | `exec.aperture-host-listed-twice` | 422 |
 | a name that is invalid, a destination or a ceiling | the existing per-name codes | 422 |
 | a name the operator did not declare | the existing undeclared-aperture refusal, naming it | 501 |
 
@@ -109,6 +127,6 @@ unchanged. No wire byte changes.
 ## Bundle
 
 Successor `0.21.0` carries: the `workdir` start field, the `apertures` request field, the array
-form of the applied network, the `exec.workdir` fact, the seven new codes above, and the bound
+form of the applied network, the `exec.workdir` fact, the eight new codes above, and the bound
 constants `MAX_WORKDIR_BYTES`. It is additive over `0.20.0`: route counts unchanged, no member
 removed, no frozen directory rewritten (invariant 6).

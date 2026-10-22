@@ -459,6 +459,7 @@ pub(super) fn validate_exec_input(
     check_egress_aperture(&facts, &input.sandbox, mutation, request_id)?;
     check_secret_slots(&facts, mutation, request_id)?;
     check_read_only_files(&facts, mutation, request_id)?;
+    check_workdir(&facts, mutation, request_id)?;
     if !input.measurements.is_empty() && facts.exec_resource_usage.is_none() {
         return Err(failure(
             StatusCode::NOT_IMPLEMENTED,
@@ -519,38 +520,56 @@ pub(super) fn validate_exec_input(
     Ok(())
 }
 
-/// Daemon-side admission for the aperture a start selects, by name (ADR 0013).
+/// Daemon-side admission for the apertures a start selects, by name (ADR 0013, design 26 § 2).
 ///
 /// Shape, then capability, then declaration — the same order the driver uses independently, so a
 /// caller hears the same answer whichever layer sees the request first. The published fact is the
 /// declared names and their pinned destinations, so this needs no access to daemon configuration
-/// and gets none.
+/// and gets none. A list is held to the same per-name rules as one `aperture`, answered at the
+/// list's address, and every name in it must be declared.
 fn check_egress_aperture(
     facts: &substrate_wire::CapabilityFacts,
     sandbox: &substrate_wire::ConfinementRequest,
     mutation: &BoundMutation<ExecStartInput>,
     request_id: &str,
 ) -> Result<(), Response> {
-    if let Err(error) =
-        substrate_wire::validate_aperture_request(sandbox.network, sandbox.aperture.as_deref())
-    {
+    let listed = !sandbox.apertures.is_empty();
+    if let Err(error) = substrate_wire::validate_aperture_selection(sandbox) {
+        let name_address = if listed {
+            "sandbox.apertures"
+        } else {
+            "sandbox.network.aperture"
+        };
         let (code, message, address) = match error {
+            // Design 26 § 2: the list's own length and uniqueness rules.
+            substrate_wire::WireValidationError::AperturesTooFew
+            | substrate_wire::WireValidationError::AperturesTooMany
+            | substrate_wire::WireValidationError::ApertureListedTwice => {
+                let refusal = substrate_wire::exec_start_refusal_for(&error)
+                    .unwrap_or(substrate_wire::APERTURE_LIST_REFUSALS[0]);
+                (refusal.code, refusal.message, "sandbox.apertures")
+            }
             substrate_wire::WireValidationError::ApertureDestinationInRequest => (
                 "exec.aperture-destination-in-request",
                 "An egress aperture is selected by name; a destination may not appear in a request.",
-                "sandbox.network.aperture",
+                name_address,
             ),
             // Named apart from the destination refusal for the same reason that one exists: an
             // escalation an operator can read is worth more than a schema complaint (ADR 0014).
             substrate_wire::WireValidationError::ApertureCeilingInRequest => (
                 "exec.aperture-ceiling-in-request",
                 "An egress aperture byte ceiling is declared by the operator; it may not appear in a request.",
-                "sandbox.network.aperture",
+                name_address,
             ),
             substrate_wire::WireValidationError::InvalidApertureName => (
                 "exec.aperture-name-invalid",
                 "An egress aperture name must match [a-z][a-z0-9_]{0,63}.",
-                "sandbox.network.aperture",
+                name_address,
+            ),
+            _ if listed => (
+                "exec.aperture-mode-mismatch",
+                "A sandbox with an aperture list asks for network \"aperture\" and names no single aperture beside it.",
+                "sandbox.apertures",
             ),
             _ => (
                 "exec.aperture-mode-mismatch",
@@ -569,9 +588,14 @@ fn check_egress_aperture(
             false,
         ));
     }
-    let Some(name) = sandbox.aperture.as_deref() else {
-        return Ok(());
+    let names: Vec<&str> = if listed {
+        sandbox.apertures.iter().map(String::as_str).collect()
+    } else {
+        sandbox.aperture.as_deref().into_iter().collect()
     };
+    if names.is_empty() {
+        return Ok(());
+    }
     let Some(published) = facts.exec_egress_apertures.as_ref() else {
         return Err(failure(
             StatusCode::NOT_IMPLEMENTED,
@@ -584,7 +608,10 @@ fn check_egress_aperture(
             false,
         ));
     };
-    if !published.iter().any(|fact| fact.name == name) {
+    if let Some(name) = names
+        .iter()
+        .find(|name| !published.iter().any(|fact| fact.name == **name))
+    {
         return Err(failure(
             StatusCode::NOT_IMPLEMENTED,
             request_id,
@@ -599,6 +626,38 @@ fn check_egress_aperture(
         ));
     }
     Ok(())
+}
+
+/// Daemon-side admission for the working directory a start names (design 26 § 1).
+///
+/// Shape, then capability — the driver's order. Whether the directory exists is the driver's
+/// question, answered against the mounts it places.
+fn check_workdir(
+    facts: &substrate_wire::CapabilityFacts,
+    mutation: &BoundMutation<ExecStartInput>,
+    request_id: &str,
+) -> Result<(), Response> {
+    let input = &mutation.input;
+    if input.workdir.is_none() {
+        return Ok(());
+    }
+    let refusal = match substrate_wire::validate_workdir(input) {
+        Err(error) => substrate_wire::exec_start_refusal_for(&error)
+            .unwrap_or(substrate_wire::WORKDIR_REFUSALS[0]),
+        // The unserved refusal, last in the design's order.
+        Ok(()) if facts.exec_workdir != Some(true) => substrate_wire::WORKDIR_REFUSALS[3],
+        Ok(()) => return Ok(()),
+    };
+    Err(failure(
+        StatusCode::from_u16(refusal.status).unwrap_or(StatusCode::UNPROCESSABLE_ENTITY),
+        request_id,
+        Some(&mutation.op),
+        refusal.class,
+        refusal.code,
+        refusal.message,
+        Some("workdir"),
+        false,
+    ))
 }
 
 /// Daemon-side admission for the slots a start names (ADR 0012).

@@ -1,0 +1,35 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.21.0:result:process-stop-by-owner",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "process-stop-by-owner operation result",
+  "additionalProperties": false,
+  "properties": {
+    "owner_session": {
+      "type": "string"
+    },
+    "stopped": {
+      "items": {
+        "additionalProperties": false,
+        "properties": {
+          "operation": {
+            "$ref": "../common.json#/$defs/operation-id"
+          },
+          "process": {
+            "$ref": "../common.json#/$defs/process-id"
+          }
+        },
+        "required": [
+          "process",
+          "operation"
+        ],
+        "type": "object"
+      },
+      "type": "array"
+    }
+  },
+  "required": [
+    "owner_session",
+    "stopped"
+  ],
+  "type": "object"
+}

@@ -1,0 +1,26 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.21.0:result:process-list",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "process-list operation result",
+  "additionalProperties": false,
+  "properties": {
+    "items": {
+      "items": {
+        "$ref": "../resource.json#/$defs/process"
+      },
+      "maxItems": 256,
+      "type": "array"
+    },
+    "next_cursor": {
+      "type": "string"
+    },
+    "observed_at": {
+      "$ref": "../common.json#/$defs/timestamp"
+    }
+  },
+  "required": [
+    "items",
+    "observed_at"
+  ],
+  "type": "object"
+}

@@ -830,8 +830,8 @@ impl ProcessRuntime {
         input: &ExecStartInput,
         pipe_settings: Option<PipeSettings>,
     ) -> DispatchOutcome<ExecObservation> {
-        let pinned = match self.admit(id, workspace, input) {
-            Ok(pinned) => pinned,
+        let (pinned, read_only_roots) = match self.admit(id, workspace, input) {
+            Ok(admitted) => admitted,
             Err(error) => return DispatchOutcome::NotDispatched(error),
         };
         let workspace_access =
@@ -850,6 +850,16 @@ impl ProcessRuntime {
             Ok(value) => value,
             Err(error) => return DispatchOutcome::NotDispatched(error),
         };
+        // Before the permit, the cgroup and the spawn: an absent or symlinked directory is
+        // refused without running anything (design 26 § 1), in the objects the mounts bind.
+        if let Err(error) = crate::workdir::check_present(
+            input,
+            &workspace_access.root,
+            capsule.as_ref().map(|capsule| capsule.directory.path()),
+            &read_only_roots,
+        ) {
+            return DispatchOutcome::NotDispatched(error);
+        }
         let permit =
             match ActivePermit::acquire(Arc::clone(&self.active), self.config.max_concurrent_execs)
             {
@@ -879,26 +889,32 @@ impl ProcessRuntime {
         // Selected again rather than carried out of `admit`, because it is a pure function of the
         // request and the configuration and re-asking is cheaper than threading a borrow through
         // every early return above.
-        let aperture = match Self::admit_egress_aperture(
+        // An absent list and an empty one are the same request on the wire; `Some(&[])` would be
+        // a list that selects nothing, which `select_apertures` refuses.
+        let listed =
+            (!input.sandbox.apertures.is_empty()).then_some(input.sandbox.apertures.as_slice());
+        let apertures = match Self::select_apertures(
             &self.config,
             self.capability.facts.exec_egress_apertures.as_ref(),
             &input.sandbox,
+            listed,
         ) {
-            Ok(value) => value.cloned(),
+            Ok(value) => value,
             Err(error) => return contain_cgroup(&cgroup, error),
         };
         // Generated before the spawn because bubblewrap binds it, and installed after, because the
         // namespace it points into does not exist yet.
-        let resolution = match aperture.as_ref() {
-            Some(aperture) => match crate::egress::GeneratedResolution::prepare(
-                aperture,
+        let resolution = if apertures.is_empty() {
+            None
+        } else {
+            match crate::egress::GeneratedResolution::prepare(
+                &apertures,
                 self.config.ca_bundle.as_deref(),
                 &self.config.aperture_root,
             ) {
                 Ok(value) => Some(value),
                 Err(error) => return contain_cgroup(&cgroup, error),
-            },
-            None => None,
+            }
         };
         // The end bubblewrap reads sits above the slot range, so no slot placement can replace it.
         let (sync_read, sync_write) = match pipe()
@@ -913,14 +929,15 @@ impl ProcessRuntime {
         // Trap 2: the namespace to bind the aperture in belongs to the pid bubblewrap *reports*,
         // never to the bubblewrap process itself. The end bubblewrap writes sits above the slot
         // range, as the barrier does.
-        let info = match aperture.as_ref() {
-            Some(_) => match pipe()
+        let info = if apertures.is_empty() {
+            None
+        } else {
+            match pipe()
                 .and_then(|(read, write)| Ok((read, bubblewrap_descriptor(write, "info pipe")?)))
             {
                 Ok(pipe) => Some(pipe),
                 Err(error) => return contain_cgroup(&cgroup, error),
-            },
-            None => None,
+            }
         };
         let info_fd = info.as_ref().map(|(_, write)| write.as_raw_fd());
         // Last thing before spawn, first thing released after it. Every admission check and the
@@ -971,6 +988,7 @@ impl ProcessRuntime {
             scratch.as_ref(),
             &workspace_access,
             &read_only_files,
+            &read_only_roots,
         ) {
             Ok(value) => value,
             Err(error) => return contain_cgroup(&cgroup, error),
@@ -985,7 +1003,8 @@ impl ProcessRuntime {
         }
         retained.push(u32::try_from(seccomp.as_raw_fd()).expect("seccomp descriptor fits u32"));
         // Inherited by bubblewrap only: it mounts each through its descriptor bind and closes it
-        // before the program starts, so none is open in the confined program (ADR 0023, ADR 0033).
+        // before the program starts, so none is open in the confined program (ADR 0023, ADR 0033,
+        // design 26 § 3).
         let workspace_fds = workspace_access
             .raw_fds()
             .into_iter()
@@ -993,6 +1012,11 @@ impl ProcessRuntime {
                 read_only_files
                     .iter()
                     .map(crate::read_only_files::PinnedFile::raw_fd),
+            )
+            .chain(
+                read_only_roots
+                    .iter()
+                    .map(crate::read_only_roots::PinnedRoot::raw_fd),
             )
             .collect::<Vec<_>>();
         retained.extend(
@@ -1035,6 +1059,8 @@ impl ProcessRuntime {
         // The parent's copies of the terminal go with the builder: while any of them is open the
         // master never sees the child's exit, so a session that ended would read as one that stalled.
         drop(command);
+        // bubblewrap holds its own copies now; the driver keeps none for the life of a waited exec.
+        drop(read_only_roots);
         let mut child = match spawned {
             Ok(child) => child,
             Err(error) => {
@@ -1080,10 +1106,11 @@ impl ProcessRuntime {
         if let Err(error) = cgroup.attach_tree(leader_pid) {
             return contain_spawned(child, cgroup, error).await;
         }
-        // Between the namespace existing and the child running: the aperture is there for every
-        // instruction the child executes, and for none before it (ADR 0013).
-        let installed = match (aperture.as_ref(), info) {
-            (Some(aperture), Some((info_read, info_write))) => {
+        // Between the namespace existing and the child running: every aperture is there for every
+        // instruction the child executes, and for none before it (ADR 0013). The info pipe exists
+        // exactly when there are apertures to install.
+        let installed = match info {
+            Some((info_read, info_write)) => {
                 drop(info_write);
                 let mut reader = std::fs::File::from(info_read);
                 let Some(sandbox_pid) = crate::egress::read_sandbox_pid(&mut reader) else {
@@ -1097,14 +1124,15 @@ impl ProcessRuntime {
                     )
                     .await;
                 };
-                match crate::egress::install(aperture, sandbox_pid, Some(&cgroup.procs())) {
+                match crate::egress::install_all(&apertures, sandbox_pid, Some(&cgroup.procs())) {
                     Ok(installed) => Some(installed),
-                    // Nothing partial: the aperture either exists exactly as declared or the
-                    // dispatch is refused with the sandbox torn down around it.
+                    // Nothing partial: every aperture exists exactly as declared, or the dispatch
+                    // is refused with the forwarders already started reaped and the sandbox torn
+                    // down around them.
                     Err(error) => return contain_spawned(child, cgroup, error).await,
                 }
             }
-            _ => None,
+            None => None,
         };
         let started_at = Instant::now();
         if let Err(error) = release_barrier(&sync_write) {
@@ -1125,9 +1153,7 @@ impl ProcessRuntime {
             // and the destination is the pinned address rather than the configured host string.
             network: installed
                 .as_ref()
-                .map_or(AppliedNetwork::None, |installed| {
-                    AppliedNetwork::Aperture(installed.applied())
-                }),
+                .map_or(AppliedNetwork::None, applied_network),
             profile: SandboxProfile::Workspace,
             workspace_access: input.workspace_access.clone(),
             capsule: applied_capsule,
@@ -1141,6 +1167,10 @@ impl ProcessRuntime {
             // Placed, not requested: this list is taken from the acquired set, so it names what
             // actually crossed into the child.
             secret_slots: applied_slots,
+            // The directory bubblewrap was told to start the program in, which `check_present`
+            // found before the spawn. One removed after it is named on the observation by
+            // `record_workdir_missing`, beside this record.
+            workdir: input.workdir.clone(),
         };
         let resource = Exec {
             unrecorded_output: pipe_settings
@@ -1615,11 +1645,15 @@ impl ProcessRuntime {
         Ok(observation)
     }
 
-    /// Every rule ADR 0010 names, checked before dispatch.
+    /// Every rule ADR 0010 names, checked before dispatch, and every root pinned.
     ///
     /// Textual rules first, because they are the caller's mistake to hear about; then the
-    /// filesystem question only the driver can answer without racing.
-    fn admit_read_only_roots(roots: &[substrate_wire::ReadOnlyRoot]) -> Result<(), DriverError> {
+    /// filesystem question, answered by opening each root once without following a symlink at any
+    /// component. The descriptor is what bubblewrap mounts, so nothing renamed at the declared
+    /// path afterwards changes what is bound (design 26 § 3).
+    fn admit_read_only_roots(
+        roots: &[substrate_wire::ReadOnlyRoot],
+    ) -> Result<Vec<crate::read_only_roots::PinnedRoot>, DriverError> {
         substrate_wire::validate_read_only_roots(roots).map_err(|error| {
             DriverError::refused(
                 "exec.read-only-root-invalid",
@@ -1627,26 +1661,7 @@ impl ProcessRuntime {
                 "read_only_roots",
             )
         })?;
-        for root in roots {
-            // `symlink_metadata`, so a symlink is refused as itself rather than followed to
-            // whatever it points at — the caller declared a directory and would not be told.
-            let metadata = std::fs::symlink_metadata(std::path::Path::new(&root.host_path))
-                .map_err(|_| {
-                    DriverError::refused(
-                        "exec.read-only-root-absent",
-                        "A declared read-only root is not present on this host.",
-                        "read_only_roots",
-                    )
-                })?;
-            if !metadata.is_dir() {
-                return Err(DriverError::refused(
-                    "exec.read-only-root-not-a-directory",
-                    "A declared read-only root is not a directory.",
-                    "read_only_roots",
-                ));
-            }
-        }
-        Ok(())
+        crate::read_only_roots::pin(roots)
     }
 
     /// Validates both the wire shape and the live workspace objects ADR 0023 will mount.
@@ -1850,52 +1865,76 @@ impl ProcessRuntime {
         Ok(())
     }
 
-    /// Which declared aperture this start selected, if any, and why it may not have one
-    /// (ADR 0013).
+    /// Which declared apertures this start selected, in the order it named them, and why it may
+    /// not have them (ADR 0013; design 26 § 2). Empty for a start that names none.
     ///
     /// Shape, then capability, then declaration — the order `admit_secret_slots` uses, so a caller
-    /// hears the same answer whichever layer sees the request first. Nothing here reads a
-    /// destination out of the request, because there is no destination in a request: a name is the
-    /// only thing a caller may say, and configuration owns everything the name stands for.
+    /// hears the same answer whichever layer sees the request first — then, for a list, whether
+    /// every member can be reached by its own name. Nothing here reads a destination out of the
+    /// request, because there is no destination in a request: a name is the only thing a caller
+    /// may say, and configuration owns everything the name stands for.
     pub(crate) fn admit_egress_aperture<'a>(
         config: &'a HostConfig,
         published: Option<&Vec<substrate_wire::EgressApertureFact>>,
         sandbox: &substrate_wire::ConfinementRequest,
-    ) -> Result<Option<&'a crate::egress::EgressAperture>, DriverError> {
-        substrate_wire::validate_aperture_request(sandbox.network, sandbox.aperture.as_deref())
-            .map_err(|error| match error {
-                // A *name* that parses as a destination is a rejected escalation, not a typo, and
-                // saying so is the difference between "you may not" and "no such thing".
-                substrate_wire::WireValidationError::ApertureDestinationInRequest => {
-                    DriverError::refused(
-                        "exec.aperture-destination-in-request",
-                        "An egress aperture is selected by name; a destination may not appear in a request.",
-                        "sandbox.network.aperture",
-                    )
-                }
-                // A ceiling is declared where reach is declared. Named apart from the destination
-                // refusal so a rejected escalation reads as one and not as a typo (ADR 0014).
-                substrate_wire::WireValidationError::ApertureCeilingInRequest => {
-                    DriverError::refused(
-                        "exec.aperture-ceiling-in-request",
-                        "An egress aperture byte ceiling is declared by the operator; it may not appear in a request.",
-                        "sandbox.network.aperture",
-                    )
-                }
-                substrate_wire::WireValidationError::InvalidApertureName => DriverError::refused(
-                    "exec.aperture-name-invalid",
-                    "An egress aperture name must match [a-z][a-z0-9_]{0,63}.",
-                    "sandbox.network.aperture",
-                ),
-                _ => DriverError::refused(
-                    "exec.aperture-mode-mismatch",
-                    "A sandbox asks for network \"aperture\" with a name, or \"none\" without one.",
-                    "sandbox.network",
-                ),
-            })?;
-        let Some(name) = sandbox.aperture.as_deref() else {
-            return Ok(None);
+    ) -> Result<Vec<&'a crate::egress::EgressAperture>, DriverError> {
+        let listed = !sandbox.apertures.is_empty();
+        // A list is held to the same per-name rules as one `aperture`, answered at the list's
+        // address (design 26 § 2).
+        let name_address = if listed {
+            "sandbox.apertures"
+        } else {
+            "sandbox.network.aperture"
         };
+        substrate_wire::validate_aperture_selection(sandbox).map_err(|error| match error {
+            // Design 26 § 2: the list's own length and uniqueness rules.
+            substrate_wire::WireValidationError::AperturesTooFew
+            | substrate_wire::WireValidationError::AperturesTooMany
+            | substrate_wire::WireValidationError::ApertureListedTwice => {
+                let refusal = substrate_wire::exec_start_refusal_for(&error)
+                    .unwrap_or(substrate_wire::APERTURE_LIST_REFUSALS[0]);
+                DriverError::refused(refusal.code, refusal.message, "sandbox.apertures")
+            }
+            // A *name* that parses as a destination is a rejected escalation, not a typo, and
+            // saying so is the difference between "you may not" and "no such thing".
+            substrate_wire::WireValidationError::ApertureDestinationInRequest => {
+                DriverError::refused(
+                    "exec.aperture-destination-in-request",
+                    "An egress aperture is selected by name; a destination may not appear in a request.",
+                    name_address,
+                )
+            }
+            // A ceiling is declared where reach is declared. Named apart from the destination
+            // refusal so a rejected escalation reads as one and not as a typo (ADR 0014).
+            substrate_wire::WireValidationError::ApertureCeilingInRequest => DriverError::refused(
+                "exec.aperture-ceiling-in-request",
+                "An egress aperture byte ceiling is declared by the operator; it may not appear in a request.",
+                name_address,
+            ),
+            substrate_wire::WireValidationError::InvalidApertureName => DriverError::refused(
+                "exec.aperture-name-invalid",
+                "An egress aperture name must match [a-z][a-z0-9_]{0,63}.",
+                name_address,
+            ),
+            _ if listed => DriverError::refused(
+                "exec.aperture-mode-mismatch",
+                "A sandbox with an aperture list asks for network \"aperture\" and names no single aperture beside it.",
+                "sandbox.apertures",
+            ),
+            _ => DriverError::refused(
+                "exec.aperture-mode-mismatch",
+                "A sandbox asks for network \"aperture\" with a name, or \"none\" without one.",
+                "sandbox.network",
+            ),
+        })?;
+        let names: Vec<&str> = if listed {
+            sandbox.apertures.iter().map(String::as_str).collect()
+        } else {
+            sandbox.aperture.as_deref().into_iter().collect()
+        };
+        if names.is_empty() {
+            return Ok(Vec::new());
+        }
         // Configured intent is not a fact. An unverified mechanism leaves the capability absent,
         // and every aperture request is then `unserved` rather than quietly getting no network.
         let Some(published) = published else {
@@ -1905,17 +1944,19 @@ impl ProcessRuntime {
                 "exec.network-aperture",
             ));
         };
-        let declared = published
-            .iter()
-            .any(|fact| fact.name == name)
-            .then(|| {
-                config
-                    .egress_apertures
-                    .iter()
-                    .find(|aperture| aperture.name == name)
-            })
-            .flatten();
-        declared.map(Some).ok_or_else(|| {
+        let declared = |name: &str| {
+            published
+                .iter()
+                .any(|fact| fact.name == name)
+                .then(|| {
+                    config
+                        .egress_apertures
+                        .iter()
+                        .find(|aperture| aperture.name == name)
+                })
+                .flatten()
+        };
+        let undeclared = |name: &str| {
             DriverError::unserved(
                 // The name, because an operator debugging a harness needs to know which one was
                 // asked for, and a name is deployment vocabulary rather than secret material.
@@ -1923,17 +1964,77 @@ impl ProcessRuntime {
                 format!("Egress aperture {name} is not declared on this host."),
                 "exec.network-aperture",
             )
-        })
+        };
+        let selected = names
+            .iter()
+            .map(|name| declared(name).ok_or_else(|| undeclared(name)))
+            .collect::<Result<Vec<_>, _>>()?;
+        // A host the generated mapping would hold twice is reached by its first line only, so the
+        // later aperture would be installed and unreachable by its name: refused before anything
+        // exists. The published fact names destinations, not hosts, so this is the driver's.
+        if crate::egress::a_host_is_mapped_twice(selected.iter().copied()) {
+            let refusal =
+                substrate_wire::exec_start_refusal(substrate_wire::EXEC_APERTURE_HOST_LISTED_TWICE)
+                    .unwrap_or(substrate_wire::APERTURE_LIST_REFUSALS[3]);
+            return Err(DriverError::refused(
+                refusal.code,
+                refusal.message,
+                "sandbox.apertures",
+            ));
+        }
+        Ok(selected)
     }
 
-    /// Admits a start and returns the pinned workspace directory the start binds.
+    /// Every aperture this start runs with, in the order that gives each its listen address.
+    ///
+    /// `listed` is a start's list of names (design 26 § 2), admitted as a list by exactly the
+    /// rules [`Self::admit_egress_aperture`] applies to `sandbox.apertures`, so a listed name is
+    /// refused for the same reasons and with the same code. Without a list, the start's own
+    /// `aperture` selects at most one, as it always has. A list that names nothing is refused
+    /// here as well as by the wire, because selecting nothing for it would run a start that asked
+    /// for network `aperture` with no network and no refusal (invariant 3).
+    pub(crate) fn select_apertures(
+        config: &HostConfig,
+        published: Option<&Vec<substrate_wire::EgressApertureFact>>,
+        sandbox: &substrate_wire::ConfinementRequest,
+        listed: Option<&[String]>,
+    ) -> Result<Vec<crate::egress::EgressAperture>, DriverError> {
+        let Some(listed) = listed else {
+            return Ok(Self::admit_egress_aperture(config, published, sandbox)?
+                .into_iter()
+                .cloned()
+                .collect());
+        };
+        if listed.is_empty() {
+            let refusal =
+                substrate_wire::exec_start_refusal(substrate_wire::EXEC_APERTURES_TOO_FEW)
+                    .unwrap_or(substrate_wire::APERTURE_LIST_REFUSALS[0]);
+            return Err(DriverError::refused(
+                refusal.code,
+                refusal.message,
+                "sandbox.apertures",
+            ));
+        }
+        let request = substrate_wire::ConfinementRequest {
+            network: substrate_wire::NetworkMode::Aperture,
+            aperture: None,
+            apertures: listed.to_vec(),
+            ..sandbox.clone()
+        };
+        Ok(Self::admit_egress_aperture(config, published, &request)?
+            .into_iter()
+            .cloned()
+            .collect())
+    }
+
+    /// Admits a start and returns the pinned workspace directory and read-only roots it binds.
     #[allow(clippy::too_many_lines)] // Refusal precedence is clearer in one admission sequence.
     fn admit(
         &self,
         id: &str,
         workspace: &Path,
         input: &ExecStartInput,
-    ) -> Result<OwnedFd, DriverError> {
+    ) -> Result<(OwnedFd, Vec<crate::read_only_roots::PinnedRoot>), DriverError> {
         if !id.starts_with("ex_")
             || !id
                 .bytes()
@@ -1945,7 +2046,7 @@ impl ProcessRuntime {
                 "exec",
             ));
         }
-        Self::admit_read_only_roots(&input.read_only_roots)?;
+        let read_only_roots = Self::admit_read_only_roots(&input.read_only_roots)?;
         crate::read_only_files::admit(
             &input.read_only_files,
             &input.read_only_roots,
@@ -1988,6 +2089,9 @@ impl ProcessRuntime {
             self.capability.facts.exec_egress_apertures.as_ref(),
             &input.sandbox,
         )?;
+        // Shape, then the fact: the daemon's order (design 26 § 1). Existence is asked in
+        // `start_inner`, once the objects the mounts bind are pinned.
+        crate::workdir::admit(input, self.capability.facts.exec_workdir)?;
         if self.capability.facts.exec_namespaces.is_none()
             || self.capability.facts.exec_cgroup_limits.is_none()
             || self.capability.facts.exec_cgroup_kill.is_none()
@@ -2062,7 +2166,7 @@ impl ProcessRuntime {
         }
         validate_environment(input)?;
         self.recheck_backend()?;
-        Ok(pinned)
+        Ok((pinned, read_only_roots))
     }
 
     fn recheck_backend(&self) -> Result<(), DriverError> {
@@ -2095,6 +2199,7 @@ impl ProcessRuntime {
         scratch: Option<&PreparedScratch>,
         workspace_access: &PreparedWorkspaceAccess,
         read_only_files: &[crate::read_only_files::PinnedFile],
+        read_only_roots: &[crate::read_only_roots::PinnedRoot],
     ) -> Result<(Command, File), DriverError> {
         // Above the slot range, close-on-exec: a slot declared at the profile's original number
         // would otherwise become the program bubblewrap installs. `start` clears the flag in the
@@ -2164,15 +2269,14 @@ impl ProcessRuntime {
                 .arg(capsule.directory.path())
                 .arg(EXECUTION_CAPSULE_MOUNT);
         }
-        // `--ro-bind` and never `--bind`: a declared root is readable and never writable, so a
-        // process cannot alter the toolchain it was given any more than it can alter `/usr`, and
-        // the workspace stays the only writable path. Before the workspace bind, so a root can
+        // `--ro-bind-fd` and never `--bind-fd`: a declared root is readable and never writable, so
+        // a process cannot alter the toolchain it was given any more than it can alter `/usr`, and
+        // the workspace stays the only writable path. Through the descriptor admission opened and
+        // never the path, which bubblewrap would resolve again, so a rename or symlink swap after
+        // admission cannot redirect it (design 26 § 3). Before the workspace bind, so a root can
         // never shadow it — though `admit` has already refused that mount point by name.
-        for root in &input.read_only_roots {
-            command
-                .arg("--ro-bind")
-                .arg(&root.host_path)
-                .arg(&root.mount);
+        for root in read_only_roots {
+            command.args(root.bind_args());
         }
         // One file each, through its pinned descriptor rather than its path, so a rename after
         // admission cannot redirect it. Bubblewrap creates the mount point and its parents in the
@@ -2197,8 +2301,12 @@ impl ProcessRuntime {
         // By descriptor only, the read-write default included: the workspace is never bound by
         // path, so a link swapped in after admission cannot choose what is mounted.
         command.args(workspace_access.bind_args());
+        // After every mount, so the requested directory is resolved inside the sandbox it names
+        // (design 26 § 1). Absent is the workspace, as it always was.
         command
-            .args(["--chdir", "/workspace", "--block-fd"])
+            .arg("--chdir")
+            .arg(crate::workdir::chdir_target(input))
+            .arg("--block-fd")
             .arg(sync_fd.to_string());
         if let Some(info_fd) = info_fd {
             command.arg("--info-fd").arg(info_fd.to_string());
@@ -2387,7 +2495,7 @@ async fn run_child(
     pipe_sender: Option<mpsc::Sender<PipeFrame>>,
     frame_limit: usize,
     capsule: Option<PreparedCapsule>,
-    aperture: Option<crate::egress::InstalledAperture>,
+    apertures: Option<crate::egress::InstalledApertures>,
     resolution: Option<crate::egress::GeneratedResolution>,
     _permit: ActivePermit,
     terminal: Option<Arc<crate::pty::PtyMaster>>,
@@ -2475,7 +2583,7 @@ async fn run_child(
         &execution,
         timeout,
         cpu_budget_micros,
-        aperture.as_ref(),
+        apertures.as_ref(),
         &output_bound,
     )
     .await;
@@ -2495,12 +2603,12 @@ async fn run_child(
     // at zero rather than raised into `exec.metrics-unavailable`: this run requested no counters,
     // so their absence is not a broken promise, and the measured path above still reports its own.
     let unmeasured_oom_kills = u64::from(!measured) * cgroup.memory_oom_kills().unwrap_or(0);
-    // Quiesce the whole run tree after the terminal counter sample. The shared mapping remains
-    // owned by `aperture`, so killing and reaping the relay cannot invalidate it and no relay can
-    // increment a counter after the observation is built.
+    // Quiesce the whole run tree after the terminal counter sample. The shared mappings remain
+    // owned by `apertures`, so killing and reaping the relays cannot invalidate them and no relay
+    // can increment a counter after the observation is built.
     let cgroup_reconciled = reconcile_cgroup(&cgroup).await;
     let scratch_reconciled = scratch.is_none_or(PreparedScratch::close);
-    let aperture_exhausted = ceiling_reached(aperture_exhausted, aperture.as_ref());
+    let aperture_exhausted = ceiling_reached(aperture_exhausted, apertures.as_ref());
     // Asked once more after the wait, for exactly the reason `ceiling_reached` is: the drain raises
     // this flag from its own task, and a child that crosses the bound on its **last** write and
     // then exits loses the `select!` to `child.wait()`, leaving the supervision tick no chance to
@@ -2510,10 +2618,8 @@ async fn run_child(
     // is the silent degradation invariant 3 forbids, and it is what
     // `vectors/driver/pty-session-output-bound-ends-the-session.json` says must not happen.
     let output_exhausted = output_exhausted || output_bound.load(Ordering::Acquire);
-    let applied_aperture = aperture
-        .as_ref()
-        .map(crate::egress::InstalledAperture::applied);
-    drop(aperture);
+    let applied_apertures = apertures.as_ref().map(applied_network);
+    drop(apertures);
     let forced_cancellation = timed_out
         || cpu_exhausted
         || aperture_exhausted
@@ -2538,7 +2644,7 @@ async fn run_child(
             },
         });
     }
-    record_aperture(&mut observation, applied_aperture, aperture_exhausted);
+    record_aperture(&mut observation, applied_apertures, aperture_exhausted);
     record_pipe_backpressure(&mut observation, &execution);
     record_terminal_output_bound(&mut observation, output_exhausted);
     // Either source, because the client's measurement set decides what is *published*, never
@@ -2593,8 +2699,51 @@ async fn run_child(
             observation.resource.exit = None;
         }
     }
+    record_workdir_missing(&mut observation);
     drop(observation);
     execution.notify.notify_waiters();
+}
+
+/// The backstop for a working directory that `check_present` found and that was gone, or replaced
+/// by a non-directory, when bubblewrap reached `--chdir` after the barrier (design 26 § 1).
+///
+/// Named only for exactly bubblewrap's diagnostic, alone on the one stream that carries it, after
+/// an exit of 1 that nothing else ended: the program did not start. The stream is standard error
+/// for pipes and the merged terminal stream for a pty; a run whose output is unrecorded keeps no
+/// bytes to recognise, and its exit stays the bare exit.
+fn record_workdir_missing(observation: &mut ExecObservation) {
+    if observation.resource.refusal.is_some()
+        || observation.resource.state != ExecState::Exited
+        || observation
+            .resource
+            .exit
+            .as_ref()
+            .is_none_or(|exit| exit.code != Some(1))
+    {
+        return;
+    }
+    let Some(workdir) = observation
+        .resource
+        .applied
+        .as_ref()
+        .and_then(|applied| applied.workdir.as_deref())
+    else {
+        return;
+    };
+    let diagnostic = match (observation.stdout.is_empty(), observation.stderr.is_empty()) {
+        (true, false) => &observation.stderr,
+        (false, true) => &observation.stdout,
+        _ => return,
+    };
+    if !crate::workdir::is_chdir_failure(diagnostic, workdir) {
+        return;
+    }
+    let refusal = substrate_wire::WORKDIR_REFUSALS[2];
+    observation.resource.refusal = Some(substrate_wire::ExecRefusal {
+        class: refusal.class,
+        code: refusal.code.to_owned(),
+        message: refusal.message.to_owned(),
+    });
 }
 
 #[allow(clippy::fn_params_excessive_bools)] // These are independent kernel termination facts.
@@ -2663,15 +2812,44 @@ fn record_pipe_backpressure(observation: &mut ExecObservation, execution: &Execu
 /// forwarder is still alive here — so the run would otherwise be reported byte for byte like one
 /// that finished on its own: `exited`, code 0, no refusal, with `bytes` summing to exactly the
 /// declared ceiling. That is the silent degradation invariant 3 forbids, and the field ADR 0014
-/// added exists precisely so it cannot happen.
+/// added exists precisely so it cannot happen. With several apertures, any one of them past its
+/// own ceiling is the run's.
 fn ceiling_reached(
     observed_on_a_tick: bool,
-    aperture: Option<&crate::egress::InstalledAperture>,
+    apertures: Option<&crate::egress::InstalledApertures>,
 ) -> bool {
-    observed_on_a_tick || aperture.is_some_and(crate::egress::InstalledAperture::ceiling_exceeded)
+    observed_on_a_tick || apertures.is_some_and(crate::egress::InstalledApertures::ceiling_exceeded)
 }
 
-/// What the aperture did, and the bound it hit, on the run's own observation.
+/// The applied network record for the apertures a run was given.
+fn applied_network(installed: &crate::egress::InstalledApertures) -> AppliedNetwork {
+    applied_network_of(
+        installed
+            .apertures()
+            .iter()
+            .map(crate::egress::InstalledAperture::applied)
+            .collect(),
+    )
+}
+
+/// The record's form for `applied`, in list order (design 26 § 2).
+///
+/// One aperture is the single object a `0.20.0` run records, byte for byte, so it states no listen
+/// address. Several only come from a start that named `apertures`, which always names at least two,
+/// and are the array form, every element with the address it listened on.
+fn applied_network_of(mut applied: Vec<substrate_wire::AppliedAperture>) -> AppliedNetwork {
+    match applied.len() {
+        0 => AppliedNetwork::None,
+        1 => {
+            let mut only = applied.remove(0);
+            only.listen = None;
+            AppliedNetwork::Aperture(only)
+        }
+        _ => AppliedNetwork::Apertures(applied),
+    }
+}
+
+/// What the apertures did, and the bound one hit, on the run's own observation.
 ///
 /// The bytes that crossed, counted where they crossed. An aperture with no traffic still reports
 /// itself: "installed and unused" and "never installed" are different observations. The refusal is
@@ -2680,13 +2858,13 @@ fn ceiling_reached(
 /// tell a ceiling from a client cancel by reading the byte counts (ADR 0014).
 fn record_aperture(
     observation: &mut ExecObservation,
-    applied: Option<substrate_wire::AppliedAperture>,
+    applied: Option<AppliedNetwork>,
     exhausted: bool,
 ) {
     if let Some(applied) = applied
         && let Some(confinement) = observation.resource.applied.as_mut()
     {
-        confinement.network = AppliedNetwork::Aperture(applied);
+        confinement.network = applied;
     }
     if exhausted {
         observation.resource.refusal = Some(substrate_wire::ExecRefusal {
@@ -2721,7 +2899,7 @@ async fn wait_for_child(
     execution: &Execution,
     timeout: Duration,
     cpu_budget_micros: u64,
-    aperture: Option<&crate::egress::InstalledAperture>,
+    apertures: Option<&crate::egress::InstalledApertures>,
     output_bound: &AtomicBool,
 ) -> (io::Result<ExitStatus>, bool, bool, bool, bool, bool) {
     let mut timed_out = false;
@@ -2751,7 +2929,7 @@ async fn wait_for_child(
                 // The ceiling before the CPU budget, on the same tick: a run that spends its
                 // budget waiting on an aperture it has already exhausted hit the ceiling, and the
                 // refusal has to say so (ADR 0014).
-                if aperture.is_some_and(crate::egress::InstalledAperture::ceiling_exceeded) {
+                if apertures.is_some_and(crate::egress::InstalledApertures::ceiling_exceeded) {
                     aperture_exhausted = true;
                     let _ = cgroup.kill_all();
                     close_live_output(execution).await;
@@ -3820,6 +3998,7 @@ mod tests {
                     capability_snapshot: format!("sha256:{}", "7".repeat(64)),
                     network: NetworkMode::None,
                     aperture: None,
+                    apertures: Vec::new(),
                     profile: SandboxProfile::Workspace,
                     required: true,
                 },
@@ -3837,6 +4016,255 @@ mod tests {
             cgroup: None,
             leader_pid: None,
         }
+    }
+
+    /// Design 26 § 1 backstop: a directory removed between `check_present` and bubblewrap's
+    /// `--chdir` is named on the observation, but only for bubblewrap's exact diagnostic alone on
+    /// its stream after an exit of 1 that nothing else ended.
+    #[test]
+    fn a_chdir_failure_after_the_barrier_is_named_workdir_missing() {
+        let diagnostic = b"bwrap: Can't chdir to /workspace/gone: No such file or directory\n";
+        let ended = |workdir: Option<&str>, code: u8, stdout: &[u8], stderr: &[u8]| {
+            let mut observation = running_observation("ex_workdir");
+            observation.resource.state = ExecState::Exited;
+            observation.resource.exit = Some(substrate_wire::ExecExit {
+                code: Some(code),
+                signal: None,
+            });
+            observation.resource.applied = Some(substrate_wire::AppliedConfinement {
+                capability_snapshot: format!("sha256:{}", "7".repeat(64)),
+                cgroup: "ex_workdir".to_owned(),
+                filesystem: substrate_wire::AppliedFilesystem::WorkspaceReadWriteSystemReadOnly,
+                network: substrate_wire::AppliedNetwork::None,
+                profile: SandboxProfile::Workspace,
+                workspace_access: substrate_wire::WorkspaceAccess::ReadWrite,
+                capsule: None,
+                read_only_roots: Vec::new(),
+                read_only_files: Vec::new(),
+                secret_slots: Vec::new(),
+                workdir: workdir.map(str::to_owned),
+            });
+            observation.stdout = stdout.to_vec();
+            observation.stderr = stderr.to_vec();
+            super::record_workdir_missing(&mut observation);
+            observation.resource.refusal.map(|refusal| refusal.code)
+        };
+        let missing = Some(substrate_wire::EXEC_WORKDIR_MISSING.to_owned());
+        assert_eq!(ended(Some("/workspace/gone"), 1, b"", diagnostic), missing);
+        // A terminal merges both streams into stdout, with the line discipline's `\r\n`.
+        assert_eq!(
+            ended(
+                Some("/workspace/gone"),
+                1,
+                b"bwrap: Can't chdir to /workspace/gone: Not a directory\r\n",
+                b""
+            ),
+            missing
+        );
+        // Anything else is the program's own exit.
+        assert_eq!(ended(None, 1, b"", diagnostic), None);
+        assert_eq!(ended(Some("/workspace/gone"), 2, b"", diagnostic), None);
+        assert_eq!(ended(Some("/workspace/other"), 1, b"", diagnostic), None);
+        assert_eq!(ended(Some("/workspace/gone"), 1, b"x", diagnostic), None);
+        assert_eq!(
+            ended(
+                Some("/workspace/gone"),
+                1,
+                b"",
+                b"bwrap: Can't chdir to /workspace/gone: Permission denied\n"
+            ),
+            None
+        );
+    }
+
+    /// Six declared apertures whose host names collide in each way the generated mapping can,
+    /// and the fact a verified mechanism would publish for them.
+    fn listed_config() -> (HostConfig, Vec<substrate_wire::EgressApertureFact>) {
+        let mut config = HostConfig::minimum("/does/not/exist");
+        config.egress_apertures = [
+            ("model", "model.example.invalid"),
+            ("search", "search.example.invalid"),
+            // The same name as `model`'s, in another case and fully qualified.
+            ("mirror", "MODEL.example.invalid."),
+            // The name the generated mapping already gives the first listen address.
+            ("local", "localhost"),
+            // Literal addresses get no mapping line, so a repeated one shadows nothing.
+            ("literal_a", "192.0.2.1"),
+            ("literal_b", "192.0.2.1"),
+        ]
+        .into_iter()
+        .zip(1_u8..)
+        .map(|((name, host), last)| crate::egress::EgressAperture {
+            name: name.to_owned(),
+            host: host.to_owned(),
+            port: 443,
+            pinned: std::net::SocketAddr::from(([127, 0, 0, last], 443)),
+            max_bytes: None,
+        })
+        .collect();
+        let published = config
+            .egress_apertures
+            .iter()
+            .map(crate::egress::EgressAperture::fact)
+            .collect();
+        (config, published)
+    }
+
+    fn list_request(
+        aperture: Option<&str>,
+        apertures: &[&str],
+    ) -> substrate_wire::ConfinementRequest {
+        substrate_wire::ConfinementRequest {
+            capability_snapshot: format!("sha256:{}", "0".repeat(64)),
+            network: NetworkMode::Aperture,
+            aperture: aperture.map(str::to_owned),
+            apertures: apertures.iter().map(|name| (*name).to_owned()).collect(),
+            profile: SandboxProfile::Workspace,
+            required: true,
+        }
+    }
+
+    fn list_refusal(
+        config: &HostConfig,
+        published: Option<&Vec<substrate_wire::EgressApertureFact>>,
+        sandbox: &substrate_wire::ConfinementRequest,
+    ) -> (crate::DriverErrorClass, &'static str, Option<String>) {
+        let error =
+            ProcessRuntime::admit_egress_aperture(config, published, sandbox).expect_err("refused");
+        (error.class, error.code, error.address)
+    }
+
+    /// Design 26 § 2 at the driver: a list is held to its shape and each name to its declaration,
+    /// in the daemon's order and at its addresses.
+    #[test]
+    fn an_aperture_list_is_held_to_its_shape_and_declarations() {
+        let (config, published) = listed_config();
+        let refusal =
+            |published: Option<&Vec<_>>, sandbox| list_refusal(&config, published, &sandbox);
+        let request = list_request;
+        let at = |address: &str| Some(address.to_owned());
+        let refused = crate::DriverErrorClass::Refused;
+        let unserved = crate::DriverErrorClass::Unserved;
+        for (aperture, apertures, code) in [
+            (None, &["model"][..], "exec.apertures-too-few"),
+            (
+                None,
+                &["model", "search", "a", "b", "c"][..],
+                "exec.apertures-too-many",
+            ),
+            (None, &["model", "model"][..], "exec.aperture-listed-twice"),
+            (
+                Some("model"),
+                &["model", "search"][..],
+                "exec.aperture-mode-mismatch",
+            ),
+            (
+                None,
+                &["model", "10.0.0.1:443"][..],
+                "exec.aperture-destination-in-request",
+            ),
+        ] {
+            assert_eq!(
+                refusal(Some(&published), request(aperture, apertures)),
+                (refused, code, at("sandbox.apertures")),
+                "{apertures:?}"
+            );
+        }
+        assert_eq!(
+            refusal(None, request(None, &["model", "search"])),
+            (
+                unserved,
+                "exec.egress-apertures-unserved",
+                at("exec.network-aperture")
+            )
+        );
+        assert_eq!(
+            refusal(Some(&published), request(None, &["model", "other"])),
+            (
+                unserved,
+                "exec.aperture-undeclared",
+                at("exec.network-aperture")
+            )
+        );
+    }
+
+    /// Design 26 § 2 at the driver: a list is held to the host names the generated mapping gives
+    /// each aperture; a valid list selects every listed aperture, in list order.
+    #[test]
+    fn an_aperture_list_selects_every_listed_aperture_in_list_order() {
+        let (config, published) = listed_config();
+        let request = list_request;
+        // Two lines for one name in the generated mapping reach only the first, so the second
+        // aperture would be unreachable by its name, or reach the first one's destination.
+        for apertures in [&["model", "mirror"][..], &["model", "local"][..]] {
+            assert_eq!(
+                list_refusal(&config, Some(&published), &request(None, apertures)),
+                (
+                    crate::DriverErrorClass::Refused,
+                    substrate_wire::EXEC_APERTURE_HOST_LISTED_TWICE,
+                    Some("sandbox.apertures".to_owned())
+                ),
+                "{apertures:?}"
+            );
+        }
+        let selected = |sandbox: &substrate_wire::ConfinementRequest| -> Vec<String> {
+            ProcessRuntime::select_apertures(&config, Some(&published), sandbox, None)
+                .expect("admissible")
+                .into_iter()
+                .map(|aperture| aperture.name)
+                .collect()
+        };
+        for apertures in [
+            &["model", "search"][..],
+            &["search", "model"][..],
+            &["model", "search", "literal_a", "literal_b"][..],
+            // `localhost` first is the address the mapping already gives it.
+            &["local", "model"][..],
+        ] {
+            assert_eq!(
+                selected(&request(None, apertures)),
+                apertures,
+                "a valid list is not selected whole and in order"
+            );
+        }
+        // One aperture is unchanged by the list.
+        assert_eq!(selected(&request(Some("search"), &[])), ["search"]);
+    }
+
+    /// A listed set that names nothing selects nothing, and a start that asked for network
+    /// `aperture` would then run with no network and nothing refusing it; so it is refused by the
+    /// list's own code wherever the set reaches selection, not only by the wire's admission.
+    #[test]
+    fn an_empty_listed_set_is_refused_rather_than_run_without_network() {
+        let mut config = HostConfig::minimum("/does/not/exist");
+        config.egress_apertures = vec![crate::egress::EgressAperture {
+            name: "model".to_owned(),
+            host: "model.example.invalid".to_owned(),
+            port: 443,
+            pinned: std::net::SocketAddr::from(([127, 0, 0, 1], 9)),
+            max_bytes: None,
+        }];
+        let published = crate::egress::egress_apertures_fact(&config.egress_apertures, true)
+            .expect("a verified mechanism publishes");
+        let sandbox = substrate_wire::ConfinementRequest {
+            capability_snapshot: format!("sha256:{}", "7".repeat(64)),
+            network: NetworkMode::Aperture,
+            aperture: Some("model".to_owned()),
+            apertures: Vec::new(),
+            profile: SandboxProfile::Workspace,
+            required: true,
+        };
+        let error =
+            ProcessRuntime::select_apertures(&config, Some(&published), &sandbox, Some(&[]))
+                .expect_err("an empty listed set is refused");
+        assert_eq!(
+            (error.class, error.code, error.address.as_deref()),
+            (
+                crate::DriverErrorClass::Refused,
+                substrate_wire::EXEC_APERTURES_TOO_FEW,
+                Some("sandbox.apertures")
+            )
+        );
     }
 
     #[test]
@@ -4095,6 +4523,7 @@ mod tests {
                 capability_snapshot: format!("sha256:{}", "8".repeat(64)),
                 network: NetworkMode::None,
                 aperture: None,
+                apertures: Vec::new(),
                 profile: SandboxProfile::Workspace,
                 required: true,
             },
@@ -4111,6 +4540,7 @@ mod tests {
             measurements: std::collections::BTreeSet::new(),
             capsule: None,
             lease_ttl_ms: None,
+            workdir: None,
         };
         let DispatchOutcome::NotDispatched(error) = runtime
             .start("ex_test", std::path::Path::new("/does/not/exist"), &input)
@@ -4216,35 +4646,9 @@ mod tests {
         };
         let runtime = ProcessRuntime::new(config, capability).expect("runtime");
         let input = ExecStartInput {
-            read_only_roots: Vec::new(),
-            read_only_files: Vec::new(),
-            secret_slots: Vec::new(),
-            workspace: "ws_test".to_owned(),
             argv: vec!["/usr/bin/true".to_owned()],
-            env: ExecEnvironment {
-                allow: vec![],
-                set: BTreeMap::new(),
-            },
-            sandbox: substrate_wire::ConfinementRequest {
-                capability_snapshot: snapshot,
-                network: NetworkMode::None,
-                aperture: None,
-                profile: SandboxProfile::Workspace,
-                required: true,
-            },
-            limits: ExecLimits {
-                timeout_ms: 5_000,
-                output_bytes: 65_536,
-                processes: 16,
-                memory_bytes: 67_108_864,
-                cpu_millis: 1_000,
-            },
-            wait: false,
-            workspace_access: substrate_wire::WorkspaceAccess::ReadWrite,
-            scratch: None,
-            measurements: std::collections::BTreeSet::new(),
-            capsule: None,
             lease_ttl_ms: None,
+            ..pty_exec_input(&snapshot)
         };
 
         let (admitted, opens) =
@@ -4329,6 +4733,7 @@ mod tests {
                 capability_snapshot: snapshot,
                 network: NetworkMode::None,
                 aperture: None,
+                apertures: Vec::new(),
                 profile: SandboxProfile::Workspace,
                 required: true,
             },
@@ -4345,6 +4750,7 @@ mod tests {
             measurements: std::collections::BTreeSet::new(),
             capsule: None,
             lease_ttl_ms: None,
+            workdir: None,
         };
         let DispatchOutcome::NotDispatched(error) = runtime
             .start_pipe(
@@ -4607,6 +5013,7 @@ mod tests {
                 capability_snapshot: snapshot.to_owned(),
                 network: NetworkMode::None,
                 aperture: None,
+                apertures: Vec::new(),
                 profile: SandboxProfile::Workspace,
                 required: true,
             },
@@ -4623,6 +5030,7 @@ mod tests {
             measurements: std::collections::BTreeSet::new(),
             capsule: None,
             lease_ttl_ms: Some(60_000),
+            workdir: None,
         }
     }
 
@@ -5376,6 +5784,342 @@ mod tests {
         drop(destination);
     }
 
+    /// A loopback destination that answers every connection with its own body and closes it.
+    struct Destination {
+        address: std::net::SocketAddr,
+        stop: Arc<std::sync::atomic::AtomicBool>,
+        handle: Option<std::thread::JoinHandle<()>>,
+    }
+
+    impl Destination {
+        fn serving(body: &'static [u8]) -> Self {
+            use std::io::Write as _;
+            let listener = std::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+                .expect("bind a pinned loopback destination");
+            let address = listener.local_addr().expect("destination address");
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let serving = Arc::clone(&stop);
+            let handle = std::thread::spawn(move || {
+                while let Ok((mut stream, _)) = listener.accept() {
+                    if serving.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let _ = stream.write_all(body);
+                }
+            });
+            Self {
+                address,
+                stop,
+                handle: Some(handle),
+            }
+        }
+    }
+
+    impl Drop for Destination {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Release);
+            let _ = std::net::TcpStream::connect(self.address);
+            if let Some(handle) = self.handle.take() {
+                let _ = handle.join();
+            }
+        }
+    }
+
+    /// The applied record's form follows the count (design 26 § 2): no aperture is `none`; one is
+    /// the single object a `0.20.0` run records, without a listen address; several, which only a
+    /// start naming `apertures` gets, are the array, in list order, each with its listen address.
+    #[test]
+    fn the_applied_network_is_the_single_object_for_one_aperture_and_the_array_for_several() {
+        use super::applied_network_of;
+        use substrate_wire::AppliedNetwork;
+        let installed = |name: &str, listen: &str| substrate_wire::AppliedAperture {
+            mode: substrate_wire::ApertureMode::Aperture,
+            name: name.to_owned(),
+            destination: "192.0.2.1:443".to_owned(),
+            mechanism: substrate_wire::ApertureMechanism::LoopbackForwarder,
+            bytes: substrate_wire::ApertureBytes::default(),
+            max_bytes: None,
+            listen: Some(listen.to_owned()),
+        };
+        assert_eq!(applied_network_of(Vec::new()), AppliedNetwork::None);
+        assert_eq!(
+            applied_network_of(vec![installed("model", "127.0.0.1:443")]),
+            AppliedNetwork::Aperture(substrate_wire::AppliedAperture {
+                listen: None,
+                ..installed("model", "127.0.0.1:443")
+            })
+        );
+        let several = vec![
+            installed("model", "127.0.0.1:443"),
+            installed("audit", "127.0.0.2:443"),
+        ];
+        assert_eq!(
+            applied_network_of(several.clone()),
+            AppliedNetwork::Apertures(several)
+        );
+    }
+
+    /// A host declaring `model` and `audit`, both listening on port 443 inside the run, with the
+    /// published fact a verified mechanism gives it.
+    fn two_aperture_runtime(
+        delegated: std::path::PathBuf,
+        root: &std::path::Path,
+        snapshot: &str,
+        model: std::net::SocketAddr,
+        audit: std::net::SocketAddr,
+    ) -> ProcessRuntime {
+        let mut config = HostConfig::minimum(root);
+        config.cgroup_root = Some(delegated);
+        config.egress_apertures = vec![
+            crate::egress::EgressAperture {
+                name: "model".to_owned(),
+                host: "model.example.invalid".to_owned(),
+                port: 443,
+                pinned: model,
+                max_bytes: None,
+            },
+            crate::egress::EgressAperture {
+                name: "audit".to_owned(),
+                host: "audit.example.invalid".to_owned(),
+                port: 443,
+                pinned: audit,
+                max_bytes: None,
+            },
+        ];
+        std::fs::create_dir_all(&config.aperture_root).unwrap();
+        std::fs::set_permissions(
+            &config.aperture_root,
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+        )
+        .unwrap();
+        let mut capability = confined_exec_capability(snapshot);
+        capability.facts.exec_egress_apertures =
+            crate::egress::egress_apertures_fact(&config.egress_apertures, true);
+        ProcessRuntime::new(config, capability).expect("runtime")
+    }
+
+    /// A start listing `model` then `audit`, the request's own list (design 26 § 2).
+    fn list_both(input: &mut ExecStartInput) {
+        input.sandbox.network = NetworkMode::Aperture;
+        input.sandbox.aperture = None;
+        input.sandbox.apertures = vec!["model".to_owned(), "audit".to_owned()];
+    }
+
+    /// The listed names, admitted one at a time with the single-name rules, in listed order —
+    /// which is the order that decides each one's listen address. An undeclared name refuses the
+    /// whole start, naming it, before anything is installed.
+    #[test]
+    fn listed_apertures_are_admitted_in_listed_order() {
+        let mut config = HostConfig::minimum("/does/not/exist");
+        let pinned = std::net::SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 9));
+        config.egress_apertures = ["model", "audit"]
+            .into_iter()
+            .map(|name| crate::egress::EgressAperture {
+                name: name.to_owned(),
+                host: format!("{name}.example.invalid"),
+                port: 443,
+                pinned,
+                max_bytes: None,
+            })
+            .collect();
+        let published = crate::egress::egress_apertures_fact(&config.egress_apertures, true)
+            .expect("a verified mechanism publishes");
+        let mut sandbox = pty_exec_input("sha256:0").sandbox;
+        let names = |selected: Vec<crate::egress::EgressAperture>| -> Vec<String> {
+            selected.into_iter().map(|aperture| aperture.name).collect()
+        };
+
+        assert_eq!(
+            names(
+                ProcessRuntime::select_apertures(&config, Some(&published), &sandbox, None)
+                    .expect("no aperture is admissible")
+            ),
+            Vec::<String>::new()
+        );
+        let listed = ["audit".to_owned(), "model".to_owned()];
+        assert_eq!(
+            names(
+                ProcessRuntime::select_apertures(
+                    &config,
+                    Some(&published),
+                    &sandbox,
+                    Some(listed.as_slice())
+                )
+                .expect("two declared apertures are admissible")
+            ),
+            ["audit", "model"]
+        );
+        let undeclared = ["model".to_owned(), "registry".to_owned()];
+        let refusal = ProcessRuntime::select_apertures(
+            &config,
+            Some(&published),
+            &sandbox,
+            Some(undeclared.as_slice()),
+        )
+        .expect_err("an undeclared listed name refuses the start");
+        assert_eq!(refusal.code, "exec.aperture-undeclared");
+        assert!(refusal.message.contains("registry"), "{}", refusal.message);
+
+        sandbox.network = NetworkMode::Aperture;
+        sandbox.aperture = Some("model".to_owned());
+        assert_eq!(
+            names(
+                ProcessRuntime::select_apertures(&config, Some(&published), &sandbox, None)
+                    .expect("one declared aperture is admissible")
+            ),
+            ["model"],
+            "a start naming one aperture no longer selects exactly it"
+        );
+    }
+
+    /// The several-apertures acceptance through one start: both forwarders installed on port 443,
+    /// the generated `/etc/hosts` maps each name to its own address, and the child reaches each
+    /// destination on its own listen address.
+    ///
+    /// The child is bash for `/dev/tcp`, the one client this case can count on in `/usr`.
+    /// Delegated only. Without `SUBSTRATE_VECTORS_CGROUP_ROOT` naming a cgroup v2 subtree this
+    /// process is inside, the case is **absent, never reported as passed** (invariant 3).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn several_apertures_install_through_one_start() {
+        let Some(delegated) = delegated_cgroup_root("several-apertures") else {
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("ws_test");
+        std::fs::create_dir(&workspace).unwrap();
+        let model = Destination::serving(b"model");
+        let audit = Destination::serving(b"audit");
+        let snapshot = format!("sha256:{}", "7".repeat(64));
+        let runtime = two_aperture_runtime(
+            delegated,
+            root.path(),
+            &snapshot,
+            model.address,
+            audit.address,
+        );
+
+        let mut input = pty_exec_input(&snapshot);
+        input.argv = vec![
+            "/usr/bin/bash".to_owned(),
+            "-c".to_owned(),
+            "cat /etc/hosts \
+             && exec 3<>/dev/tcp/127.0.0.1/443 && printf 'first:' && cat <&3 && exec 3<&- \
+             && exec 4<>/dev/tcp/127.0.0.2/443 && printf '\\nsecond:' && cat <&4 && exec 4<&-"
+                .to_owned(),
+        ];
+        list_both(&mut input);
+        input.wait = true;
+        let observed = match runtime
+            .start("ex_several_apertures", &workspace, &input)
+            .await
+        {
+            DispatchOutcome::Observed(observed) => observed,
+            DispatchOutcome::NotDispatched(error)
+            | DispatchOutcome::ContainedAbsent(error)
+            | DispatchOutcome::OutcomeUnknown(error) => panic!(
+                "the delegated lane must dispatch a two-aperture exec: {} {}",
+                error.code, error.message
+            ),
+        };
+        let stdout = String::from_utf8_lossy(&observed.stdout);
+        assert_eq!(
+            observed
+                .resource
+                .exit
+                .expect("a waited exec reports its exit")
+                .code,
+            Some(0),
+            "the two-aperture exec did not reach both apertures: {stdout} {}",
+            String::from_utf8_lossy(&observed.stderr)
+        );
+        assert!(
+            stdout.starts_with(
+                "127.0.0.1\tlocalhost\n::1\tlocalhost\n\
+                 127.0.0.1\tmodel.example.invalid\n\
+                 127.0.0.2\taudit.example.invalid\n"
+            ),
+            "the child was not given each name on its own address: {stdout}"
+        );
+        assert!(
+            stdout.ends_with("first:model\nsecond:audit"),
+            "a listen address did not reach its own destination: {stdout}"
+        );
+        // The array form: every listed aperture, in list order, each with the address it listened
+        // on and the destination it reached.
+        let applied = &observed
+            .resource
+            .applied
+            .as_ref()
+            .expect("an observed run records its applied confinement")
+            .network;
+        let substrate_wire::AppliedNetwork::Apertures(listed) = applied else {
+            panic!("a listed run did not record every aperture: {applied:?}");
+        };
+        let recorded: Vec<(&str, Option<&str>, &str)> = listed
+            .iter()
+            .map(|aperture| {
+                (
+                    aperture.name.as_str(),
+                    aperture.listen.as_deref(),
+                    aperture.destination.as_str(),
+                )
+            })
+            .collect();
+        let (model, audit) = (model.address.to_string(), audit.address.to_string());
+        assert_eq!(
+            recorded,
+            [
+                ("model", Some("127.0.0.1:443"), model.as_str()),
+                ("audit", Some("127.0.0.2:443"), audit.as_str()),
+            ]
+        );
+    }
+
+    /// All or nothing through `start`: the second aperture cannot be installed, so the start is
+    /// refused with `exec.aperture-install-failed` and the run is contained and absent (ADR 0013).
+    ///
+    /// Delegated only, as above.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_second_aperture_that_cannot_install_refuses_the_start() {
+        let Some(delegated) = delegated_cgroup_root("several-apertures-refused") else {
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        let workspace = root.path().join("ws_test");
+        std::fs::create_dir(&workspace).unwrap();
+        let model = Destination::serving(b"model");
+        let snapshot = format!("sha256:{}", "7".repeat(64));
+        // The mechanism serves IPv4 destinations only, so this one fails after its listener is
+        // bound and with the first aperture's forwarder already running.
+        let unservable = "[::1]:9".parse().expect("an IPv6 destination");
+        let runtime =
+            two_aperture_runtime(delegated, root.path(), &snapshot, model.address, unservable);
+
+        let mut input = pty_exec_input(&snapshot);
+        input.argv = vec!["/bin/true".to_owned()];
+        list_both(&mut input);
+        input.wait = true;
+        match runtime
+            .start("ex_several_apertures_refused", &workspace, &input)
+            .await
+        {
+            DispatchOutcome::ContainedAbsent(error) => {
+                assert_eq!(error.code, "exec.aperture-install-failed");
+                assert!(error.message.contains("IPv4"), "{}", error.message);
+            }
+            DispatchOutcome::Observed(observed) => panic!(
+                "a run with an uninstallable aperture ran: {:?}",
+                observed.resource.state
+            ),
+            DispatchOutcome::NotDispatched(error) | DispatchOutcome::OutcomeUnknown(error) => {
+                panic!(
+                    "the refused install was not contained: {} {}",
+                    error.code, error.message
+                )
+            }
+        }
+    }
+
     /// The published capability an admitted exec stands on, for the delegated cases below.
     ///
     /// One builder rather than a copy per case: every field here is a floor the driver checks
@@ -5883,6 +6627,7 @@ mod tests {
                 None,
                 &access,
                 &[],
+                &[],
             )
             .expect("the exec argv builds");
         let argv: Vec<String> = command
@@ -5924,6 +6669,78 @@ mod tests {
         assert_cloexec(seccomp_fd);
     }
 
+    /// Design 26 § 1: bubblewrap starts the program in the requested directory, after every mount,
+    /// and in the workspace when the start names none.
+    #[test]
+    fn the_exec_argv_starts_the_program_in_the_requested_directory() {
+        let root = tempfile::tempdir().expect("root");
+        let workspace = root.path().join("ws_test");
+        std::fs::create_dir(&workspace).expect("workspace");
+        let snapshot = format!("sha256:{}", "7".repeat(64));
+        let mut config = HostConfig::minimum(root.path());
+        config.cgroup_root = Some(root.path().to_path_buf());
+        let capability = CapabilitySnapshot {
+            snapshot: snapshot.clone(),
+            driver: HostDriverKind::Host,
+            driver_version: "test".to_owned(),
+            config_generation: 1,
+            probed_at: chrono::Utc::now(),
+            valid_until: None,
+            facts: CapabilityFacts::default(),
+        };
+        let runtime = ProcessRuntime::new(config, capability).expect("runtime");
+        let slots = crate::secrets::SecretSlotSet::acquire(&[], &[]).expect("no slots");
+        let sync = std::fs::File::open("/dev/null").expect("a barrier descriptor");
+        let pinned = crate::fs::pin_workspace_directory(&workspace).expect("pinned workspace");
+        let access = ProcessRuntime::prepare_workspace_access(
+            &pinned,
+            &substrate_wire::WorkspaceAccess::ReadWrite,
+        )
+        .expect("read-write access");
+        for (workdir, expected) in [
+            (None, "/workspace"),
+            (Some("/workspace/src"), "/workspace/src"),
+        ] {
+            let mut input = pty_exec_input(&snapshot);
+            input.workdir = workdir.map(str::to_owned);
+            let (command, _seccomp) = runtime
+                .command(
+                    &input,
+                    sync.as_raw_fd(),
+                    ChildChannel::Quiet,
+                    None,
+                    &slots,
+                    None,
+                    None,
+                    None,
+                    &access,
+                    &[],
+                    &[],
+                )
+                .expect("the exec argv builds");
+            let argv: Vec<String> = command
+                .as_std()
+                .get_args()
+                .map(|part| part.to_string_lossy().into_owned())
+                .collect();
+            let chdir: Vec<usize> = argv
+                .iter()
+                .enumerate()
+                .filter_map(|(at, part)| (part == "--chdir").then_some(at))
+                .collect();
+            assert_eq!(chdir.len(), 1, "one --chdir: {argv:?}");
+            assert_eq!(argv[chdir[0] + 1], expected, "{argv:?}");
+            let workspace_mount = argv
+                .iter()
+                .position(|part| part == "/workspace")
+                .expect("the workspace mount");
+            assert!(
+                workspace_mount < chdir[0],
+                "the directory is resolved after the mounts: {argv:?}"
+            );
+        }
+    }
+
     fn assert_cloexec(descriptor: RawFd) {
         // SAFETY: reads the flags of a live descriptor.
         let flags = unsafe { libc::fcntl(descriptor, libc::F_GETFD) };
@@ -5931,6 +6748,89 @@ mod tests {
             flags >= 0 && flags & libc::FD_CLOEXEC != 0,
             "descriptor {descriptor} is inheritable by every spawn of this process"
         );
+    }
+
+    /// A declared read-only root reaches bubblewrap as the descriptor admission opened, never as
+    /// its host path, which a rename and a symlink could redirect between admission and the mount
+    /// (`story:read-only-roots-bound-by-descriptor`, design 26 § 3).
+    ///
+    /// Portable, for the reason the user-namespace case above is.
+    #[test]
+    fn the_exec_argv_binds_each_read_only_root_by_its_pinned_descriptor() {
+        let root = tempfile::tempdir().expect("root");
+        let workspace = root.path().join("ws_test");
+        std::fs::create_dir(&workspace).expect("workspace");
+        let cgroup_root = root.path().join("cgroups");
+        std::fs::create_dir(&cgroup_root).expect("cgroup root");
+        let host = std::fs::canonicalize(root.path())
+            .expect("canonical root")
+            .join("declared-root");
+        std::fs::create_dir(&host).expect("declared root");
+        let host_text = host.to_str().expect("UTF-8 root").to_owned();
+        let snapshot = format!("sha256:{}", "7".repeat(64));
+        let mut config = HostConfig::minimum(root.path());
+        config.cgroup_root = Some(cgroup_root);
+        let capability = CapabilitySnapshot {
+            snapshot: snapshot.clone(),
+            driver: HostDriverKind::Host,
+            driver_version: "test".to_owned(),
+            config_generation: 1,
+            probed_at: chrono::Utc::now(),
+            valid_until: None,
+            facts: CapabilityFacts::default(),
+        };
+        let runtime = ProcessRuntime::new(config, capability).expect("runtime");
+        let mut input = pty_exec_input(&snapshot);
+        input.read_only_roots = vec![substrate_wire::ReadOnlyRoot {
+            host_path: host_text.clone(),
+            mount: "/opt/root".to_owned(),
+        }];
+        let roots =
+            ProcessRuntime::admit_read_only_roots(&input.read_only_roots).expect("admitted root");
+        let slots = crate::secrets::SecretSlotSet::acquire(&[], &[]).expect("no slots");
+        let sync = std::fs::File::open("/dev/null").expect("a barrier descriptor");
+        let pinned = crate::fs::pin_workspace_directory(&workspace).expect("pinned workspace");
+        let access = ProcessRuntime::prepare_workspace_access(
+            &pinned,
+            &substrate_wire::WorkspaceAccess::ReadWrite,
+        )
+        .expect("read-write access");
+        let (command, _seccomp) = runtime
+            .command(
+                &input,
+                sync.as_raw_fd(),
+                ChildChannel::Quiet,
+                None,
+                &slots,
+                None,
+                None,
+                None,
+                &access,
+                &[],
+                &roots,
+            )
+            .expect("the exec argv builds");
+        let argv: Vec<String> = command
+            .as_std()
+            .get_args()
+            .map(|part| part.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            !argv.iter().any(|part| part.contains(&host_text)),
+            "the root host path reaches the argv: {argv:?}"
+        );
+        let bind = argv
+            .windows(3)
+            .find(|window| window[2] == "/opt/root")
+            .expect("the exec argv mounts the declared root");
+        assert_eq!(bind[0], "--ro-bind-fd", "{argv:?}");
+        let descriptor: RawFd = bind[1].parse().expect("a descriptor number");
+        assert!(
+            descriptor > RawFd::try_from(substrate_wire::MAX_SECRET_SLOT_FD).unwrap(),
+            "the root descriptor sits at {descriptor}, inside the secret-slot range"
+        );
+        assert_eq!(descriptor, roots[0].raw_fd(), "{argv:?}");
+        assert_cloexec(descriptor);
     }
 
     /// The launch barrier and the info pipe end bubblewrap uses sit above the slot range,

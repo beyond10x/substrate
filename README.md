@@ -95,7 +95,7 @@ The table is the gate's own order (`scripts/gate.sh`).
 | contract bundle 0.2.0 | `python3 scripts/check-contract-bundle-0.2.0.py` |
 | contract bundle 0.3.0 | `python3 scripts/check-contract-bundle-0.3.0.py` |
 | contract bundle 0.4.0 | `python3 scripts/check-contract-bundle-0.4.0.py` |
-| contract bundles 0.5.0–0.20.0 | `cargo xtask check-bundles 0.5.0 … 0.20.0` — bounded parallel fixed-point, compatibility, classification and version-addition checks; `check-bundle <version>` remains the focused form |
+| contract bundles 0.5.0–0.21.0 | `cargo xtask check-bundles 0.5.0 … 0.21.0` — bounded parallel fixed-point, compatibility, classification and version-addition checks; `check-bundle <version>` remains the focused form |
 | contract JSON | `cargo xtask check-json` — every JSON under `contracts/` is classified by exactly one bundled schema, or it fails closed |
 | toolchain | `cargo xtask check-toolchain` |
 
@@ -336,6 +336,13 @@ dialled and the bytes counted where they crossed. An aperture nobody declared is
 the name in the message**; where the mechanism did not verify in a throwaway sandbox at startup, the
 capability fact `exec.egress-apertures` is absent and every aperture request is `unserved` — never a
 run that quietly got no network instead (invariant 3). ADR 0013.
+
+A run that needs two to four destinations names them as a list, `"apertures": ["model", "audit"]`,
+in place of `aperture`. Each keeps its own forwarder and ceiling; the n-th listens on `127.0.0.n`,
+and `applied.network` becomes an array whose elements add that `listen` address. Two listed
+apertures that declare one host name, or `localhost` listed anywhere but first, are refused
+`exec.aperture-host-listed-twice` before anything is installed, because the child could reach only
+one of them by that name. Design 26.
 
 The optional `/max=<size>` term bounds **how much** may cross, over both directions summed, for one
 run — `1048576`, `512KiB`, `64MiB`, `2GiB`, and never a decimal-power unit such as `MB`. An

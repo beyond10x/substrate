@@ -184,6 +184,7 @@ impl Driver for AdoptFixtureDriver {
                     read_only_roots: Vec::new(),
                     read_only_files: Vec::new(),
                     secret_slots: Vec::new(),
+                    workdir: None,
                     capability_snapshot: SNAPSHOT.to_owned(),
                     cgroup: format!("fixture-{id}"),
                     filesystem: AppliedFilesystem::WorkspaceReadWriteSystemReadOnly,

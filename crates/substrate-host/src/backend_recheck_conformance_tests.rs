@@ -129,6 +129,7 @@ fn input() -> ExecStartInput {
             capability_snapshot: format!("sha256:{}", SNAPSHOT_DIGIT.repeat(64)),
             network: NetworkMode::None,
             aperture: None,
+            apertures: Vec::new(),
             profile: SandboxProfile::Workspace,
             required: true,
         },
@@ -145,6 +146,7 @@ fn input() -> ExecStartInput {
         measurements: std::collections::BTreeSet::new(),
         capsule: None,
         lease_ttl_ms: None,
+        workdir: None,
     }
 }
 

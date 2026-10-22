@@ -218,6 +218,7 @@ async fn twelve_route_vertical_slice_is_scoped_durable_and_observed() {
             capability_snapshot: snapshot.clone(),
             network: NetworkMode::None,
             aperture: None,
+            apertures: Vec::new(),
             profile: SandboxProfile::Workspace,
             required: true,
         },

@@ -1,0 +1,40 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.21.0:input:process-logs-get",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "A bounded tail, by bytes, of one stream or both, oldest line first (ADR 0036 S7). stream defaults to both and max_bytes to its maximum.",
+  "properties": {
+    "max_bytes": {
+      "maximum": 1048576,
+      "minimum": 1,
+      "type": "integer"
+    },
+    "stream": {
+      "enum": [
+        "stdout",
+        "stderr",
+        "both"
+      ]
+    }
+  },
+  "required": [],
+  "title": "process-logs-get operation input",
+  "type": "object",
+  "x-b10x-refusals": [
+    {
+      "class": "refused",
+      "code": "process.host-posture-refused",
+      "status": 403
+    },
+    {
+      "class": "refused",
+      "code": "process.host-subject-mismatch",
+      "status": 403
+    },
+    {
+      "class": "refused",
+      "code": "process.not-found",
+      "status": 404
+    }
+  ]
+}

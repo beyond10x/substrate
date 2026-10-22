@@ -1,0 +1,14 @@
+{
+  "at": "2026-10-22T07:24:06Z",
+  "actor": "human:timo",
+  "artifact": "story:read-only-roots-bound-by-descriptor",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:read-only-roots-by-descriptor-security-pass-1",
+    "review": "review-result:read-only-roots-by-descriptor-security-pass-1",
+    "outcome": "fixed"
+  }
+}
