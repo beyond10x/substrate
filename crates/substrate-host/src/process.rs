@@ -1059,6 +1059,8 @@ impl ProcessRuntime {
         // The parent's copies of the terminal go with the builder: while any of them is open the
         // master never sees the child's exit, so a session that ended would read as one that stalled.
         drop(command);
+        // bubblewrap holds its own copies now; the driver keeps none for the life of a waited exec.
+        drop(read_only_roots);
         let mut child = match spawned {
             Ok(child) => child,
             Err(error) => {
