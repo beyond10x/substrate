@@ -1089,39 +1089,28 @@ fn workspace_has_nonterminal_execs(
     scope: &Scope,
     workspace_id: &str,
 ) -> Result<bool, StoreError> {
-    // An exec in another workspace holds this one when its applied record binds it as a writable
-    // Git root (ADR 0038 kind 2). The quoted id narrows the scan; the parsed record decides.
+    // An exec in another workspace holds this one when it binds it as a writable Git root
+    // (ADR 0038 kind 2). Acceptance records that on the row, so an exec still Accepted, or Unknown
+    // after a dispatch that proved nothing, holds it as surely as one whose applied record names it.
     let mut statement = connection.prepare(
-        "SELECT workspace_id, resource_json FROM execs
+        "SELECT resource_json FROM execs
          WHERE deployment = ?1 AND subject = ?2 AND physically_absent = 0
-           AND (workspace_id = ?3 OR instr(resource_json, ?4) > 0)",
+           AND (workspace_id = ?3
+                OR EXISTS (SELECT 1 FROM json_each(execs.git_root_workspaces)
+                           WHERE json_each.value = ?3))",
     )?;
-    let quoted = serde_json::to_string(workspace_id)?;
     let resources = statement
         .query_map(
-            params![scope.deployment, scope.subject, workspace_id, quoted],
-            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            params![scope.deployment, scope.subject, workspace_id],
+            |row| row.get::<_, String>(0),
         )?
         .collect::<Result<Vec<_>, _>>()?;
-    for (owner, json) in resources {
+    for json in resources {
         let resource: Exec = serde_json::from_str(&json)?;
-        if !matches!(
+        if matches!(
             resource.state,
             ExecState::Accepted | ExecState::Running | ExecState::Unknown
         ) {
-            continue;
-        }
-        if owner == workspace_id
-            || resource.applied.as_ref().is_some_and(|applied| {
-                applied.writable_roots.iter().any(|root| {
-                    matches!(
-                        root,
-                        substrate_wire::AppliedWritableRoot::Git { workspace, .. }
-                            if workspace == workspace_id
-                    )
-                })
-            })
-        {
             return Ok(true);
         }
     }

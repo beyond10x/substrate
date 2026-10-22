@@ -12,7 +12,7 @@ use substrate_wire::{
 use tempfile::tempdir;
 
 use crate::events::event_cursor;
-use crate::execs::upsert_exec;
+use crate::execs::{record_exec_git_roots, upsert_exec};
 use crate::leases::{LEASE_SWEEPER_ACTOR, lease_due, upsert_lease};
 use crate::{
     CommitEffect, CommitEffectSink, EventCursorError, ExecRetireReservation, ExecWrite,
@@ -4491,6 +4491,13 @@ fn an_exec_binding_a_workspace_as_a_writable_git_root_holds_it_until_terminal() 
         mount: "/srv/checkout".to_owned(),
     }]));
     seed_exec(&store, &scope, &bound);
+    record_exec_git_roots(
+        &store.connection.lock(),
+        &scope,
+        "ex_bound",
+        &["ws_git".to_owned()],
+    )
+    .expect("record the Git root as acceptance does");
     // A host root that happens to carry the same name binds no workspace.
     let mut host = exec("ex_host", "ws_own", ExecState::Running);
     host.resource.applied = Some(applied(vec![substrate_wire::AppliedWritableRoot::Host {
@@ -4513,7 +4520,134 @@ fn an_exec_binding_a_workspace_as_a_writable_git_root_holds_it_until_terminal() 
             .expect("other subject"),
         "another subject's exec never holds this subject's workspace"
     );
+    assert_eq!(
+        store
+            .execs_holding_workspace(&scope, "ws_git")
+            .expect("holders")
+            .iter()
+            .map(|exec| exec.id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["ex_bound"],
+        "lease cleanup of ws_git reaches the exec that binds it"
+    );
     bound.resource.state = ExecState::Exited;
     seed_exec(&store, &scope, &bound);
     assert!(!held("ws_git"), "a terminal exec releases its Git root");
+}
+
+#[test]
+fn an_accepted_exec_holds_its_git_roots_before_any_applied_record() {
+    // An exec still Accepted, or Unknown after a dispatch that proved nothing, has no applied
+    // record; what acceptance recorded is what holds its Git roots (ADR 0038 kind 2).
+    let store = Store::open(":memory:").expect("open store");
+    let scope = scope("local:1000");
+    for id in ["ws_own", "ws_git"] {
+        store
+            .put_workspace(&scope, id, &workspace(id))
+            .expect("seed workspace");
+    }
+    let accepted = exec("ex_accepted", "ws_own", ExecState::Accepted);
+    assert!(accepted.resource.applied.is_none());
+    let operation = operation_named(
+        "local:1000",
+        "01JGITROOTACCEPTED00001",
+        "exec.start",
+        "ex_accepted",
+        &"a".repeat(64),
+    );
+    assert_eq!(
+        store
+            .reserve_exec_start_binding(&operation, &accepted, None, None, &["ws_git".to_owned()])
+            .expect("reserve"),
+        Reservation::Accepted
+    );
+    assert!(
+        store
+            .workspace_has_nonterminal_execs(&scope, "ws_git")
+            .unwrap()
+    );
+    let mut unknown = accepted.clone();
+    unknown.resource.state = ExecState::Unknown;
+    seed_exec(&store, &scope, &unknown);
+    assert!(
+        store
+            .workspace_has_nonterminal_execs(&scope, "ws_git")
+            .unwrap(),
+        "a later write of the exec keeps what acceptance recorded"
+    );
+}
+
+#[test]
+fn git_root_workspaces_migrate_from_the_applied_record() {
+    // A store written before acceptance recorded Git roots knew them only from applied records.
+    let directory = tempdir().expect("tempdir");
+    let path = directory.path().join("state.db");
+    let store = Store::open(&path).expect("open store");
+    let scope = scope("local:1000");
+    for id in ["ws_own", "ws_git"] {
+        store
+            .put_workspace(&scope, id, &workspace(id))
+            .expect("seed workspace");
+    }
+    let mut bound = exec("ex_legacy", "ws_own", ExecState::Running);
+    bound.resource.applied = Some(substrate_wire::AppliedConfinement {
+        writable_roots: vec![
+            substrate_wire::AppliedWritableRoot::Host {
+                name: "cache".to_owned(),
+                host_path: "/srv/cache".to_owned(),
+                mount: "/srv/cache".to_owned(),
+            },
+            substrate_wire::AppliedWritableRoot::Git {
+                workspace: "ws_git".to_owned(),
+                host_path: "/srv/workspaces/ws_git".to_owned(),
+                mount: "/srv/checkout".to_owned(),
+            },
+        ],
+        workspace_access: substrate_wire::WorkspaceAccess::ReadWrite,
+        read_only_roots: Vec::new(),
+        read_only_files: Vec::new(),
+        secret_slots: Vec::new(),
+        workdir: None,
+        capability_snapshot: format!("sha256:{}", "7".repeat(64)),
+        cgroup: "fixture".to_owned(),
+        filesystem: substrate_wire::AppliedFilesystem::WorkspaceReadWriteSystemReadOnly,
+        network: substrate_wire::AppliedNetwork::None,
+        profile: SandboxProfile::Workspace,
+        capsule: None,
+    });
+    seed_exec(&store, &scope, &bound);
+    seed_exec(
+        &store,
+        &scope,
+        &exec("ex_plain", "ws_own", ExecState::Running),
+    );
+    store
+        .connection
+        .lock()
+        .execute_batch("ALTER TABLE execs DROP COLUMN git_root_workspaces;")
+        .expect("rewind to the pre-column schema");
+    drop(store);
+
+    let reopened = Store::open(&path).expect("reopen migrates");
+    assert!(
+        reopened
+            .workspace_has_nonterminal_execs(&scope, "ws_git")
+            .unwrap()
+    );
+    let columns: Vec<(String, String)> = reopened
+        .connection
+        .lock()
+        .prepare("SELECT id, git_root_workspaces FROM execs ORDER BY id")
+        .unwrap()
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(
+        columns,
+        vec![
+            ("ex_legacy".to_owned(), "[\"ws_git\"]".to_owned()),
+            ("ex_plain".to_owned(), "[]".to_owned()),
+        ]
+    );
 }

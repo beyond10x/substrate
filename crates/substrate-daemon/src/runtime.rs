@@ -599,6 +599,7 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
         state_directory(&config.state)?,
         nix::unistd::Uid::effective().as_raw(),
     )?;
+    check_writable_roots_clear_of(&config.writable_roots, &protected_host_paths(&config))?;
     check_ca_bundle(config.ca_bundle.as_deref())?;
     // Resolved before any listener exists: a trust anchor that only becomes usable later would let
     // the daemon serve mutations it could not attribute (ADR 0011).
@@ -1015,6 +1016,66 @@ fn check_writable_roots(
             }
             if reserved.starts_with(path) {
                 return Err(refuse(&format!("contains {what}")));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Every host path the daemon trusts outside the workspace root and the state directory, each
+/// with what it is: the API socket, the bubblewrap binary, every secret-slot source, the CA bundle
+/// and the delegated cgroup root. A program given a writable root containing one could replace
+/// the confinement binary, read or rewrite a secret, swap the trust anchor, talk to the API as the
+/// daemon's peer or move itself out of its cgroup.
+fn protected_host_paths(config: &DaemonConfig) -> Vec<(PathBuf, String)> {
+    let mut protected = vec![
+        (config.socket.clone(), "the API socket".to_owned()),
+        (
+            config.bubblewrap.clone(),
+            "the bubblewrap binary".to_owned(),
+        ),
+    ];
+    protected.extend(config.secret_slots.iter().map(|slot| {
+        (
+            slot.path.clone(),
+            format!("the source of secret slot {:?}", slot.name),
+        )
+    }));
+    if let Some(ca_bundle) = &config.ca_bundle {
+        protected.push((ca_bundle.clone(), "the CA bundle".to_owned()));
+    }
+    if let Some(cgroup_root) = &config.cgroup_root {
+        protected.push((cgroup_root.clone(), "the delegated cgroup root".to_owned()));
+    }
+    protected
+}
+
+/// Refuses, naming the root, a writable root that equals or contains any of `protected`
+/// ([`protected_host_paths`]). Each protected path is compared both as written and as resolved,
+/// so a symlink to it inside the root and the root holding its target are both refused.
+///
+/// # Errors
+///
+/// Returns the first containment found, prefixed `config.writable-root-invalid`.
+fn check_writable_roots_clear_of(
+    declared: &[WritableRootConfig],
+    protected: &[(PathBuf, String)],
+) -> anyhow::Result<()> {
+    let mut forms = Vec::new();
+    for (path, what) in protected {
+        if let Ok(absolute) = std::path::absolute(path) {
+            forms.push((absolute, what));
+        }
+        forms.push((resolved_prefix(path)?, what));
+    }
+    for root in declared {
+        let resolved = resolved_prefix(&root.path)?;
+        for (path, what) in &forms {
+            if path.starts_with(&root.path) || path.starts_with(&resolved) {
+                return Err(anyhow!(
+                    "config.writable-root-invalid: writable root {:?} contains {what}",
+                    root.name
+                ));
             }
         }
     }
@@ -2210,6 +2271,106 @@ mod tests {
             refusal.contains("contains the state directory"),
             "{refusal}"
         );
+    }
+
+    /// A daemon configuration over the writable-root tree whose protected paths all lie in
+    /// `other`, with `cache` declared writable; each case moves one protected path into `cache`.
+    fn protected_config(base: &Path) -> DaemonConfig {
+        let mut config = DaemonConfig::minimum(
+            base.join("other/api.sock"),
+            base.join("state/state.db"),
+            base.join("workspaces"),
+            "d",
+            vec![1],
+        );
+        config.bubblewrap = base.join("other/bwrap");
+        config.writable_roots = vec![writable_root("cache", base.join("cache"))];
+        config
+    }
+
+    fn protected_refusal(config: &DaemonConfig) -> String {
+        check_writable_roots_clear_of(&config.writable_roots, &protected_host_paths(config))
+            .expect_err("a writable root holding a protected path stops startup")
+            .to_string()
+    }
+
+    fn assert_protected_refusal(config: &DaemonConfig, what: &str) {
+        let refusal = protected_refusal(config);
+        assert!(
+            refusal.starts_with("config.writable-root-invalid: writable root \"cache\" contains "),
+            "{refusal}"
+        );
+        assert!(refusal.contains(what), "{refusal} names {what}");
+    }
+
+    #[test]
+    fn a_writable_root_clear_of_every_protected_path_starts() {
+        let (_directory, base) = writable_root_tree();
+        let mut config = protected_config(&base);
+        config.secret_slots = vec![SecretSlot {
+            name: "token".to_owned(),
+            path: base.join("other/token"),
+        }];
+        config.ca_bundle = Some(base.join("other/ca.pem"));
+        config.cgroup_root = Some(base.join("other/cgroup"));
+        check_writable_roots_clear_of(&config.writable_roots, &protected_host_paths(&config))
+            .unwrap();
+    }
+
+    #[test]
+    fn a_writable_root_containing_the_api_socket_is_refused() {
+        let (_directory, base) = writable_root_tree();
+        let mut config = protected_config(&base);
+        config.socket = base.join("cache/api.sock");
+        assert_protected_refusal(&config, "the API socket");
+    }
+
+    #[test]
+    fn a_writable_root_containing_the_bubblewrap_binary_is_refused() {
+        let (_directory, base) = writable_root_tree();
+        let mut config = protected_config(&base);
+        config.bubblewrap = base.join("cache/bin/bwrap");
+        assert_protected_refusal(&config, "the bubblewrap binary");
+        // Reached through a symlink outside the root: the resolved target is what runs.
+        std::fs::write(base.join("cache/bwrap"), "x").unwrap();
+        std::os::unix::fs::symlink(base.join("cache/bwrap"), base.join("other/bwrap")).unwrap();
+        config.bubblewrap = base.join("other/bwrap");
+        assert_protected_refusal(&config, "the bubblewrap binary");
+    }
+
+    #[test]
+    fn a_writable_root_containing_a_secret_slot_source_is_refused() {
+        let (_directory, base) = writable_root_tree();
+        let mut config = protected_config(&base);
+        config.secret_slots = vec![
+            SecretSlot {
+                name: "clear".to_owned(),
+                path: base.join("other/clear"),
+            },
+            SecretSlot {
+                name: "token".to_owned(),
+                path: base.join("cache/token"),
+            },
+        ];
+        assert_protected_refusal(&config, "the source of secret slot \"token\"");
+    }
+
+    #[test]
+    fn a_writable_root_containing_the_ca_bundle_is_refused() {
+        let (_directory, base) = writable_root_tree();
+        let mut config = protected_config(&base);
+        config.ca_bundle = Some(base.join("cache/ca.pem"));
+        assert_protected_refusal(&config, "the CA bundle");
+    }
+
+    #[test]
+    fn a_writable_root_containing_or_equal_to_the_delegated_cgroup_root_is_refused() {
+        let (_directory, base) = writable_root_tree();
+        let mut config = protected_config(&base);
+        config.cgroup_root = Some(base.join("cache/delegated"));
+        assert_protected_refusal(&config, "the delegated cgroup root");
+        config.cgroup_root = Some(base.join("cache"));
+        assert_protected_refusal(&config, "the delegated cgroup root");
     }
 
     #[test]

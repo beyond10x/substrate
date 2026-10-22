@@ -156,13 +156,18 @@ pub(super) async fn exec_start(
         leader_pid: None,
     };
     let workspace_clock = app.lease_clock().ok();
+    let bound: Vec<String> = git_roots
+        .iter()
+        .map(|binding| binding.workspace.clone())
+        .collect();
     if let Some(response) = reservation_response(
         app.store_io(|| {
-            app.store.reserve_exec_start(
+            app.store.reserve_exec_start_binding(
                 &new,
                 &provisional,
                 lease.as_ref(),
                 workspace_clock.as_ref(),
+                &bound,
             )
         })
         .await,

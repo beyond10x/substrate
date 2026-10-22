@@ -142,6 +142,7 @@ impl Store {
                 physically_absent INTEGER NOT NULL DEFAULT 0 CHECK (physically_absent IN (0, 1)),
                 cgroup TEXT,
                 leader_pid INTEGER,
+                git_root_workspaces TEXT NOT NULL DEFAULT '[]',
                 PRIMARY KEY (deployment, subject, id)
             ) WITHOUT ROWID;
             CREATE INDEX IF NOT EXISTS execs_recovery_state
@@ -278,6 +279,7 @@ impl Store {
         migrate_exec_physical_absence(&connection)?;
         migrate_workspace_cleanup_progress(&connection)?;
         migrate_workspace_origin(&connection)?;
+        migrate_exec_git_root_workspaces(&connection)?;
         migrate_operation_ledger_accounting(&mut connection, config)?;
         migrate_operation_grant_attribution(&connection)?;
         crate::host_processes::migrate_host_processes(&connection)?;
@@ -776,6 +778,34 @@ fn validate_durable_operation_occupancy(
             OperationCapacity::GlobalBytes,
         ));
     }
+    Ok(())
+}
+
+/// ADR 0038 kind 2: an exec records the workspaces it binds as writable Git roots when it is
+/// accepted. A row written before the column existed gains it from its applied record, the only
+/// place such a row ever named one; a row without one binds none.
+fn migrate_exec_git_root_workspaces(connection: &Connection) -> Result<(), StoreError> {
+    let mut statement = connection.prepare("PRAGMA table_info(execs)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    if columns.iter().any(|column| column == "git_root_workspaces") {
+        return Ok(());
+    }
+    connection.execute(
+        "ALTER TABLE execs ADD COLUMN git_root_workspaces TEXT NOT NULL DEFAULT '[]'",
+        [],
+    )?;
+    connection.execute(
+        "UPDATE execs SET git_root_workspaces = (
+            SELECT json_group_array(json_extract(root.value, '$.workspace'))
+            FROM json_each(execs.resource_json, '$.applied.writable_roots') AS root
+            WHERE json_extract(root.value, '$.kind') = 'git'
+         )
+         WHERE json_type(resource_json, '$.applied.writable_roots') = 'array'",
+        [],
+    )?;
     Ok(())
 }
 

@@ -79,6 +79,21 @@ impl Store {
         lease: Option<&NewLease>,
         workspace_clock: Option<&LeaseClock>,
     ) -> Result<Reservation, StoreError> {
+        self.reserve_exec_start_binding(new, provisional, lease, workspace_clock, &[])
+    }
+
+    /// [`Self::reserve_exec_start`] for a start that binds `git_roots`, the ids of the workspaces
+    /// it names as writable Git roots (ADR 0038 kind 2). They are recorded on the exec row in the
+    /// same transaction that accepts it, so an exec holds them from acceptance on, before any
+    /// applied record exists and whatever its dispatch outcome.
+    pub fn reserve_exec_start_binding(
+        &self,
+        new: &NewOperation,
+        provisional: &StoredExec,
+        lease: Option<&NewLease>,
+        workspace_clock: Option<&LeaseClock>,
+        git_roots: &[String],
+    ) -> Result<Reservation, StoreError> {
         let mut connection = self.connection.lock();
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if let Some(reservation) = existing_reservation(&transaction, new)? {
@@ -147,6 +162,12 @@ impl Store {
                 Err(error) => return Err(error),
             };
         upsert_exec(&transaction, &new.scope, provisional)?;
+        record_exec_git_roots(
+            &transaction,
+            &new.scope,
+            &provisional.resource.id,
+            git_roots,
+        )?;
         if let Some(lease) = lease {
             upsert_lease(
                 &transaction,
@@ -584,6 +605,41 @@ impl Store {
             .collect()
     }
 
+    /// Reads the identity and state of every exec still physically present that holds a
+    /// workspace: each exec in it, and each exec in another workspace that binds it as a writable
+    /// Git root (ADR 0038 kind 2), as recorded when that exec was accepted.
+    ///
+    /// The same projection as [`Self::execs_for_workspace`]; workspace lease cleanup reads this
+    /// one, so it ends every exec that may hold the workspace before it ends the workspace.
+    pub fn execs_holding_workspace(
+        &self,
+        scope: &Scope,
+        workspace_id: &str,
+    ) -> Result<Vec<WorkspaceExecState>, StoreError> {
+        let connection = self.connection.lock();
+        let mut statement = connection.prepare(
+            "SELECT id, json_extract(resource_json, '$.state') FROM execs
+             WHERE deployment = ?1 AND subject = ?2 AND physically_absent = 0
+               AND (workspace_id = ?3
+                    OR EXISTS (SELECT 1 FROM json_each(execs.git_root_workspaces)
+                               WHERE json_each.value = ?3))
+             ORDER BY id",
+        )?;
+        statement
+            .query_map(
+                params![scope.deployment, scope.subject, workspace_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )?
+            .map(|row| {
+                let (id, state) = row?;
+                Ok(WorkspaceExecState {
+                    id,
+                    state: serde_json::from_value(serde_json::Value::String(state))?,
+                })
+            })
+            .collect()
+    }
+
     pub fn mark_exec_physically_absent(
         &self,
         candidate: &RecoveryExec,
@@ -722,6 +778,27 @@ pub(crate) fn load_exec(
             },
         )
         .transpose()
+}
+
+/// Records the workspaces an accepted exec binds as writable Git roots. [`upsert_exec`] never
+/// writes the column, so every later write of the exec keeps what acceptance recorded.
+pub(crate) fn record_exec_git_roots(
+    connection: &Connection,
+    scope: &Scope,
+    exec_id: &str,
+    git_roots: &[String],
+) -> Result<(), StoreError> {
+    connection.execute(
+        "UPDATE execs SET git_root_workspaces = ?4
+         WHERE deployment = ?1 AND subject = ?2 AND id = ?3",
+        params![
+            scope.deployment,
+            scope.subject,
+            exec_id,
+            serde_json::to_string(git_roots)?
+        ],
+    )?;
+    Ok(())
 }
 
 pub(crate) fn upsert_exec(

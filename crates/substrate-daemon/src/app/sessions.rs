@@ -408,14 +408,19 @@ pub(super) async fn pipe_session_start(
         lease: lease.observation(),
     };
     let workspace_clock = app.lease_clock().ok();
+    let bound: Vec<String> = git_roots
+        .iter()
+        .map(|binding| binding.workspace.clone())
+        .collect();
     if let Some(response) = reservation_response(
         app.store_io(|| {
-            app.store.reserve_pipe_session_start(
+            app.store.reserve_pipe_session_start_binding(
                 &new,
                 &provisional_session,
                 &provisional,
                 &lease,
                 workspace_clock.as_ref(),
+                &bound,
             )
         })
         .await,

@@ -1,5 +1,7 @@
 use crate::events::{append_event, commit_effect};
-use crate::execs::{is_terminal_exec_state, load_exec, mark_exec_unknown, upsert_exec};
+use crate::execs::{
+    is_terminal_exec_state, load_exec, mark_exec_unknown, record_exec_git_roots, upsert_exec,
+};
 use crate::leases::{freeze_workspace_lease_if_due, upsert_lease};
 use crate::operations::{
     complete_operation_error_transaction, existing_reservation, finalize_operation_accounting,
@@ -179,6 +181,27 @@ impl Store {
         lease: &NewLease,
         workspace_clock: Option<&LeaseClock>,
     ) -> Result<Reservation, StoreError> {
+        self.reserve_pipe_session_start_binding(
+            new,
+            provisional_session,
+            provisional_exec,
+            lease,
+            workspace_clock,
+            &[],
+        )
+    }
+
+    /// [`Self::reserve_pipe_session_start`] for a session whose exec binds `git_roots` writable,
+    /// recorded on the exec row as [`Self::reserve_exec_start_binding`] records them.
+    pub fn reserve_pipe_session_start_binding(
+        &self,
+        new: &NewOperation,
+        provisional_session: &PipeSession,
+        provisional_exec: &StoredExec,
+        lease: &NewLease,
+        workspace_clock: Option<&LeaseClock>,
+        git_roots: &[String],
+    ) -> Result<Reservation, StoreError> {
         if (provisional_session.capture == substrate_wire::CaptureMode::Unrecorded)
             != provisional_exec.resource.unrecorded_output.is_some()
         {
@@ -252,6 +275,12 @@ impl Store {
                 Err(error) => return Err(error),
             };
         upsert_exec(&transaction, &new.scope, provisional_exec)?;
+        record_exec_git_roots(
+            &transaction,
+            &new.scope,
+            &provisional_exec.resource.id,
+            git_roots,
+        )?;
         upsert_session(&transaction, &new.scope, provisional_session)?;
         upsert_lease(
             &transaction,

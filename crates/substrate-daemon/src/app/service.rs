@@ -775,7 +775,10 @@ impl App {
             LeaseResource::Workspace { root_name, origin } => {
                 let mut child_failure = None;
                 if let Ok(execs) = self
-                    .store_io(|| self.store.execs_for_workspace(&expired.scope, &expired.id))
+                    .store_io(|| {
+                        self.store
+                            .execs_holding_workspace(&expired.scope, &expired.id)
+                    })
                     .await
                 {
                     for exec in execs {
