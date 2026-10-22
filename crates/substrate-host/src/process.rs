@@ -737,7 +737,19 @@ impl ProcessRuntime {
         workspace: &Path,
         input: &ExecStartInput,
     ) -> DispatchOutcome<ExecObservation> {
-        self.start_inner(id, workspace, input, None).await
+        self.start_inner(id, workspace, &[], input, None).await
+    }
+
+    /// [`Self::start`], also binding each writable Git root the daemon admitted (ADR 0038 kind 2).
+    pub async fn start_with_git_roots(
+        &self,
+        id: &str,
+        workspace: &Path,
+        git_roots: &[crate::GitRootBinding],
+        input: &ExecStartInput,
+    ) -> DispatchOutcome<ExecObservation> {
+        self.start_inner(id, workspace, git_roots, input, None)
+            .await
     }
 
     /// Starts a confined process with bounded live stdin/stdout/stderr pipes.
@@ -745,6 +757,18 @@ impl ProcessRuntime {
         &self,
         id: &str,
         workspace: &Path,
+        input: &PipeSessionStartInput,
+    ) -> DispatchOutcome<ExecObservation> {
+        self.start_pipe_with_git_roots(id, workspace, &[], input)
+            .await
+    }
+
+    /// [`Self::start_pipe`], also binding each writable Git root the daemon admitted.
+    pub async fn start_pipe_with_git_roots(
+        &self,
+        id: &str,
+        workspace: &Path,
+        git_roots: &[crate::GitRootBinding],
         input: &PipeSessionStartInput,
     ) -> DispatchOutcome<ExecObservation> {
         // **The mode gate is outermost, and nothing precedes it at either entry point.** That is
@@ -826,7 +850,7 @@ impl ProcessRuntime {
                 SessionMode::Pty => input.window,
             },
         };
-        self.start_inner(id, workspace, &input.exec, Some(settings))
+        self.start_inner(id, workspace, git_roots, &input.exec, Some(settings))
             .await
     }
 
@@ -835,13 +859,15 @@ impl ProcessRuntime {
         &self,
         id: &str,
         workspace: &Path,
+        git_roots: &[crate::GitRootBinding],
         input: &ExecStartInput,
         pipe_settings: Option<PipeSettings>,
     ) -> DispatchOutcome<ExecObservation> {
-        let (pinned, read_only_roots, writable_roots) = match self.admit(id, workspace, input) {
-            Ok(admitted) => admitted,
-            Err(error) => return DispatchOutcome::NotDispatched(error),
-        };
+        let (pinned, read_only_roots, writable_roots) =
+            match self.admit(id, workspace, git_roots, input) {
+                Ok(admitted) => admitted,
+                Err(error) => return DispatchOutcome::NotDispatched(error),
+            };
         let workspace_access =
             match Self::prepare_workspace_access(&pinned, &input.workspace_access) {
                 Ok(value) => value,
@@ -2056,6 +2082,7 @@ impl ProcessRuntime {
         &self,
         id: &str,
         workspace: &Path,
+        git_roots: &[crate::GitRootBinding],
         input: &ExecStartInput,
     ) -> Result<Admitted, DriverError> {
         if !id.starts_with("ex_")
@@ -2117,9 +2144,21 @@ impl ProcessRuntime {
         // driver without the daemon; it is never silently left unbound. Then each host root is
         // opened once, by descriptor, and checked on that descriptor: the object bound is the
         // object checked, and one gone, swapped for a symlink or not owned is refused by name.
+        // A Git root is the workspace directory the daemon resolved, pinned beneath the same
+        // workspace-root descriptor as this start's own, and only with a Git baseline beside it.
         admit_writable_roots(input, &self.capability.facts)?;
-        let writable_roots =
-            crate::writable_roots::pin(&self.config.writable_roots, &input.writable_roots)?;
+        crate::check_writable_git_roots(input)?;
+        let writable_roots = crate::writable_roots::pin(
+            &self.config.writable_roots,
+            &input.writable_roots,
+            Some(&crate::writable_roots::GitRoots {
+                root,
+                root_path: &self.config.workspace_root,
+                baseline_root: &self.config.git_baseline_root(),
+                own_root_name: workspace.file_name().and_then(std::ffi::OsStr::to_str),
+                bindings: git_roots,
+            }),
+        )?;
         // Shape, then the fact: the daemon's order (design 26 § 1). Existence is asked in
         // `start_inner`, once the objects the mounts bind are pinned.
         crate::workdir::admit(input, self.capability.facts.exec_workdir)?;
@@ -4716,8 +4755,9 @@ mod tests {
             ..pty_exec_input(&snapshot)
         };
 
-        let (admitted, opens) =
-            opens_of(&bubblewrap, || runtime.admit("ex_test", &workspace, &input));
+        let (admitted, opens) = opens_of(&bubblewrap, || {
+            runtime.admit("ex_test", &workspace, &[], &input)
+        });
         admitted.expect("an unchanged backend admits");
         assert_eq!(
             opens, 0,
@@ -4738,8 +4778,9 @@ mod tests {
             .unwrap()
             .set_modified(modified)
             .unwrap();
-        let (refused, opens) =
-            opens_of(&bubblewrap, || runtime.admit("ex_test", &workspace, &input));
+        let (refused, opens) = opens_of(&bubblewrap, || {
+            runtime.admit("ex_test", &workspace, &[], &input)
+        });
         assert_eq!(
             refused.expect_err("a replaced backend refuses").code,
             "exec.capability-stale"

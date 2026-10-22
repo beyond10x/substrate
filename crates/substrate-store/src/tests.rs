@@ -4459,3 +4459,61 @@ fn every_removal_path_reader_carries_the_adopted_origin() {
         }
     );
 }
+
+#[test]
+fn an_exec_binding_a_workspace_as_a_writable_git_root_holds_it_until_terminal() {
+    let store = Store::open(":memory:").expect("open store");
+    let scope = scope("local:1000");
+    for id in ["ws_own", "ws_git", "ws_other"] {
+        store
+            .put_workspace(&scope, id, &workspace(id))
+            .expect("seed workspace");
+    }
+    let applied =
+        |roots: Vec<substrate_wire::AppliedWritableRoot>| substrate_wire::AppliedConfinement {
+            writable_roots: roots,
+            workspace_access: substrate_wire::WorkspaceAccess::ReadWrite,
+            read_only_roots: Vec::new(),
+            read_only_files: Vec::new(),
+            secret_slots: Vec::new(),
+            workdir: None,
+            capability_snapshot: format!("sha256:{}", "7".repeat(64)),
+            cgroup: "fixture".to_owned(),
+            filesystem: substrate_wire::AppliedFilesystem::WorkspaceReadWriteSystemReadOnly,
+            network: substrate_wire::AppliedNetwork::None,
+            profile: SandboxProfile::Workspace,
+            capsule: None,
+        };
+    let mut bound = exec("ex_bound", "ws_own", ExecState::Running);
+    bound.resource.applied = Some(applied(vec![substrate_wire::AppliedWritableRoot::Git {
+        workspace: "ws_git".to_owned(),
+        host_path: "/srv/workspaces/ws_git".to_owned(),
+        mount: "/srv/checkout".to_owned(),
+    }]));
+    seed_exec(&store, &scope, &bound);
+    // A host root that happens to carry the same name binds no workspace.
+    let mut host = exec("ex_host", "ws_own", ExecState::Running);
+    host.resource.applied = Some(applied(vec![substrate_wire::AppliedWritableRoot::Host {
+        name: "ws_other".to_owned(),
+        host_path: "/srv/ws_other".to_owned(),
+        mount: "/srv/other".to_owned(),
+    }]));
+    seed_exec(&store, &scope, &host);
+    let held = |id: &str| {
+        store
+            .workspace_has_nonterminal_execs(&scope, id)
+            .expect("in-use check")
+    };
+    assert!(held("ws_git"), "a running exec binds ws_git");
+    assert!(held("ws_own"), "and runs in ws_own");
+    assert!(!held("ws_other"), "a host root name is not a workspace");
+    assert!(
+        !store
+            .workspace_has_nonterminal_execs(&self::scope("local:1001"), "ws_git")
+            .expect("other subject"),
+        "another subject's exec never holds this subject's workspace"
+    );
+    bound.resource.state = ExecState::Exited;
+    seed_exec(&store, &scope, &bound);
+    assert!(!held("ws_git"), "a terminal exec releases its Git root");
+}

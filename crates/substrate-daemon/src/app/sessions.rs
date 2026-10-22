@@ -17,7 +17,7 @@ use sha2::{Digest as _, Sha256};
 use substrate_host::{DispatchOutcome, ExecObservation, PipeStream};
 use substrate_store::{
     ExecWrite, NewSessionAuthority, Scope, SessionAttachmentClaim, SessionAuthorityLookup,
-    SessionAuthorityMint, SessionRetireReservation, StoredExec, WorkspaceAdmission,
+    SessionAuthorityMint, SessionRetireReservation, StoredExec,
 };
 use substrate_wire::{
     Base64Content, Base64Encoding, EmptyInput, ErrorClass, Exec, ExecKind, ExecSignalInput,
@@ -32,6 +32,7 @@ use tokio::sync::{Notify, Semaphore};
 use crate::runtime::TransportPermit;
 
 use super::events::{ControlRate, enforce_stream_send_deadline};
+use super::git_roots::{StartRefusal, admit_start_workspaces, start_workspaces};
 use super::operations::{
     begin, decode_mutation, finish_driver_error, finish_lease_store_error,
     finish_pipe_session_dispatch_absence, finish_pipe_session_dispatch_unknown,
@@ -42,7 +43,7 @@ use super::operations::{
 };
 use super::responses::{
     failure, not_found, not_found_with_operation, operation_ledger_capacity, outcome_unknown,
-    query_is_empty, request_id, schema_invalid, store_failure, success, workspace_frozen_refusal,
+    query_is_empty, request_id, schema_invalid, store_failure, success,
 };
 use super::{
     App, Identity, MAINTENANCE_DRIVER_TIMEOUT, PIPE_MAX_FRAME_BYTES, PIPE_MAX_INPUT_BYTES,
@@ -291,14 +292,22 @@ pub(super) async fn pipe_session_start(
         .await;
     }
     let scope = app.scope(&identity);
-    let _workspace_guard = app
-        .lock_workspace(&scope, &mutation.input.exec.workspace)
+    // As for an exec start: the session's own workspace and every writable Git root its exec
+    // names stay locked through dispatch.
+    let _workspace_guards = app
+        .lock_workspaces(&scope, &start_workspaces(&mutation.input.exec))
         .await;
-    let root_name = match app
-        .admit_workspace(&scope, &mutation.input.exec.workspace)
-        .await
+    let (root_name, git_roots) = match admit_start_workspaces(
+        &app,
+        &scope,
+        &request_id,
+        &mutation.op,
+        &mutation.input.exec,
+    )
+    .await
     {
-        Ok(WorkspaceAdmission::Missing) => {
+        Ok(value) => value,
+        Err(StartRefusal::Recorded(response)) => {
             return refuse_before_dispatch_response(
                 &app,
                 &identity,
@@ -307,25 +316,11 @@ pub(super) async fn pipe_session_start(
                 "POST",
                 "/v1/sessions",
                 &mutation,
-                not_found_with_operation(&request_id, &mutation.op),
+                response,
             )
             .await;
         }
-        Ok(WorkspaceAdmission::Frozen { .. }) => {
-            return refuse_before_dispatch_response(
-                &app,
-                &identity,
-                &request_id,
-                "session.start",
-                "POST",
-                "/v1/sessions",
-                &mutation,
-                workspace_frozen_refusal(&request_id, &mutation.op),
-            )
-            .await;
-        }
-        Ok(WorkspaceAdmission::Admitted { root_name, .. }) => root_name,
-        Err(error) => return store_failure(&request_id, Some(&mutation.op), &error),
+        Err(StartRefusal::Unrecorded(response)) => return response,
     };
     let operation = mutation.op.clone();
     let ttl_ms = mutation
@@ -431,7 +426,7 @@ pub(super) async fn pipe_session_start(
     }
     match app
         .driver
-        .start_pipe_session(&exec_id, &root_name, &mutation.input)
+        .start_pipe_session_with_git_roots(&exec_id, &root_name, &git_roots, &mutation.input)
         .await
     {
         DispatchOutcome::Observed(mut observation) => {

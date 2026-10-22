@@ -179,6 +179,87 @@ pub struct DeclaredWritableRoot {
     pub path: PathBuf,
 }
 
+/// A writable Git root that names a workspace not materialized from a Git source: an empty or an
+/// adopted workspace (ADR 0038 kind 2).
+pub const WRITABLE_ROOT_NOT_GIT: &str = "exec.writable-root-not-git";
+/// A writable Git root that names the start's own workspace, which is already `/workspace`.
+pub const WRITABLE_ROOT_OWN_WORKSPACE: &str = "exec.writable-root-own-workspace";
+/// A writable Git root that names a workspace another entry of the same start already names.
+pub const WRITABLE_ROOT_WORKSPACE_DUPLICATE: &str = "exec.writable-root-workspace-duplicate";
+
+/// One writable Git root the daemon admitted for a start (ADR 0038 kind 2): the workspace the
+/// request names and the root name the store holds for it in the caller's scope.
+///
+/// The daemon resolves it, never the request: a start names a workspace id, and only the store
+/// knows which directory under the workspace root that id is for this subject.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitRootBinding {
+    pub workspace: String,
+    pub root_name: String,
+}
+
+/// The unserved refusal for a writable Git root, naming the workspace.
+#[must_use]
+pub fn git_root_unserved(workspace: &str) -> DriverError {
+    DriverError::unserved(
+        substrate_wire::EXEC_WRITABLE_ROOTS_GIT_UNSERVED,
+        format!("Writable Git root {workspace} is not served by this host."),
+        "writable_roots",
+    )
+}
+
+/// Refuses a writable Git root whose workspace was not created from a Git source.
+#[must_use]
+pub fn writable_root_not_git(workspace: &str) -> DriverError {
+    DriverError::refused(
+        WRITABLE_ROOT_NOT_GIT,
+        format!("Writable Git root {workspace} is not a workspace created from a Git source."),
+        "writable_roots",
+    )
+}
+
+/// Refuses a writable Git root that is the start's own workspace.
+pub(crate) fn writable_root_own_workspace(workspace: &str) -> DriverError {
+    DriverError::refused(
+        WRITABLE_ROOT_OWN_WORKSPACE,
+        format!(
+            "Writable Git root {workspace} is the start's own workspace, already mounted at /workspace."
+        ),
+        "writable_roots",
+    )
+}
+
+/// The checks on a start's writable Git roots that need nothing but the request, in order: no
+/// entry names the start's own workspace, and no workspace is named twice. Both ports run it, the
+/// daemon before any workspace is looked up and the driver again at admission.
+///
+/// # Errors
+///
+/// [`WRITABLE_ROOT_OWN_WORKSPACE`] or [`WRITABLE_ROOT_WORKSPACE_DUPLICATE`], naming the workspace.
+pub fn check_writable_git_roots(input: &ExecStartInput) -> Result<(), DriverError> {
+    let named = input
+        .writable_roots
+        .iter()
+        .filter_map(|root| match root {
+            substrate_wire::WritableRoot::Git(root) => Some(root.workspace.as_str()),
+            substrate_wire::WritableRoot::Host(_) => None,
+        })
+        .collect::<Vec<_>>();
+    for (index, workspace) in named.iter().enumerate() {
+        if *workspace == input.workspace {
+            return Err(writable_root_own_workspace(workspace));
+        }
+        if named[..index].contains(workspace) {
+            return Err(DriverError::refused(
+                WRITABLE_ROOT_WORKSPACE_DUPLICATE,
+                format!("Writable Git root {workspace} is named more than once."),
+                "writable_roots",
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub struct HostConfig {
     pub workspace_root: PathBuf,
@@ -656,6 +737,71 @@ pub trait Driver: Send + Sync {
             "The selected driver does not serve raw-pipe sessions.",
             "session",
         ))
+    }
+
+    /// What the start request alone shows about its writable Git roots (ADR 0038 kind 2): the
+    /// start's own workspace named as one, or one workspace named twice. The daemon asks before
+    /// it looks any of them up, so the refusal is a ledger row.
+    ///
+    /// # Errors
+    ///
+    /// `exec.writable-root-own-workspace` or `exec.writable-root-workspace-duplicate`, naming the
+    /// workspace.
+    fn check_git_roots_request(&self, input: &ExecStartInput) -> Result<(), DriverError> {
+        check_writable_git_roots(input)
+    }
+
+    /// Admits workspace `workspace`, stored at `root_name`, as a writable Git root (ADR 0038
+    /// kind 2). `adopted` is the daemon's own record that the directory is an operator's, which
+    /// refuses it whatever it holds; otherwise the driver's record of a Git materialization
+    /// decides. The daemon asks before it dispatches, so the refusal is a ledger row. A driver
+    /// that materializes no Git workspace admits none.
+    ///
+    /// # Errors
+    ///
+    /// `exec.writable-root-not-git`, naming the workspace, or a driver failure reading its own
+    /// record of the materialization.
+    fn admit_git_root(
+        &self,
+        workspace: &str,
+        _root_name: &str,
+        _adopted: bool,
+    ) -> Result<(), DriverError> {
+        Err(writable_root_not_git(workspace))
+    }
+
+    /// [`Self::start_exec`], also binding each admitted writable Git root (ADR 0038 kind 2).
+    ///
+    /// A driver that serves no Git root refuses one by name and never starts without it; with
+    /// none to bind this is [`Self::start_exec`].
+    async fn start_exec_with_git_roots(
+        &self,
+        id: &str,
+        workspace_root_name: &str,
+        git_roots: &[GitRootBinding],
+        input: &ExecStartInput,
+    ) -> DispatchOutcome<ExecObservation> {
+        match git_roots.first() {
+            None => self.start_exec(id, workspace_root_name, input).await,
+            Some(root) => DispatchOutcome::NotDispatched(git_root_unserved(&root.workspace)),
+        }
+    }
+
+    /// [`Self::start_pipe_session`], also binding each admitted writable Git root.
+    async fn start_pipe_session_with_git_roots(
+        &self,
+        id: &str,
+        workspace_root_name: &str,
+        git_roots: &[GitRootBinding],
+        input: &substrate_wire::PipeSessionStartInput,
+    ) -> DispatchOutcome<ExecObservation> {
+        match git_roots.first() {
+            None => {
+                self.start_pipe_session(id, workspace_root_name, input)
+                    .await
+            }
+            Some(root) => DispatchOutcome::NotDispatched(git_root_unserved(&root.workspace)),
+        }
     }
 
     /// Writes one bounded frame to an admitted raw-pipe process.
@@ -1614,6 +1760,51 @@ impl Driver for HostDriver {
         input: &substrate_wire::PipeSessionStartInput,
     ) -> DispatchOutcome<ExecObservation> {
         HostDriver::start_pipe_session(self, id, workspace_root_name, input).await
+    }
+
+    fn admit_git_root(
+        &self,
+        workspace: &str,
+        root_name: &str,
+        adopted: bool,
+    ) -> Result<(), DriverError> {
+        if !adopted && git::has_baseline(&self.config.git_baseline_root(), root_name)? {
+            Ok(())
+        } else {
+            Err(writable_root_not_git(workspace))
+        }
+    }
+
+    async fn start_exec_with_git_roots(
+        &self,
+        id: &str,
+        workspace_root_name: &str,
+        git_roots: &[GitRootBinding],
+        input: &ExecStartInput,
+    ) -> DispatchOutcome<ExecObservation> {
+        let workspace = match self.workspace_path(workspace_root_name) {
+            Ok(value) => value,
+            Err(error) => return DispatchOutcome::NotDispatched(error),
+        };
+        self.processes
+            .start_with_git_roots(id, &workspace, git_roots, input)
+            .await
+    }
+
+    async fn start_pipe_session_with_git_roots(
+        &self,
+        id: &str,
+        workspace_root_name: &str,
+        git_roots: &[GitRootBinding],
+        input: &substrate_wire::PipeSessionStartInput,
+    ) -> DispatchOutcome<ExecObservation> {
+        let workspace = match self.workspace_path(workspace_root_name) {
+            Ok(value) => value,
+            Err(error) => return DispatchOutcome::NotDispatched(error),
+        };
+        self.processes
+            .start_pipe_with_git_roots(id, &workspace, git_roots, input)
+            .await
     }
 
     async fn write_pipe_session(&self, id: &str, bytes: &[u8]) -> Result<(), DriverError> {

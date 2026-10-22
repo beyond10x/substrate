@@ -530,6 +530,20 @@ fn failed(code: &'static str) -> DriverError {
     DriverError::failed(code, "Git workspace materialization failed.")
 }
 
+/// Whether the workspace at `root_name` was materialized from a Git source: it holds a valid
+/// materialization baseline. An empty or adopted workspace holds none.
+///
+/// # Errors
+///
+/// A baseline that exists but cannot be read or is malformed.
+pub(crate) fn has_baseline(baseline_root: &Path, root_name: &str) -> Result<bool, DriverError> {
+    match read_baseline(baseline_root, root_name) {
+        Ok(_) => Ok(true),
+        Err(error) if error.code == "workspace.git-workspace-required" => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 fn read_baseline(baseline_root: &Path, root_name: &str) -> Result<String, DriverError> {
     let value = match std::fs::read_to_string(baseline_root.join(root_name)) {
         Ok(value) => value,

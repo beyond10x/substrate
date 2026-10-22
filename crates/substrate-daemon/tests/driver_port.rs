@@ -64,6 +64,11 @@ const COMPOSITION_ROOTS: &[(&str, &str)] = &[
 /// `substrate-daemon/src` at HEAD, so it is deliberately absent.
 const PORT_ITEMS: &[(&str, &str)] = &[
     (
+        "GitRootBinding",
+        "the parameter of Driver::start_exec_with_git_roots and \
+         Driver::start_pipe_session_with_git_roots (crates/substrate-host/src/lib.rs:196, :777)",
+    ),
+    (
         "Driver",
         "the port trait itself (crates/substrate-host/src/lib.rs:370)",
     ),

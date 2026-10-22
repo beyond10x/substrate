@@ -286,11 +286,26 @@ async fn request(
     request_id: &str,
     body: Option<&[u8]>,
 ) -> (u16, Value) {
+    request_headed(socket, method, path, request_id, &[], body).await
+}
+
+/// [`request`], with extra `(name, value)` request headers written verbatim into the head.
+async fn request_headed(
+    socket: &Path,
+    method: &str,
+    path: &str,
+    request_id: &str,
+    headers: &[(&str, &str)],
+    body: Option<&[u8]>,
+) -> (u16, Value) {
     let mut stream = UnixStream::connect(socket)
         .await
         .unwrap_or_else(|error| panic!("connect {}: {error}", socket.display()));
     let mut head =
         format!("{method} {path} HTTP/1.1\r\nHost: localhost\r\nx-request-id: {request_id}\r\n");
+    for (name, value) in headers {
+        write!(head, "{name}: {value}\r\n").expect("format the request head");
+    }
     if let Some(body) = body {
         let length = body.len();
         head.push_str("content-type: application/json\r\n");
@@ -564,6 +579,32 @@ impl Daemon {
         require_delegated_context: bool,
         writable_roots: &[String],
     ) -> Self {
+        Self::start_with_arguments(
+            root,
+            cgroup_root,
+            apertures,
+            secret_slots,
+            delegated_context_keys,
+            require_delegated_context,
+            writable_roots,
+            &[],
+        )
+        .await
+    }
+
+    /// [`Self::start_declaring`], with `extra` appended to the daemon's own argv (a Git source
+    /// declaration and its trust root, for the writable Git root cases).
+    #[allow(clippy::too_many_arguments)] // One argument per declaration family the daemon takes.
+    async fn start_with_arguments(
+        root: &Path,
+        cgroup_root: Option<&Path>,
+        apertures: &[String],
+        secret_slots: &[String],
+        delegated_context_keys: &[String],
+        require_delegated_context: bool,
+        writable_roots: &[String],
+        extra: &[String],
+    ) -> Self {
         let socket = root.join("substrate.sock");
         let workspaces = root.join("workspaces");
         let mut command = vec![
@@ -608,6 +649,7 @@ impl Daemon {
             command.push("--writable-root".to_owned());
             command.push(root.clone());
         }
+        command.extend(extra.iter().cloned());
         if let Some(cgroup_root) = cgroup_root {
             let mut wrapped = vec![
                 CGROUP_EXEC.to_owned(),
@@ -663,6 +705,17 @@ impl Daemon {
         body: Option<&[u8]>,
     ) -> (u16, Value) {
         request(&self.socket, method, path, request_id, body).await
+    }
+
+    async fn call_headed(
+        &self,
+        method: &str,
+        path: &str,
+        request_id: &str,
+        headers: &[(&str, &str)],
+        body: Option<&[u8]>,
+    ) -> (u16, Value) {
+        request_headed(&self.socket, method, path, request_id, headers, body).await
     }
 
     async fn stream(&self, path: &str) -> EventStream {
@@ -5019,9 +5072,11 @@ async fn check_workdir_and_aperture_list_shape(
 /// Writable roots (ADR 0038), in both lanes: every lexical rule is answered before any fact is
 /// consulted. The daemon declares one host root, [`WRITABLE_ROOT_NAME`]; a delegated host
 /// publishes exactly that name in `exec.writable-roots.host` once its probe passes, and a portable
-/// one publishes nothing. No host publishes `exec.writable-roots.git` yet. Either way a root this
-/// daemon did not declare (`cache`), and every Git root, is `unserved` with its name — never a run
-/// that quietly got no writable mount, and never one that got a different one.
+/// one publishes nothing. This daemon declares no Git source, so it serves no `workspace.git` and
+/// publishes no `exec.writable-roots.git` in either lane; [`check_git_roots`] runs the daemon that
+/// does. Either way a root this daemon did not declare (`cache`), and every Git root, is
+/// `unserved` with its name — never a run that quietly got no writable mount, and never one that
+/// got a different one.
 async fn check_writable_roots_refused(
     daemon: &Daemon,
     workspace: &str,
@@ -5046,10 +5101,11 @@ async fn check_writable_roots_refused(
         );
     }
     assert!(
-        machine["result"]["facts"]
-            .get("exec.writable-roots.git")
-            .is_none(),
-        "no host publishes exec.writable-roots.git yet: {machine}"
+        machine["result"]["facts"].get("workspace.git").is_none()
+            && machine["result"]["facts"]
+                .get("exec.writable-roots.git")
+                .is_none(),
+        "a daemon that declares no Git source serves no Git workspace and so no Git root: {machine}"
     );
     let mut passed = 0;
     for (operation, request, roots, status, code, message) in writable_root_cases() {
@@ -5877,12 +5933,581 @@ async fn check_confined_aperture_list(
 }
 
 // ---------------------------------------------------------------------------------------------
+// Writable Git roots (ADR 0038 kind 2)
+// ---------------------------------------------------------------------------------------------
+
+/// The Git source name the Git-root daemon declares.
+const GIT_SOURCE_NAME: &str = "connector";
+/// The provider branch the fixture repository's one commit is on.
+const GIT_FIXTURE_BRANCH: &str = "provider-default";
+/// Where the cases mount the Git workspace, and the directory beneath it they start in.
+const GIT_ROOT_MOUNT: &str = "/srv/checkout";
+const GIT_ROOT_WORKDIR: &str = "/srv/checkout/docs";
+
+/// Runs the fixture's own `git` in `directory`, isolated from the operator's configuration.
+fn fixture_git(directory: &Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_AUTHOR_NAME", "Substrate Fixture")
+        .env("GIT_AUTHOR_EMAIL", "fixture@example.invalid")
+        .env("GIT_COMMITTER_NAME", "Substrate Fixture")
+        .env("GIT_COMMITTER_EMAIL", "fixture@example.invalid")
+        .arg("-C")
+        .arg(directory)
+        .args(args)
+        .output()
+        .expect("git is installed");
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("UTF-8 git output")
+        .trim()
+        .to_owned()
+}
+
+/// `git upload-pack --stateless-rpc`, the server half of smart HTTP protocol v2.
+fn fixture_upload_pack(repository: &Path, discovery: bool, body: &[u8]) -> Vec<u8> {
+    let mut command = std::process::Command::new("git");
+    command
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_PROTOCOL", "version=2")
+        .args(["upload-pack", "--stateless-rpc"]);
+    if discovery {
+        command.arg("--advertise-refs");
+    }
+    let mut child = command
+        .arg(repository)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("git upload-pack is installed");
+    std::io::Write::write_all(&mut child.stdin.take().expect("upload-pack stdin"), body)
+        .expect("upload-pack input");
+    let output = child.wait_with_output().expect("upload-pack output");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output.stdout
+}
+
+/// Serves one smart-HTTP request on a TLS connection; an error ends the connection.
+fn fixture_serve_request(
+    stream: &mut std::io::BufReader<
+        rustls::StreamOwned<rustls::ServerConnection, std::net::TcpStream>,
+    >,
+    repository: &Path,
+) -> std::io::Result<()> {
+    use std::io::{BufRead as _, Read as _, Write as _};
+    let mut line = String::new();
+    if stream.read_line(&mut line)? == 0 {
+        return Err(std::io::Error::from(ErrorKind::UnexpectedEof));
+    }
+    let discovery = line.starts_with("GET ");
+    let mut length = 0;
+    loop {
+        line.clear();
+        stream.read_line(&mut line)?;
+        if line == "\r\n" || line.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.trim_end().split_once(':')
+            && name.eq_ignore_ascii_case("content-length")
+        {
+            length = value.trim().parse::<usize>().expect("body length");
+        }
+    }
+    assert!(length < 64 * 1024, "a bounded fixture request body");
+    let mut body = vec![0; length];
+    stream.read_exact(&mut body)?;
+    let response = fixture_upload_pack(repository, discovery, &body);
+    let content = if discovery { "advertisement" } else { "result" };
+    write!(
+        stream.get_mut(),
+        "HTTP/1.1 200 OK\r\nContent-Type: application/x-git-upload-pack-{content}\r\n\
+         Content-Length: {}\r\nConnection: keep-alive\r\n\r\n",
+        response.len()
+    )?;
+    stream.get_mut().write_all(&response)?;
+    stream.get_mut().flush()
+}
+
+/// A one-commit repository served over HTTPS on loopback by `git upload-pack`, with the
+/// self-signed trust root the daemon is given as `--ca-bundle`.
+struct GitSourceFixture {
+    _directory: TempDir,
+    ca_bundle: PathBuf,
+    origin: String,
+    commit: String,
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl GitSourceFixture {
+    fn start() -> Self {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let directory = tempfile::Builder::new()
+            .prefix("git-source-cleanroom-")
+            .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
+            .expect("fixture under CARGO_TARGET_TMPDIR");
+        let parent = std::fs::canonicalize(directory.path()).expect("canonical fixture");
+        let repository = parent.join("repository.git");
+        std::fs::create_dir_all(repository.join("docs")).expect("fixture repository");
+        fixture_git(&repository, &["init", "-q", "-b", GIT_FIXTURE_BRANCH]);
+        std::fs::write(repository.join("README.md"), "writable Git root\n").expect("README");
+        std::fs::write(repository.join("docs/guide.md"), "guide\n").expect("guide");
+        fixture_git(&repository, &["add", "-A"]);
+        fixture_git(&repository, &["commit", "-q", "-m", "fixture"]);
+        let commit = fixture_git(&repository, &["rev-parse", "HEAD"]);
+
+        let identity = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_owned()])
+            .expect("TLS fixture identity");
+        let ca_bundle = parent.join("ca.pem");
+        std::fs::write(&ca_bundle, identity.cert.pem()).expect("fixture trust root");
+        let config = Arc::new(
+            rustls::ServerConfig::builder()
+                .with_no_client_auth()
+                .with_single_cert(
+                    vec![identity.cert.der().clone()],
+                    rustls::pki_types::PrivatePkcs8KeyDer::from(
+                        identity.signing_key.serialize_der(),
+                    )
+                    .into(),
+                )
+                .expect("TLS server config"),
+        );
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("Git listener");
+        listener
+            .set_nonblocking(true)
+            .expect("nonblocking listener");
+        let origin = format!(
+            "https://{}/",
+            listener.local_addr().expect("listener address")
+        );
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = Arc::clone(&stop);
+        let thread = std::thread::spawn(move || {
+            while !stopped.load(Ordering::Relaxed) {
+                let socket = match listener.accept() {
+                    Ok((socket, _)) => socket,
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(2));
+                        continue;
+                    }
+                    Err(_) => break,
+                };
+                let _ = socket.set_nonblocking(false);
+                let _ = socket.set_read_timeout(Some(Duration::from_secs(2)));
+                let _ = socket.set_write_timeout(Some(Duration::from_secs(2)));
+                let Ok(tls) = rustls::ServerConnection::new(Arc::clone(&config)) else {
+                    continue;
+                };
+                let mut stream = std::io::BufReader::new(rustls::StreamOwned::new(tls, socket));
+                while !stopped.load(Ordering::Relaxed)
+                    && fixture_serve_request(&mut stream, &repository).is_ok()
+                {}
+            }
+        });
+        Self {
+            _directory: directory,
+            ca_bundle,
+            origin,
+            commit,
+            stop,
+            thread: Some(thread),
+        }
+    }
+
+    /// The daemon flags that declare this source and trust its certificate.
+    fn arguments(&self) -> Vec<String> {
+        vec![
+            "--git-source".to_owned(),
+            format!("{GIT_SOURCE_NAME}={}", self.origin),
+            "--ca-bundle".to_owned(),
+            self.ca_bundle.display().to_string(),
+        ]
+    }
+
+    fn create_input(&self) -> Value {
+        json!({
+            "source": { "git": {
+                "source": GIT_SOURCE_NAME,
+                "locator": format!("{}repository.git", self.origin),
+                "ref": GIT_FIXTURE_BRANCH,
+                "commit": self.commit,
+                "depth": 1,
+            } },
+            "labels": { "runner": "git-root" },
+        })
+    }
+}
+
+impl Drop for GitSourceFixture {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+async fn create_empty_workspace(daemon: &Daemon, operation: &str, request_id: &str) -> String {
+    let (status, created) = daemon
+        .call(
+            "POST",
+            "/v1/workspaces",
+            request_id,
+            Some(&mutation(
+                operation,
+                &json!({ "source": "empty", "labels": {} }),
+            )),
+        )
+        .await;
+    assert_eq!(status, 201, "{created}");
+    text(&created["result"]["id"])
+}
+
+/// Writable Git roots (ADR 0038 kind 2), against a second daemon that declares a Git source.
+///
+/// Both lanes: the daemon serves `workspace.git` and materializes a Git workspace from the HTTPS
+/// fixture. Portable: no confinement proves the bind, so `exec.writable-roots.git` is absent and a
+/// start naming the Git workspace is `unserved` by its id, before anything runs. Delegated: the fact
+/// is published, a child commits in the mounted checkout from a working directory beneath the mount
+/// and the commit is on the host and in the change-set route, and each refusal the request or the
+/// store decides is named before dispatch and recorded.
+async fn check_git_roots(cgroup_root: Option<&Path>) -> usize {
+    let source = GitSourceFixture::start();
+    let temporary = TempDir::with_prefix("substrate-gitroots-").expect("clean-room directory");
+    let root = temporary.path();
+    std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))
+        .expect("owner-private clean-room directory");
+    let daemon = Daemon::start_with_arguments(
+        root,
+        cgroup_root,
+        &[],
+        &[],
+        &[],
+        false,
+        &[],
+        &source.arguments(),
+    )
+    .await;
+    let delegated = cgroup_root.is_some();
+    let mut passed = 0;
+
+    let (status, machine) = daemon
+        .call("GET", "/v1/machine", "req_git_root_machine", None)
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        machine["result"]["facts"]["workspace.git"], true,
+        "a declared Git source is served: {machine}"
+    );
+    let fact = machine["result"]["facts"].get("exec.writable-roots.git");
+    if delegated {
+        assert_eq!(
+            fact,
+            Some(&json!(true)),
+            "a delegated host with Git workspaces proves the bind and publishes the fact: {machine}"
+        );
+    } else {
+        assert!(
+            fact.is_none(),
+            "without confinement nothing is proved, so nothing is published: {machine}"
+        );
+    }
+    let snapshot = text(&machine["result"]["snapshot"]);
+    passed += 1;
+
+    let (status, created) = daemon
+        .call_headed(
+            "POST",
+            "/v1/workspaces",
+            "req_git_root_checkout",
+            &[("x-b10x-workspace-source-authorization", "fixture-authority")],
+            Some(&mutation(
+                "01JGITROOTCLEANCHECKOUT1",
+                &source.create_input(),
+            )),
+        )
+        .await;
+    assert_eq!(status, 201, "{created}");
+    assert_eq!(created["result"]["state"], "ready", "{created}");
+    let checkout = text(&created["result"]["id"]);
+    let host_path = daemon.workspaces.join(&checkout);
+    assert_eq!(
+        fixture_git(&host_path, &["rev-parse", "HEAD"]),
+        source.commit,
+        "the Git workspace is a checkout of the admitted commit"
+    );
+    passed += 1;
+
+    let own = create_empty_workspace(&daemon, "01JGITROOTCLEANOWN00001", "req_git_root_own").await;
+    passed += if delegated {
+        check_confined_git_root(&daemon, &own, &snapshot, &checkout, &source.commit).await
+            + check_git_root_refusals(&daemon, &own, &snapshot, &checkout).await
+    } else {
+        check_git_root_unserved(&daemon, &own, &snapshot, &checkout).await
+    };
+    daemon.close().await;
+    drop(source);
+    passed
+}
+
+/// Portable lane: a start naming a ready Git workspace is `unserved` by its id, is recorded as
+/// refused, and nothing ran in its checkout.
+async fn check_git_root_unserved(
+    daemon: &Daemon,
+    own: &str,
+    snapshot: &str,
+    checkout: &str,
+) -> usize {
+    let operation = "01JGITROOTCLEANUNSERVED1";
+    let request_id = "req_git_root_unserved";
+    let response = daemon
+        .call(
+            "POST",
+            "/v1/execs",
+            request_id,
+            Some(&mutation(
+                operation,
+                &ExecInput::new(
+                    own,
+                    snapshot,
+                    &["/bin/sh", "-c", "echo written >/srv/checkout/written"],
+                    true,
+                )
+                .writable_roots(json!([{ "workspace": checkout, "mount": GIT_ROOT_MOUNT }]))
+                .build(),
+            )),
+        )
+        .await;
+    expect_error_at(
+        &response,
+        501,
+        "exec.writable-roots-git-unserved",
+        "writable_roots",
+    );
+    assert_eq!(
+        response.1["error"]["message"],
+        format!("Writable Git root {checkout} is not served by this host."),
+        "{}",
+        response.1
+    );
+    assert_eq!(
+        ledger_row(daemon, operation, "req_git_root_unserved_ledger").await["state"],
+        "refused"
+    );
+    assert!(
+        !daemon.workspaces.join(checkout).join("written").exists(),
+        "an unserved start wrote nothing to the checkout"
+    );
+    1
+}
+
+/// Delegated lane, two cases: a child commits in the checkout mounted at [`GIT_ROOT_MOUNT`],
+/// starting in [`GIT_ROOT_WORKDIR`] beneath it, and the applied record names the bind; the commit
+/// is then on the host, on top of the admitted commit, and its file is in the change-set route.
+async fn check_confined_git_root(
+    daemon: &Daemon,
+    own: &str,
+    snapshot: &str,
+    checkout: &str,
+    baseline: &str,
+) -> usize {
+    let host_path = daemon.workspaces.join(checkout);
+    let git = "/usr/bin/git -c safe.directory=* -c user.name=Child \
+               -c user.email=child@example.invalid -c commit.gpgsign=false -c gc.auto=0 \
+               -c maintenance.auto=false";
+    let program = format!(
+        "set -e; export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null HOME=/workspace; \
+         echo child >child.txt; {git} add child.txt; {git} commit -q -m 'child commit'"
+    );
+    let (status, committed) = daemon
+        .call(
+            "POST",
+            "/v1/execs",
+            "req_git_root_commit",
+            Some(&mutation(
+                "01JGITROOTCLEANCOMMIT001",
+                &ExecInput::new(own, snapshot, &["/bin/sh", "-c", &program], true)
+                    .writable_roots(json!([{ "workspace": checkout, "mount": GIT_ROOT_MOUNT }]))
+                    .workdir(GIT_ROOT_WORKDIR)
+                    .build(),
+            )),
+        )
+        .await;
+    assert_eq!(status, 200, "{committed}");
+    assert_eq!(committed["result"]["exit"], EXITED_CLEANLY(), "{committed}");
+    assert_eq!(
+        committed["result"]["applied"]["writable_roots"],
+        json!([{
+            "kind": "git",
+            "workspace": checkout,
+            "host_path": host_path.to_str().expect("UTF-8 workspace path"),
+            "mount": GIT_ROOT_MOUNT,
+        }]),
+        "{committed}"
+    );
+    assert_eq!(
+        committed["result"]["applied"]["workdir"], GIT_ROOT_WORKDIR,
+        "{committed}"
+    );
+    assert_eq!(
+        fixture_git(&host_path, &["log", "-1", "--format=%s"]),
+        "child commit",
+        "the child's commit is on the host checkout"
+    );
+    assert_eq!(
+        fixture_git(&host_path, &["rev-parse", "HEAD~1"]),
+        baseline,
+        "the child committed on top of the admitted commit"
+    );
+    assert_eq!(
+        fixture_git(&host_path, &["show", "HEAD:docs/child.txt"]),
+        "child",
+        "the program ran in the working directory beneath the mount"
+    );
+    assert!(
+        !daemon.workspaces.join(own).join("child.txt").exists(),
+        "nothing landed in the start's own workspace"
+    );
+    let mut passed = 1;
+
+    let (status, changes) = daemon
+        .call(
+            "GET",
+            &format!(
+                "/v2/workspaces/{checkout}/git/changes\
+                 ?max_files=16&max_file_bytes=65536&max_total_bytes=262144"
+            ),
+            "req_git_root_changes",
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{changes}");
+    assert_eq!(changes["result"]["commit"], baseline, "{changes}");
+    assert!(
+        changes["result"]["items"]
+            .as_array()
+            .expect("change items")
+            .iter()
+            .any(|item| item["status"] == "added" && item["current"]["path"] == "docs/child.txt"),
+        "the committed file is a change against the baseline: {changes}"
+    );
+    passed += 1;
+    passed
+}
+
+/// Delegated lane, four cases: an empty workspace, the start's own workspace, one workspace named
+/// twice, and a workspace that does not exist are each refused by name at `writable_roots`
+/// before dispatch, recorded as refused, and nothing ran.
+async fn check_git_root_refusals(
+    daemon: &Daemon,
+    own: &str,
+    snapshot: &str,
+    checkout: &str,
+) -> usize {
+    let plain =
+        create_empty_workspace(daemon, "01JGITROOTCLEANPLAIN0001", "req_git_root_plain").await;
+    let cases = [
+        (
+            "01JGITROOTCLEANNOTGIT001",
+            "req_git_root_not_git",
+            json!([{ "workspace": plain, "mount": GIT_ROOT_MOUNT }]),
+            422,
+            "exec.writable-root-not-git",
+            Some(format!(
+                "Writable Git root {plain} is not a workspace created from a Git source."
+            )),
+        ),
+        (
+            "01JGITROOTCLEANOWNROOT01",
+            "req_git_root_own_root",
+            json!([{ "workspace": own, "mount": GIT_ROOT_MOUNT }]),
+            422,
+            "exec.writable-root-own-workspace",
+            None,
+        ),
+        (
+            "01JGITROOTCLEANDUPLICATE",
+            "req_git_root_duplicate",
+            json!([
+                { "workspace": checkout, "mount": "/srv/first" },
+                { "workspace": checkout, "mount": "/srv/second" }
+            ]),
+            422,
+            "exec.writable-root-workspace-duplicate",
+            Some(format!(
+                "Writable Git root {checkout} is named more than once."
+            )),
+        ),
+        (
+            "01JGITROOTCLEANUNKNOWN01",
+            "req_git_root_unknown",
+            json!([{ "workspace": "ws_neverexisted", "mount": GIT_ROOT_MOUNT }]),
+            404,
+            "resource.not-found",
+            Some("Resource was not found.".to_owned()),
+        ),
+    ];
+    let mut passed = 0;
+    for (operation, request_id, roots, status, code, message) in cases {
+        let response = daemon
+            .call(
+                "POST",
+                "/v1/execs",
+                request_id,
+                Some(&mutation(
+                    operation,
+                    &ExecInput::new(
+                        own,
+                        snapshot,
+                        &["/bin/sh", "-c", "echo ran >/workspace/ran"],
+                        true,
+                    )
+                    .writable_roots(roots)
+                    .build(),
+                )),
+            )
+            .await;
+        expect_error_at(&response, status, code, "writable_roots");
+        if let Some(message) = message {
+            assert_eq!(response.1["error"]["message"], message, "{}", response.1);
+        }
+        assert_eq!(
+            ledger_row(daemon, operation, &format!("{request_id}_ledger")).await["state"],
+            "refused",
+            "{code}"
+        );
+        assert!(
+            !daemon.workspaces.join(own).join("ran").exists(),
+            "a refused start ran nothing ({code})"
+        );
+        passed += 1;
+    }
+    passed
+}
+
+// ---------------------------------------------------------------------------------------------
 // The lane
 // ---------------------------------------------------------------------------------------------
 
 /// The predecessor printed its case count; the port asserts it, so a case cannot vanish quietly.
-const PORTABLE_CASES: usize = 108;
-const DELEGATED_CASES: usize = 159;
+const PORTABLE_CASES: usize = 111;
+const DELEGATED_CASES: usize = 167;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {
@@ -5952,6 +6577,9 @@ async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {
     inside_server.abort();
     outside_server.abort();
     firehose_server.abort();
+    // A second daemon, after the first has stopped: writable Git roots need a declared Git source,
+    // which the journey's daemon deliberately does not have (its Git roots are unserved).
+    let passed = passed + check_git_roots(delegated.as_ref().map(DelegatedCgroup::path)).await;
     let (lane, expected) = if delegated.is_some() {
         ("delegated", DELEGATED_CASES)
     } else {

@@ -21,8 +21,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `exec.writable-root-mount-invalid`, `exec.writable-root-mount-reserved`,
   `exec.writable-root-mount-duplicate` and `exec.writable-root-mount-overlap` (422) before any
   capability is consulted, then `exec.writable-roots-host-unserved` and
-  `exec.writable-roots-git-unserved` (501) with the root's name. No host publishes
-  `exec.writable-roots.git` yet, so every start naming a Git root is refused unserved.
+  `exec.writable-roots-git-unserved` (501) with the root's name.
 - Writable host roots (ADR 0038 kind 1). `substrate-daemon --writable-root <name>=<path>`
   (repeatable, `SUBSTRATE_WRITABLE_ROOT`) declares a host directory a start may name. Startup
   refuses, naming the root, a name outside the root-name set or declared twice, and a path that is
@@ -39,13 +38,31 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   is `exec.writable-root-not-a-directory`, and one this uid does not own is
   `exec.writable-root-not-owned` (422), each naming the root. The declared roots and their paths
   move the configuration generation; a daemon that declares none keeps its generation.
-- A `workdir` may lie at or beneath a writable root mount, and a host root's mount runs the program
-  there. The applied confinement record gains an optional `writable_roots` list (kind, name or
-  workspace id, host path, mount), filled from what was bound.
-- The clean-room runtime vectors declare one writable root: the portable lane refuses it unserved
-  (108 cases), and the delegated lane (159 cases) binds it, sees the write on the host with its
-  parent and sibling unchanged, runs a working directory beneath its mount, and refuses it by name
-  once its path is swapped for a symlink.
+- Writable Git roots (ADR 0038 kind 2). A start may name `{workspace, mount}` for a Ready
+  workspace of the same deployment and subject that was created from a Git source; the host binds
+  that workspace's directory writable by descriptor at `mount`, `.git` included, so a program can
+  commit in the checkout, and its storage quota still applies. The host publishes
+  `exec.writable-roots.git` only when it serves `workspace.git` and the writable-bind probe passes;
+  otherwise every Git root is `exec.writable-roots-git-unserved` (501). Before dispatch, and
+  recorded in the operation ledger, the daemon refuses the start's own workspace
+  (`exec.writable-root-own-workspace`), a workspace named twice
+  (`exec.writable-root-workspace-duplicate`) and an empty or adopted workspace
+  (`exec.writable-root-not-git`), each 422 naming the workspace; an unknown workspace or another
+  subject's answers the same 404 `resource.not-found`, and one that is not Ready answers 409
+  `workspace.not-ready`, both at `writable_roots`. The start locks its own workspace and every Git
+  root in one order through dispatch, and a workspace a running exec binds as a Git root is not
+  destroyed under it (`workspace.execs-active`, 409). These three codes are host-local: bundle
+  `0.22.0` does not name them.
+- A `workdir` may lie at or beneath a writable root mount, and the mount runs the program there.
+  The applied confinement record gains an optional `writable_roots` list (kind, name or workspace
+  id, host path, mount), filled from what was bound.
+- The clean-room runtime vectors declare one writable root: the portable lane refuses it unserved,
+  and the delegated lane binds it, sees the write on the host with its parent and sibling
+  unchanged, runs a working directory beneath its mount, and refuses it by name once its path is
+  swapped for a symlink. A second daemon declares a Git source served over HTTPS on loopback: the
+  portable lane refuses its Git workspace as a Git root unserved (111 cases in all), and the
+  delegated lane (167 cases) has a child commit in the mounted checkout, reads the commit on the
+  host and in the change-set route, and refuses each named Git-root case before dispatch.
 
 ## [0.9.0] — 2026-10-22
 

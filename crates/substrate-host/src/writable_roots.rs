@@ -1,4 +1,5 @@
-//! Operator-declared writable host roots (ADR 0038 kind 1), bound by descriptor.
+//! Writable roots (ADR 0038), bound by descriptor: operator-declared host roots (kind 1) and Git
+//! checkout workspaces (kind 2).
 //!
 //! The operator declares a directory by name ([`DeclaredWritableRoot`]); a start names it and a
 //! mount. At each start the driver opens the declared path once, `O_PATH | O_DIRECTORY |
@@ -8,6 +9,12 @@
 //! redirect the mount, as for read-only roots (design 26 § 3). A root that is gone, a symlink, not
 //! a directory or not owned is refused by its name; nothing is widened or silently dropped
 //! (invariant 3).
+//!
+//! A Git root names a workspace. The daemon resolves it in the caller's scope to a root name
+//! ([`GitRootBinding`]); the driver pins that directory beneath the workspace-root descriptor
+//! exactly as it pins the start's own workspace, `.git` and all, and binds it the same way. Only a
+//! workspace with a Git materialization baseline is a Git root: an empty or adopted one is refused
+//! by name.
 
 use std::os::fd::{AsRawFd as _, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt as _;
@@ -17,7 +24,7 @@ use std::process::Command;
 
 use substrate_wire::{AppliedWritableRoot, WritableRoot};
 
-use crate::{DeclaredWritableRoot, DriverError};
+use crate::{DeclaredWritableRoot, DriverError, GitRootBinding};
 
 const ADDRESS: &str = "writable_roots";
 
@@ -28,12 +35,11 @@ pub const WRITABLE_ROOT_NOT_A_DIRECTORY: &str = "exec.writable-root-not-a-direct
 /// A declared writable root that this process's effective uid does not own.
 pub const WRITABLE_ROOT_NOT_OWNED: &str = "exec.writable-root-not-owned";
 
-/// A declared root, opened and checked, pinned for the bind.
+/// A root, opened and checked, pinned for the bind.
 #[derive(Debug)]
 pub(crate) struct PinnedWritableRoot {
     descriptor: OwnedFd,
-    name: String,
-    host_path: String,
+    applied: AppliedWritableRoot,
     mount: String,
 }
 
@@ -64,20 +70,28 @@ impl PinnedWritableRoot {
 
     /// What was bound, for the applied record (ADR 0038 decision 6).
     pub(crate) fn applied(&self) -> AppliedWritableRoot {
-        AppliedWritableRoot::Host {
-            name: self.name.clone(),
-            host_path: self.host_path.clone(),
-            mount: self.mount.clone(),
-        }
+        self.applied.clone()
     }
+}
+
+/// Where a start's writable Git roots are resolved: the workspace-root descriptor its own
+/// workspace is pinned beneath, that root's path for the applied record, the Git baseline
+/// directory, the start's own root name, and the bindings the daemon admitted.
+pub(crate) struct GitRoots<'a> {
+    pub(crate) root: &'a OwnedFd,
+    pub(crate) root_path: &'a Path,
+    pub(crate) baseline_root: &'a Path,
+    pub(crate) own_root_name: Option<&'a str>,
+    pub(crate) bindings: &'a [GitRootBinding],
 }
 
 /// Opens, checks and pins every writable root a start names, in request order. The lexical rules
 /// and the facts are the caller's, already applied; a name this host did not declare, or a Git
-/// root, is still refused here by name rather than skipped.
+/// root without an admitted binding, is still refused here by name rather than skipped.
 pub(crate) fn pin(
     declared: &[DeclaredWritableRoot],
     requested: &[WritableRoot],
+    git: Option<&GitRoots<'_>>,
 ) -> Result<Vec<PinnedWritableRoot>, DriverError> {
     requested
         .iter()
@@ -93,21 +107,102 @@ pub(crate) fn pin(
                     .to_owned();
                 Ok(PinnedWritableRoot {
                     descriptor: pin_one(&root.host, &declaration.path)?,
-                    name: root.host.clone(),
-                    host_path,
+                    applied: AppliedWritableRoot::Host {
+                        name: root.host.clone(),
+                        host_path,
+                        mount: root.mount.clone(),
+                    },
                     mount: root.mount.clone(),
                 })
             }
-            WritableRoot::Git(root) => Err(DriverError::unserved(
-                substrate_wire::EXEC_WRITABLE_ROOTS_GIT_UNSERVED,
-                format!(
-                    "Writable Git root {} is not served by this host.",
-                    root.workspace
-                ),
-                ADDRESS,
-            )),
+            WritableRoot::Git(root) => pin_git(git, &root.workspace, &root.mount),
         })
         .collect()
+}
+
+/// Pins the workspace a Git root names, beneath the same workspace-root descriptor the start's own
+/// workspace is pinned beneath (`openat2`, beneath, no symlinks), and checks on the host that it was
+/// materialized from Git. A root without a binding from the daemon is unserved, never skipped.
+fn pin_git(
+    git: Option<&GitRoots<'_>>,
+    workspace: &str,
+    mount: &str,
+) -> Result<PinnedWritableRoot, DriverError> {
+    let Some(git) = git else {
+        return Err(crate::git_root_unserved(workspace));
+    };
+    let Some(binding) = git
+        .bindings
+        .iter()
+        .find(|binding| binding.workspace == workspace)
+    else {
+        return Err(crate::git_root_unserved(workspace));
+    };
+    let root_name = binding.root_name.as_str();
+    if root_name.is_empty()
+        || !root_name.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-' || byte == b'.'
+        })
+        || root_name.starts_with('.')
+    {
+        return Err(git_absent(workspace));
+    }
+    if git.own_root_name == Some(root_name) {
+        return Err(crate::writable_root_own_workspace(workspace));
+    }
+    let host_path = git.root_path.join(root_name);
+    let opened =
+        crate::fs::pin_workspace_directory_beneath(git.root, &host_path).map_err(|error| {
+            match error.code {
+                "resource.not-found" => git_absent(workspace),
+                "workspace.path-escape" | "workspace.not-directory" => {
+                    git_not_a_directory(workspace)
+                }
+                _ => DriverError {
+                    address: Some(ADDRESS.to_owned()),
+                    ..error
+                },
+            }
+        })?;
+    if !crate::git::has_baseline(git.baseline_root, root_name)? {
+        return Err(crate::writable_root_not_git(workspace));
+    }
+    let descriptor = crate::process::above_secret_slots(&opened).ok_or_else(|| {
+        DriverError::failed(
+            "exec.spawn-failed",
+            "A writable Git root could not be pinned above the secret-slot range.",
+        )
+    })?;
+    Ok(PinnedWritableRoot {
+        descriptor,
+        applied: AppliedWritableRoot::Git {
+            workspace: workspace.to_owned(),
+            host_path: host_path
+                .to_str()
+                .ok_or_else(|| git_absent(workspace))?
+                .to_owned(),
+            mount: mount.to_owned(),
+        },
+        mount: mount.to_owned(),
+    })
+}
+
+fn git_absent(workspace: &str) -> DriverError {
+    DriverError::refused(
+        WRITABLE_ROOT_ABSENT,
+        format!("Writable Git root {workspace} is not present on this host."),
+        ADDRESS,
+    )
+}
+
+fn git_not_a_directory(workspace: &str) -> DriverError {
+    DriverError::refused(
+        WRITABLE_ROOT_NOT_A_DIRECTORY,
+        format!(
+            "Writable Git root {workspace} is not a directory, or is reached through a symlink."
+        ),
+        ADDRESS,
+    )
 }
 
 fn pin_one(name: &str, path: &Path) -> Result<OwnedFd, DriverError> {
@@ -225,6 +320,7 @@ pub(crate) fn mechanism_is_provable(bubblewrap: &Path) -> bool {
             host: "probe".to_owned(),
             mount: format!("{PROBE_PARENT}/root"),
         })],
+        None,
     ) else {
         return false;
     };
@@ -301,15 +397,26 @@ pub(crate) fn mechanism_is_provable(bubblewrap: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
+    use std::os::fd::OwnedFd;
+    use std::path::{Path, PathBuf};
+
     use super::{
-        DeclaredWritableRoot, WRITABLE_ROOT_ABSENT, WRITABLE_ROOT_NOT_A_DIRECTORY,
+        DeclaredWritableRoot, GitRoots, WRITABLE_ROOT_ABSENT, WRITABLE_ROOT_NOT_A_DIRECTORY,
         WRITABLE_ROOT_NOT_OWNED, pin,
     };
+    use crate::GitRootBinding;
     use substrate_wire::{AppliedWritableRoot, WritableGitRoot, WritableHostRoot, WritableRoot};
 
     fn host(name: &str, mount: &str) -> WritableRoot {
         WritableRoot::Host(WritableHostRoot {
             host: name.to_owned(),
+            mount: mount.to_owned(),
+        })
+    }
+
+    fn git(workspace: &str, mount: &str) -> WritableRoot {
+        WritableRoot::Git(WritableGitRoot {
+            workspace: workspace.to_owned(),
             mount: mount.to_owned(),
         })
     }
@@ -321,11 +428,73 @@ mod tests {
         }
     }
 
+    fn binding(workspace: &str, root_name: &str) -> GitRootBinding {
+        GitRootBinding {
+            workspace: workspace.to_owned(),
+            root_name: root_name.to_owned(),
+        }
+    }
+
+    /// A workspace root holding `ws_own` (the start's), `ws_checkout` and `ws_adopted_name` with
+    /// Git baselines, and `ws_empty` without one: what an empty workspace create leaves.
+    struct Workspaces {
+        _directory: tempfile::TempDir,
+        root_path: PathBuf,
+        baselines: PathBuf,
+        root: OwnedFd,
+    }
+
+    impl Workspaces {
+        fn new() -> Self {
+            let directory = tempfile::tempdir().unwrap();
+            let root_path = std::fs::canonicalize(directory.path()).unwrap();
+            let baselines = root_path.join(".substrate-git-baselines");
+            std::fs::create_dir(&baselines).unwrap();
+            for name in ["ws_own", "ws_checkout", "ws_empty"] {
+                std::fs::create_dir_all(root_path.join(name).join(".git")).unwrap();
+            }
+            for name in ["ws_own", "ws_checkout"] {
+                std::fs::write(
+                    baselines.join(name),
+                    "0123456789abcdef0123456789abcdef01234567",
+                )
+                .unwrap();
+            }
+            let root = OwnedFd::from(std::fs::File::open(&root_path).unwrap());
+            Self {
+                _directory: directory,
+                root_path,
+                baselines,
+                root,
+            }
+        }
+
+        fn roots<'a>(&'a self, bindings: &'a [GitRootBinding]) -> GitRoots<'a> {
+            GitRoots {
+                root: &self.root,
+                root_path: &self.root_path,
+                baseline_root: &self.baselines,
+                own_root_name: Some("ws_own"),
+                bindings,
+            }
+        }
+
+        fn path(&self, name: &str) -> &Path {
+            // Leaked for the test's lifetime: a borrowed path keeps the assertions short.
+            Box::leak(self.root_path.join(name).into_boxed_path())
+        }
+    }
+
     #[test]
     fn a_declared_directory_is_pinned_and_bound_writable_by_descriptor() {
         let directory = tempfile::tempdir().unwrap();
         let root = std::fs::canonicalize(directory.path()).unwrap();
-        let pinned = pin(&[declared("cache", &root)], &[host("cache", "/srv/cache")]).unwrap();
+        let pinned = pin(
+            &[declared("cache", &root)],
+            &[host("cache", "/srv/cache")],
+            None,
+        )
+        .unwrap();
         assert_eq!(pinned.len(), 1);
         let [flag, fd, mount] = pinned[0].bind_args();
         assert_eq!(flag, "--bind-fd");
@@ -361,8 +530,12 @@ mod tests {
             cases.push(("/usr".into(), WRITABLE_ROOT_NOT_OWNED));
         }
         for (path, code) in cases {
-            let error = pin(&[declared("cache", &path)], &[host("cache", "/srv/cache")])
-                .expect_err(&path.display().to_string());
+            let error = pin(
+                &[declared("cache", &path)],
+                &[host("cache", "/srv/cache")],
+                None,
+            )
+            .expect_err(&path.display().to_string());
             assert_eq!(error.code, code, "{}", path.display());
             assert!(error.message.contains("cache"), "{}", error.message);
             assert_eq!(error.address.as_deref(), Some("writable_roots"));
@@ -371,21 +544,144 @@ mod tests {
 
     #[test]
     fn an_undeclared_name_and_a_git_root_are_unserved_never_skipped() {
-        let error = pin(&[], &[host("cache", "/srv/cache")]).unwrap_err();
+        let error = pin(&[], &[host("cache", "/srv/cache")], None).unwrap_err();
         assert_eq!(
             error.code,
             substrate_wire::EXEC_WRITABLE_ROOTS_HOST_UNSERVED
         );
         assert!(error.message.contains("cache"));
+        let error = pin(&[], &[git("ws_checkout", "/srv/checkout")], None).unwrap_err();
+        assert_eq!(error.code, substrate_wire::EXEC_WRITABLE_ROOTS_GIT_UNSERVED);
+        assert!(error.message.contains("ws_checkout"));
+    }
+
+    #[test]
+    fn a_git_root_the_daemon_did_not_bind_is_unserved_never_skipped() {
+        let workspaces = Workspaces::new();
         let error = pin(
             &[],
-            &[WritableRoot::Git(WritableGitRoot {
-                workspace: "ws_checkout".to_owned(),
-                mount: "/srv/checkout".to_owned(),
-            })],
+            &[git("ws_checkout", "/srv/checkout")],
+            Some(&workspaces.roots(&[binding("ws_other", "ws_other")])),
         )
         .unwrap_err();
         assert_eq!(error.code, substrate_wire::EXEC_WRITABLE_ROOTS_GIT_UNSERVED);
-        assert!(error.message.contains("ws_checkout"));
+        assert!(error.message.contains("ws_checkout"), "{}", error.message);
+    }
+
+    #[test]
+    fn a_git_workspace_is_pinned_beneath_the_root_and_bound_writable_with_its_git_directory() {
+        let workspaces = Workspaces::new();
+        let bindings = [binding("ws_checkout", "ws_checkout")];
+        let pinned = pin(
+            &[],
+            &[git("ws_checkout", "/srv/checkout")],
+            Some(&workspaces.roots(&bindings)),
+        )
+        .unwrap();
+        assert_eq!(pinned.len(), 1);
+        let [flag, fd, mount] = pinned[0].bind_args();
+        assert_eq!(flag, "--bind-fd");
+        assert!(fd.parse::<u32>().unwrap() > substrate_wire::MAX_SECRET_SLOT_FD);
+        assert_eq!(mount, "/srv/checkout");
+        let host_path = workspaces.path("ws_checkout");
+        assert_eq!(
+            pinned[0].applied(),
+            AppliedWritableRoot::Git {
+                workspace: "ws_checkout".to_owned(),
+                host_path: host_path.to_str().unwrap().to_owned(),
+                mount: "/srv/checkout".to_owned(),
+            }
+        );
+        // The descriptor is the workspace directory itself, `.git` beneath it.
+        let held = std::fs::read_link(format!("/proc/self/fd/{fd}")).unwrap();
+        assert_eq!(held, host_path);
+        assert!(held.join(".git").is_dir());
+    }
+
+    #[test]
+    fn a_git_root_without_a_git_baseline_or_reached_through_a_link_is_refused_by_name() {
+        let workspaces = Workspaces::new();
+        std::os::unix::fs::symlink(workspaces.path("ws_checkout"), workspaces.path("ws_linked"))
+            .unwrap();
+        std::fs::write(
+            workspaces.baselines.join("ws_linked"),
+            "0123456789abcdef0123456789abcdef01234567",
+        )
+        .unwrap();
+        for (workspace, root_name, code) in [
+            ("ws_empty", "ws_empty", crate::WRITABLE_ROOT_NOT_GIT),
+            ("ws_adopted", "operator_dir", crate::WRITABLE_ROOT_NOT_GIT),
+            ("ws_own_alias", "ws_own", crate::WRITABLE_ROOT_OWN_WORKSPACE),
+        ] {
+            if root_name == "operator_dir" {
+                std::fs::create_dir_all(workspaces.path(root_name)).unwrap();
+            }
+            let bindings = [binding(workspace, root_name)];
+            let error = pin(
+                &[],
+                &[git(workspace, "/srv/checkout")],
+                Some(&workspaces.roots(&bindings)),
+            )
+            .expect_err(workspace);
+            assert_eq!(error.code, code, "{workspace}: {}", error.message);
+            assert!(error.message.contains(workspace), "{}", error.message);
+            assert_eq!(error.address.as_deref(), Some("writable_roots"));
+        }
+        // A symlinked workspace entry is never followed: refused before any bind, even with a
+        // baseline beside it.
+        let bindings = [binding("ws_linked", "ws_linked")];
+        let error = pin(
+            &[],
+            &[git("ws_linked", "/srv/checkout")],
+            Some(&workspaces.roots(&bindings)),
+        )
+        .expect_err("a symlinked workspace entry");
+        assert_eq!(error.address.as_deref(), Some("writable_roots"));
+        assert_ne!(error.code, crate::WRITABLE_ROOT_NOT_GIT);
+    }
+
+    #[test]
+    fn the_request_only_git_root_checks_name_the_workspace_in_order() {
+        let input = |roots: Vec<WritableRoot>| {
+            let mut input: substrate_wire::ExecStartInput = serde_json::from_value(
+                serde_json::json!({
+                    "workspace": "ws_own",
+                    "argv": ["/usr/bin/true"],
+                    "env": { "allow": [], "set": {} },
+                    "sandbox": {
+                        "capability_snapshot": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                        "network": "none",
+                        "profile": "workspace",
+                        "require": true
+                    },
+                    "limits": {
+                        "timeout_ms": 1000,
+                        "output_bytes": 1024,
+                        "processes": 1,
+                        "memory_bytes": 67_108_864,
+                        "cpu_millis": 100
+                    },
+                    "wait": true
+                }),
+            )
+            .unwrap();
+            input.writable_roots = roots;
+            input
+        };
+        assert!(crate::check_writable_git_roots(&input(vec![git("ws_a", "/a")])).is_ok());
+        let error =
+            crate::check_writable_git_roots(&input(vec![git("ws_a", "/a"), git("ws_own", "/b")]))
+                .unwrap_err();
+        assert_eq!(error.code, crate::WRITABLE_ROOT_OWN_WORKSPACE);
+        assert!(error.message.contains("ws_own"));
+        let error = crate::check_writable_git_roots(&input(vec![
+            git("ws_a", "/a"),
+            host("cache", "/c"),
+            git("ws_a", "/b"),
+        ]))
+        .unwrap_err();
+        assert_eq!(error.code, crate::WRITABLE_ROOT_WORKSPACE_DUPLICATE);
+        assert!(error.message.contains("ws_a"));
+        assert_eq!(error.address.as_deref(), Some("writable_roots"));
     }
 }
