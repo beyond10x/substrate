@@ -978,6 +978,11 @@ fn check_writable_roots(
         if !names.insert(name) {
             return Err(refuse("is declared more than once"));
         }
+        // ADR 0038 decision 2: the applied record states the bound host path as a string, so a
+        // path with no exact string form can never be recorded as bound.
+        if path.to_str().is_none() {
+            return Err(refuse("does not name a UTF-8 path"));
+        }
         if !path.is_absolute() {
             return Err(refuse("does not name an absolute path"));
         }
@@ -1023,10 +1028,12 @@ fn check_writable_roots(
 }
 
 /// Every host path the daemon trusts outside the workspace root and the state directory, each
-/// with what it is: the API socket, the bubblewrap binary, every secret-slot source, the CA bundle
-/// and the delegated cgroup root. A program given a writable root containing one could replace
-/// the confinement binary, read or rewrite a secret, swap the trust anchor, talk to the API as the
-/// daemon's peer or move itself out of its cgroup.
+/// with what it is: the daemon executable, the API socket, the bubblewrap binary, every
+/// secret-slot source, the CA bundle, the delegated cgroup root, the production TLS private key
+/// and certificate chain, the hosted Identity CA bundle and the static-bearer file. A program
+/// given a writable root containing one could replace the daemon or the confinement binary, read
+/// or rewrite a secret, the daemon's identity key or the bearer it admits, swap a trust anchor,
+/// talk to the API as the daemon's peer or move itself out of its cgroup.
 fn protected_host_paths(config: &DaemonConfig) -> Vec<(PathBuf, String)> {
     let mut protected = vec![
         (config.socket.clone(), "the API socket".to_owned()),
@@ -1035,6 +1042,25 @@ fn protected_host_paths(config: &DaemonConfig) -> Vec<(PathBuf, String)> {
             "the bubblewrap binary".to_owned(),
         ),
     ];
+    if let Ok(executable) = std::env::current_exe() {
+        protected.push((executable, "the daemon executable".to_owned()));
+    }
+    if let Some(tls) = &config.tls {
+        protected.push((tls.private_key.clone(), "the TLS private key".to_owned()));
+        protected.push((
+            tls.certificate_chain.clone(),
+            "the TLS certificate chain".to_owned(),
+        ));
+    }
+    if let Some(identity) = &config.hosted_identity {
+        protected.push((
+            identity.ca_bundle.clone(),
+            "the hosted Identity CA bundle".to_owned(),
+        ));
+    }
+    if let Some(tcp) = &config.tcp {
+        protected.push((tcp.bearer_file.clone(), "the static-bearer file".to_owned()));
+    }
     protected.extend(config.secret_slots.iter().map(|slot| {
         (
             slot.path.clone(),
@@ -2315,6 +2341,33 @@ mod tests {
         config.cgroup_root = Some(base.join("other/cgroup"));
         check_writable_roots_clear_of(&config.writable_roots, &protected_host_paths(&config))
             .unwrap();
+    }
+
+    #[test]
+    fn a_writable_root_containing_the_daemon_executable_is_refused() {
+        let (_directory, base) = writable_root_tree();
+        let mut config = protected_config(&base);
+        let executable = std::fs::canonicalize(std::env::current_exe().unwrap()).unwrap();
+        config.writable_roots = vec![writable_root(
+            "cache",
+            executable.parent().expect("executable directory"),
+        )];
+        assert_protected_refusal(&config, "the daemon executable");
+    }
+
+    #[test]
+    fn a_writable_root_path_that_is_not_utf8_is_refused_naming_the_root() {
+        use std::os::unix::ffi::OsStrExt as _;
+        let (_directory, base) = writable_root_tree();
+        let uid = nix::unistd::Uid::effective().as_raw();
+        let path = base.join(std::ffi::OsStr::from_bytes(b"cache-\xff"));
+        std::fs::create_dir(&path).unwrap();
+        let refusal = writable_root_refusal(&base, &[writable_root("cache", path)], uid);
+        assert!(
+            refusal.starts_with("config.writable-root-invalid: writable root \"cache\" "),
+            "{refusal}"
+        );
+        assert!(refusal.contains("does not name a UTF-8 path"), "{refusal}");
     }
 
     #[test]

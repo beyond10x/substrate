@@ -181,11 +181,12 @@ pub struct DeclaredWritableRoot {
 
 /// A writable Git root that names a workspace not materialized from a Git source: an empty or an
 /// adopted workspace (ADR 0038 kind 2).
-pub const WRITABLE_ROOT_NOT_GIT: &str = "exec.writable-root-not-git";
+pub const WRITABLE_ROOT_NOT_GIT: &str = substrate_wire::EXEC_WRITABLE_ROOT_NOT_GIT;
 /// A writable Git root that names the start's own workspace, which is already `/workspace`.
-pub const WRITABLE_ROOT_OWN_WORKSPACE: &str = "exec.writable-root-own-workspace";
+pub const WRITABLE_ROOT_OWN_WORKSPACE: &str = substrate_wire::EXEC_WRITABLE_ROOT_OWN_WORKSPACE;
 /// A writable Git root that names a workspace another entry of the same start already names.
-pub const WRITABLE_ROOT_WORKSPACE_DUPLICATE: &str = "exec.writable-root-workspace-duplicate";
+pub const WRITABLE_ROOT_WORKSPACE_DUPLICATE: &str =
+    substrate_wire::EXEC_WRITABLE_ROOT_WORKSPACE_DUPLICATE;
 
 /// One writable Git root the daemon admitted for a start (ADR 0038 kind 2): the workspace the
 /// request names and the root name the store holds for it in the caller's scope.

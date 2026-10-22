@@ -30,8 +30,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   refuses, naming the root, a name outside the root-name set or declared twice, and a path that is
   not absolute and normal, does not exist, is not a directory, is reached through a symlink, is not
   owned by the daemon's uid, lies under or contains the workspace root or the state directory, or
-  equals or contains the API socket, the bubblewrap binary, a secret-slot source, the CA bundle or
-  the delegated cgroup root, each compared as written and as resolved.
+  equals or contains the API socket, the daemon executable, the bubblewrap binary, a secret-slot
+  source, the CA bundle, the TLS private key or certificate chain, the hosted Identity CA bundle,
+  the static-bearer file or the delegated cgroup root, each compared as written and as resolved.
+  A path that is not UTF-8 stops startup with `config.writable-root-invalid` (ADR 0038 decision 2).
   The host publishes `exec.writable-roots.host`, the declared names, only when roots are declared
   and a throwaway sandbox proved a root bound by descriptor writable beneath a read-only parent,
   with no descriptor left resolving to either; otherwise the fact is absent and every host root is
@@ -55,12 +57,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   (`exec.writable-root-not-git`), each 422 naming the workspace; an unknown workspace or another
   subject's answers the same 404 `resource.not-found`, and one that is not Ready answers 409
   `workspace.not-ready`, both at `writable_roots`. The start locks its own workspace and every Git
-  root in one order through dispatch. The exec row records the Git roots it binds in the
+  root in one order through dispatch. The transaction that accepts the start checks again that its
+  own workspace and every Git root are Ready with no lapsed lease; one whose lease fell due since
+  admission is frozen there and the start answers 409 `workspace.not-ready`, not retriable, never
+  500 `state.store-failed`. The exec row records the Git roots it binds in the
   transaction that accepts it (a new `git_root_workspaces` column; an existing store fills it from
   each exec's applied record), so a workspace an Accepted, Running or Unknown exec binds is not
   destroyed under it (`workspace.execs-active`, 409), and workspace lease expiry kills every exec
-  that binds the workspace, as it kills the execs in it, before it ends the workspace. These three
-  codes are host-local: bundle `0.22.0` does not name them.
+  that binds the workspace, as it kills the execs in it, before it ends the workspace. Bundle
+  `0.22.0` publishes these three codes with the three host-path refusals above.
 - A `workdir` may lie at or beneath a writable root mount, and the mount runs the program there.
   The applied confinement record gains an optional `writable_roots` list (kind, name or workspace
   id, host path, mount), filled from what was bound.

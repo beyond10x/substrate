@@ -25,6 +25,7 @@ use crate::delegation::{ContextRefusal, VerifiedContext};
 use super::responses::{
     conflict, delegated_context_refusal, failure, failure_detail, operation_ledger_capacity,
     outcome_unknown, query_is_empty, schema_invalid, store_failure, success,
+    workspace_frozen_refusal,
 };
 use super::{
     App, BODY_LIMIT, Identity, PIPE_MAX_FRAME_BYTES, PIPE_MAX_INPUT_BYTES, PIPE_MAX_QUEUED_FRAMES,
@@ -1029,6 +1030,10 @@ pub(super) fn reservation_response(
         )),
         Ok(Reservation::Pending(_)) => Some(outcome_unknown(request_id, operation)),
         Ok(Reservation::Capacity(_)) => Some(operation_ledger_capacity(request_id)),
+        // The accepting transaction found a workspace frozen, its own or a bound Git root whose
+        // lease fell due after admission: the same refusal admission gives, never a retriable
+        // store failure.
+        Err(StoreError::WorkspaceFrozen) => Some(workspace_frozen_refusal(request_id, operation)),
         Err(error) => Some(store_failure(request_id, Some(operation), &error)),
     }
 }

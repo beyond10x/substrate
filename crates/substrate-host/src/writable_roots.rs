@@ -29,11 +29,11 @@ use crate::{DeclaredWritableRoot, DriverError, GitRootBinding};
 const ADDRESS: &str = "writable_roots";
 
 /// A declared writable root that is not present on this host.
-pub const WRITABLE_ROOT_ABSENT: &str = "exec.writable-root-absent";
+pub const WRITABLE_ROOT_ABSENT: &str = substrate_wire::EXEC_WRITABLE_ROOT_ABSENT;
 /// A declared writable root that is not a directory, or is reached through a symlink.
-pub const WRITABLE_ROOT_NOT_A_DIRECTORY: &str = "exec.writable-root-not-a-directory";
+pub const WRITABLE_ROOT_NOT_A_DIRECTORY: &str = substrate_wire::EXEC_WRITABLE_ROOT_NOT_A_DIRECTORY;
 /// A declared writable root that this process's effective uid does not own.
-pub const WRITABLE_ROOT_NOT_OWNED: &str = "exec.writable-root-not-owned";
+pub const WRITABLE_ROOT_NOT_OWNED: &str = substrate_wire::EXEC_WRITABLE_ROOT_NOT_OWNED;
 
 /// A root, opened and checked, pinned for the bind.
 #[derive(Debug)]
