@@ -837,8 +837,8 @@ impl ProcessRuntime {
         input: &ExecStartInput,
         pipe_settings: Option<PipeSettings>,
     ) -> DispatchOutcome<ExecObservation> {
-        let pinned = match self.admit(id, workspace, input) {
-            Ok(pinned) => pinned,
+        let (pinned, read_only_roots) = match self.admit(id, workspace, input) {
+            Ok(admitted) => admitted,
             Err(error) => return DispatchOutcome::NotDispatched(error),
         };
         let workspace_access =
@@ -985,6 +985,7 @@ impl ProcessRuntime {
             scratch.as_ref(),
             &workspace_access,
             &read_only_files,
+            &read_only_roots,
         ) {
             Ok(value) => value,
             Err(error) => return contain_cgroup(&cgroup, error),
@@ -999,7 +1000,8 @@ impl ProcessRuntime {
         }
         retained.push(u32::try_from(seccomp.as_raw_fd()).expect("seccomp descriptor fits u32"));
         // Inherited by bubblewrap only: it mounts each through its descriptor bind and closes it
-        // before the program starts, so none is open in the confined program (ADR 0023, ADR 0033).
+        // before the program starts, so none is open in the confined program (ADR 0023, ADR 0033,
+        // design 26 § 3).
         let workspace_fds = workspace_access
             .raw_fds()
             .into_iter()
@@ -1007,6 +1009,11 @@ impl ProcessRuntime {
                 read_only_files
                     .iter()
                     .map(crate::read_only_files::PinnedFile::raw_fd),
+            )
+            .chain(
+                read_only_roots
+                    .iter()
+                    .map(crate::read_only_roots::PinnedRoot::raw_fd),
             )
             .collect::<Vec<_>>();
         retained.extend(
@@ -1629,11 +1636,15 @@ impl ProcessRuntime {
         Ok(observation)
     }
 
-    /// Every rule ADR 0010 names, checked before dispatch.
+    /// Every rule ADR 0010 names, checked before dispatch, and every root pinned.
     ///
     /// Textual rules first, because they are the caller's mistake to hear about; then the
-    /// filesystem question only the driver can answer without racing.
-    fn admit_read_only_roots(roots: &[substrate_wire::ReadOnlyRoot]) -> Result<(), DriverError> {
+    /// filesystem question, answered by opening each root once without following a symlink at any
+    /// component. The descriptor is what bubblewrap mounts, so nothing renamed at the declared
+    /// path afterwards changes what is bound (design 26 § 3).
+    fn admit_read_only_roots(
+        roots: &[substrate_wire::ReadOnlyRoot],
+    ) -> Result<Vec<crate::read_only_roots::PinnedRoot>, DriverError> {
         substrate_wire::validate_read_only_roots(roots).map_err(|error| {
             DriverError::refused(
                 "exec.read-only-root-invalid",
@@ -1641,26 +1652,7 @@ impl ProcessRuntime {
                 "read_only_roots",
             )
         })?;
-        for root in roots {
-            // `symlink_metadata`, so a symlink is refused as itself rather than followed to
-            // whatever it points at — the caller declared a directory and would not be told.
-            let metadata = std::fs::symlink_metadata(std::path::Path::new(&root.host_path))
-                .map_err(|_| {
-                    DriverError::refused(
-                        "exec.read-only-root-absent",
-                        "A declared read-only root is not present on this host.",
-                        "read_only_roots",
-                    )
-                })?;
-            if !metadata.is_dir() {
-                return Err(DriverError::refused(
-                    "exec.read-only-root-not-a-directory",
-                    "A declared read-only root is not a directory.",
-                    "read_only_roots",
-                ));
-            }
-        }
-        Ok(())
+        crate::read_only_roots::pin(roots)
     }
 
     /// Validates both the wire shape and the live workspace objects ADR 0023 will mount.
@@ -1979,14 +1971,14 @@ impl ProcessRuntime {
             .collect()
     }
 
-    /// Admits a start and returns the pinned workspace directory the start binds.
+    /// Admits a start and returns the pinned workspace directory and read-only roots it binds.
     #[allow(clippy::too_many_lines)] // Refusal precedence is clearer in one admission sequence.
     fn admit(
         &self,
         id: &str,
         workspace: &Path,
         input: &ExecStartInput,
-    ) -> Result<OwnedFd, DriverError> {
+    ) -> Result<(OwnedFd, Vec<crate::read_only_roots::PinnedRoot>), DriverError> {
         if !id.starts_with("ex_")
             || !id
                 .bytes()
@@ -1998,7 +1990,7 @@ impl ProcessRuntime {
                 "exec",
             ));
         }
-        Self::admit_read_only_roots(&input.read_only_roots)?;
+        let read_only_roots = Self::admit_read_only_roots(&input.read_only_roots)?;
         crate::read_only_files::admit(
             &input.read_only_files,
             &input.read_only_roots,
@@ -2115,7 +2107,7 @@ impl ProcessRuntime {
         }
         validate_environment(input)?;
         self.recheck_backend()?;
-        Ok(pinned)
+        Ok((pinned, read_only_roots))
     }
 
     fn recheck_backend(&self) -> Result<(), DriverError> {
@@ -2148,6 +2140,7 @@ impl ProcessRuntime {
         scratch: Option<&PreparedScratch>,
         workspace_access: &PreparedWorkspaceAccess,
         read_only_files: &[crate::read_only_files::PinnedFile],
+        read_only_roots: &[crate::read_only_roots::PinnedRoot],
     ) -> Result<(Command, File), DriverError> {
         // Above the slot range, close-on-exec: a slot declared at the profile's original number
         // would otherwise become the program bubblewrap installs. `start` clears the flag in the
@@ -2217,15 +2210,14 @@ impl ProcessRuntime {
                 .arg(capsule.directory.path())
                 .arg(EXECUTION_CAPSULE_MOUNT);
         }
-        // `--ro-bind` and never `--bind`: a declared root is readable and never writable, so a
-        // process cannot alter the toolchain it was given any more than it can alter `/usr`, and
-        // the workspace stays the only writable path. Before the workspace bind, so a root can
+        // `--ro-bind-fd` and never `--bind-fd`: a declared root is readable and never writable, so
+        // a process cannot alter the toolchain it was given any more than it can alter `/usr`, and
+        // the workspace stays the only writable path. Through the descriptor admission opened and
+        // never the path, which bubblewrap would resolve again, so a rename or symlink swap after
+        // admission cannot redirect it (design 26 § 3). Before the workspace bind, so a root can
         // never shadow it — though `admit` has already refused that mount point by name.
-        for root in &input.read_only_roots {
-            command
-                .arg("--ro-bind")
-                .arg(&root.host_path)
-                .arg(&root.mount);
+        for root in read_only_roots {
+            command.args(root.bind_args());
         }
         // One file each, through its pinned descriptor rather than its path, so a rename after
         // admission cannot redirect it. Bubblewrap creates the mount point and its parents in the
@@ -6219,6 +6211,7 @@ mod tests {
                 None,
                 &access,
                 &[],
+                &[],
             )
             .expect("the exec argv builds");
         let argv: Vec<String> = command
@@ -6267,6 +6260,89 @@ mod tests {
             flags >= 0 && flags & libc::FD_CLOEXEC != 0,
             "descriptor {descriptor} is inheritable by every spawn of this process"
         );
+    }
+
+    /// A declared read-only root reaches bubblewrap as the descriptor admission opened, never as
+    /// its host path, which a rename and a symlink could redirect between admission and the mount
+    /// (`story:read-only-roots-bound-by-descriptor`, design 26 § 3).
+    ///
+    /// Portable, for the reason the user-namespace case above is.
+    #[test]
+    fn the_exec_argv_binds_each_read_only_root_by_its_pinned_descriptor() {
+        let root = tempfile::tempdir().expect("root");
+        let workspace = root.path().join("ws_test");
+        std::fs::create_dir(&workspace).expect("workspace");
+        let cgroup_root = root.path().join("cgroups");
+        std::fs::create_dir(&cgroup_root).expect("cgroup root");
+        let host = std::fs::canonicalize(root.path())
+            .expect("canonical root")
+            .join("declared-root");
+        std::fs::create_dir(&host).expect("declared root");
+        let host_text = host.to_str().expect("UTF-8 root").to_owned();
+        let snapshot = format!("sha256:{}", "7".repeat(64));
+        let mut config = HostConfig::minimum(root.path());
+        config.cgroup_root = Some(cgroup_root);
+        let capability = CapabilitySnapshot {
+            snapshot: snapshot.clone(),
+            driver: HostDriverKind::Host,
+            driver_version: "test".to_owned(),
+            config_generation: 1,
+            probed_at: chrono::Utc::now(),
+            valid_until: None,
+            facts: CapabilityFacts::default(),
+        };
+        let runtime = ProcessRuntime::new(config, capability).expect("runtime");
+        let mut input = pty_exec_input(&snapshot);
+        input.read_only_roots = vec![substrate_wire::ReadOnlyRoot {
+            host_path: host_text.clone(),
+            mount: "/opt/root".to_owned(),
+        }];
+        let roots =
+            ProcessRuntime::admit_read_only_roots(&input.read_only_roots).expect("admitted root");
+        let slots = crate::secrets::SecretSlotSet::acquire(&[], &[]).expect("no slots");
+        let sync = std::fs::File::open("/dev/null").expect("a barrier descriptor");
+        let pinned = crate::fs::pin_workspace_directory(&workspace).expect("pinned workspace");
+        let access = ProcessRuntime::prepare_workspace_access(
+            &pinned,
+            &substrate_wire::WorkspaceAccess::ReadWrite,
+        )
+        .expect("read-write access");
+        let (command, _seccomp) = runtime
+            .command(
+                &input,
+                sync.as_raw_fd(),
+                ChildChannel::Quiet,
+                None,
+                &slots,
+                None,
+                None,
+                None,
+                &access,
+                &[],
+                &roots,
+            )
+            .expect("the exec argv builds");
+        let argv: Vec<String> = command
+            .as_std()
+            .get_args()
+            .map(|part| part.to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            !argv.iter().any(|part| part.contains(&host_text)),
+            "the root host path reaches the argv: {argv:?}"
+        );
+        let bind = argv
+            .windows(3)
+            .find(|window| window[2] == "/opt/root")
+            .expect("the exec argv mounts the declared root");
+        assert_eq!(bind[0], "--ro-bind-fd", "{argv:?}");
+        let descriptor: RawFd = bind[1].parse().expect("a descriptor number");
+        assert!(
+            descriptor > RawFd::try_from(substrate_wire::MAX_SECRET_SLOT_FD).unwrap(),
+            "the root descriptor sits at {descriptor}, inside the secret-slot range"
+        );
+        assert_eq!(descriptor, roots[0].raw_fd(), "{argv:?}");
+        assert_cloexec(descriptor);
     }
 
     /// The launch barrier and the info pipe end bubblewrap uses sit above the slot range,
