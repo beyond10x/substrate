@@ -34,6 +34,8 @@ mod secrets;
 mod unsupported;
 #[cfg(target_os = "linux")]
 mod workdir;
+#[cfg(target_os = "linux")]
+mod writable_roots;
 
 use std::collections::HashSet;
 use std::os::unix::fs::PermissionsExt as _;
@@ -165,6 +167,100 @@ pub struct SecretSlot {
     pub path: PathBuf,
 }
 
+/// One operator-declared writable host root: a name in the root-name set and an absolute host
+/// directory (ADR 0038 decision 2).
+///
+/// Daemon configuration and never request data: a start names the root and its mount, never the
+/// path. The composition root checks the path at startup; the driver opens it again, by
+/// descriptor and without following a symlink, at every start that names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeclaredWritableRoot {
+    pub name: String,
+    pub path: PathBuf,
+}
+
+/// A writable Git root that names a workspace not materialized from a Git source: an empty or an
+/// adopted workspace (ADR 0038 kind 2).
+pub const WRITABLE_ROOT_NOT_GIT: &str = substrate_wire::EXEC_WRITABLE_ROOT_NOT_GIT;
+/// A writable Git root that names the start's own workspace, which is already `/workspace`.
+pub const WRITABLE_ROOT_OWN_WORKSPACE: &str = substrate_wire::EXEC_WRITABLE_ROOT_OWN_WORKSPACE;
+/// A writable Git root that names a workspace another entry of the same start already names.
+pub const WRITABLE_ROOT_WORKSPACE_DUPLICATE: &str =
+    substrate_wire::EXEC_WRITABLE_ROOT_WORKSPACE_DUPLICATE;
+
+/// One writable Git root the daemon admitted for a start (ADR 0038 kind 2): the workspace the
+/// request names and the root name the store holds for it in the caller's scope.
+///
+/// The daemon resolves it, never the request: a start names a workspace id, and only the store
+/// knows which directory under the workspace root that id is for this subject.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitRootBinding {
+    pub workspace: String,
+    pub root_name: String,
+}
+
+/// The unserved refusal for a writable Git root, naming the workspace.
+#[must_use]
+pub fn git_root_unserved(workspace: &str) -> DriverError {
+    DriverError::unserved(
+        substrate_wire::EXEC_WRITABLE_ROOTS_GIT_UNSERVED,
+        format!("Writable Git root {workspace} is not served by this host."),
+        "writable_roots",
+    )
+}
+
+/// Refuses a writable Git root whose workspace was not created from a Git source.
+#[must_use]
+pub fn writable_root_not_git(workspace: &str) -> DriverError {
+    DriverError::refused(
+        WRITABLE_ROOT_NOT_GIT,
+        format!("Writable Git root {workspace} is not a workspace created from a Git source."),
+        "writable_roots",
+    )
+}
+
+/// Refuses a writable Git root that is the start's own workspace.
+pub(crate) fn writable_root_own_workspace(workspace: &str) -> DriverError {
+    DriverError::refused(
+        WRITABLE_ROOT_OWN_WORKSPACE,
+        format!(
+            "Writable Git root {workspace} is the start's own workspace, already mounted at /workspace."
+        ),
+        "writable_roots",
+    )
+}
+
+/// The checks on a start's writable Git roots that need nothing but the request, in order: no
+/// entry names the start's own workspace, and no workspace is named twice. Both ports run it, the
+/// daemon before any workspace is looked up and the driver again at admission.
+///
+/// # Errors
+///
+/// [`WRITABLE_ROOT_OWN_WORKSPACE`] or [`WRITABLE_ROOT_WORKSPACE_DUPLICATE`], naming the workspace.
+pub fn check_writable_git_roots(input: &ExecStartInput) -> Result<(), DriverError> {
+    let named = input
+        .writable_roots
+        .iter()
+        .filter_map(|root| match root {
+            substrate_wire::WritableRoot::Git(root) => Some(root.workspace.as_str()),
+            substrate_wire::WritableRoot::Host(_) => None,
+        })
+        .collect::<Vec<_>>();
+    for (index, workspace) in named.iter().enumerate() {
+        if *workspace == input.workspace {
+            return Err(writable_root_own_workspace(workspace));
+        }
+        if named[..index].contains(workspace) {
+            return Err(DriverError::refused(
+                WRITABLE_ROOT_WORKSPACE_DUPLICATE,
+                format!("Writable Git root {workspace} is named more than once."),
+                "writable_roots",
+            ));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone)]
 pub struct HostConfig {
     pub workspace_root: PathBuf,
@@ -220,6 +316,10 @@ pub struct HostConfig {
     /// is the personal Unix socket. [`HostConfig::minimum`] sets `false`: the fact is absent, and
     /// every start is `process.host-unserved`.
     pub host_processes: bool,
+    /// Every writable host root this operator declared (ADR 0038 kind 1). Empty means
+    /// `exec.writable-roots.host` is absent and every start naming a host root is
+    /// `exec.writable-roots-host-unserved`. [`HostConfig::minimum`] declares none.
+    pub writable_roots: Vec<DeclaredWritableRoot>,
 }
 
 /// Refuses an exec CPU ceiling the host cannot honour, before the host opens.
@@ -256,6 +356,43 @@ fn validate_exec_cpu_cores(
              are unknown."
         )),
     }
+}
+
+/// Refuses a writable-root declaration a start could not name unambiguously, before the host
+/// opens: a name outside the root-name set, a name declared twice, or a path that is not absolute.
+///
+/// What the path *is* (present, a directory, owned, clear of the workspace and state roots) is the
+/// composition root's startup check, and the driver checks it again by descriptor at every start.
+fn validate_writable_roots(roots: &[DeclaredWritableRoot]) -> Result<(), DriverError> {
+    let mut names = HashSet::new();
+    for root in roots {
+        let refuse = |reason: String| {
+            Err(DriverError::refused(
+                "config.writable-root-invalid",
+                reason,
+                "config.writable_roots",
+            ))
+        };
+        if !substrate_wire::is_root_name(&root.name) {
+            return refuse(format!(
+                "Writable host root {:?} is not a valid root name.",
+                root.name
+            ));
+        }
+        if !names.insert(root.name.as_str()) {
+            return refuse(format!(
+                "Writable host root {} is declared more than once.",
+                root.name
+            ));
+        }
+        if !root.path.is_absolute() {
+            return refuse(format!(
+                "Writable host root {} does not name an absolute path.",
+                root.name
+            ));
+        }
+    }
+    Ok(())
 }
 
 impl HostConfig {
@@ -298,6 +435,7 @@ impl HostConfig {
             git_sources: Vec::new(),
             exec_cpu_cores: 1,
             host_processes: false,
+            writable_roots: Vec::new(),
         }
     }
 
@@ -602,6 +740,71 @@ pub trait Driver: Send + Sync {
         ))
     }
 
+    /// What the start request alone shows about its writable Git roots (ADR 0038 kind 2): the
+    /// start's own workspace named as one, or one workspace named twice. The daemon asks before
+    /// it looks any of them up, so the refusal is a ledger row.
+    ///
+    /// # Errors
+    ///
+    /// `exec.writable-root-own-workspace` or `exec.writable-root-workspace-duplicate`, naming the
+    /// workspace.
+    fn check_git_roots_request(&self, input: &ExecStartInput) -> Result<(), DriverError> {
+        check_writable_git_roots(input)
+    }
+
+    /// Admits workspace `workspace`, stored at `root_name`, as a writable Git root (ADR 0038
+    /// kind 2). `adopted` is the daemon's own record that the directory is an operator's, which
+    /// refuses it whatever it holds; otherwise the driver's record of a Git materialization
+    /// decides. The daemon asks before it dispatches, so the refusal is a ledger row. A driver
+    /// that materializes no Git workspace admits none.
+    ///
+    /// # Errors
+    ///
+    /// `exec.writable-root-not-git`, naming the workspace, or a driver failure reading its own
+    /// record of the materialization.
+    fn admit_git_root(
+        &self,
+        workspace: &str,
+        _root_name: &str,
+        _adopted: bool,
+    ) -> Result<(), DriverError> {
+        Err(writable_root_not_git(workspace))
+    }
+
+    /// [`Self::start_exec`], also binding each admitted writable Git root (ADR 0038 kind 2).
+    ///
+    /// A driver that serves no Git root refuses one by name and never starts without it; with
+    /// none to bind this is [`Self::start_exec`].
+    async fn start_exec_with_git_roots(
+        &self,
+        id: &str,
+        workspace_root_name: &str,
+        git_roots: &[GitRootBinding],
+        input: &ExecStartInput,
+    ) -> DispatchOutcome<ExecObservation> {
+        match git_roots.first() {
+            None => self.start_exec(id, workspace_root_name, input).await,
+            Some(root) => DispatchOutcome::NotDispatched(git_root_unserved(&root.workspace)),
+        }
+    }
+
+    /// [`Self::start_pipe_session`], also binding each admitted writable Git root.
+    async fn start_pipe_session_with_git_roots(
+        &self,
+        id: &str,
+        workspace_root_name: &str,
+        git_roots: &[GitRootBinding],
+        input: &substrate_wire::PipeSessionStartInput,
+    ) -> DispatchOutcome<ExecObservation> {
+        match git_roots.first() {
+            None => {
+                self.start_pipe_session(id, workspace_root_name, input)
+                    .await
+            }
+            Some(root) => DispatchOutcome::NotDispatched(git_root_unserved(&root.workspace)),
+        }
+    }
+
     /// Writes one bounded frame to an admitted raw-pipe process.
     async fn write_pipe_session(&self, _id: &str, _bytes: &[u8]) -> Result<(), DriverError> {
         Err(DriverError::unserved(
@@ -810,6 +1013,7 @@ impl HostDriver {
             config.exec_cpu_cores,
             std::thread::available_parallelism().ok(),
         )?;
+        validate_writable_roots(&config.writable_roots)?;
         std::fs::create_dir_all(&config.workspace_root).map_err(|error| {
             DriverError::failed("workspace.root-failed", format!("workspace root: {error}"))
         })?;
@@ -1559,6 +1763,51 @@ impl Driver for HostDriver {
         HostDriver::start_pipe_session(self, id, workspace_root_name, input).await
     }
 
+    fn admit_git_root(
+        &self,
+        workspace: &str,
+        root_name: &str,
+        adopted: bool,
+    ) -> Result<(), DriverError> {
+        if !adopted && git::has_baseline(&self.config.git_baseline_root(), root_name)? {
+            Ok(())
+        } else {
+            Err(writable_root_not_git(workspace))
+        }
+    }
+
+    async fn start_exec_with_git_roots(
+        &self,
+        id: &str,
+        workspace_root_name: &str,
+        git_roots: &[GitRootBinding],
+        input: &ExecStartInput,
+    ) -> DispatchOutcome<ExecObservation> {
+        let workspace = match self.workspace_path(workspace_root_name) {
+            Ok(value) => value,
+            Err(error) => return DispatchOutcome::NotDispatched(error),
+        };
+        self.processes
+            .start_with_git_roots(id, &workspace, git_roots, input)
+            .await
+    }
+
+    async fn start_pipe_session_with_git_roots(
+        &self,
+        id: &str,
+        workspace_root_name: &str,
+        git_roots: &[GitRootBinding],
+        input: &substrate_wire::PipeSessionStartInput,
+    ) -> DispatchOutcome<ExecObservation> {
+        let workspace = match self.workspace_path(workspace_root_name) {
+            Ok(value) => value,
+            Err(error) => return DispatchOutcome::NotDispatched(error),
+        };
+        self.processes
+            .start_pipe_with_git_roots(id, &workspace, git_roots, input)
+            .await
+    }
+
     async fn write_pipe_session(&self, id: &str, bytes: &[u8]) -> Result<(), DriverError> {
         HostDriver::write_pipe_session(self, id, bytes).await
     }
@@ -1650,6 +1899,38 @@ mod tests {
             validate_exec_cpu_cores(1, None).is_ok(),
             "one core is admitted even when the usable CPU count is unknown"
         );
+    }
+
+    #[test]
+    fn a_writable_root_declaration_a_start_cannot_name_is_refused_before_open() {
+        let root = |name: &str, path: &str| super::DeclaredWritableRoot {
+            name: name.to_owned(),
+            path: path.into(),
+        };
+        assert!(super::validate_writable_roots(&[]).is_ok());
+        assert!(
+            super::validate_writable_roots(&[
+                root("cache", "/srv/cache"),
+                root("tools", "/srv/tools")
+            ])
+            .is_ok()
+        );
+        for (roots, needle) in [
+            (vec![root("-cache", "/srv/cache")], "-cache"),
+            (vec![root("ca/che", "/srv/cache")], "ca/che"),
+            (vec![root("", "/srv/cache")], "\"\""),
+            (
+                vec![root("cache", "/srv/a"), root("cache", "/srv/b")],
+                "more than once",
+            ),
+            (vec![root("cache", "srv/cache")], "absolute"),
+        ] {
+            let error = super::validate_writable_roots(&roots)
+                .expect_err("an unnameable declaration must be refused");
+            assert_eq!(error.code, "config.writable-root-invalid");
+            assert_eq!(error.class, super::DriverErrorClass::Refused);
+            assert!(error.message.contains(needle), "{}", error.message);
+        }
     }
 
     #[test]

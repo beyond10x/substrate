@@ -13,7 +13,7 @@ use crate::{
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 use substrate_wire::{
-    ErrorClass, ErrorDetail, Exec, ExecAbsence, ExecKind, ExecState, ExecUsage, LeaseState,
+    ErrorClass, ErrorDetail, Event, Exec, ExecAbsence, ExecKind, ExecState, ExecUsage, LeaseState,
     OperationOutcome, Workspace, WorkspaceState,
 };
 
@@ -79,6 +79,21 @@ impl Store {
         lease: Option<&NewLease>,
         workspace_clock: Option<&LeaseClock>,
     ) -> Result<Reservation, StoreError> {
+        self.reserve_exec_start_binding(new, provisional, lease, workspace_clock, &[])
+    }
+
+    /// [`Self::reserve_exec_start`] for a start that binds `git_roots`, the ids of the workspaces
+    /// it names as writable Git roots (ADR 0038 kind 2). They are recorded on the exec row in the
+    /// same transaction that accepts it, so an exec holds them from acceptance on, before any
+    /// applied record exists and whatever its dispatch outcome.
+    pub fn reserve_exec_start_binding(
+        &self,
+        new: &NewOperation,
+        provisional: &StoredExec,
+        lease: Option<&NewLease>,
+        workspace_clock: Option<&LeaseClock>,
+        git_roots: &[String],
+    ) -> Result<Reservation, StoreError> {
         let mut connection = self.connection.lock();
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if let Some(reservation) = existing_reservation(&transaction, new)? {
@@ -109,18 +124,26 @@ impl Store {
             &mut workspace,
             workspace_clock,
         )?;
-        if newly_frozen
-            || workspace.state != WorkspaceState::Ready
-            || workspace
-                .lease
-                .as_ref()
-                .is_some_and(|lease| lease.state != LeaseState::Active)
-        {
+        let mut frozen_events: Vec<Event> = frozen_event.into_iter().collect();
+        let mut refused = newly_frozen || !workspace_admissible(&workspace);
+        if !refused {
+            refused = !git_roots_admissible(
+                &transaction,
+                self.event_retention,
+                &new.scope,
+                git_roots,
+                workspace_clock,
+                &mut frozen_events,
+            )?;
+        }
+        if refused {
             transaction.commit()?;
             drop(connection);
-            if let Some(event) = frozen_event {
-                self.report_committed(&[commit_effect(&new.scope, &event)]);
-            }
+            let effects: Vec<_> = frozen_events
+                .iter()
+                .map(|event| commit_effect(&new.scope, event))
+                .collect();
+            self.report_committed(&effects);
             return Err(StoreError::WorkspaceFrozen);
         }
         if resource_partition_at_capacity(
@@ -147,6 +170,12 @@ impl Store {
                 Err(error) => return Err(error),
             };
         upsert_exec(&transaction, &new.scope, provisional)?;
+        record_exec_git_roots(
+            &transaction,
+            &new.scope,
+            &provisional.resource.id,
+            git_roots,
+        )?;
         if let Some(lease) = lease {
             upsert_lease(
                 &transaction,
@@ -584,6 +613,41 @@ impl Store {
             .collect()
     }
 
+    /// Reads the identity and state of every exec still physically present that holds a
+    /// workspace: each exec in it, and each exec in another workspace that binds it as a writable
+    /// Git root (ADR 0038 kind 2), as recorded when that exec was accepted.
+    ///
+    /// The same projection as [`Self::execs_for_workspace`]; workspace lease cleanup reads this
+    /// one, so it ends every exec that may hold the workspace before it ends the workspace.
+    pub fn execs_holding_workspace(
+        &self,
+        scope: &Scope,
+        workspace_id: &str,
+    ) -> Result<Vec<WorkspaceExecState>, StoreError> {
+        let connection = self.connection.lock();
+        let mut statement = connection.prepare(
+            "SELECT id, json_extract(resource_json, '$.state') FROM execs
+             WHERE deployment = ?1 AND subject = ?2 AND physically_absent = 0
+               AND (workspace_id = ?3
+                    OR EXISTS (SELECT 1 FROM json_each(execs.git_root_workspaces)
+                               WHERE json_each.value = ?3))
+             ORDER BY id",
+        )?;
+        statement
+            .query_map(
+                params![scope.deployment, scope.subject, workspace_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )?
+            .map(|row| {
+                let (id, state) = row?;
+                Ok(WorkspaceExecState {
+                    id,
+                    state: serde_json::from_value(serde_json::Value::String(state))?,
+                })
+            })
+            .collect()
+    }
+
     pub fn mark_exec_physically_absent(
         &self,
         candidate: &RecoveryExec,
@@ -722,6 +786,74 @@ pub(crate) fn load_exec(
             },
         )
         .transpose()
+}
+
+/// Whether a workspace, its lease already frozen if due, may still be bound by a start.
+pub(crate) fn workspace_admissible(workspace: &Workspace) -> bool {
+    workspace.state == WorkspaceState::Ready
+        && workspace
+            .lease
+            .as_ref()
+            .is_none_or(|lease| lease.state == LeaseState::Active)
+}
+
+/// Re-checks, inside the accepting transaction, every workspace a start binds as a writable Git
+/// root exactly as the start's own workspace is re-checked: its lease is frozen if it fell due
+/// after admission, and the start is refused unless each is still Ready under an active lease
+/// (ADR 0038 decision 3). Each freeze event is pushed onto `events` for the caller to report once
+/// the transaction commits. A Git root that is gone is not admissible either.
+pub(crate) fn git_roots_admissible(
+    connection: &Connection,
+    retention: u64,
+    scope: &Scope,
+    git_roots: &[String],
+    clock: Option<&LeaseClock>,
+    events: &mut Vec<Event>,
+) -> Result<bool, StoreError> {
+    let mut admissible = true;
+    for id in git_roots {
+        let json: Option<String> = connection
+            .query_row(
+                "SELECT resource_json FROM workspaces
+                 WHERE deployment = ?1 AND subject = ?2 AND id = ?3",
+                params![scope.deployment, scope.subject, id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(json) = json else {
+            admissible = false;
+            continue;
+        };
+        let mut workspace: Workspace = serde_json::from_str(&json)?;
+        let (newly_frozen, event) =
+            freeze_workspace_lease_if_due(connection, retention, scope, id, &mut workspace, clock)?;
+        events.extend(event);
+        if newly_frozen || !workspace_admissible(&workspace) {
+            admissible = false;
+        }
+    }
+    Ok(admissible)
+}
+
+/// Records the workspaces an accepted exec binds as writable Git roots. [`upsert_exec`] never
+/// writes the column, so every later write of the exec keeps what acceptance recorded.
+pub(crate) fn record_exec_git_roots(
+    connection: &Connection,
+    scope: &Scope,
+    exec_id: &str,
+    git_roots: &[String],
+) -> Result<(), StoreError> {
+    connection.execute(
+        "UPDATE execs SET git_root_workspaces = ?4
+         WHERE deployment = ?1 AND subject = ?2 AND id = ?3",
+        params![
+            scope.deployment,
+            scope.subject,
+            exec_id,
+            serde_json::to_string(git_roots)?
+        ],
+    )?;
+    Ok(())
 }
 
 pub(crate) fn upsert_exec(

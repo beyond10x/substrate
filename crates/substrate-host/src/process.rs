@@ -263,6 +263,14 @@ impl Drop for PreparedScratch {
     }
 }
 
+/// What admission pinned: the workspace directory, then each declared read-only root and each
+/// writable host root, every one an open descriptor the mounts bind (design 26 § 3, ADR 0038).
+type Admitted = (
+    OwnedFd,
+    Vec<crate::read_only_roots::PinnedRoot>,
+    Vec<crate::writable_roots::PinnedWritableRoot>,
+);
+
 /// Stable directory objects for every workspace mount, the read-write default included.
 ///
 /// The workspace root is pinned at admission beneath the configured workspace root without
@@ -729,7 +737,19 @@ impl ProcessRuntime {
         workspace: &Path,
         input: &ExecStartInput,
     ) -> DispatchOutcome<ExecObservation> {
-        self.start_inner(id, workspace, input, None).await
+        self.start_inner(id, workspace, &[], input, None).await
+    }
+
+    /// [`Self::start`], also binding each writable Git root the daemon admitted (ADR 0038 kind 2).
+    pub async fn start_with_git_roots(
+        &self,
+        id: &str,
+        workspace: &Path,
+        git_roots: &[crate::GitRootBinding],
+        input: &ExecStartInput,
+    ) -> DispatchOutcome<ExecObservation> {
+        self.start_inner(id, workspace, git_roots, input, None)
+            .await
     }
 
     /// Starts a confined process with bounded live stdin/stdout/stderr pipes.
@@ -737,6 +757,18 @@ impl ProcessRuntime {
         &self,
         id: &str,
         workspace: &Path,
+        input: &PipeSessionStartInput,
+    ) -> DispatchOutcome<ExecObservation> {
+        self.start_pipe_with_git_roots(id, workspace, &[], input)
+            .await
+    }
+
+    /// [`Self::start_pipe`], also binding each writable Git root the daemon admitted.
+    pub async fn start_pipe_with_git_roots(
+        &self,
+        id: &str,
+        workspace: &Path,
+        git_roots: &[crate::GitRootBinding],
         input: &PipeSessionStartInput,
     ) -> DispatchOutcome<ExecObservation> {
         // **The mode gate is outermost, and nothing precedes it at either entry point.** That is
@@ -818,7 +850,7 @@ impl ProcessRuntime {
                 SessionMode::Pty => input.window,
             },
         };
-        self.start_inner(id, workspace, &input.exec, Some(settings))
+        self.start_inner(id, workspace, git_roots, &input.exec, Some(settings))
             .await
     }
 
@@ -827,13 +859,15 @@ impl ProcessRuntime {
         &self,
         id: &str,
         workspace: &Path,
+        git_roots: &[crate::GitRootBinding],
         input: &ExecStartInput,
         pipe_settings: Option<PipeSettings>,
     ) -> DispatchOutcome<ExecObservation> {
-        let (pinned, read_only_roots) = match self.admit(id, workspace, input) {
-            Ok(admitted) => admitted,
-            Err(error) => return DispatchOutcome::NotDispatched(error),
-        };
+        let (pinned, read_only_roots, writable_roots) =
+            match self.admit(id, workspace, git_roots, input) {
+                Ok(admitted) => admitted,
+                Err(error) => return DispatchOutcome::NotDispatched(error),
+            };
         let workspace_access =
             match Self::prepare_workspace_access(&pinned, &input.workspace_access) {
                 Ok(value) => value,
@@ -857,6 +891,7 @@ impl ProcessRuntime {
             &workspace_access.root,
             capsule.as_ref().map(|capsule| capsule.directory.path()),
             &read_only_roots,
+            &writable_roots,
         ) {
             return DispatchOutcome::NotDispatched(error);
         }
@@ -989,6 +1024,7 @@ impl ProcessRuntime {
             &workspace_access,
             &read_only_files,
             &read_only_roots,
+            &writable_roots,
         ) {
             Ok(value) => value,
             Err(error) => return contain_cgroup(&cgroup, error),
@@ -1017,6 +1053,11 @@ impl ProcessRuntime {
                 read_only_roots
                     .iter()
                     .map(crate::read_only_roots::PinnedRoot::raw_fd),
+            )
+            .chain(
+                writable_roots
+                    .iter()
+                    .map(crate::writable_roots::PinnedWritableRoot::raw_fd),
             )
             .collect::<Vec<_>>();
         retained.extend(
@@ -1061,6 +1102,13 @@ impl ProcessRuntime {
         drop(command);
         // bubblewrap holds its own copies now; the driver keeps none for the life of a waited exec.
         drop(read_only_roots);
+        // What was bound, taken from the pinned roots before they go, never from the request:
+        // the host path is the declared one the descriptor was opened from (ADR 0038 decision 6).
+        let applied_writable_roots = writable_roots
+            .iter()
+            .map(crate::writable_roots::PinnedWritableRoot::applied)
+            .collect::<Vec<_>>();
+        drop(writable_roots);
         let mut child = match spawned {
             Ok(child) => child,
             Err(error) => {
@@ -1142,7 +1190,7 @@ impl ProcessRuntime {
 
         let applied_capsule = capsule.as_ref().map(|value| value.applied.clone());
         let applied = AppliedConfinement {
-            writable_roots: Vec::new(),
+            writable_roots: applied_writable_roots,
             capability_snapshot: self.capability.snapshot.clone(),
             cgroup: cgroup.name().to_owned(),
             filesystem: if applied_capsule.is_some() {
@@ -2034,8 +2082,9 @@ impl ProcessRuntime {
         &self,
         id: &str,
         workspace: &Path,
+        git_roots: &[crate::GitRootBinding],
         input: &ExecStartInput,
-    ) -> Result<(OwnedFd, Vec<crate::read_only_roots::PinnedRoot>), DriverError> {
+    ) -> Result<Admitted, DriverError> {
         if !id.starts_with("ex_")
             || !id
                 .bytes()
@@ -2090,10 +2139,26 @@ impl ProcessRuntime {
             self.capability.facts.exec_egress_apertures.as_ref(),
             &input.sandbox,
         )?;
-        // ADR 0038: every lexical rule, then the fact of each kind, in the daemon's order. No
-        // host publishes either fact yet, so a named root is refused by name here even when a
-        // caller reaches the driver without the daemon; it is never silently left unbound.
+        // ADR 0038: every lexical rule, then the fact of each kind, in the daemon's order, so a
+        // named root this host does not serve is refused by name even when a caller reaches the
+        // driver without the daemon; it is never silently left unbound. Then each host root is
+        // opened once, by descriptor, and checked on that descriptor: the object bound is the
+        // object checked, and one gone, swapped for a symlink or not owned is refused by name.
+        // A Git root is the workspace directory the daemon resolved, pinned beneath the same
+        // workspace-root descriptor as this start's own, and only with a Git baseline beside it.
         admit_writable_roots(input, &self.capability.facts)?;
+        crate::check_writable_git_roots(input)?;
+        let writable_roots = crate::writable_roots::pin(
+            &self.config.writable_roots,
+            &input.writable_roots,
+            Some(&crate::writable_roots::GitRoots {
+                root,
+                root_path: &self.config.workspace_root,
+                baseline_root: &self.config.git_baseline_root(),
+                own_root_name: workspace.file_name().and_then(std::ffi::OsStr::to_str),
+                bindings: git_roots,
+            }),
+        )?;
         // Shape, then the fact: the daemon's order (design 26 § 1). Existence is asked in
         // `start_inner`, once the objects the mounts bind are pinned.
         crate::workdir::admit(input, self.capability.facts.exec_workdir)?;
@@ -2171,7 +2236,7 @@ impl ProcessRuntime {
         }
         validate_environment(input)?;
         self.recheck_backend()?;
-        Ok((pinned, read_only_roots))
+        Ok((pinned, read_only_roots, writable_roots))
     }
 
     fn recheck_backend(&self) -> Result<(), DriverError> {
@@ -2205,6 +2270,7 @@ impl ProcessRuntime {
         workspace_access: &PreparedWorkspaceAccess,
         read_only_files: &[crate::read_only_files::PinnedFile],
         read_only_roots: &[crate::read_only_roots::PinnedRoot],
+        writable_roots: &[crate::writable_roots::PinnedWritableRoot],
     ) -> Result<(Command, File), DriverError> {
         // Above the slot range, close-on-exec: a slot declared at the profile's original number
         // would otherwise become the program bubblewrap installs. `start` clears the flag in the
@@ -2281,6 +2347,14 @@ impl ProcessRuntime {
         // admission cannot redirect it (design 26 § 3). Before the workspace bind, so a root can
         // never shadow it — though `admit` has already refused that mount point by name.
         for root in read_only_roots {
+            command.args(root.bind_args());
+        }
+        // `--bind-fd`, writable, and only for a directory the operator declared by name: the one
+        // place outside the workspace a program may write (ADR 0038 kind 1). Through the
+        // descriptor admission opened and checked, never the declared path, for the same reason
+        // as the read-only roots above. Bubblewrap creates the mount point in the sandbox root;
+        // `admit` has refused a mount that overlaps any other.
+        for root in writable_roots {
             command.args(root.bind_args());
         }
         // One file each, through its pinned descriptor rather than its path, so a rename after
@@ -4681,8 +4755,9 @@ mod tests {
             ..pty_exec_input(&snapshot)
         };
 
-        let (admitted, opens) =
-            opens_of(&bubblewrap, || runtime.admit("ex_test", &workspace, &input));
+        let (admitted, opens) = opens_of(&bubblewrap, || {
+            runtime.admit("ex_test", &workspace, &[], &input)
+        });
         admitted.expect("an unchanged backend admits");
         assert_eq!(
             opens, 0,
@@ -4703,8 +4778,9 @@ mod tests {
             .unwrap()
             .set_modified(modified)
             .unwrap();
-        let (refused, opens) =
-            opens_of(&bubblewrap, || runtime.admit("ex_test", &workspace, &input));
+        let (refused, opens) = opens_of(&bubblewrap, || {
+            runtime.admit("ex_test", &workspace, &[], &input)
+        });
         assert_eq!(
             refused.expect_err("a replaced backend refuses").code,
             "exec.capability-stale"
@@ -6660,6 +6736,7 @@ mod tests {
                 &access,
                 &[],
                 &[],
+                &[],
             )
             .expect("the exec argv builds");
         let argv: Vec<String> = command
@@ -6746,6 +6823,7 @@ mod tests {
                     None,
                     None,
                     &access,
+                    &[],
                     &[],
                     &[],
                 )
@@ -6840,6 +6918,7 @@ mod tests {
                 &access,
                 &[],
                 &roots,
+                &[],
             )
             .expect("the exec argv builds");
         let argv: Vec<String> = command

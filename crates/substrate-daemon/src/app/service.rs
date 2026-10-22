@@ -65,6 +65,12 @@ impl WorkspaceLockDomains {
     }
 }
 
+fn workspace_stripe(domain: &WorkspaceLockDomain, workspace: &str) -> usize {
+    let mut hasher = DefaultHasher::new();
+    workspace.hash(&mut hasher);
+    usize::try_from(hasher.finish()).unwrap_or(usize::MAX) % domain.stripes.len()
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum CompletedDriverAction {
     Acknowledge,
@@ -319,15 +325,40 @@ impl App {
 
     pub(super) async fn lock_workspace(&self, scope: &Scope, workspace: &str) -> WorkspaceGuard {
         let domain = self.workspace_locks.domain(scope);
-        let mut hasher = DefaultHasher::new();
-        workspace.hash(&mut hasher);
-        let stripe = usize::try_from(hasher.finish()).unwrap_or(usize::MAX) % domain.stripes.len();
+        let stripe = workspace_stripe(&domain, workspace);
         let lock = Arc::clone(&domain.stripes[stripe]);
         let guard = lock.lock_owned().await;
         WorkspaceGuard {
             _domain: domain,
             _guard: guard,
         }
+    }
+
+    /// Locks every workspace a start involves: its own and each writable Git root (ADR 0038
+    /// kind 2). Each stripe is taken once, in ascending order, so two starts naming the same
+    /// workspaces in opposite roles cannot deadlock, and two names sharing a stripe do not
+    /// deadlock on themselves.
+    pub(super) async fn lock_workspaces(
+        &self,
+        scope: &Scope,
+        workspaces: &[&str],
+    ) -> Vec<WorkspaceGuard> {
+        let domain = self.workspace_locks.domain(scope);
+        let mut stripes: Vec<usize> = workspaces
+            .iter()
+            .map(|workspace| workspace_stripe(&domain, workspace))
+            .collect();
+        stripes.sort_unstable();
+        stripes.dedup();
+        let mut guards = Vec::with_capacity(stripes.len());
+        for stripe in stripes {
+            let lock = Arc::clone(&domain.stripes[stripe]);
+            guards.push(WorkspaceGuard {
+                _domain: Arc::clone(&domain),
+                _guard: lock.lock_owned().await,
+            });
+        }
+        guards
     }
 
     pub(super) fn nudge_maintenance(&self) {
@@ -744,7 +775,10 @@ impl App {
             LeaseResource::Workspace { root_name, origin } => {
                 let mut child_failure = None;
                 if let Ok(execs) = self
-                    .store_io(|| self.store.execs_for_workspace(&expired.scope, &expired.id))
+                    .store_io(|| {
+                        self.store
+                            .execs_holding_workspace(&expired.scope, &expired.id)
+                    })
                     .await
                 {
                     for exec in execs {

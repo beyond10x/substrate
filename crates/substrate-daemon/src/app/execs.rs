@@ -6,12 +6,13 @@ use axum::extract::{Path, RawQuery, State};
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::Response;
 use substrate_host::{DispatchOutcome, DriverErrorClass};
-use substrate_store::{ExecRetireReservation, ExecWrite, NewLease, StoredExec, WorkspaceAdmission};
+use substrate_store::{ExecRetireReservation, ExecWrite, NewLease, StoredExec};
 use substrate_wire::{
     EmptyInput, Exec, ExecKind, ExecOutputQuery, ExecSignalInput, ExecStartInput, ExecState,
     LeaseRenewInput, MAX_LEASE_TTL_MS, MIN_LEASE_TTL_MS, Success,
 };
 
+use super::git_roots::{StartRefusal, admit_start_workspaces, start_workspaces};
 use super::operations::{
     begin, decode_mutation, driver_failure, finish_dispatch_absence, finish_dispatch_unknown,
     finish_driver_error, finish_exec, finish_exec_leased, finish_lease_store_error, new_lease,
@@ -20,7 +21,7 @@ use super::operations::{
 };
 use super::responses::{
     failure, not_found, not_found_with_operation, operation_ledger_capacity, outcome_unknown,
-    query_is_empty, request_id, schema_invalid, store_failure, success, workspace_frozen_refusal,
+    query_is_empty, request_id, schema_invalid, store_failure, success,
 };
 use super::{App, Identity};
 
@@ -62,9 +63,22 @@ pub(super) async fn exec_start(
         .await;
     }
     let scope = app.scope(&identity);
-    let _workspace_guard = app.lock_workspace(&scope, &mutation.input.workspace).await;
-    let root_name = match app.admit_workspace(&scope, &mutation.input.workspace).await {
-        Ok(WorkspaceAdmission::Missing) => {
+    // The start's own workspace and every writable Git root stay locked through dispatch, so none
+    // of them is destroyed between its admission and the bind.
+    let _workspace_guards = app
+        .lock_workspaces(&scope, &start_workspaces(&mutation.input))
+        .await;
+    let (root_name, git_roots) = match admit_start_workspaces(
+        &app,
+        &scope,
+        &request_id,
+        &mutation.op,
+        &mutation.input,
+    )
+    .await
+    {
+        Ok(value) => value,
+        Err(StartRefusal::Recorded(response)) => {
             return refuse_before_dispatch_response(
                 &app,
                 &identity,
@@ -73,25 +87,11 @@ pub(super) async fn exec_start(
                 "POST",
                 "/v1/execs",
                 &mutation,
-                not_found_with_operation(&request_id, &mutation.op),
+                response,
             )
             .await;
         }
-        Ok(WorkspaceAdmission::Frozen { .. }) => {
-            return refuse_before_dispatch_response(
-                &app,
-                &identity,
-                &request_id,
-                "exec.start",
-                "POST",
-                "/v1/execs",
-                &mutation,
-                workspace_frozen_refusal(&request_id, &mutation.op),
-            )
-            .await;
-        }
-        Ok(WorkspaceAdmission::Admitted { root_name, .. }) => root_name,
-        Err(error) => return store_failure(&request_id, Some(&mutation.op), &error),
+        Err(StartRefusal::Unrecorded(response)) => return response,
     };
     let operation = mutation.op.clone();
     let lease = match mutation.input.lease_ttl_ms {
@@ -156,13 +156,18 @@ pub(super) async fn exec_start(
         leader_pid: None,
     };
     let workspace_clock = app.lease_clock().ok();
+    let bound: Vec<String> = git_roots
+        .iter()
+        .map(|binding| binding.workspace.clone())
+        .collect();
     if let Some(response) = reservation_response(
         app.store_io(|| {
-            app.store.reserve_exec_start(
+            app.store.reserve_exec_start_binding(
                 &new,
                 &provisional,
                 lease.as_ref(),
                 workspace_clock.as_ref(),
+                &bound,
             )
         })
         .await,
@@ -173,7 +178,7 @@ pub(super) async fn exec_start(
     }
     match app
         .driver
-        .start_exec(&id, &root_name, &mutation.input)
+        .start_exec_with_git_roots(&id, &root_name, &git_roots, &mutation.input)
         .await
     {
         DispatchOutcome::Observed(mut observation) => {

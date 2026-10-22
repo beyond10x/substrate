@@ -25,6 +25,7 @@ use substrate_wire::{
 
 use crate::DriverError;
 use crate::read_only_roots::PinnedRoot;
+use crate::writable_roots::PinnedWritableRoot;
 
 const ADDRESS: &str = "workdir";
 
@@ -61,8 +62,8 @@ pub(crate) fn admit(input: &ExecStartInput, published: Option<bool>) -> Result<(
 
 /// Whether the admitted directory exists, as a directory reached without a symlink, in the object
 /// its mount binds: beneath the pinned `workspace`, the materialized `capsule`, or the directory
-/// admission pinned for a declared root (`roots`). Fresh scratch is empty, so only its mount point
-/// exists.
+/// admission pinned for a declared root (`roots`) or a writable host root (`writable`). Fresh
+/// scratch is empty, so only its mount point exists.
 ///
 /// # Errors
 ///
@@ -73,6 +74,7 @@ pub(crate) fn check_present(
     workspace: &OwnedFd,
     capsule: Option<&Path>,
     roots: &[PinnedRoot],
+    writable: &[PinnedWritableRoot],
 ) -> Result<(), DriverError> {
     let Some(workdir) = input.workdir.as_deref() else {
         return Ok(());
@@ -102,6 +104,11 @@ pub(crate) fn check_present(
     // The directory admission pinned is the one bubblewrap mounts (design 26 § 3), so that is the
     // one asked, never the declared path, which may name another directory by now.
     for root in roots {
+        if let Some(rest) = beneath(root.mount()) {
+            return walk(root.descriptor(), &rest);
+        }
+    }
+    for root in writable {
         if let Some(rest) = beneath(root.mount()) {
             return walk(root.descriptor(), &rest);
         }

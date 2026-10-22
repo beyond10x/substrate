@@ -91,6 +91,14 @@ pub fn probe(config: &HostConfig, openat2: bool) -> CapabilitySnapshot {
     let quota =
         crate::quota::ProjectQuotas::probe(&config.workspace_root, config.project_quota_ids);
     let quota_facts = quota.then_some(crate::quota::ProjectQuotas::facts());
+    let workspace_git =
+        !config.git_sources.is_empty() && crate::git::mechanism_is_provable(&config.workspace_root);
+    // ADR 0038 decision 5: one throwaway sandbox proves a descriptor-bound root writable beneath a
+    // read-only parent. Both kinds bind that way, so both facts share the one proof. Gated on
+    // `exec`, the floor the bind rides; nothing is probed when neither kind could be published.
+    let writable_bind = exec
+        && (!config.writable_roots.is_empty() || workspace_git)
+        && crate::writable_roots::mechanism_is_provable(&config.bubblewrap);
     let facts = CapabilityFacts {
         events_pull: Some(true),
         events_stream: Some(true),
@@ -109,9 +117,7 @@ pub fn probe(config: &HostConfig, openat2: bool) -> CapabilitySnapshot {
         workspace_read_limit_bytes: workspace.then_some(config.read_limit_bytes),
         workspace_list_limit_items: workspace.then_some(config.list_limit_items),
         workspace_storage_quota: quota_facts,
-        workspace_git: (!config.git_sources.is_empty()
-            && crate::git::mechanism_is_provable(&config.workspace_root))
-        .then_some(true),
+        workspace_git: workspace_git.then_some(true),
         exec_argv_only: exec.then_some(true),
         exec_namespaces: exec.then_some(NamespaceFacts {
             user: true,
@@ -158,11 +164,22 @@ pub fn probe(config: &HostConfig, openat2: bool) -> CapabilitySnapshot {
             && workspace
             && crate::workdir::mechanism_is_provable(&config.bubblewrap))
         .then_some(true),
-        // ADR 0038 decision 5: neither kind is published until the throwaway-sandbox probe that
-        // proves a descriptor-bound root writable beside a read-only parent exists. Absent keeps
-        // every start that names one unserved, by name.
-        exec_writable_roots_host: None,
-        exec_writable_roots_git: None,
+        // ADR 0038 decision 5: the declared names, only when the operator declared any and the
+        // writable-bind proof held, with no descriptor left resolving to the root or its parent.
+        // Absent keeps every start that names a host root unserved, by name.
+        exec_writable_roots_host: (writable_bind && !config.writable_roots.is_empty()).then(|| {
+            let mut names: Vec<String> = config
+                .writable_roots
+                .iter()
+                .map(|root| root.name.clone())
+                .collect();
+            names.sort();
+            names
+        }),
+        // ADR 0038 kind 2: only when this host materializes Git workspaces (`workspace.git`) and
+        // the same writable-bind proof held. Absent keeps every start that names a Git root
+        // unserved, by name.
+        exec_writable_roots_git: (writable_bind && workspace_git).then_some(true),
         exec_resource_usage: resource_usage.filter(|_| exec),
         metrics_stream: (exec && resource_usage.is_some()).then_some(MetricsStreamFacts {
             sample_interval_ms: substrate_wire::RESOURCE_USAGE_SAMPLE_INTERVAL_MS,

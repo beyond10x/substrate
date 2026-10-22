@@ -98,7 +98,7 @@ fn pin_one(host_path: &str) -> Result<OwnedFd, DriverError> {
     })
 }
 
-fn open(path: &CString, flags: libc::c_int) -> std::io::Result<OwnedFd> {
+pub(crate) fn open(path: &CString, flags: libc::c_int) -> std::io::Result<OwnedFd> {
     let how = OpenHow {
         flags: u64::try_from(flags).expect("open flags are non-negative"),
         mode: 0,

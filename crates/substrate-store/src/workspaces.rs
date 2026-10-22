@@ -1089,10 +1089,15 @@ fn workspace_has_nonterminal_execs(
     scope: &Scope,
     workspace_id: &str,
 ) -> Result<bool, StoreError> {
+    // An exec in another workspace holds this one when it binds it as a writable Git root
+    // (ADR 0038 kind 2). Acceptance records that on the row, so an exec still Accepted, or Unknown
+    // after a dispatch that proved nothing, holds it as surely as one whose applied record names it.
     let mut statement = connection.prepare(
         "SELECT resource_json FROM execs
-         WHERE deployment = ?1 AND subject = ?2 AND workspace_id = ?3
-           AND physically_absent = 0",
+         WHERE deployment = ?1 AND subject = ?2 AND physically_absent = 0
+           AND (workspace_id = ?3
+                OR EXISTS (SELECT 1 FROM json_each(execs.git_root_workspaces)
+                           WHERE json_each.value = ?3))",
     )?;
     let resources = statement
         .query_map(

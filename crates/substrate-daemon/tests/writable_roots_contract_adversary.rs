@@ -43,9 +43,9 @@ fn every_writable_root_refusal_the_host_and_daemon_raise_is_published_in_0_22_0(
         "exec.writable-root-absent",
         "exec.writable-root-not-a-directory",
         "exec.writable-root-not-owned",
-        "exec.writable-root-not-git",
-        "exec.writable-root-own-workspace",
-        "exec.writable-root-workspace-duplicate",
+        substrate_host::WRITABLE_ROOT_NOT_GIT,
+        substrate_host::WRITABLE_ROOT_OWN_WORKSPACE,
+        substrate_host::WRITABLE_ROOT_WORKSPACE_DUPLICATE,
     ];
     let missing: Vec<&str> = emitted
         .iter()

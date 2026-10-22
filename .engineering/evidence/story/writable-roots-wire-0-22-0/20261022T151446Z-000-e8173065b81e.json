@@ -1,0 +1,14 @@
+{
+  "at": "2026-10-22T15:14:46Z",
+  "actor": "agent:b10x-chef-orchestrator",
+  "artifact": "story:writable-roots-wire-0-22-0",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:wave-2026-10-22-writable-roots-adversary-pass-1",
+    "review": "review-result:wave-2026-10-22-writable-roots-adversary-pass-1",
+    "outcome": "fixed"
+  }
+}

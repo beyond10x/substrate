@@ -25,6 +25,7 @@ use crate::delegation::{ContextRefusal, VerifiedContext};
 use super::responses::{
     conflict, delegated_context_refusal, failure, failure_detail, operation_ledger_capacity,
     outcome_unknown, query_is_empty, schema_invalid, store_failure, success,
+    workspace_frozen_refusal,
 };
 use super::{
     App, BODY_LIMIT, Identity, PIPE_MAX_FRAME_BYTES, PIPE_MAX_INPUT_BYTES, PIPE_MAX_QUEUED_FRAMES,
@@ -459,7 +460,7 @@ pub(super) fn validate_exec_input(
     check_egress_aperture(&facts, &input.sandbox, mutation, request_id)?;
     check_secret_slots(&facts, mutation, request_id)?;
     check_read_only_files(&facts, mutation, request_id)?;
-    check_writable_roots(&facts, mutation, request_id)?;
+    check_writable_roots(app, &facts, mutation, request_id)?;
     check_workdir(&facts, mutation, request_id)?;
     if !input.measurements.is_empty() && facts.exec_resource_usage.is_none() {
         return Err(failure(
@@ -639,12 +640,18 @@ fn check_egress_aperture(
 /// `exec.writable-roots.host` does not list, or a Git root while `exec.writable-roots.git` is not
 /// published, is unserved with that name. Refused before dispatch, so the ledger records it.
 fn check_writable_roots(
+    app: &App,
     facts: &substrate_wire::CapabilityFacts,
     mutation: &BoundMutation<ExecStartInput>,
     request_id: &str,
 ) -> Result<(), Response> {
     let Err(error) = substrate_wire::admit_writable_roots(&mutation.input, facts) else {
-        return Ok(());
+        // ADR 0038 kind 2: what the request alone shows about its Git roots, before any of the
+        // named workspaces is looked up.
+        return app
+            .driver
+            .check_git_roots_request(&mutation.input)
+            .map_err(|error| driver_failure(request_id, Some(&mutation.op), &error));
     };
     let (refusal, message) = substrate_wire::writable_root_refusal(&error).unwrap_or_else(|| {
         let refusal = substrate_wire::WRITABLE_ROOT_REFUSALS[1];
@@ -1023,6 +1030,10 @@ pub(super) fn reservation_response(
         )),
         Ok(Reservation::Pending(_)) => Some(outcome_unknown(request_id, operation)),
         Ok(Reservation::Capacity(_)) => Some(operation_ledger_capacity(request_id)),
+        // The accepting transaction found a workspace frozen, its own or a bound Git root whose
+        // lease fell due after admission: the same refusal admission gives, never a retriable
+        // store failure.
+        Err(StoreError::WorkspaceFrozen) => Some(workspace_frozen_refusal(request_id, operation)),
         Err(error) => Some(store_failure(request_id, Some(operation), &error)),
     }
 }

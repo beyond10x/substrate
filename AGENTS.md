@@ -254,7 +254,18 @@ refusals — `exec.sandbox-unavailable` (501), `exec.secret-slots-unserved` (501
 (422) of design 26, `exec.workdir-unserved` (501) and `exec.egress-apertures-unserved` (501) for
 a list, and the six lexical writable-root refusals (422) of ADR 0038 with
 `exec.writable-roots-host-unserved` and `exec.writable-roots-git-unserved` (501), which both lanes
-answer because no host publishes either fact yet — across 107 cases, and its delegated lane 155.
+answer for a host root the daemon did not declare and for every Git root, and the portable lane
+also for the one host root the runner declares, which it cannot prove without confinement — across
+111 cases, and its delegated lane 167, whose four writable-root cases bind that declared root and
+check the host side: the write lands, its parent and sibling do not change, a working directory
+beneath the mount runs there, and the declared path swapped for a symlink is
+`exec.writable-root-not-a-directory` (422). Both totals also count a second daemon that declares a
+Git source served over HTTPS on loopback by `git upload-pack` (ADR 0038 kind 2): it serves
+`workspace.git` and materializes a Git workspace; the portable lane then refuses that workspace as
+a Git root `exec.writable-roots-git-unserved` (501), and the delegated lane mounts it, has a child
+commit in it from a working directory beneath the mount, reads the commit on the host and in the
+change-set route, and refuses an empty workspace, the start's own, one named twice and an unknown
+one before dispatch, each recorded as refused.
 Both totals include
 one route/refusal probe for every operation in the promoted registry (the seven host-process routes
 of `0.20.0` among them: unserved on the portable lane, served and refused before anything runs on

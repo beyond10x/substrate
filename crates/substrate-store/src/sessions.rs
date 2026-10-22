@@ -1,5 +1,8 @@
 use crate::events::{append_event, commit_effect};
-use crate::execs::{is_terminal_exec_state, load_exec, mark_exec_unknown, upsert_exec};
+use crate::execs::{
+    git_roots_admissible, is_terminal_exec_state, load_exec, mark_exec_unknown,
+    record_exec_git_roots, upsert_exec, workspace_admissible,
+};
 use crate::leases::{freeze_workspace_lease_if_due, upsert_lease};
 use crate::operations::{
     complete_operation_error_transaction, existing_reservation, finalize_operation_accounting,
@@ -14,8 +17,8 @@ use crate::{
 use chrono::{DateTime, Utc};
 use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 use substrate_wire::{
-    ErrorClass, ErrorDetail, Exec, ExecState, LeaseState, OperationOutcome, PipeSession,
-    SessionAbsence, SessionAttachmentState, SessionKind, SessionState, Workspace, WorkspaceState,
+    ErrorClass, ErrorDetail, Event, Exec, ExecState, LeaseState, OperationOutcome, PipeSession,
+    SessionAbsence, SessionAttachmentState, SessionKind, SessionState, Workspace,
 };
 use subtle::ConstantTimeEq as _;
 
@@ -179,6 +182,27 @@ impl Store {
         lease: &NewLease,
         workspace_clock: Option<&LeaseClock>,
     ) -> Result<Reservation, StoreError> {
+        self.reserve_pipe_session_start_binding(
+            new,
+            provisional_session,
+            provisional_exec,
+            lease,
+            workspace_clock,
+            &[],
+        )
+    }
+
+    /// [`Self::reserve_pipe_session_start`] for a session whose exec binds `git_roots` writable,
+    /// recorded on the exec row as [`Self::reserve_exec_start_binding`] records them.
+    pub fn reserve_pipe_session_start_binding(
+        &self,
+        new: &NewOperation,
+        provisional_session: &PipeSession,
+        provisional_exec: &StoredExec,
+        lease: &NewLease,
+        workspace_clock: Option<&LeaseClock>,
+        git_roots: &[String],
+    ) -> Result<Reservation, StoreError> {
         if (provisional_session.capture == substrate_wire::CaptureMode::Unrecorded)
             != provisional_exec.resource.unrecorded_output.is_some()
         {
@@ -214,18 +238,26 @@ impl Store {
             &mut workspace,
             workspace_clock,
         )?;
-        if newly_frozen
-            || workspace.state != WorkspaceState::Ready
-            || workspace
-                .lease
-                .as_ref()
-                .is_some_and(|lease| lease.state != LeaseState::Active)
-        {
+        let mut frozen_events: Vec<Event> = frozen_event.into_iter().collect();
+        let mut refused = newly_frozen || !workspace_admissible(&workspace);
+        if !refused {
+            refused = !git_roots_admissible(
+                &transaction,
+                self.event_retention,
+                &new.scope,
+                git_roots,
+                workspace_clock,
+                &mut frozen_events,
+            )?;
+        }
+        if refused {
             transaction.commit()?;
             drop(connection);
-            if let Some(event) = frozen_event {
-                self.report_committed(&[commit_effect(&new.scope, &event)]);
-            }
+            let effects: Vec<_> = frozen_events
+                .iter()
+                .map(|event| commit_effect(&new.scope, event))
+                .collect();
+            self.report_committed(&effects);
             return Err(StoreError::WorkspaceFrozen);
         }
         if resource_partition_at_capacity(
@@ -252,6 +284,12 @@ impl Store {
                 Err(error) => return Err(error),
             };
         upsert_exec(&transaction, &new.scope, provisional_exec)?;
+        record_exec_git_roots(
+            &transaction,
+            &new.scope,
+            &provisional_exec.resource.id,
+            git_roots,
+        )?;
         upsert_session(&transaction, &new.scope, provisional_session)?;
         upsert_lease(
             &transaction,
