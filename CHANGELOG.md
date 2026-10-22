@@ -9,6 +9,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [0.9.0] — 2026-10-22
 
+Published by [release run 39756033654](https://github.com/beyond10x/substrate/actions/runs/39756033654)
+from tagged commit `9c5f38be3f22234367dfc068c7d34cd560e8f6fd`. All three artifacts were
+keyless-signed and verified against `release.yml@refs/tags/0.9.0` by the release workflow, and each
+digest resolved anonymously:
+
+- Image: `ghcr.io/beyond10x/b10x-substrate-daemon:0.9.0` at `sha256:da28e2c86f3753e5a566e31ffa6652d05caecc87d9ece96d3929742dbe6752c3`.
+- Contract bundle: `ghcr.io/beyond10x/b10x-substrate-wire:0.21.0` at `sha256:448423df3fd7669053636732a407af629305dac25e32a84482e15cb72da22b01`, first published by this release.
+- Disposable MCP image: `ghcr.io/beyond10x/b10x-substrate-mcp:0.9.0` at `sha256:5ba10859d46cff8223c5b3fa6947509fc8e150406d5b916f95272ff9f2f3d830`, development-only.
+
 ### Added
 
 - Development contract bundle `substrate-wire/0.21.0` (design 26), additive over `0.20.0` with
