@@ -46,6 +46,7 @@ use crate::report::Report;
 
 mod host_process;
 mod workdir_apertures;
+mod writable_roots;
 
 const DRAFT_2020_12: &str = "https://json-schema.org/draft/2020-12/schema";
 /// The URI namespace the schema registry is keyed under. A wire-visible b10x identifier, reserved
@@ -891,6 +892,10 @@ fn check_classification(version: &str, released: &Tree, failures: &mut Vec<Strin
 /// A successor that rendered, verified and preserved everything while adding nothing is the failure
 /// this catches; the entries are the acceptance list of the story that cut the bundle.
 fn check_additions(version: &str, released: &Tree, failures: &mut Vec<String>) {
+    if version == "0.22.0" {
+        writable_roots::check(version, released, failures);
+        return;
+    }
     if version == "0.21.0" {
         workdir_apertures::check(version, released, failures);
         return;
@@ -5877,7 +5882,7 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{}: {error}", bundle.display()));
             checked += 1;
         }
-        assert_eq!(checked, 21, "every released bundle must be checked");
+        assert_eq!(checked, 22, "every released bundle must be checked");
     }
 
     /// Class, the other half: if a parameter's name is not a discriminator, then renaming one is

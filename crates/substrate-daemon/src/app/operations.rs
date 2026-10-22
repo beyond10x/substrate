@@ -459,6 +459,7 @@ pub(super) fn validate_exec_input(
     check_egress_aperture(&facts, &input.sandbox, mutation, request_id)?;
     check_secret_slots(&facts, mutation, request_id)?;
     check_read_only_files(&facts, mutation, request_id)?;
+    check_writable_roots(&facts, mutation, request_id)?;
     check_workdir(&facts, mutation, request_id)?;
     if !input.measurements.is_empty() && facts.exec_resource_usage.is_none() {
         return Err(failure(
@@ -632,6 +633,35 @@ fn check_egress_aperture(
 ///
 /// Shape, then capability — the driver's order. Whether the directory exists is the driver's
 /// question, answered against the mounts it places.
+/// Daemon-side admission for the writable roots a start names (ADR 0038).
+///
+/// Every lexical rule first, then the fact of each kind: a host root whose name
+/// `exec.writable-roots.host` does not list, or a Git root while `exec.writable-roots.git` is not
+/// published, is unserved with that name. Refused before dispatch, so the ledger records it.
+fn check_writable_roots(
+    facts: &substrate_wire::CapabilityFacts,
+    mutation: &BoundMutation<ExecStartInput>,
+    request_id: &str,
+) -> Result<(), Response> {
+    let Err(error) = substrate_wire::admit_writable_roots(&mutation.input, facts) else {
+        return Ok(());
+    };
+    let (refusal, message) = substrate_wire::writable_root_refusal(&error).unwrap_or_else(|| {
+        let refusal = substrate_wire::WRITABLE_ROOT_REFUSALS[1];
+        (refusal, refusal.message.to_owned())
+    });
+    Err(failure(
+        StatusCode::from_u16(refusal.status).unwrap_or(StatusCode::UNPROCESSABLE_ENTITY),
+        request_id,
+        Some(&mutation.op),
+        refusal.class,
+        refusal.code,
+        &message,
+        Some("writable_roots"),
+        false,
+    ))
+}
+
 fn check_workdir(
     facts: &substrate_wire::CapabilityFacts,
     mutation: &BoundMutation<ExecStartInput>,

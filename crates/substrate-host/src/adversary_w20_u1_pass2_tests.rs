@@ -103,6 +103,7 @@ fn runtime(host: &Host) -> ProcessRuntime {
 
 fn input(workspace: &str, access: WorkspaceAccess) -> ExecStartInput {
     ExecStartInput {
+        writable_roots: Vec::new(),
         read_only_roots: Vec::new(),
         read_only_files: Vec::new(),
         secret_slots: Vec::new(),

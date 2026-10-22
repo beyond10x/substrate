@@ -30,6 +30,7 @@ fn pty_start(snapshot: &str, window: Option<substrate_wire::PtyWindow>) -> PipeS
     PipeSessionStartInput {
         capture: substrate_wire::CaptureMode::Recorded,
         exec: ExecStartInput {
+            writable_roots: Vec::new(),
             workspace: "ws_test".to_owned(),
             argv: vec!["/bin/sh".to_owned()],
             env: ExecEnvironment {

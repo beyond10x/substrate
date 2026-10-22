@@ -1,0 +1,6 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.22.0:result:process-stop",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "process-stop operation result",
+  "$ref": "../resource.json#/$defs/process"
+}

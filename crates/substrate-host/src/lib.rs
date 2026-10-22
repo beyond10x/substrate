@@ -1721,6 +1721,7 @@ mod tests {
 
     fn swap_probe_exec_input(snapshot: &str) -> substrate_wire::ExecStartInput {
         substrate_wire::ExecStartInput {
+            writable_roots: Vec::new(),
             read_only_roots: Vec::new(),
             read_only_files: Vec::new(),
             secret_slots: Vec::new(),

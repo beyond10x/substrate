@@ -51,6 +51,7 @@ fn root_at(host_path: &str, mount: &str) -> ReadOnlyRoot {
 
 fn exec_input(snapshot: &str, argv: &[&str]) -> ExecStartInput {
     ExecStartInput {
+        writable_roots: Vec::new(),
         read_only_roots: Vec::new(),
         read_only_files: Vec::new(),
         secret_slots: Vec::new(),

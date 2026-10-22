@@ -1,0 +1,23 @@
+{
+  "$schema": "schemas/compatibility.json",
+  "client_visible_changes": [
+    "0.22.0 adds no route and preserves the 44 routes of 0.21.0 (ADR 0038). An exec or session start gains the optional writable_roots list, a closed union of {host, mount} naming an operator-declared host root and {workspace, mount} naming a Git checkout workspace, at most MAX_WRITABLE_ROOTS (8) entries; a start that names none serializes and hashes exactly as before. A request never carries a host path.",
+    "The capability facts object (schemas/capability.json) and the observed resource union (schemas/resource.json) are closed, and 0.22.0 adds the optional exec.writable-roots.host and exec.writable-roots.git facts to the one and, to an exec's applied confinement, an optional writable_roots member listing each bound root with its kind, its name or workspace id, the resolved host_path and its mount. A client that validates snapshots or resources against predecessor 0.21.0 rejects a snapshot that publishes either fact, or a record of a start that bound a writable root, until it moves to 0.22.0.",
+    "A workdir may now lie at or beneath a writable root mount; exec.workdir-outside-mounts keeps its 0.21.0 message.",
+    "Eight refusals are new: exec.writable-roots-exceeded, exec.writable-root-name-invalid, exec.writable-root-mount-invalid, exec.writable-root-mount-reserved, exec.writable-root-mount-duplicate and exec.writable-root-mount-overlap (422), checked before any capability, and exec.writable-roots-host-unserved and exec.writable-roots-git-unserved (501), whose message names the host root or workspace id no published fact serves."
+  ],
+  "contract": "substrate-wire",
+  "development_constraints": [
+    "This development bundle is contract-execution-ready but cannot satisfy a stable dependency.",
+    "Passing the bundle gate proves bundle integrity; it does not claim producer or host-driver conformance.",
+    "No compatibility promise begins before a signed stable release."
+  ],
+  "request_policy": "closed",
+  "response_policy": "closed-route-selected-envelopes",
+  "status": "development",
+  "supported_api_majors": [
+    1,
+    2
+  ],
+  "version": "0.22.0"
+}

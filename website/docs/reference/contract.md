@@ -140,7 +140,21 @@ across retry. Resource and operation lookup stays within the authenticated subje
 Read [operations and observations](../concepts/operations.md) for retry semantics and
 [status](../status.md) for the implementation boundary.
 
-Development source now advertises `substrate-wire/0.21.0`. It adds no route. An exec or session
+Development source now advertises `substrate-wire/0.22.0`. It adds no route. An exec or session
+start may name `writable_roots`, at most eight writable mounts outside `/workspace` (ADR 0038). Each
+entry is exactly one of `{"host": <name>, "mount": <path>}`, a directory the operator declared by
+name, or `{"workspace": <workspace id>, "mount": <path>}`, a Git checkout workspace of the caller; a
+request never carries a host path. A mount is absolute and canonical, never `/`, and neither is, lies
+beneath nor contains a system path, `/workspace`, `/runtime`, `/scratch`, another writable root or a
+read-only root or file; each of those rules has its own named refusal (422), checked before any
+capability. A host publishes `exec.writable-roots.host`, the declared names, and
+`exec.writable-roots.git` only after it proved a root bound by descriptor is writable; a start
+naming a kind or name no fact serves is `exec.writable-roots-host-unserved` or
+`exec.writable-roots-git-unserved` (501), and the message names the root. The applied record lists
+each bound root with its kind, name or workspace id, host path and mount, and a `workdir` may lie
+beneath a writable root. A client that validates capability snapshots or resources against `0.21.0`
+must move to `0.22.0` to accept the new facts and record member.
+`0.21.0` added design 26. An exec or session
 start may name `workdir`, the directory the program starts in: an absolute, lexically normal path
 of at most 4096 bytes at or beneath `/workspace`, a declared read-only root mount, `/scratch` when
 scratch is requested, or `/runtime` when a capsule is carried. A host that has proved it can apply

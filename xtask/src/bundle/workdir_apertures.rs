@@ -507,7 +507,7 @@ fn check_vectors(version: &str, released: &Tree, failures: &mut Vec<String>) {
 }
 
 /// The exec result schema, compiled against the bundle's own schemas.
-fn exec_result_validator(
+pub(super) fn exec_result_validator(
     version: &str,
     released: &Tree,
     failures: &mut Vec<String>,

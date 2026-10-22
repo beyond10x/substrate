@@ -1,0 +1,36 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.22.0:input:process-stop-by-owner",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Stops every live record of the authenticated subject with this owner session, one process.stop operation each, and keep records too unless except_keep is true (ADR 0036 S5). No live record is an empty list, never a refusal; another subject's records are never reached.",
+  "properties": {
+    "except_keep": {
+      "type": "boolean"
+    },
+    "owner_session": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "owner_session"
+  ],
+  "title": "process-stop-by-owner operation input",
+  "type": "object",
+  "x-b10x-refusals": [
+    {
+      "class": "unserved",
+      "code": "process.host-unserved",
+      "status": 501
+    },
+    {
+      "class": "refused",
+      "code": "process.host-posture-refused",
+      "status": 403
+    },
+    {
+      "class": "refused",
+      "code": "process.host-subject-mismatch",
+      "status": 403
+    }
+  ]
+}

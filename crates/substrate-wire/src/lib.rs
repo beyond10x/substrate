@@ -15,9 +15,9 @@ pub const API_VERSION: &str = "v1";
 ///
 /// This is the SHA-256 of the inner immutable `bundle.json`, not the outer OCI manifest digest.
 /// Moving either member is an explicit coordinated promotion (Atlas ADR 0019).
-pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.21.0";
+pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.22.0";
 pub const ADVERTISED_CONTRACT_BUNDLE_SHA256: &str =
-    "044b3099d8e5a1108cc75cf3b03f1ea4d250ee4e34266cf493276fe4a9a0fe15";
+    "932becccb3781c4bc82d1fb8d8b77632dfe9ca40e573710258a71d9136a9f263";
 pub const MAX_FILE_BYTES: u64 = 1_048_576;
 pub const MAX_IO_BYTES: u64 = 1_048_576;
 pub const MAX_LIST_ITEMS: u32 = 1_000;
@@ -125,6 +125,50 @@ pub const READ_ONLY_FILE_REFUSAL_CODES: [&str; 9] = [
     READ_ONLY_FILE_ABSENT,
     READ_ONLY_FILE_SYMLINK,
     READ_ONLY_FILE_NOT_A_FILE,
+];
+/// How many writable roots one start may declare (ADR 0038).
+pub const MAX_WRITABLE_ROOTS: u32 = 8;
+/// Longest writable root mount, in UTF-8 bytes (ADR 0038): the bound a read-only file path has,
+/// for the same reason ([`MAX_READ_ONLY_FILE_PATH_BYTES`]).
+pub const MAX_WRITABLE_ROOT_MOUNT_BYTES: usize = MAX_READ_ONLY_FILE_PATH_BYTES;
+/// The fact listing the operator-declared writable host root names this host serves (ADR 0038).
+pub const EXEC_WRITABLE_ROOTS_HOST_FACT: &str = "exec.writable-roots.host";
+/// The fact a host publishes when it binds a Git checkout workspace writable (ADR 0038).
+pub const EXEC_WRITABLE_ROOTS_GIT_FACT: &str = "exec.writable-roots.git";
+/// `writable_roots` holds more entries than [`MAX_WRITABLE_ROOTS`] (ADR 0038).
+pub const EXEC_WRITABLE_ROOTS_EXCEEDED: &str = "exec.writable-roots-exceeded";
+/// A host root is not named by a root name, or a Git root not by a workspace id (ADR 0038).
+pub const EXEC_WRITABLE_ROOT_NAME_INVALID: &str = "exec.writable-root-name-invalid";
+/// A writable root mount is not absolute and canonical within its bounds (ADR 0038).
+pub const EXEC_WRITABLE_ROOT_MOUNT_INVALID: &str = "exec.writable-root-mount-invalid";
+/// A writable root mount is `/`, or is, lies beneath or contains a reserved mount (ADR 0038).
+pub const EXEC_WRITABLE_ROOT_MOUNT_RESERVED: &str = "exec.writable-root-mount-reserved";
+/// Two writable roots name the same mount (ADR 0038).
+pub const EXEC_WRITABLE_ROOT_MOUNT_DUPLICATE: &str = "exec.writable-root-mount-duplicate";
+/// A writable root mount nests with another writable root, or equals or nests with a read-only
+/// root or file mount (ADR 0038).
+pub const EXEC_WRITABLE_ROOT_MOUNT_OVERLAP: &str = "exec.writable-root-mount-overlap";
+/// A host root was named and [`EXEC_WRITABLE_ROOTS_HOST_FACT`] is absent or does not list the
+/// name (ADR 0038).
+pub const EXEC_WRITABLE_ROOTS_HOST_UNSERVED: &str = "exec.writable-roots-host-unserved";
+/// A Git root was named and [`EXEC_WRITABLE_ROOTS_GIT_FACT`] is not published (ADR 0038).
+pub const EXEC_WRITABLE_ROOTS_GIT_UNSERVED: &str = "exec.writable-roots-git-unserved";
+/// The paths a writable root mount may not be, lie beneath or contain (ADR 0038 decision 4); `/`
+/// by equality only. The mounts substrate owns ([`RESERVED_MOUNTS`] and the aperture files under
+/// `/etc`) are all here or beneath one of these.
+pub const WRITABLE_ROOT_RESERVED_MOUNTS: [&str; 12] = [
+    "/",
+    "/usr",
+    "/bin",
+    "/lib",
+    "/lib64",
+    "/proc",
+    "/dev",
+    "/tmp",
+    "/etc",
+    EXEC_WORKSPACE_MOUNT,
+    EXECUTION_CAPSULE_MOUNT,
+    EXEC_SCRATCH_MOUNT,
 ];
 /// Largest number of distinct writable workspace subtrees in one execution.
 pub const MAX_WORKSPACE_WRITABLE_SUBTREES: u32 = 64;
@@ -1409,6 +1453,72 @@ pub struct AppliedConfinement {
     /// Absent means `/workspace`, as for every run before the field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workdir: Option<String>,
+    /// Every writable root that was bound, with what it resolved to (ADR 0038 decision 6).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub writable_roots: Vec<AppliedWritableRoot>,
+}
+
+/// A writable mount outside `/workspace` a start asks for (ADR 0038), a closed union of two kinds.
+///
+/// A request never carries a host path: a host root is named, and a Git root is a workspace the
+/// caller already holds.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum WritableRoot {
+    /// An operator-declared host directory, by name (ADR 0038 decision 2).
+    Host(WritableHostRoot),
+    /// A second workspace created from a Git source (ADR 0038 decision 3).
+    Git(WritableGitRoot),
+}
+
+/// `{"host": <root name>, "mount": <sandbox path>}` (ADR 0038 decision 2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WritableHostRoot {
+    /// The declared name, in the root-name set ([`is_root_name`]).
+    pub host: String,
+    /// Where it appears inside, absolute and canonical.
+    pub mount: String,
+}
+
+/// `{"workspace": <workspace id>, "mount": <sandbox path>}` (ADR 0038 decision 3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WritableGitRoot {
+    /// The Git checkout workspace, `ws_` and its identifier.
+    pub workspace: String,
+    /// Where it appears inside, absolute and canonical.
+    pub mount: String,
+}
+
+impl WritableRoot {
+    /// Where the root appears inside the sandbox.
+    #[must_use]
+    pub fn mount(&self) -> &str {
+        match self {
+            Self::Host(root) => &root.mount,
+            Self::Git(root) => &root.mount,
+        }
+    }
+}
+
+/// One writable root as it was bound (ADR 0038 decision 6): its kind, its name or workspace id,
+/// the host path it resolved to, and its mount.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "lowercase", deny_unknown_fields)]
+pub enum AppliedWritableRoot {
+    /// A declared host root.
+    Host {
+        name: String,
+        host_path: String,
+        mount: String,
+    },
+    /// A Git checkout workspace.
+    Git {
+        workspace: String,
+        host_path: String,
+        mount: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1712,6 +1822,13 @@ pub struct ExecStartInput {
     /// always did.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workdir: Option<String>,
+    /// Writable mounts outside `/workspace`: named host roots and Git checkouts (ADR 0038).
+    ///
+    /// At most [`MAX_WRITABLE_ROOTS`], checked by [`validate_writable_roots`] and admitted by
+    /// [`admit_writable_roots`]. Empty on every existing consumer, and skipped when empty, so an
+    /// unchanged start hashes as it did under `0.21.0`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub writable_roots: Vec<WritableRoot>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -3158,6 +3275,24 @@ pub struct CapabilityFacts {
         skip_serializing_if = "Option::is_none"
     )]
     pub exec_workdir: Option<bool>,
+    /// The operator-declared writable host root names this host serves
+    /// ([`EXEC_WRITABLE_ROOTS_HOST_FACT`], ADR 0038 decision 5). Absent, or a list without the
+    /// name, leaves a start naming that root `exec.writable-roots-host-unserved`.
+    #[serde(
+        rename = "exec.writable-roots.host",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub exec_writable_roots_host: Option<Vec<String>>,
+    /// Whether this host binds a Git checkout workspace writable ([`EXEC_WRITABLE_ROOTS_GIT_FACT`],
+    /// ADR 0038 decision 5). Absent leaves every start naming one
+    /// `exec.writable-roots-git-unserved`.
+    #[serde(
+        rename = "exec.writable-roots.git",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub exec_writable_roots_git: Option<bool>,
     #[serde(
         rename = "exec.resource-usage",
         skip_serializing_if = "Option::is_none"
@@ -3252,6 +3387,8 @@ impl Default for CapabilityFacts {
             exec_scratch_quota: None,
             exec_read_only_files: None,
             exec_workdir: None,
+            exec_writable_roots_host: None,
+            exec_writable_roots_git: None,
             exec_resource_usage: None,
             metrics_stream: None,
             exec_egress_apertures: None,
@@ -3480,6 +3617,22 @@ pub enum WireValidationError {
     AperturesTooMany,
     #[error("an aperture list names one aperture twice")]
     ApertureListedTwice,
+    #[error("a start declares more writable roots than one run may hold")]
+    WritableRootsExceeded,
+    #[error("a writable root is not named by a root name or a workspace id")]
+    WritableRootNameInvalid,
+    #[error("a writable root mount is not an absolute, canonical path within its bounds")]
+    WritableRootMountInvalid,
+    #[error("a writable root mount takes a reserved path")]
+    WritableRootMountReserved,
+    #[error("two writable roots name the same mount")]
+    WritableRootMountDuplicate,
+    #[error("a writable root mount nests with another writable root or a read-only mount")]
+    WritableRootMountOverlap,
+    #[error("writable host root {name} is not served by this host")]
+    WritableRootHostUnserved { name: String },
+    #[error("writable Git root {workspace} is not served by this host")]
+    WritableRootGitUnserved { workspace: String },
 }
 
 fn valid_sha256(value: &str) -> bool {
@@ -3995,8 +4148,9 @@ pub fn validate_aperture_selection(
 /// Absent is `/workspace` and always admitted. A named directory must be absolute and lexically
 /// normal: it begins with `/`, has no empty, `.` or `..` component, no trailing `/` and no NUL,
 /// and is at most [`MAX_WORKDIR_BYTES`] bytes. Then it must be at or beneath a mount this start
-/// places: `/workspace`, the `mount` of one of its `read_only_roots`, `/scratch` when it asks for
-/// scratch, or `/runtime` when it carries a capsule. Whether the directory exists in the sandbox is
+/// places: `/workspace`, the `mount` of one of its `read_only_roots` or `writable_roots`
+/// (ADR 0038 decision 7), `/scratch` when it asks for scratch, or `/runtime` when it carries a
+/// capsule. Whether the directory exists in the sandbox is
 /// the driver's question, answered with [`EXEC_WORKDIR_MISSING`] after the mounts are placed.
 ///
 /// # Errors
@@ -4017,6 +4171,10 @@ pub fn validate_workdir(input: &ExecStartInput) -> Result<(), WireValidationErro
             .read_only_roots
             .iter()
             .any(|root| at_or_beneath(&root.mount))
+        || input
+            .writable_roots
+            .iter()
+            .any(|root| at_or_beneath(root.mount()))
         || (input.scratch.is_some() && at_or_beneath(EXEC_SCRATCH_MOUNT))
         || (input.capsule.is_some() && at_or_beneath(EXECUTION_CAPSULE_MOUNT));
     if placed {
@@ -4112,11 +4270,195 @@ pub const APERTURE_LIST_REFUSALS: [ExecStartRefusal; 4] = [
     },
 ];
 
-/// Looks up one of the design 26 start refusals by its code.
+/// The eight writable-root refusals of ADR 0038: six lexical (422), then the two unserved kinds
+/// (501).
+///
+/// The two unserved messages are templates: `{name}` stands for the host root name or the
+/// workspace id the start named, which [`writable_root_refusal`] fills in. The lexical messages
+/// name the rule and never echo the request.
+pub const WRITABLE_ROOT_REFUSALS: [ExecStartRefusal; 8] = [
+    ExecStartRefusal {
+        code: EXEC_WRITABLE_ROOTS_EXCEEDED,
+        status: 422,
+        class: ErrorClass::Refused,
+        message: "A start declares at most 8 writable roots.",
+    },
+    ExecStartRefusal {
+        code: EXEC_WRITABLE_ROOT_NAME_INVALID,
+        status: 422,
+        class: ErrorClass::Refused,
+        message: "A writable root names a host root by a root name, or a Git checkout by a workspace id.",
+    },
+    ExecStartRefusal {
+        code: EXEC_WRITABLE_ROOT_MOUNT_INVALID,
+        status: 422,
+        class: ErrorClass::Refused,
+        message: "A writable root mount must be an absolute, canonical path other than /, of at most 4000 bytes.",
+    },
+    ExecStartRefusal {
+        code: EXEC_WRITABLE_ROOT_MOUNT_RESERVED,
+        status: 422,
+        class: ErrorClass::Refused,
+        message: "A writable root mount must not be, lie beneath or contain /usr, /bin, /lib, /lib64, /proc, /dev, /tmp, /etc, /workspace, /runtime or /scratch.",
+    },
+    ExecStartRefusal {
+        code: EXEC_WRITABLE_ROOT_MOUNT_DUPLICATE,
+        status: 422,
+        class: ErrorClass::Refused,
+        message: "Two writable roots name the same mount.",
+    },
+    ExecStartRefusal {
+        code: EXEC_WRITABLE_ROOT_MOUNT_OVERLAP,
+        status: 422,
+        class: ErrorClass::Refused,
+        message: "A writable root mount must not contain or lie beneath another writable root, and must not equal, contain or lie beneath a read-only root or file.",
+    },
+    ExecStartRefusal {
+        code: EXEC_WRITABLE_ROOTS_HOST_UNSERVED,
+        status: 501,
+        class: ErrorClass::Unserved,
+        message: "Writable host root {name} is not served by this host.",
+    },
+    ExecStartRefusal {
+        code: EXEC_WRITABLE_ROOTS_GIT_UNSERVED,
+        status: 501,
+        class: ErrorClass::Unserved,
+        message: "Writable Git root {name} is not served by this host.",
+    },
+];
+
+/// Whether `id` is a workspace id: `ws_` and one or more ASCII alphanumerics, the published
+/// `workspace-id` pattern.
+fn is_workspace_id(id: &str) -> bool {
+    id.strip_prefix("ws_")
+        .is_some_and(|rest| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_alphanumeric()))
+}
+
+/// Checks a start's writable roots against every lexical rule ADR 0038 names.
+///
+/// In order: the bound, then per entry its name, its mount's form, the reserved paths, the
+/// read-only mounts of the same start; then the writable mounts against each other. Whether a host
+/// name is declared, or a workspace is a Ready Git checkout of the caller, is not lexical.
+///
+/// # Errors
+///
+/// Returns the first rule that was broken; [`writable_root_refusal`] names its code. Nothing is
+/// adjusted.
+pub fn validate_writable_roots(input: &ExecStartInput) -> Result<(), WireValidationError> {
+    let roots = &input.writable_roots;
+    if roots.len() > MAX_WRITABLE_ROOTS as usize {
+        return Err(WireValidationError::WritableRootsExceeded);
+    }
+    let nested = |a: &str, b: &str| a == b || is_path_beneath(a, b) || is_path_beneath(b, a);
+    for root in roots {
+        let named = match root {
+            WritableRoot::Host(root) => is_root_name(&root.host),
+            WritableRoot::Git(root) => is_workspace_id(&root.workspace),
+        };
+        if !named {
+            return Err(WireValidationError::WritableRootNameInvalid);
+        }
+        let mount = root.mount();
+        if !is_bounded_file_path(mount) || mount.len() > MAX_WRITABLE_ROOT_MOUNT_BYTES {
+            return Err(WireValidationError::WritableRootMountInvalid);
+        }
+        if collides_with_owned_mount(mount)
+            || WRITABLE_ROOT_RESERVED_MOUNTS
+                .iter()
+                .any(|reserved| mount == *reserved || (*reserved != "/" && nested(mount, reserved)))
+        {
+            return Err(WireValidationError::WritableRootMountReserved);
+        }
+        if input
+            .read_only_roots
+            .iter()
+            .map(|root| root.mount.as_str())
+            .chain(input.read_only_files.iter().map(|file| file.mount.as_str()))
+            .any(|other| nested(mount, other))
+        {
+            return Err(WireValidationError::WritableRootMountOverlap);
+        }
+    }
+    for (index, root) in roots.iter().enumerate() {
+        for other in &roots[..index] {
+            if root.mount() == other.mount() {
+                return Err(WireValidationError::WritableRootMountDuplicate);
+            }
+            if nested(root.mount(), other.mount()) {
+                return Err(WireValidationError::WritableRootMountOverlap);
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Admits a start's writable roots against the published facts (ADR 0038 decision 5): every
+/// lexical rule first ([`validate_writable_roots`]), then each entry in order against the fact of
+/// its kind. A host root whose name the host fact does not list, or a Git root while the Git fact
+/// is not `true`, is unserved with that name; nothing is skipped.
+///
+/// # Errors
+///
+/// The lexical rule that was broken, or the first entry no fact serves.
+pub fn admit_writable_roots(
+    input: &ExecStartInput,
+    facts: &CapabilityFacts,
+) -> Result<(), WireValidationError> {
+    validate_writable_roots(input)?;
+    for root in &input.writable_roots {
+        match root {
+            WritableRoot::Host(root) => {
+                let declared = facts
+                    .exec_writable_roots_host
+                    .as_ref()
+                    .is_some_and(|names| names.contains(&root.host));
+                if !declared {
+                    return Err(WireValidationError::WritableRootHostUnserved {
+                        name: root.host.clone(),
+                    });
+                }
+            }
+            WritableRoot::Git(root) => {
+                if facts.exec_writable_roots_git != Some(true) {
+                    return Err(WireValidationError::WritableRootGitUnserved {
+                        workspace: root.workspace.clone(),
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The ADR 0038 refusal a validation error names, with its message rendered: the unserved
+/// templates carry the host root name or workspace id. `None` for every other error.
+#[must_use]
+pub fn writable_root_refusal(error: &WireValidationError) -> Option<(ExecStartRefusal, String)> {
+    let (index, name) = match error {
+        WireValidationError::WritableRootsExceeded => (0, None),
+        WireValidationError::WritableRootNameInvalid => (1, None),
+        WireValidationError::WritableRootMountInvalid => (2, None),
+        WireValidationError::WritableRootMountReserved => (3, None),
+        WireValidationError::WritableRootMountDuplicate => (4, None),
+        WireValidationError::WritableRootMountOverlap => (5, None),
+        WireValidationError::WritableRootHostUnserved { name } => (6, Some(name.as_str())),
+        WireValidationError::WritableRootGitUnserved { workspace } => (7, Some(workspace.as_str())),
+        _ => return None,
+    };
+    let refusal = WRITABLE_ROOT_REFUSALS[index];
+    let message = match name {
+        Some(name) => refusal.message.replace("{name}", name),
+        None => refusal.message.to_owned(),
+    };
+    Some((refusal, message))
+}
+
+/// Looks up one of the design 26 or ADR 0038 start refusals by its code.
 pub fn exec_start_refusal(code: &str) -> Option<ExecStartRefusal> {
     WORKDIR_REFUSALS
         .iter()
         .chain(APERTURE_LIST_REFUSALS.iter())
+        .chain(WRITABLE_ROOT_REFUSALS.iter())
         .find(|refusal| refusal.code == code)
         .copied()
 }
@@ -5124,8 +5466,8 @@ mod tests {
         let version = ADVERTISED_CONTRACT_BUNDLE
             .strip_prefix("substrate-wire/")
             .expect("advertised contract prefix");
-        assert_eq!(version, "0.21.0", "the reviewed promotion target moved");
-        let bytes = include_bytes!("../../../contracts/substrate-wire/0.21.0/bundle.json");
+        assert_eq!(version, "0.22.0", "the reviewed promotion target moved");
+        let bytes = include_bytes!("../../../contracts/substrate-wire/0.22.0/bundle.json");
         assert_eq!(
             hex::encode(Sha256::digest(bytes)),
             ADVERTISED_CONTRACT_BUNDLE_SHA256
@@ -5695,6 +6037,9 @@ mod workdir_aperture_tests;
 
 #[cfg(test)]
 mod host_process_tests;
+
+#[cfg(test)]
+mod writable_root_tests;
 
 #[cfg(test)]
 mod adoption_tests {

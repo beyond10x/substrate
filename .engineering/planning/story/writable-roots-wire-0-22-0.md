@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:writable-roots-wire-0-22-0
 kind: story
-status: draft
+status: active
 title: Bundle substrate-wire/0.22.0 publishes writable roots
 scope:
 - confidence: cited
@@ -17,7 +17,10 @@ scope:
   path: xtask/bundle-source/0.22.0
 - confidence: cited
   path: xtask/src/bundle.rs
-revision: 2
+revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-22T11:02:42Z", actor: "agent:b10x-chef-orchestrator", revision: 3}
+- {from: "proposed", to: "active", at: "2026-10-22T11:02:42Z", actor: "agent:b10x-chef-orchestrator", revision: 4}
 ---
 # Bundle substrate-wire/0.22.0 publishes writable roots
 

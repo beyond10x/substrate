@@ -116,6 +116,7 @@ fn exec_input(
     read_only_roots: Vec<ReadOnlyRoot>,
 ) -> ExecStartInput {
     ExecStartInput {
+        writable_roots: Vec::new(),
         read_only_roots,
         read_only_files,
         secret_slots: Vec::new(),
