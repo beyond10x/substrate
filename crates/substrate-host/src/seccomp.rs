@@ -233,7 +233,7 @@ pub(crate) struct FamilyPolicy {
 /// that is measured, not feared: `socket(AF_INET, SOCK_STREAM, IPPROTO_SCTP)` from inside this
 /// argv loaded `sctp` onto the host, where it stayed. It cannot be closed for `AF_INET` without
 /// closing `AF_INET`, and the egress aperture is a TCP listener in the child's own namespace
-/// (`egress::install`) while every ordinary program resolves names — so that one is an **accepted
+/// (`egress::install_all`) while every ordinary program resolves names — so that one is an **accepted
 /// residual, written down**. The families that are denied below are the ones where the same
 /// channel costs nothing to close, because the survey also measured that a confined process can do
 /// nothing with them: an empty network namespace has no interface for `AF_RDS` or `AF_SMC`, no
