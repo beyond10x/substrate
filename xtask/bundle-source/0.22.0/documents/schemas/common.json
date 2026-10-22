@@ -453,6 +453,36 @@
           "class": "unserved",
           "code": "exec.writable-roots-git-unserved",
           "status": 501
+        },
+        {
+          "class": "refused",
+          "code": "exec.writable-root-absent",
+          "status": 422
+        },
+        {
+          "class": "refused",
+          "code": "exec.writable-root-not-a-directory",
+          "status": 422
+        },
+        {
+          "class": "refused",
+          "code": "exec.writable-root-not-owned",
+          "status": 422
+        },
+        {
+          "class": "refused",
+          "code": "exec.writable-root-not-git",
+          "status": 422
+        },
+        {
+          "class": "refused",
+          "code": "exec.writable-root-own-workspace",
+          "status": 422
+        },
+        {
+          "class": "refused",
+          "code": "exec.writable-root-workspace-duplicate",
+          "status": 422
         }
       ],
       "x-b10x-unique": "mount"

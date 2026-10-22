@@ -17,7 +17,7 @@ pub const API_VERSION: &str = "v1";
 /// Moving either member is an explicit coordinated promotion (Atlas ADR 0019).
 pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.22.0";
 pub const ADVERTISED_CONTRACT_BUNDLE_SHA256: &str =
-    "932becccb3781c4bc82d1fb8d8b77632dfe9ca40e573710258a71d9136a9f263";
+    "5d551f08c3b680c144359b13ff99a7da2853003c4fcc9665a32b21ce85e146da";
 pub const MAX_FILE_BYTES: u64 = 1_048_576;
 pub const MAX_IO_BYTES: u64 = 1_048_576;
 pub const MAX_LIST_ITEMS: u32 = 1_000;
@@ -153,6 +153,33 @@ pub const EXEC_WRITABLE_ROOT_MOUNT_OVERLAP: &str = "exec.writable-root-mount-ove
 pub const EXEC_WRITABLE_ROOTS_HOST_UNSERVED: &str = "exec.writable-roots-host-unserved";
 /// A Git root was named and [`EXEC_WRITABLE_ROOTS_GIT_FACT`] is not published (ADR 0038).
 pub const EXEC_WRITABLE_ROOTS_GIT_UNSERVED: &str = "exec.writable-roots-git-unserved";
+/// A declared writable host root, or a Git root's checkout, is not present on this host
+/// (ADR 0038).
+pub const EXEC_WRITABLE_ROOT_ABSENT: &str = "exec.writable-root-absent";
+/// A writable root's host path is not a directory, or is reached through a symlink (ADR 0038).
+pub const EXEC_WRITABLE_ROOT_NOT_A_DIRECTORY: &str = "exec.writable-root-not-a-directory";
+/// A writable root's host path is not owned by the daemon's effective uid (ADR 0038).
+pub const EXEC_WRITABLE_ROOT_NOT_OWNED: &str = "exec.writable-root-not-owned";
+/// A writable Git root names a workspace not created from a Git source (ADR 0038 kind 2).
+pub const EXEC_WRITABLE_ROOT_NOT_GIT: &str = "exec.writable-root-not-git";
+/// A writable Git root names the start's own workspace, already mounted at `/workspace`.
+pub const EXEC_WRITABLE_ROOT_OWN_WORKSPACE: &str = "exec.writable-root-own-workspace";
+/// A writable Git root names a workspace another entry of the same start already names.
+pub const EXEC_WRITABLE_ROOT_WORKSPACE_DUPLICATE: &str = "exec.writable-root-workspace-duplicate";
+/// The six writable-root refusals a host raises at admission, after every lexical rule and
+/// capability check of [`WRITABLE_ROOT_REFUSALS`]: each a 422 `refused` whose message names the
+/// root or workspace (ADR 0038).
+///
+/// The one place the set is written down for the contract: the host binds its codes from these
+/// constants, and the `0.22.0` additions check asks the bundle to publish them beside the table.
+pub const WRITABLE_ROOT_HOST_REFUSAL_CODES: [&str; 6] = [
+    EXEC_WRITABLE_ROOT_ABSENT,
+    EXEC_WRITABLE_ROOT_NOT_A_DIRECTORY,
+    EXEC_WRITABLE_ROOT_NOT_OWNED,
+    EXEC_WRITABLE_ROOT_NOT_GIT,
+    EXEC_WRITABLE_ROOT_OWN_WORKSPACE,
+    EXEC_WRITABLE_ROOT_WORKSPACE_DUPLICATE,
+];
 /// The paths a writable root mount may not be, lie beneath or contain (ADR 0038 decision 4); `/`
 /// by equality only. The mounts substrate owns ([`RESERVED_MOUNTS`] and the aperture files under
 /// `/etc`) are all here or beneath one of these.

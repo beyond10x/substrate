@@ -11,9 +11,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 - Development contract bundle `substrate-wire/0.22.0` (ADR 0038), additive over `0.21.0` with
   its 44 routes unchanged. The daemon and SDK advertise it at inner `bundle.json` digest
-  `932becccb3781c4bc82d1fb8d8b77632dfe9ca40e573710258a71d9136a9f263`. `cargo xtask check-bundle
+  `5d551f08c3b680c144359b13ff99a7da2853003c4fcc9665a32b21ce85e146da`. `cargo xtask check-bundle
   0.22.0` holds its bound, reserved mounts, facts, refusals, vectors and compatibility text to the
-  wire constants, and the gate checks it beside every earlier bundle.
+  wire constants, and the gate checks it beside every earlier bundle. Its `writable-roots` register
+  publishes the six host refusals beside the eight lexical and unserved ones, as `0.21.0` publishes
+  the read-only-file host codes: `exec.writable-root-absent`, `-not-a-directory`, `-not-owned`,
+  `-not-git`, `-own-workspace` and `-workspace-duplicate`, each 422 `refused`.
 - An exec or session start may name `writable_roots`, at most `MAX_WRITABLE_ROOTS` (8) entries,
   each either `{host, mount}` naming an operator-declared host root or `{workspace, mount}` naming
   a Git checkout workspace. A start that names none serializes and hashes as before. The daemon and
