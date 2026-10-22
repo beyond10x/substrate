@@ -2,11 +2,13 @@
 format: aep.planning-md/3
 id: decision-blocker:writable-host-roots-adr
 kind: decision-blocker
-status: open
+status: cleared
 title: Accept the writable-host-roots ADR
 relations:
 - blocks: story:writable-host-roots
-revision: 2
+revision: 4
+transitions:
+- {from: "open", to: "cleared", at: "2026-10-22T10:47:48Z", actor: "agent:b10x-chef-orchestrator", revision: 4}
 ---
 # Decision blocker: accept the writable-host-roots ADR
 
@@ -29,3 +31,14 @@ Recommendation: B, drafted as
 Orchestrator, 2026-10-22: "Agreed: ADR is Timo's; I asked him A/B/C." Then: "Accepted: draft B
 (proposed, not accepted, no implementation); adr/0035:18 confirms the single-component limit. I put
 B to Timo as the recommendation."
+
+## Answer
+
+Operator, 2026-10-22, relayed verbatim by the orchestrator: "either name physical paths, or provide
+git source". Orchestrator: "So a writable root outside /workspace is one of two kinds: (1) a host
+path the operator names physically in the daemon config, or (2) a git source the run gets as a
+writable checkout. Write the ADR on that design (it replaces options A/B/C; B's named, fd-bound
+selection fits kind 1)".
+
+Decided by `adr/0038-writable-roots-are-named-host-paths-or-git-checkouts.md` (accepted), recorded
+as `architecture-decision-record:writable-host-roots-are-operator-declared`.
