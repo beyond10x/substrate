@@ -1284,13 +1284,20 @@ fn release_sandbox(mut barrier: File) {
     drop(barrier);
 }
 
-/// Reads bubblewrap's `--info-fd` JSON far enough to take `child-pid` — trap 2 in one place.
+/// Reads bubblewrap's whole `--info-fd` JSON object and takes `child-pid` — trap 2 in one place.
+///
+/// The whole object, not just the field: bubblewrap writes it in separate `write` calls
+/// (`child-pid`, then one per namespace id, then the closing brace) and only then lets its child
+/// run. A caller that drops the read end after the first write makes the next one raise `SIGPIPE`
+/// in bubblewrap, which dies with the child unstarted and `lo` never raised, so the install fails
+/// `EADDRNOTAVAIL` and the run is refused. EOF is still not awaited: the object's closing brace is
+/// the end, because other forks may hold a copy of the write end.
 pub(crate) fn read_sandbox_pid<R: std::io::Read>(info: &mut R) -> Option<u32> {
     let mut buffer = Vec::new();
     let mut chunk = [0_u8; 512];
     loop {
-        if let Some(pid) = sandbox_pid_from(&buffer) {
-            return Some(pid);
+        if buffer.trim_ascii_end().ends_with(b"}") {
+            return sandbox_pid_from(&buffer);
         }
         let read = info.read(&mut chunk).ok()?;
         if read == 0 {
@@ -1303,10 +1310,11 @@ pub(crate) fn read_sandbox_pid<R: std::io::Read>(info: &mut R) -> Option<u32> {
     }
 }
 
-/// The `child-pid` field, taken without waiting for bubblewrap to close the descriptor.
+/// The `child-pid` field of bytes read from `--info-fd`.
 ///
-/// Bubblewrap writes the whole object before it releases `--block-fd` but keeps the descriptor
-/// open, so waiting for EOF here would deadlock against the barrier this exists to run inside.
+/// Bubblewrap writes the whole object before it releases `--block-fd`, but a copy of the
+/// descriptor may stay open, so waiting for EOF would deadlock against the barrier this exists to
+/// run inside; [`read_sandbox_pid`] stops at the object's closing brace instead.
 pub(crate) fn sandbox_pid_from(bytes: &[u8]) -> Option<u32> {
     let text = std::str::from_utf8(bytes).ok()?;
     let after = text.split_once("\"child-pid\"")?.1;
@@ -2514,6 +2522,48 @@ mod tests {
         assert_eq!(sandbox_pid_from(b"{\"child-pid\":"), None);
     }
 
+    /// Bubblewrap 0.12.0's `--info-fd` report, one element per `write` it makes (strace), with
+    /// the closing brace last.
+    const INFO_WRITES: [&[u8]; 5] = [
+        b"{\n    \"child-pid\": 2732544",
+        b",\n    \"mnt-namespace\": 4026548654",
+        b",\n    \"net-namespace\": 4026548657",
+        b",\n    \"pid-namespace\": 4026548656",
+        b"\n}\n",
+    ];
+
+    /// A reader that hands out one bubblewrap `write` per `read`, and counts how many it gave.
+    struct InfoWrites {
+        given: usize,
+    }
+
+    impl std::io::Read for InfoWrites {
+        fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+            let Some(write) = INFO_WRITES.get(self.given) else {
+                panic!("read past the closing brace: EOF may never come while a copy is open");
+            };
+            buffer[..write.len()].copy_from_slice(write);
+            self.given += 1;
+            Ok(write.len())
+        }
+    }
+
+    /// The report is read to its closing brace before the pid is returned. A reader that stopped at
+    /// `child-pid` let its caller close the pipe while bubblewrap still had four writes to make;
+    /// the next one killed bubblewrap with `SIGPIPE` before its child raised `lo`, and the install
+    /// failed `EADDRNOTAVAIL` (`a_failed_third_install_leaves_no_earlier_listener_answering`
+    /// printed nothing, 40 of 1,600 parallel runs).
+    #[test]
+    fn the_sandbox_pid_is_returned_only_after_bubblewraps_last_info_write() {
+        let mut info = InfoWrites { given: 0 };
+        assert_eq!(read_sandbox_pid(&mut info), Some(2_732_544));
+        assert_eq!(
+            info.given,
+            INFO_WRITES.len(),
+            "the pid was returned with bubblewrap's later info writes still to come"
+        );
+    }
+
     /// The startup probe: the mechanism, exercised end to end in a throwaway sandbox.
     ///
     /// This is the one path a run never takes and the daemon always does, so it gets its own case.
@@ -3226,6 +3276,11 @@ mod tests {
                 panic!("a set with an uninstallable third member was installed");
             };
             assert_eq!(refusal.code, "exec.aperture-install-failed");
+            assert!(
+                refusal.message.contains("Only IPv4"),
+                "the set was refused before its third member: {}",
+                refusal.message
+            );
             let printed = sandbox.finish(Duration::from_secs(30));
             assert_eq!(
                 printed, "127.0.0.1=refused 127.0.0.2=refused 127.0.0.3=refused ",
