@@ -43,3 +43,4 @@ with YAML frontmatter containing `date` and `status`. Draft design questions rem
 | [0035](0035-an-operators-directory-is-served-after-an-explicit-adopt.md) | An operator's directory is served after an explicit adopt | accepted |
 | [0036](0036-host-processes-are-a-supervised-resource-family.md) | Host processes are a supervised resource family | accepted |
 | [0037](0037-macos-confinement-is-the-platform-sandbox.md) | macOS confinement is the platform sandbox, with its own capability facts | accepted |
+| [0038](0038-writable-roots-are-named-host-paths-or-git-checkouts.md) | A writable root is a named host path or a Git checkout | accepted |
