@@ -1,0 +1,14 @@
+{
+  "at": "2026-10-22T07:24:06Z",
+  "actor": "human:timo",
+  "artifact": "story:several-apertures-per-run",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:several-apertures-host-adversary-pass-2",
+    "review": "review-result:several-apertures-host-adversary-pass-2",
+    "outcome": "fixed"
+  }
+}
