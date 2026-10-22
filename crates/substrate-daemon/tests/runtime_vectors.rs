@@ -3155,7 +3155,7 @@ async fn check_http_journey(
             Some(&mutation("01JPHASE2CLEANDESTROY1", &json!({}))),
         )
         .await;
-    assert_eq!(status, 200);
+    assert_eq!(status, 200, "{destroyed}");
     assert_eq!(destroyed["result"]["absent"], true);
     passed += 1;
 
@@ -5144,6 +5144,27 @@ async fn check_confined_workdir(daemon: &Daemon, workspace: &str, snapshot: &str
         );
         passed += 1;
     }
+    // The probe goes again: the journey's own destroy expects a workspace one batch can empty, and
+    // a directory two levels deep takes a second (`flatten_directory_batch`).
+    let (status, removed) = daemon
+        .call(
+            "POST",
+            "/v1/execs",
+            "req_clean_workdir_remove",
+            Some(&mutation(
+                "01JWORKDIRCLEANREMOVE01",
+                &ExecInput::new(
+                    workspace,
+                    snapshot,
+                    &["/bin/rm", "-rf", "workdir-probe"],
+                    true,
+                )
+                .build(),
+            )),
+        )
+        .await;
+    assert_eq!(status, 200, "{removed}");
+    assert_eq!(removed["result"]["exit"], EXITED_CLEANLY(), "{removed}");
     passed + check_confined_workdir_beneath_a_root(daemon, workspace, snapshot).await
 }
 
