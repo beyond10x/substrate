@@ -106,6 +106,14 @@ impl GuardedFilesystem {
         self.openat2
     }
 
+    /// A duplicate of the workspaces-root descriptor pinned at open, for the exec path to resolve
+    /// workspaces beneath, so exec and the file routes name one root.
+    pub(super) fn root_descriptor(&self) -> Result<OwnedFd, DriverError> {
+        // SAFETY: duplicates the live root descriptor; the result is owned immediately.
+        let fd = unsafe { libc::fcntl(self.root.as_raw_fd(), libc::F_DUPFD_CLOEXEC, 3) };
+        owned_fd(fd, "workspace root")
+    }
+
     pub(super) fn root_identity(&self) -> Result<(libc::dev_t, libc::ino_t), DriverError> {
         let metadata = fstat(self.root.as_raw_fd())?;
         Ok((metadata.st_dev, metadata.st_ino))
@@ -1329,6 +1337,67 @@ fn split_parent(path: &str) -> Result<(&str, &str), DriverError> {
         None if !path.is_empty() => Ok((".", path)),
         _ => Err(path_escape()),
     }
+}
+
+/// Pins the directory an exec mounts at `/workspace`: the entry `workspace` names, opened with
+/// `openat2` beneath `root`, the workspaces-root descriptor the driver pinned when it opened, and
+/// without following any link, so bubblewrap binds this descriptor and never re-resolves a path.
+/// The file routes resolve every root name beneath that same descriptor (`workspace_fd`), so exec
+/// and the file routes name one object even after the root's path is replaced.
+///
+/// An adopted directory belongs to the operator, who may replace it after adopt. The answers are
+/// the ones adoption and the file routes give for the same entry (`classify_open_error`): absent
+/// is `resource.not-found`; a symlink, a regular file or another mount in its place is
+/// `workspace.path-escape`; a kernel without `openat2` is `workspace.openat2-unavailable`.
+pub(crate) fn pin_workspace_directory_beneath(
+    root: &OwnedFd,
+    workspace: &Path,
+) -> Result<OwnedFd, DriverError> {
+    let Some(name) = workspace.file_name() else {
+        return Err(path_escape());
+    };
+    let name = CString::new(name.as_bytes()).map_err(|_| path_escape())?;
+    openat2_cstr(
+        root.as_raw_fd(),
+        &name,
+        libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        0,
+    )
+}
+
+/// Opens one component of a writable subtree beneath the pinned directory `directory`, without
+/// following a link, and reports what it is.
+pub(crate) fn open_component_beneath(
+    directory: &OwnedFd,
+    component: &str,
+) -> Result<OwnedFd, DriverError> {
+    openat2(
+        directory.as_raw_fd(),
+        component,
+        libc::O_PATH | libc::O_CLOEXEC | libc::O_NOFOLLOW,
+        0,
+    )
+}
+
+/// [`pin_workspace_directory_beneath`] for a directory the caller has just created and holds by
+/// path, as the capability probe does: the parent is opened by path, following links.
+pub(crate) fn pin_workspace_directory(workspace: &Path) -> Result<OwnedFd, DriverError> {
+    let Some(parent) = workspace.parent() else {
+        return Err(path_escape());
+    };
+    let parent = CString::new(parent.as_os_str().as_bytes()).map_err(|_| path_escape())?;
+    // SAFETY: the C string is terminated and the successful descriptor is immediately owned.
+    let root = unsafe {
+        libc::open(
+            parent.as_ptr(),
+            libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
+        )
+    };
+    if root < 0 {
+        return Err(classify_open_error(std::io::Error::last_os_error()));
+    }
+    let root = owned_fd(root, "open")?;
+    pin_workspace_directory_beneath(&root, workspace)
 }
 
 /// Refuse any workspace root name that is not a single, safely spellable path component.

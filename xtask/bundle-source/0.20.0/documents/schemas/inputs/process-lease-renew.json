@@ -1,0 +1,45 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.20.0:input:process-lease-renew",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Renews a TTL lease, or changes keep to a TTL (ADR 0036 S4). The shape is the shared lease-renew input.",
+  "properties": {
+    "ttl_ms": {
+      "maximum": 86400000,
+      "minimum": 1000,
+      "type": "integer"
+    }
+  },
+  "required": [
+    "ttl_ms"
+  ],
+  "title": "process-lease-renew operation input",
+  "type": "object",
+  "x-b10x-refusals": [
+    {
+      "class": "unserved",
+      "code": "process.host-unserved",
+      "status": 501
+    },
+    {
+      "class": "refused",
+      "code": "process.host-posture-refused",
+      "status": 403
+    },
+    {
+      "class": "refused",
+      "code": "process.host-subject-mismatch",
+      "status": 403
+    },
+    {
+      "class": "refused",
+      "code": "process.not-found",
+      "status": 404
+    },
+    {
+      "class": "conflict",
+      "code": "lease.expired",
+      "status": 409
+    }
+  ]
+}

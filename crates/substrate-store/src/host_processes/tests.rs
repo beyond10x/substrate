@@ -1215,3 +1215,232 @@ fn the_table_refuses_a_lease_and_a_keep_together() {
         "a TTL and a keep together violate the row's check"
     );
 }
+
+#[test]
+fn an_abandoned_start_concludes_its_operation_and_removes_only_its_starting_record() {
+    let (_dir, store) = open();
+    let alice = scope("local:1000");
+    start(
+        &store,
+        &alice,
+        "op-abandon",
+        &process("proc_1", "s-1", "dev"),
+    );
+    let detail = substrate_wire::ErrorDetail {
+        class: substrate_wire::ErrorClass::Failed,
+        code: "process.start-abandoned".to_owned(),
+        message: "never dispatched".to_owned(),
+        retriable: false,
+        address: Some("process".to_owned()),
+        operation: Some("op-abandon".to_owned()),
+    };
+    store
+        .abandon_host_process_start(&alice, "op-abandon", at(5), 503, "proc_1", &detail)
+        .expect("abandon");
+    assert_eq!(store.host_process(&alice, "proc_1").expect("read"), None);
+    let operation = store
+        .operation(&alice, "op-abandon")
+        .expect("ledger")
+        .expect("op");
+    assert_eq!(operation.state, OperationState::Terminal);
+    assert!(
+        serde_json::to_string(&operation.outcome)
+            .expect("outcome")
+            .contains("process.start-abandoned")
+    );
+    // A running record is never removed by an abandon of its start.
+    start(
+        &store,
+        &alice,
+        "op-running",
+        &process("proc_2", "s-1", "db"),
+    );
+    store
+        .mark_host_process_running(&alice, "proc_2", at(1))
+        .expect("running");
+    store
+        .abandon_host_process_start(&alice, "op-running", at(5), 503, "proc_2", &detail)
+        .expect("abandon of a running start");
+    assert_eq!(
+        store
+            .host_process(&alice, "proc_2")
+            .expect("read")
+            .expect("kept")
+            .state,
+        HostProcessState::Running
+    );
+}
+
+fn selected_ids(selected: &[(Scope, HostProcessRecord)]) -> Vec<(&str, &str)> {
+    selected
+        .iter()
+        .map(|(scope, record)| (scope.subject.as_str(), record.id.as_str()))
+        .collect()
+}
+
+#[test]
+fn reconciliation_selects_the_live_records_of_every_other_run() {
+    let (_dir, store) = open();
+    let alice = scope("local:1000");
+    let bob = scope("local:1001");
+    store.set_host_process_run("run_a");
+    start(&store, &alice, "op-a", &process("proc_a", "s-1", "a"));
+    start(&store, &bob, "op-b", &process("proc_b", "s-1", "b"));
+    start(&store, &alice, "op-c", &process("proc_c", "s-1", "c"));
+    end_exit(&store, &alice, "proc_c", 0);
+    assert_eq!(
+        store
+            .host_process(&alice, "proc_a")
+            .expect("read")
+            .expect("record")
+            .run
+            .as_deref(),
+        Some("run_a"),
+        "a record names the run that started it"
+    );
+
+    // The next run's wall clock reads two minutes before the previous run's starts: run
+    // membership must not follow the instant.
+    store.set_host_process_run("run_b");
+    let HostProcessStartReservation::Accepted(_) = start_at(
+        &store,
+        &alice,
+        "op-d",
+        &process("proc_d", "s-1", "d"),
+        at(-120_000),
+        &HostProcessLimits::default(),
+    ) else {
+        panic!("expected an accepted start");
+    };
+
+    let earlier = store
+        .host_processes_to_reconcile("dep_test", "run_b", 100)
+        .expect("select");
+    assert_eq!(
+        selected_ids(&earlier),
+        [("local:1000", "proc_a"), ("local:1001", "proc_b")],
+        "an earlier run's live record is reconciled although it started later on the wall clock"
+    );
+    let other = store
+        .host_processes_to_reconcile("dep_test", "run_a", 100)
+        .expect("select");
+    assert_eq!(selected_ids(&other), [("local:1000", "proc_d")]);
+    assert_eq!(
+        store
+            .host_processes_to_reconcile("dep_test", "run_c", 100)
+            .expect("select")
+            .len(),
+        3,
+        "a third run reconciles every live record"
+    );
+    let live = store
+        .live_host_processes("dep_test", 100)
+        .expect("select live");
+    assert_eq!(
+        selected_ids(&live),
+        [
+            ("local:1000", "proc_d"),
+            ("local:1000", "proc_a"),
+            ("local:1001", "proc_b"),
+        ],
+        "every live record of every run, in start order"
+    );
+}
+
+#[test]
+fn a_record_written_before_records_named_their_run_reads_and_is_reconciled() {
+    // Prevents a store written before the run column from failing to read its host processes,
+    // or from reading one as the current run's: no run can claim it, so a restart reconciles it.
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("state.sqlite");
+    let store = Store::open(&path).expect("open store");
+    let alice = scope("local:1000");
+    store.set_host_process_run("run_a");
+    start(&store, &alice, "op-a", &process("proc_a", "s-1", "a"));
+    store
+        .connection
+        .lock()
+        .execute_batch("ALTER TABLE host_processes DROP COLUMN run_id;")
+        .expect("rewind to the pre-run schema");
+    drop(store);
+
+    let reopened = Store::open(&path).expect("reopen migrates");
+    let record = reopened
+        .host_process(&alice, "proc_a")
+        .expect("read")
+        .expect("legacy record");
+    assert_eq!(record.run, None);
+    assert_eq!(record.state, HostProcessState::Starting);
+    reopened.set_host_process_run("run_a");
+    assert_eq!(
+        selected_ids(
+            &reopened
+                .host_processes_to_reconcile("dep_test", "run_a", 100)
+                .expect("select")
+        ),
+        [("local:1000", "proc_a")],
+        "a record that names no run belongs to an earlier run, whatever this run is called"
+    );
+    start(&reopened, &alice, "op-b", &process("proc_b", "s-1", "b"));
+    assert_eq!(
+        reopened
+            .host_process(&alice, "proc_b")
+            .expect("read")
+            .expect("record")
+            .run
+            .as_deref(),
+        Some("run_a"),
+        "the migrated column carries the run of a record written after it"
+    );
+}
+
+#[test]
+fn the_open_stop_operation_of_a_record_is_found_until_it_completes() {
+    let (_dir, store) = open();
+    let alice = scope("local:1000");
+    start(&store, &alice, "op-start", &process("proc_1", "s-1", "dev"));
+    assert_eq!(
+        store
+            .open_host_process_operation(&alice, "proc_1", HOST_PROCESS_STOP_KIND)
+            .expect("read"),
+        None
+    );
+    let mut stop = op(&alice, "op-stop", HOST_PROCESS_STOP_KIND, "proc_1", at(5));
+    stop.actor = HOST_PROCESS_SUPERVISOR_ACTOR.to_owned();
+    assert!(matches!(
+        store
+            .reserve_host_process_stop(&stop, "proc_1", HostProcessEndedBy::Stop)
+            .expect("stop"),
+        HostProcessStopReservation::Accepted(_)
+    ));
+    assert_eq!(
+        store
+            .open_host_process_operation(&alice, "proc_1", HOST_PROCESS_STOP_KIND)
+            .expect("read")
+            .as_deref(),
+        Some("op-stop")
+    );
+    assert_eq!(
+        store
+            .open_host_process_operation(&scope("local:1001"), "proc_1", HOST_PROCESS_STOP_KIND)
+            .expect("read"),
+        None,
+        "another subject's operation is not found"
+    );
+    store
+        .complete_success(
+            &alice,
+            "op-stop",
+            &at(6).to_rfc3339(),
+            200,
+            Some("proc_1"),
+            &1,
+        )
+        .expect("complete");
+    assert_eq!(
+        store
+            .open_host_process_operation(&alice, "proc_1", HOST_PROCESS_STOP_KIND)
+            .expect("read"),
+        None
+    );
+}

@@ -7,10 +7,14 @@ owner, a reason, a lease or a reasoned keep, an optional hard deadline, one cgro
 bounded log and an event stream. Under the `host` profile the process runs unconfined, and the
 record says so (`confinement: none`).
 
-No route, wire bundle or generated type is derived from this domain yet; the successor bundle that
-carries the family is cut from it. `cargo xtask check-ess` validates it, compares the committed
-synthesized suite [`../host-processes-suite.json`](../host-processes-suite.json) byte for byte, and
-runs the synthesized and authored scenarios against the ESS interpreted reference.
+The wire types of S1-S7 and S11 are declared in `wire.yaml` and generated from it into
+`crates/substrate-wire/src/generated/host_process.rs`, which `substrate-wire` re-exports (as
+`ProcessStartInput`, `ProcessRecord`, `ProcessState`, `ProcessEndedBy` and the rest). No route or wire
+bundle is derived from this domain yet; the successor bundle that carries the family is cut from it.
+`cargo xtask check-ess` validates it, compares the committed synthesized suite
+[`../host-processes-suite.json`](../host-processes-suite.json) byte for byte, runs the synthesized
+and authored scenarios against the ESS interpreted reference, and regenerates the wire types and
+compares them byte for byte.
 
 ```console
 ess specify validate --path spec/host-processes --strict-requires
@@ -20,7 +24,7 @@ ess verify conform run --path spec/host-processes --scenarios spec/host-processe
   --target interpreted --report-format 2 --strict-requires
 ```
 
-The pin is ESS 0.60.0 (`ess-inputs.yaml`). The authored scenarios under `scenarios/` are the
+The pin is ESS 0.67.0 (`ess-inputs.yaml`). The authored scenarios under `scenarios/` are the
 acceptance set, one or more per command. A run against the interpreted reference checks the model
 only. It is not evidence that any implementation conforms.
 
@@ -56,3 +60,29 @@ bound on the log file. Here a record reaches `Ended` only through the supervisor
 report (`RecordExit`) or its reconciliation finding the cgroup gone (`RecordVanished`, which ends
 the record `vanished`). Lease expiry and the hard deadline are supervisor commands, because ESS has
 no clock-driven transition.
+
+## Wire types (`wire.yaml`)
+
+`wire.yaml` declares what the routes of S1-S7 and S11 carry inside the existing mutation and success
+envelopes: the start input, the record and its lease, deadline, exit and observations, the listing
+page, the stop-by-owner input and result, and the log tail. `cargo xtask check-ess` generates them
+with ESS's Rust target (`--names short`) and compares the file byte for byte. Three choices follow
+from what ESS 0.60.0 can state:
+
+- **State spelling.** ESS requires a lifecycle state name to start with an upper-case letter, and the
+  wire spells every resource state in lower case, so `ProcessState` (`starting`, `running`,
+  `stopping`, `ended`) is its own enum beside the `HostProcess` lifecycle.
+- **Lease request.** ESS realizes a union with an explicit tag member, which ADR 0036's
+  `{ "ttl_ms": n }` or `{ "keep": true }` does not have, so `ProcessLeaseRequest` is one struct with
+  optional members, and the daemon admits exactly one of a TTL and a keep.
+- **Reachable refusals.** Every start member with a named refusal is optional, and `profile` and
+  `expires_at` are text, so an omitted or malformed member reaches its named refusal
+  (`process.profile-required`, `process.profile-unknown`, `process.expires-at-invalid`, …)
+  instead of the generic schema refusal.
+
+Hand-written beside them in `crates/substrate-wire/src/lib.rs`, because ESS 0.60.0 cannot express
+them: the bounds (`MAX_PROCESS_*` and the retention and grace constants; ESS declares no constants),
+the refusal codes with their statuses (`PROCESS_REFUSALS`; an ESS error carries no wire code or
+status), the `process.host` capability fact (a member of the existing hand-written capability
+facts), and the two query-string types `ProcessListQuery` and `ProcessLogsQuery` (ESS realizes an
+`Integer` as a JSON number, which a query-string decoder cannot read).

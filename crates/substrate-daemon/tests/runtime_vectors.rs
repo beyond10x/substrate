@@ -43,9 +43,9 @@ const DAEMON: &str = env!("CARGO_BIN_EXE_substrate-daemon");
 const CGROUP_EXEC: &str = env!("CARGO_BIN_EXE_substrate-cgroup-exec");
 const DAEMON_OVERRIDE_VARIABLE: &str = "SUBSTRATE_VECTORS_DAEMON";
 /// Pinned independently of the daemon implementation: the clean-room client verifies what ships.
-const ADVERTISED_CONTRACT: &str = "substrate-wire/0.19.0";
+const ADVERTISED_CONTRACT: &str = "substrate-wire/0.20.0";
 const ADVERTISED_CONTRACT_SHA256: &str =
-    "2590ccad60fb25df236426254005aeb874b8a08f7d38ec173dc864bb48aeeddd";
+    "52f72530cecf1b0e5d70fdca47abd27b844b89f65e6da2827c70fbf10d97a6d5";
 
 fn daemon_binary() -> PathBuf {
     std::env::var_os(DAEMON_OVERRIDE_VARIABLE).map_or_else(|| PathBuf::from(DAEMON), PathBuf::from)
@@ -957,6 +957,23 @@ impl<'a> ExecInput<'a> {
 
 const NO_EGRESS_PROGRAM: &str = "import socket;socket.create_connection(('1.1.1.1',53),1)";
 
+/// Exits [`NESTED_USERNS_REFUSED`] only when the kernel refuses a nested user namespace with
+/// `ENOSPC`, the answer `--disable-userns` gives (bubblewrap sets the child namespace's
+/// `user.max_user_namespaces` to zero), and 0 if one was created. Any other refusal, such as an
+/// `EPERM` from a host-level user-namespace restriction, exits 1, so the case cannot pass on a
+/// host policy that would hold without `--disable-userns`; any other failure (no `os.unshare`,
+/// say) exits 1 with a traceback, so it cannot pass on a program that never asked.
+const NESTED_USERNS_PROGRAM: &str = concat!(
+    "import errno,os,sys\n",
+    "try:\n",
+    "    os.unshare(os.CLONE_NEWUSER)\n",
+    "except OSError as error:\n",
+    "    print(error.errno, flush=True)\n",
+    "    sys.exit(7 if error.errno == errno.ENOSPC else 1)\n",
+    "sys.exit(0)\n",
+);
+const NESTED_USERNS_REFUSED: i64 = 7;
+
 const PIDS_PROGRAM: &str = concat!(
     "\n",
     "import os,time\n",
@@ -1056,12 +1073,85 @@ async fn wait_for_workspace_file(daemon: &Daemon, workspace: &str, path: &str, r
 // The delegated lane: confined execs
 // ---------------------------------------------------------------------------------------------
 
-#[allow(clippy::too_many_lines)] // One sequential journey; splitting it would lose the ordering.
+/// Guarded I/O: a file path that climbs out of the workspace is refused by name, never resolved
+/// (`openat2` beneath the workspace root). Runs for each [`WorkspaceOrigin`].
+async fn check_path_escape(daemon: &Daemon, workspace: &str, origin: WorkspaceOrigin) -> usize {
+    expect_error(
+        &daemon
+            .call(
+                "GET",
+                &format!(
+                    "/v1/workspaces/{workspace}/files/%2e%2e%2fetc%2fpasswd\
+                     ?mode=file&offset=0&limit_bytes=16"
+                ),
+                &origin.id("req_clean_escape"),
+                None,
+            )
+            .await,
+        422,
+        "workspace.path-escape",
+    );
+    1
+}
+
+/// How the workspace an isolation case runs in came to be served (ADR 0035).
+///
+/// The confinement floor is claimed unchanged for an adopted directory, so the isolation cases
+/// are one body run once per origin rather than a copy per origin: a case added to the floor is
+/// added for both.
+#[derive(Clone, Copy)]
+enum WorkspaceOrigin {
+    /// Minted and made by `workspace.create`.
+    Created,
+    /// An operator's directory, served after `workspace.adopt`.
+    Adopted,
+}
+
+impl WorkspaceOrigin {
+    /// The operation or request id a case sends for this origin.
+    ///
+    /// The created origin keeps the exact ids this file always sent, so its ledger rows are
+    /// unchanged; the adopted origin suffixes them, so each run is its own ledger row and never a
+    /// replay or a conflict of the other's.
+    fn id(self, base: &str) -> String {
+        match self {
+            Self::Created => base.to_owned(),
+            Self::Adopted => format!("{base}_ADOPTED"),
+        }
+    }
+}
+
 async fn check_confined_execs(
     daemon: &Daemon,
     workspace: &str,
     snapshot: &str,
     cgroup_root: &Path,
+) -> usize {
+    let mut passed = check_confined_isolation(
+        daemon,
+        workspace,
+        snapshot,
+        cgroup_root,
+        WorkspaceOrigin::Created,
+    )
+    .await;
+    passed += check_exec_retention(daemon, workspace, snapshot).await;
+    passed
+}
+
+/// The confinement floor of one confined exec: output, environment shaping, working directory,
+/// no egress, no nested user namespace, pids and memory bounds, output truncation, timeout,
+/// whole-tree kill and graceful termination.
+///
+/// Run against a created workspace and again against an adopted one (ADR 0035, consequences: "the
+/// delegated lane runs its isolation cases against an adopted workspace").
+#[allow(clippy::too_many_lines)] // One case per floor guarantee, in the order the lane has run them.
+async fn check_confined_isolation(
+    daemon: &Daemon,
+    workspace: &str,
+    snapshot: &str,
+    cgroup_root: &Path,
+    origin: WorkspaceOrigin,
 ) -> usize {
     let mut passed = 0;
 
@@ -1069,9 +1159,9 @@ async fn check_confined_execs(
         .call(
             "POST",
             "/v1/execs",
-            "req_clean_exec",
+            &origin.id("req_clean_exec"),
             Some(&mutation(
-                "01JPHASE2CLEANEXEC0001",
+                &origin.id("01JPHASE2CLEANEXEC0001"),
                 &ExecInput::new(workspace, snapshot, &["/usr/bin/printf", "hello"], true).build(),
             )),
         )
@@ -1094,9 +1184,9 @@ async fn check_confined_execs(
         .call(
             "POST",
             "/v1/execs",
-            "req_clean_environment",
+            &origin.id("req_clean_environment"),
             Some(&mutation(
-                "01JPHASE2CLEANENV000001",
+                &origin.id("01JPHASE2CLEANENV000001"),
                 &ExecInput::new(workspace, snapshot, &["/usr/bin/env"], true)
                     .environment(json!({ "VECTOR_VISIBLE": "yes" }))
                     .build(),
@@ -1115,35 +1205,62 @@ async fn check_confined_execs(
     );
     passed += 1;
 
+    // The working directory is observed, not stated: the program prints its physical cwd
+    // (`getcwd`, so no `PWD` in the environment can answer for it) and writes a relative file,
+    // which must then be served by this workspace's own file route, so the cwd is the mount of
+    // the workspace this exec named, not merely a directory called `/workspace`.
     let (status, pwd_exec) = daemon
         .call(
             "POST",
             "/v1/execs",
-            "req_clean_pwd",
+            &origin.id("req_clean_pwd"),
             Some(&mutation(
-                "01JPHASE3CLEANPWD000001",
+                &origin.id("01JPHASE3CLEANPWD000001"),
                 &ExecInput::new(
                     workspace,
                     snapshot,
-                    &["/usr/bin/test", "/workspace", "=", "/workspace"],
+                    &["/usr/bin/sh", "-c", "pwd -P && printf cwd > cwd-probe.txt"],
                     true,
                 )
-                .environment(json!({ "PWD": "/workspace" }))
                 .build(),
             )),
         )
         .await;
     assert_eq!(status, 200, "{pwd_exec}");
     assert_eq!(pwd_exec["result"]["exit"], EXITED_CLEANLY(), "{pwd_exec}");
+    let cwd = read_output(daemon, &text(&pwd_exec["result"]["id"]), "stdout").await;
+    assert_eq!(
+        decoded(&cwd),
+        b"/workspace\n",
+        "{}",
+        String::from_utf8_lossy(&decoded(&cwd))
+    );
+    let (status, probe) = daemon
+        .call(
+            "GET",
+            &format!(
+                "/v1/workspaces/{workspace}/files/cwd-probe.txt?mode=file&offset=0&limit_bytes=16"
+            ),
+            &origin.id("req_clean_pwd_probe"),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{probe}");
+    assert_eq!(
+        BASE64
+            .decode(text(&probe["result"]["content"]["data"]))
+            .expect("base64 file content"),
+        b"cwd"
+    );
     passed += 1;
 
     let (status, no_egress) = daemon
         .call(
             "POST",
             "/v1/execs",
-            "req_clean_no_egress",
+            &origin.id("req_clean_no_egress"),
             Some(&mutation(
-                "01JPHASE2CLEANNOEGRESS1",
+                &origin.id("01JPHASE2CLEANNOEGRESS1"),
                 &ExecInput::new(
                     workspace,
                     snapshot,
@@ -1159,13 +1276,44 @@ async fn check_confined_execs(
     assert_ne!(no_egress["result"]["exit"]["code"], 0, "{no_egress}");
     passed += 1;
 
+    // No nested user namespace: the child's own namespace is made with `--disable-userns`, so it
+    // cannot create another one and hold `CAP_SYS_ADMIN` in it (AGENTS.md, safety envelope).
+    let (status, nested_userns) = daemon
+        .call(
+            "POST",
+            "/v1/execs",
+            &origin.id("req_clean_nested_userns"),
+            Some(&mutation(
+                &origin.id("01JPHASE4CLEANNESTUSERNS"),
+                &ExecInput::new(
+                    workspace,
+                    snapshot,
+                    &["/usr/bin/python3", "-c", NESTED_USERNS_PROGRAM],
+                    true,
+                )
+                .build(),
+            )),
+        )
+        .await;
+    assert_eq!(status, 200, "{nested_userns}");
+    assert_eq!(
+        nested_userns["result"]["state"], "exited",
+        "{nested_userns}"
+    );
+    assert_eq!(
+        nested_userns["result"]["exit"],
+        json!({ "code": NESTED_USERNS_REFUSED, "signal": null }),
+        "{nested_userns}"
+    );
+    passed += 1;
+
     let (status, pids_exec) = daemon
         .call(
             "POST",
             "/v1/execs",
-            "req_clean_pids",
+            &origin.id("req_clean_pids"),
             Some(&mutation(
-                "01JPHASE2CLEANPIDS00001",
+                &origin.id("01JPHASE2CLEANPIDS00001"),
                 &ExecInput::new(
                     workspace,
                     snapshot,
@@ -1190,9 +1338,9 @@ async fn check_confined_execs(
         .call(
             "POST",
             "/v1/execs",
-            "req_clean_memory",
+            &origin.id("req_clean_memory"),
             Some(&mutation(
-                "01JPHASE2CLEANMEMORY0001",
+                &origin.id("01JPHASE2CLEANMEMORY0001"),
                 &ExecInput::new(
                     workspace,
                     snapshot,
@@ -1215,9 +1363,9 @@ async fn check_confined_execs(
         .call(
             "POST",
             "/v1/execs",
-            "req_clean_truncation",
+            &origin.id("req_clean_truncation"),
             Some(&mutation(
-                "01JPHASE2CLEANFILL00001",
+                &origin.id("01JPHASE2CLEANFILL00001"),
                 &ExecInput::new(
                     workspace,
                     snapshot,
@@ -1241,9 +1389,9 @@ async fn check_confined_execs(
         .call(
             "POST",
             "/v1/execs",
-            "req_clean_timeout",
+            &origin.id("req_clean_timeout"),
             Some(&mutation(
-                "01JPHASE2CLEANTIMEOUT001",
+                &origin.id("01JPHASE2CLEANTIMEOUT001"),
                 &ExecInput::new(workspace, snapshot, &["/usr/bin/sleep", "60"], true)
                     .timeout_ms(100)
                     .build(),
@@ -1267,9 +1415,9 @@ async fn check_confined_execs(
         .call(
             "POST",
             "/v1/execs",
-            "req_clean_tree_start",
+            &origin.id("req_clean_tree_start"),
             Some(&mutation(
-                "01JPHASE2CLEANTREE00001",
+                &origin.id("01JPHASE2CLEANTREE00001"),
                 &ExecInput::new(
                     workspace,
                     snapshot,
@@ -1283,14 +1431,20 @@ async fn check_confined_execs(
     assert_eq!(status, 202, "{running}");
     let exec_id = text(&running["result"]["id"]);
     let cgroup_name = text(&running["result"]["applied"]["cgroup"]);
-    wait_for_workspace_file(daemon, workspace, ".tree-ready", "req_clean_tree_ready").await;
+    wait_for_workspace_file(
+        daemon,
+        workspace,
+        ".tree-ready",
+        &origin.id("req_clean_tree_ready"),
+    )
+    .await;
     let (status, cancelled) = daemon
         .call(
             "POST",
             &format!("/v1/execs/{exec_id}/signal"),
-            "req_clean_tree_signal",
+            &origin.id("req_clean_tree_signal"),
             Some(&mutation(
-                "01JPHASE2CLEANTREESIGNAL",
+                &origin.id("01JPHASE2CLEANTREESIGNAL"),
                 &json!({ "signal": "TERM", "grace_ms": 100 }),
             )),
         )
@@ -1309,9 +1463,9 @@ async fn check_confined_execs(
         .call(
             "POST",
             "/v1/execs",
-            "req_clean_trap_start",
+            &origin.id("req_clean_trap_start"),
             Some(&mutation(
-                "01JPHASE3CLEANTRAPSTART1",
+                &origin.id("01JPHASE3CLEANTRAPSTART1"),
                 &ExecInput::new(
                     workspace,
                     snapshot,
@@ -1323,14 +1477,20 @@ async fn check_confined_execs(
         )
         .await;
     assert_eq!(status, 202, "{trapping}");
-    wait_for_workspace_file(daemon, workspace, ".trap-ready", "req_clean_trap_ready").await;
+    wait_for_workspace_file(
+        daemon,
+        workspace,
+        ".trap-ready",
+        &origin.id("req_clean_trap_ready"),
+    )
+    .await;
     let (status, trapped) = daemon
         .call(
             "POST",
             &format!("/v1/execs/{}/signal", text(&trapping["result"]["id"])),
-            "req_clean_trap_signal",
+            &origin.id("req_clean_trap_signal"),
             Some(&mutation(
-                "01JPHASE3CLEANTRAPSIGNAL",
+                &origin.id("01JPHASE3CLEANTRAPSIGNAL"),
                 &json!({ "signal": "TERM", "grace_ms": 5000 }),
             )),
         )
@@ -1339,7 +1499,13 @@ async fn check_confined_execs(
     assert_eq!(trapped["result"]["state"], "exited", "{trapped}");
     assert_eq!(trapped["result"]["exit"], EXITED_CLEANLY(), "{trapped}");
     passed += 1;
+    passed
+}
 
+/// Exec-record retention: waited and abandoned execs past the retained bound. A property of the
+/// daemon's exec table, not of the workspace an exec runs in, so it runs once.
+async fn check_exec_retention(daemon: &Daemon, workspace: &str, snapshot: &str) -> usize {
+    let mut passed = 0;
     for index in 0..129 {
         let (status, completed) = daemon
             .call(
@@ -2043,7 +2209,11 @@ async fn check_exec_lease(daemon: &Daemon, workspace: &str, snapshot: &str, cgro
 /// reaches every address declared by the promoted bundle and carries the promoted identity on the
 /// HTTP response or WebSocket handshake path.
 #[allow(clippy::too_many_lines)] // Keeping the complete declarative inventory together makes drift reviewable.
-async fn check_promoted_route_inventory(daemon: &Daemon, workspace: &str) -> usize {
+async fn check_promoted_route_inventory(
+    daemon: &Daemon,
+    workspace: &str,
+    process_host: bool,
+) -> usize {
     type Probe<'a> = (&'a str, &'a str, String, Option<&'a [u8]>, u16, &'a str);
     let invalid_body = b"{}".as_slice();
     let probes: Vec<Probe<'_>> = vec![
@@ -2334,11 +2504,104 @@ async fn check_promoted_route_inventory(daemon: &Daemon, workspace: &str) -> usi
             "request.schema-invalid",
         ),
     ];
+    // The host-process family (ADR 0036): no probe may start a program. Without a delegated
+    // cgroup the daemon serves no host process, so a well-formed start and every mutation of a
+    // record answer `process.host-unserved` (501), never a degraded start; the reads still answer,
+    // an unknown id is `process.not-found`. With one, the start omits its profile (refused before
+    // anything runs) and the mutations name a record that does not exist.
+    let process_absent = "proc_01JPROBEABSENT0000000001";
+    let process_start = serde_json::to_vec(&json!({
+        "op": "01JPROBEPROCESSSTART00001",
+        "input": {
+            "argv": ["/usr/bin/true"],
+            "cwd": "/",
+            "env": {},
+            "lease": { "ttl_ms": 60_000 },
+            "owner": { "name": "probe", "session": "sess-probe" },
+            "profile": "host",
+            "reason": "Route inventory probe.",
+        },
+    }))
+    .expect("process start JSON");
+    let process_start_unprofiled = serde_json::to_vec(&json!({
+        "op": "01JPROBEPROCESSSTART00002",
+        "input": {
+            "argv": ["/usr/bin/true"],
+            "cwd": "/",
+            "env": {},
+            "lease": { "ttl_ms": 60_000 },
+            "owner": { "name": "probe", "session": "sess-probe" },
+            "reason": "Route inventory probe.",
+        },
+    }))
+    .expect("process start JSON");
+    let process_stop = mutation("01JPROBEPROCESSSTOP000001", &json!({}));
+    let process_stop_by_owner = br#"{"owner_session":"sess-probe-absent"}"#.as_slice();
+    let process_renew = mutation("01JPROBEPROCESSRENEW00001", &json!({ "ttl_ms": 60_000 }));
+    let (start_body, start_status, start_code, mutation_status, mutation_code) = if process_host {
+        (
+            process_start_unprofiled.as_slice(),
+            422,
+            "process.profile-required",
+            404,
+            "process.not-found",
+        )
+    } else {
+        (
+            process_start.as_slice(),
+            501,
+            "process.host-unserved",
+            501,
+            "process.host-unserved",
+        )
+    };
+    let process_probes: Vec<Probe<'_>> = vec![
+        (
+            "process.start",
+            "POST",
+            "/v1/processes".to_owned(),
+            Some(start_body),
+            start_status,
+            start_code,
+        ),
+        (
+            "process.get",
+            "GET",
+            format!("/v1/processes/{process_absent}"),
+            None,
+            404,
+            "process.not-found",
+        ),
+        (
+            "process.stop",
+            "POST",
+            format!("/v1/processes/{process_absent}/stop"),
+            Some(process_stop.as_slice()),
+            mutation_status,
+            mutation_code,
+        ),
+        (
+            "process.lease.renew",
+            "POST",
+            format!("/v1/processes/{process_absent}/lease/renew"),
+            Some(process_renew.as_slice()),
+            mutation_status,
+            mutation_code,
+        ),
+        (
+            "process.logs.get",
+            "GET",
+            format!("/v1/processes/{process_absent}/logs"),
+            None,
+            404,
+            "process.not-found",
+        ),
+    ];
 
     let expected: BTreeSet<String> = {
         let registry = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
-            .join("contracts/substrate-wire/0.19.0/operations.json");
+            .join("contracts/substrate-wire/0.20.0/operations.json");
         let document: Value = serde_json::from_slice(
             &std::fs::read(&registry).expect("promoted operation registry bytes"),
         )
@@ -2358,6 +2621,8 @@ async fn check_promoted_route_inventory(daemon: &Daemon, workspace: &str) -> usi
         .iter()
         .map(|(id, ..)| (*id).to_owned())
         .chain(upgrade_probes.iter().map(|(id, ..)| (*id).to_owned()))
+        .chain(process_probes.iter().map(|(id, ..)| (*id).to_owned()))
+        .chain(["process.list", "process.stop-by-owner"].map(str::to_owned))
         .collect();
     assert_eq!(covered, expected, "shipped-binary route probes drifted");
 
@@ -2372,6 +2637,64 @@ async fn check_promoted_route_inventory(daemon: &Daemon, workspace: &str) -> usi
         let observed = upgrade_refusal(&daemon.socket, path, &request_id).await;
         expect_error(&observed, *status, code);
         assert!(observed.1["error"].is_object(), "{id}: {}", observed.1);
+    }
+
+    let (status, machine) = daemon
+        .call("GET", "/v1/machine", "req_promoted_process_fact", None)
+        .await;
+    assert_eq!(status, 200, "{machine}");
+    let published = &machine["result"]["facts"]["process.host"];
+    if process_host {
+        assert_eq!(
+            published,
+            &json!(true),
+            "process.host on the delegated lane"
+        );
+    } else {
+        assert!(
+            published.is_null(),
+            "process.host published without a delegated cgroup"
+        );
+    }
+    for (index, (id, method, path, body, status, code)) in process_probes.iter().enumerate() {
+        let request_id = format!("req_promoted_process_{index:02}");
+        let observed = daemon.call(method, path, &request_id, *body).await;
+        expect_error(&observed, *status, code);
+        assert_eq!(observed.1["error"]["code"], *code, "{id}: {}", observed.1);
+    }
+    // The reads answer on both lanes: no record of this subject exists yet.
+    let (status, listed) = daemon
+        .call(
+            "GET",
+            "/v1/processes?owner_session=sess-probe",
+            "req_promoted_process_list",
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "process.list: {listed}");
+    assert_eq!(
+        listed["result"]["items"],
+        json!([]),
+        "process.list: {listed}"
+    );
+    let stopped_by_owner = daemon
+        .call(
+            "POST",
+            "/v1/processes/stop",
+            "req_promoted_process_stop_by_owner",
+            Some(process_stop_by_owner),
+        )
+        .await;
+    if process_host {
+        assert_eq!(stopped_by_owner.0, 200, "{}", stopped_by_owner.1);
+        assert_eq!(
+            stopped_by_owner.1["result"],
+            json!({ "owner_session": "sess-probe-absent", "stopped": [] }),
+            "process.stop-by-owner: {}",
+            stopped_by_owner.1
+        );
+    } else {
+        expect_error(&stopped_by_owner, 501, "process.host-unserved");
     }
     covered.len()
 }
@@ -2409,7 +2732,7 @@ async fn check_http_journey(
     assert!(workspace.starts_with("ws_"));
     passed += 1;
 
-    passed += check_promoted_route_inventory(daemon, &workspace).await;
+    passed += check_promoted_route_inventory(daemon, &workspace, cgroup_root.is_some()).await;
 
     let (status, replay) = daemon
         .call(
@@ -2521,22 +2844,7 @@ async fn check_http_journey(
     assert_eq!(read["result"]["eof"], true);
     passed += 1;
 
-    expect_error(
-        &daemon
-            .call(
-                "GET",
-                &format!(
-                    "/v1/workspaces/{workspace}/files/%2e%2e%2fetc%2fpasswd\
-                     ?mode=file&offset=0&limit_bytes=16"
-                ),
-                "req_clean_escape",
-                None,
-            )
-            .await,
-        422,
-        "workspace.path-escape",
-    );
-    passed += 1;
+    passed += check_path_escape(daemon, &workspace, WorkspaceOrigin::Created).await;
 
     let float_operation = "01JPHASE3FLOATREFUSAL01";
     let float_input = json!({ "source": "empty", "labels": {}, "priority": 1.5 });
@@ -2869,6 +3177,288 @@ async fn check_http_journey(
         "req_clean_forged",
     )
     .await;
+    passed += 1;
+
+    passed += check_adopted_workspace(daemon, &snapshot, cgroup_root).await;
+    passed
+}
+
+// ---------------------------------------------------------------------------------------------
+// An operator's directory, adopted (ADR 0035)
+// ---------------------------------------------------------------------------------------------
+
+/// The directory the operator places under the workspace root. No `ws_` prefix: the daemon did
+/// not make it, and only `workspace.adopt` lets it be served.
+const ADOPTED_ROOT_NAME: &str = "adopted-repo";
+/// A real directory under the workspace root whose name is outside the root-name set: the
+/// refusal must come from the name, because a host observation of this entry would succeed.
+const OUT_OF_SET_ROOT_NAME: &str = ".adopted-hidden";
+const ADOPTED_MARKER: &str = "operator-owned\n";
+/// What the confined exec writes into the adopted directory, read back from the host side.
+const ADOPTED_EXEC_WRITE: &str = "written-inside";
+/// The adopted exec's own exit code, chosen so a default 0 or a confinement failure cannot pass.
+const ADOPTED_EXEC_EXIT: i64 = 3;
+
+/// `workspace.adopt` through the shipped daemon: an operator's directory is adopted, its
+/// out-of-set neighbour is refused before dispatch, an exec runs in it (delegated) or is refused
+/// by the same named refusal as a created workspace's (portable), the isolation cases run in it
+/// (delegated), and destroying it leaves the operator's files.
+#[allow(clippy::too_many_lines)] // One sequential journey; splitting it would lose the ordering.
+async fn check_adopted_workspace(
+    daemon: &Daemon,
+    snapshot: &str,
+    cgroup_root: Option<&Path>,
+) -> usize {
+    let mut passed = 0;
+    let directory = daemon.workspaces.join(ADOPTED_ROOT_NAME);
+    std::fs::create_dir(&directory).expect("place the operator directory");
+    std::fs::write(directory.join("marker.txt"), ADOPTED_MARKER).expect("place the marker");
+    let hidden = daemon.workspaces.join(OUT_OF_SET_ROOT_NAME);
+    std::fs::create_dir(&hidden).expect("place the out-of-set directory");
+
+    // Adopted: a minted `ws_` id, the root name and origin published, no lease, and the operator's
+    // own file served through the workspace's file route.
+    let adopt_input =
+        json!({ "root_name": ADOPTED_ROOT_NAME, "labels": { "runner": "cleanroom" } });
+    let (status, adopted) = daemon
+        .call(
+            "POST",
+            "/v1/workspaces/adopt",
+            "req_clean_adopt",
+            Some(&mutation("01JADOPTCLEANADOPT000001", &adopt_input)),
+        )
+        .await;
+    assert_eq!(status, 201, "{adopted}");
+    let workspace = &text(&adopted["result"]["id"]);
+    assert!(workspace.starts_with("ws_"), "{adopted}");
+    assert_ne!(workspace, ADOPTED_ROOT_NAME);
+    assert_eq!(adopted["result"]["origin"], "adopted", "{adopted}");
+    assert_eq!(
+        adopted["result"]["root_name"], ADOPTED_ROOT_NAME,
+        "{adopted}"
+    );
+    assert_eq!(adopted["result"]["state"], "ready", "{adopted}");
+    assert!(adopted["result"].get("lease").is_none(), "{adopted}");
+    let (status, observed) = daemon
+        .call(
+            "GET",
+            &format!("/v1/workspaces/{workspace}"),
+            "req_clean_adopt_get",
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{observed}");
+    assert_eq!(observed["result"]["origin"], "adopted", "{observed}");
+    assert_eq!(observed["result"]["root_name"], ADOPTED_ROOT_NAME);
+    let (status, marker) = daemon
+        .call(
+            "GET",
+            &format!(
+                "/v1/workspaces/{workspace}/files/marker.txt?mode=file&offset=0&limit_bytes=64"
+            ),
+            "req_clean_adopt_marker",
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{marker}");
+    assert_eq!(
+        BASE64
+            .decode(text(&marker["result"]["content"]["data"]))
+            .expect("base64 file content"),
+        ADOPTED_MARKER.as_bytes()
+    );
+    passed += 1;
+
+    // Out of the published root-name set: refused by the input schema before dispatch, with a
+    // directory really there, recorded in the ledger naming no resource, and replayed.
+    for (index, name) in [OUT_OF_SET_ROOT_NAME, "../adopted-repo", "-adopted"]
+        .into_iter()
+        .enumerate()
+    {
+        let operation = format!("01JADOPTCLEANOUTOFSET{index:03}");
+        let input = json!({ "root_name": name, "labels": {} });
+        let (status, refused) = daemon
+            .call(
+                "POST",
+                "/v1/workspaces/adopt",
+                &format!("req_clean_adopt_out_of_set_{index}"),
+                Some(&mutation(&operation, &input)),
+            )
+            .await;
+        assert_eq!(status, 422, "{name:?} {refused}");
+        assert_eq!(
+            refused["error"]["code"], "request.schema-invalid",
+            "{name:?}"
+        );
+        assert_eq!(refused["error"]["address"], "root_name", "{name:?}");
+        assert_eq!(
+            refused["error"]["operation"],
+            operation.as_str(),
+            "{name:?}"
+        );
+        let (status, replayed) = daemon
+            .call(
+                "POST",
+                "/v1/workspaces/adopt",
+                &format!("req_clean_adopt_out_of_set_replay_{index}"),
+                Some(&mutation(&operation, &input)),
+            )
+            .await;
+        assert_eq!(status, 422, "{name:?} {replayed}");
+        assert_eq!(replayed["error"], refused["error"], "{name:?}");
+        let (status, record) = daemon
+            .call(
+                "GET",
+                &format!("/v1/ops/{operation}"),
+                &format!("req_clean_adopt_out_of_set_record_{index}"),
+                None,
+            )
+            .await;
+        assert_eq!(status, 200, "{name:?} {record}");
+        assert_eq!(record["result"]["state"], "refused", "{name:?} {record}");
+        assert_eq!(record["result"]["operation_kind"], "workspace.adopt");
+        assert!(record["result"]["resource"].is_null(), "{name:?} {record}");
+    }
+    assert!(hidden.is_dir(), "the out-of-set directory was touched");
+    passed += 1;
+
+    // The root name is not a workspace id: an exec addressing the directory by it is refused by
+    // the published `workspace-id` pattern before dispatch, in every lane.
+    expect_error(
+        &daemon
+            .call(
+                "POST",
+                "/v1/execs",
+                "req_clean_adopt_exec_by_name",
+                Some(&mutation(
+                    "01JADOPTCLEANEXECBYNAME1",
+                    &ExecInput::new(ADOPTED_ROOT_NAME, snapshot, &["/usr/bin/true"], true).build(),
+                )),
+            )
+            .await,
+        422,
+        "request.schema-invalid",
+    );
+    passed += 1;
+
+    passed += check_path_escape(daemon, workspace, WorkspaceOrigin::Adopted).await;
+
+    let exec_script = format!(
+        "cat /workspace/marker.txt; printf {ADOPTED_EXEC_WRITE} > /workspace/from-exec.txt; \
+         exit {ADOPTED_EXEC_EXIT}"
+    );
+    let exec_input = ExecInput::new(
+        workspace,
+        snapshot,
+        &["/usr/bin/sh", "-c", exec_script.as_str()],
+        true,
+    )
+    .build();
+    if let Some(cgroup_root) = cgroup_root {
+        // The exec runs confined in the operator's directory: it reads the operator's file, its
+        // write lands in that directory on the host, and its own exit code is observed.
+        let (status, executed) = daemon
+            .call(
+                "POST",
+                "/v1/execs",
+                "req_clean_adopt_exec",
+                Some(&mutation("01JADOPTCLEANEXEC0000001", &exec_input)),
+            )
+            .await;
+        assert_eq!(status, 200, "{executed}");
+        assert_eq!(executed["result"]["state"], "exited", "{executed}");
+        assert_eq!(
+            executed["result"]["exit"],
+            json!({ "code": ADOPTED_EXEC_EXIT, "signal": null }),
+            "{executed}"
+        );
+        assert_eq!(executed["result"]["applied"]["network"], "none");
+        let output = read_output(daemon, &text(&executed["result"]["id"]), "stdout").await;
+        assert_eq!(decoded(&output), ADOPTED_MARKER.as_bytes());
+        assert_eq!(output["eof"], true);
+        assert_eq!(
+            std::fs::read_to_string(directory.join("from-exec.txt"))
+                .expect("the exec's write in the operator directory"),
+            ADOPTED_EXEC_WRITE
+        );
+        passed += 1;
+
+        passed += check_confined_isolation(
+            daemon,
+            workspace,
+            snapshot,
+            cgroup_root,
+            WorkspaceOrigin::Adopted,
+        )
+        .await;
+    } else {
+        // No verified sandbox: the adopted workspace gets the same named refusal a created one
+        // does, never an unconfined run in the operator's directory (invariant 3).
+        //
+        // This exec observes nothing about adoption, and cannot: the daemon decides
+        // `exec.sandbox-unavailable` in `validate_exec_input`, before `admit_workspace` reads the
+        // workspace row (`crates/substrate-daemon/src/app/execs.rs`), so no exec answer on this
+        // lane depends on which workspace it names. That ranking is asserted rather than assumed:
+        // an id no adopt ever minted gets the same refusal. What this lane does observe about
+        // adoption is the record above (minted `ws_` id, `origin`, `root_name`, the operator's
+        // file served) and destroy below; an exec in the adopted directory, and a changed
+        // directory refused before any mount, are the delegated lane's and the host crate's
+        // (`an_adopted_directory_changed_after_adopt_is_refused_at_exec_before_any_mount`).
+        let mut never_adopted = exec_input.clone();
+        never_adopted["workspace"] = json!("ws_neveradopted");
+        expect_error(
+            &daemon
+                .call(
+                    "POST",
+                    "/v1/execs",
+                    "req_clean_adopt_exec_unknown",
+                    Some(&mutation("01JADOPTCLEANEXECUNKNOWN", &never_adopted)),
+                )
+                .await,
+            501,
+            "exec.sandbox-unavailable",
+        );
+        expect_error(
+            &daemon
+                .call(
+                    "POST",
+                    "/v1/execs",
+                    "req_clean_adopt_exec",
+                    Some(&mutation("01JADOPTCLEANEXEC0000001", &exec_input)),
+                )
+                .await,
+            501,
+            "exec.sandbox-unavailable",
+        );
+        assert!(!directory.join("from-exec.txt").exists());
+        passed += 1;
+    }
+
+    // Destroy forgets the record and leaves the operator's directory and files (ADR 0035
+    // decision 7).
+    let (status, destroyed) = daemon
+        .call(
+            "DELETE",
+            &format!("/v1/workspaces/{workspace}"),
+            "req_clean_adopt_destroy",
+            Some(&mutation("01JADOPTCLEANDESTROY0001", &json!({}))),
+        )
+        .await;
+    assert_eq!(status, 200, "{destroyed}");
+    assert_eq!(destroyed["result"]["absent"], true, "{destroyed}");
+    assert_eq!(
+        std::fs::read_to_string(directory.join("marker.txt")).expect("the marker survives"),
+        ADOPTED_MARKER
+    );
+    let (status, gone) = daemon
+        .call(
+            "GET",
+            &format!("/v1/workspaces/{workspace}"),
+            "req_clean_adopt_gone",
+            None,
+        )
+        .await;
+    assert_eq!(status, 404, "{gone}");
     passed += 1;
     passed
 }
@@ -4246,8 +4836,8 @@ async fn check_read_only_file_host_refusals(
 // ---------------------------------------------------------------------------------------------
 
 /// The predecessor printed its case count; the port asserts it, so a case cannot vanish quietly.
-const PORTABLE_CASES: usize = 77;
-const DELEGATED_CASES: usize = 107;
+const PORTABLE_CASES: usize = 90;
+const DELEGATED_CASES: usize = 132;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {
@@ -4516,5 +5106,144 @@ async fn a_non_ascii_aperture_name_is_refused_over_the_wire() {
         .call("GET", "/v1/machine", "req_adversarial_utf8_again", None)
         .await;
     assert_eq!(status, 200, "{again}");
+    daemon.close().await;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Adversarial: an adopted directory changed under the daemon after adopt (ADR 0035)
+// ---------------------------------------------------------------------------------------------
+
+/// Adopts `name` (already placed under the workspace root) and returns the minted id and the
+/// capability snapshot an exec start must carry.
+async fn adversarial_adopt(daemon: &Daemon, name: &str, tag: &str) -> (String, String) {
+    let (status, machine) = daemon
+        .call(
+            "GET",
+            "/v1/machine",
+            &format!("req_adv_{tag}_machine"),
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{machine}");
+    let snapshot = text(&machine["result"]["snapshot"]);
+    let (status, adopted) = daemon
+        .call(
+            "POST",
+            "/v1/workspaces/adopt",
+            &format!("req_adv_{tag}_adopt"),
+            Some(&mutation(
+                &format!("01JADVADOPT{}ADOPT01", tag.to_uppercase()),
+                &json!({ "root_name": name, "labels": {} }),
+            )),
+        )
+        .await;
+    assert_eq!(status, 201, "{adopted}");
+    (text(&adopted["result"]["id"]), snapshot)
+}
+
+/// ADR 0035 decision 5 refuses to adopt an entry that is not a directory, and the host opens a
+/// root name with `O_NOFOLLOW` (`crates/substrate-host/src/fs.rs`), so a symlink is never
+/// adopted and never read through. An exec start pins the same entry the same way
+/// (`pin_workspace_directory`, `crates/substrate-host/src/fs.rs`) and bubblewrap binds that
+/// descriptor (`--bind-fd`), never the path: once bound by path (`--bind <path> /workspace`), an
+/// entry the operator replaced with a symlink after adopt mounted the link target read-write,
+/// outside the workspace root. The exec is now `workspace.path-escape` before any mount, the
+/// answer the file route gives for the same entry.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_adopted_directory_swapped_for_a_symlink_never_mounts_the_link_target() {
+    let Some(delegated) = DelegatedCgroup::acquire() else {
+        return;
+    };
+    let temporary = TempDir::with_prefix("substrate-adversarial-swap-").expect("clean-room");
+    let root = temporary.path();
+    std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))
+        .expect("owner-private clean-room directory");
+    let daemon = Daemon::start(root, Some(delegated.path()), &[], &[], &[], false).await;
+    let outside = root.join("outside-the-workspace-root");
+    std::fs::create_dir(&outside).expect("a directory outside the workspace root");
+    let adopted = daemon.workspaces.join("adopted-swap");
+    std::fs::create_dir(&adopted).expect("the operator directory");
+    let (workspace, snapshot) = adversarial_adopt(&daemon, "adopted-swap", "swap").await;
+
+    // The operator replaces the adopted entry with a link to a directory outside the root.
+    std::fs::rename(&adopted, daemon.workspaces.join("adopted-swap-before"))
+        .expect("move the adopted directory aside");
+    std::os::unix::fs::symlink(&outside, &adopted).expect("link in its place");
+
+    // The file route refuses the link (openat2, O_NOFOLLOW).
+    let (status, read) = daemon
+        .call(
+            "GET",
+            &format!("/v1/workspaces/{workspace}/files/probe.txt?mode=file&offset=0&limit_bytes=1"),
+            "req_adv_swap_list",
+            None,
+        )
+        .await;
+    expect_error(&(status, read), 422, "workspace.path-escape");
+
+    let (status, answered) = daemon
+        .call(
+            "POST",
+            "/v1/execs",
+            "req_adv_swap_exec",
+            Some(&mutation(
+                "01JADVADOPTSWAPEXEC00001",
+                &ExecInput::new(
+                    &workspace,
+                    &snapshot,
+                    &[
+                        "/usr/bin/sh",
+                        "-c",
+                        "printf escaped > /workspace/escaped.txt",
+                    ],
+                    true,
+                )
+                .build(),
+            )),
+        )
+        .await;
+    let escaped = outside.join("escaped.txt");
+    assert!(
+        !escaped.exists(),
+        "the confined exec wrote outside the workspace root through the swapped entry: \
+         {status} {answered}"
+    );
+    expect_error(&(status, answered), 422, "workspace.path-escape");
+    daemon.close().await;
+}
+
+/// The directory an adopted row names is the operator's, and the operator may remove it. An exec
+/// started afterwards must be a named refusal (invariant 3), never a run somewhere else.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_adopted_directory_removed_after_adopt_is_a_named_refusal_at_exec() {
+    let Some(delegated) = DelegatedCgroup::acquire() else {
+        return;
+    };
+    let temporary = TempDir::with_prefix("substrate-adversarial-gone-").expect("clean-room");
+    let root = temporary.path();
+    std::fs::set_permissions(root, std::fs::Permissions::from_mode(0o700))
+        .expect("owner-private clean-room directory");
+    let daemon = Daemon::start(root, Some(delegated.path()), &[], &[], &[], false).await;
+    let adopted = daemon.workspaces.join("adopted-gone");
+    std::fs::create_dir(&adopted).expect("the operator directory");
+    let (workspace, snapshot) = adversarial_adopt(&daemon, "adopted-gone", "gone").await;
+    std::fs::remove_dir(&adopted).expect("the operator removes the directory");
+
+    let (status, answered) = daemon
+        .call(
+            "POST",
+            "/v1/execs",
+            "req_adv_gone_exec",
+            Some(&mutation(
+                "01JADVADOPTGONEEXEC00001",
+                &ExecInput::new(&workspace, &snapshot, &["/usr/bin/true"], true).build(),
+            )),
+        )
+        .await;
+    expect_error(&(status, answered), 404, "resource.not-found");
+    assert!(
+        !adopted.exists(),
+        "the exec recreated the operator's directory"
+    );
     daemon.close().await;
 }

@@ -50,19 +50,20 @@ pub const HOST_PROCESS_RENEW_KIND: &str = "process.lease.renew";
 pub const HOST_PROCESS_SUPERVISOR_ACTOR: &str = "process-supervisor";
 
 /// Default bound on non-terminal records per subject (`process.limit-exceeded`).
-pub const DEFAULT_HOST_PROCESS_SUBJECT_MAX_LIVE: u64 = 64;
+pub const DEFAULT_HOST_PROCESS_SUBJECT_MAX_LIVE: u64 = substrate_wire::MAX_PROCESSES_PER_SUBJECT;
 
 /// Default upper bound of `timeout_ms`, and of how far ahead `expires_at` may lie.
-pub const DEFAULT_MAX_PROCESS_TIMEOUT_MS: u64 = substrate_wire::MAX_LEASE_TTL_MS;
+pub const DEFAULT_MAX_PROCESS_TIMEOUT_MS: u64 = substrate_wire::MAX_PROCESS_TIMEOUT_MS;
 
 /// Default time an ended record is retained.
-pub const DEFAULT_HOST_PROCESS_RETAIN_ENDED_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
+pub const DEFAULT_HOST_PROCESS_RETAIN_ENDED_MS: u64 = substrate_wire::PROCESS_RETAIN_ENDED_MS;
 
 /// Default number of ended records retained per subject.
-pub const DEFAULT_HOST_PROCESS_RETAIN_ENDED_COUNT: u64 = 256;
+pub const DEFAULT_HOST_PROCESS_RETAIN_ENDED_COUNT: u64 = substrate_wire::PROCESS_RETAIN_ENDED_COUNT;
 
 /// Default and largest page a listing returns.
-pub const DEFAULT_HOST_PROCESS_MAX_PAGE: u64 = 256;
+#[allow(clippy::cast_lossless)] // `u64::from` is not const; widening u32 to u64 loses nothing.
+pub const DEFAULT_HOST_PROCESS_MAX_PAGE: u64 = substrate_wire::MAX_PROCESS_LIST_ITEMS as u64;
 
 /// The bounds this module enforces. Each becomes a wire constant of the successor bundle that
 /// carries the host-process family (design 26 § named refusals); until then they are store
@@ -108,18 +109,18 @@ pub enum HostProcessRefusal {
 impl HostProcessRefusal {
     pub fn code(self) -> &'static str {
         match self {
-            Self::OwnerInvalid => "process.owner-invalid",
-            Self::ReasonRequired => "process.reason-required",
-            Self::ArgvInvalid => "process.argv-invalid",
-            Self::CwdInvalid => "process.cwd-invalid",
-            Self::EnvInvalid => "process.env-invalid",
-            Self::LeaseInvalid => "process.lease-invalid",
-            Self::KeepReasonRequired => "process.keep-reason-required",
-            Self::TimeoutInvalid => "process.timeout-invalid",
-            Self::ExpiresAtInvalid => "process.expires-at-invalid",
-            Self::NameConflict => "process.name-conflict",
-            Self::LimitExceeded => "process.limit-exceeded",
-            Self::NotFound => "process.not-found",
+            Self::OwnerInvalid => substrate_wire::PROCESS_OWNER_INVALID,
+            Self::ReasonRequired => substrate_wire::PROCESS_REASON_REQUIRED,
+            Self::ArgvInvalid => substrate_wire::PROCESS_ARGV_INVALID,
+            Self::CwdInvalid => substrate_wire::PROCESS_CWD_INVALID,
+            Self::EnvInvalid => substrate_wire::PROCESS_ENV_INVALID,
+            Self::LeaseInvalid => substrate_wire::PROCESS_LEASE_INVALID,
+            Self::KeepReasonRequired => substrate_wire::PROCESS_KEEP_REASON_REQUIRED,
+            Self::TimeoutInvalid => substrate_wire::PROCESS_TIMEOUT_INVALID,
+            Self::ExpiresAtInvalid => substrate_wire::PROCESS_EXPIRES_AT_INVALID,
+            Self::NameConflict => substrate_wire::PROCESS_NAME_CONFLICT,
+            Self::LimitExceeded => substrate_wire::PROCESS_LIMIT_EXCEEDED,
+            Self::NotFound => substrate_wire::PROCESS_NOT_FOUND,
         }
     }
 
@@ -259,6 +260,9 @@ pub struct HostProcessRecord {
     pub running_at: Option<DateTime<Utc>>,
     pub stopping_at: Option<DateTime<Utc>>,
     pub ended_at: Option<DateTime<Utc>>,
+    /// The daemon run that started this record ([`Store::set_host_process_run`]). Absent on a
+    /// record written before runs were recorded, which only an earlier run can have written.
+    pub run: Option<String>,
 }
 
 /// The answer to a start reservation.
@@ -403,7 +407,11 @@ impl HostProcessRefusal {
         ErrorDetail {
             class: self.class(),
             code: self.code().to_owned(),
-            message: self.message().to_owned(),
+            // The wire's message for the code where it publishes one, so a stored refusal and a
+            // daemon-side one read the same (PROCESS_REFUSALS).
+            message: substrate_wire::process_refusal(self.code())
+                .map_or(self.message(), |refusal| refusal.message)
+                .to_owned(),
             retriable: false,
             address: Some(self.address().to_owned()),
             operation: Some(operation.to_owned()),
@@ -414,12 +422,24 @@ impl HostProcessRefusal {
 const COLUMNS: &str = "subject, id, owner_session, owner_name, reason, argv_json, cwd,
     env_names_json, env_digest, profile, confinement, lease_ttl_ms, lease_issued_ms,
     lease_expires_ms, keep_reason, timeout_ms, expires_at_ms, deadline_ms, deadline_source, state,
-    ended_by, exit_code, exit_signal, start_operation, started_ms, running_ms, stopping_ms, ended_ms";
+    ended_by, exit_code, exit_signal, start_operation, started_ms, running_ms, stopping_ms, ended_ms,
+    run_id";
 
 /// Selected rows of a single subject are bounded by the live bound; this caps the owner query.
 const MAX_OWNER_SELECTION: i64 = 4_096;
 
 impl Store {
+    /// Names the daemon run every host-process record started from now on belongs to. The daemon
+    /// sets it once, when it is constructed, to an identity no earlier run used.
+    ///
+    /// Which run a record belongs to is decided by this identity and never by comparing wall
+    /// instants: a wall clock stepped back across a restart puts an earlier run's `started_at` at
+    /// or after the next run's start, and one stepped back inside a run puts this run's before it
+    /// (ADR 0036 S3).
+    pub fn set_host_process_run(&self, run: impl Into<String>) {
+        *self.host_process_run.write() = Some(run.into());
+    }
+
     /// Records a start durably before dispatch: either a refused operation naming the refusal,
     /// or an accepted operation together with a `starting` record, in one transaction.
     pub fn reserve_host_process_start(
@@ -489,16 +509,7 @@ impl Store {
                 }
                 Err(error) => return Err(error),
             };
-        let lease = match &process.lease {
-            HostProcessLeaseRequest::Ttl { ttl_ms } => HostProcessLease::Ttl {
-                ttl_ms: *ttl_ms,
-                issued_at: now,
-                expires_at: add_ms(now, *ttl_ms)?,
-            },
-            HostProcessLeaseRequest::Keep { reason } => HostProcessLease::Keep {
-                reason: reason.clone(),
-            },
-        };
+        let lease = issued_lease(&process.lease, now)?;
         let record = HostProcessRecord {
             id: process.id.clone(),
             owner_session: process.owner_session.clone(),
@@ -522,6 +533,7 @@ impl Store {
             running_at: None,
             stopping_at: None,
             ended_at: None,
+            run: self.host_process_run.read().clone(),
         };
         insert_record(&transaction, &new.scope, &record)?;
         transaction.commit()?;
@@ -567,6 +579,39 @@ impl Store {
         id: &str,
         ttl_ms: u64,
     ) -> Result<HostProcessRenewal, StoreError> {
+        self.renew_host_process_lease_with(
+            scope,
+            operation,
+            terminal_at,
+            status,
+            id,
+            ttl_ms,
+            |record| {
+                let HostProcessLease::Ttl { expires_at, .. } = &record.lease else {
+                    return Err(StoreError::HostProcessInvariant("renewed lease is a TTL"));
+                };
+                Ok(serde_json::json!({
+                    "id": record.id,
+                    "lease": { "ttl_ms": ttl_ms, "renew_by": expires_at.to_rfc3339() },
+                }))
+            },
+        )
+    }
+
+    /// [`Store::renew_host_process_lease`], with the operation's recorded result built from the
+    /// renewed record inside the same transaction, so the answer a replay returns is exactly the
+    /// answer the renewal returned (the daemon records the wire record).
+    #[allow(clippy::too_many_arguments)] // One atomic renewal and ledger terminal boundary.
+    pub fn renew_host_process_lease_with(
+        &self,
+        scope: &Scope,
+        operation: &str,
+        terminal_at: DateTime<Utc>,
+        status: u16,
+        id: &str,
+        ttl_ms: u64,
+        result: impl FnOnce(&HostProcessRecord) -> Result<serde_json::Value, StoreError>,
+    ) -> Result<HostProcessRenewal, StoreError> {
         let mut connection = self.connection.lock();
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let Some(record) = load_record(&transaction, scope, id)? else {
@@ -603,10 +648,7 @@ impl Store {
             ],
         )?;
         let record = reload(&transaction, scope, id)?;
-        let result = serde_json::json!({
-            "id": record.id,
-            "lease": { "ttl_ms": ttl_ms, "renew_by": expires_at.to_rfc3339() },
-        });
+        let result = result(&record)?;
         let event = complete_renewal(
             &transaction,
             self,
@@ -967,6 +1009,124 @@ impl Store {
     }
 }
 
+impl Store {
+    /// Concludes a start whose program never ran (ADR 0036 S1): the start operation is completed
+    /// with `error` and the `starting` record is removed, in one transaction. Used when dispatch
+    /// failed before anything ran, and on restart for a start interrupted between its durable
+    /// record and its dispatch, which is never re-dispatched because its environment values were
+    /// never stored. A record that is no longer `starting` is left as it is.
+    #[allow(clippy::too_many_arguments)] // One atomic operation/record terminal boundary.
+    pub fn abandon_host_process_start(
+        &self,
+        scope: &Scope,
+        operation: &str,
+        terminal_at: DateTime<Utc>,
+        status: u16,
+        id: &str,
+        error: &ErrorDetail,
+    ) -> Result<(), StoreError> {
+        let mut connection = self.connection.lock();
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let event = crate::operations::complete_operation_error_transaction(
+            &transaction,
+            self.event_retention,
+            self.config,
+            scope,
+            operation,
+            &terminal_at.to_rfc3339(),
+            status,
+            Some(id),
+            error,
+        )?;
+        transaction.execute(
+            "DELETE FROM host_processes
+             WHERE deployment = ?1 AND subject = ?2 AND id = ?3 AND state = 'starting'
+               AND start_operation = ?4",
+            params![scope.deployment, scope.subject, id, operation],
+        )?;
+        transaction.commit()?;
+        drop(connection);
+        self.report_committed(&[commit_effect(scope, &event)]);
+        Ok(())
+    }
+
+    /// The non-terminal records of one deployment that any run other than `run` started, a
+    /// record that names no run included, oldest first, at most `limit`: what a restarted daemon
+    /// reconciles against the cgroup tree (ADR 0036 S3). The exact complement of the live records
+    /// `run` started ([`Store::set_host_process_run`]).
+    pub fn host_processes_to_reconcile(
+        &self,
+        deployment: &str,
+        run: &str,
+        limit: u64,
+    ) -> Result<Vec<(Scope, HostProcessRecord)>, StoreError> {
+        self.live_host_processes_except(deployment, Some(run), limit)
+    }
+
+    /// Every non-terminal record of one deployment, whichever run started it, oldest first, at
+    /// most `limit`.
+    pub fn live_host_processes(
+        &self,
+        deployment: &str,
+        limit: u64,
+    ) -> Result<Vec<(Scope, HostProcessRecord)>, StoreError> {
+        self.live_host_processes_except(deployment, None, limit)
+    }
+
+    fn live_host_processes_except(
+        &self,
+        deployment: &str,
+        run: Option<&str>,
+        limit: u64,
+    ) -> Result<Vec<(Scope, HostProcessRecord)>, StoreError> {
+        let connection = self.connection.lock();
+        let mut statement = connection.prepare(&format!(
+            "SELECT {COLUMNS} FROM host_processes
+             WHERE deployment = ?1 AND state != 'ended' AND (?2 IS NULL OR run_id IS NOT ?2)
+             ORDER BY started_ms, subject, id LIMIT ?3"
+        ))?;
+        let rows = statement
+            .query_map(params![deployment, run, to_i64(limit)?], |row| {
+                Ok((row.get::<_, String>(0)?, RawRecord::read(row)?))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|(subject, raw)| {
+                Ok((
+                    Scope {
+                        deployment: deployment.to_owned(),
+                        subject,
+                    },
+                    raw.into_record()?,
+                ))
+            })
+            .collect()
+    }
+
+    /// The operation of `kind` on record `id` that is still open (accepted, or marked unknown by
+    /// a restart), most recent first: the stop a crash interrupted, which a restarted daemon
+    /// completes rather than leaves open (ADR 0036 § Consequences, invariant 5).
+    pub fn open_host_process_operation(
+        &self,
+        scope: &Scope,
+        id: &str,
+        kind: &str,
+    ) -> Result<Option<String>, StoreError> {
+        let connection = self.connection.lock();
+        connection
+            .query_row(
+                "SELECT operation FROM operations
+                 WHERE deployment = ?1 AND subject = ?2 AND resource = ?3
+                   AND operation_kind = ?4 AND state IN ('accepted','unknown')
+                 ORDER BY accepted_at DESC, operation DESC LIMIT 1",
+                params![scope.deployment, scope.subject, id, kind],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(StoreError::from)
+    }
+}
+
 pub(crate) fn migrate_host_processes(connection: &Connection) -> Result<(), StoreError> {
     connection.execute_batch(
         "
@@ -1002,6 +1162,7 @@ pub(crate) fn migrate_host_processes(connection: &Connection) -> Result<(), Stor
             running_ms INTEGER,
             stopping_ms INTEGER,
             ended_ms INTEGER,
+            run_id TEXT,
             PRIMARY KEY (deployment, subject, id),
             CHECK (
                 (keep_reason IS NULL AND lease_ttl_ms IS NOT NULL
@@ -1028,6 +1189,20 @@ pub(crate) fn migrate_host_processes(connection: &Connection) -> Result<(), Stor
             WHERE state = 'ended';
         ",
     )?;
+    migrate_host_process_run(connection)
+}
+
+/// A table written before records named their run gains the column, empty on every existing
+/// row: each of them was started by an earlier daemon run, and a restart reconciles it as one.
+fn migrate_host_process_run(connection: &Connection) -> Result<(), StoreError> {
+    let mut statement = connection.prepare("PRAGMA table_info(host_processes)")?;
+    let columns = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?;
+    drop(statement);
+    if !columns.iter().any(|column| column == "run_id") {
+        connection.execute("ALTER TABLE host_processes ADD COLUMN run_id TEXT", [])?;
+    }
     Ok(())
 }
 
@@ -1198,10 +1373,10 @@ fn insert_record(
             deployment, subject, id, owner_session, owner_name, reason, argv_json, cwd,
             env_names_json, env_digest, profile, confinement, lease_ttl_ms, lease_issued_ms,
             lease_expires_ms, keep_reason, timeout_ms, expires_at_ms, deadline_ms,
-            deadline_source, state, start_operation, started_ms
+            deadline_source, state, start_operation, started_ms, run_id
          ) VALUES (
             ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19,
-            ?20, ?21, ?22, ?23
+            ?20, ?21, ?22, ?23, ?24
          )",
         params![
             scope.deployment,
@@ -1236,6 +1411,7 @@ fn insert_record(
             record.state.as_str(),
             record.start_operation,
             record.started_at.timestamp_millis(),
+            record.run,
         ],
     )?;
     Ok(())
@@ -1325,6 +1501,23 @@ fn add_ms(at: DateTime<Utc>, ms: u64) -> Result<DateTime<Utc>, StoreError> {
         .ok_or(StoreError::IntegerRange)
 }
 
+/// The lease a start accepted at `now` holds: a TTL lease issued then, or a keep.
+fn issued_lease(
+    request: &HostProcessLeaseRequest,
+    now: DateTime<Utc>,
+) -> Result<HostProcessLease, StoreError> {
+    Ok(match request {
+        HostProcessLeaseRequest::Ttl { ttl_ms } => HostProcessLease::Ttl {
+            ttl_ms: *ttl_ms,
+            issued_at: now,
+            expires_at: add_ms(now, *ttl_ms)?,
+        },
+        HostProcessLeaseRequest::Keep { reason } => HostProcessLease::Keep {
+            reason: reason.clone(),
+        },
+    })
+}
+
 fn from_ms(ms: i64) -> Result<DateTime<Utc>, StoreError> {
     Utc.timestamp_millis_opt(ms)
         .single()
@@ -1371,6 +1564,7 @@ struct RawRecord {
     running_ms: Option<i64>,
     stopping_ms: Option<i64>,
     ended_ms: Option<i64>,
+    run_id: Option<String>,
 }
 
 impl RawRecord {
@@ -1404,6 +1598,7 @@ impl RawRecord {
             running_ms: row.get(25)?,
             stopping_ms: row.get(26)?,
             ended_ms: row.get(27)?,
+            run_id: row.get(28)?,
         })
     }
 
@@ -1481,6 +1676,7 @@ impl RawRecord {
             running_at: from_ms_opt(self.running_ms)?,
             stopping_at: from_ms_opt(self.stopping_ms)?,
             ended_at: from_ms_opt(self.ended_ms)?,
+            run: self.run_id,
         })
     }
 }

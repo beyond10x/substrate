@@ -5,7 +5,7 @@ to serve a directory it did not create: `workspace.adopt` (ADR 0035, superseding
 separate from the accepted-operation ledger and the capture projections, so it changes neither
 suite's obligations.
 
-`cargo xtask check-ess` validates it, regenerates `../workspaces-suite.json` (16 synthesized and 5
+`cargo xtask check-ess` validates it, regenerates `../workspaces-suite.json` (18 synthesized and 5
 authored scenarios) and compares bytes, runs that suite against ESS's `interpreted` reference, and
 regenerates `RootName` and `Origin` into `crates/substrate-wire/src/generated/workspace.rs`, which
 `substrate-wire` exports as `RootName` and `WorkspaceOrigin`. The interpreted run checks the model,
@@ -25,8 +25,10 @@ not the daemon; the daemon's native tests (`crates/substrate-daemon/src/app/test
   The model's alphabet has to hold the prefix's `_`, so it also admits a `_` after the prefix,
   which the wire pattern refuses.
 
-As before, ESS reports the alphabet and the invariants as runtime obligations. Generated types do
-not enforce them, so the daemon's admission is the evidence for them, not this model.
+Under ESS 0.67.0 the generated `RootName` decoder checks the alphabet and the length bound; the
+leading-`-` rule and the other invariants stay runtime obligations. The adopt input decodes its
+root name without that check, so the daemon's admission refuses it and records the operation.
+The daemon's admission is the evidence for these rules, not this model.
 
 ## Adoption (`adoption.yaml`)
 
@@ -62,8 +64,8 @@ refusal is the daemon test's to assert.
 
 ## Scenarios
 
-Synthesis writes 16 scenarios. Five more are authored under `scenarios/`. All 21 pass against
-ESS 0.60.0's `interpreted` target, which checks the model, not the daemon.
+Synthesis writes 18 scenarios. Five more are authored under `scenarios/`. All 23 pass against
+ESS 0.67.0's `interpreted` target, which checks the model, not the daemon.
 
 | file | claim |
 |---|---|
@@ -89,7 +91,12 @@ ESS 0.60.0's `interpreted` target, which checks the model, not the daemon.
   is unique across subjects (beyond10x/ess#580). Revisit the external declarations when an ESS
   release fixes it.
 - The out-of-set name has no authored scenario: every Adopt refusal is external, so an act that
-  names no outcome may claim nothing (`ESS-AUTHOR-037`). The daemon test asserts it.
+  names no outcome may claim nothing (`ESS-AUTHOR-037`). The daemon test asserts it, and so does
+  the clean-room runner against the shipped binary
+  (`crates/substrate-daemon/tests/runtime_vectors.rs`, `check_adopted_workspace`).
+- Exec is outside this projection. That an exec runs in an adopted workspace, and that the
+  confinement floor around it is the created workspace's, are runtime claims: the clean-room
+  runner's delegated lane runs an exec and its isolation cases against an adopted workspace.
 - `RootName` and `WorkspaceId` stay unscenarioed (`ESS-SYNTH-013`): a view row does not assert
   `.count` in this suite format.
 - Lease freezing, Expired and Unknown states, and destroy completion are not modelled. They stay in

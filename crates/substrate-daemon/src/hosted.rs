@@ -342,6 +342,8 @@ fn required_scope(_method: &Method, path: &str) -> Option<&'static str> {
         Some("workspaces")
     } else if path.starts_with("/v1/execs") || path.starts_with("/v1/sessions") {
         Some("exec")
+    } else if path.starts_with("/v1/processes") {
+        Some("process")
     } else {
         None
     }
@@ -472,6 +474,10 @@ mod tests {
             ("/v2/workspaces/ws_test/tree", Some("workspaces")),
             ("/v1/execs", Some("exec")),
             ("/v1/sessions/ses_test/attach", Some("exec")),
+            ("/v1/processes", Some("process")),
+            ("/v1/processes/stop", Some("process")),
+            ("/v1/processes/proc_test/logs", Some("process")),
+            ("/v1/processes/proc_test/lease/renew", Some("process")),
             ("/v1/not-a-route", None),
         ] {
             assert_eq!(required_scope(&Method::GET, path), expected, "{path}");

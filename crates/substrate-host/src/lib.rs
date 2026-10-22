@@ -53,6 +53,13 @@ use zeroize::Zeroizing;
 
 pub use aperture::EgressAperture;
 pub use observation::{ExecObservation, PipeFrame, PipeStream};
+// The host-process port and the vocabulary its signatures force, at the crate root as `Driver`'s
+// is: a client names these, and never `host_process::HostProcessSupervisor`.
+pub use host_process::{
+    Deadline, HostProcessEnd, HostProcessObservation, HostProcessSpec, LogStream,
+    LogStreamSelection, LogTail, ProcessExit, ProcessLogs, ProcessSupervisor, Reattached,
+    SocketProtocol, StopCause, StoredProcessLogs,
+};
 #[cfg(not(target_os = "linux"))]
 pub use unsupported::HostDriver;
 
@@ -202,6 +209,13 @@ pub struct HostConfig {
     /// sets 1, the historical one-core clamp. `HostDriver::open` refuses 0 and any value above the
     /// CPUs this process may run on as `config.exec-cpu-cores-invalid`, never clamping it.
     pub exec_cpu_cores: u32,
+    /// Whether this daemon serves host processes (ADR 0036 S2), which publishes `process.host`.
+    ///
+    /// The composition root sets it **only** after `HostProcessSupervisor::open` proved the
+    /// delegated cgroup root usable for process cgroups, and only for a daemon whose one listener
+    /// is the personal Unix socket. [`HostConfig::minimum`] sets `false`: the fact is absent, and
+    /// every start is `process.host-unserved`.
+    pub host_processes: bool,
 }
 
 /// Refuses an exec CPU ceiling the host cannot honour, before the host opens.
@@ -279,6 +293,7 @@ impl HostConfig {
             project_quota_ids: None,
             git_sources: Vec::new(),
             exec_cpu_cores: 1,
+            host_processes: false,
         }
     }
 
@@ -864,6 +879,7 @@ impl HostDriver {
             config.clone(),
             capability.clone(),
             quotas.clone(),
+            Some(Arc::new(filesystem.root_descriptor()?)),
         )?;
         let workspace_destroy_namespace = filesystem.root_identity()?;
         Ok(Arc::new(Self {
@@ -1697,6 +1713,103 @@ mod tests {
             .await
             .expect_err("a non-root-name is refused");
         assert_eq!(error.code, "workspace.path-escape");
+    }
+
+    fn swap_probe_exec_input(snapshot: &str) -> substrate_wire::ExecStartInput {
+        substrate_wire::ExecStartInput {
+            read_only_roots: Vec::new(),
+            read_only_files: Vec::new(),
+            secret_slots: Vec::new(),
+            workspace: "ws_adopted".to_owned(),
+            argv: vec!["/usr/bin/true".to_owned()],
+            env: substrate_wire::ExecEnvironment {
+                allow: vec![],
+                set: std::collections::BTreeMap::new(),
+            },
+            sandbox: substrate_wire::ConfinementRequest {
+                capability_snapshot: snapshot.to_owned(),
+                network: substrate_wire::NetworkMode::None,
+                aperture: None,
+                profile: substrate_wire::SandboxProfile::Workspace,
+                required: true,
+            },
+            limits: substrate_wire::ExecLimits {
+                timeout_ms: 5_000,
+                output_bytes: 65_536,
+                processes: 16,
+                memory_bytes: 67_108_864,
+                cpu_millis: 1_000,
+            },
+            wait: false,
+            workspace_access: substrate_wire::WorkspaceAccess::ReadWrite,
+            scratch: None,
+            measurements: std::collections::BTreeSet::new(),
+            capsule: None,
+            lease_ttl_ms: None,
+        }
+    }
+
+    /// The operator owns an adopted directory and may replace it after adopt. An exec start pins
+    /// the entry beneath the workspace root without following a link, so an entry swapped for a
+    /// symlink is `workspace.path-escape` before anything is mounted, a regular file in its place
+    /// is the same, and a removed entry is `resource.not-found`: never a bind of whatever the link
+    /// names. Portable: the pin precedes the confinement-floor refusal in driver admission, so no
+    /// delegated cgroup is needed to observe it.
+    #[tokio::test]
+    async fn an_adopted_directory_changed_after_adopt_is_refused_at_exec_before_any_mount() {
+        type Change = fn(&std::path::Path, &std::path::Path);
+        let directory = tempdir().expect("tempdir");
+        let driver = HostDriver::open(HostConfig::minimum(directory.path())).expect("host driver");
+        if !driver.filesystem.openat2_available() {
+            return;
+        }
+        let snapshot = driver.machine().snapshot;
+        let input = swap_probe_exec_input(&snapshot);
+        let outside = directory.path().join("outside-the-workspace-root");
+        std::fs::create_dir(&outside).expect("a directory the link names");
+        let root = driver.root().to_path_buf();
+
+        let cases: [(&str, Change, &str); 3] = [
+            (
+                "adopted-link",
+                |entry, outside| {
+                    std::os::unix::fs::symlink(outside, entry).expect("link in its place");
+                },
+                "workspace.path-escape",
+            ),
+            (
+                "adopted-file",
+                |entry, _| std::fs::write(entry, b"not a directory").expect("file in its place"),
+                "workspace.path-escape",
+            ),
+            ("adopted-gone", |_, _| {}, "resource.not-found"),
+        ];
+        for (name, replace, code) in cases {
+            let entry = root.join(name);
+            std::fs::create_dir(&entry).expect("the operator directory");
+            driver
+                .filesystem
+                .observe_workspace(name)
+                .expect("the directory is adoptable");
+            std::fs::rename(&entry, root.join(format!("{name}-before")))
+                .expect("move the adopted directory aside");
+            replace(&entry, &outside);
+            match driver.start_exec("ex_swap", name, &input).await {
+                super::DispatchOutcome::NotDispatched(error) => {
+                    assert_eq!(error.code, code, "{name}: {error:?}");
+                }
+                other => panic!(
+                    "{name}: an exec in a changed adopted entry was not refused before dispatch: \
+                     {:?}",
+                    matches!(other, super::DispatchOutcome::Observed(_))
+                ),
+            }
+            assert_eq!(
+                std::fs::read_dir(&outside).expect("outside").count(),
+                0,
+                "{name}: nothing reached the link target"
+            );
+        }
     }
 
     #[tokio::test]

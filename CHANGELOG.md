@@ -7,8 +7,42 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.8.0] — 2026-10-22
+
 ### Added
 
+- The clean-room runtime vectors drive `workspace.adopt` through the shipped daemon: an operator's
+  directory without the `ws_` prefix is adopted, out-of-set root names are refused as
+  `request.schema-invalid` before dispatch and replayed from the ledger, an exec addressing the
+  directory by its root name is refused, and destroying it leaves the operator's files. On the
+  delegated lane an exec runs confined in the adopted directory with its output and exit observed,
+  and the isolation cases run against the adopted workspace as well as a created one; on the
+  portable lane the adopted exec is `exec.sandbox-unavailable`. A no-nested-user-namespace case
+  joins the isolation cases.
+- The clean-room route inventory reads the `0.20.0` operation registry and probes the seven
+  host-process routes through the shipped daemon. Without a delegated cgroup `process.host` is not
+  published, a start, stop, stop by owner and lease renewal answer `process.host-unserved` (501),
+  the list is empty and an unknown record is `process.not-found`; with one, `process.host` is
+  published, a start without a profile is `process.profile-required` and nothing runs. The runtime
+  vectors grow to 90 portable and 132 delegated cases.
+- Development contract bundle `substrate-wire/0.20.0`, the additive successor of `0.19.0` (ADR 0036
+  S1 to S7 and S11): the seven host-process routes under `/v1/processes` with the `process` scope,
+  the optional `process.host` capability fact, the closed `process` record and log tail, their
+  bounds, the seventeen named refusals and the shared `lease.expired` (409) on lease renewal, each
+  held to its `substrate_wire` constant by `cargo xtask check-bundle 0.20.0`. The daemon and Rust
+  SDK advertise it.
+- `substrate_wire`: the host-process wire types generated from `spec/host-processes/wire.yaml`,
+  their bounds, refusals, `PROCESS_SHARED_REFUSALS` (`LEASE_EXPIRED`), `PROCESS_HOST_FACT` and
+  `PROCESS_ID_PREFIX`.
+- The daemon serves the host-process routes (ADR 0036 S1 to S7 and S11) on a local Unix socket
+  only: `proc_` ids, the `process` scope, `process.host` published only with a delegated cgroup,
+  one cgroup per process with whole-tree stop, renewable leases and hard deadlines on a supervisor
+  clock, bounded owner-private logs, and restart re-attachment by cgroup membership. The daemon
+  holds the supervisor through the `ProcessSupervisor` and `ProcessLogs` port traits. A stop that
+  lands while a process starts never leaves it running unsupervised, a failed re-attachment is
+  retried, and every start operation is concluded after a restart. Restart reconciliation tells
+  this run's records from an earlier run's by a per-run id stored on each record, so a wall-clock
+  step back across a restart neither orphans a running process nor abandons a dispatched start.
 - `b10x-substrate-host` gains `seatbelt`, the macOS confinement primitive of
   [ADR 0037](adr/0037-macos-confinement-is-the-platform-sandbox.md). A `SeatbeltPolicy` (one
   writable workspace, read-only roots, an exec allowlist, no network) renders a `(deny default)`
@@ -21,6 +55,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - The macOS workflow runs `crates/substrate-host/tests/seatbelt_adversary.rs` on `macos-15`: seven
   attacks on the profile, each paired with a control that succeeds where the profile allows it, and
   the step fails unless all seven ran.
+
+### Changed
+
+- The specification pins ESS 0.67.0, and its suites and generated wire types are regenerated with
+  it. The generated `RootName` decoder now checks the root-name alphabet and length; the adopt
+  input bypasses that check so an out-of-set name is still refused by the adopt admission with its
+  operation recorded.
+- `scripts/delegated-lane.sh` also runs the delegated cases of the daemon's host-process tests.
+
+### Fixed
+
+- Exec binds a workspace by a descriptor opened beneath the workspaces root without following
+  symlinks (`--bind-fd`), so an adopted directory swapped for a symlink after adoption never mounts
+  the link's target: a swapped symlink or file is `workspace.path-escape` and a removed entry
+  `resource.not-found`, before any mount. Scoped access walks its writable subtrees beneath that
+  descriptor, and exec pins the workspace beneath the driver's own root descriptor.
 
 ## [0.7.18] — 2026-10-21
 

@@ -109,6 +109,11 @@ SUBSTRATE_MCP_CGROUP_ROOT="${root}" \
 cargo test -p b10x-substrate-daemon --test tls_listener \
   hosted_wss_attachment_authority_is_one_use_and_channel_bound --locked -- --nocapture
 
+# The host-process cases (ADR 0036) start real process trees in cgroups below the same root: start,
+# whole-tree stop, leases, keeps, deadlines and restart reattachment. Without this line they are
+# absent from every lane, and a delegated-only regression in them went unseen.
+cargo test -p b10x-substrate-daemon --test processes --locked -- --nocapture --test-threads=1
+
 cargo test -p b10x-substrate-daemon --test runtime_vectors -- --nocapture "$@"
 
 # What this lane did *not* run. A green run above covers the delegated cgroup cases and nothing

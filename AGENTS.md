@@ -43,7 +43,12 @@ Each is a claim that can be checked. Breaking one is a design change, not a refa
 5. **Operations are durable before driver dispatch**
    (`adr/0005-operations-are-durable-before-driver-dispatch.md`).
 6. **Every released contract bundle directory is immutable.** `contracts/substrate-wire/0.1.0`
-   through `0.19.0` exist; `0.19.0` adds the explicit `workspace.adopt` route at
+   through `0.20.0` exist; `0.20.0` adds the host-process family of ADR 0036 S1 to S7 and S11: seven
+   `/v1/processes` routes under the new `process` scope, the optional `process.host` fact, the
+   closed `process` record (always `profile: host`, `confinement: none`), its bounds, seventeen
+   named refusals and the shared `lease.expired` on renewal, each held to its `substrate_wire`
+   constant by `cargo xtask check-bundle 0.20.0`;
+   `0.19.0` added the explicit `workspace.adopt` route at
    `POST /v1/workspaces/adopt` and two required read-only members, `origin` and `root_name`, on the
    closed workspace resource, with `workspace-id` unchanged and still `ws_`-prefixed (ADR 0035; its compatibility block
    records that client-visible change); `0.18.0` made `exec.resource-usage.block_io` a published boolean and
@@ -67,7 +72,7 @@ Each is a claim that can be checked. Breaking one is a design change, not a refa
    context and grant attribution (ADR 0011); `0.6.0` added destination-bound egress
    apertures (ADR 0013), and **every earlier directory is frozen** (`STATUS.md:36`,
    `xtask/src/json.rs:152`, `contracts/substrate-wire/0.2.0/README.md:13`).
-   The daemon and Rust SDK advertise `substrate-wire/0.19.0` with the SHA-256 of that bundle's
+   The daemon and Rust SDK advertise `substrate-wire/0.20.0` with the SHA-256 of that bundle's
    inner `bundle.json` (`crates/substrate-wire/src/lib.rs`); design 21 records the Git source and
    observation additions, ADR 0028 records the preceding route promotion, and the gate retains the
    one additional 0.11.0-to-0.12.0 lineage bridge. Moving this
@@ -135,7 +140,7 @@ Substrate is confinement. Everything below is the reason it can be trusted with 
   deliberately not committed (`docs/design/09-delegated-context-and-grant-attribution.md` § 6), so
   the vectors are verify-only. They do **not** verify with `delegated_signing_key` in
   `crates/substrate-daemon/tests/runtime_vectors.rs`, whose published seed signs only the
-  documents that runner mints at run time. This holds for bundles `0.17.0` through `0.19.0`. The exception is scoped by rule
+  documents that runner mints at run time. This holds for bundles `0.17.0` through `0.20.0`. The exception is scoped by rule
   **and** by path; a JWT anywhere else, including any other vector, is still a finding. Proven, not
   asserted: the same token in `contracts/substrate-wire/0.7.0/vectors/http/delegated-context-*.json`
   is allowed and in `crates/substrate-daemon/src/` is caught. **Widening this allowlist is a
@@ -168,7 +173,7 @@ In order: `cargo test --workspace --release --locked`, `cargo fmt --all --check`
 `cargo xtask check-licenses`, `cargo xtask check-packages`, `cargo xtask check-mcp-boundary`,
 `check-contract-bundle.py`, `check-contract-bundle-0.2.0.py`,
 `-0.3.0.py`, `-0.4.0.py`, one bounded
-`cargo xtask check-bundles 0.5.0 ... 0.19.0`,
+`cargo xtask check-bundles 0.5.0 ... 0.20.0`,
 `cargo xtask check-json` and `cargo xtask check-toolchain`.
 Green here is the bar for `main`.
 The former brand is fenced org-wide by `scripts/check-org-brand.sh` in the **atlas** repo, not here.
@@ -192,8 +197,8 @@ bundles' reproducibility proof (invariant 6), not as tooling.
 | `package-bundle <version> --out <dir>` | produces a released bundle as a deterministic OCI image layout | no — under `cargo test` |
 | `render-bundle <version> --out <dir>` | produces a bundle tree from `substrate-wire` and `xtask/bundle-source/<version>/`; refuses to write anywhere under `contracts/` | no — under `cargo test` |
 | `check-bundle <version>` | a released bundle whose bytes are not the fixed point of `xtask/bundle-source/<version>/` | no — focused form of the batched gate check |
-| `check-bundles <version>...` | the same checks with a bounded worker count and deterministic version-order reporting | yes, `0.5.0` through `0.19.0` in one invocation |
-| `check-json [<version>...]` | JSON beneath a released bundle that no bundled schema classifies, that its schema rejects, or that is not in deterministic source form | yes, all nineteen |
+| `check-bundles <version>...` | the same checks with a bounded worker count and deterministic version-order reporting | yes, `0.5.0` through `0.20.0` in one invocation |
+| `check-json [<version>...]` | JSON beneath a released bundle that no bundled schema classifies, that its schema rejects, or that is not in deterministic source form | yes, all twenty |
 
 **`cargo xtask package-bundle <version> --out <dir>`** packages a released bundle as a
 deterministic OCI image layout. It is not a gate step of its own: its cases run under
@@ -216,7 +221,7 @@ already ahead of `0.4.0` — `ExecStartInput::read_only_roots` (the `ExecStartIn
 `crates/substrate-wire/src/lib.rs`) has no `0.4.0` schema — and no bound sits *on* a type as a
 derive attribute. The bounds the schemas state are free constants: the wire crate's own
 `pub const MAX_…`/`MIN_…` items (`grep -c '^pub const \(MAX\|MIN\)_' crates/substrate-wire/src/lib.rs`
-= 34), which a schema binds with the `{"$wire": "CONSTANT"}` marker, plus the daemon- and
+= 47), which a schema binds with the `{"$wire": "CONSTANT"}` marker, plus the daemon- and
 host-local literals their enforcement sites hold — `PIPE_MAX_FRAME_BYTES`,
 `PIPE_MAX_INPUT_BYTES` and `PIPE_MAX_QUEUED_FRAMES` in `crates/substrate-daemon/src/app.rs`, and
 `PIPE_FRAME_BYTES` and `PIPE_QUEUED_FRAMES` in `crates/substrate-host/src/process.rs`.
@@ -234,13 +239,19 @@ hand-written HTTP/1.1 and WebSocket client, so it links no implementation and as
 the wire; `cargo test --workspace --release --locked` runs it. Its portable lane asserts three named
 refusals — `exec.sandbox-unavailable` (501), `exec.secret-slots-unserved` (501) and
 `exec.secret-slot-descriptor-invalid` (422) — plus `session.pty-unserved` (501), the five lexical
-`exec.read-only-file*` refusals (422) and `exec.read-only-files-unserved` (501) — across 77 cases,
-and its delegated lane 107. Both totals include one route/refusal probe for every operation in the
-promoted registry; the delegated cases also include an interactive shell driven through a `pty` session
+`exec.read-only-file*` refusals (422), `exec.read-only-files-unserved` (501) and
+`process.host-unserved` (501) — across 90 cases, and its delegated lane 132. Both totals include
+one route/refusal probe for every operation in the promoted registry (the seven host-process routes
+of `0.20.0` among them: unserved on the portable lane, served and refused before anything runs on
+the delegated one), and an operator's directory adopted through `workspace.adopt` (ADR 0035): its
+out-of-set neighbour refused as `request.schema-invalid` before dispatch, an exec addressing it by
+root name refused, a destroy that leaves its files, and, delegated, an exec run in it plus every
+`check_confined_isolation` case run again against it (portable: `exec.sandbox-unavailable`
+instead); the delegated cases also include an interactive shell driven through a `pty` session
 (`crates/substrate-daemon/tests/runtime_vectors.rs`, `PORTABLE_CASES` and `DELEGATED_CASES`). Its delegated lane runs only when
 `SUBSTRATE_VECTORS_CGROUP_ROOT` names a delegated cgroup v2 subtree the test process is inside;
 unset, those cases are **absent, never reported as passed** (invariant 3). **`bash scripts/delegated-lane.sh`
-runs that lane plus the host, public-SDK and disposable-MCP delegated cases, and needs no privilege** — it asks
+runs that lane plus the host, host-process (`--test processes`), public-SDK and disposable-MCP delegated cases, and needs no privilege** — it asks
 systemd for a delegated scope, moves itself into a
 child group so the delegation root stays process-free, and sets the variable. Do not conclude the
 delegated lane cannot run here: a user session's own scope is root-owned, so `mkdir` in it fails,
@@ -289,8 +300,8 @@ condition has ever asserted them; treat kernel project-quota enforcement as prov
 **The gate verifies every released bundle, not just `0.1.0`.** The four
 `run python3 scripts/check-contract-bundle*.py` lines in `scripts/gate.sh` run the
 four frozen Python checkers, and the line after them runs `cargo xtask check-bundles` for `0.5.0`
-through `0.19.0`, so
-a green gate *is* evidence that all nineteen still hold. Cutting a successor bundle therefore means
+through `0.20.0`, so
+a green gate *is* evidence that all twenty still hold. Cutting a successor bundle therefore means
 **adding its check to `scripts/gate.sh`** — a bundle whose check is not in the gate is unverified
 from the next commit onward.
 

@@ -115,6 +115,9 @@ pub struct Store {
     event_retention: u64,
     config: StoreConfig,
     effect_sink: RwLock<Option<std::sync::Arc<dyn CommitEffectSink>>>,
+    /// The daemon run each host-process record started from now on belongs to
+    /// ([`Store::set_host_process_run`]); unset, a record carries none.
+    host_process_run: RwLock<Option<String>>,
 }
 
 #[derive(Debug, Error)]

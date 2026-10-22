@@ -286,6 +286,7 @@ impl Store {
             event_retention: config.event_retention,
             config,
             effect_sink: RwLock::new(None),
+            host_process_run: RwLock::new(None),
         })
     }
 }

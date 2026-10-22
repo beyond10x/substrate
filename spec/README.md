@@ -4,8 +4,8 @@ The first ESS projection describes the **accepted-operation ledger** implemented
 store. It is derived from shipped code; it neither changes the runtime nor replaces the immutable
 wire bundles. Read [coverage and limitations](coverage.md) before interpreting a green result.
 
-The exact CLI pin is in `ess-inputs.yaml`: ESS 0.60.0. Install that official release, or use
-`ess specify toolchain install 0.60.0` with an existing ESS CLI. CI installs its checksum-verified
+The exact CLI pin is in `ess-inputs.yaml`: ESS 0.67.0. Install that official release, or use
+`ess specify toolchain install 0.67.0` with an existing ESS CLI. CI installs its checksum-verified
 Linux archive. There is no ESS implementation dependency in the Substrate workspace.
 
 ```console

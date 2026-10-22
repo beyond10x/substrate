@@ -8,11 +8,10 @@
 use std::convert::Infallible;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
 
 use super::{
     HOST_UNSERVED, HostProcessEnd, HostProcessObservation, HostProcessSpec, HostProcessStarted,
-    LogStreamSelection, LogTail, StopCause,
+    LogStreamSelection, LogTail, ProcessLogs, ProcessSupervisor, Reattached, StopCause,
 };
 use crate::DriverError;
 
@@ -23,7 +22,6 @@ pub struct HostProcessSupervisor {
     never: Infallible,
 }
 
-#[allow(clippy::unused_async)] // The signatures mirror the Linux supervisor, whose methods await.
 impl HostProcessSupervisor {
     /// Refuses by name before touching the host.
     ///
@@ -40,55 +38,10 @@ impl HostProcessSupervisor {
             "process.host",
         ))
     }
+}
 
-    /// # Errors
-    ///
-    /// Unreachable: no supervisor exists off Linux.
-    pub fn spawn(
-        self: &Arc<Self>,
-        _id: &str,
-        _spec: &HostProcessSpec,
-    ) -> Result<HostProcessStarted, DriverError> {
-        match self.never {}
-    }
-
-    /// # Errors
-    ///
-    /// Unreachable: no supervisor exists off Linux.
-    pub async fn stop(
-        &self,
-        _id: &str,
-        _cause: StopCause,
-        _grace: Duration,
-    ) -> Result<HostProcessEnd, DriverError> {
-        match self.never {}
-    }
-
-    /// # Errors
-    ///
-    /// Unreachable: no supervisor exists off Linux.
-    pub async fn wait(&self, _id: &str) -> Result<HostProcessEnd, DriverError> {
-        match self.never {}
-    }
-
-    /// # Errors
-    ///
-    /// Unreachable: no supervisor exists off Linux.
-    pub fn ended(&self, _id: &str) -> Result<Option<HostProcessEnd>, DriverError> {
-        match self.never {}
-    }
-
-    /// # Errors
-    ///
-    /// Unreachable: no supervisor exists off Linux.
-    pub fn observe(&self, _id: &str) -> Result<HostProcessObservation, DriverError> {
-        match self.never {}
-    }
-
-    /// # Errors
-    ///
-    /// Unreachable: no supervisor exists off Linux.
-    pub fn log_tail(
+impl ProcessLogs for HostProcessSupervisor {
+    fn log_tail(
         &self,
         _id: &str,
         _selection: LogStreamSelection,
@@ -96,11 +49,34 @@ impl HostProcessSupervisor {
     ) -> Result<LogTail, DriverError> {
         match self.never {}
     }
+}
 
-    /// # Errors
-    ///
-    /// Unreachable: no supervisor exists off Linux.
-    pub fn forget(&self, _id: &str) -> Result<(), DriverError> {
+impl ProcessSupervisor for HostProcessSupervisor {
+    fn start(
+        self: Arc<Self>,
+        _id: &str,
+        _spec: &HostProcessSpec,
+    ) -> Result<HostProcessStarted, DriverError> {
+        match self.never {}
+    }
+
+    fn reattach(self: Arc<Self>, _id: &str) -> Result<Reattached, DriverError> {
+        match self.never {}
+    }
+
+    fn begin_stop(&self, _id: &str, _cause: StopCause) -> Result<(), DriverError> {
+        match self.never {}
+    }
+
+    fn ended(&self, _id: &str) -> Result<Option<HostProcessEnd>, DriverError> {
+        match self.never {}
+    }
+
+    fn observe(&self, _id: &str) -> Result<HostProcessObservation, DriverError> {
+        match self.never {}
+    }
+
+    fn forget(&self, _id: &str) -> Result<(), DriverError> {
         match self.never {}
     }
 }

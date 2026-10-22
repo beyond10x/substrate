@@ -1,6 +1,6 @@
 {
   "provenance": {
-    "suite_version": "ess-conformance/34",
+    "suite_version": "ess-conformance/40",
     "system": "substrate",
     "specification_version": "v1",
     "spec_digest": "b29907e47155a50f7ae195e6e7db2fcac8e0b075ff569a7545889469bd3e1501",
@@ -3423,6 +3423,178 @@
         }
       ]
     },
+    "substrate.workspaces.RootName/invariant/at/substrate.workspaces.Workspaces/root_name": {
+      "purpose": "every `substrate.workspaces.RootName` that `substrate.workspaces.Workspaces` publishes at `root_name` satisfies what the type declares",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Adopt",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262144"
+          },
+          "input": {
+            "labels": {
+              "kind": "literal",
+              "value": {
+                "labels": "labels.0"
+              }
+            },
+            "root_name": {
+              "kind": "literal",
+              "value": "adopted-repo"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "adopted"
+          }
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.workspaces.Workspaces",
+          "expectation": {
+            "expect": "satisfies",
+            "predicate": "root_name.count >= 1"
+          }
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.workspaces.Workspaces",
+          "expectation": {
+            "expect": "satisfies",
+            "predicate": "root_name.count <= 255"
+          }
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.workspaces.Workspaces",
+          "expectation": {
+            "expect": "satisfies",
+            "predicate": {
+              "not": {
+                "root_name": {
+                  "starts_with": "-"
+                }
+              }
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Adopt",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262145"
+          },
+          "input": {
+            "labels": {
+              "kind": "literal",
+              "value": {
+                "labels": "labels.0"
+              }
+            },
+            "root_name": {
+              "kind": "literal",
+              "value": "adopted-repo"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "adopted"
+          }
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.workspaces.Workspaces",
+          "expectation": {
+            "expect": "satisfies",
+            "predicate": "root_name.count >= 1"
+          }
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.workspaces.Workspaces",
+          "expectation": {
+            "expect": "satisfies",
+            "predicate": "root_name.count <= 255"
+          }
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.workspaces.Workspaces",
+          "expectation": {
+            "expect": "satisfies",
+            "predicate": {
+              "not": {
+                "root_name": {
+                  "starts_with": "-"
+                }
+              }
+            }
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "type",
+          "name": "substrate.workspaces.RootName"
+        },
+        {
+          "kind": "entity",
+          "name": "substrate.workspaces.Workspace"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.workspaces.Adopt"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "adopted"
+          }
+        },
+        {
+          "kind": "view",
+          "name": "substrate.workspaces.Workspaces"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.workspaces.AllowedSubject"
+        }
+      ]
+    },
     "substrate.workspaces.Workspace/state/Destroying/refuses/substrate.workspaces.Destroy": {
       "purpose": "`substrate.workspaces.Destroy` does not move a `substrate.workspaces.Workspace` that is in `Destroying`, and reports `substrate.workspaces.NotReady`",
       "steps": [
@@ -4361,6 +4533,122 @@
         {
           "kind": "event",
           "name": "substrate.workspaces.WorkspaceForgotten"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.workspaces.Workspaces"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.workspaces.AllowedSubject"
+        }
+      ]
+    },
+    "substrate.workspaces.WorkspaceId/invariant/at/substrate.workspaces.Workspaces/workspace": {
+      "purpose": "every `substrate.workspaces.WorkspaceId` that `substrate.workspaces.Workspaces` publishes at `workspace` satisfies what the type declares",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Adopt",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262144"
+          },
+          "input": {
+            "labels": {
+              "kind": "literal",
+              "value": {
+                "labels": "labels.0"
+              }
+            },
+            "root_name": {
+              "kind": "literal",
+              "value": "adopted-repo"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "adopted"
+          }
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.workspaces.Workspaces",
+          "expectation": {
+            "expect": "satisfies",
+            "predicate": "workspace.count >= 4"
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.workspaces.Adopt",
+          "actor": "substrate.workspaces.AllowedSubject",
+          "caller": {
+            "subject": "subject-262145"
+          },
+          "input": {
+            "labels": {
+              "kind": "literal",
+              "value": {
+                "labels": "labels.0"
+              }
+            },
+            "root_name": {
+              "kind": "literal",
+              "value": "adopted-repo"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "adopted"
+          }
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.workspaces.Workspaces"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.workspaces.Workspaces",
+          "expectation": {
+            "expect": "satisfies",
+            "predicate": "workspace.count >= 4"
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "type",
+          "name": "substrate.workspaces.RootName"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.workspaces.WorkspaceId"
+        },
+        {
+          "kind": "entity",
+          "name": "substrate.workspaces.Workspace"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.workspaces.Adopt"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.workspaces.Adopt",
+            "outcome": "adopted"
+          }
         },
         {
           "kind": "view",

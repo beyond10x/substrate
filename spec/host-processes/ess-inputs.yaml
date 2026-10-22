@@ -1,6 +1,6 @@
 format: ess-inputs/2
-requires: ess 0.60.0
-specification: [system.yaml, components.yaml, processes.yaml]
+requires: ess 0.67.0
+specification: [system.yaml, components.yaml, processes.yaml, wire.yaml]
 scenarios:
   - scenarios/start-is-listed.yaml
   - scenarios/start-refusals.yaml
@@ -20,3 +20,4 @@ scenarios:
   - scenarios/log-discard-counted.yaml
   - scenarios/expires-at-reached.yaml
   - scenarios/vanished-on-reconcile.yaml
+  - scenarios/stop-while-starting.yaml
