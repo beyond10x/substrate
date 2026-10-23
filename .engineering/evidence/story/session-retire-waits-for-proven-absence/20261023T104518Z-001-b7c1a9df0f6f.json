@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-23T10:45:18Z",
+  "actor": "agent:b10x-chef-orchestrator",
+  "artifact": "story:session-retire-waits-for-proven-absence",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "unit gate: store lib 103 passed, clippy -D warnings, fmt, full delegated lane EXIT=0",
+    "reference": "unit/2026-10-23-b10b11b12-retire-cgroups-admit@1f60076"
+  }
+}

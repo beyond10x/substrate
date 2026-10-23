@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:bundle-publishes-read-only-roots
 kind: story
-status: active
+status: implemented
 title: The published bundle states read-only roots
 relations:
 - decomposes: epic:host-run-gates
@@ -31,10 +31,11 @@ scope:
   path: xtask/src/bundle.rs
 - confidence: inferred
   path: xtask/src/bundle/read_only_roots.rs
-revision: 7
+revision: 8
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-23T06:27:15Z", actor: "agent:b10x-chef-orchestrator", revision: 6}
 - {from: "proposed", to: "active", at: "2026-10-23T06:27:15Z", actor: "agent:b10x-chef-orchestrator", revision: 7}
+- {from: "active", to: "implemented", at: "2026-10-23T14:58:54Z", actor: "agent:b10x-chef-orchestrator", revision: 8, decided_on: {"recorded":{"test_result":1,"review_outcome":3,"verification":2}}}
 ---
 # Story: the published bundle states read-only roots
 

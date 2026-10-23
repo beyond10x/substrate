@@ -2,14 +2,18 @@
 format: aep.planning-md/3
 id: story:the-metrics-stream-cap-is-machine-readable
 kind: story
-status: draft
+status: implemented
 title: The metrics stream cap is machine-readable
 scope:
 - confidence: cited
   path: crates/substrate-daemon/src/app/events.rs
 - confidence: cited
   path: crates/substrate-daemon/src/app/metrics.rs
-revision: 3
+revision: 6
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-23T11:30:10Z", actor: "agent:b10x-chef-orchestrator", revision: 4}
+- {from: "proposed", to: "active", at: "2026-10-23T11:30:10Z", actor: "agent:b10x-chef-orchestrator", revision: 5}
+- {from: "active", to: "implemented", at: "2026-10-23T14:58:56Z", actor: "agent:b10x-chef-orchestrator", revision: 6, decided_on: {"recorded":{"test_result":1,"review_outcome":1,"verification":2}}}
 ---
 # Story: The metrics stream cap is machine-readable
 

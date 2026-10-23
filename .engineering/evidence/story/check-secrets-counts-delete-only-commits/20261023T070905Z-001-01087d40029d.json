@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-23T07:09:05Z",
+  "actor": "agent:b10x-chef-orchestrator",
+  "artifact": "story:check-secrets-counts-delete-only-commits",
+  "kind": "story",
+  "revision": 8,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo xtask check-secrets at 344f9c56 (refused: Gitleaks 593 vs Git 594) and at d047fb20 (passed: 597 reachable, 4 with nothing to scan); VERIFIED",
+    "reference": "unit/2026-10-23-u1-secrets@d047fb20"
+  }
+}

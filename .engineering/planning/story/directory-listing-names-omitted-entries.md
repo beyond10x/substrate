@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:directory-listing-names-omitted-entries
 kind: story
-status: draft
+status: implemented
 title: Directory listings name the entries they omit
 relations:
 - decomposes: epic:review-2026-09-03-findings
@@ -33,7 +33,11 @@ scope:
   path: xtask/bundle-source/0.23.0
 - confidence: inferred
   path: xtask/src/bundle.rs
-revision: 4
+revision: 7
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-23T12:02:50Z", actor: "agent:b10x-chef-orchestrator", revision: 5}
+- {from: "proposed", to: "active", at: "2026-10-23T12:02:50Z", actor: "agent:b10x-chef-orchestrator", revision: 6}
+- {from: "active", to: "implemented", at: "2026-10-23T14:58:54Z", actor: "agent:b10x-chef-orchestrator", revision: 7, decided_on: {"recorded":{"test_result":1,"review_outcome":1,"verification":2}}}
 ---
 # Story: Directory listings name the entries they omit
 

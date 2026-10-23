@@ -2,14 +2,18 @@
 format: aep.planning-md/3
 id: story:a-confined-process-cannot-mutate-host-global-kernel-state
 kind: story
-status: draft
+status: implemented
 title: A confined process cannot mutate host-global kernel state
 scope:
 - confidence: cited
   path: crates/substrate-host/src/process.rs
 - confidence: cited
   path: crates/substrate-host/src/seccomp.rs
-revision: 3
+revision: 7
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-23T08:28:01Z", actor: "agent:b10x-chef-orchestrator", revision: 4}
+- {from: "proposed", to: "active", at: "2026-10-23T08:28:02Z", actor: "agent:b10x-chef-orchestrator", revision: 5}
+- {from: "active", to: "implemented", at: "2026-10-23T14:58:53Z", actor: "agent:b10x-chef-orchestrator", revision: 7, decided_on: {"recorded":{"test_result":1,"review_outcome":1,"verification":2}}}
 ---
 # Story: A confined process cannot mutate host-global kernel state
 
@@ -42,8 +46,15 @@ removes shipped capability:
 
 ## Acceptance
 
-A confined exec cannot cause the host kernel to load a module that was not already resident, by any
-route, proven by a delegated-lane case that diffs `/proc/modules` across a sandbox that tries.
+Narrowed 2026-10-23 (wave 2026-10-23-next, coordinator): "by any route" cannot be proven by a
+finite case set, so the acceptance names its triggers and ADR 0039 states the rest as not claimed.
+
+A confined exec's `socket`/`socketpair` calls are admitted only for the allowlisted (family,
+protocol) pairs ADR 0039 records (`AF_INET`/`AF_INET6` with protocol 0, TCP or UDP; `AF_NETLINK`
+with `NETLINK_ROUTE` only; the existing `AF_UNIX` floor), and `ioctl(TIOCSETD)` is refused, each with
+`EACCES`. A delegated-lane case per trigger (an SCTP socket over `AF_INET`, a non-`NETLINK_ROUTE`
+netlink socket, `TIOCSETD`) shows the call refused inside a sandbox and no new entry in
+`/proc/modules` before and after. Other kernel autoload paths are not claimed closed; ADR 0039 says so.
 
 ## Notes
 

@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:session-start-publishes-exec-fields
 kind: story
-status: draft
+status: implemented
 title: Session start publishes the exec fields exec start does
 relations:
 - decomposes: epic:host-run-gates
@@ -31,7 +31,11 @@ scope:
   path: xtask/src/bundle.rs
 - confidence: inferred
   path: xtask/tests/release_workflow.rs
-revision: 4
+revision: 7
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-23T10:35:48Z", actor: "agent:b10x-chef-orchestrator", revision: 5}
+- {from: "proposed", to: "active", at: "2026-10-23T10:35:48Z", actor: "agent:b10x-chef-orchestrator", revision: 6}
+- {from: "active", to: "implemented", at: "2026-10-23T14:58:56Z", actor: "agent:b10x-chef-orchestrator", revision: 7, decided_on: {"recorded":{"test_result":1,"review_outcome":1,"verification":2}}}
 ---
 # Story: session start publishes the exec fields exec start does
 

@@ -1,0 +1,14 @@
+{
+  "at": "2026-10-23T13:08:32Z",
+  "actor": "agent:b10x-chef-orchestrator",
+  "artifact": "story:transport-admission-and-stream-lifetime-disagree",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:wave-2026-10-23-b2-security-pass-1",
+    "review": "review-result:wave-2026-10-23-b2-security-pass-1",
+    "outcome": "fixed"
+  }
+}

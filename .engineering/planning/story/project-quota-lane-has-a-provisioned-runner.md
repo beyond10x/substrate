@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:project-quota-lane-has-a-provisioned-runner
 kind: story
-status: draft
+status: implemented
 title: The project-quota lane runs somewhere, and a release says when it last did
 relations:
 - informed_by: story:git-workspace-quota-lifecycle
@@ -17,7 +17,11 @@ scope:
   path: xtask/src/quota_lane.rs
 - confidence: inferred
   path: xtask/tests/release_workflow.rs
-revision: 2
+revision: 5
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-23T08:50:59Z", actor: "agent:b10x-chef-orchestrator", revision: 3}
+- {from: "proposed", to: "active", at: "2026-10-23T08:50:59Z", actor: "agent:b10x-chef-orchestrator", revision: 4}
+- {from: "active", to: "implemented", at: "2026-10-23T14:58:55Z", actor: "agent:b10x-chef-orchestrator", revision: 5, decided_on: {"recorded":{"test_result":1,"review_outcome":1,"verification":2}}}
 ---
 # Story: The project-quota lane runs somewhere, and a release says when it last did
 

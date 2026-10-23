@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-23T09:57:02Z",
+  "actor": "agent:b10x-chef-orchestrator",
+  "artifact": "story:session-attachment-lifetime-is-an-accepted-decision",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "ADR 0041 and design 05 read against sessions.rs:77,1364-1379,1478,1551-1559 and bundles 0.17.0-0.23.0; check-adrs 39 records, check-links",
+    "reference": "unit/2026-10-23-b8b13-docs-secrets@efe2fc8"
+  }
+}

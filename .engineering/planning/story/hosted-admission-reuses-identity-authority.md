@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:hosted-admission-reuses-identity-authority
 kind: story
-status: draft
+status: implemented
 title: Hosted admission reuses a resolved Identity authority within its lifetime, or an ADR records why not
 summary: 'Every TLS request opens a fresh connection to Identity with Connection: close and no cache (hosted.rs:170-194).'
 tags:
@@ -14,7 +14,11 @@ scope:
   path: adr/0026-hosted-admission-resolves-opaque-identity-authority.md
 - confidence: cited
   path: crates/substrate-daemon/src/hosted.rs
-revision: 4
+revision: 7
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-23T08:50:56Z", actor: "agent:b10x-chef-orchestrator", revision: 5, decided_on: {"recorded":{"review_outcome":1}}}
+- {from: "proposed", to: "active", at: "2026-10-23T08:50:56Z", actor: "agent:b10x-chef-orchestrator", revision: 6, decided_on: {"recorded":{"review_outcome":1}}}
+- {from: "active", to: "implemented", at: "2026-10-23T14:58:55Z", actor: "agent:b10x-chef-orchestrator", revision: 7, decided_on: {"recorded":{"test_result":1,"review_outcome":2,"verification":2}}}
 ---
 # Story: Hosted admission reuses a resolved Identity authority
 

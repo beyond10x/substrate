@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-23T10:45:19Z",
+  "actor": "agent:b10x-chef-orchestrator",
+  "artifact": "story:host-admit-checks-the-read-only-roots-fact",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "unit gate: b10b11b12_security_pass1 3 passed portable and delegated, read_only_root_bind 3 and conformance 4 passed delegated, full delegated lane EXIT=0",
+    "reference": "unit/2026-10-23-b10b11b12-retire-cgroups-admit@1f60076"
+  }
+}

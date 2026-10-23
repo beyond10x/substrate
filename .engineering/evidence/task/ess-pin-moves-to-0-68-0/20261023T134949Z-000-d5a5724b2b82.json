@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-23T13:49:49Z",
+  "actor": "agent:b10x-chef-orchestrator",
+  "artifact": "task:ess-pin-moves-to-0-68-0",
+  "kind": "task",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "cargo xtask check-ess (ESS 0.68.0), exit 0",
+    "reference": "unit/2026-10-23-ess-0-68-0@36f90c3"
+  }
+}

@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:session-attachment-lifetime-is-an-accepted-decision
 kind: story
-status: draft
+status: implemented
 title: The 1 h attachment lifetime and kill-on-disconnect are a recorded decision
 summary: Attachments live 1 h, any disconnect kills the tree, no re-attach exists (sessions.rs:70,1301); the figure is undocumented.
 tags:
@@ -14,7 +14,11 @@ scope:
   path: adr/0008-pipe-sessions-have-distinct-durable-identity.md
 - confidence: cited
   path: docs/design/05-streams-sessions-and-endpoints.md
-revision: 4
+revision: 8
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-23T08:28:31Z", actor: "agent:b10x-chef-orchestrator", revision: 5, decided_on: {"recorded":{"review_outcome":1}}}
+- {from: "proposed", to: "active", at: "2026-10-23T08:28:31Z", actor: "agent:b10x-chef-orchestrator", revision: 6, decided_on: {"recorded":{"review_outcome":1}}}
+- {from: "active", to: "implemented", at: "2026-10-23T14:58:56Z", actor: "agent:b10x-chef-orchestrator", revision: 8, decided_on: {"recorded":{"test_result":1,"review_outcome":1,"verification":2}}}
 ---
 # Story: The session attachment lifetime is an accepted decision
 
@@ -29,7 +33,7 @@ interactive agent session longer than an hour is out of scope.
 
 ## Acceptance
 
-ADR 0008, or a successor ADR that supersedes it, records the one-hour attachment lifetime and the no-re-attach rule together with the consumer they were chosen for.
+ADR 0008, or a later ADR that amends it (and is linked from it), records the one-hour attachment lifetime and the no-re-attach rule together with the consumer they were chosen for.
 
 ## Notes
 

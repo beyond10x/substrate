@@ -2,15 +2,16 @@
 format: aep.planning-md/3
 id: story:check-secrets-counts-delete-only-commits
 kind: story
-status: active
+status: implemented
 title: check-secrets accepts a commit that only deletes files
 scope:
 - confidence: cited
   path: xtask/src/secrets.rs
-revision: 8
+revision: 9
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-23T06:27:15Z", actor: "agent:b10x-chef-orchestrator", revision: 7}
 - {from: "proposed", to: "active", at: "2026-10-23T06:27:15Z", actor: "agent:b10x-chef-orchestrator", revision: 8}
+- {from: "active", to: "implemented", at: "2026-10-23T14:58:54Z", actor: "agent:b10x-chef-orchestrator", revision: 9, decided_on: {"recorded":{"test_result":1,"review_outcome":2,"verification":2}}}
 ---
 ## Problem
 

@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-23T11:29:56Z",
+  "actor": "agent:b10x-chef-orchestrator",
+  "artifact": "story:session-start-publishes-exec-fields",
+  "kind": "story",
+  "revision": 6,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "unit gate: session_exec_fields_adversary_pass1 6 passed (5 red before the fix), xtask 230 unit, wire 114, daemon and host EXIT=0, delegated lane 175 cases EXIT=0, check-bundle and check-json 0.23.0 (361 files), check-links, check-adrs, check-docs, clippy -D warnings",
+    "reference": "unit/2026-10-23-b3-session-exec@a07f34b"
+  }
+}

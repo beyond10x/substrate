@@ -7,6 +7,79 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- Development contract bundle `substrate-wire/0.23.0`, additive over `0.22.0` with no new route.
+  It publishes the optional `read_only_roots` start list (at most 4 `{host_path, mount}` entries),
+  the `exec.read-only-roots` fact `{"max_roots": 4}`, the applied `read_only_roots` record and
+  three named refusals (`exec.read-only-root-invalid`, `-absent`, `-not-a-directory`, 422)
+  (ADR 0010). The exec applied record now admits `secret_slots` and `read_only_files`, which
+  earlier bundles wrongly rejected; those bundles stay frozen.
+- Bundle `0.23.0`: the session start's `exec` object publishes `scratch`, `measurements` and
+  `workspace_access` with the same schemas as exec start, and both starts publish the refusals
+  these members have always raised (design 27). No refusal is new.
+- Capability facts `events.stream-bounds` and `metrics.stream-bounds` (`per_subject` 4, `global`
+  64, `lifetime_ms` 3600000, `refusal`) and `sessions.attachment-bounds` (`per_session` 1,
+  `per_subject` 16, `global` 32, `lifetime_ms` 3600000, `refusal`
+  `session.attachment-capacity`), published in bundle `0.23.0` (ADR 0042).
+- A v1 directory page and a v2 tree name the entries they omit (a FIFO, socket, device or
+  non-UTF-8 name) in the `x-b10x-omitted-entries` response header, sent only when at least one
+  was omitted; bundle `0.23.0` publishes it as an `x-b10x-response-headers` annotation
+  (ADR 0043). The v2 tree's `truncated` still answers true for an omission as well as for the
+  limit; the header tells them apart. The Rust SDK adds `Workspace::tree_with_omissions` and
+  `Workspace::read_directory_with_omissions`; `tree` and `read_directory` are unchanged.
+- `cargo xtask quota-fixture run` builds the checked-in recipe `fixtures/quota-lab/` and runs
+  the seven `real_quota_*` cases on an ext4 project-quota loop filesystem in a container, adding
+  only `SYS_ADMIN` and never `--privileged`. It runs from a `git archive` snapshot of `HEAD` and
+  prints a `Quota-lane:` record only when the checkout was clean before and after and `HEAD` did
+  not move.
+- README § Serving exec states what the published daemon image carries for exec (bubblewrap
+  0.11.2 and socat) and the four things a deployment still supplies before exec is advertised.
+- ADR 0041 records the one-hour session attachment lifetime, killed on expiry, disconnect or
+  protocol error, with a one-shot attachment right.
+
+### Changed
+
+- The daemon and the Rust SDK advertise `substrate-wire/0.23.0`.
+- A confined exec's `socket(2)` is an argument allowlist: `AF_INET`/`AF_INET6` with protocol 0,
+  TCP or UDP, `AF_NETLINK` with `NETLINK_ROUTE`, and the existing `AF_UNIX` floor;
+  `socketpair(2)` admits only `AF_UNIX` stream and seqpacket pairs; `ioctl(TIOCSETD)` and every
+  x32 syscall are refused, each with `EACCES` (ADR 0039). A confined child can no longer make the
+  host kernel autoload `sctp`, `n_hdlc` or `scsi_transport_iscsi` through these calls.
+- Hosted admission reuses its connections to Identity through a bounded keep-alive pool (at most
+  8 idle, closed after 30 s idle, never reused after an error, a refusal or a close-requesting
+  response, retried once on a fresh connection only when the request was never sent). Every
+  request still resolves online, so revocation applies to the next request (ADR 0040).
+- An upgraded WebSocket (event stream, metrics stream or session attachment) hands its
+  connection's transport slot to its stream at the upgrade, so streams inside their caps no
+  longer block co-located callers from connecting (ADR 0042). One subject holds at most 16
+  session attachments; the 17th is refused `session.attachment-capacity` (429).
+- `GET /v1/metrics/stream` refuses `501 exec.metrics-unserved` before the upgrade on a host that
+  does not publish `metrics.stream`.
+- The daemon refuses `scratch: null`, a storage `max_bytes` that is not a multiple of 1024 (exec,
+  session and workspace storage) and a measurement listed twice as `request.schema-invalid`
+  (422), as the published schemas always did. A misaligned workspace quota was `429
+  storage.quota-limit` before.
+- A release refuses unless its annotated tag, or the `quota_evidence` dispatch input, carries
+  `Quota-lane: <sha> <case-count> <RFC 3339 UTC>` for the tagged commit. Both lane records are
+  refused when they span more than one line, lack exactly three fields, appear twice in the tag,
+  or name a timestamp that is not a real UTC instant.
+
+### Fixed
+
+- An exec recorded `unknown` because its cgroup could not be proven empty is killed again on
+  lease cleanup and once per maintenance round until its tree is proven gone, instead of keeping
+  its processes until the daemon restarts.
+- `session.retire` refuses a session in `unknown` until recovery has recorded its tree as
+  physically gone.
+- Removing an exec's cgroup removes nested cgroups deepest first (at most 32 levels and 256
+  groups, never following a symlink), so an empty nested group no longer pins the exec's slot.
+- The host driver checks the `exec.read-only-roots` fact before opening any caller-named root,
+  and refuses `exec.sandbox-unavailable` without it.
+- `cargo xtask check-secrets` counts only commits Gitleaks scans, so a delete-only, binary-only
+  or mode-only commit no longer fails the gate; it runs without textconv drivers, replace objects
+  or grafts, diffs merges with `--diff-merges=separate`, and refuses a shallow repository.
+
 ## [0.10.0] — 2026-10-22
 
 Published by [release run 39866527468](https://github.com/beyond10x/substrate/actions/runs/39866527468)

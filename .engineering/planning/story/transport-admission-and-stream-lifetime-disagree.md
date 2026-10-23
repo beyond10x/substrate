@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:transport-admission-and-stream-lifetime-disagree
 kind: story
-status: draft
+status: implemented
 title: Transport admission and stream lifetime disagree
 scope:
 - confidence: cited
@@ -13,7 +13,11 @@ scope:
   path: crates/substrate-daemon/src/app/sessions.rs
 - confidence: cited
   path: crates/substrate-daemon/src/runtime.rs
-revision: 5
+revision: 8
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-23T11:30:10Z", actor: "agent:b10x-chef-orchestrator", revision: 6}
+- {from: "proposed", to: "active", at: "2026-10-23T11:30:10Z", actor: "agent:b10x-chef-orchestrator", revision: 7}
+- {from: "active", to: "implemented", at: "2026-10-23T14:58:56Z", actor: "agent:b10x-chef-orchestrator", revision: 8, decided_on: {"recorded":{"test_result":1,"review_outcome":1,"verification":2}}}
 ---
 # Story: Transport admission and stream lifetime disagree
 
