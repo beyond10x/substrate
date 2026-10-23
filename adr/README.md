@@ -44,3 +44,4 @@ with YAML frontmatter containing `date` and `status`. Draft design questions rem
 | [0036](0036-host-processes-are-a-supervised-resource-family.md) | Host processes are a supervised resource family | accepted |
 | [0037](0037-macos-confinement-is-the-platform-sandbox.md) | macOS confinement is the platform sandbox, with its own capability facts | accepted |
 | [0038](0038-writable-roots-are-named-host-paths-or-git-checkouts.md) | A writable root is a named host path or a Git checkout | accepted |
+| [0041](0041-a-session-attachment-lives-one-hour-and-is-never-re-attached.md) | A session attachment lives one hour and is never re-attached | accepted |

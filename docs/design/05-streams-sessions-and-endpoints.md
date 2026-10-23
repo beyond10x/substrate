@@ -33,8 +33,16 @@ lease, and attachment limits. Backpressure or attachment loss follows typed canc
 reconciliation behavior rather than unbounded buffering.
 
 Session authority is operation-scoped, short-lived, revocable, non-loggable, proof-bound on network
-transport, and single-use for initial redemption. Reconnection requires a fresh authority;
-attachment cannot imply an unbounded process lease.
+transport, and single-use for initial redemption. Attachment cannot imply an unbounded process
+lease.
+
+[ADR 0041](../../adr/0041-a-session-attachment-lives-one-hour-and-is-never-re-attached.md) fixes the
+attachment bounds. An attachment lives at most one hour, published as `attachment_lifetime_ms`
+(`3600000`) in the session capability. Its expiry, a client disconnect or a protocol error ends the
+process tree. The attachment right is one-shot: a session is never re-attached, and reconnecting
+means a new session with, on a network transport, a newly minted authority. These bounds serve
+bounded interactive and agent sessions; a session meant to outlive an hour or a disconnect is out
+of scope and would be a contract change with a successor bundle.
 
 ## 3. Endpoints and tunnels
 
@@ -64,7 +72,8 @@ substrate tenant policy or giving connectors access to daemon internals.
    local ownership/capability/lease, as fixed by
    `architecture/adr/0016-operation-scoped-session-authority.md`.
 3. **Redemption:** network authorities are proof-bound, valid for at most 60 seconds, and redeem
-   exactly once. Reconnect obtains a fresh authority. V1 permits one concurrent attachment.
+   exactly once. Reconnect starts a new session and obtains a fresh authority for it; a session's
+   one attachment is never re-attached (ADR 0041).
 4. **Transport:** WebSocket over TLS carries the v1 closed frames; an owner-permissioned Unix socket
    may carry the same frames locally. Semantics and authority remain transport-independent.
 5. **Reachability:** substrate advertises only observed configured routes. There is no NAT traversal,
