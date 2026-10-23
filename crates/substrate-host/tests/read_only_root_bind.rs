@@ -5,11 +5,12 @@
 //! mounts that descriptor. A root renamed away and replaced by a symlink to another directory
 //! after admission therefore still mounts the directory admission inspected.
 //!
-//! The refusal cases are portable: root admission is the first filesystem question a start is
-//! asked, before any confinement fact, so a host without a delegated cgroup answers it too. The
-//! swap case is delegated only: without `SUBSTRATE_VECTORS_CGROUP_ROOT` naming a cgroup v2 subtree
-//! this process is inside, or without bubblewrap, it is **absent, never reported as passed**
-//! (invariant 3). `bash scripts/delegated-lane.sh` runs it.
+//! A host that does not publish `exec.read-only-roots` refuses every root it is handed
+//! `exec.sandbox-unavailable` before it resolves any path, as the daemon does; that case is
+//! portable. The per-root refusals are answered only by a host that publishes the fact, so they and
+//! the swap case are delegated only: without `SUBSTRATE_VECTORS_CGROUP_ROOT` naming a cgroup v2
+//! subtree this process is inside, or without bubblewrap, they are **absent, never reported as
+//! passed** (invariant 3). `bash scripts/delegated-lane.sh` runs them.
 //!
 //! Fixtures live under `CARGO_TARGET_TMPDIR` (this checkout's `target/tmp`), canonicalized, so a
 //! declared host path has no symlink component unless a case puts one there on purpose.
@@ -109,29 +110,15 @@ async fn refusal(
     }
 }
 
-/// Each refusal by its existing code, and one admissible root as the control that shows root
-/// admission is not simply refusing everything: on a host without confinement it passes root
-/// admission and is refused later, by the confinement floor.
-///
-/// A symlink above the last component was followed before and is refused now (design 26 § 3), as
-/// ADR 0033 already refuses one for a single file.
-#[tokio::test(flavor = "multi_thread")]
-async fn a_root_is_refused_by_its_existing_code_and_a_symlinked_component_is_not_a_directory() {
-    let directory = tempfile::tempdir().expect("temporary host root");
-    let driver = HostDriver::open(HostConfig::minimum(directory.path().join("workspaces")))
-        .expect("host driver");
-    let snapshot = driver.machine().snapshot;
-    std::fs::create_dir_all(driver.root().join(WORKSPACE)).expect("workspace directory");
-
-    let (_fixture, host) = fixture("ro-root-refusal-");
+/// The refusal fixtures under `host`: the admissible root, and each refused root with the code a
+/// host that publishes `exec.read-only-roots` answers it with.
+fn refusal_cases(host: &Path) -> (PathBuf, Vec<(&'static str, PathBuf, &'static str)>) {
     let real = host.join("real");
     std::fs::create_dir_all(real.join("inner")).expect("real directory");
     std::fs::write(host.join("file"), "not a directory\n").expect("regular file");
     let linked = host.join("linked");
     std::os::unix::fs::symlink(&real, &linked).expect("symlink to a directory");
-
-    let mut refused = Vec::new();
-    for (id, declared, code) in [
+    let cases = vec![
         (
             "ex_root_parent_link",
             linked.join("inner"),
@@ -157,7 +144,97 @@ async fn a_root_is_refused_by_its_existing_code_and_a_symlinked_component_is_not
             host.join("file").join("beneath"),
             "exec.read-only-root-absent",
         ),
-    ] {
+    ];
+    (real, cases)
+}
+
+/// The code a start declaring `roots` is refused with before dispatch, or nothing when it was
+/// dispatched.
+async fn admission(
+    driver: &HostDriver,
+    snapshot: &str,
+    id: &str,
+    roots: Vec<ReadOnlyRoot>,
+) -> Option<String> {
+    match driver
+        .start_exec(id, WORKSPACE, &exec_input(snapshot, &["/bin/true"], roots))
+        .await
+    {
+        DispatchOutcome::NotDispatched(error) => Some(error.code.to_owned()),
+        _ => None,
+    }
+}
+
+/// A host that does not publish `exec.read-only-roots` refuses every root
+/// `exec.sandbox-unavailable` before it resolves the path, the admissible one included, as the
+/// daemon does: what is or is not at a path it cannot bind is not its answer to give.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_host_without_the_fact_refuses_every_root_unserved_before_resolving_it() {
+    let directory = tempfile::tempdir().expect("temporary host root");
+    let driver = HostDriver::open(HostConfig::minimum(directory.path().join("workspaces")))
+        .expect("host driver");
+    let machine = driver.machine();
+    assert!(
+        machine.facts.exec_read_only_roots.is_none(),
+        "a host without a delegated cgroup must not publish exec.read-only-roots"
+    );
+    std::fs::create_dir_all(driver.root().join(WORKSPACE)).expect("workspace directory");
+
+    let (_fixture, host) = fixture("ro-root-unserved-");
+    let (real, cases) = refusal_cases(&host);
+    let mut wrong = Vec::new();
+    for (id, declared) in cases
+        .into_iter()
+        .map(|(id, declared, _)| (id, declared))
+        .chain([("ex_root_admitted", real)])
+    {
+        let got = refusal(&driver, &machine.snapshot, id, vec![root(&declared)]).await;
+        if got != "exec.sandbox-unavailable" {
+            wrong.push(format!(
+                "{id} ({}): expected exec.sandbox-unavailable, got {got}",
+                declared.display()
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+}
+
+/// On a host that publishes `exec.read-only-roots`, each refusal by its existing code, and one
+/// admissible root as the control that shows root admission is not simply refusing everything:
+/// it passes root admission.
+///
+/// A symlink above the last component was followed before and is refused now (design 26 § 3), as
+/// ADR 0033 already refuses one for a single file.
+///
+/// Delegated only: absent, never passed, without a delegated cgroup and bubblewrap.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_root_is_refused_by_its_existing_code_and_a_symlinked_component_is_not_a_directory() {
+    let Some(delegated) = delegated_cgroup_root() else {
+        eprintln!("ABSENT: SUBSTRATE_VECTORS_CGROUP_ROOT is unset");
+        return;
+    };
+    if !PathBuf::from("/usr/bin/bwrap").is_file() {
+        eprintln!("ABSENT: no bubblewrap");
+        return;
+    }
+    let directory = tempfile::tempdir().expect("temporary host root");
+    let mut config = HostConfig::minimum(directory.path().join("workspaces"));
+    config.cgroup_root = Some(delegated);
+    let driver = HostDriver::open(config).expect("host driver");
+    let machine = driver.machine();
+    assert!(
+        machine.facts.exec_read_only_roots.is_some(),
+        "the delegated lane must publish exec.read-only-roots; an absent fact here is a broken \
+         harness: {:?}",
+        machine.facts
+    );
+    let snapshot = machine.snapshot;
+    std::fs::create_dir_all(driver.root().join(WORKSPACE)).expect("workspace directory");
+
+    let (_fixture, host) = fixture("ro-root-refusal-");
+    let (real, cases) = refusal_cases(&host);
+    let mut refused = Vec::new();
+    for (id, declared, code) in cases {
         let got = refusal(&driver, &snapshot, id, vec![root(&declared)]).await;
         if got != code {
             refused.push(format!(
@@ -166,10 +243,12 @@ async fn a_root_is_refused_by_its_existing_code_and_a_symlinked_component_is_not
             ));
         }
     }
-    let control = refusal(&driver, &snapshot, "ex_root_admitted", vec![root(&real)]).await;
+    let control = admission(&driver, &snapshot, "ex_root_admitted", vec![root(&real)]).await;
     assert!(
-        !control.starts_with("exec.read-only-root-"),
-        "an admissible root was refused by root admission: {control}"
+        !control
+            .as_deref()
+            .is_some_and(|code| code.starts_with("exec.read-only-root-")),
+        "an admissible root was refused by root admission: {control:?}"
     );
     assert!(refused.is_empty(), "{refused:#?}");
 }

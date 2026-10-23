@@ -58,17 +58,18 @@ impl PinnedRoot {
     }
 }
 
-/// The driver's own admission of declared roots: the wire's lexical rules, each root opened and
-/// checked by descriptor, then the fact. A start naming a root on a host whose snapshot does not
-/// publish `exec.read-only-roots` is refused `exec.sandbox-unavailable` with the daemon's message
-/// and address (`check_read_only_roots` in the daemon's `app/operations.rs`), so an embedder that
-/// reaches the driver without the daemon is refused too and no root is ever bound by a host that
-/// does not publish it (invariant 3).
+/// The driver's own admission of declared roots, in the daemon's order
+/// (`check_read_only_roots` in the daemon's `app/operations.rs`): the wire's lexical rules, then
+/// the fact, then each root opened and checked by descriptor. A start naming a root on a host
+/// whose snapshot does not publish `exec.read-only-roots` is refused `exec.sandbox-unavailable`
+/// with the daemon's message and address, so an embedder that reaches the driver without the
+/// daemon is refused too and no root is ever bound by a host that does not publish it
+/// (invariant 3).
 ///
-/// The lexical rules come first, as in the daemon. The per-root filesystem refusals (`absent`,
-/// `not-a-directory`) come before the fact, as they did before the fact was checked here, so a
-/// caller still hears what is wrong with a root on a host without confinement; opening a root
-/// `O_PATH` mounts nothing, and the descriptors close with the refusal.
+/// The fact comes before any path is opened: a host that cannot bind a root never resolves a path
+/// the caller named, so its answer says nothing about what is or is not at that path. The
+/// per-root filesystem refusals (`absent`, `not-a-directory`) are answered only by a host that
+/// publishes the fact.
 pub(crate) fn admit(
     roots: &[ReadOnlyRoot],
     published: Option<&ReadOnlyRootFacts>,
@@ -80,7 +81,6 @@ pub(crate) fn admit(
             ADDRESS,
         )
     })?;
-    let pinned = pin(roots)?;
     if !roots.is_empty() && published.is_none() {
         return Err(DriverError::unserved(
             "exec.sandbox-unavailable",
@@ -89,7 +89,7 @@ pub(crate) fn admit(
             ADDRESS,
         ));
     }
-    Ok(pinned)
+    pin(roots)
 }
 
 /// Opens, checks and pins every declared root, in declaration order. The lexical rules are the

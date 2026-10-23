@@ -5,9 +5,11 @@
 //! maximum count beside the maximum number of read-only files and secret slots, and how long the
 //! driver itself holds a root descriptor once the exec is spawned.
 //!
-//! The refusal cases are portable. The rest are delegated: without `SUBSTRATE_VECTORS_CGROUP_ROOT`
-//! naming a cgroup v2 subtree this process is inside, or without bubblewrap, they return early and
-//! are **absent, never passed**. `bash scripts/delegated-lane.sh` runs them.
+//! A host that does not publish `exec.read-only-roots` answers every root
+//! `exec.sandbox-unavailable` before resolving it; that half of each refusal case is portable. The
+//! per-root refusals and the rest are delegated: without `SUBSTRATE_VECTORS_CGROUP_ROOT` naming a
+//! cgroup v2 subtree this process is inside, or without bubblewrap, they return early and are
+//! **absent, never passed**. `bash scripts/delegated-lane.sh` runs them.
 
 // Every case drives the Linux host driver, which refuses to open elsewhere.
 #![cfg(target_os = "linux")]
@@ -122,46 +124,96 @@ impl Drop for Unlock {
     }
 }
 
+/// The code a start declaring `roots` is refused with before dispatch, or nothing when it was
+/// dispatched.
+async fn admission(
+    driver: &HostDriver,
+    snapshot: &str,
+    id: &str,
+    roots: Vec<ReadOnlyRoot>,
+) -> Option<String> {
+    let mut input = exec_input(snapshot, &["/bin/true"]);
+    input.read_only_roots = roots;
+    match driver.start_exec(id, WORKSPACE, &input).await {
+        DispatchOutcome::NotDispatched(error) => Some(error.code.to_owned()),
+        _ => None,
+    }
+}
+
+/// A delegated driver that publishes `exec.read-only-roots`, the only kind that answers the
+/// per-root refusals; nothing, reported absent, without a delegated cgroup and bubblewrap.
+fn publishing_lane(prefix: &str) -> Option<Lane> {
+    let Some(lane) = lane(prefix, false) else {
+        eprintln!("ABSENT: no delegated lane for {prefix}");
+        return None;
+    };
+    assert!(
+        lane.driver.machine().facts.exec_read_only_roots.is_some(),
+        "the delegated lane must publish exec.read-only-roots; an absent fact here is a broken \
+         harness"
+    );
+    Some(lane)
+}
+
+/// `host/locked/inner` beneath a mode-000 `host/locked`, and the guard that unlocks it.
+fn unsearchable_root(host: &Path) -> (PathBuf, Unlock) {
+    let locked = host.join("locked");
+    std::fs::create_dir_all(locked.join("inner")).expect("locked/inner");
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("mode 000");
+    let unlock = Unlock(locked.clone());
+    (locked.join("inner"), unlock)
+}
+
 /// Invariant 4: a root beneath a directory the driver may not search is answered
-/// `exec.read-only-root-absent`, as a root that is not there is, and never as `not-a-directory`
-/// or a later code.
+/// `exec.read-only-root-absent` by a host that publishes `exec.read-only-roots`, as a root that is
+/// not there is, and never as `not-a-directory` or a later code. A host that does not publish the
+/// fact answers `exec.sandbox-unavailable` without resolving the path.
+///
+/// The second half is delegated only: absent, never passed, without a delegated cgroup and
+/// bubblewrap.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_root_beneath_an_unsearchable_directory_is_absent() {
+    let (_host_root, driver, snapshot) = portable_driver();
+    assert!(driver.machine().facts.exec_read_only_roots.is_none());
+    let (_fixture, host) = fixture("ro-root-eacces-");
+    let (inner, _unlock) = unsearchable_root(&host);
+    let got = refusal(
+        &driver,
+        &snapshot,
+        "ex_root_eacces_unserved",
+        vec![root_at(&text(&inner), "/opt/locked")],
+    )
+    .await;
+    assert_eq!(got, "exec.sandbox-unavailable");
+
     // SAFETY: `geteuid` reads the caller's effective uid and cannot fail.
     if unsafe { libc::geteuid() } == 0 {
         eprintln!("absent: uid 0 searches a mode-000 directory, so EACCES cannot be produced");
         return;
     }
-    let (_host_root, driver, snapshot) = portable_driver();
-    let (_fixture, host) = fixture("ro-root-eacces-");
-    let locked = host.join("locked");
-    std::fs::create_dir_all(locked.join("inner")).expect("locked/inner");
-    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("mode 000");
-    let _unlock = Unlock(locked.clone());
+    let Some(lane) = publishing_lane("ro-root-eacces-lane-") else {
+        return;
+    };
+    let (inner, _unlock) = unsearchable_root(&lane.fixture);
     assert_eq!(
-        std::fs::symlink_metadata(locked.join("inner"))
+        std::fs::symlink_metadata(&inner)
             .expect_err("the fixture is unsearchable")
             .raw_os_error(),
         Some(libc::EACCES),
         "the fixture does not produce EACCES on this host"
     );
     let got = refusal(
-        &driver,
-        &snapshot,
+        &lane.driver,
+        &lane.snapshot,
         "ex_root_eacces",
-        vec![root_at(&text(&locked.join("inner")), "/opt/locked")],
+        vec![root_at(&text(&inner), "/opt/locked")],
     )
     .await;
     assert_eq!(got, "exec.read-only-root-absent");
 }
 
-/// Invariant 3, the symlink forms the existing case does not state: a dangling link, a link to a
-/// regular file, a link loop and a `/proc/<pid>/root` magic link in a parent component. Each is a
-/// symlink at some component, so each is `exec.read-only-root-not-a-directory`.
-#[tokio::test(flavor = "multi_thread")]
-async fn every_symlink_form_of_a_root_is_not_a_directory() {
-    let (_host_root, driver, snapshot) = portable_driver();
-    let (_fixture, host) = fixture("ro-root-links-");
+/// The symlink fixtures under `host`: the real directory, and each symlink form of a root.
+fn symlink_forms(host: &Path) -> (PathBuf, Vec<(&'static str, String)>) {
     let real = host.join("real");
     std::fs::create_dir(&real).expect("real directory");
     std::fs::write(host.join("file"), "file\n").expect("regular file");
@@ -174,9 +226,7 @@ async fn every_symlink_form_of_a_root_is_not_a_directory() {
         Path::new(&magic).is_dir(),
         "the magic-link path {magic} must reach a real directory, or the case proves nothing"
     );
-
-    let mut wrong = Vec::new();
-    for (id, declared) in [
+    let forms = vec![
         ("ex_root_dangling", text(&host.join("dangling"))),
         ("ex_root_to_file", text(&host.join("to-file"))),
         ("ex_root_loop", text(&host.join("loop-a"))),
@@ -184,11 +234,51 @@ async fn every_symlink_form_of_a_root_is_not_a_directory() {
             "ex_root_loop_parent",
             text(&host.join("loop-a").join("inner")),
         ),
-        ("ex_root_magic_parent", magic.clone()),
-    ] {
+        ("ex_root_magic_parent", magic),
+    ];
+    (real, forms)
+}
+
+/// Invariant 3, the symlink forms the existing case does not state: a dangling link, a link to a
+/// regular file, a link loop and a `/proc/<pid>/root` magic link in a parent component. Each is a
+/// symlink at some component, so a host that publishes `exec.read-only-roots` answers each
+/// `exec.read-only-root-not-a-directory`. A host that does not publish the fact answers every one,
+/// the real directory included, `exec.sandbox-unavailable` without resolving it.
+///
+/// The second half is delegated only: absent, never passed, without a delegated cgroup and
+/// bubblewrap.
+#[tokio::test(flavor = "multi_thread")]
+async fn every_symlink_form_of_a_root_is_not_a_directory() {
+    let (_host_root, driver, snapshot) = portable_driver();
+    assert!(driver.machine().facts.exec_read_only_roots.is_none());
+    let (_fixture, host) = fixture("ro-root-links-");
+    let (real, forms) = symlink_forms(&host);
+    let mut wrong = Vec::new();
+    for (id, declared) in forms.into_iter().chain([("ex_root_real", text(&real))]) {
         let got = refusal(
             &driver,
             &snapshot,
+            id,
+            vec![root_at(&declared, "/opt/link")],
+        )
+        .await;
+        if got != "exec.sandbox-unavailable" {
+            wrong.push(format!(
+                "{id} ({declared}): expected exec.sandbox-unavailable, got {got}"
+            ));
+        }
+    }
+    assert!(wrong.is_empty(), "{wrong:#?}");
+
+    let Some(lane) = publishing_lane("ro-root-links-lane-") else {
+        return;
+    };
+    let (real, forms) = symlink_forms(&lane.fixture);
+    let mut wrong = Vec::new();
+    for (id, declared) in forms {
+        let got = refusal(
+            &lane.driver,
+            &lane.snapshot,
             id,
             vec![root_at(&declared, "/opt/link")],
         )
@@ -199,16 +289,18 @@ async fn every_symlink_form_of_a_root_is_not_a_directory() {
             ));
         }
     }
-    let control = refusal(
-        &driver,
-        &snapshot,
+    let control = admission(
+        &lane.driver,
+        &lane.snapshot,
         "ex_root_real",
         vec![root_at(&text(&real), "/opt/link")],
     )
     .await;
     assert!(
-        !control.starts_with("exec.read-only-root-"),
-        "an admissible root was refused by root admission: {control}"
+        !control
+            .as_deref()
+            .is_some_and(|code| code.starts_with("exec.read-only-root-")),
+        "an admissible root was refused by root admission: {control:?}"
     );
     assert!(wrong.is_empty(), "{wrong:#?}");
 }
