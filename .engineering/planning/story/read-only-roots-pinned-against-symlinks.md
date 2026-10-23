@@ -2,10 +2,11 @@
 format: aep.planning-md/3
 id: story:read-only-roots-pinned-against-symlinks
 kind: story
-status: draft
+status: archived
 title: Read-only roots are pinned against symlinked components
 relations:
 - decomposes: epic:host-run-gates
+- informed_by: story:read-only-roots-bound-by-descriptor
 scope:
 - confidence: inferred
   path: adr/0010-declared-host-roots-are-mounted-read-only.md
@@ -19,7 +20,9 @@ scope:
   path: crates/substrate-host/tests/read_only_root_bind_conformance.rs
 - confidence: cited
   path: docs/design/26-working-directory-and-several-apertures.md
-revision: 4
+revision: 6
+transitions:
+- {from: "draft", to: "archived", at: "2026-10-23T15:33:34Z", actor: "agent:b10x-chef-orchestrator", revision: 6}
 ---
 # Story: read-only roots are pinned against symlinked components
 
@@ -61,3 +64,14 @@ Derived 2026-10-23 by `story-scoper`. Each line is **cited** (read from the stor
 - **Documents:** `docs/design/26-working-directory-and-several-apertures.md` § 3 — cited; `adr/0010-declared-host-roots-are-mounted-read-only.md` — inferred, only if the note must also be in the ADR
 - **Confidence:** high
 - **Not established:** the tests were not run by the scoper; a separate refusal code for a symlinked component would need a successor bundle and a decision.
+
+## Closed, 2026-10-23: already met, nothing built
+
+Archived without code. `story:read-only-roots-bound-by-descriptor` (implemented, `d8e09385`) already
+meets every acceptance line: `openat2` with `RESOLVE_NO_SYMLINKS` refuses a symlinked component as
+`exec.read-only-root-not-a-directory` (`crates/substrate-host/src/read_only_roots.rs:75-172`), the
+bind is `--ro-bind-fd` (`:52`), and the delegated swap case is
+`crates/substrate-host/tests/read_only_root_bind.rs:224`. Wave 2026-10-23 ran that case in
+`bash scripts/delegated-lane.sh` (exit 0, 180 delegated runtime vectors) at `d8811be`; the wave
+closed at merge `f042304`. The wave's approval record named this story but its closing commit
+did not move it; this archive is that missing record.
