@@ -17,7 +17,7 @@ pub const API_VERSION: &str = "v1";
 /// Moving either member is an explicit coordinated promotion (Atlas ADR 0019).
 pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.23.0";
 pub const ADVERTISED_CONTRACT_BUNDLE_SHA256: &str =
-    "aa192049d405e75da293159cde0ec69c1ff97762bcbad0b6fb68bb627e6b27c9";
+    "0a4a4c06df6ca94b5a6e1ad51c25cfabf1cc07cd9e36f8a1c56d1b4a24777b42";
 pub const MAX_FILE_BYTES: u64 = 1_048_576;
 pub const MAX_IO_BYTES: u64 = 1_048_576;
 pub const MAX_LIST_ITEMS: u32 = 1_000;
@@ -1327,6 +1327,14 @@ pub struct FileSlice {
     pub observed_at: DateTime<Utc>,
 }
 
+/// The response header naming how many entries a directory page or a workspace tree omitted
+/// because the wire cannot name them (ADR 0043): a FIFO, socket or device, or a name that is not
+/// UTF-8. Its value is a decimal count of at least 1; it is absent when nothing was omitted. It is
+/// a header and not a body member because [`DirectoryPage`] and [`WorkspaceTree`] are closed, and
+/// it is distinct from [`WorkspaceTree::truncated`], which answers either cause; a tree that is
+/// truncated without this header reached its item limit only.
+pub const OMITTED_ENTRIES_HEADER: &str = "x-b10x-omitted-entries";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DirectoryPage {
@@ -1382,6 +1390,8 @@ pub struct WorkspaceTreeEntry {
 pub struct WorkspaceTree {
     pub workspace: String,
     pub items: Vec<WorkspaceTreeEntry>,
+    /// The tree is incomplete: the walk reached `limit_items` with entries left, or omitted an entry
+    /// it cannot name. [`OMITTED_ENTRIES_HEADER`] tells the two causes apart (ADR 0043).
     pub truncated: bool,
     pub observed_at: DateTime<Utc>,
 }

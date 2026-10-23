@@ -511,7 +511,7 @@ mod tests {
             _root_name: &str,
             _path: &str,
             _query: &FileReadQuery,
-        ) -> Result<FileReadResult, DriverError> {
+        ) -> Result<substrate_host::Listed<FileReadResult>, DriverError> {
             unreachable!("the metrics stream fixture makes no driver call")
         }
 

@@ -209,10 +209,10 @@
   },
   "files": [
     {
-      "byte_length": 5673,
+      "byte_length": 6238,
       "media_type": "application/json",
       "path": "compatibility.json",
-      "sha256": "dd93a150d797f872ba7e07376c998ddf3dac676bd4e04d4a7c86d7ba461010e5"
+      "sha256": "7e132f579c5e580df99923395e67ebdb9ee7854421482d39feace7dccc23a671"
     },
     {
       "byte_length": 65487,
@@ -1133,10 +1133,10 @@
       "sha256": "5189c2d85457fd6ae20ff59520bb51674e2531ffc1aecadedd9fc66e50c3a1ac"
     },
     {
-      "byte_length": 3170,
+      "byte_length": 3601,
       "media_type": "application/json",
       "path": "schemas/results/workspace-file-read.json",
-      "sha256": "4e7788d598632e61dd239cad2d93a9dd4995e20a84ff514ca06245f4ab599b50"
+      "sha256": "4b597626471ca2a81847be7fd56193c0fc4465093460ec93ebd823dc851f64b6"
     },
     {
       "byte_length": 890,
@@ -1169,10 +1169,10 @@
       "sha256": "f8cd330984123f202e8bb499af78f3fa75b318baebd1355cf4c8a7b3541d3e87"
     },
     {
-      "byte_length": 1251,
+      "byte_length": 2082,
       "media_type": "application/json",
       "path": "schemas/results/workspace-tree-read-v2.json",
-      "sha256": "5a8f27901e38b794fbd6428dba9d587f34c7df05323052b397d27bae523cc9c4"
+      "sha256": "6777e64612dcd20d20f393f8cf9b375b7760b2a8c3c63ddd69e36dbc15148160"
     },
     {
       "byte_length": 2966,

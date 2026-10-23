@@ -535,6 +535,27 @@ impl DriverError {
     }
 }
 
+/// A listing and the number of entries it omitted because the wire cannot name them (ADR 0043).
+///
+/// The count travels beside the wire object, not in it, because the directory page and the tree
+/// are closed objects; the daemon answers it as `substrate_wire::OMITTED_ENTRIES_HEADER`. A
+/// result that lists nothing, such as a file read, omits nothing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Listed<T> {
+    pub value: T,
+    pub omitted_entries: u64,
+}
+
+impl<T> Listed<T> {
+    /// A result that omitted no entry.
+    pub fn complete(value: T) -> Self {
+        Self {
+            value,
+            omitted_entries: 0,
+        }
+    }
+}
+
 #[async_trait]
 pub trait Driver: Send + Sync {
     fn machine(&self) -> CapabilitySnapshot;
@@ -581,7 +602,7 @@ pub trait Driver: Send + Sync {
         root_name: &str,
         path: &str,
         query: &FileReadQuery,
-    ) -> Result<FileReadResult, DriverError>;
+    ) -> Result<Listed<FileReadResult>, DriverError>;
 
     async fn write_workspace_file(
         &self,
@@ -617,7 +638,7 @@ pub trait Driver: Send + Sync {
         _workspace_id: &str,
         _root_name: &str,
         _query: &WorkspaceTreeQuery,
-    ) -> Result<WorkspaceTree, DriverError> {
+    ) -> Result<Listed<WorkspaceTree>, DriverError> {
         Err(DriverError::unserved(
             "workspace.tree-v2-unserved",
             "The active driver does not serve bounded recursive workspace trees.",
@@ -1509,7 +1530,7 @@ impl Driver for HostDriver {
         root_name: &str,
         path: &str,
         query: &FileReadQuery,
-    ) -> Result<FileReadResult, DriverError> {
+    ) -> Result<Listed<FileReadResult>, DriverError> {
         let workspace_id = workspace_id.to_owned();
         let root_name = root_name.to_owned();
         let path = path.to_owned();
@@ -1574,7 +1595,7 @@ impl Driver for HostDriver {
         workspace_id: &str,
         root_name: &str,
         query: &WorkspaceTreeQuery,
-    ) -> Result<WorkspaceTree, DriverError> {
+    ) -> Result<Listed<WorkspaceTree>, DriverError> {
         let workspace_id = workspace_id.to_owned();
         let root_name = root_name.to_owned();
         let query = query.clone();
