@@ -1,3 +1,7 @@
+//! `cargo xtask check-secrets`: Gitleaks over the whole reachable history, with the scanned
+//! count held to Git's own. Merges are diffed with an explicit `--diff-merges=separate` so caller
+//! config (`log.diffMerges`) cannot change the format.
+
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::Write as _;
@@ -70,7 +74,7 @@ pub fn check(root: &Path) -> Result<Report> {
             "--no-banner",
             "--no-color",
             "--log-level=info",
-            "--log-opts=-m --root --all --no-textconv",
+            "--log-opts=--diff-merges=separate --root --all --no-textconv",
         ])
         .current_dir(root)
         .output()
@@ -92,7 +96,8 @@ pub fn check(root: &Path) -> Result<Report> {
         words.get(at.checked_sub(1)?)?.parse::<u64>().ok()
     });
     // Gitleaks counts the commits that yield at least one fragment from the same
-    // `git log -p -U0 -m --root --all`; the rest carry no added bytes and are named instead.
+    // `git log -p -U0 --diff-merges=separate --root --all`; the rest carry no added bytes and are
+    // named instead.
     let Expectation { scannable, hidden } = expectation(root)?;
     let refusals = refusals(scanned, &scannable, hidden);
     if !refusals.is_empty() {
@@ -234,8 +239,8 @@ fn scannable_commits(root: &Path) -> Result<BTreeSet<String>> {
     Ok(expectation(root)?.scannable)
 }
 
-/// Reads the patch Gitleaks reads itself (`git log -p -U0` with `--log-opts=-m --root --all
-/// --no-textconv`, so a textconv driver from the checking machine's config cannot empty it;
+/// Reads the patch Gitleaks reads itself (`git log -p -U0` with `--log-opts=--diff-merges=separate
+/// --root --all --no-textconv`, so a textconv driver from the checking machine's config cannot empty it;
 /// `sources/git.go`; `--full-index` only lengthens the `index` line). A diff Git prints as binary
 /// is checked against Git's own heuristic, a NUL in the first 8000 bytes of the post-image: one
 /// without (a diff attribute, or a merge parent whose version had a NUL) went unscanned, so its
@@ -247,7 +252,7 @@ fn expectation(root: &Path) -> Result<Expectation> {
             "log",
             "-p",
             "-U0",
-            "-m",
+            "--diff-merges=separate",
             "--root",
             "--all",
             "--no-color",
@@ -373,7 +378,7 @@ impl FileDiff {
 /// The parse of a `git log -p --full-index --format='commit %H'` stream.
 #[derive(Default)]
 struct Patch {
-    /// Commits with at least one file diff that yields a Gitleaks fragment. Under `-m` a merge
+    /// Commits with at least one file diff that yields a Gitleaks fragment. Under `--diff-merges=separate` a merge
     /// appears once per parent; any parent's diff counts.
     scannable: BTreeSet<String>,
     /// Every non-deleted file diff Git printed as binary.
@@ -970,5 +975,113 @@ mod tests {
         assert_eq!(expected.scannable, set(&[&base]));
         assert!(!expected.scannable.contains(&wide));
         assert!(expected.hidden.is_empty(), "{:?}", expected.hidden);
+    }
+
+    /// `base`, a side branch adding `s.txt`, a main commit adding `m.txt`, and a merge whose tree
+    /// also adds `evil.txt` (in neither parent) carrying `content`. Returns the merge commit.
+    fn adversary3_evil_merge(repo: &Repo, content: &[u8]) -> String {
+        repo.write("a.txt", b"alpha\n");
+        repo.commit("base");
+        repo.git(&["checkout", "--quiet", "-b", "side"]);
+        repo.write("s.txt", b"side\n");
+        repo.commit("side");
+        repo.git(&["checkout", "--quiet", "main"]);
+        repo.write("m.txt", b"main\n");
+        repo.commit("main");
+        repo.git(&["merge", "--quiet", "--no-commit", "side"]);
+        repo.write("evil.txt", content);
+        repo.commit("merge")
+    }
+
+    /// `-m` is `--diff-merges=on`, which shows a merge in the format the local `log.diffMerges`
+    /// names. That config is never pushed, and `off` (or `none`) makes `git log -p -m` print no
+    /// patch for any merge, for the expectation and for Gitleaks' own log alike, so content a
+    /// merge adds drops out of both counts and they still agree.
+    #[test]
+    fn adversary3_log_diff_merges_off_cannot_remove_a_merge_from_the_expected_count() {
+        let repo = Repo::new();
+        let merge = adversary3_evil_merge(&repo, b"token = not-a-real-value\n");
+        repo.git(&["config", "log.diffMerges", "off"]);
+
+        let expected = expectation(repo.path()).expect("counting scannable commits");
+        assert!(
+            expected.scannable.contains(&merge),
+            "{merge} adds evil.txt in neither parent; scannable {:?}",
+            expected.scannable
+        );
+    }
+
+    /// The same with `log.diffMerges=dense-combined`: Git prints `diff --cc`, which the
+    /// expectation's parser does not read as a file diff.
+    #[test]
+    fn adversary3_log_diff_merges_combined_cannot_remove_a_merge_from_the_expected_count() {
+        let repo = Repo::new();
+        let merge = adversary3_evil_merge(&repo, b"token = not-a-real-value\n");
+        repo.git(&["config", "log.diffMerges", "dense-combined"]);
+
+        let expected = expectation(repo.path()).expect("counting scannable commits");
+        assert!(
+            expected.scannable.contains(&merge),
+            "{merge} adds evil.txt in neither parent; scannable {:?}",
+            expected.scannable
+        );
+    }
+
+    fn adversary3_e2e_evil_merge_with(diff_merges: &str) {
+        let repo = Repo::new();
+        write_default_gitleaks_config(&repo);
+        adversary3_evil_merge(&repo, adversary2_key_line().as_bytes());
+        repo.git(&["config", "log.diffMerges", diff_merges]);
+
+        let report = super::check(repo.path()).expect("running the check");
+        assert!(
+            !report.failures().is_empty(),
+            "check-secrets passed a merge holding an unscanned credential under log.diffMerges={diff_merges}: {}",
+            report.summary()
+        );
+    }
+
+    /// End to end with the pinned Gitleaks: a credential added by a merge must not pass under a
+    /// local `log.diffMerges=off`.
+    #[test]
+    #[ignore = "downloads the pinned Gitleaks release"]
+    fn adversary3_e2e_log_diff_merges_off_does_not_let_a_secret_merge_pass() {
+        adversary3_e2e_evil_merge_with("off");
+    }
+
+    /// End to end with the pinned Gitleaks, `log.diffMerges=dense-combined`.
+    #[test]
+    #[ignore = "downloads the pinned Gitleaks release"]
+    fn adversary3_e2e_log_diff_merges_combined_does_not_let_a_secret_merge_pass() {
+        adversary3_e2e_evil_merge_with("dense-combined");
+    }
+
+    /// End to end with the pinned Gitleaks: with no local config the same merge is refused
+    /// (control for the two cases above).
+    #[test]
+    #[ignore = "downloads the pinned Gitleaks release"]
+    fn adversary3_e2e_a_secret_merge_is_refused_with_default_config() {
+        adversary3_e2e_evil_merge_with("separate");
+    }
+
+    /// End to end with the pinned Gitleaks: `color.diff=always` colours only Gitleaks' log (the
+    /// expectation passes `--no-color`), so the check must refuse, not pass.
+    #[test]
+    #[ignore = "downloads the pinned Gitleaks release"]
+    fn adversary3_e2e_color_diff_always_does_not_let_a_secret_commit_pass() {
+        let repo = Repo::new();
+        write_default_gitleaks_config(&repo);
+        repo.write("a.txt", b"alpha\n");
+        repo.commit("base");
+        repo.write("creds.txt", adversary2_key_line().as_bytes());
+        repo.commit("add a credential");
+        repo.git(&["config", "color.diff", "always"]);
+
+        let report = super::check(repo.path()).expect("running the check");
+        assert!(
+            !report.failures().is_empty(),
+            "check-secrets passed a history holding an unscanned credential: {}",
+            report.summary()
+        );
     }
 }
