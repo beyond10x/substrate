@@ -720,7 +720,7 @@ mod upgraded_transport_slot {
     ///
     /// Returns the address to connect to and the budget the listener admits from, so a case can
     /// read the budget from outside the listener.
-    async fn admitted_listener(
+    pub(super) async fn admitted_listener(
         deployment: &str,
         subjects: u32,
     ) -> (SocketAddr, Arc<TcpConnectionLimits>) {
@@ -1412,11 +1412,309 @@ fn the_stream_policies_enforce_the_bounds_their_facts_publish() {
     );
     let published = substrate_wire::AttachmentBoundsFacts::sessions();
     assert_eq!(
-        (sessions.global_attachments, sessions.lifetime),
         (
+            sessions.attachments_per_subject,
+            sessions.global_attachments,
+            sessions.lifetime
+        ),
+        (
+            usize::try_from(published.per_subject).expect("small cap"),
             usize::try_from(published.global).expect("small cap"),
             lifetime
         ),
         "sessions.attachment-bounds"
     );
+}
+
+/// Security review pass 1 on unit b2 (ADR 0042): integrity conformance checks of the hand-over of
+/// an upgraded connection's transport slot to its stream, through the production TCP listener's
+/// shape (`upgraded_transport_slot::admitted_listener`, reused rather than copied so the crate's
+/// listener inventory checks count no new listener) and the real router.
+///
+/// Each case measures one clause of ADR 0042 against the running composition: no path leaks a
+/// slot of either budget, the two budgets together bound the open sockets under concurrency, and
+/// the bound a client reads from `/v1/machine` is the one the route enforces.
+mod stream_caps_security_pass1 {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::time::{Duration, Instant};
+
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use tokio::net::TcpStream;
+
+    use super::upgraded_transport_slot::admitted_listener;
+    use crate::runtime::TcpConnectionLimits;
+
+    const HANDSHAKE_KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
+    const CLIENT: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    /// `TcpConnectionLimits::production`'s per-source bound.
+    const PER_SOURCE: usize = 16;
+    const SETTLE: Duration = Duration::from_secs(3);
+    const EVENTS: &str = "/v1/events/stream?limit=1";
+
+    fn global() -> usize {
+        usize::try_from(substrate_wire::EVENT_STREAMS_GLOBAL).expect("small cap")
+    }
+
+    /// A handshake's status, its response head and the client half, or `None` when the listener
+    /// refused the connection at accept.
+    async fn handshake(address: SocketAddr, path: &str) -> Option<(u16, String, TcpStream)> {
+        let mut stream = TcpStream::connect(address).await.ok()?;
+        let request = format!(
+            "GET {path} HTTP/1.1\r\nHost: {address}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {HANDSHAKE_KEY}\r\n\r\n"
+        );
+        stream.write_all(request.as_bytes()).await.ok()?;
+        let mut head = Vec::new();
+        while !head.ends_with(b"\r\n\r\n") {
+            assert!(head.len() < 16 * 1_024, "bounded handshake response");
+            let mut byte = [0_u8; 1];
+            match tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut byte)).await {
+                Ok(Ok(_)) => head.push(byte[0]),
+                Ok(Err(_)) if head.is_empty() => return None,
+                Ok(Err(error)) => panic!("read the handshake response: {error}"),
+                Err(elapsed) => panic!("no handshake response within five seconds: {elapsed}"),
+            }
+        }
+        let head = String::from_utf8(head).expect("ASCII handshake response");
+        let status = head
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|value| value.parse::<u16>().ok())
+            .expect("HTTP handshake status");
+        Some((status, head, stream))
+    }
+
+    /// The first answer on a connection the transport admits, retried past refusals at accept.
+    async fn admitted_handshake(address: SocketAddr, path: &str) -> (u16, String, TcpStream) {
+        let deadline = Instant::now() + SETTLE;
+        loop {
+            if let Some(answer) = handshake(address, path).await {
+                return answer;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no connection was admitted at the transport within {SETTLE:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// `count` event stream upgrades at once: the upgraded client halves, and how many were
+    /// refused `429`. Any other answer fails the case.
+    async fn concurrent_upgrades(address: SocketAddr, count: usize) -> (Vec<TcpStream>, usize) {
+        let mut attempts = tokio::task::JoinSet::new();
+        for _ in 0..count {
+            attempts.spawn(async move { admitted_handshake(address, EVENTS).await });
+        }
+        let mut upgraded = Vec::new();
+        let mut refused = 0_usize;
+        while let Some(joined) = attempts.join_next().await {
+            let (status, head, stream) = joined.expect("handshake task");
+            match status {
+                101 => upgraded.push(stream),
+                429 => refused += 1,
+                other => panic!("unexpected handshake status {other}: {head}"),
+            }
+        }
+        (upgraded, refused)
+    }
+
+    /// Waits until the deployment's whole event stream cap upgrades at once again — sixty-four
+    /// concurrent upgrades over a listener whose subjects are at least sixteen, so no per-subject
+    /// cap binds — and says whether it did.
+    async fn deployment_cap_returns(address: SocketAddr) -> bool {
+        let deadline = Instant::now() + SETTLE;
+        while Instant::now() < deadline {
+            let (upgraded, _) = concurrent_upgrades(address, global()).await;
+            let whole = upgraded.len() == global();
+            drop(upgraded);
+            if whole {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
+    }
+
+    async fn body(head: &str, stream: &mut TcpStream) -> String {
+        let length = head
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())?
+            })
+            .expect("a refusal states its content-length");
+        let mut body = vec![0_u8; length];
+        stream.read_exact(&mut body).await.expect("read the body");
+        String::from_utf8(body).expect("UTF-8 body")
+    }
+
+    /// Waits until the whole per-source transport budget is free, and says whether it became so.
+    async fn transport_budget_returns(limits: &TcpConnectionLimits) -> bool {
+        let deadline = Instant::now() + SETTLE;
+        while Instant::now() < deadline {
+            let held = (0..PER_SOURCE)
+                .map_while(|_| limits.acquire(CLIENT))
+                .collect::<Vec<_>>();
+            if held.len() == PER_SOURCE {
+                return true;
+            }
+            drop(held);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        false
+    }
+
+    /// **No aborted handshake leaks a slot of either budget.**
+    ///
+    /// A client that closes mid-upgrade reaches one of two paths: the `101` write fails and the
+    /// upgrade is abandoned (the callback, the stream permit and the transport clone are dropped
+    /// unrun), or the upgrade completes into a socket whose peer has already gone (the upgraded
+    /// task hands over and then ends on end of file). Sixty-four such aborts over sixteen subjects,
+    /// half before reading anything and half after reading the answer, concurrently, and then: the
+    /// source's whole transport budget is free, and the deployment's whole event stream cap of
+    /// sixty-four upgrades at once — sixteen subjects at their per-subject cap of four each, so
+    /// every per-subject and every deployment slot an aborted upgrade took came back.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn aborted_handshakes_leak_no_slot_of_either_budget() {
+        let (address, limits) = admitted_listener("dep_sec_aborted_handshakes", 16).await;
+        let mut aborts = tokio::task::JoinSet::new();
+        for index in 0..64_u32 {
+            aborts.spawn(async move {
+                let Ok(mut stream) = TcpStream::connect(address).await else {
+                    return;
+                };
+                let request = format!(
+                    "GET {EVENTS} HTTP/1.1\r\nHost: {address}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {HANDSHAKE_KEY}\r\n\r\n"
+                );
+                if stream.write_all(request.as_bytes()).await.is_err() {
+                    return;
+                }
+                if index % 2 == 1 {
+                    let mut some = [0_u8; 16];
+                    let _ =
+                        tokio::time::timeout(Duration::from_millis(500), stream.read(&mut some))
+                            .await;
+                }
+                drop(stream);
+            });
+        }
+        while aborts.join_next().await.is_some() {}
+
+        assert!(
+            transport_budget_returns(&limits).await,
+            "the source's transport budget did not return within {SETTLE:?} of every aborted \
+             handshake ending: an aborted upgrade leaked a transport slot"
+        );
+        assert!(
+            deployment_cap_returns(address).await,
+            "the deployment's event stream cap did not upgrade whole within {SETTLE:?} of every \
+             aborted handshake ending: an aborted upgrade leaked a stream slot"
+        );
+    }
+
+    /// **Under concurrency, the open sockets stay inside transport budget + stream cap, and both
+    /// budgets are returned whole.**
+    ///
+    /// One hundred concurrent upgrades from one source over fifty identities (two each, so no
+    /// per-subject cap binds): exactly the published `global` of sixty-four upgrade and hold, the
+    /// rest are refused — at accept by the source's sixteen transport slots, retried, then `429` by
+    /// the deployment cap — and while the sixty-four serve, all sixteen transport slots are free.
+    /// After every client closes, the same holds a second time: no slot was retired by the race.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_upgrades_stay_inside_both_budgets_and_return_them() {
+        let (address, limits) = admitted_listener("dep_sec_concurrent_upgrades", 50).await;
+        for round in 0..2 {
+            let (upgraded, refused) = concurrent_upgrades(address, 100).await;
+            assert_eq!(
+                (upgraded.len(), refused),
+                (global(), 100 - global()),
+                "round {round}: exactly the deployment cap of {} upgraded sockets is served \
+                 concurrently",
+                global()
+            );
+            assert!(
+                transport_budget_returns(&limits).await,
+                "round {round}: with {} upgraded sockets serving, a transport slot is still \
+                 held: an upgraded socket is counted by both budgets past the upgrade",
+                global()
+            );
+            drop(upgraded);
+            assert!(
+                transport_budget_returns(&limits).await,
+                "round {round}: the transport budget did not return after every client closed"
+            );
+            assert!(
+                deployment_cap_returns(address).await,
+                "round {round}: the deployment's event stream cap did not upgrade whole within \
+                 {SETTLE:?} of every upgraded client closing"
+            );
+        }
+    }
+
+    /// **The bound a client reads is the bound the route enforces.** The `events.stream-bounds`
+    /// fact is read from `/v1/machine` over the same listener, and the route is driven from it: one
+    /// subject upgrades `per_subject` streams and the next is refused with the fact's `refusal`.
+    /// The presence ties of the other two facts are read from the same snapshot.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_event_bounds_a_client_reads_are_the_ones_the_route_enforces() {
+        let (address, _limits) = admitted_listener("dep_sec_fact_drives_route", 1).await;
+        let mut stream = TcpStream::connect(address).await.expect("connect");
+        stream
+            .write_all(
+                format!("GET /v1/machine HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .expect("send the machine request");
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .await
+            .expect("read the machine response");
+        let response = String::from_utf8(response).expect("UTF-8 response");
+        let (_, json) = response.split_once("\r\n\r\n").expect("a response body");
+        let machine: serde_json::Value = serde_json::from_str(json).expect("JSON machine body");
+        let facts = &machine["result"]["facts"];
+        let bounds = &facts["events.stream-bounds"];
+        let per_subject = usize::try_from(
+            bounds["per_subject"]
+                .as_u64()
+                .expect("the fact publishes per_subject"),
+        )
+        .expect("small cap");
+        let refusal = bounds["refusal"]
+            .as_str()
+            .expect("the fact publishes refusal")
+            .to_owned();
+        assert_eq!(
+            facts.get("metrics.stream-bounds").is_some(),
+            facts.get("metrics.stream").is_some(),
+            "{machine}"
+        );
+        assert_eq!(
+            facts.get("sessions.attachment-bounds").is_some(),
+            facts.get("exec.argv-only").is_some(),
+            "{machine}"
+        );
+
+        let mut open = Vec::new();
+        for index in 0..per_subject {
+            let (status, head, stream) = admitted_handshake(address, EVENTS).await;
+            assert_eq!(
+                status, 101,
+                "stream {index} is inside the published cap: {head}"
+            );
+            open.push(stream);
+        }
+        let (status, head, mut refused) = admitted_handshake(address, EVENTS).await;
+        assert_eq!(status, 429, "past the published per_subject: {head}");
+        let refused_body = body(&head, &mut refused).await;
+        assert!(
+            refused_body.contains(&format!("\"{refusal}\"")),
+            "the refusal is the one the fact publishes, {refusal}: {refused_body}"
+        );
+        drop(open);
+    }
 }

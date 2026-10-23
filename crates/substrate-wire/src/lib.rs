@@ -17,7 +17,7 @@ pub const API_VERSION: &str = "v1";
 /// Moving either member is an explicit coordinated promotion (Atlas ADR 0019).
 pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.23.0";
 pub const ADVERTISED_CONTRACT_BUNDLE_SHA256: &str =
-    "aa192049d405e75da293159cde0ec69c1ff97762bcbad0b6fb68bb627e6b27c9";
+    "de6d58f941c33c53649624131af77fb86cea2b07db2a0a6bc3c9edcbe4f56c80";
 pub const MAX_FILE_BYTES: u64 = 1_048_576;
 pub const MAX_IO_BYTES: u64 = 1_048_576;
 pub const MAX_LIST_ITEMS: u32 = 1_000;
@@ -146,6 +146,9 @@ pub const METRICS_STREAMS_PER_SUBJECT: u32 = 4;
 pub const METRICS_STREAMS_GLOBAL: u32 = 64;
 /// The refusal a metrics stream past either cap earns, `429` (ADR 0042).
 pub const METRICS_STREAM_CAPACITY: &str = "metrics.stream-capacity";
+/// Session attachments one subject may hold at once (ADR 0042 decision 4,
+/// `sessions.attachment-bounds`).
+pub const SESSION_ATTACHMENTS_PER_SUBJECT: u32 = 16;
 /// Attachments one session may hold at once (ADR 0042, `sessions.attachment-bounds`).
 pub const SESSION_ATTACHMENTS_PER_SESSION: u32 = 1;
 /// Session attachments one deployment serves at once (ADR 0042, `sessions.attachment-bounds`).
@@ -3747,6 +3750,7 @@ impl StreamBoundsFacts {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AttachmentBoundsFacts {
+    pub per_subject: u32,
     pub per_session: u32,
     pub global: u32,
     pub lifetime_ms: u64,
@@ -3758,6 +3762,7 @@ impl AttachmentBoundsFacts {
     #[must_use]
     pub fn sessions() -> Self {
         Self {
+            per_subject: SESSION_ATTACHMENTS_PER_SUBJECT,
             per_session: SESSION_ATTACHMENTS_PER_SESSION,
             global: SESSION_ATTACHMENTS_GLOBAL,
             lifetime_ms: UPGRADED_STREAM_LIFETIME_MS,

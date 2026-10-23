@@ -506,7 +506,7 @@
         },
         "sessions.attachment-bounds": {
           "additionalProperties": false,
-          "description": "The caps that bound concurrent session attachments per session and per deployment, the most an upgraded attachment lives, and the refusal an attachment over the global cap earns; a second attachment to one session is refused session.already-attached (ADR 0042). From the upgrade on, these caps and not the transport budget count the socket.",
+          "description": "The caps that bound concurrent session attachments per subject, per session and per deployment, the most an upgraded attachment lives, and the refusal an attachment over the per-subject or global cap earns; a second attachment to one session is refused session.already-attached (ADR 0042). From the upgrade on, these caps and not the transport budget count the socket.",
           "properties": {
             "global": {
               "const": 32
@@ -517,11 +517,15 @@
             "per_session": {
               "const": 1
             },
+            "per_subject": {
+              "const": 16
+            },
             "refusal": {
               "const": "session.attachment-capacity"
             }
           },
           "required": [
+            "per_subject",
             "per_session",
             "global",
             "lifetime_ms",

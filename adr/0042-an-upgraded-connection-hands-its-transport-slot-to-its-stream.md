@@ -26,7 +26,7 @@ Three routes upgrade: the event stream (`/v1/events/stream`), the metrics stream
 |---|---|---|---|
 | event stream | 4 | 64 | `event.stream-capacity` |
 | metrics stream | 4 | 64 | `metrics.stream-capacity` |
-| session attachment | 1 per session | 32 | `session.attachment-capacity` |
+| session attachment | 1 per session, none per subject | 32 | `session.attachment-capacity` |
 
 Review finding 4 (`story:upgraded-connections-keep-their-permit`) made every upgraded task keep the
 transport permit too, so the transport budget counted a socket that was still serving. That closed
@@ -60,14 +60,34 @@ bound does not close it, because the number of subjects behind one address is un
 3. **Every stream family has a deployment-wide cap.** All three already had one (64, 64 and 32);
    none was added. Upgraded sockets are therefore bounded by 160 per deployment in total, whatever
    the transport admitted.
-4. **The caps, the lifetime and the refusal code of each family are capability facts**, which a
+4. **A session attachment has a per-subject cap of 16**, refused `session.attachment-capacity`
+   (429) like the deployment-wide cap. The hand-over removed the only bound that stood between one
+   subject and all 32 attachments. Before it, that bound was the transport's, and it was never a
+   per-subject one: on the unix socket the subject is `local:<uid>` and the per-uid transport cap is
+   32, equal to the attachment cap, so one uid could already hold all 32; over TCP and TLS it was 16
+   per source address, so one subject behind one address held at most 16, and one subject behind
+   two addresses held all 32. The cap keeps the TCP figure and applies it per subject on every
+   listener, which tightens the unix socket from 32 to 16. One subject can then hold at most half of
+   the deployment's attachments, and a second subject always finds one free unless a third holds
+   it. The cap is counted beside the per-session and global caps in `PipeAttachmentLimits`
+   (`crates/substrate-daemon/src/app/sessions.rs`), taken before the `101` and returned when the
+   attachment ends, on every path.
+5. **The metrics stream route refuses before the upgrade when the snapshot does not publish
+   `metrics.stream`**, with `exec.metrics-unserved` (501, class `unserved`). The route already
+   declared `metrics.stream` as its capability predicate in the bundle, and the daemon did not
+   consult it: a host that published neither `metrics.stream` nor `metrics.stream-bounds` still
+   upgraded and served a capped stream. `exec.metrics-unserved` is the published code for
+   "this host has not proved execution resource counters" (the `measurements` refusal of
+   `exec.start`), which is what an absent `metrics.stream` states; no code is added. The check
+   runs after the query is parsed and before the stream permit is taken.
+6. **The caps, the lifetime and the refusal code of each family are capability facts**, which a
    client reads from `GET /v1/machine` before it opens a stream:
 
    | fact | members |
    |---|---|
    | `events.stream-bounds` | `per_subject: 4`, `global: 64`, `lifetime_ms: 3600000`, `refusal: "event.stream-capacity"` |
    | `metrics.stream-bounds` | `per_subject: 4`, `global: 64`, `lifetime_ms: 3600000`, `refusal: "metrics.stream-capacity"` |
-   | `sessions.attachment-bounds` | `per_session: 1`, `global: 32`, `lifetime_ms: 3600000`, `refusal: "session.attachment-capacity"` |
+   | `sessions.attachment-bounds` | `per_subject: 16`, `per_session: 1`, `global: 32`, `lifetime_ms: 3600000`, `refusal: "session.attachment-capacity"` |
 
    `refusal` names the code for a stream over its family's caps. The one exception is the
    per-session attachment cap: a second attachment to one session keeps its existing, more
@@ -79,7 +99,7 @@ bound does not close it, because the number of subjects behind one address is un
    is served, because a session is an exec. Bundle `0.23.0` declares each fact as a closed object
    of constants, and `cargo xtask check-bundle` holds every constant to its `substrate_wire`
    value.
-5. **Stream capacity is published as a fact, not in `refusals.json`.** `refusals.json` is the
+7. **Stream capacity is published as a fact, not in `refusals.json`.** `refusals.json` is the
    session refusal vocabulary (`b10x.substrate-session-refusals.v1`); a fact sits beside the
    capabilities a client already reads before opening a stream, and states the cap and the code
    together.
@@ -94,8 +114,17 @@ bound does not close it, because the number of subjects behind one address is un
   check in `app/metrics.rs` now require the hand-over call inside every `.on_upgrade(` task.
 - A deployment can serve up to 160 upgraded sockets beside 128 un-upgraded connections. That is the
   sum of the published caps, and every term of it is named.
-- The session attachment has no per-subject cap. One subject with 32 attachable sessions can hold
-  the deployment's 32 attachments; it is published as `global`, and a per-subject attachment cap is
-  a separate decision.
+- One subject holds at most 16 of the deployment's 32 session attachments (decision 4). A unix
+  client that attached more than 16 sessions at once under one uid is now refused at the 17th; no
+  published bound said it could.
+- The event and metrics streams keep their per-subject caps and no per-source one, and that is
+  accepted: sixteen subjects behind one source address, each inside its cap of four, hold all 64
+  event streams (or all 64 metrics streams) for the hour, and every other caller is refused the
+  family's `429` until one ends. The streams are a deployment-wide budget by design; bounding the
+  subjects behind one address is admission's concern, not a stream cap's, and no code changes for
+  it here.
+- A host that does not publish `metrics.stream` now answers `501 exec.metrics-unserved` on the
+  metrics stream route where it used to answer `101` (decision 5). A client that followed the
+  route's published capability predicate never sent that request.
 - A client that validates snapshots against `0.22.0` rejects a snapshot that publishes one of the
   three facts until it moves to `0.23.0`, as with every new fact on the closed facts object.

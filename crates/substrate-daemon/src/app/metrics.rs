@@ -144,6 +144,21 @@ pub(super) async fn metrics_stream(
     else {
         return schema_invalid(&request_id, None, "query");
     };
+    // The route's published capability predicate is `metrics.stream` (ADR 0042 decision 5): a
+    // host that has not proved the sampling it describes serves no stream, and is refused before
+    // a permit is taken or anything is read.
+    if app.driver.machine().facts.metrics_stream.is_none() {
+        return failure(
+            StatusCode::NOT_IMPLEMENTED,
+            &request_id,
+            None,
+            ErrorClass::Unserved,
+            substrate_wire::EXEC_METRICS_UNSERVED,
+            "The active host has not published the metrics stream.",
+            Some("stream"),
+            false,
+        );
+    }
     let scope = app.scope(&identity);
     // The permit is taken before the first durable read, so a flood of upgrades cannot buy the
     // `observe_exec` and `put_exec` that a stream costs. Every refusal below drops it again.
@@ -429,10 +444,11 @@ mod tests {
     };
     use substrate_store::{ExecWrite, NewOperation, Reservation, Scope, Store, StoredExec};
     use substrate_wire::{
-        CapabilitySnapshot, ConfinementRequest, Exec, ExecExit, ExecKind, ExecOutputQuery,
-        ExecSignalInput, ExecStartInput, ExecState, ExecUsage, FileAbsence, FileObservation,
-        FileReadQuery, FileReadResult, LeaseObservation, NetworkMode, OutputSlice, ResourceUsage,
-        SandboxProfile, Workspace, WorkspaceCreateInput, WorkspaceKind, WorkspaceState,
+        CapabilityFacts, CapabilitySnapshot, ConfinementRequest, Exec, ExecExit, ExecKind,
+        ExecOutputQuery, ExecSignalInput, ExecStartInput, ExecState, ExecUsage, FileAbsence,
+        FileObservation, FileReadQuery, FileReadResult, HostDriverKind, LeaseObservation,
+        MetricsStreamFacts, NetworkMode, OutputSlice, ResourceUsage, SandboxProfile,
+        StreamBoundsFacts, Workspace, WorkspaceCreateInput, WorkspaceKind, WorkspaceState,
     };
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::{TcpListener, TcpStream};
@@ -466,17 +482,39 @@ mod tests {
         }
     }
 
-    /// A driver that answers nothing. Every metrics sample in these cases is served from the
+    /// A driver that answers nothing but its snapshot. Every metrics sample in these cases is served from the
     /// store, because `load_exec_usage` reads a terminal exec's recorded usage without observing
     /// it again — so a driver call on this path is a bug, and this fake makes it a panic rather
     /// than a silent host read. It also keeps the host *implementation* out of a file that is not
     /// a composition root (`crates/substrate-daemon/tests/driver_port.rs`).
-    struct NoDriver;
+    ///
+    /// The one call it answers is `machine`, because the stream route reads `metrics.stream` from
+    /// the snapshot before it upgrades (ADR 0042 decision 5): `metrics_stream` says whether this
+    /// host publishes that fact, with its bounds beside it as the host probe publishes them.
+    struct NoDriver {
+        metrics_stream: bool,
+    }
 
     #[async_trait::async_trait]
     impl Driver for NoDriver {
         fn machine(&self) -> CapabilitySnapshot {
-            unreachable!("the metrics stream fixture makes no driver call")
+            CapabilitySnapshot {
+                snapshot: format!("sha256:{}", "a".repeat(64)),
+                driver: HostDriverKind::Host,
+                driver_version: "metrics-stream-test".to_owned(),
+                config_generation: 1,
+                probed_at: Utc::now(),
+                valid_until: None,
+                facts: CapabilityFacts {
+                    metrics_stream: self.metrics_stream.then_some(MetricsStreamFacts {
+                        sample_interval_ms: substrate_wire::RESOURCE_USAGE_SAMPLE_INTERVAL_MS,
+                        latest_wins: true,
+                        replay: false,
+                    }),
+                    metrics_stream_bounds: self.metrics_stream.then(StreamBoundsFacts::metrics),
+                    ..CapabilityFacts::default()
+                },
+            }
         }
 
         async fn shutdown(&self) -> Result<(), DriverError> {
@@ -601,8 +639,17 @@ mod tests {
 
     impl Harness {
         async fn open() -> Self {
+            Self::publishing(true).await
+        }
+
+        /// A daemon whose host publishes `metrics.stream` exactly when `metrics_stream` is set.
+        async fn publishing(metrics_stream: bool) -> Self {
             let store = Arc::new(Store::open(":memory:").expect("state store"));
-            let app = App::new(Arc::clone(&store), Arc::new(NoDriver), DEPLOYMENT);
+            let app = App::new(
+                Arc::clone(&store),
+                Arc::new(NoDriver { metrics_stream }),
+                DEPLOYMENT,
+            );
             seed_streaming_exec(&store);
 
             let listener = TcpListener::bind("127.0.0.1:0")
@@ -882,6 +929,42 @@ mod tests {
         assert_eq!(refusal["error"]["class"], "exhausted");
         assert_eq!(refusal["error"]["retriable"], true);
         assert_eq!(refusal["error"]["address"], "stream");
+    }
+
+    /// ADR 0042 decision 5: the route's published capability predicate is `metrics.stream`, so a
+    /// host that does not publish it refuses the stream before the upgrade, in the published
+    /// `exec.metrics-unserved` (501), and never serves a stream whose sampling and caps it has not
+    /// published. The refusal takes no stream permit: the host that does publish the fact still
+    /// serves its full per-subject cap afterwards.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_host_without_the_metrics_stream_fact_refuses_the_stream_before_the_upgrade() {
+        let harness = Harness::publishing(false).await;
+        let per_subject = MetricsStreamPolicy::production().streams_per_subject;
+        for _attempt in 0..=per_subject {
+            let refused = harness.stream().await;
+            assert_eq!(
+                refused.status, 501,
+                "a host that publishes no metrics.stream must not upgrade the metrics stream"
+            );
+            let refusal = refused.refusal();
+            assert_eq!(
+                refusal["error"]["code"],
+                substrate_wire::EXEC_METRICS_UNSERVED
+            );
+            assert_eq!(refusal["error"]["class"], "unserved");
+            assert_eq!(refusal["error"]["retriable"], false);
+        }
+
+        let serving = Harness::open().await;
+        let mut held = Vec::new();
+        for _stream in 0..per_subject {
+            let handshake = serving.stream().await;
+            assert_eq!(
+                handshake.status, 101,
+                "a host that publishes metrics.stream serves it"
+            );
+            held.push(handshake);
+        }
     }
 
     /// The cap is a live bound, not a one-way ratchet: a stream that ends gives its permit back.

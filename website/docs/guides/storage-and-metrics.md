@@ -137,7 +137,9 @@ and `io_write_bytes`.
 
 `GET /v1/metrics/stream?exec_id=ex_…` upgrades to WebSocket and emits one immediate observation,
 then the latest sample approximately once per second. Slow readers skip intermediate samples. The
-stream has no replay history and closes after a terminal or unavailable observation.
+stream has no replay history and closes after a terminal or unavailable observation. A host that
+does not publish the `metrics.stream` fact serves no stream: the route answers `501` with
+`exec.metrics-unserved` before it upgrades.
 
 The stream is bounded, and the bounds a client can act on carry a code. A subject may hold 4 metrics
 streams at once and a deployment 64; one more is refused `429` with the code

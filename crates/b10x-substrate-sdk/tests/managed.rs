@@ -150,7 +150,14 @@ async fn managed_external_daemon_serves_the_typed_workspace_journey() {
     else {
         panic!("metrics stream handshake must preserve its named refusal")
     };
-    assert_eq!(stream_refusal.code, "resource.not-found");
+    // ADR 0042 decision 5: a host that does not publish `metrics.stream` refuses the route before
+    // it reads the exec.
+    let expected = if managed.client().machine().facts.metrics_stream.is_some() {
+        "resource.not-found"
+    } else {
+        "exec.metrics-unserved"
+    };
+    assert_eq!(stream_refusal.code, expected);
 
     let policy = ExecutionPolicy::builder()
         .timeout(Duration::from_secs(5))

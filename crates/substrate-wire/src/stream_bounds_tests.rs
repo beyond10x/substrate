@@ -5,10 +5,11 @@ use super::{
     EVENT_STREAMS_PER_SUBJECT, EVENTS_STREAM_BOUNDS_FACT, METRICS_STREAM_BOUNDS_FACT,
     METRICS_STREAM_CAPACITY, METRICS_STREAMS_GLOBAL, METRICS_STREAMS_PER_SUBJECT,
     SESSION_ATTACHMENT_CAPACITY, SESSION_ATTACHMENTS_GLOBAL, SESSION_ATTACHMENTS_PER_SESSION,
-    SESSIONS_ATTACHMENT_BOUNDS_FACT, StreamBoundsFacts, UPGRADED_STREAM_LIFETIME_MS,
+    SESSION_ATTACHMENTS_PER_SUBJECT, SESSIONS_ATTACHMENT_BOUNDS_FACT, StreamBoundsFacts,
+    UPGRADED_STREAM_LIFETIME_MS,
 };
 
-/// The values ADR 0042 decision 4 publishes, stated once here so a constant that moves without
+/// The values ADR 0042 decisions 4 and 6 publish, stated once here so a constant that moves without
 /// its ADR fails.
 #[test]
 fn the_published_stream_bounds_are_the_ones_adr_0042_states() {
@@ -24,8 +25,12 @@ fn the_published_stream_bounds_are_the_ones_adr_0042_states() {
         (4, 64)
     );
     assert_eq!(
-        (SESSION_ATTACHMENTS_PER_SESSION, SESSION_ATTACHMENTS_GLOBAL),
-        (1, 32)
+        (
+            SESSION_ATTACHMENTS_PER_SUBJECT,
+            SESSION_ATTACHMENTS_PER_SESSION,
+            SESSION_ATTACHMENTS_GLOBAL
+        ),
+        (16, 1, 32)
     );
     assert_eq!(UPGRADED_STREAM_LIFETIME_MS, 3_600_000);
     assert_eq!(EVENT_STREAM_CAPACITY, "event.stream-capacity");
@@ -74,6 +79,7 @@ fn the_stream_bound_facts_serialize_under_their_names_and_read_back() {
     assert_eq!(
         value[SESSIONS_ATTACHMENT_BOUNDS_FACT],
         serde_json::json!({
+            "per_subject": 16,
             "per_session": 1,
             "global": 32,
             "lifetime_ms": 3_600_000,
@@ -91,6 +97,6 @@ fn a_stream_bound_fact_with_an_undeclared_member_is_refused() {
     value["per_source"] = serde_json::json!(16);
     assert!(serde_json::from_value::<StreamBoundsFacts>(value).is_err());
     let mut value = serde_json::to_value(AttachmentBoundsFacts::sessions()).expect("fact");
-    value["per_subject"] = serde_json::json!(1);
+    value["per_source"] = serde_json::json!(16);
     assert!(serde_json::from_value::<AttachmentBoundsFacts>(value).is_err());
 }

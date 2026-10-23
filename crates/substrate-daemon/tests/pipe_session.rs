@@ -36,6 +36,13 @@ use tokio::task::JoinHandle;
 use tower::ServiceExt as _;
 
 const SUBJECT: &str = "local:1000";
+/// A second subject on the same daemon, for the per-subject attachment cap (ADR 0042 decision 4).
+const OTHER_SUBJECT: &str = "local:1001";
+/// A third subject, which finds the deployment-wide attachment cap full when the first two hold
+/// their per-subject shares.
+const THIRD_SUBJECT: &str = "local:1002";
+/// The per-subject attachment cap ADR 0042 decision 4 states; half of the global 32.
+const ATTACHMENTS_PER_SUBJECT: u32 = 16;
 const DEPLOYMENT: &str = "dep_pipe_session_test";
 const SNAPSHOT: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const HANDSHAKE_KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
@@ -620,8 +627,14 @@ impl Harness {
     }
 
     async fn create_workspace(&self, operation: &str) -> String {
+        self.create_workspace_for(&identity(), operation).await
+    }
+
+    /// [`Harness::create_workspace`] in the scope of `identity`'s subject.
+    async fn create_workspace_for(&self, identity: &Identity, operation: &str) -> String {
         let (status, workspace) = self
-            .call(
+            .call_as(
+                identity,
                 Method::POST,
                 "/v1/workspaces",
                 mutation(
@@ -668,6 +681,17 @@ impl Harness {
     }
 
     async fn call(&self, method: Method, uri: &str, body: Body) -> (StatusCode, Value) {
+        self.call_as(&identity(), method, uri, body).await
+    }
+
+    /// [`Harness::call`] as `identity`.
+    async fn call_as(
+        &self,
+        identity: &Identity,
+        method: Method,
+        uri: &str,
+        body: Body,
+    ) -> (StatusCode, Value) {
         let request = Request::builder()
             .method(method)
             .uri(uri)
@@ -675,7 +699,7 @@ impl Harness {
             .body(body)
             .expect("request");
         let response = router(Arc::clone(&self.app))
-            .layer(Extension(identity()))
+            .layer(Extension(identity.clone()))
             .oneshot(request)
             .await
             .expect("router response");
@@ -862,8 +886,12 @@ fn pty_start(workspace: &str, window: Option<Value>) -> Value {
 }
 
 fn identity() -> Identity {
+    identity_of(SUBJECT)
+}
+
+fn identity_of(subject: &str) -> Identity {
     Identity {
-        subject: SUBJECT.to_owned(),
+        subject: subject.to_owned(),
         actor: "pipe-session-test".to_owned(),
         principal: None,
     }
@@ -889,6 +917,15 @@ impl TestServer {
     }
 
     async fn serving(app: Arc<App>, upgrades: bool) -> Self {
+        Self::serving_as(app, upgrades, identity()).await
+    }
+
+    /// A server whose every connection is admitted as `identity`, as a listener admits one peer.
+    async fn spawn_as(app: Arc<App>, identity: Identity) -> Self {
+        Self::serving_as(app, true, identity).await
+    }
+
+    async fn serving_as(app: Arc<App>, upgrades: bool, identity: Identity) -> Self {
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind pipe websocket test server");
@@ -898,7 +935,7 @@ impl TestServer {
                 let Ok((stream, _peer)) = listener.accept().await else {
                     return;
                 };
-                let service = router(Arc::clone(&app)).layer(Extension(identity()));
+                let service = router(Arc::clone(&app)).layer(Extension(identity.clone()));
                 tokio::spawn(async move {
                     let connection = http1::Builder::new()
                         .serve_connection(TokioIo::new(stream), TowerToHyperService::new(service));
@@ -2530,8 +2567,14 @@ async fn refused_upgrade(address: SocketAddr, path: &str) -> (u16, Value) {
 impl Harness {
     /// Starts one pty session under a caller-chosen operation id, avoiding replay in capacity tests.
     async fn start_pty_as(&self, workspace: &str, operation: &str) -> String {
+        self.start_pty_for(&identity(), workspace, operation).await
+    }
+
+    /// [`Harness::start_pty_as`] in the scope of `identity`'s subject.
+    async fn start_pty_for(&self, identity: &Identity, workspace: &str, operation: &str) -> String {
         let (status, session) = self
-            .call(
+            .call_as(
+                identity,
                 Method::POST,
                 "/v1/sessions",
                 mutation(
@@ -2546,6 +2589,41 @@ impl Harness {
             .expect("pty session id")
             .to_owned()
     }
+
+    /// One subject's view of this daemon: a listener that admits every connection as that
+    /// subject, as a listener admits one peer, and a workspace in its scope.
+    async fn subject_view(&self, subject: &str, workspace_operation: &str) -> SubjectView {
+        let identity = identity_of(subject);
+        let workspace = self
+            .create_workspace_for(&identity, workspace_operation)
+            .await;
+        let server = TestServer::spawn_as(Arc::clone(&self.app), identity.clone()).await;
+        SubjectView {
+            identity,
+            server,
+            workspace,
+        }
+    }
+
+    /// Starts a pty session in `view`'s workspace and returns its attach path.
+    async fn attach_path_for(&self, view: &SubjectView, operation: &str) -> String {
+        let session = self
+            .start_pty_for(&view.identity, &view.workspace, operation)
+            .await;
+        format!("/v1/sessions/{session}/attach")
+    }
+}
+
+struct SubjectView {
+    identity: Identity,
+    server: TestServer,
+    workspace: String,
+}
+
+/// Which of two subject views holds the attachment numbered `index` when the deployment's 32
+/// are filled at the per-subject cap: the first sixteen are the first subject's.
+fn holder(index: u32) -> usize {
+    usize::from(index >= ATTACHMENTS_PER_SUBJECT)
 }
 
 fn published_refusal_row(code: &str) -> Value {
@@ -2564,29 +2642,36 @@ fn published_refusal_row(code: &str) -> Value {
 }
 
 /// The attach path uses the same per-code retry fact that the published refusal register uses.
+///
+/// The deployment's 32 attachments are held by two subjects at their per-subject cap of 16 (ADR
+/// 0042 decision 4), so the thirty-third, from a third subject that holds none, meets the global
+/// cap and nothing else.
 #[tokio::test(flavor = "multi_thread")]
 async fn the_attachment_capacity_refusal_carries_the_retriable_the_register_publishes() {
     let harness = Harness::with_terminals().await;
-    let workspace = harness.create_workspace("01JADV7WORKSPACE00000001").await;
+    let views = [
+        harness
+            .subject_view(SUBJECT, "01JADV7WORKSPACE00000001")
+            .await,
+        harness
+            .subject_view(OTHER_SUBJECT, "01JADV7WORKSPACE00000002")
+            .await,
+    ];
     let mut held = Vec::new();
     for index in 0..32_u32 {
-        let session = harness
-            .start_pty_as(&workspace, &format!("01JADV7ATTACHCAPACITY{index:04}"))
+        let view = &views[holder(index)];
+        let path = harness
+            .attach_path_for(view, &format!("01JADV7ATTACHCAPACITY{index:04}"))
             .await;
-        held.push(
-            harness
-                .attach(&format!("/v1/sessions/{session}/attach"))
-                .await,
-        );
+        held.push(Handshake::open(view.server.address, &path).await.upgraded());
     }
-    let overflow = harness
-        .start_pty_as(&workspace, "01JADV7ATTACHCAPACITYXX1")
+    let third = harness
+        .subject_view(THIRD_SUBJECT, "01JADV7WORKSPACE00000003")
         .await;
-    let (status, body) = refused_upgrade(
-        harness.server.address,
-        &format!("/v1/sessions/{overflow}/attach"),
-    )
-    .await;
+    let overflow = harness
+        .attach_path_for(&third, "01JADV7ATTACHCAPACITYXX1")
+        .await;
+    let (status, body) = refused_upgrade(third.server.address, &overflow).await;
     assert_eq!(
         body["error"]["code"].as_str(),
         Some(substrate_wire::SESSION_ATTACHMENT_CAPACITY),
@@ -2596,6 +2681,78 @@ async fn the_attachment_capacity_refusal_carries_the_retriable_the_register_publ
     assert_eq!(body["error"]["class"], row["class"]);
     assert_eq!(json!(status), row["status"]);
     assert_eq!(body["error"]["retriable"], row["retriable"]);
+}
+
+/// ADR 0042 decision 4, the per-subject attachment cap, on the served route.
+///
+/// Once an upgraded connection hands its transport slot to its attachment, no transport bound
+/// stands between one subject and the deployment's 32 attachments, which it could then hold for
+/// the hour and deny every other subject `session.attachment-capacity`. One subject attaches
+/// sixteen sessions; its seventeenth is refused `429 session.attachment-capacity` while the global
+/// cap still has sixteen free, another subject still attaches, and the first subject's refused
+/// session attaches once one of its own attachments has ended.
+#[tokio::test(flavor = "multi_thread")]
+async fn one_subject_is_refused_at_its_attachment_cap_while_another_subject_still_attaches() {
+    let harness = Harness::with_terminals().await;
+    let first = harness
+        .subject_view(SUBJECT, "01JCAPSUBJWORKSPACE00001")
+        .await;
+    let second = harness
+        .subject_view(OTHER_SUBJECT, "01JCAPSUBJWORKSPACE00002")
+        .await;
+    let mut held = Vec::new();
+    for index in 0..ATTACHMENTS_PER_SUBJECT {
+        let path = harness
+            .attach_path_for(&first, &format!("01JCAPSUBJATTACHED{index:06}"))
+            .await;
+        held.push(
+            Handshake::open(first.server.address, &path)
+                .await
+                .upgraded(),
+        );
+    }
+    let over = harness
+        .attach_path_for(&first, "01JCAPSUBJOVERTHECAP0001")
+        .await;
+    let (status, body) = refused_upgrade(first.server.address, &over).await;
+    assert_eq!(
+        (status, body["error"]["code"].as_str()),
+        (429, Some(substrate_wire::SESSION_ATTACHMENT_CAPACITY)),
+        "one subject's seventeenth attachment is over its per-subject cap: {body}"
+    );
+    assert_eq!(
+        body["error"]["retriable"],
+        json!(substrate_wire::session_refusal_is_retriable(
+            substrate_wire::SESSION_ATTACHMENT_CAPACITY
+        )),
+        "the per-subject refusal carries the retriable the register publishes: {body}"
+    );
+
+    let other = harness
+        .attach_path_for(&second, "01JCAPSUBJOTHERSUBJECT01")
+        .await;
+    let handshake = Handshake::open(second.server.address, &other).await;
+    assert_eq!(
+        handshake.status, 101,
+        "another subject attaches while the first is at its cap"
+    );
+    let _other = handshake.upgraded();
+
+    drop(held.pop());
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let handshake = Handshake::open(first.server.address, &over).await;
+        if handshake.status == 101 {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the first subject's refused session is still answered {} ten seconds after one of \
+             its attachments ended",
+            handshake.status
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
 }
 
 /// The acceptance sentence of `story:unattached-claimed-session-is-contained`, on the server shape
@@ -2688,7 +2845,8 @@ async fn adversary_a_client_that_drops_after_the_switch_leaves_no_running_proces
 /// same property on the served-attachment path, which carried the same defect on `617bbed`.
 ///
 /// `the_attachment_capacity_refusal_carries_the_retriable_the_register_publishes` above pins that a
-/// healthy daemon serves all 32 at once, so 32 is the number this case is entitled to.
+/// healthy daemon serves all 32 at once to two subjects of sixteen each, so 32 is the number this
+/// case is entitled to.
 #[tokio::test(flavor = "multi_thread")]
 async fn adversary_a_stranded_attach_with_an_unproven_kill_keeps_the_bounded_capacity() {
     let harness = Harness::with_terminals().await;
@@ -2721,15 +2879,26 @@ async fn adversary_a_stranded_attach_with_an_unproven_kill_keeps_the_bounded_cap
         .refuse_signal
         .store(false, std::sync::atomic::Ordering::Relaxed);
 
+    // The 32 slots are taken at the per-subject cap (ADR 0042 decision 4): the stranding subject
+    // takes sixteen, so a slot its stranded permit kept would fail its own cap as well as the
+    // global one, and a second subject takes the other sixteen.
+    let views = [
+        harness
+            .subject_view(SUBJECT, "01JADVU3WORKSPACE0000002")
+            .await,
+        harness
+            .subject_view(OTHER_SUBJECT, "01JADVU3WORKSPACE0000003")
+            .await,
+    ];
     let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
     let mut held = Vec::new();
     for index in 0..32_u32 {
-        let session = harness
-            .start_pty_as(&workspace, &format!("01JADVU3CAPACITYSLOT{index:04}"))
+        let view = &views[holder(index)];
+        let path = harness
+            .attach_path_for(view, &format!("01JADVU3CAPACITYSLOT{index:04}"))
             .await;
-        let path = format!("/v1/sessions/{session}/attach");
         loop {
-            let handshake = Handshake::open(harness.server.address, &path).await;
+            let handshake = Handshake::open(view.server.address, &path).await;
             if handshake.status == 101 {
                 held.push(handshake.upgraded());
                 break;
@@ -3229,7 +3398,8 @@ async fn a_client_that_aborts_the_connection_around_the_switch_leaves_no_running
 /// retriable, when it is destroyed and no retry can ever recover it.
 ///
 /// `the_attachment_capacity_refusal_carries_the_retriable_the_register_publishes` pins that a
-/// healthy daemon serves all 32 at once, so 32 is the number this case is entitled to, and
+/// healthy daemon serves all 32 at once to two subjects of sixteen each, so 32 is the number this
+/// case is entitled to, and
 /// `adversary_a_stranded_attach_with_an_unproven_kill_keeps_the_bounded_capacity` pins the same
 /// property for the sibling `on_failed_upgrade` path this unit corrected. This case is that case
 /// with the upgrade allowed to succeed.
@@ -3258,15 +3428,26 @@ async fn adversary_a_served_attachment_with_an_unproven_kill_keeps_the_bounded_c
         .refuse_signal
         .store(false, std::sync::atomic::Ordering::Relaxed);
 
+    // The 32 slots are taken at the per-subject cap (ADR 0042 decision 4): the subject whose
+    // attachment was stranded takes sixteen, so a slot its permit kept would fail its own cap as
+    // well as the global one, and a second subject takes the other sixteen.
+    let views = [
+        harness
+            .subject_view(SUBJECT, "01JADVP2WORKSPACE0000002")
+            .await,
+        harness
+            .subject_view(OTHER_SUBJECT, "01JADVP2WORKSPACE0000003")
+            .await,
+    ];
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     let mut held = Vec::new();
     for index in 0..32_u32 {
-        let session = harness
-            .start_pty_as(&workspace, &format!("01JADVP2CAPACITYSLOT{index:04}"))
+        let view = &views[holder(index)];
+        let path = harness
+            .attach_path_for(view, &format!("01JADVP2CAPACITYSLOT{index:04}"))
             .await;
-        let path = format!("/v1/sessions/{session}/attach");
         loop {
-            let handshake = Handshake::open(harness.server.address, &path).await;
+            let handshake = Handshake::open(view.server.address, &path).await;
             if handshake.status == 101 {
                 held.push(handshake.upgraded());
                 break;
