@@ -8,7 +8,38 @@ relations:
 - decomposes: epic:host-process-supervision
 - informed_by: architecture-decision-record:host-processes-are-a-supervised-resource-family
 - depends_on: story:host-process-start
-revision: 1
+scope:
+- confidence: inferred
+  path: AGENTS.md
+- confidence: inferred
+  path: CHANGELOG.md
+- confidence: inferred
+  path: crates/substrate-daemon/src/app/processes.rs
+- confidence: inferred
+  path: crates/substrate-daemon/tests/processes.rs
+- confidence: inferred
+  path: crates/substrate-daemon/tests/runtime_vectors.rs
+- confidence: cited
+  path: crates/substrate-host/src/host_process
+- confidence: inferred
+  path: crates/substrate-store/src/host_processes.rs
+- confidence: inferred
+  path: crates/substrate-wire/src/generated/host_process.rs
+- confidence: cited
+  path: crates/substrate-wire/src/host_process_tests.rs
+- confidence: cited
+  path: crates/substrate-wire/src/lib.rs
+- confidence: inferred
+  path: scripts/gate.sh
+- confidence: cited
+  path: spec/host-processes
+- confidence: cited
+  path: spec/host-processes-suite.json
+- confidence: inferred
+  path: xtask/bundle-source/0.23.0
+- confidence: inferred
+  path: xtask/src/bundle/host_process.rs
+revision: 4
 ---
 # Story: Docker container and k3d cluster records
 
@@ -20,11 +51,14 @@ Decided by `adr/0036-host-processes-are-a-supervised-resource-family.md` (S8). S
 
 ## Scope
 
-- `crates/substrate-host/src/`: docker and k3d backends invoking the runtimes' own commands with restart policy `no` and the record, owner and renew-by labels; removal on stop and expiry; runtime observations.
-- `crates/substrate-wire/src/lib.rs`: `backend`, the container and cluster requests, the `process.container.docker`/`process.container.k3d` facts and three refusals.
+Derived 2026-10-23 by `story-scoper`. Each line is **cited** (read from the story or the tree) or
+**inferred** (a reading that could be wrong).
 
-- `spec/host-processes/`: the scenarios below.
-- `xtask/bundle-source/<successor>/`: the schemas, routes and vectors this slice adds to the successor bundle after 0.18.0.
+- **Primary surface:** `crates/substrate-host/src/host_process/` (docker and k3d backends) — cited
+- **Files:** `spec/host-processes/` (`processes.yaml:705` `StartContainer`, deferred points 11 and 12; `wire.yaml`; `scenarios/`; `README.md:49`), `spec/host-processes-suite.json`, `crates/substrate-wire/src/lib.rs` (`PROCESS_REFUSALS` :2555, facts :3369, `ADVERTISED_CONTRACT_BUNDLE` :18), `crates/substrate-wire/src/host_process_tests.rs:310` — cited
+- **Also likely:** `crates/substrate-wire/src/generated/host_process.rs`, successor bundle `0.23.0`, `scripts/gate.sh`, `xtask/src/bundle/host_process.rs`, `crates/substrate-daemon/src/app/processes.rs`, `crates/substrate-store/src/host_processes.rs`, `runtime_vectors.rs`, `crates/substrate-daemon/tests/processes.rs`, `CHANGELOG.md`, `AGENTS.md` — inferred
+- **Confidence:** medium — ADR 0036 S8 says `backend`, the spec draft says `kind` plus raw `argv`
+- **Open before code:** points 11 (label keys) and 12 (container timeout) and the request shape, settled spec-first; whether the restart and label refusals hold against raw runtime argv is not shown.
 
 ## Acceptance
 

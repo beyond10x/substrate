@@ -9,7 +9,46 @@ relations:
 - informed_by: architecture-decision-record:host-processes-are-a-supervised-resource-family
 - depends_on: story:host-process-start
 - depends_on: story:host-process-logs
-revision: 1
+scope:
+- confidence: inferred
+  path: AGENTS.md
+- confidence: inferred
+  path: CHANGELOG.md
+- confidence: cited
+  path: crates/b10x-substrate-sdk/src/lib.rs
+- confidence: cited
+  path: crates/b10x-substrate-sdk/src/transport.rs
+- confidence: cited
+  path: crates/substrate-daemon/src/app/processes.rs
+- confidence: cited
+  path: crates/substrate-daemon/src/app/routes.rs
+- confidence: inferred
+  path: crates/substrate-daemon/tests/processes.rs
+- confidence: inferred
+  path: crates/substrate-daemon/tests/runtime_vectors.rs
+- confidence: inferred
+  path: crates/substrate-host/src/host_process/log.rs
+- confidence: inferred
+  path: crates/substrate-store/src/events.rs
+- confidence: inferred
+  path: crates/substrate-store/src/host_processes.rs
+- confidence: inferred
+  path: crates/substrate-wire/src/generated/host_process.rs
+- confidence: cited
+  path: crates/substrate-wire/src/lib.rs
+- confidence: inferred
+  path: scripts/gate.sh
+- confidence: inferred
+  path: spec/coverage.md
+- confidence: cited
+  path: spec/host-processes
+- confidence: cited
+  path: spec/host-processes-suite.json
+- confidence: cited
+  path: xtask/bundle-source/0.23.0
+- confidence: inferred
+  path: xtask/src/bundle.rs
+revision: 4
 ---
 # Story: per-process event stream
 
@@ -21,12 +60,14 @@ Decided by `adr/0036-host-processes-are-a-supervised-resource-family.md` (S12). 
 
 ## Scope
 
-- `crates/substrate-wire/src/lib.rs`: the `process.*` variants of the closed event union, the per-process stream item union (event, line, gap, terminal), `MAX_PROCESS_EVENT_LINE_BYTES`, `MAX_PROCESS_EVENT_READERS`.
-- `crates/substrate-daemon/src/app/`: lifecycle events into the existing event log; `GET /v1/processes/{process_id}/events` WebSocket reading the S7 log with a per-process cursor.
-- `crates/b10x-substrate-sdk/src/`: the per-process stream call beside `event_stream`.
+Derived 2026-10-23 by `story-scoper`. Each line is **cited** (read from the story or the tree) or
+**inferred** (a reading that could be wrong).
 
-- `spec/host-processes/`: the scenarios below.
-- `xtask/bundle-source/<successor>/`: the schemas, routes and vectors this slice adds to the successor bundle after 0.18.0.
+- **Primary surface:** `crates/substrate-daemon/src/app` (`GET /v1/processes/{process_id}/events`) — cited
+- **Files:** `crates/substrate-wire/src/lib.rs` (`Event::validate_closed_shape` :2081, new bounds, `ADVERTISED_CONTRACT_BUNDLE` :18), `crates/substrate-daemon/src/app/processes.rs`, `app/routes.rs:112-120`, `crates/b10x-substrate-sdk/src/lib.rs:350`, `transport.rs:142`, `spec/host-processes/`, `spec/host-processes-suite.json`, successor bundle `0.23.0` — cited
+- **Also likely:** `crates/substrate-store/src/host_processes.rs` (:1484 `append_event`), `crates/substrate-store/src/events.rs:203`, `crates/substrate-host/src/host_process/log.rs`, `crates/substrate-wire/src/generated/host_process.rs`, `runtime_vectors.rs`, `crates/substrate-daemon/tests/processes.rs`, `xtask/src/bundle.rs`, `scripts/gate.sh`, `AGENTS.md`, `CHANGELOG.md`, `spec/coverage.md` — inferred
+- **Confidence:** medium
+- **Open:** about 10 of the 12 acceptance scenarios do not exist yet; `wire.yaml:8` defines no stream item; bound values are unset.
 
 ## Acceptance
 
