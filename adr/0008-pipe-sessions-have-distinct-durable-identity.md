@@ -5,6 +5,9 @@ date: 2026-08-14
 
 # ADR 0008: pipe sessions have distinct durable identity
 
+Amended by [ADR 0041](0041-a-session-attachment-lives-one-hour-and-is-never-re-attached.md), which
+records the one-hour attachment lifetime, the no-re-attach rule and the consumer they serve.
+
 ## Context
 
 The first raw-pipe daemon slice used the underlying `ex_…` identity in a route named

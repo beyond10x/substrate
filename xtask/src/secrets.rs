@@ -1,3 +1,7 @@
+//! `cargo xtask check-secrets`: Gitleaks over the whole reachable history, with the scanned
+//! count held to Git's own. Merges are diffed with an explicit `--diff-merges=separate` so caller
+//! config (`log.diffMerges`) cannot change the format.
+
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::Write as _;
@@ -13,25 +17,25 @@ const VERSION: &str = "8.30.1";
 const ARCHIVE: &str = "gitleaks_8.30.1_linux_x64.tar.gz";
 const SHA256: &str = "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb";
 
-/// Set on every Git process this check starts, Gitleaks included: `refs/replace/*` would make
-/// Git print another commit's content under a replaced commit's hash, to both sides alike.
-const NO_REPLACE_OBJECTS: &str = "GIT_NO_REPLACE_OBJECTS";
+/// Set on every Git process this check starts, Gitleaks included, so local state that is never
+/// pushed cannot change which history both sides read. `GIT_NO_REPLACE_OBJECTS`: `refs/replace/*`
+/// would make Git print another commit's content under a replaced commit's hash.
+/// `GIT_GRAFT_FILE`: a `.git/info/grafts` line can cut a commit's parents, so every commit
+/// behind it would drop out of the count and of Gitleaks' log alike; Git reads the named file
+/// instead. The name is beneath a device, so it can never exist and Git reads no graft, silently:
+/// any file that does exist, `/dev/null` and an empty one included, makes Git 2.55 print its
+/// graft-deprecation hint on stderr, and Gitleaks then reports no scanned commits.
+const WHOLE_HISTORY: [(&str, &str); 2] = [
+    ("GIT_NO_REPLACE_OBJECTS", "1"),
+    ("GIT_GRAFT_FILE", "/dev/null/grafts"),
+];
 
 pub fn check(root: &Path) -> Result<Report> {
     require_success(root, "git", &["fsck", "--full"])?;
-    let count_output = Command::new("git")
-        .env(NO_REPLACE_OBJECTS, "1")
-        .args(["rev-list", "--all", "--count"])
-        .current_dir(root)
-        .output()
-        .context("counting reachable commits")?;
-    if !count_output.status.success() {
-        bail!(
-            "git rev-list failed: {}",
-            String::from_utf8_lossy(&count_output.stderr)
-        );
+    if let Some(refusal) = shallow(root)? {
+        return Ok(Report::failed(vec![refusal]));
     }
-    let expected: u64 = String::from_utf8(count_output.stdout)?.trim().parse()?;
+    let expected = all_commits(root)?.len();
     if expected == 0 {
         return Ok(Report::failed(vec![
             "secret scan refused an empty history".to_owned(),
@@ -63,14 +67,14 @@ pub fn check(root: &Path) -> Result<Report> {
         ],
     )?;
     let output = Command::new(directory.path().join("gitleaks"))
-        .env(NO_REPLACE_OBJECTS, "1")
+        .envs(WHOLE_HISTORY)
         .args([
             "git",
             "--redact=100",
             "--no-banner",
             "--no-color",
             "--log-level=info",
-            "--log-opts=-m --root --all --no-textconv",
+            "--log-opts=--diff-merges=separate --root --all --no-textconv",
         ])
         .current_dir(root)
         .output()
@@ -92,7 +96,8 @@ pub fn check(root: &Path) -> Result<Report> {
         words.get(at.checked_sub(1)?)?.parse::<u64>().ok()
     });
     // Gitleaks counts the commits that yield at least one fragment from the same
-    // `git log -p -U0 -m --root --all`; the rest carry no added bytes and are named instead.
+    // `git log -p -U0 --diff-merges=separate --root --all`; the rest carry no added bytes and are
+    // named instead.
     let Expectation { scannable, hidden } = expectation(root)?;
     let refusals = refusals(scanned, &scannable, hidden);
     if !refusals.is_empty() {
@@ -122,6 +127,38 @@ pub fn check(root: &Path) -> Result<Report> {
     )))
 }
 
+/// The refusal for a shallow repository, naming its shallow file: the commits past that
+/// boundary are not in the object store, so no environment variable can bring them back to scan.
+fn shallow(root: &Path) -> Result<Option<String>> {
+    let output = Command::new("git")
+        .envs(WHOLE_HISTORY)
+        .args([
+            "rev-parse",
+            "--is-shallow-repository",
+            "--path-format=absolute",
+            "--git-path",
+            "shallow",
+        ])
+        .current_dir(root)
+        .output()
+        .context("asking Git whether the repository is shallow")?;
+    if !output.status.success() {
+        bail!(
+            "git rev-parse failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let stdout = String::from_utf8(output.stdout)?;
+    let mut lines = stdout.lines();
+    match (lines.next(), lines.next()) {
+        (Some("false"), Some(_)) => Ok(None),
+        (Some("true"), Some(file)) => Ok(Some(format!(
+            "secret scan refused a shallow repository: {file} cuts the history, so the commits behind it cannot be scanned; fetch with --unshallow first"
+        ))),
+        _ => bail!("git rev-parse --is-shallow-repository answered {stdout:?}"),
+    }
+}
+
 fn root_commits(root: &Path) -> Result<Vec<String>> {
     rev_list(root, &["--max-parents=0"], "listing reachable root commits")
 }
@@ -132,7 +169,7 @@ fn all_commits(root: &Path) -> Result<Vec<String>> {
 
 fn rev_list(root: &Path, extra: &[&str], purpose: &'static str) -> Result<Vec<String>> {
     let output = Command::new("git")
-        .env(NO_REPLACE_OBJECTS, "1")
+        .envs(WHOLE_HISTORY)
         .args(["rev-list", "--all"])
         .args(extra)
         .current_dir(root)
@@ -202,20 +239,20 @@ fn scannable_commits(root: &Path) -> Result<BTreeSet<String>> {
     Ok(expectation(root)?.scannable)
 }
 
-/// Reads the patch Gitleaks reads itself (`git log -p -U0` with `--log-opts=-m --root --all
-/// --no-textconv`, so a textconv driver from the checking machine's config cannot empty it;
+/// Reads the patch Gitleaks reads itself (`git log -p -U0` with `--log-opts=--diff-merges=separate
+/// --root --all --no-textconv`, so a textconv driver from the checking machine's config cannot empty it;
 /// `sources/git.go`; `--full-index` only lengthens the `index` line). A diff Git prints as binary
 /// is checked against Git's own heuristic, a NUL in the first 8000 bytes of the post-image: one
 /// without (a diff attribute, or a merge parent whose version had a NUL) went unscanned, so its
 /// commit stays expected and is named. This fails closed on the merge case by decision.
 fn expectation(root: &Path) -> Result<Expectation> {
     let output = Command::new("git")
-        .env(NO_REPLACE_OBJECTS, "1")
+        .envs(WHOLE_HISTORY)
         .args([
             "log",
             "-p",
             "-U0",
-            "-m",
+            "--diff-merges=separate",
             "--root",
             "--all",
             "--no-color",
@@ -258,7 +295,7 @@ fn blobs_with_nul<'a>(root: &Path, blobs: &BTreeSet<&'a str>) -> Result<BTreeSet
         return Ok(binary);
     }
     let mut child = Command::new("git")
-        .env(NO_REPLACE_OBJECTS, "1")
+        .envs(WHOLE_HISTORY)
         .args(["cat-file", "--batch"])
         .current_dir(root)
         .stdin(Stdio::piped())
@@ -341,7 +378,7 @@ impl FileDiff {
 /// The parse of a `git log -p --full-index --format='commit %H'` stream.
 #[derive(Default)]
 struct Patch {
-    /// Commits with at least one file diff that yields a Gitleaks fragment. Under `-m` a merge
+    /// Commits with at least one file diff that yields a Gitleaks fragment. Under `--diff-merges=separate` a merge
     /// appears once per parent; any parent's diff counts.
     scannable: BTreeSet<String>,
     /// Every non-deleted file diff Git printed as binary.
@@ -431,6 +468,7 @@ fn scan_root_commit(root: &Path, tool_directory: &Path, commit: &str) -> Result<
         ],
     )?;
     let output = Command::new(tool_directory.join("gitleaks"))
+        .envs(WHOLE_HISTORY)
         .args([
             "dir",
             "--redact=100",
@@ -459,7 +497,7 @@ fn require_success(root: &Path, program: &str, args: &[&str]) -> Result<()> {
 
 fn require_success_at(root: &Path, program: &str, args: &[&str]) -> Result<()> {
     let output = Command::new(program)
-        .env(NO_REPLACE_OBJECTS, "1")
+        .envs(WHOLE_HISTORY)
         .args(args)
         .current_dir(root)
         .output()?;
@@ -479,7 +517,7 @@ mod tests {
     use std::path::Path;
     use std::process::Command;
 
-    use super::{completeness, expectation, scannable_commits, scannable_in_log};
+    use super::{all_commits, completeness, expectation, scannable_commits, scannable_in_log};
 
     /// A Git repository whose commits do not depend on the caller's Git configuration.
     struct Repo {
@@ -837,6 +875,87 @@ mod tests {
         );
     }
 
+    /// `base`, then a commit adding a credential, then one deleting it again, with a local
+    /// `.git/info/grafts` line that makes the last commit parentless. Git honours that file
+    /// unless `GIT_GRAFT_FILE` points elsewhere, so without it the credential commit is not
+    /// reachable to `git rev-list`, to `git log` or to Gitleaks. Returns the credential commit.
+    fn history_hidden_behind_a_graft(repo: &Repo) -> String {
+        repo.write("a.txt", b"alpha\n");
+        repo.commit("base");
+        repo.write("creds.txt", adversary2_key_line().as_bytes());
+        let leaking = repo.commit("add a credential");
+        fs::remove_file(repo.path().join("creds.txt")).expect("deleting the credential file");
+        repo.write("b.txt", b"beta\n");
+        let tip = repo.commit("delete the credential");
+        fs::write(
+            repo.path().join(".git/info/grafts"),
+            format!("{tip}\n").as_bytes(),
+        )
+        .expect("writing a graft file");
+        leaking
+    }
+
+    /// Story check-secrets-ignores-a-local-graft-file: a local graft file cannot cut a commit out
+    /// of the history this check lists and expects Gitleaks to scan.
+    #[test]
+    fn a_graft_file_cannot_hide_a_commit_from_the_expected_count() {
+        let repo = Repo::new();
+        let leaking = history_hidden_behind_a_graft(&repo);
+
+        let all = all_commits(repo.path()).expect("listing reachable commits");
+        assert!(
+            all.contains(&leaking),
+            "{leaking} is hidden behind a graft; listed {all:?}"
+        );
+        let expected = expectation(repo.path()).expect("counting scannable commits");
+        assert!(
+            expected.scannable.contains(&leaking),
+            "{leaking} adds a credential behind a graft; scannable {:?}",
+            expected.scannable
+        );
+    }
+
+    /// A shallow repository has no history past its boundary at all, so the scan cannot be
+    /// complete; the check refuses it by name before downloading anything.
+    #[test]
+    fn a_shallow_repository_is_refused_by_name() {
+        let origin = Repo::new();
+        origin.write("a.txt", b"alpha\n");
+        origin.commit("base");
+        origin.write("b.txt", b"beta\n");
+        origin.commit("tip");
+        let shallow = Repo::new();
+        let url = format!("file://{}", origin.path().display());
+        shallow.git(&["fetch", "--quiet", "--depth=1", &url, "main"]);
+        shallow.git(&["checkout", "--quiet", "FETCH_HEAD"]);
+
+        let report = super::check(shallow.path()).expect("running the check");
+        let text = report.failure_text();
+        assert!(
+            text.contains("shallow"),
+            "check-secrets did not refuse a shallow repository by name: {} {text}",
+            report.summary()
+        );
+    }
+
+    /// End to end with the pinned Gitleaks: the credential commit behind the graft is scanned,
+    /// and the check refuses it with Gitleaks' own finding.
+    #[test]
+    #[ignore = "downloads the pinned Gitleaks release"]
+    fn adversary_e2e_a_graft_file_does_not_let_a_secret_commit_pass() {
+        let repo = Repo::new();
+        write_default_gitleaks_config(&repo);
+        history_hidden_behind_a_graft(&repo);
+
+        let report = super::check(repo.path()).expect("running the check");
+        let text = report.failure_text();
+        assert!(
+            text.contains("Gitleaks refused the history") && text.contains("leaks found: 1"),
+            "check-secrets did not refuse the credential behind a graft: {} {text}",
+            report.summary()
+        );
+    }
+
     /// Accepted behaviour (story acceptance, binary line): a file carrying a NUL in its first
     /// 8000 bytes is a binary Gitleaks skips, so a commit adding only such a file is not expected
     /// and is not named as hidden text. UTF-16 text is such a file.
@@ -856,5 +975,113 @@ mod tests {
         assert_eq!(expected.scannable, set(&[&base]));
         assert!(!expected.scannable.contains(&wide));
         assert!(expected.hidden.is_empty(), "{:?}", expected.hidden);
+    }
+
+    /// `base`, a side branch adding `s.txt`, a main commit adding `m.txt`, and a merge whose tree
+    /// also adds `evil.txt` (in neither parent) carrying `content`. Returns the merge commit.
+    fn adversary3_evil_merge(repo: &Repo, content: &[u8]) -> String {
+        repo.write("a.txt", b"alpha\n");
+        repo.commit("base");
+        repo.git(&["checkout", "--quiet", "-b", "side"]);
+        repo.write("s.txt", b"side\n");
+        repo.commit("side");
+        repo.git(&["checkout", "--quiet", "main"]);
+        repo.write("m.txt", b"main\n");
+        repo.commit("main");
+        repo.git(&["merge", "--quiet", "--no-commit", "side"]);
+        repo.write("evil.txt", content);
+        repo.commit("merge")
+    }
+
+    /// `-m` is `--diff-merges=on`, which shows a merge in the format the local `log.diffMerges`
+    /// names. That config is never pushed, and `off` (or `none`) makes `git log -p -m` print no
+    /// patch for any merge, for the expectation and for Gitleaks' own log alike, so content a
+    /// merge adds drops out of both counts and they still agree.
+    #[test]
+    fn adversary3_log_diff_merges_off_cannot_remove_a_merge_from_the_expected_count() {
+        let repo = Repo::new();
+        let merge = adversary3_evil_merge(&repo, b"token = not-a-real-value\n");
+        repo.git(&["config", "log.diffMerges", "off"]);
+
+        let expected = expectation(repo.path()).expect("counting scannable commits");
+        assert!(
+            expected.scannable.contains(&merge),
+            "{merge} adds evil.txt in neither parent; scannable {:?}",
+            expected.scannable
+        );
+    }
+
+    /// The same with `log.diffMerges=dense-combined`: Git prints `diff --cc`, which the
+    /// expectation's parser does not read as a file diff.
+    #[test]
+    fn adversary3_log_diff_merges_combined_cannot_remove_a_merge_from_the_expected_count() {
+        let repo = Repo::new();
+        let merge = adversary3_evil_merge(&repo, b"token = not-a-real-value\n");
+        repo.git(&["config", "log.diffMerges", "dense-combined"]);
+
+        let expected = expectation(repo.path()).expect("counting scannable commits");
+        assert!(
+            expected.scannable.contains(&merge),
+            "{merge} adds evil.txt in neither parent; scannable {:?}",
+            expected.scannable
+        );
+    }
+
+    fn adversary3_e2e_evil_merge_with(diff_merges: &str) {
+        let repo = Repo::new();
+        write_default_gitleaks_config(&repo);
+        adversary3_evil_merge(&repo, adversary2_key_line().as_bytes());
+        repo.git(&["config", "log.diffMerges", diff_merges]);
+
+        let report = super::check(repo.path()).expect("running the check");
+        assert!(
+            !report.failures().is_empty(),
+            "check-secrets passed a merge holding an unscanned credential under log.diffMerges={diff_merges}: {}",
+            report.summary()
+        );
+    }
+
+    /// End to end with the pinned Gitleaks: a credential added by a merge must not pass under a
+    /// local `log.diffMerges=off`.
+    #[test]
+    #[ignore = "downloads the pinned Gitleaks release"]
+    fn adversary3_e2e_log_diff_merges_off_does_not_let_a_secret_merge_pass() {
+        adversary3_e2e_evil_merge_with("off");
+    }
+
+    /// End to end with the pinned Gitleaks, `log.diffMerges=dense-combined`.
+    #[test]
+    #[ignore = "downloads the pinned Gitleaks release"]
+    fn adversary3_e2e_log_diff_merges_combined_does_not_let_a_secret_merge_pass() {
+        adversary3_e2e_evil_merge_with("dense-combined");
+    }
+
+    /// End to end with the pinned Gitleaks: with no local config the same merge is refused
+    /// (control for the two cases above).
+    #[test]
+    #[ignore = "downloads the pinned Gitleaks release"]
+    fn adversary3_e2e_a_secret_merge_is_refused_with_default_config() {
+        adversary3_e2e_evil_merge_with("separate");
+    }
+
+    /// End to end with the pinned Gitleaks: `color.diff=always` colours only Gitleaks' log (the
+    /// expectation passes `--no-color`), so the check must refuse, not pass.
+    #[test]
+    #[ignore = "downloads the pinned Gitleaks release"]
+    fn adversary3_e2e_color_diff_always_does_not_let_a_secret_commit_pass() {
+        let repo = Repo::new();
+        write_default_gitleaks_config(&repo);
+        repo.write("a.txt", b"alpha\n");
+        repo.commit("base");
+        repo.write("creds.txt", adversary2_key_line().as_bytes());
+        repo.commit("add a credential");
+        repo.git(&["config", "color.diff", "always"]);
+
+        let report = super::check(repo.path()).expect("running the check");
+        assert!(
+            !report.failures().is_empty(),
+            "check-secrets passed a history holding an unscanned credential: {}",
+            report.summary()
+        );
     }
 }
