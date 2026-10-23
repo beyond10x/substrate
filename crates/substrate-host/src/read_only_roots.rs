@@ -10,7 +10,7 @@
 use std::ffi::CString;
 use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
 
-use substrate_wire::ReadOnlyRoot;
+use substrate_wire::{ReadOnlyRoot, ReadOnlyRootFacts};
 
 use crate::DriverError;
 
@@ -56,6 +56,40 @@ impl PinnedRoot {
             self.mount.clone(),
         ]
     }
+}
+
+/// The driver's own admission of declared roots: the wire's lexical rules, each root opened and
+/// checked by descriptor, then the fact. A start naming a root on a host whose snapshot does not
+/// publish `exec.read-only-roots` is refused `exec.sandbox-unavailable` with the daemon's message
+/// and address (`check_read_only_roots` in the daemon's `app/operations.rs`), so an embedder that
+/// reaches the driver without the daemon is refused too and no root is ever bound by a host that
+/// does not publish it (invariant 3).
+///
+/// The lexical rules come first, as in the daemon. The per-root filesystem refusals (`absent`,
+/// `not-a-directory`) come before the fact, as they did before the fact was checked here, so a
+/// caller still hears what is wrong with a root on a host without confinement; opening a root
+/// `O_PATH` mounts nothing, and the descriptors close with the refusal.
+pub(crate) fn admit(
+    roots: &[ReadOnlyRoot],
+    published: Option<&ReadOnlyRootFacts>,
+) -> Result<Vec<PinnedRoot>, DriverError> {
+    substrate_wire::validate_read_only_roots(roots).map_err(|error| {
+        DriverError::refused(
+            substrate_wire::READ_ONLY_ROOT_INVALID,
+            substrate_wire::read_only_root_invalid_message(&error),
+            ADDRESS,
+        )
+    })?;
+    let pinned = pin(roots)?;
+    if !roots.is_empty() && published.is_none() {
+        return Err(DriverError::unserved(
+            "exec.sandbox-unavailable",
+            "This host does not publish exec.read-only-roots, so no declared read-only root can \
+             be bound.",
+            ADDRESS,
+        ));
+    }
+    Ok(pinned)
 }
 
 /// Opens, checks and pins every declared root, in declaration order. The lexical rules are the

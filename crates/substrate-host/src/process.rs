@@ -36,6 +36,11 @@ const PIPE_OUTPUT_STALL_TIMEOUT: Duration = Duration::from_secs(1);
 // Proof attempts, 25 ms apart, that one retry of an unproven exec tree makes before it leaves the
 // rest to the next maintenance round.
 const UNPROVEN_PROOF_ATTEMPTS: usize = 4;
+// The deepest a cgroup nested under an exec's own may sit, the exec's own at depth 0, for the
+// removal walk to descend to it. Past this the walk refuses and removes nothing.
+const MAX_EXEC_CGROUP_DEPTH: usize = 32;
+// The most cgroups nested under an exec's own that one removal walk visits.
+const MAX_EXEC_NESTED_CGROUPS: usize = 256;
 
 /// The user-namespace posture of every sandbox this crate opens, in one place.
 ///
@@ -1870,15 +1875,9 @@ impl ProcessRuntime {
     /// path afterwards changes what is bound (design 26 § 3).
     fn admit_read_only_roots(
         roots: &[substrate_wire::ReadOnlyRoot],
+        published: Option<&substrate_wire::ReadOnlyRootFacts>,
     ) -> Result<Vec<crate::read_only_roots::PinnedRoot>, DriverError> {
-        substrate_wire::validate_read_only_roots(roots).map_err(|error| {
-            DriverError::refused(
-                substrate_wire::READ_ONLY_ROOT_INVALID,
-                substrate_wire::read_only_root_invalid_message(&error),
-                "read_only_roots",
-            )
-        })?;
-        crate::read_only_roots::pin(roots)
+        crate::read_only_roots::admit(roots, published)
     }
 
     /// Validates both the wire shape and the live workspace objects ADR 0023 will mount.
@@ -2264,7 +2263,10 @@ impl ProcessRuntime {
                 "exec",
             ));
         }
-        let read_only_roots = Self::admit_read_only_roots(&input.read_only_roots)?;
+        let read_only_roots = Self::admit_read_only_roots(
+            &input.read_only_roots,
+            self.capability.facts.exec_read_only_roots.as_ref(),
+        )?;
         crate::read_only_files::admit(
             &input.read_only_files,
             &input.read_only_roots,
@@ -3954,6 +3956,15 @@ impl Cgroup {
         Ok(())
     }
 
+    /// Proves this cgroup and every cgroup nested beneath it empty, then removes the nested ones
+    /// deepest first and this one last.
+    ///
+    /// Nothing inside a sandbox can create a nested group, but a process outside it with write
+    /// access to the delegated subtree can, and `rmdir` refuses a cgroup with children: without
+    /// the walk such a group keeps the exec's own cgroup, and its tracking slot, until restart.
+    /// The walk never follows a symlink and is bounded in depth and count; a subtree past either
+    /// bound, or with a member anywhere in it, is refused before anything is removed. Callers kill
+    /// first: `cgroup.kill` already reaches every nested group.
     pub(crate) fn prove_empty_and_remove(&self) -> Result<(), DriverError> {
         let processes =
             std::fs::read_to_string(self.path.join("cgroup.procs")).map_err(|error| {
@@ -3968,12 +3979,95 @@ impl Cgroup {
                 "Exec cgroup still contains processes after observation.",
             ));
         }
+        let nested = self.nested_cgroups()?;
+        for cgroup in &nested {
+            match std::fs::read_to_string(cgroup.join("cgroup.procs")) {
+                Ok(processes) if !processes.trim().is_empty() => {
+                    return Err(DriverError::failed(
+                        "exec.cgroup-not-empty",
+                        "A cgroup nested in the exec cgroup still contains processes.",
+                    ));
+                }
+                // A nested group removed meanwhile, or a directory that is no cgroup and holds
+                // none: no member is listed in it.
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(DriverError::failed(
+                        "exec.cgroup-read-failed",
+                        format!("nested cgroup processes: {error}"),
+                    ));
+                }
+            }
+        }
+        // Parents precede their children in the walk, so the reverse removes children first.
+        for cgroup in nested.iter().rev() {
+            match std::fs::remove_dir(cgroup) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(DriverError::failed(
+                        "exec.cgroup-cleanup-failed",
+                        format!("nested cgroup cleanup: {error}"),
+                    ));
+                }
+            }
+        }
         std::fs::remove_dir(&self.path).map_err(|error| {
             DriverError::failed(
                 "exec.cgroup-cleanup-failed",
                 format!("cgroup cleanup: {error}"),
             )
         })
+    }
+
+    /// Every cgroup nested beneath this one, parents before their children, never following a
+    /// symlink. A subtree deeper than [`MAX_EXEC_CGROUP_DEPTH`] or holding more than
+    /// [`MAX_EXEC_NESTED_CGROUPS`] groups is refused as a whole, never answered in part.
+    fn nested_cgroups(&self) -> Result<Vec<PathBuf>, DriverError> {
+        let past_bound = || {
+            DriverError::failed(
+                "exec.cgroup-not-empty",
+                format!(
+                    "The exec cgroup nests cgroups deeper than {MAX_EXEC_CGROUP_DEPTH} levels or \
+                     more than {MAX_EXEC_NESTED_CGROUPS} of them; they are kept for the operator."
+                ),
+            )
+        };
+        // The exec's own cgroup at depth 0, then each nested group in the order it was found.
+        let mut found: Vec<(PathBuf, usize)> = vec![(self.path.clone(), 0)];
+        let mut next = 0;
+        while let Some((path, depth)) = found.get(next).cloned() {
+            next += 1;
+            let entries = match std::fs::read_dir(&path) {
+                Ok(entries) => entries,
+                // A nested group removed during the walk has nothing left to visit.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound && depth > 0 => {
+                    continue;
+                }
+                Err(error) => {
+                    return Err(DriverError::failed(
+                        "exec.cgroup-read-failed",
+                        format!("cgroup walk: {error}"),
+                    ));
+                }
+            };
+            for entry in entries {
+                let entry = entry.map_err(|error| {
+                    DriverError::failed("exec.cgroup-read-failed", format!("cgroup walk: {error}"))
+                })?;
+                // `DirEntry::file_type` does not follow a symlink, so a link is never descended.
+                if !matches!(entry.file_type(), Ok(kind) if kind.is_dir()) {
+                    continue;
+                }
+                // `found` holds the exec's own cgroup besides the nested ones.
+                if depth + 1 > MAX_EXEC_CGROUP_DEPTH || found.len() > MAX_EXEC_NESTED_CGROUPS {
+                    return Err(past_bound());
+                }
+                found.push((entry.path(), depth + 1));
+            }
+        }
+        Ok(found.into_iter().skip(1).map(|(path, _)| path).collect())
     }
 }
 
@@ -6242,12 +6336,18 @@ mod tests {
             leftovers.push((id, cgroup.clone(), sleeper_in(&cgroup), sleeper_in(&cgroup)));
         }
         // A cgroup whose processes the kill reaches but whose directory cannot be removed: its
-        // processes sit in a nested group, so after the kill it holds none and still cannot be
-        // proven empty and removed.
+        // processes sit in a group nested deeper than the removal walk descends, so after the
+        // kill it holds none and still cannot be proven empty and removed. (An empty nested group
+        // within the bound is removed depth-first, `nested_exec_cgroups_are_removed_depth_first`.)
         let stuck = delegated.join("substrate-ex_stuck");
-        let pinned = stuck.join("pinned");
         std::fs::create_dir(&stuck).unwrap();
-        std::fs::create_dir(&pinned).unwrap();
+        let mut chain = Vec::new();
+        let mut pinned = stuck.clone();
+        for _ in 0..=super::MAX_EXEC_CGROUP_DEPTH {
+            pinned = pinned.join("n");
+            std::fs::create_dir(&pinned).unwrap();
+            chain.push(pinned.clone());
+        }
         let stuck_sleeper = sleeper_in(&pinned);
 
         let lease = install_terminal_unknown(&runtime, "ex_lease", true);
@@ -6308,13 +6408,160 @@ mod tests {
             "the startup refusal for an unproven tree is unchanged"
         );
 
-        std::fs::remove_dir(&pinned).expect("the nested group is empty");
+        // Back within the bound: the round removes the rest of the chain, deepest first.
+        std::fs::remove_dir(chain.last().expect("a chain")).expect("the deepest group is empty");
         runtime.retry_unproven().await;
         assert!(runtime.unproven.lock().is_empty());
         assert!(!stuck.exists());
         ProcessRuntime::new(config, unproven_capability())
             .expect("a cgroup the retry emptied does not block the next start");
         let _ = std::fs::remove_dir(&delegated);
+    }
+
+    /// The story's acceptance, against a real cgroup: groups a process outside the sandbox nests
+    /// under an exec's cgroup, with members in them, do not keep the exec's cgroup or its tracking
+    /// slot. One retry round kills the members, removes the nested groups deepest first and then
+    /// the exec's own, and the slot is free again without a restart.
+    ///
+    /// Delegated only. Without `SUBSTRATE_VECTORS_CGROUP_ROOT` naming a cgroup v2 subtree this
+    /// process is inside, the case is **absent, never reported as passed** (invariant 3).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn nested_exec_cgroups_are_removed_depth_first() {
+        let Some(delegated) = delegated_cgroup_root("nested-depth-first") else {
+            eprintln!(
+                "nested_exec_cgroups_are_removed_depth_first: absent, no delegated cgroup root"
+            );
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        let mut config = HostConfig::minimum(root.path());
+        config.cgroup_root = Some(delegated.clone());
+        let runtime = ProcessRuntime::new(config.clone(), unproven_capability()).expect("runtime");
+        let cgroup = delegated.join("substrate-ex_nested");
+        let deep = cgroup.join("outer").join("inner");
+        let beside = cgroup.join("beside");
+        std::fs::create_dir(&cgroup).unwrap();
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::create_dir(&beside).unwrap();
+        let in_deep = sleeper_in(&deep);
+        let in_beside = sleeper_in(&beside);
+        let observation = install_terminal_unknown(&runtime, "ex_nested", true);
+        runtime.acknowledge(&observation);
+        assert_eq!(
+            super::TrackingReservation::acquire(
+                std::sync::Arc::clone(&runtime.executions),
+                std::sync::Arc::clone(&runtime.reservations),
+                &runtime.unproven,
+                "ex_next",
+                1,
+            )
+            .err()
+            .map(|error| error.code),
+            Some("exec.tracking-capacity"),
+            "the carried tree holds its slot until it is proven gone"
+        );
+
+        runtime.retry_unproven().await;
+
+        assert_killed(in_deep, "nested inner").await;
+        assert_killed(in_beside, "nested beside").await;
+        assert!(!deep.exists(), "the deepest nested group is removed");
+        assert!(!beside.exists(), "a sibling nested group is removed");
+        assert!(!cgroup.exists(), "the exec's own cgroup is removed");
+        assert!(
+            !runtime.unproven.lock().contains_key("ex_nested"),
+            "a tree proven gone is forgotten"
+        );
+        super::TrackingReservation::acquire(
+            std::sync::Arc::clone(&runtime.executions),
+            std::sync::Arc::clone(&runtime.reservations),
+            &runtime.unproven,
+            "ex_next",
+            1,
+        )
+        .expect("the slot is free without a restart");
+        ProcessRuntime::new(config, unproven_capability())
+            .expect("nothing is left to block the next start");
+        let _ = std::fs::remove_dir(&delegated);
+        eprintln!("nested_exec_cgroups_are_removed_depth_first: delegated case executed");
+    }
+
+    /// Portable: the removal walk descends real directories only. A symlink in an exec cgroup is
+    /// never followed, so the directory it names keeps its contents; nested directories are
+    /// removed deepest first.
+    #[test]
+    fn the_nested_cgroup_walk_never_follows_a_symlink() {
+        let root = tempfile::tempdir().unwrap();
+        let top = root.path().join("substrate-ex_walk");
+        let elsewhere = root.path().join("elsewhere");
+        std::fs::create_dir_all(top.join("a").join("b")).unwrap();
+        std::fs::create_dir_all(elsewhere.join("kept")).unwrap();
+        std::fs::write(top.join("cgroup.procs"), b"").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, top.join("link")).unwrap();
+        let cgroup = Cgroup::at(top.clone(), "substrate-ex_walk".to_owned());
+
+        // The top still holds its control files on a plain filesystem, so its own `rmdir` fails;
+        // everything nested beneath it is gone, and nothing behind the symlink was touched.
+        assert!(cgroup.prove_empty_and_remove().is_err());
+        assert!(!top.join("a").exists(), "nested groups are removed");
+        assert!(
+            elsewhere.join("kept").is_dir(),
+            "a symlink is never followed"
+        );
+    }
+
+    /// Portable: past the depth bound the walk refuses and removes nothing, rather than looping
+    /// or reporting part of the subtree as the whole.
+    #[test]
+    fn a_cgroup_nested_past_the_bound_is_refused_and_kept() {
+        let root = tempfile::tempdir().unwrap();
+        let top = root.path().join("substrate-ex_deep");
+        std::fs::create_dir(&top).unwrap();
+        std::fs::write(top.join("cgroup.procs"), b"").unwrap();
+        let mut deepest = top.clone();
+        for _ in 0..=super::MAX_EXEC_CGROUP_DEPTH {
+            deepest = deepest.join("n");
+        }
+        std::fs::create_dir_all(&deepest).unwrap();
+        let cgroup = Cgroup::at(top.clone(), "substrate-ex_deep".to_owned());
+
+        let refused = cgroup.prove_empty_and_remove().expect_err("past the bound");
+        assert_eq!(refused.code, "exec.cgroup-not-empty");
+        assert!(deepest.is_dir(), "nothing is removed past the bound");
+        assert!(top.join("n").is_dir(), "nor above it");
+    }
+
+    /// Portable: past the count bound the walk refuses and removes nothing.
+    #[test]
+    fn a_cgroup_with_more_nested_groups_than_the_bound_is_refused_and_kept() {
+        let root = tempfile::tempdir().unwrap();
+        let top = root.path().join("substrate-ex_wide");
+        std::fs::create_dir(&top).unwrap();
+        std::fs::write(top.join("cgroup.procs"), b"").unwrap();
+        for index in 0..=super::MAX_EXEC_NESTED_CGROUPS {
+            std::fs::create_dir(top.join(format!("g{index}"))).unwrap();
+        }
+        let cgroup = Cgroup::at(top.clone(), "substrate-ex_wide".to_owned());
+
+        let refused = cgroup.prove_empty_and_remove().expect_err("past the bound");
+        assert_eq!(refused.code, "exec.cgroup-not-empty");
+        assert!(top.join("g0").is_dir(), "nothing is removed past the bound");
+    }
+
+    /// Portable: a member in any nested group keeps the whole subtree, nothing removed.
+    #[test]
+    fn a_member_in_a_nested_group_keeps_the_whole_subtree() {
+        let root = tempfile::tempdir().unwrap();
+        let top = root.path().join("substrate-ex_member");
+        let inner = top.join("a").join("b");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::write(top.join("cgroup.procs"), b"").unwrap();
+        std::fs::write(inner.join("cgroup.procs"), b"4242\n").unwrap();
+        let cgroup = Cgroup::at(top.clone(), "substrate-ex_member".to_owned());
+
+        let refused = cgroup.prove_empty_and_remove().expect_err("populated");
+        assert_eq!(refused.code, "exec.cgroup-not-empty");
+        assert!(inner.is_dir(), "a populated nested group is kept");
     }
 
     /// One admitted exec, run to its terminal observation, or a panic naming the refusal.
@@ -7556,8 +7803,13 @@ mod tests {
             host_path: host_text.clone(),
             mount: "/opt/root".to_owned(),
         }];
-        let roots =
-            ProcessRuntime::admit_read_only_roots(&input.read_only_roots).expect("admitted root");
+        let roots = ProcessRuntime::admit_read_only_roots(
+            &input.read_only_roots,
+            Some(&substrate_wire::ReadOnlyRootFacts {
+                max_roots: substrate_wire::MAX_READ_ONLY_ROOTS,
+            }),
+        )
+        .expect("admitted root");
         let slots = crate::secrets::SecretSlotSet::acquire(&[], &[]).expect("no slots");
         let sync = std::fs::File::open("/dev/null").expect("a barrier descriptor");
         let pinned = crate::fs::pin_workspace_directory(&workspace).expect("pinned workspace");
@@ -7603,6 +7855,88 @@ mod tests {
         );
         assert_eq!(descriptor, roots[0].raw_fd(), "{argv:?}");
         assert_cloexec(descriptor);
+    }
+
+    /// `story:host-admit-checks-the-read-only-roots-fact`: the driver itself refuses a start
+    /// naming a read-only root when its own capability snapshot lacks `exec.read-only-roots`,
+    /// with the daemon's code, class, address and message (`check_read_only_roots` in the daemon's
+    /// `app/operations.rs`), so an embedder that reaches the driver without the daemon is refused
+    /// too. Called through the driver's public `start`; portable, nothing runs.
+    #[tokio::test]
+    async fn the_driver_refuses_read_only_roots_its_snapshot_does_not_publish() {
+        let root = tempfile::tempdir().expect("root");
+        let workspaces = root.path().join("workspaces");
+        let workspace = workspaces.join("ws_test");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let host = std::fs::canonicalize(root.path())
+            .expect("canonical root")
+            .join("declared-root");
+        std::fs::create_dir(&host).expect("declared root");
+        let snapshot = format!("sha256:{}", "7".repeat(64));
+        let capability = |facts: CapabilityFacts| CapabilitySnapshot {
+            snapshot: snapshot.clone(),
+            driver: HostDriverKind::Host,
+            driver_version: "test".to_owned(),
+            config_generation: 1,
+            probed_at: chrono::Utc::now(),
+            valid_until: None,
+            facts,
+        };
+        let mut input = pty_exec_input(&snapshot);
+        input.read_only_roots = vec![substrate_wire::ReadOnlyRoot {
+            host_path: host.to_str().expect("UTF-8 root").to_owned(),
+            mount: "/opt/root".to_owned(),
+        }];
+
+        let unpublished = ProcessRuntime::new(
+            HostConfig::minimum(&workspaces),
+            capability(CapabilityFacts::default()),
+        )
+        .expect("runtime");
+        let DispatchOutcome::NotDispatched(refused) =
+            unpublished.start("ex_test", &workspace, &input).await
+        else {
+            panic!("a start naming an unpublished read-only root is refused before dispatch");
+        };
+        assert_eq!(refused.code, "exec.sandbox-unavailable");
+        assert_eq!(refused.class, crate::DriverErrorClass::Unserved);
+        assert_eq!(refused.address.as_deref(), Some("read_only_roots"));
+        assert_eq!(
+            refused.message,
+            "This host does not publish exec.read-only-roots, so no declared read-only root can \
+             be bound."
+        );
+
+        // The control: the same start on a host that publishes the fact passes this check.
+        let published = ProcessRuntime::new(
+            HostConfig::minimum(&workspaces),
+            capability(CapabilityFacts {
+                exec_read_only_roots: Some(substrate_wire::ReadOnlyRootFacts {
+                    max_roots: substrate_wire::MAX_READ_ONLY_ROOTS,
+                }),
+                ..CapabilityFacts::default()
+            }),
+        )
+        .expect("runtime");
+        if let Err(error) = published.admit("ex_test", &workspace, &[], &input) {
+            assert_ne!(
+                error.address.as_deref(),
+                Some("read_only_roots"),
+                "a published fact admits the root: {} {}",
+                error.code,
+                error.message
+            );
+        }
+
+        // An invalid root is still refused by shape first, whatever the fact says (the daemon's
+        // order: 422 before 501).
+        input.read_only_roots[0].host_path = "relative".to_owned();
+        let DispatchOutcome::NotDispatched(invalid) =
+            unpublished.start("ex_test", &workspace, &input).await
+        else {
+            panic!("an invalid root is refused before dispatch");
+        };
+        assert_eq!(invalid.code, substrate_wire::READ_ONLY_ROOT_INVALID);
     }
 
     /// The launch barrier and the info pipe end bubblewrap uses sit above the slot range,
@@ -7925,8 +8259,13 @@ mod adversary_unknown_exec_retry {
             "the delegated lane must dispatch the exec"
         );
         let cgroup = root.join(format!("substrate-{id}"));
-        let pinned = cgroup.join("pinned");
-        std::fs::create_dir(&pinned).expect("pin the exec cgroup with a nested group");
+        // Pinned by a chain of nested groups deeper than the removal walk descends; an empty
+        // nested group within the bound is removed depth-first and pins nothing.
+        let mut pinned = cgroup.clone();
+        for _ in 0..=super::MAX_EXEC_CGROUP_DEPTH {
+            pinned = pinned.join("n");
+            std::fs::create_dir(&pinned).expect("pin the exec cgroup with a nested chain");
+        }
 
         let terminal = tokio::time::timeout(Duration::from_secs(15), async {
             loop {
@@ -7977,7 +8316,8 @@ mod adversary_unknown_exec_retry {
             "a tree not proven empty stays retried"
         );
 
-        std::fs::remove_dir(&pinned).expect("the nested group is empty after the kill");
+        // Back within the bound: the round removes the rest of the chain, deepest first.
+        std::fs::remove_dir(&pinned).expect("the deepest group is empty after the kill");
         runtime.retry_unproven().await;
         assert!(
             !cgroup.exists(),
