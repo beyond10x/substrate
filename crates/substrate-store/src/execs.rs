@@ -233,17 +233,25 @@ impl Store {
                     operation: Some(new.operation.clone()),
                 },
             )),
-            Some(stored) if !is_terminal_exec_state(stored.resource.state) => Some((
-                409,
-                ErrorDetail {
-                    class: ErrorClass::Conflict,
-                    code: "exec.not-terminal".to_owned(),
-                    message: "Only a durable terminal exec can be retired.".to_owned(),
-                    retriable: false,
-                    address: Some("exec".to_owned()),
-                    operation: Some(new.operation.clone()),
-                },
-            )),
+            // An `unknown` exec is retirable only once recovery has recorded its tree physically
+            // absent; before that its processes may still be running.
+            Some(stored)
+                if !is_terminal_exec_state(stored.resource.state)
+                    && (stored.resource.state != ExecState::Unknown
+                        || !exec_recorded_absent(&transaction, &new.scope, id)?) =>
+            {
+                Some((
+                    409,
+                    ErrorDetail {
+                        class: ErrorClass::Conflict,
+                        code: "exec.not-terminal".to_owned(),
+                        message: "Only a durable terminal exec can be retired.".to_owned(),
+                        retriable: false,
+                        address: Some("exec".to_owned()),
+                        operation: Some(new.operation.clone()),
+                    },
+                ))
+            }
             Some(_) => None,
         };
         if let Some((status, detail)) = refusal {
@@ -735,6 +743,24 @@ pub(crate) fn is_terminal_exec_state(state: ExecState) -> bool {
         state,
         ExecState::Exited | ExecState::Cancelled | ExecState::Expired
     )
+}
+
+/// Whether recovery recorded this exec's tree physically absent
+/// (`Store::mark_exec_physically_absent`).
+fn exec_recorded_absent(
+    connection: &Connection,
+    scope: &Scope,
+    id: &str,
+) -> Result<bool, StoreError> {
+    Ok(connection
+        .query_row(
+            "SELECT physically_absent FROM execs
+             WHERE deployment = ?1 AND subject = ?2 AND id = ?3",
+            params![scope.deployment, scope.subject, id],
+            |row| row.get::<_, bool>(0),
+        )
+        .optional()?
+        .unwrap_or(false))
 }
 
 pub(crate) fn load_exec(

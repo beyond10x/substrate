@@ -76,6 +76,11 @@ struct PipeFixtureDriver {
     /// When set, a kill is answered with an `unknown` terminal observation: the driver ended the
     /// exec but could not prove the whole tree went with it.
     kill_ends_unknown: std::sync::atomic::AtomicBool,
+    /// Every maintenance-round retry of unproven exec trees that reached this driver.
+    unproven_retries: AtomicU32,
+    /// Execs whose tree the driver has not proven gone: `signal` answers each the way the host
+    /// driver answers a carried tree, `exec.cgroup-not-empty`, never `NotFound`.
+    unproven_tree_for: Mutex<std::collections::HashSet<String>>,
 }
 
 impl PipeFixtureDriver {
@@ -92,6 +97,8 @@ impl PipeFixtureDriver {
             signalled: Mutex::new(Vec::new()),
             refuse_signal_for: Mutex::new(std::collections::HashSet::new()),
             kill_ends_unknown: std::sync::atomic::AtomicBool::new(false),
+            unproven_retries: AtomicU32::new(0),
+            unproven_tree_for: Mutex::new(std::collections::HashSet::new()),
         })
     }
 
@@ -388,6 +395,17 @@ impl Driver for PipeFixtureDriver {
             std::future::pending::<()>().await;
         }
         if self
+            .unproven_tree_for
+            .lock()
+            .expect("unproven_tree_for fixture lock")
+            .contains(id)
+        {
+            return Err(DriverError::failed(
+                "exec.cgroup-not-empty",
+                "The exec's cgroup has not been proven empty yet.",
+            ));
+        }
+        if self
             .refuse_signal_for
             .lock()
             .expect("refuse_signal_for fixture lock")
@@ -459,6 +477,11 @@ impl Driver for PipeFixtureDriver {
     fn discard_superseded_exec(&self, id: &str) {
         self.pipes.lock().expect("pipe fixture lock").remove(id);
         self.host.discard_superseded_exec(id);
+    }
+
+    async fn retry_unproven_exec_trees(&self) -> Result<(), DriverError> {
+        self.unproven_retries.fetch_add(1, Ordering::SeqCst);
+        self.host.retry_unproven_exec_trees().await
     }
 }
 
@@ -727,14 +750,24 @@ impl Harness {
     /// [`Harness::start_pipe`] with operation ids of its own, so one harness can hold many
     /// sessions: a fresh workspace and a fresh session per `n`.
     async fn start_pipe_numbered(&self, n: u32) -> (String, String) {
+        self.start_pipe_numbered_leased(n, None).await
+    }
+
+    /// [`Harness::start_pipe_numbered`] in a workspace created with `workspace_lease_ttl_ms`.
+    async fn start_pipe_numbered_leased(
+        &self,
+        n: u32,
+        workspace_lease_ttl_ms: Option<u64>,
+    ) -> (String, String) {
+        let mut input = json!({"source": "empty", "labels": {"fixture": "pipe"}});
+        if let Some(ttl) = workspace_lease_ttl_ms {
+            input["lease_ttl_ms"] = json!(ttl);
+        }
         let (status, workspace) = self
             .call(
                 Method::POST,
                 "/v1/workspaces",
-                mutation(
-                    &format!("01JU1SECWORKSPACE{n:07}"),
-                    json!({"source": "empty", "labels": {"fixture": "pipe"}}),
-                ),
+                mutation(&format!("01JU1SECWORKSPACE{n:07}"), input),
             )
             .await;
         assert_eq!(status, StatusCode::CREATED, "{workspace}");
@@ -2945,6 +2978,26 @@ async fn sweep_expired_returns_while_a_containment_kill_is_unanswered() {
     drop(stranding);
 }
 
+/// Every maintenance round asks the driver to kill again the exec trees it ended without proving
+/// their cgroups empty, so such a tree is killed within one round of its lease expiring, not at
+/// the next daemon start (`story:an-unknown-exec-is-killed-again-before-restart`).
+#[tokio::test(flavor = "multi_thread")]
+async fn every_maintenance_round_retries_unproven_exec_trees() {
+    let harness = Harness::driven().await;
+    let before = harness.driver.unproven_retries.load(Ordering::SeqCst);
+    harness.app.sweep_expired().await;
+    assert_eq!(
+        harness.driver.unproven_retries.load(Ordering::SeqCst),
+        before + 1,
+        "one maintenance round, one retry"
+    );
+    harness.app.sweep_expired().await;
+    assert_eq!(
+        harness.driver.unproven_retries.load(Ordering::SeqCst),
+        before + 2
+    );
+}
+
 /// A pending containment whose exec the store already records terminal leaves the set without a
 /// kill: there is nothing left to contain.
 #[tokio::test(flavor = "multi_thread")]
@@ -3369,9 +3422,10 @@ impl CapturedLog {
     }
 }
 
-/// A pending containment whose exec the store records `unknown` leaves the set — nothing retries
-/// a kill of an `unknown` exec before the daemon restarts — but says so at `warn`, naming the
-/// exec, because the whole-tree kill was never proven.
+/// A pending containment whose exec the store records `unknown` leaves the set, and says so at
+/// `warn`, naming the exec, because the whole-tree kill was never proven. The containment step
+/// does not retry it itself: the driver kills that tree again once per maintenance round until
+/// its cgroup is proven gone (`every_maintenance_round_retries_unproven_exec_trees`).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_pending_containment_whose_exec_ended_unknown_is_dropped_with_a_warning() {
     let harness = Harness::driven().await;
@@ -3425,8 +3479,9 @@ async fn an_unproven_containment_is_reported_on_its_first_failure_then_at_doubli
 }
 
 /// A containment kill the driver answers with `unknown` ended the exec without proving the whole
-/// tree went with it. The containment step drops it — nothing retries that kill before the daemon
-/// restarts — but says so at `warn`, naming the exec, rather than reporting it terminated.
+/// tree went with it. The containment step drops it and says so at `warn`, naming the exec, rather
+/// than reporting it terminated; the driver's per-round retry of unproven trees, not this step,
+/// kills that tree again (`every_maintenance_round_retries_unproven_exec_trees`).
 #[tokio::test(flavor = "multi_thread")]
 async fn a_containment_kill_answered_unknown_is_reported_at_warn() {
     let harness = Harness::driven().await;
@@ -3454,4 +3509,148 @@ async fn a_containment_kill_answered_unknown_is_reported_at_warn() {
     );
     drop(log);
     drop(stranding);
+}
+
+/// Adversary cases for `story:an-unknown-exec-is-killed-again-before-restart`, wave 2026-10-23.
+mod adversary_unknown_exec_retry {
+    use super::*;
+
+    /// The acceptance's second clause, through the path its first clause names: an exec the
+    /// driver recorded `unknown` whose lease then expires is handed to lease cleanup, whose KILL
+    /// the driver again answers `unknown` (the tree still cannot be proven empty). What the daemon
+    /// reports afterwards must stay `unknown`, never a terminated state such as `expired`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_unknown_exec_whose_lease_expires_is_still_reported_unknown() {
+        let harness = Harness::driven().await;
+        let (session_id, exec_id) = harness.start_pipe().await;
+        let (status, renewed) = harness
+            .call(
+                Method::POST,
+                &format!("/v1/sessions/{session_id}/lease/renew"),
+                mutation(
+                    "01JU2UNKNOWNLEASERENEW01",
+                    json!({"ttl_ms": substrate_wire::MIN_LEASE_TTL_MS}),
+                ),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK, "{renewed}");
+        let lease = harness.exec(&exec_id).await["result"]["lease"].clone();
+        let renew_by: chrono::DateTime<Utc> = lease["renew_by"]
+            .as_str()
+            .unwrap_or_else(|| panic!("the renewed exec names its lease deadline: {lease}"))
+            .parse()
+            .expect("an RFC 3339 lease deadline");
+
+        harness
+            .driver
+            .kill_ends_unknown
+            .store(true, Ordering::SeqCst);
+        harness.driver.terminal(&exec_id, ExecState::Unknown, None);
+        harness.app.sweep_expired().await;
+        assert_eq!(harness.exec(&exec_id).await["result"]["state"], "unknown");
+
+        let remaining = (renew_by - Utc::now()).to_std().unwrap_or_default();
+        tokio::time::sleep(remaining + Duration::from_millis(100)).await;
+        let observed = tokio::time::timeout(Duration::from_secs(20), async {
+            loop {
+                harness.app.sweep_expired().await;
+                let observed = harness.exec(&exec_id).await;
+                if observed["result"]["lease"]["state"] == "expired"
+                    || observed["result"]["state"] != "unknown"
+                {
+                    return observed;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("lease cleanup reaches the expired exec lease");
+        assert_eq!(
+            observed["result"]["state"], "unknown",
+            "a tree that still cannot be proven empty is never reported terminated: {observed}"
+        );
+    }
+}
+
+/// Correction round 2 (F2) of `story:an-unknown-exec-is-killed-again-before-restart`: when the
+/// driver answers lease cleanup's KILL for an `unknown` exec with `exec.cgroup-not-empty`, as the
+/// host driver now does for a tree it has not proven gone, workspace-lease cleanup keeps the
+/// workspace and tries again on a later round. It ends the workspace only on `NotFound`, and
+/// `NotFound` would end it with the tree's processes still in it.
+#[tokio::test(flavor = "multi_thread")]
+async fn workspace_lease_cleanup_keeps_a_workspace_whose_unknown_exec_tree_is_not_proven_gone() {
+    let harness = Harness::driven().await;
+    let (_session_id, exec_id) = harness
+        .start_pipe_numbered_leased(0, Some(substrate_wire::MIN_LEASE_TTL_MS))
+        .await;
+    let observed = harness.exec(&exec_id).await;
+    let workspace = observed["result"]["workspace"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the exec names its workspace: {observed}"))
+        .to_owned();
+    let (status, leased) = harness
+        .call(
+            Method::GET,
+            &format!("/v1/workspaces/{workspace}"),
+            Body::empty(),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{leased}");
+    let renew_by: chrono::DateTime<Utc> = leased["result"]["lease"]["renew_by"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the workspace names its lease deadline: {leased}"))
+        .parse()
+        .expect("an RFC 3339 lease deadline");
+
+    harness.driver.terminal(&exec_id, ExecState::Unknown, None);
+    harness
+        .driver
+        .unproven_tree_for
+        .lock()
+        .expect("unproven_tree_for fixture lock")
+        .insert(exec_id.clone());
+    harness.app.sweep_expired().await;
+    assert_eq!(harness.exec(&exec_id).await["result"]["state"], "unknown");
+
+    let remaining = (renew_by - Utc::now()).to_std().unwrap_or_default();
+    tokio::time::sleep(remaining + Duration::from_millis(100)).await;
+    // Long enough for the first cleanup attempt and at least one retry after its backoff.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    let attempts = loop {
+        harness.app.sweep_expired().await;
+        let attempts = harness
+            .driver
+            .signalled
+            .lock()
+            .expect("signalled fixture lock")
+            .iter()
+            .filter(|signalled| **signalled == exec_id)
+            .count();
+        if attempts >= 2 || tokio::time::Instant::now() >= deadline {
+            break attempts;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    };
+    assert!(
+        attempts >= 2,
+        "workspace-lease cleanup retries the KILL on a later round ({attempts} reached the driver)"
+    );
+
+    let (status, kept) = harness
+        .call(
+            Method::GET,
+            &format!("/v1/workspaces/{workspace}"),
+            Body::empty(),
+        )
+        .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a workspace whose exec tree is not proven gone is never ended: {kept}"
+    );
+    assert_ne!(
+        kept["result"]["state"], "expired",
+        "a workspace whose exec tree is not proven gone is never ended: {kept}"
+    );
+    assert_eq!(harness.exec(&exec_id).await["result"]["state"], "unknown");
 }
