@@ -372,6 +372,20 @@
         },
         "read_only_roots": {
           "$ref": "../common.json#/$defs/read-only-roots"
+        },
+        "scratch": {
+          "$ref": "../common.json#/$defs/storage-limit"
+        },
+        "measurements": {
+          "items": {
+            "const": "resource-usage"
+          },
+          "maxItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "workspace_access": {
+          "$ref": "../common.json#/$defs/workspace-access"
         }
       },
       "required": [

@@ -46,6 +46,7 @@ use crate::report::Report;
 
 mod host_process;
 mod read_only_roots;
+mod session_exec_fields;
 mod workdir_apertures;
 mod writable_roots;
 
@@ -895,6 +896,7 @@ fn check_classification(version: &str, released: &Tree, failures: &mut Vec<Strin
 fn check_additions(version: &str, released: &Tree, failures: &mut Vec<String>) {
     if version == "0.23.0" {
         read_only_roots::check(version, released, failures);
+        session_exec_fields::check(released, failures);
         return;
     }
     if version == "0.22.0" {

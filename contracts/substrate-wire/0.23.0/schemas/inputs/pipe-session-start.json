@@ -211,6 +211,14 @@
           ],
           "type": "object"
         },
+        "measurements": {
+          "items": {
+            "const": "resource-usage"
+          },
+          "maxItems": 1,
+          "type": "array",
+          "uniqueItems": true
+        },
         "read_only_files": {
           "$ref": "../common.json#/$defs/read-only-files"
         },
@@ -333,6 +341,9 @@
           "type": "object",
           "x-b10x-reach-is-configuration": "a-request-selects-a-declared-name"
         },
+        "scratch": {
+          "$ref": "../common.json#/$defs/storage-limit"
+        },
         "secret_slots": {
           "items": {
             "additionalProperties": false,
@@ -368,6 +379,9 @@
         },
         "workspace": {
           "$ref": "../common.json#/$defs/workspace-id"
+        },
+        "workspace_access": {
+          "$ref": "../common.json#/$defs/workspace-access"
         },
         "writable_roots": {
           "$ref": "../common.json#/$defs/writable-roots"

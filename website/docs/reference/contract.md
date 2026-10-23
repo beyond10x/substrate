@@ -152,7 +152,9 @@ dispatch, after the checks of the start's other confinement members. The exec ap
 also admits `secret_slots`, which `0.5.0` to `0.22.0` wrongly reject, and `read_only_files`, which
 `0.18.0` to `0.22.0` wrongly reject. A client that
 validates capability snapshots or resources against `0.22.0` must move to `0.23.0` to accept the
-new fact and record members.
+new fact and record members. The session start's `exec` object now also publishes `scratch`,
+`measurements` and `workspace_access`, each the same schema as on exec start; a session has always
+accepted and applied them, with the same refusals as an exec start.
 `0.22.0` added ADR 0038. An exec or session
 start may name `writable_roots`, at most eight writable mounts outside `/workspace` (ADR 0038). Each
 entry is exactly one of `{"host": <name>, "mount": <path>}`, a directory the operator declared by
