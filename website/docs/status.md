@@ -52,7 +52,9 @@ in a broader architecture do not imply served endpoints.
 - A verified capsule identifies its provided bytes, not the entire host runtime closure.
 - Static-bearer TCP is loopback-only, development-only, and unsuitable for public or shared ingress.
 - Production TLS admits callers only through online Identity resolution. Identity unavailability
-  fails closed, and no cached authority or caller-written identity is used.
+  fails closed, and no cached authority or caller-written identity is used. Every request costs one
+  Identity round trip on a reused keep-alive connection (at most 8 idle, closed after 30 s idle or
+  any error), so a completed revocation applies to the next request.
 - One daemon is one trust domain; it is not a multi-tenant isolation layer.
 - Release `0.7.3` advertises `substrate-wire/0.16.0` and the SHA-256 of its inner
   `bundle.json` as one claim. The outer OCI package has its own digest. Version `0.15.0`
