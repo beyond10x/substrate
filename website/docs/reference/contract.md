@@ -140,7 +140,20 @@ across retry. Resource and operation lookup stays within the authenticated subje
 Read [operations and observations](../concepts/operations.md) for retry semantics and
 [status](../status.md) for the implementation boundary.
 
-Development source now advertises `substrate-wire/0.22.0`. It adds no route. An exec or session
+Development source now advertises `substrate-wire/0.23.0`. It adds no route and publishes the
+read-only roots the wire has always admitted (ADR 0010): an exec or session start may name
+`read_only_roots`, at most four `{"host_path": <path>, "mount": <path>}` entries, each path absolute
+and canonical. A host publishes `exec.read-only-roots`, `{"max_roots": 4}`, only when it is
+confined and resolves paths without following a symlink. The applied record lists each bound root
+as declared. No refusal is new: `exec.read-only-root-invalid`, `exec.read-only-root-absent` and
+`exec.read-only-root-not-a-directory` (422) are now published, each with a refusal vector. A
+start naming a root on a host without the fact is refused `exec.sandbox-unavailable` (501) before
+dispatch, after the checks of the start's other confinement members. The exec applied record now
+also admits `secret_slots`, which `0.5.0` to `0.22.0` wrongly reject, and `read_only_files`, which
+`0.18.0` to `0.22.0` wrongly reject. A client that
+validates capability snapshots or resources against `0.22.0` must move to `0.23.0` to accept the
+new fact and record members.
+`0.22.0` added ADR 0038. An exec or session
 start may name `writable_roots`, at most eight writable mounts outside `/workspace` (ADR 0038). Each
 entry is exactly one of `{"host": <name>, "mount": <path>}`, a directory the operator declared by
 name, or `{"workspace": <workspace id>, "mount": <path>}`, a Git checkout workspace of the caller; a

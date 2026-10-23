@@ -43,9 +43,9 @@ const DAEMON: &str = env!("CARGO_BIN_EXE_substrate-daemon");
 const CGROUP_EXEC: &str = env!("CARGO_BIN_EXE_substrate-cgroup-exec");
 const DAEMON_OVERRIDE_VARIABLE: &str = "SUBSTRATE_VECTORS_DAEMON";
 /// Pinned independently of the daemon implementation: the clean-room client verifies what ships.
-const ADVERTISED_CONTRACT: &str = "substrate-wire/0.22.0";
+const ADVERTISED_CONTRACT: &str = "substrate-wire/0.23.0";
 const ADVERTISED_CONTRACT_SHA256: &str =
-    "5d551f08c3b680c144359b13ff99a7da2853003c4fcc9665a32b21ce85e146da";
+    "4f41d7def24b7615562dc5c871e907ed5c524c40f7437b5b466a7d2089af6989";
 
 fn daemon_binary() -> PathBuf {
     std::env::var_os(DAEMON_OVERRIDE_VARIABLE).map_or_else(|| PathBuf::from(DAEMON), PathBuf::from)
@@ -2715,7 +2715,7 @@ async fn check_promoted_route_inventory(
     let expected: BTreeSet<String> = {
         let registry = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
-            .join("contracts/substrate-wire/0.22.0/operations.json");
+            .join("contracts/substrate-wire/0.23.0/operations.json");
         let document: Value = serde_json::from_slice(
             &std::fs::read(&registry).expect("promoted operation registry bytes"),
         )
@@ -3120,11 +3120,13 @@ async fn check_http_journey(
         passed += check_confined_secret_slots(daemon, &workspace, &snapshot).await;
         passed += check_confined_pty(daemon, &workspace, &snapshot).await;
         passed += check_confined_read_only_files(daemon, &workspace, &snapshot).await;
+        passed += check_confined_read_only_roots(daemon, &workspace, &snapshot).await;
         passed += check_confined_workdir(daemon, &workspace, &snapshot).await;
         passed +=
             check_confined_aperture_list(daemon, &workspace, &snapshot, inside, firehose).await;
     } else {
         passed += check_read_only_files_unserved(daemon, &workspace, &snapshot).await;
+        passed += check_read_only_roots_unserved(daemon, &workspace, &snapshot).await;
         passed += check_workdir_and_aperture_list_unserved(daemon, &workspace, &snapshot).await;
         passed += check_writable_root_unserved(daemon, &workspace, &snapshot, writable).await;
         // No confinement means no verified mechanism, so the capability is absent and every
@@ -4956,6 +4958,217 @@ async fn check_read_only_file_host_refusals(
 }
 
 // ---------------------------------------------------------------------------------------------
+// Declared read-only roots (ADR 0010, bundle 0.23.0)
+// ---------------------------------------------------------------------------------------------
+
+/// The served bound the 0.23.0 capability schema publishes as `exec.read-only-roots` `max_roots`,
+/// pinned here rather than read from the wire crate: the clean-room runner links no implementation.
+const READ_ONLY_ROOTS_BOUND: usize = 4;
+
+/// The portable journey: no confinement floor, so no roots bound is published and a start naming
+/// roots is refused by the floor's own name, never run with the roots missing (invariant 3).
+async fn check_read_only_roots_unserved(daemon: &Daemon, workspace: &str, snapshot: &str) -> usize {
+    let (status, machine) = daemon
+        .call("GET", "/v1/machine", "req_clean_roroot_fact_absent", None)
+        .await;
+    assert_eq!(status, 200);
+    assert!(
+        machine["result"]["facts"]
+            .get("exec.read-only-roots")
+            .is_none(),
+        "a portable host publishes no read-only roots fact: {machine}"
+    );
+    expect_error(
+        &daemon
+            .call(
+                "POST",
+                "/v1/execs",
+                "req_clean_roroot_unserved",
+                Some(&mutation(
+                    "01JROROOTCLEANUNSERVED01",
+                    &ExecInput::new(workspace, snapshot, &["/usr/bin/true"], true)
+                        .read_only_roots(json!([{
+                            "host_path": "/opt/host/toolchain",
+                            "mount": "/opt/toolchain"
+                        }]))
+                        .build(),
+                )),
+            )
+            .await,
+        501,
+        "exec.sandbox-unavailable",
+    );
+    // Shape before capability: one root over the bound is the caller's mistake on any host.
+    let over_bound: Vec<Value> = (0..=READ_ONLY_ROOTS_BOUND)
+        .map(|index| json!({ "host_path": format!("/opt/host/r{index}"), "mount": format!("/opt/r{index}") }))
+        .collect();
+    expect_error_at(
+        &daemon
+            .call(
+                "POST",
+                "/v1/execs",
+                "req_clean_roroot_portable_bound",
+                Some(&mutation(
+                    "01JROROOTCLEANPORTBOUND1",
+                    &ExecInput::new(workspace, snapshot, &["/usr/bin/true"], true)
+                        .read_only_roots(Value::Array(over_bound))
+                        .build(),
+                )),
+            )
+            .await,
+        422,
+        "exec.read-only-root-invalid",
+        "read_only_roots",
+    );
+    2
+}
+
+/// The delegated journey: the host publishes the wire bound, a start naming that many roots runs
+/// with each one readable and none writable, the applied observation lists exactly the declared
+/// roots, and one root over the bound is refused by name before anything runs.
+async fn check_confined_read_only_roots(daemon: &Daemon, workspace: &str, snapshot: &str) -> usize {
+    let (status, machine) = daemon
+        .call("GET", "/v1/machine", "req_clean_roroot_fact", None)
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        machine["result"]["facts"]["exec.read-only-roots"],
+        json!({ "max_roots": READ_ONLY_ROOTS_BOUND }),
+        "a delegated host publishes the served roots bound: {machine}"
+    );
+
+    let fixture = tempfile::Builder::new()
+        .prefix("roroot-cleanroom-")
+        .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
+        .expect("fixture under CARGO_TARGET_TMPDIR");
+    let base = std::fs::canonicalize(fixture.path()).expect("canonical fixture");
+    let bound = READ_ONLY_ROOTS_BOUND;
+    let roots: Vec<Value> = (0..=bound)
+        .map(|index| {
+            let host = base.join(format!("root{index}"));
+            std::fs::create_dir(&host).expect("root directory");
+            std::fs::write(host.join("marker"), format!("root {index}\n")).expect("marker");
+            json!({
+                "host_path": host.to_str().expect("UTF-8 fixture"),
+                "mount": format!("/opt/ro-root{index}"),
+            })
+        })
+        .collect();
+    let declared = Value::Array(roots[..bound].to_vec());
+    let script = (0..bound)
+        .map(|index| {
+            format!(
+                "test \"$(cat /opt/ro-root{index}/marker)\" = 'root {index}' \
+                 && ! (echo written >/opt/ro-root{index}/marker) 2>/dev/null \
+                 && ! touch /opt/ro-root{index}/new 2>/dev/null"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" && ");
+
+    let (status, run) = daemon
+        .call(
+            "POST",
+            "/v1/execs",
+            "req_clean_roroot_runs",
+            Some(&mutation(
+                "01JROROOTCLEANRUNS00001",
+                &ExecInput::new(workspace, snapshot, &["/bin/sh", "-c", &script], true)
+                    .read_only_roots(declared.clone())
+                    .build(),
+            )),
+        )
+        .await;
+    assert_eq!(status, 200, "{run}");
+    assert_eq!(
+        run["result"]["exit"],
+        EXITED_CLEANLY(),
+        "every declared root is readable and none is writable: {run}"
+    );
+    assert_eq!(
+        run["result"]["applied"]["read_only_roots"], declared,
+        "the applied observation lists every bound root: {run}"
+    );
+    for index in 0..bound {
+        let host = base.join(format!("root{index}"));
+        assert_eq!(
+            std::fs::read_to_string(host.join("marker")).expect("marker"),
+            format!("root {index}\n"),
+            "the host root is unchanged"
+        );
+        assert!(
+            !host.join("new").exists(),
+            "nothing was created in a host root"
+        );
+    }
+
+    expect_error(
+        &daemon
+            .call(
+                "POST",
+                "/v1/execs",
+                "req_clean_roroot_over_bound",
+                Some(&mutation(
+                    "01JROROOTCLEANOVERBOUND1",
+                    &ExecInput::new(workspace, snapshot, &["/usr/bin/true"], true)
+                        .read_only_roots(Value::Array(roots))
+                        .build(),
+                )),
+            )
+            .await,
+        422,
+        "exec.read-only-root-invalid",
+    );
+
+    2 + check_confined_read_only_root_host_refusals(daemon, workspace, snapshot, &base).await
+}
+
+/// The two host refusals, each for a list the wire crate admits, so only the pinned object can
+/// answer: a path with nothing at it, a regular file, and a symlink to a real directory.
+async fn check_confined_read_only_root_host_refusals(
+    daemon: &Daemon,
+    workspace: &str,
+    snapshot: &str,
+    base: &std::path::Path,
+) -> usize {
+    let file = base.join("plain-file");
+    std::fs::write(&file, "not a directory\n").expect("plain file");
+    let link = base.join("link-to-root0");
+    std::os::unix::fs::symlink(base.join("root0"), &link).expect("symlink to a root");
+    for (index, (host, code)) in [
+        (base.join("absent"), "exec.read-only-root-absent"),
+        (file, "exec.read-only-root-not-a-directory"),
+        (link, "exec.read-only-root-not-a-directory"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        expect_error_at(
+            &daemon
+                .call(
+                    "POST",
+                    "/v1/execs",
+                    &format!("req_clean_roroot_host_{index}"),
+                    Some(&mutation(
+                        &format!("01JROROOTCLEANHOSTREFUSE{index}"),
+                        &ExecInput::new(workspace, snapshot, &["/usr/bin/true"], true)
+                            .read_only_roots(json!([{
+                                "host_path": host.to_str().expect("UTF-8 fixture"),
+                                "mount": "/opt/ro-refused"
+                            }]))
+                            .build(),
+                    )),
+                )
+                .await,
+            422,
+            code,
+            "read_only_roots",
+        );
+    }
+    3
+}
+
+// ---------------------------------------------------------------------------------------------
 // Working directory and several apertures (design 26)
 // ---------------------------------------------------------------------------------------------
 
@@ -6506,8 +6719,8 @@ async fn check_git_root_refusals(
 // ---------------------------------------------------------------------------------------------
 
 /// The predecessor printed its case count; the port asserts it, so a case cannot vanish quietly.
-const PORTABLE_CASES: usize = 111;
-const DELEGATED_CASES: usize = 167;
+const PORTABLE_CASES: usize = 113;
+const DELEGATED_CASES: usize = 172;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {

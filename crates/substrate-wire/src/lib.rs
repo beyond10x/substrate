@@ -15,9 +15,9 @@ pub const API_VERSION: &str = "v1";
 ///
 /// This is the SHA-256 of the inner immutable `bundle.json`, not the outer OCI manifest digest.
 /// Moving either member is an explicit coordinated promotion (Atlas ADR 0019).
-pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.22.0";
+pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.23.0";
 pub const ADVERTISED_CONTRACT_BUNDLE_SHA256: &str =
-    "5d551f08c3b680c144359b13ff99a7da2853003c4fcc9665a32b21ce85e146da";
+    "4f41d7def24b7615562dc5c871e907ed5c524c40f7437b5b466a7d2089af6989";
 pub const MAX_FILE_BYTES: u64 = 1_048_576;
 pub const MAX_IO_BYTES: u64 = 1_048_576;
 pub const MAX_LIST_ITEMS: u32 = 1_000;
@@ -70,6 +70,39 @@ pub const EXEC_APERTURE_HOST_LISTED_TWICE: &str = "exec.aperture-host-listed-twi
 /// Small on purpose. A closure that needs many roots is a closure that should be assembled rather
 /// than enumerated, and a long list is a request nobody reviewed.
 pub const MAX_READ_ONLY_ROOTS: u32 = 4;
+/// The fact a host publishes with the served bound on declared read-only roots (ADR 0010, bundle
+/// `0.23.0`).
+pub const EXEC_READ_ONLY_ROOTS_FACT: &str = "exec.read-only-roots";
+/// A declared root broke a lexical rule of [`validate_read_only_roots`]: the bound, the path form,
+/// a reserved, duplicate or overlapping mount (ADR 0010, ADR 0015).
+pub const READ_ONLY_ROOT_INVALID: &str = "exec.read-only-root-invalid";
+/// A declared root's host path is not present, or not reachable, on this host (ADR 0010).
+pub const READ_ONLY_ROOT_ABSENT: &str = "exec.read-only-root-absent";
+/// A declared root's host path is not a directory, or is reached through a symlink (ADR 0010,
+/// design 26 § 3).
+pub const READ_ONLY_ROOT_NOT_A_DIRECTORY: &str = "exec.read-only-root-not-a-directory";
+/// Every refusal a declared read-only root can raise, all `422 refused` before dispatch (ADR 0010).
+///
+/// The one place the set is written down for the bundle: the `0.23.0` additions check asks the
+/// bundle to publish exactly this set.
+pub const READ_ONLY_ROOT_REFUSAL_CODES: [&str; 3] = [
+    READ_ONLY_ROOT_INVALID,
+    READ_ONLY_ROOT_ABSENT,
+    READ_ONLY_ROOT_NOT_A_DIRECTORY,
+];
+/// The message of [`READ_ONLY_ROOT_ABSENT`] for a host path with nothing at it.
+pub const READ_ONLY_ROOT_ABSENT_MESSAGE: &str =
+    "A declared read-only root is not present on this host.";
+/// The message of [`READ_ONLY_ROOT_NOT_A_DIRECTORY`].
+pub const READ_ONLY_ROOT_NOT_A_DIRECTORY_MESSAGE: &str =
+    "A declared read-only root is not a directory, or is reached through a symlink.";
+
+/// The message of [`READ_ONLY_ROOT_INVALID`] for the rule `error` names: one source for the
+/// daemon's answer and the bundle's published one.
+#[must_use]
+pub fn read_only_root_invalid_message(error: &WireValidationError) -> String {
+    format!("A declared read-only root is invalid: {error}")
+}
 /// How many single host files one start may declare read-only (ADR 0033).
 ///
 /// Enough for the handful of programs and configuration files one gate run names, and too few to
@@ -3283,6 +3316,18 @@ pub struct CapabilityFacts {
     pub exec_inline_capsule: Option<ExecutionCapsuleFacts>,
     #[serde(rename = "exec.scratch-quota", skip_serializing_if = "Option::is_none")]
     pub exec_scratch_quota: Option<ScratchQuotaFacts>,
+    /// The served bound on declared read-only host roots ([`EXEC_READ_ONLY_ROOTS_FACT`], ADR 0010).
+    ///
+    /// Published with the confinement floor the bind rides on and the `openat2` resolution each
+    /// root is pinned with, and absent exactly when one of them is: the daemon then refuses a
+    /// start naming a root `exec.sandbox-unavailable` before dispatch, so no root is ever mounted
+    /// by a host that does not publish this.
+    #[serde(
+        rename = "exec.read-only-roots",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub exec_read_only_roots: Option<ReadOnlyRootFacts>,
     /// The served bound on declared read-only host files (ADR 0033). Absent leaves every start
     /// that declares one `exec.read-only-files-unserved`.
     #[serde(
@@ -3412,6 +3457,7 @@ impl Default for CapabilityFacts {
             exec_signals: None,
             exec_inline_capsule: None,
             exec_scratch_quota: None,
+            exec_read_only_roots: None,
             exec_read_only_files: None,
             exec_workdir: None,
             exec_writable_roots_host: None,
@@ -3443,6 +3489,13 @@ pub struct ScratchQuotaFacts {
     pub allocation_unit_bytes: u64,
     pub max_bytes: u64,
     pub max_inodes: u64,
+}
+
+/// The served bound on declared read-only host roots (ADR 0010): at most [`MAX_READ_ONLY_ROOTS`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadOnlyRootFacts {
+    pub max_roots: u32,
 }
 
 /// The served bound on declared read-only host files (ADR 0033).
@@ -5493,8 +5546,8 @@ mod tests {
         let version = ADVERTISED_CONTRACT_BUNDLE
             .strip_prefix("substrate-wire/")
             .expect("advertised contract prefix");
-        assert_eq!(version, "0.22.0", "the reviewed promotion target moved");
-        let bytes = include_bytes!("../../../contracts/substrate-wire/0.22.0/bundle.json");
+        assert_eq!(version, "0.23.0", "the reviewed promotion target moved");
+        let bytes = include_bytes!("../../../contracts/substrate-wire/0.23.0/bundle.json");
         assert_eq!(
             hex::encode(Sha256::digest(bytes)),
             ADVERTISED_CONTRACT_BUNDLE_SHA256

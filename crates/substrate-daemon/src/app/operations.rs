@@ -462,6 +462,7 @@ pub(super) fn validate_exec_input(
     check_read_only_files(&facts, mutation, request_id)?;
     check_writable_roots(app, &facts, mutation, request_id)?;
     check_workdir(&facts, mutation, request_id)?;
+    check_read_only_roots(&facts, mutation, request_id)?;
     if !input.measurements.is_empty() && facts.exec_resource_usage.is_none() {
         return Err(failure(
             StatusCode::NOT_IMPLEMENTED,
@@ -750,6 +751,51 @@ fn check_secret_slots(
                 false,
             ));
         }
+    }
+    Ok(())
+}
+
+/// Daemon-side admission for declared read-only roots (ADR 0010, bundle `0.23.0`).
+///
+/// Shape, then capability, as for read-only files, and after every other confinement-input check, so
+/// a start those already refused keeps the answer it had before this check existed. The published
+/// list requires `exec.read-only-roots`; a host whose snapshot omits it never receives a start
+/// naming a root, and the caller hears `exec.sandbox-unavailable`, the answer that fact's absence
+/// is published to mean. Whether each host path is present and a directory reached without a
+/// symlink is the driver's question, answered against the descriptor it pins.
+fn check_read_only_roots(
+    facts: &substrate_wire::CapabilityFacts,
+    mutation: &BoundMutation<ExecStartInput>,
+    request_id: &str,
+) -> Result<(), Response> {
+    let input = &mutation.input;
+    if input.read_only_roots.is_empty() {
+        return Ok(());
+    }
+    if let Err(error) = substrate_wire::validate_read_only_roots(&input.read_only_roots) {
+        return Err(failure(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            request_id,
+            Some(&mutation.op),
+            ErrorClass::Refused,
+            substrate_wire::READ_ONLY_ROOT_INVALID,
+            &substrate_wire::read_only_root_invalid_message(&error),
+            Some("read_only_roots"),
+            false,
+        ));
+    }
+    if facts.exec_read_only_roots.is_none() {
+        return Err(failure(
+            StatusCode::NOT_IMPLEMENTED,
+            request_id,
+            Some(&mutation.op),
+            ErrorClass::Unserved,
+            "exec.sandbox-unavailable",
+            "This host does not publish exec.read-only-roots, so no declared read-only root can \
+             be bound.",
+            Some("read_only_roots"),
+            false,
+        ));
     }
     Ok(())
 }
