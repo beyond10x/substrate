@@ -866,6 +866,15 @@ pub trait Driver: Send + Sync {
     fn acknowledge_exec(&self, persisted: &ExecObservation);
 
     fn discard_superseded_exec(&self, id: &str);
+
+    /// One maintenance round's retry of every exec tree the driver ended without proving its
+    /// cgroup empty: the tree is killed again, and forgotten only once it is proven gone. The
+    /// observation it recorded stays `unknown` either way.
+    ///
+    /// A driver that never leaves such a tree has nothing to retry.
+    async fn retry_unproven_exec_trees(&self) -> Result<(), DriverError> {
+        Ok(())
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -1862,6 +1871,11 @@ impl Driver for HostDriver {
 
     fn discard_superseded_exec(&self, id: &str) {
         self.processes.discard_terminal(id);
+    }
+
+    async fn retry_unproven_exec_trees(&self) -> Result<(), DriverError> {
+        self.processes.retry_unproven().await;
+        Ok(())
     }
 }
 

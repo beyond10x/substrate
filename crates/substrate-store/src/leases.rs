@@ -557,7 +557,10 @@ impl Store {
             } else {
                 observation.cloned().unwrap_or(durable)
             };
-            if !previous_terminal {
+            // An exec whose tree was never proven empty stays `unknown`: expiry ends its lease,
+            // not the uncertainty about what still runs in its cgroup.
+            let keeps_unknown = !previous_terminal && stored.resource.state == ExecState::Unknown;
+            if !previous_terminal && !keeps_unknown {
                 stored.resource.state = ExecState::Expired;
                 stored.resource.observed_at = observed_at;
                 stored.output_complete = true;
