@@ -370,6 +370,18 @@ impl Client {
         decode_result(&response)
     }
 
+    async fn get_with_omissions<T: DeserializeOwned>(
+        &self,
+        path: &str,
+    ) -> Result<WithOmissions<T>, SdkError> {
+        let response = self.inner.transport.request("GET", path, None).await?;
+        let listing = decode_result(&response)?;
+        Ok(WithOmissions {
+            listing,
+            omitted_entries: omitted_entries(&response)?,
+        })
+    }
+
     async fn mutation<I: Serialize, O: DeserializeOwned>(
         &self,
         method: &str,
@@ -669,6 +681,37 @@ impl WorkspaceBuilder {
     }
 }
 
+/// A listing together with how many entries it omitted (ADR 0043): entries the wire cannot name,
+/// a FIFO, socket, device or non-UTF-8 name, read from the `x-b10x-omitted-entries` response
+/// header. Zero when the header is absent. On a tree that reached its limit the count is a lower
+/// bound.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WithOmissions<T> {
+    pub listing: T,
+    pub omitted_entries: u64,
+}
+
+/// The omitted-entry count a response states: absent is zero; present is a decimal integer of at
+/// least 1, and anything else is a protocol error rather than a guess (invariant 3).
+fn omitted_entries(response: &transport::HttpResponse) -> Result<u64, SdkError> {
+    let Some(value) = response.headers.get(substrate_wire::OMITTED_ENTRIES_HEADER) else {
+        return Ok(0);
+    };
+    match value.parse::<u64>() {
+        Ok(count)
+            if count >= 1
+                && value.bytes().all(|byte| byte.is_ascii_digit())
+                && !value.starts_with('0') =>
+        {
+            Ok(count)
+        }
+        _ => Err(SdkError::Protocol(format!(
+            "{} is not a positive decimal count",
+            substrate_wire::OMITTED_ENTRIES_HEADER
+        ))),
+    }
+}
+
 #[derive(Clone)]
 pub struct Workspace {
     client: Client,
@@ -797,6 +840,19 @@ impl Workspace {
         cursor: Option<&str>,
         limit_items: u32,
     ) -> Result<DirectoryPage, SdkError> {
+        self.read_directory_with_omissions(path, cursor, limit_items)
+            .await
+            .map(|page| page.listing)
+    }
+
+    /// [`Workspace::read_directory`] together with how many entries the directory omits from
+    /// every page (ADR 0043). The count is the directory's, so every page carries the same one.
+    pub async fn read_directory_with_omissions(
+        &self,
+        path: impl AsRef<str>,
+        cursor: Option<&str>,
+        limit_items: u32,
+    ) -> Result<WithOmissions<DirectoryPage>, SdkError> {
         if limit_items == 0 || limit_items > MAX_LIST_ITEMS {
             return Err(SdkError::Protocol(
                 "directory limit is outside its contract bound".to_owned(),
@@ -817,9 +873,13 @@ impl Workspace {
             encode_path(&self.observed.id),
             encode_path(path.as_ref())
         );
-        let result: substrate_wire::FileReadResult = self.client.get(&target).await?;
-        match result {
-            substrate_wire::FileReadResult::Directory(page) => Ok(page),
+        let result: WithOmissions<substrate_wire::FileReadResult> =
+            self.client.get_with_omissions(&target).await?;
+        match result.listing {
+            substrate_wire::FileReadResult::Directory(page) => Ok(WithOmissions {
+                listing: page,
+                omitted_entries: result.omitted_entries,
+            }),
             substrate_wire::FileReadResult::File(_) => Err(SdkError::Protocol(
                 "daemon returned a file for a directory read".to_owned(),
             )),
@@ -963,11 +1023,25 @@ impl Workspace {
         slice.try_into()
     }
 
+    /// A bounded tree. `truncated` is true when the walk reached `limit_items` with entries left
+    /// or omitted an entry it cannot name; [`Workspace::tree_with_omissions`] tells the two apart.
     pub async fn tree(
         &self,
         limit_items: u32,
         include_hidden: bool,
     ) -> Result<WorkspaceTree, SdkError> {
+        self.tree_with_omissions(limit_items, include_hidden)
+            .await
+            .map(|tree| tree.listing)
+    }
+
+    /// [`Workspace::tree`] together with how many entries the walked part of the tree omitted
+    /// (ADR 0043). A tree with `truncated` true and a count of zero reached its limit only.
+    pub async fn tree_with_omissions(
+        &self,
+        limit_items: u32,
+        include_hidden: bool,
+    ) -> Result<WithOmissions<WorkspaceTree>, SdkError> {
         let query = substrate_wire::WorkspaceTreeQuery {
             limit_items,
             include_hidden,
@@ -978,7 +1052,7 @@ impl Workspace {
         let query = serde_urlencoded::to_string(query)
             .map_err(|error| SdkError::Protocol(error.to_string()))?;
         self.client
-            .get(&format!(
+            .get_with_omissions(&format!(
                 "/v2/workspaces/{}/tree?{query}",
                 encode_path(&self.observed.id)
             ))
@@ -2023,6 +2097,44 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::{UnixListener, UnixStream};
+
+    fn with_omitted_header(value: Option<&str>) -> transport::HttpResponse {
+        let mut headers = BTreeMap::new();
+        if let Some(value) = value {
+            headers.insert(
+                substrate_wire::OMITTED_ENTRIES_HEADER.to_owned(),
+                value.to_owned(),
+            );
+        }
+        transport::HttpResponse {
+            status: 200,
+            headers,
+            body: Vec::new(),
+        }
+    }
+
+    /// ADR 0043: absent is zero, a positive decimal is the count, and nothing else is guessed.
+    #[test]
+    fn the_omitted_entries_header_is_read_strictly() {
+        assert_eq!(omitted_entries(&with_omitted_header(None)).ok(), Some(0));
+        assert_eq!(
+            omitted_entries(&with_omitted_header(Some("1"))).ok(),
+            Some(1)
+        );
+        assert_eq!(
+            omitted_entries(&with_omitted_header(Some("1000"))).ok(),
+            Some(1000)
+        );
+        for malformed in ["0", "01", "+1", "-1", "", "one", "1 "] {
+            assert!(
+                matches!(
+                    omitted_entries(&with_omitted_header(Some(malformed))),
+                    Err(SdkError::Protocol(_))
+                ),
+                "{malformed:?} is refused"
+            );
+        }
+    }
 
     async fn read_request(stream: &mut UnixStream) -> Vec<u8> {
         let mut bytes = Vec::new();

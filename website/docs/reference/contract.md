@@ -59,11 +59,18 @@ edits, and patches.
 A directory entry the contract cannot name is omitted from both listings: an entry that is not a
 regular file, directory or symbolic link (a FIFO, socket or device), or whose name is not UTF-8.
 The v1 directory page (`mode=directory`) and the v2 tree leave it out, as they leave out `.git`,
-and the tree never descends into it or counts it toward `limit_items`. The v1 page gives no signal
-that it omitted an entry. The v2 tree answers `truncated: true` for either of two causes: it
-reached `limit_items`, or it omitted at least one such entry, so a retry with a higher limit after
-an omission still answers `truncated: true`. Neither listing refuses because of such an entry;
-`workspace.path-escape` stays the answer for a path that escapes the workspace.
+and the tree never descends into it or counts it toward `limit_items`. Since bundle `0.23.0`
+(ADR 0043) both listings name what they left out in the `x-b10x-omitted-entries` response header:
+the count of such entries, sent only when it is at least 1. On a v1 page it is the directory's
+count, the same on every page; on the v2 tree it covers the part the walk reached, so it is a lower
+bound when the walk reached `limit_items`. A `.git` entry, and a hidden entry the request excludes,
+are not counted. The tree still answers `truncated: true` for either of two causes, as before: it
+reached `limit_items`, or it omitted at least one such entry. The header tells them apart:
+`truncated: true` without it means the limit only, so raising the limit helps; with it, at least one
+entry will stay omitted whatever the limit. The Rust SDK's `Workspace::tree_with_omissions` and
+`Workspace::read_directory_with_omissions` return the count beside the listing. Neither listing
+refuses because of such an entry; `workspace.path-escape` stays the answer for a path that escapes
+the workspace.
 
 Release `0.7.3` advertises `substrate-wire/0.16.0` in `x-b10x-contract` and its inner
 `bundle.json` SHA-256 in `x-b10x-contract-bundle-sha256`. The two headers are one claim. The signed

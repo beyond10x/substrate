@@ -267,7 +267,7 @@ a list, and the six lexical writable-root refusals (422) of ADR 0038 with
 `exec.writable-roots-host-unserved` and `exec.writable-roots-git-unserved` (501), which both lanes
 answer for a host root the daemon did not declare and for every Git root, and the portable lane
 also for the one host root the runner declares, which it cannot prove without confinement — across
-114 cases, and its delegated lane 176, whose four writable-root cases bind that declared root and
+118 cases, and its delegated lane 180, whose four writable-root cases bind that declared root and
 check the host side: the write lands, its parent and sibling do not change, a working directory
 beneath the mount runs there, and the declared path swapped for a symlink is
 `exec.writable-root-not-a-directory` (422). Its read-only-root cases (ADR 0010, bundle `0.23.0`): portable, the `exec.read-only-roots` fact is absent, one root is refused `exec.sandbox-unavailable` (501) by the daemon before dispatch and five roots are `exec.read-only-root-invalid` (422), the lexical rule checked first; delegated, the fact is `{"max_roots": 4}`, four roots are bound, read and refused writes, listed in the applied record and left unchanged on the host, a fifth is `exec.read-only-root-invalid` (422), and an absent host path is `exec.read-only-root-absent` (422) while a plain file and a symlink to a directory are `exec.read-only-root-not-a-directory` (422). Both totals also count a second daemon that declares a
@@ -276,7 +276,10 @@ Git source served over HTTPS on loopback by `git upload-pack` (ADR 0038 kind 2):
 a Git root `exec.writable-roots-git-unserved` (501), and the delegated lane mounts it, has a child
 commit in it from a working directory beneath the mount, reads the commit on the host and in the
 change-set route, and refuses an empty workspace, the start's own, one named twice and an unknown
-one before dispatch, each recorded as refused.
+one before dispatch, each recorded as refused. Both lanes also hold four omitted-entry cases (ADR 0043): a
+FIFO beside a file is named by the `x-b10x-omitted-entries` header, count 1, on the v1 directory
+page and on the v2 tree both under its limit and when the limit truncates it, and once the FIFO is gone
+neither listing carries the header and the tree is not truncated.
 Both totals include
 one route/refusal probe for every operation in the promoted registry (the seven host-process routes
 of `0.20.0` among them: unserved on the portable lane, served and refused before anything runs on

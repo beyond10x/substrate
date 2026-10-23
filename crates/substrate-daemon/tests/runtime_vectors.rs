@@ -45,7 +45,7 @@ const DAEMON_OVERRIDE_VARIABLE: &str = "SUBSTRATE_VECTORS_DAEMON";
 /// Pinned independently of the daemon implementation: the clean-room client verifies what ships.
 const ADVERTISED_CONTRACT: &str = "substrate-wire/0.23.0";
 const ADVERTISED_CONTRACT_SHA256: &str =
-    "de6d58f941c33c53649624131af77fb86cea2b07db2a0a6bc3c9edcbe4f56c80";
+    "fc88fb9aa9feee20504cc29725a23c19886a2343e2c16757e6c2482e28f49bdc";
 
 fn daemon_binary() -> PathBuf {
     std::env::var_os(DAEMON_OVERRIDE_VARIABLE).map_or_else(|| PathBuf::from(DAEMON), PathBuf::from)
@@ -298,6 +298,20 @@ async fn request_headed(
     headers: &[(&str, &str)],
     body: Option<&[u8]>,
 ) -> (u16, Value) {
+    let (status, _, payload) =
+        request_with_response_headers(socket, method, path, request_id, headers, body).await;
+    (status, payload)
+}
+
+/// [`request_headed`], also answering the response head's headers, names lower-cased.
+async fn request_with_response_headers(
+    socket: &Path,
+    method: &str,
+    path: &str,
+    request_id: &str,
+    headers: &[(&str, &str)],
+    body: Option<&[u8]>,
+) -> (u16, BTreeMap<String, String>, Value) {
     let mut stream = UnixStream::connect(socket)
         .await
         .unwrap_or_else(|error| panic!("connect {}: {error}", socket.display()));
@@ -327,13 +341,13 @@ async fn request_headed(
             "write {method} {path}: {error}"
         );
     }
-    let (status, headers, body) = read_response(&mut stream).await;
-    assert_contract_headers(&headers);
+    let (status, response_headers, body) = read_response(&mut stream).await;
+    assert_contract_headers(&response_headers);
     let payload: Value = serde_json::from_slice(&body).expect("JSON response body");
     let api_version = if path.starts_with("/v2/") { "v2" } else { "v1" };
     assert_eq!(payload["api_version"], api_version, "{payload}");
     assert_eq!(payload["request_id"], request_id, "{payload}");
-    (status, payload)
+    (status, response_headers, payload)
 }
 
 async fn upgrade_refusal(socket: &Path, path: &str, request_id: &str) -> (u16, Value) {
@@ -716,6 +730,15 @@ impl Daemon {
         body: Option<&[u8]>,
     ) -> (u16, Value) {
         request_headed(&self.socket, method, path, request_id, headers, body).await
+    }
+
+    /// A bodiless `GET` answering the response headers beside the status and payload.
+    async fn get_with_response_headers(
+        &self,
+        path: &str,
+        request_id: &str,
+    ) -> (u16, BTreeMap<String, String>, Value) {
+        request_with_response_headers(&self.socket, "GET", path, request_id, &[], None).await
     }
 
     async fn stream(&self, path: &str) -> EventStream {
@@ -3074,6 +3097,107 @@ async fn check_stream_bound_facts(daemon: &Daemon, delegated: bool) -> usize {
     1
 }
 
+/// The response header naming how many entries a listing omitted (ADR 0043).
+const OMITTED_ENTRIES_HEADER: &str = "x-b10x-omitted-entries";
+
+/// A directory holding a FIFO answers the omission in `x-b10x-omitted-entries` on the v1
+/// directory page and on the v2 tree; the tree keeps answering `truncated` for it (ADR 0043).
+///
+/// Run on a workspace that holds nothing else yet, so the tree's items and count are exact; the
+/// fixture is removed afterwards, and the same reads then carry no header.
+async fn check_omitted_entries(daemon: &Daemon, workspace: &str) -> usize {
+    let host = daemon.workspaces.join(workspace);
+    let listing = host.join("listing");
+    std::fs::create_dir(&listing).expect("listing directory");
+    std::fs::write(listing.join("b.txt"), b"b").expect("listed file");
+    let fifo = listing.join("a-fifo");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("run mkfifo");
+    assert!(made.success(), "mkfifo {}", fifo.display());
+    let page_path =
+        format!("/v1/workspaces/{workspace}/files/listing?mode=directory&limit_items=10");
+    let tree_path = |limit: u32| format!("/v2/workspaces/{workspace}/tree?limit_items={limit}");
+    let mut passed = 0;
+
+    let (status, headers, page) = daemon
+        .get_with_response_headers(&page_path, "req_clean_omitted_page")
+        .await;
+    assert_eq!(status, 200, "{page}");
+    assert_eq!(
+        page["result"]["items"],
+        json!([{ "name": "b.txt", "kind": "file", "size": 1 }])
+    );
+    assert_eq!(
+        headers.get(OMITTED_ENTRIES_HEADER).map(String::as_str),
+        Some("1"),
+        "the v1 directory page names its omitted FIFO: {headers:?}"
+    );
+    passed += 1;
+
+    let (status, headers, tree) = daemon
+        .get_with_response_headers(&tree_path(100), "req_clean_omitted_tree")
+        .await;
+    assert_eq!(status, 200, "{tree}");
+    let paths: Vec<&str> = tree["result"]["items"]
+        .as_array()
+        .expect("tree items")
+        .iter()
+        .map(|item| item["path"].as_str().expect("tree path"))
+        .collect();
+    assert_eq!(paths, ["listing", "listing/b.txt"], "{tree}");
+    assert_eq!(
+        tree["result"]["truncated"], true,
+        "an omission still sets truncated, for compatibility: {tree}"
+    );
+    assert_eq!(
+        headers.get(OMITTED_ENTRIES_HEADER).map(String::as_str),
+        Some("1"),
+        "the v2 tree names its omitted FIFO: {headers:?}"
+    );
+    passed += 1;
+
+    let (status, headers, tree) = daemon
+        .get_with_response_headers(&tree_path(1), "req_clean_omitted_tree_limit")
+        .await;
+    assert_eq!(status, 200, "{tree}");
+    assert_eq!(tree["result"]["items"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        tree["result"]["truncated"], true,
+        "the limit is truncation: {tree}"
+    );
+    assert_eq!(
+        headers.get(OMITTED_ENTRIES_HEADER).map(String::as_str),
+        Some("1"),
+        "the omission is named beside the limit, not folded into it: {headers:?}"
+    );
+    passed += 1;
+
+    std::fs::remove_file(&fifo).expect("remove the FIFO");
+    let (status, page_headers, _) = daemon
+        .get_with_response_headers(&page_path, "req_clean_complete_page")
+        .await;
+    assert_eq!(status, 200);
+    let (status, tree_headers, tree) = daemon
+        .get_with_response_headers(&tree_path(100), "req_clean_complete_tree")
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(tree["result"]["truncated"], false, "{tree}");
+    assert_eq!(
+        (
+            page_headers.get(OMITTED_ENTRIES_HEADER),
+            tree_headers.get(OMITTED_ENTRIES_HEADER)
+        ),
+        (None, None),
+        "a listing that omits nothing carries no omission header"
+    );
+    passed += 1;
+
+    std::fs::remove_dir_all(&listing).expect("remove the listing fixture");
+    passed
+}
+
 #[allow(clippy::too_many_lines)] // One sequential journey; splitting it would lose the ordering.
 async fn check_http_journey(
     daemon: &Daemon,
@@ -3110,6 +3234,7 @@ async fn check_http_journey(
 
     passed += check_promoted_route_inventory(daemon, &workspace, cgroup_root.is_some()).await;
     passed += check_stream_bound_facts(daemon, cgroup_root.is_some()).await;
+    passed += check_omitted_entries(daemon, &workspace).await;
 
     let (status, replay) = daemon
         .call(
@@ -6982,8 +7107,8 @@ async fn check_git_root_refusals(
 // ---------------------------------------------------------------------------------------------
 
 /// The predecessor printed its case count; the port asserts it, so a case cannot vanish quietly.
-const PORTABLE_CASES: usize = 114;
-const DELEGATED_CASES: usize = 176;
+const PORTABLE_CASES: usize = 118;
+const DELEGATED_CASES: usize = 180;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {

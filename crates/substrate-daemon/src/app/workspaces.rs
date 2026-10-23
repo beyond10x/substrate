@@ -3,10 +3,12 @@ use std::sync::Arc;
 use axum::Extension;
 use axum::body::Body;
 use axum::extract::{Path, RawQuery, State};
-use axum::http::{HeaderMap, StatusCode};
+use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::Response;
 use base64::Engine as _;
-use substrate_host::{DispatchOutcome, DriverError, DriverErrorClass, WorkspaceDestroyProgress};
+use substrate_host::{
+    DispatchOutcome, DriverError, DriverErrorClass, Listed, WorkspaceDestroyProgress,
+};
 use substrate_store::{
     NewLease, WorkspaceAdmission, WorkspaceAdoptReservation, WorkspaceDestroyReservation,
     WorkspaceObservationWrite, WorkspaceRootHolder, adopt_not_found,
@@ -14,8 +16,8 @@ use substrate_store::{
 use substrate_wire::{
     EmptyInput, ErrorClass, FileEditInput, FilePatchInput, FileReadQuery, FileReplaceInput,
     FileWriteInput, GitBaselineFileQuery, GitChangesQuery, LeaseRenewInput, MAX_LEASE_TTL_MS,
-    MIN_LEASE_TTL_MS, Success, WorkspaceAdoptInput, WorkspaceCreateInput, WorkspaceKind,
-    WorkspaceOrigin, WorkspaceState, WorkspaceTreeQuery, validate_relative_path,
+    MIN_LEASE_TTL_MS, OMITTED_ENTRIES_HEADER, Success, WorkspaceAdoptInput, WorkspaceCreateInput,
+    WorkspaceKind, WorkspaceOrigin, WorkspaceState, WorkspaceTreeQuery, validate_relative_path,
 };
 
 use super::operations::{
@@ -492,7 +494,7 @@ pub(super) async fn workspace_file_read(
         .read_workspace_path(&workspace_id, &root_name, &path, &query)
         .await
     {
-        Ok(result) => success(StatusCode::OK, Success::observed(request_id, result)),
+        Ok(listed) => listed_success(request_id, listed),
         Err(error) => driver_failure(&request_id, None, &error),
     }
 }
@@ -580,9 +582,22 @@ pub(super) async fn workspace_tree_read_v2(
         .list_workspace_tree_v2(&workspace_id, &root_name, &query)
         .await
     {
-        Ok(result) => success(StatusCode::OK, Success::observed(request_id, result)),
+        Ok(listed) => listed_success(request_id, listed),
         Err(error) => driver_failure(&request_id, None, &error),
     }
+}
+
+/// A listing's `200`, naming the entries it omitted in `x-b10x-omitted-entries` exactly when it
+/// omitted at least one (ADR 0043). The body is the closed wire object, unchanged.
+fn listed_success<T: serde::Serialize>(request_id: String, listed: Listed<T>) -> Response {
+    let mut response = success(StatusCode::OK, Success::observed(request_id, listed.value));
+    if listed.omitted_entries > 0 {
+        response.headers_mut().insert(
+            OMITTED_ENTRIES_HEADER,
+            HeaderValue::from(listed.omitted_entries),
+        );
+    }
+    response
 }
 
 pub(super) async fn workspace_git_baseline_file_read_v2(

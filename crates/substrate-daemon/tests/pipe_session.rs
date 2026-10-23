@@ -199,7 +199,7 @@ impl Driver for PipeFixtureDriver {
         root_name: &str,
         path: &str,
         query: &FileReadQuery,
-    ) -> Result<FileReadResult, DriverError> {
+    ) -> Result<substrate_host::Listed<FileReadResult>, DriverError> {
         self.host
             .read_workspace_path(workspace_id, root_name, path, query)
             .await

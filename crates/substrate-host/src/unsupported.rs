@@ -17,7 +17,7 @@ use substrate_wire::{
 };
 
 use crate::{
-    DispatchOutcome, Driver, DriverError, ExecObservation, HostConfig, PLATFORM_UNSERVED,
+    DispatchOutcome, Driver, DriverError, ExecObservation, HostConfig, Listed, PLATFORM_UNSERVED,
     PipeFrame, WorkspaceDestroyProgress,
 };
 
@@ -135,7 +135,7 @@ impl Driver for HostDriver {
         _root_name: &str,
         _path: &str,
         _query: &FileReadQuery,
-    ) -> Result<FileReadResult, DriverError> {
+    ) -> Result<Listed<FileReadResult>, DriverError> {
         match self.never {}
     }
 

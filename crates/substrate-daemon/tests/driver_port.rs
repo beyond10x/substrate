@@ -73,6 +73,12 @@ const PORT_ITEMS: &[(&str, &str)] = &[
         "the port trait itself (crates/substrate-host/src/lib.rs:370)",
     ),
     (
+        "Listed",
+        "the port's listing result (crates/substrate-host/src/lib.rs:544), returned by \
+         Driver::read_workspace_path and Driver::list_workspace_tree_v2 \
+         (crates/substrate-host/src/lib.rs:605, :641) with the omitted-entry count (ADR 0043)",
+    ),
+    (
         "DispatchOutcome",
         "the port's dispatch result (crates/substrate-host/src/lib.rs:302), returned by \
          Driver::create_workspace (crates/substrate-host/src/lib.rs:383)",

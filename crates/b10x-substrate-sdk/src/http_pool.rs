@@ -144,7 +144,11 @@ impl HttpPool {
                 .unwrap_or_else(std::sync::PoisonError::into_inner)
                 .push(connection);
         }
-        Ok(HttpResponse { status, body })
+        Ok(HttpResponse {
+            status,
+            headers,
+            body,
+        })
     }
 }
 

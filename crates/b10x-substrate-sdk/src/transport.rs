@@ -72,6 +72,8 @@ struct EndpointConfiguration {
 
 pub(crate) struct HttpResponse {
     pub status: u16,
+    /// Every response header, its name in lower case. The contract headers are already verified.
+    pub headers: BTreeMap<String, String>,
     pub body: Vec<u8>,
 }
 
@@ -617,6 +619,7 @@ async fn websocket_on(
             verify_contract_headers(&headers).map_err(WebSocketAttemptError::Sdk)?;
             return Err(WebSocketAttemptError::Refusal(HttpResponse {
                 status: response.status().as_u16(),
+                headers,
                 body: response.body().clone().unwrap_or_default(),
             }));
         }
@@ -795,6 +798,7 @@ where
     }
     Ok(HttpResponse {
         status,
+        headers,
         body: bytes[boundary..boundary + length].to_vec(),
     })
 }

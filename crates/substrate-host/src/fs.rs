@@ -17,7 +17,7 @@ use substrate_wire::{
 };
 use ulid::Ulid;
 
-use crate::DriverError;
+use crate::{DriverError, Listed};
 
 const RESOLVE_NO_XDEV: u64 = 0x01;
 const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
@@ -156,7 +156,7 @@ impl GuardedFilesystem {
         root_name: &str,
         path: &str,
         query: &FileReadQuery,
-    ) -> Result<FileReadResult, DriverError> {
+    ) -> Result<Listed<FileReadResult>, DriverError> {
         validate_api_path(path)?;
         query.validate_shape().map_err(|_| {
             DriverError::refused(
@@ -199,7 +199,7 @@ impl GuardedFilesystem {
                 let returned_bytes = u64::try_from(bytes.len()).expect("usize fits u64");
                 let next_offset = offset.saturating_add(returned_bytes);
                 let size = u64::try_from(stat.st_size).unwrap_or(0);
-                Ok(FileReadResult::File(FileSlice {
+                Ok(Listed::complete(FileReadResult::File(FileSlice {
                     kind: FileKind::File,
                     workspace: workspace_id.to_owned(),
                     path: path.to_owned(),
@@ -212,7 +212,7 @@ impl GuardedFilesystem {
                         data: base64::engine::general_purpose::STANDARD.encode(bytes),
                     },
                     observed_at: Utc::now(),
-                }))
+                })))
             }
             FileMode::Directory => {
                 let limit = query.limit_items.expect("shape validated");
@@ -229,7 +229,7 @@ impl GuardedFilesystem {
                     libc::O_RDONLY | libc::O_DIRECTORY | libc::O_CLOEXEC | libc::O_NOFOLLOW,
                     0,
                 )?;
-                let mut items = list_directory(fd.as_raw_fd())?;
+                let (mut items, omitted_entries) = list_directory(fd.as_raw_fd())?;
                 items.sort_by(|left, right| left.name.as_bytes().cmp(right.name.as_bytes()));
                 let start = decode_cursor(query.cursor.as_deref())?;
                 if start > items.len() {
@@ -242,14 +242,19 @@ impl GuardedFilesystem {
                 let limit = usize::try_from(limit).expect("u32 fits usize");
                 let end = start.saturating_add(limit).min(items.len());
                 let next_cursor = (end < items.len()).then(|| encode_cursor(end));
-                Ok(FileReadResult::Directory(DirectoryPage {
-                    kind: DirectoryKind::Directory,
-                    workspace: workspace_id.to_owned(),
-                    path: path.to_owned(),
-                    items: items[start..end].to_vec(),
-                    next_cursor,
-                    observed_at: Utc::now(),
-                }))
+                // The count is the directory's, not the page's: an omitted entry is on no page, so
+                // every page of one directory names the same count (ADR 0043, decision 3).
+                Ok(Listed {
+                    value: FileReadResult::Directory(DirectoryPage {
+                        kind: DirectoryKind::Directory,
+                        workspace: workspace_id.to_owned(),
+                        path: path.to_owned(),
+                        items: items[start..end].to_vec(),
+                        next_cursor,
+                        observed_at: Utc::now(),
+                    }),
+                    omitted_entries,
+                })
             }
         }
     }
@@ -318,7 +323,7 @@ impl GuardedFilesystem {
         workspace_id: &str,
         root_name: &str,
         query: &WorkspaceTreeQuery,
-    ) -> Result<WorkspaceTree, DriverError> {
+    ) -> Result<Listed<WorkspaceTree>, DriverError> {
         query.validate().map_err(|_| {
             DriverError::refused(
                 "request.schema-invalid",
@@ -346,11 +351,16 @@ impl GuardedFilesystem {
             &mut items,
             &mut walk,
         )?;
-        Ok(WorkspaceTree {
-            workspace: workspace_id.to_owned(),
-            items,
-            truncated: walk.limit_reached || walk.omitted,
-            observed_at: Utc::now(),
+        // Either cause sets `truncated`, as since 0.10.0, because a client reads it as "incomplete";
+        // the header carries the omission count, which tells the two causes apart (ADR 0043).
+        Ok(Listed {
+            value: WorkspaceTree {
+                workspace: workspace_id.to_owned(),
+                items,
+                truncated: walk.limit_reached || walk.omitted > 0,
+                observed_at: Utc::now(),
+            },
+            omitted_entries: walk.omitted,
         })
     }
 
@@ -782,14 +792,18 @@ fn representable_entry(
     Some((name, kind, size))
 }
 
-fn list_directory(fd: RawFd) -> Result<Vec<DirectoryEntry>, DriverError> {
+/// The directory's representable entries and how many it omitted. `.git` is left out by policy
+/// and is not counted; an entry the wire cannot name is counted (ADR 0043, decision 2).
+fn list_directory(fd: RawFd) -> Result<(Vec<DirectoryEntry>, u64), DriverError> {
     let entries = raw_directory_entries(fd)?;
     let mut result = Vec::new();
+    let mut omitted = 0_u64;
     for (name, file_type, size) in entries {
         if name.to_bytes() == b".git" {
             continue;
         }
         let Some((name_text, kind, size)) = representable_entry(&name, file_type, size) else {
+            omitted = omitted.saturating_add(1);
             continue;
         };
         result.push(DirectoryEntry {
@@ -798,15 +812,16 @@ fn list_directory(fd: RawFd) -> Result<Vec<DirectoryEntry>, DriverError> {
             size,
         });
     }
-    Ok(result)
+    Ok((result, omitted))
 }
 
 /// Why a tree walk answers an incomplete tree. The two causes are kept apart because only
-/// reaching the limit stops the walk; an omission only marks the answer incomplete.
+/// reaching the limit stops the walk; an omission is counted, sets `truncated` beside the limit, and
+/// its count is answered as a header that tells the two causes apart (ADR 0043).
 #[derive(Default)]
 struct TreeWalk {
     limit_reached: bool,
-    omitted: bool,
+    omitted: u64,
 }
 
 fn walk_tree(
@@ -828,10 +843,10 @@ fn walk_tree(
             continue;
         }
         // Omitted before the limit check: an unrepresentable entry is never counted toward the
-        // limit and never descended into, and its omission alone reports an incomplete tree.
+        // limit and never descended into; it is counted, and the count is answered as a header.
         let Some((name_text, kind, entry_size)) = representable_entry(&name, file_type, size)
         else {
-            walk.omitted = true;
+            walk.omitted = walk.omitted.saturating_add(1);
             continue;
         };
         if result.len() == limit {
@@ -1576,6 +1591,8 @@ mod tests {
     use substrate_wire::{FileMode, FileReadQuery, LinePatchEdit};
     use tempfile::tempdir;
 
+    use crate::Listed;
+
     use super::{
         DESTROY_BATCH_ITEMS, GuardedFilesystem, WorkspaceDestroyBatch, apply_line_patch,
         list_directory, openat2, read_bounded_complete, remove_children_batch, validate_root_name,
@@ -1802,7 +1819,8 @@ mod tests {
                     limit_items: None,
                 },
             )
-            .expect("read");
+            .expect("read")
+            .value;
         assert!(matches!(result, substrate_wire::FileReadResult::File(_)));
         symlink(outside.path(), directory.path().join("ws_test/link")).expect("symlink");
         assert!(
@@ -1872,7 +1890,11 @@ mod tests {
         );
 
         let root_fd = filesystem.workspace_fd("ws_git").expect("workspace fd");
-        let root_items = list_directory(root_fd.as_raw_fd()).expect("root listing");
+        let (root_items, root_omitted) = list_directory(root_fd.as_raw_fd()).expect("root listing");
+        assert_eq!(
+            root_omitted, 0,
+            ".git is left out by policy, not counted as omitted"
+        );
         assert_eq!(root_items.len(), 1);
         assert_eq!(root_items[0].name, "visible.txt");
 
@@ -1886,6 +1908,8 @@ mod tests {
                 },
             )
             .expect("tree listing");
+        assert_eq!(tree.omitted_entries, 0, ".git is not an omission");
+        let tree = tree.value;
         assert_eq!(tree.items.len(), 1);
         assert_eq!(tree.items[0].path, "visible.txt");
     }
@@ -1919,26 +1943,37 @@ mod tests {
         std::fs::create_dir(&raw_name).expect("non-UTF-8 directory");
         std::fs::write(raw_name.join("never-listed.txt"), b"x").expect("file beneath it");
 
-        let page = filesystem
-            .read(
-                "ws_mixed",
-                "ws_mixed",
-                "mixed",
-                &FileReadQuery {
-                    mode: FileMode::Directory,
-                    offset: None,
-                    limit_bytes: None,
-                    cursor: None,
-                    limit_items: Some(100),
-                },
-            )
-            .expect("directory page with special entries");
-        let super::FileReadResult::Directory(page) = page else {
-            panic!("directory mode answers a directory page");
+        let page = |cursor: Option<String>, limit_items: u32| {
+            let listed = filesystem
+                .read(
+                    "ws_mixed",
+                    "ws_mixed",
+                    "mixed",
+                    &FileReadQuery {
+                        mode: FileMode::Directory,
+                        offset: None,
+                        limit_bytes: None,
+                        cursor,
+                        limit_items: Some(limit_items),
+                    },
+                )
+                .expect("directory page with special entries");
+            let super::FileReadResult::Directory(page) = listed.value else {
+                panic!("directory mode answers a directory page");
+            };
+            (page, listed.omitted_entries)
         };
-        let names: Vec<&str> = page.items.iter().map(|item| item.name.as_str()).collect();
+        let (whole, omitted) = page(None, 100);
+        let names: Vec<&str> = whole.items.iter().map(|item| item.name.as_str()).collect();
         assert_eq!(names, ["sub", "visible.txt"]);
-        assert_eq!(page.next_cursor, None);
+        assert_eq!(whole.next_cursor, None);
+        // ADR 0043: the FIFO, the socket and the non-UTF-8 directory, each counted once.
+        assert_eq!(omitted, 3, "the page names the three entries it omitted");
+        // Decision 3: the count is the directory's, so every page carries it.
+        let (first, first_omitted) = page(None, 1);
+        let (second, second_omitted) = page(first.next_cursor.clone(), 1);
+        assert_eq!(first.items.len() + second.items.len(), 2);
+        assert_eq!((first_omitted, second_omitted), (3, 3));
 
         let expected = [
             "mixed",
@@ -1948,7 +1983,7 @@ mod tests {
             "z-after.txt",
         ];
         for limit_items in [100, 5] {
-            let tree = filesystem
+            let listed = filesystem
                 .list_tree(
                     "ws_mixed",
                     "ws_mixed",
@@ -1958,10 +1993,32 @@ mod tests {
                     },
                 )
                 .expect("tree with special entries");
-            let paths: Vec<&str> = tree.items.iter().map(|item| item.path.as_str()).collect();
+            let paths: Vec<&str> = listed
+                .value
+                .items
+                .iter()
+                .map(|item| item.path.as_str())
+                .collect();
             assert_eq!(paths, expected, "limit {limit_items}");
-            assert!(tree.truncated, "an omission reports truncated");
+            assert_eq!(listed.omitted_entries, 3, "limit {limit_items}");
+            assert!(
+                listed.value.truncated,
+                "an omission still sets truncated, for compatibility (ADR 0043), limit {limit_items}"
+            );
         }
+        // The limit reached after every omission was walked: truncated, and still counted.
+        let listed = filesystem
+            .list_tree(
+                "ws_mixed",
+                "ws_mixed",
+                &substrate_wire::WorkspaceTreeQuery {
+                    limit_items: 4,
+                    include_hidden: false,
+                },
+            )
+            .expect("tree at its limit");
+        assert!(listed.value.truncated, "the limit is truncation");
+        assert_eq!(listed.omitted_entries, 3);
     }
 
     /// Runs `operation` on its own thread and answers whether it returned within a bound. A
@@ -2199,9 +2256,9 @@ mod tests {
 
     #[test]
     fn tree_omission_probe_deep_hidden_and_exact_limit() {
-        // Probe, expected green: an omission three levels deep still reports truncated; a hidden
-        // FIFO excluded by include_hidden=false is not an omission; an exact-limit tree with no
-        // omission is not truncated; and omitted entries never consume limit_items.
+        // An omission three levels deep is counted and sets truncated (ADR 0043); a hidden
+        // FIFO excluded by include_hidden=false is not an omission, so an exact-limit tree without
+        // one is not truncated; and omitted entries never consume limit_items.
         let directory = tempdir().expect("tempdir");
         let filesystem =
             GuardedFilesystem::open(directory.path(), 1024, 1024, 100).expect("guarded filesystem");
@@ -2232,10 +2289,14 @@ mod tests {
         mkfifo(deep.join("a/b/c/0-fifo"));
         std::fs::write(deep.join("a/b/c/x.txt"), b"x").expect("deep file");
         std::fs::write(deep.join("z.txt"), b"z").expect("last file");
-        let observed = tree("ws_deep", 5, false);
+        let Listed {
+            value: observed,
+            omitted_entries,
+        } = tree("ws_deep", 5, false);
         let paths: Vec<&str> = observed.items.iter().map(|i| i.path.as_str()).collect();
         assert_eq!(paths, ["a", "a/b", "a/b/c", "a/b/c/x.txt", "z.txt"]);
-        assert!(observed.truncated, "a deep omission reports truncated");
+        assert_eq!(omitted_entries, 1, "a deep omission is counted");
+        assert!(observed.truncated, "a deep omission sets truncated");
 
         filesystem.create_workspace("ws_hidden").expect("workspace");
         let hidden = directory.path().join("ws_hidden");
@@ -2243,14 +2304,22 @@ mod tests {
         std::fs::write(hidden.join("a.txt"), b"a").expect("file");
         std::fs::write(hidden.join("b.txt"), b"b").expect("file");
         let observed = tree("ws_hidden", 2, false);
-        assert_eq!(observed.items.len(), 2);
-        assert!(
-            !observed.truncated,
+        assert_eq!(observed.value.items.len(), 2);
+        assert!(!observed.value.truncated, "an exact-limit tree is complete");
+        assert_eq!(
+            observed.omitted_entries, 0,
             "a hidden entry the caller excluded is no omission"
         );
         let observed = tree("ws_hidden", 2, true);
-        assert_eq!(observed.items.len(), 2);
-        assert!(observed.truncated, "an included hidden FIFO is an omission");
+        assert_eq!(observed.value.items.len(), 2);
+        assert!(
+            observed.value.truncated,
+            "an included hidden FIFO sets truncated"
+        );
+        assert_eq!(
+            observed.omitted_entries, 1,
+            "an included hidden FIFO is an omission"
+        );
     }
 
     #[test]

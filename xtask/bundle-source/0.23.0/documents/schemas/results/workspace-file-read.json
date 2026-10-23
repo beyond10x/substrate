@@ -129,7 +129,14 @@
         "next_cursor",
         "observed_at"
       ],
-      "type": "object"
+      "type": "object",
+      "x-b10x-response-headers": {
+        "x-b10x-omitted-entries": {
+          "description": "Present only when the directory holds entries no page lists (a FIFO, socket or device, or a name that is not UTF-8): their count, the same on every page of the directory. Absent means none was omitted. A .git entry excluded by policy is not counted (ADR 0043).",
+          "minimum": 1,
+          "type": "integer"
+        }
+      }
     }
   ],
   "title": "workspace-file-read operation result"
