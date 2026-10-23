@@ -1887,7 +1887,7 @@ impl ProcessRuntime {
     ) -> Result<(), DriverError> {
         substrate_wire::validate_workspace_access(access).map_err(|error| {
             DriverError::refused(
-                "exec.workspace-access-invalid",
+                substrate_wire::EXEC_WORKSPACE_ACCESS_INVALID,
                 format!("The requested workspace access is invalid: {error}"),
                 "workspace_access",
             )
@@ -1897,7 +1897,7 @@ impl ProcessRuntime {
         }
         if published != Some(true) {
             return Err(DriverError::unserved(
-                "exec.workspace-scoped-write-unserved",
+                substrate_wire::EXEC_WORKSPACE_SCOPED_WRITE_UNSERVED,
                 "The active host has not proved read-only and scoped workspace mounts.",
                 "workspace_access",
             ));
@@ -1930,11 +1930,12 @@ impl ProcessRuntime {
                     crate::fs::open_component_beneath(directory, component).map_err(|error| {
                         match error.code {
                             "resource.not-found" => {
-                                refuse("exec.workspace-subtree-absent", "is absent")
+                                refuse(substrate_wire::EXEC_WORKSPACE_SUBTREE_ABSENT, "is absent")
                             }
-                            "workspace.path-escape" => {
-                                refuse("exec.workspace-subtree-symlink", "crosses a symlink")
-                            }
+                            "workspace.path-escape" => refuse(
+                                substrate_wire::EXEC_WORKSPACE_SUBTREE_SYMLINK,
+                                "crosses a symlink",
+                            ),
                             _ => error,
                         }
                     })?;
@@ -1943,20 +1944,20 @@ impl ProcessRuntime {
                 // SAFETY: as above; `next` is live and `status` is a valid out pointer.
                 if unsafe { libc::fstat(next.as_raw_fd(), &raw mut status) } != 0 {
                     return Err(refuse(
-                        "exec.workspace-subtree-not-directory",
+                        substrate_wire::EXEC_WORKSPACE_SUBTREE_NOT_DIRECTORY,
                         "is not a directory",
                     ));
                 }
                 // `O_PATH | O_NOFOLLOW` opens a final symlink itself rather than refusing it.
                 if status.st_mode & libc::S_IFMT == libc::S_IFLNK {
                     return Err(refuse(
-                        "exec.workspace-subtree-symlink",
+                        substrate_wire::EXEC_WORKSPACE_SUBTREE_SYMLINK,
                         "crosses a symlink",
                     ));
                 }
                 if status.st_mode & libc::S_IFMT != libc::S_IFDIR {
                     return Err(refuse(
-                        "exec.workspace-subtree-not-directory",
+                        substrate_wire::EXEC_WORKSPACE_SUBTREE_NOT_DIRECTORY,
                         "is not a directory",
                     ));
                 }
@@ -1997,7 +1998,7 @@ impl ProcessRuntime {
                 for component in path.split('/') {
                     let component = CString::new(component).map_err(|_| {
                         DriverError::refused(
-                            "exec.workspace-access-invalid",
+                            substrate_wire::EXEC_WORKSPACE_ACCESS_INVALID,
                             "A writable workspace subtree contains a NUL byte.",
                             "workspace_access.writable_subtrees",
                         )
@@ -2012,7 +2013,7 @@ impl ProcessRuntime {
                     };
                     if next < 0 {
                         return Err(DriverError::refused(
-                            "exec.workspace-subtree-changed",
+                            substrate_wire::EXEC_WORKSPACE_SUBTREE_CHANGED,
                             format!(
                                 "Writable workspace subtree {path} changed before it could be pinned."
                             ),
@@ -2340,7 +2341,7 @@ impl ProcessRuntime {
         }
         if !input.measurements.is_empty() && self.capability.facts.exec_resource_usage.is_none() {
             return Err(DriverError::unserved(
-                "exec.metrics-unserved",
+                substrate_wire::EXEC_METRICS_UNSERVED,
                 "The active host has not proved the requested execution resource counters.",
                 "measurements",
             ));
@@ -2348,7 +2349,7 @@ impl ProcessRuntime {
         if let Some(scratch) = input.scratch {
             let Some(fact) = self.capability.facts.exec_scratch_quota.as_ref() else {
                 return Err(DriverError::unserved(
-                    "exec.scratch-quota-unserved",
+                    substrate_wire::EXEC_SCRATCH_QUOTA_UNSERVED,
                     "The active host has not proved hard per-exec scratch quotas.",
                     "scratch",
                 ));
@@ -2359,7 +2360,7 @@ impl ProcessRuntime {
                 || scratch.max_inodes > fact.max_inodes
             {
                 return Err(DriverError::exhausted(
-                    "exec.scratch-quota-limit",
+                    substrate_wire::EXEC_SCRATCH_QUOTA_LIMIT,
                     "The requested scratch quota exceeds or misaligns with the proved host limit.",
                     "scratch",
                 ));
@@ -2696,7 +2697,7 @@ impl ProcessRuntime {
         };
         let quotas = self.quotas.clone().ok_or_else(|| {
             DriverError::unserved(
-                "exec.scratch-quota-unserved",
+                substrate_wire::EXEC_SCRATCH_QUOTA_UNSERVED,
                 "The active host has not proved hard per-exec scratch quotas.",
                 "scratch",
             )
@@ -4704,9 +4705,9 @@ mod tests {
         ProcessRuntime::admit_writable_subtrees(&pinned, &scoped("allowed"))
             .expect("real directory admitted");
         for (path, code) in [
-            ("missing", "exec.workspace-subtree-absent"),
-            ("file", "exec.workspace-subtree-not-directory"),
-            ("link", "exec.workspace-subtree-symlink"),
+            ("missing", substrate_wire::EXEC_WORKSPACE_SUBTREE_ABSENT),
+            ("file", substrate_wire::EXEC_WORKSPACE_SUBTREE_NOT_DIRECTORY),
+            ("link", substrate_wire::EXEC_WORKSPACE_SUBTREE_SYMLINK),
         ] {
             let error = ProcessRuntime::admit_writable_subtrees(&pinned, &scoped(path))
                 .expect_err("refused");
@@ -4721,7 +4722,10 @@ mod tests {
             None,
         )
         .expect_err("unserved");
-        assert_eq!(error.code, "exec.workspace-scoped-write-unserved");
+        assert_eq!(
+            error.code,
+            substrate_wire::EXEC_WORKSPACE_SCOPED_WRITE_UNSERVED
+        );
     }
 
     #[test]

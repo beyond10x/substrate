@@ -17,7 +17,7 @@ pub const API_VERSION: &str = "v1";
 /// Moving either member is an explicit coordinated promotion (Atlas ADR 0019).
 pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.23.0";
 pub const ADVERTISED_CONTRACT_BUNDLE_SHA256: &str =
-    "4f41d7def24b7615562dc5c871e907ed5c524c40f7437b5b466a7d2089af6989";
+    "41abb057474cb0bb70cbce7eaef099305a80807a8d6b8b9a53befffc41a1e497";
 pub const MAX_FILE_BYTES: u64 = 1_048_576;
 pub const MAX_IO_BYTES: u64 = 1_048_576;
 pub const MAX_LIST_ITEMS: u32 = 1_000;
@@ -34,6 +34,99 @@ pub const MIN_STORAGE_QUOTA_BYTES: u64 = 1_048_576;
 pub const MAX_STORAGE_QUOTA_BYTES: u64 = 1_099_511_627_776;
 pub const MIN_STORAGE_QUOTA_INODES: u64 = 16;
 pub const MAX_STORAGE_QUOTA_INODES: u64 = 1_048_576;
+/// The unit a storage quota's `max_bytes` is a multiple of: the schema's `multipleOf` on
+/// `storage-limit` (design 27, amendment 3).
+pub const STORAGE_QUOTA_BYTES_UNIT: u64 = 1_024;
+/// A start asked for `measurements` on a host without the `exec.resource-usage` fact (ADR 0021).
+pub const EXEC_METRICS_UNSERVED: &str = "exec.metrics-unserved";
+/// A start asked for `scratch` on a host without the `exec.scratch-quota` fact (ADR 0020).
+pub const EXEC_SCRATCH_QUOTA_UNSERVED: &str = "exec.scratch-quota-unserved";
+/// A start's `scratch` exceeds, or is not aligned to, the host's proved quota (ADR 0020).
+pub const EXEC_SCRATCH_QUOTA_LIMIT: &str = "exec.scratch-quota-limit";
+/// A start's `workspace_access` broke a rule of [`validate_workspace_access`] (ADR 0023).
+pub const EXEC_WORKSPACE_ACCESS_INVALID: &str = "exec.workspace-access-invalid";
+/// A start asked for read-only or scoped workspace access on a host that has not proved it
+/// (ADR 0023).
+pub const EXEC_WORKSPACE_SCOPED_WRITE_UNSERVED: &str = "exec.workspace-scoped-write-unserved";
+/// A writable workspace subtree is not present (ADR 0023).
+pub const EXEC_WORKSPACE_SUBTREE_ABSENT: &str = "exec.workspace-subtree-absent";
+/// A writable workspace subtree is reached through a symlink (ADR 0023).
+pub const EXEC_WORKSPACE_SUBTREE_SYMLINK: &str = "exec.workspace-subtree-symlink";
+/// A writable workspace subtree is not a directory (ADR 0023).
+pub const EXEC_WORKSPACE_SUBTREE_NOT_DIRECTORY: &str = "exec.workspace-subtree-not-directory";
+/// A writable workspace subtree changed between admission and pinning (ADR 0023).
+pub const EXEC_WORKSPACE_SUBTREE_CHANGED: &str = "exec.workspace-subtree-changed";
+
+/// One refusal an exec field raises, as the bundle publishes it on that member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExecFieldRefusal {
+    /// The start member that raises it.
+    pub member: &'static str,
+    pub code: &'static str,
+    pub status: u16,
+    pub class: &'static str,
+}
+
+const fn field_refusal(
+    member: &'static str,
+    code: &'static str,
+    status: u16,
+    class: &'static str,
+) -> ExecFieldRefusal {
+    ExecFieldRefusal {
+        member,
+        code,
+        status,
+        class,
+    }
+}
+
+/// Every refusal `measurements`, `scratch` and `workspace_access` raise, on exec start and session
+/// start alike (design 27, amendment 2).
+///
+/// The one place the set is written down for the bundle: from `0.23.0` on, the bundle check asks
+/// each start schema to publish exactly these rows on each member.
+pub const EXEC_FIELD_REFUSALS: [ExecFieldRefusal; 9] = [
+    field_refusal("measurements", EXEC_METRICS_UNSERVED, 501, "unserved"),
+    field_refusal("scratch", EXEC_SCRATCH_QUOTA_UNSERVED, 501, "unserved"),
+    field_refusal("scratch", EXEC_SCRATCH_QUOTA_LIMIT, 507, "exhausted"),
+    field_refusal(
+        "workspace_access",
+        EXEC_WORKSPACE_ACCESS_INVALID,
+        422,
+        "refused",
+    ),
+    field_refusal(
+        "workspace_access",
+        EXEC_WORKSPACE_SCOPED_WRITE_UNSERVED,
+        501,
+        "unserved",
+    ),
+    field_refusal(
+        "workspace_access",
+        EXEC_WORKSPACE_SUBTREE_ABSENT,
+        422,
+        "refused",
+    ),
+    field_refusal(
+        "workspace_access",
+        EXEC_WORKSPACE_SUBTREE_SYMLINK,
+        422,
+        "refused",
+    ),
+    field_refusal(
+        "workspace_access",
+        EXEC_WORKSPACE_SUBTREE_NOT_DIRECTORY,
+        422,
+        "refused",
+    ),
+    field_refusal(
+        "workspace_access",
+        EXEC_WORKSPACE_SUBTREE_CHANGED,
+        422,
+        "refused",
+    ),
+];
 pub const RESOURCE_USAGE_SAMPLE_INTERVAL_MS: u64 = 1_000;
 pub const EXEC_SCRATCH_MOUNT: &str = "/scratch";
 /// Where the workspace appears inside every confined run, and the working directory a start that
@@ -839,7 +932,30 @@ impl StorageLimit {
             && self.max_bytes <= MAX_STORAGE_QUOTA_BYTES
             && self.max_inodes >= MIN_STORAGE_QUOTA_INODES
             && self.max_inodes <= MAX_STORAGE_QUOTA_INODES
+            && self.max_bytes.is_multiple_of(STORAGE_QUOTA_BYTES_UNIT)
     }
+}
+
+/// Decodes a present `scratch`: `null` is refused, not read as absent (design 27, amendment 3).
+fn present_storage_limit<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<StorageLimit>, D::Error> {
+    StorageLimit::deserialize(deserializer).map(Some)
+}
+
+/// Decodes `measurements` as the published list: a repeated measurement is refused, not collapsed
+/// (design 27, amendment 3).
+fn distinct_measurements<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<BTreeSet<ExecMeasurement>, D::Error> {
+    let listed = Vec::<ExecMeasurement>::deserialize(deserializer)?;
+    let distinct: BTreeSet<ExecMeasurement> = listed.iter().copied().collect();
+    if distinct.len() != listed.len() {
+        return Err(serde::de::Error::custom(
+            "measurements lists one measurement twice",
+        ));
+    }
+    Ok(distinct)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1845,9 +1961,17 @@ pub struct ExecStartInput {
     /// Effective write authority requested for `/workspace` (ADR 0023).
     #[serde(default, skip_serializing_if = "WorkspaceAccess::is_read_write")]
     pub workspace_access: WorkspaceAccess,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "present_storage_limit",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub scratch: Option<StorageLimit>,
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "distinct_measurements",
+        skip_serializing_if = "BTreeSet::is_empty"
+    )]
     pub measurements: BTreeSet<ExecMeasurement>,
     /// Host directories admitted read-only inside this process (ADR 0010).
     ///

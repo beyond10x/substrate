@@ -209,10 +209,10 @@
   },
   "files": [
     {
-      "byte_length": 2932,
+      "byte_length": 4729,
       "media_type": "application/json",
       "path": "compatibility.json",
-      "sha256": "9d72ed9f6b8563c260354f0b3b5a1bcdc919d7bf0684675e9b7eb7b3b1a718b5"
+      "sha256": "1dc41dcf5d3e61994bc51cf3c7f820805d998f0b57a3f429a257d381db6fab5b"
     },
     {
       "byte_length": 65487,
@@ -653,10 +653,10 @@
       "sha256": "25c0ad0fcdd038613661623c317859b5710af5e2050d2646d8d8aeacf3120770"
     },
     {
-      "byte_length": 9025,
+      "byte_length": 10270,
       "media_type": "application/json",
       "path": "schemas/inputs/exec-start.json",
-      "sha256": "e5cb3ef33e1fdc7211333c79a16ea88dc533a6479d66818c3441082a56fd2aa1"
+      "sha256": "1e95db46722dc541acb0956921a8fe2ce9a9e32dfe5618c429637a2ae326e89d"
     },
     {
       "byte_length": 373,
@@ -713,10 +713,10 @@
       "sha256": "4f9fdaae6bec2340c85f52429a0069ba366dd23b26c657e7983013ece7ed3c09"
     },
     {
-      "byte_length": 11988,
+      "byte_length": 13816,
       "media_type": "application/json",
       "path": "schemas/inputs/pipe-session-start.json",
-      "sha256": "c86b7139b30e8e2d0a168c674d6ef8ca485197fdb73fe72d9f6d77cc62f449ed"
+      "sha256": "0d9ec2e26b221b95a5779e3dd63b8ce759f990558ece09e952c021590990e03b"
     },
     {
       "byte_length": 729,

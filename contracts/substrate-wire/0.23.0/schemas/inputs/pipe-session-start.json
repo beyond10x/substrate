@@ -211,6 +211,21 @@
           ],
           "type": "object"
         },
+        "measurements": {
+          "items": {
+            "const": "resource-usage"
+          },
+          "maxItems": 1,
+          "type": "array",
+          "uniqueItems": true,
+          "x-b10x-refusals": [
+            {
+              "class": "unserved",
+              "code": "exec.metrics-unserved",
+              "status": 501
+            }
+          ]
+        },
         "read_only_files": {
           "$ref": "../common.json#/$defs/read-only-files"
         },
@@ -333,6 +348,21 @@
           "type": "object",
           "x-b10x-reach-is-configuration": "a-request-selects-a-declared-name"
         },
+        "scratch": {
+          "$ref": "../common.json#/$defs/storage-limit",
+          "x-b10x-refusals": [
+            {
+              "class": "unserved",
+              "code": "exec.scratch-quota-unserved",
+              "status": 501
+            },
+            {
+              "class": "exhausted",
+              "code": "exec.scratch-quota-limit",
+              "status": 507
+            }
+          ]
+        },
         "secret_slots": {
           "items": {
             "additionalProperties": false,
@@ -368,6 +398,41 @@
         },
         "workspace": {
           "$ref": "../common.json#/$defs/workspace-id"
+        },
+        "workspace_access": {
+          "$ref": "../common.json#/$defs/workspace-access",
+          "x-b10x-refusals": [
+            {
+              "class": "refused",
+              "code": "exec.workspace-access-invalid",
+              "status": 422
+            },
+            {
+              "class": "unserved",
+              "code": "exec.workspace-scoped-write-unserved",
+              "status": 501
+            },
+            {
+              "class": "refused",
+              "code": "exec.workspace-subtree-absent",
+              "status": 422
+            },
+            {
+              "class": "refused",
+              "code": "exec.workspace-subtree-symlink",
+              "status": 422
+            },
+            {
+              "class": "refused",
+              "code": "exec.workspace-subtree-not-directory",
+              "status": 422
+            },
+            {
+              "class": "refused",
+              "code": "exec.workspace-subtree-changed",
+              "status": 422
+            }
+          ]
         },
         "writable_roots": {
           "$ref": "../common.json#/$defs/writable-roots"

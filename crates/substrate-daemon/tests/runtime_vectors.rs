@@ -45,7 +45,7 @@ const DAEMON_OVERRIDE_VARIABLE: &str = "SUBSTRATE_VECTORS_DAEMON";
 /// Pinned independently of the daemon implementation: the clean-room client verifies what ships.
 const ADVERTISED_CONTRACT: &str = "substrate-wire/0.23.0";
 const ADVERTISED_CONTRACT_SHA256: &str =
-    "4f41d7def24b7615562dc5c871e907ed5c524c40f7437b5b466a7d2089af6989";
+    "41abb057474cb0bb70cbce7eaef099305a80807a8d6b8b9a53befffc41a1e497";
 
 fn daemon_binary() -> PathBuf {
     std::env::var_os(DAEMON_OVERRIDE_VARIABLE).map_or_else(|| PathBuf::from(DAEMON), PathBuf::from)
@@ -2200,6 +2200,200 @@ async fn check_confined_pty(daemon: &Daemon, workspace: &str, snapshot: &str) ->
     passed
 }
 
+/// A raw-pipe session around `exec`, with one exec-start field set to `value` (design 27).
+fn session_with_exec_field(exec: Value, field: &str, value: Value) -> Value {
+    let mut exec = exec;
+    exec["lease_ttl_ms"] = json!(60_000);
+    exec[field] = value;
+    json!({
+        "exec": exec,
+        "input_limit_bytes": 65_536,
+        "frame_limit_bytes": 16_384,
+        "queued_frames": 8
+    })
+}
+
+/// Attaches to a started session, reads it to its `exit` frame, and returns the exec record once
+/// the daemon has recorded it terminal with `ready` holding.
+async fn run_session_to_exit(
+    daemon: &Daemon,
+    session: &Value,
+    ready: impl Fn(&Value) -> bool,
+) -> (Value, Value) {
+    let session_id = text(&session["result"]["id"]);
+    let exec_id = text(&session["result"]["exec"]);
+    let mut channel =
+        SessionChannel::open(&daemon.socket, &format!("/v1/sessions/{session_id}/attach")).await;
+    // Each program first reads one line, so the session is still ready when the attach arrives.
+    channel.input("go\n").await;
+    let terminal = channel.wait_for_terminal().await;
+    assert_eq!(terminal["kind"], "exit", "{terminal}");
+    drop(channel);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let (status, observed) = daemon
+            .call(
+                "GET",
+                &format!("/v1/execs/{exec_id}"),
+                "req_clean_session_field_exec",
+                None,
+            )
+            .await;
+        assert_eq!(status, 200, "{observed}");
+        if observed["result"]["state"] == "exited" && ready(&observed["result"]) {
+            return (terminal, observed["result"].clone());
+        }
+        assert!(Instant::now() < deadline, "{observed}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Design 27: each exec-start field the session start publishes in `0.23.0` is served on
+/// `POST /v1/sessions` exactly as on exec start — `measurements` and `workspace_access` honoured,
+/// `scratch` refused by its own named code before dispatch on a host without project quotas.
+#[allow(clippy::too_many_lines)] // Three cases, one per field; splitting them would hide the set.
+async fn check_confined_session_exec_fields(
+    daemon: &Daemon,
+    workspace: &str,
+    snapshot: &str,
+) -> usize {
+    let mut passed = 0;
+    let (status, machine) = daemon
+        .call("GET", "/v1/machine", "req_clean_session_fields_facts", None)
+        .await;
+    assert_eq!(status, 200, "{machine}");
+    let facts = &machine["result"]["facts"];
+    assert!(
+        facts.get("exec.resource-usage").is_some(),
+        "the delegated lane delegates cpu, memory and pids, so it proves usage counters: {machine}"
+    );
+    assert_eq!(
+        facts["exec.workspace-scoped-write"], true,
+        "the delegated lane proves read-only and scoped workspace mounts: {machine}"
+    );
+    assert!(
+        facts.get("exec.scratch-quota").is_none(),
+        "the clean-room daemon declares no project-quota identities: {machine}"
+    );
+
+    // `measurements`: the session's exec record carries usage from the start, and the counters
+    // are observed once the session has ended.
+    let (status, session) = daemon
+        .call(
+            "POST",
+            "/v1/sessions",
+            "req_clean_session_measurements",
+            Some(&mutation(
+                "01JSESSIONFIELDMEASURE01",
+                &session_with_exec_field(
+                    ExecInput::new(
+                        workspace,
+                        snapshot,
+                        &["/bin/sh", "-c", "read line; exit 0"],
+                        false,
+                    )
+                    .build(),
+                    "measurements",
+                    json!(["resource-usage"]),
+                ),
+            )),
+        )
+        .await;
+    assert_eq!(status, 202, "{session}");
+    let exec_id = text(&session["result"]["exec"]);
+    let (status, started) = daemon
+        .call(
+            "GET",
+            &format!("/v1/execs/{exec_id}"),
+            "req_clean_session_measurements_started",
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{started}");
+    assert!(
+        started["result"]["usage"]["status"] == "pending"
+            || started["result"]["usage"]["status"] == "observed",
+        "a session that asked for measurements carries usage: {started}"
+    );
+    let (_, observed) = run_session_to_exit(daemon, &session, |record| {
+        record["usage"]["status"] == "observed"
+    })
+    .await;
+    assert_eq!(observed["exit"]["code"], 0, "{observed}");
+    assert_eq!(observed["usage"]["complete"], true, "{observed}");
+    assert!(
+        observed["usage"]["processes_peak"].as_u64() >= Some(1),
+        "{observed}"
+    );
+    passed += 1;
+
+    // `workspace_access`: the grant is applied and stated, and a write to `/workspace` fails
+    // inside the sandbox and leaves the host workspace untouched.
+    let probe = "session-read-only-probe";
+    let program =
+        format!("read line; if echo x > /workspace/{probe}; then exit 0; else exit 9; fi");
+    let (status, session) = daemon
+        .call(
+            "POST",
+            "/v1/sessions",
+            "req_clean_session_workspace_access",
+            Some(&mutation(
+                "01JSESSIONFIELDACCESS001",
+                &session_with_exec_field(
+                    ExecInput::new(workspace, snapshot, &["/bin/sh", "-c", &program], false)
+                        .build(),
+                    "workspace_access",
+                    json!({ "mode": "read-only" }),
+                ),
+            )),
+        )
+        .await;
+    assert_eq!(status, 202, "{session}");
+    let (terminal, observed) = run_session_to_exit(daemon, &session, |_| true).await;
+    assert_eq!(terminal["exit"]["code"], 9, "{terminal}");
+    assert_eq!(observed["exit"]["code"], 9, "{observed}");
+    assert_eq!(
+        observed["applied"]["workspace_access"],
+        json!({ "mode": "read-only" }),
+        "{observed}"
+    );
+    assert!(
+        !daemon.workspaces.join(workspace).join(probe).exists(),
+        "a read-only session wrote the workspace"
+    );
+    passed += 1;
+
+    // `scratch`: the same named refusal exec start gives on a host without the quota fact, before
+    // dispatch and recorded as refused.
+    let operation = "01JSESSIONFIELDSCRATCH01";
+    expect_error(
+        &daemon
+            .call(
+                "POST",
+                "/v1/sessions",
+                "req_clean_session_scratch",
+                Some(&mutation(
+                    operation,
+                    &session_with_exec_field(
+                        ExecInput::new(workspace, snapshot, &["/bin/sh", "-c", "exit 0"], false)
+                            .build(),
+                        "scratch",
+                        json!({ "max_bytes": 1_048_576, "max_inodes": 16 }),
+                    ),
+                )),
+            )
+            .await,
+        501,
+        "exec.scratch-quota-unserved",
+    );
+    assert_eq!(
+        ledger_row(daemon, operation, "req_clean_session_scratch_ledger").await["state"],
+        "refused"
+    );
+    passed += 1;
+    passed
+}
+
 /// The delegated exec-lease sequence: idle-time whole-cgroup expiry, replay, conflict and retire.
 #[allow(clippy::too_many_lines)] // One sequential journey; splitting it would lose the ordering.
 async fn check_exec_lease(daemon: &Daemon, workspace: &str, snapshot: &str, cgroup_root: &Path) {
@@ -3119,6 +3313,7 @@ async fn check_http_journey(
         passed += check_confined_aperture_ceiling(daemon, &workspace, &snapshot, firehose).await;
         passed += check_confined_secret_slots(daemon, &workspace, &snapshot).await;
         passed += check_confined_pty(daemon, &workspace, &snapshot).await;
+        passed += check_confined_session_exec_fields(daemon, &workspace, &snapshot).await;
         passed += check_confined_read_only_files(daemon, &workspace, &snapshot).await;
         passed += check_confined_read_only_roots(daemon, &workspace, &snapshot).await;
         passed += check_confined_workdir(daemon, &workspace, &snapshot).await;
@@ -6720,7 +6915,7 @@ async fn check_git_root_refusals(
 
 /// The predecessor printed its case count; the port asserts it, so a case cannot vanish quietly.
 const PORTABLE_CASES: usize = 113;
-const DELEGATED_CASES: usize = 172;
+const DELEGATED_CASES: usize = 175;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {
