@@ -51,7 +51,9 @@ Each is a claim that can be checked. Breaking one is a design change, not a refa
    0.23.0`; the daemon refuses a start naming a root `exec.sandbox-unavailable` (501) before
    dispatch when the fact is absent, and the exec applied record admits every member the wire
    crate emits, correcting `secret_slots`, which `0.5.0` to `0.22.0` omit, and `read_only_files`,
-   which `0.18.0` to `0.22.0` omit;
+   which `0.18.0` to `0.22.0` omit; and, by design 27, publishes `scratch`, `measurements` and
+   `workspace_access` on the session start, with the refusals they raise on both starts, each held
+   to its `substrate_wire` constant;
    `0.22.0` added ADR 0038: the optional
    `writable_roots` start list (a closed union of a declared host root and a Git checkout
    workspace, at most eight), the optional `exec.writable-roots.host` and `exec.writable-roots.git`

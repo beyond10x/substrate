@@ -154,7 +154,10 @@ also admits `secret_slots`, which `0.5.0` to `0.22.0` wrongly reject, and `read_
 validates capability snapshots or resources against `0.22.0` must move to `0.23.0` to accept the
 new fact and record members. The session start's `exec` object now also publishes `scratch`,
 `measurements` and `workspace_access`, each the same schema as on exec start; a session has always
-accepted and applied them, with the same refusals as an exec start.
+accepted and applied them. Both starts now publish the refusals those three members have always
+raised, each held to its `substrate_wire` constant, and the daemon refuses a null `scratch`, a
+storage `max_bytes` that is not a multiple of 1024 and a repeated measurement as
+`request.schema-invalid` (422), as the schemas always did.
 `0.22.0` added ADR 0038. An exec or session
 start may name `writable_roots`, at most eight writable mounts outside `/workspace` (ADR 0038). Each
 entry is exactly one of `{"host": <name>, "mount": <path>}`, a directory the operator declared by

@@ -7,8 +7,14 @@
 //!
 //! The rule is checked for the class, not for the three instances: the session-start `exec` object
 //! declares exactly the exec-start property set, and every shared member is the same schema except
-//! those [`narrowed`] names, which a session restricts on purpose. A future exec-start field left off the
-//! session schema fails here.
+//! those [`narrowed`] names, which a session restricts on purpose. The object's own
+//! `additionalProperties` is exec start's, and its `required` list is exec start's plus
+//! [`SESSION_REQUIRES`] (amendment 1). A future exec-start field left off the session schema fails
+//! here, in `0.23.0` and in every later bundle ([`applies_to`]).
+//!
+//! The refusals the three members raise are published on both starts and held to the wire crate's
+//! [`wire::EXEC_FIELD_REFUSALS`] (amendment 2), and the wire type refuses the values the schema
+//! refuses (amendment 3).
 
 use std::collections::BTreeSet;
 
@@ -24,16 +30,144 @@ const SESSION_EXEC: &str = "/properties/exec";
 /// The three members design 27 adds to the session start.
 const ADDED: [&str; 3] = ["scratch", "measurements", "workspace_access"];
 
+/// What a session's exec requires beyond exec start: a session is always leased
+/// (`validate_pipe_session_input` refuses one without `lease_ttl_ms`).
+const SESSION_REQUIRES: [&str; 1] = ["lease_ttl_ms"];
+
+/// The first bundle the class check binds.
+const FIRST: (u64, u64, u64) = (0, 23, 0);
+
 /// The schema a member a session narrows must have there, or `None` for a shared member: a
 /// session's exec never waits.
 fn narrowed(name: &str) -> Option<Value> {
     (name == "wait").then(|| json!({ "const": false }))
 }
 
+/// Whether `version` is `0.23.0` or later, so design 27's class check binds it.
+pub(super) fn applies_to(version: &str) -> bool {
+    let mut parts = version.split('.').map(str::parse::<u64>);
+    match (parts.next(), parts.next(), parts.next(), parts.next()) {
+        (Some(Ok(major)), Some(Ok(minor)), Some(Ok(patch)), None) => (major, minor, patch) >= FIRST,
+        _ => false,
+    }
+}
+
+/// The class check, for `0.23.0` and every later bundle.
 pub(super) fn check(released: &Tree, failures: &mut Vec<String>) {
     check_members(released, failures);
+    check_object(released, failures);
+    check_refusals(released, failures);
     check_wire_admits(failures);
+}
+
+/// What only the bundle that introduced the change states: its client-visible change.
+pub(super) fn check_introduction(released: &Tree, failures: &mut Vec<String>) {
     check_client_visible_change(released, failures);
+}
+
+fn names(list: Option<&Value>) -> BTreeSet<String> {
+    list.and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+/// The session's exec object is as closed as exec start and requires what exec start does, plus
+/// the lease.
+fn check_object(released: &Tree, failures: &mut Vec<String>) {
+    let (Some(exec), Some(session)) = (
+        json_at(released, EXEC_START, failures),
+        json_at(released, SESSION_START, failures),
+    ) else {
+        return;
+    };
+    let Some(session) = session.pointer(SESSION_EXEC) else {
+        failures.push(format!("{SESSION_START}: no exec object"));
+        return;
+    };
+    if session.get("additionalProperties") != exec.get("additionalProperties") {
+        failures.push(format!(
+            "{SESSION_START}: exec additionalProperties is not exec start's ({})",
+            exec.get("additionalProperties").unwrap_or(&Value::Null)
+        ));
+    }
+    let mut expected = names(exec.get("required"));
+    expected.extend(SESSION_REQUIRES.iter().map(|name| (*name).to_owned()));
+    let required = names(session.get("required"));
+    for missing in expected.difference(&required) {
+        failures.push(format!(
+            "{SESSION_START}: exec does not require {missing}, which a session start must name"
+        ));
+    }
+    for extra in required.difference(&expected) {
+        failures.push(format!(
+            "{SESSION_START}: exec requires {extra}, which exec start leaves optional"
+        ));
+    }
+    let common = "schemas/common.json";
+    if let Some(document) = json_at(released, common, failures)
+        && document.pointer("/$defs/storage-limit/properties/max_bytes/multipleOf")
+            != Some(&json!(wire::STORAGE_QUOTA_BYTES_UNIT))
+    {
+        failures.push(format!(
+            "{common}: storage-limit max_bytes is not a multiple of the wire unit {}",
+            wire::STORAGE_QUOTA_BYTES_UNIT
+        ));
+    }
+}
+
+/// `(code, status, class)` for each row an `x-b10x-refusals` annotation declares.
+fn declared(annotation: Option<&Value>) -> BTreeSet<(String, u64, String)> {
+    annotation
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|row| {
+            Some((
+                row.get("code")?.as_str()?.to_owned(),
+                row.get("status")?.as_u64()?,
+                row.get("class")?.as_str()?.to_owned(),
+            ))
+        })
+        .collect()
+}
+
+/// Each start publishes exactly the wire crate's refusals on each of the three members.
+fn check_refusals(released: &Tree, failures: &mut Vec<String>) {
+    for (path, object) in [(EXEC_START, ""), (SESSION_START, SESSION_EXEC)] {
+        let Some(document) = json_at(released, path, failures) else {
+            continue;
+        };
+        for member in ADDED {
+            let expected: BTreeSet<(String, u64, String)> = wire::EXEC_FIELD_REFUSALS
+                .iter()
+                .filter(|row| row.member == member)
+                .map(|row| {
+                    (
+                        row.code.to_owned(),
+                        u64::from(row.status),
+                        row.class.to_owned(),
+                    )
+                })
+                .collect();
+            let published = declared(
+                document.pointer(&format!("{object}/properties/{member}/x-b10x-refusals")),
+            );
+            for (code, status, class) in expected.difference(&published) {
+                failures.push(format!(
+                    "{path}: {member} does not declare {code} ({status}, {class})"
+                ));
+            }
+            for (code, status, class) in published.difference(&expected) {
+                failures.push(format!(
+                    "{path}: {member} declares {code} ({status}, {class}), which is not a refusal \
+                     {member} raises"
+                ));
+            }
+        }
+    }
 }
 
 fn properties(document: &Value, pointer: &str) -> Option<serde_json::Map<String, Value>> {
@@ -118,6 +252,31 @@ fn check_wire_admits(failures: &mut Vec<String>) {
         "frame_limit_bytes": 1024,
         "queued_frames": 1
     });
+    // Amendment 3: a value every published start schema refuses is one the wire type refuses too,
+    // so the daemon answers it `request.schema-invalid` rather than running something else.
+    for (field, value) in [
+        ("scratch", Value::Null),
+        ("measurements", json!(["resource-usage", "resource-usage"])),
+    ] {
+        let mut refused = session.clone();
+        refused["exec"][field] = value.clone();
+        if serde_json::from_value::<wire::PipeSessionStartInput>(refused).is_ok() {
+            failures.push(format!(
+                "the wire crate's session start admits exec.{field} = {value}, which the \
+                 published schema refuses"
+            ));
+        }
+    }
+    let misaligned = wire::StorageLimit {
+        max_bytes: wire::MIN_STORAGE_QUOTA_BYTES + 1,
+        max_inodes: wire::MIN_STORAGE_QUOTA_INODES,
+    };
+    if misaligned.within_contract_bounds() {
+        failures.push(format!(
+            "the wire crate admits a storage max_bytes off the {}-byte unit the schema states",
+            wire::STORAGE_QUOTA_BYTES_UNIT
+        ));
+    }
     match serde_json::from_value::<wire::PipeSessionStartInput>(session) {
         Ok(start)
             if start.exec.scratch.is_some()
@@ -175,6 +334,7 @@ mod tests {
     fn failures_of(tree: &super::Tree) -> Vec<String> {
         let mut failures = Vec::new();
         super::check(tree, &mut failures);
+        super::check_introduction(tree, &mut failures);
         failures
     }
 
@@ -250,6 +410,109 @@ mod tests {
             &failures_of(&tree),
             "exec declares unheard_of, which exec start does not",
         );
+    }
+
+    /// Amendment 1: the object's own `required` list and `additionalProperties` are compared too.
+    #[test]
+    fn a_changed_required_list_or_an_open_object_is_reported() {
+        let tree = edited(super::SESSION_START, |document| {
+            document["properties"]["exec"]["required"]
+                .as_array_mut()
+                .expect("required list")
+                .push("workspace_access".into());
+        });
+        assert_reported(&failures_of(&tree), "exec requires workspace_access");
+        let tree = edited(super::SESSION_START, |document| {
+            document["properties"]["exec"]["required"]
+                .as_array_mut()
+                .expect("required list")
+                .retain(|name| name != "argv");
+        });
+        assert_reported(&failures_of(&tree), "exec does not require argv");
+        let tree = edited(super::SESSION_START, |document| {
+            document["properties"]["exec"]["required"]
+                .as_array_mut()
+                .expect("required list")
+                .retain(|name| name != "lease_ttl_ms");
+        });
+        assert_reported(&failures_of(&tree), "exec does not require lease_ttl_ms");
+        let tree = edited(super::SESSION_START, |document| {
+            document["properties"]["exec"]["additionalProperties"] = true.into();
+        });
+        assert_reported(
+            &failures_of(&tree),
+            "exec additionalProperties is not exec start's",
+        );
+    }
+
+    /// Amendment 2: each refusal the three members raise is published on both starts.
+    #[test]
+    fn the_refusals_of_the_three_members_are_published_on_both_starts() {
+        let tree = released(VERSION);
+        for (path, prefix) in [
+            (super::EXEC_START, ""),
+            (super::SESSION_START, "/properties/exec"),
+        ] {
+            let document: serde_json::Value =
+                serde_json::from_slice(tree.get(path).expect("present")).expect("parses");
+            for (member, code) in [
+                ("measurements", "exec.metrics-unserved"),
+                ("scratch", "exec.scratch-quota-unserved"),
+                ("scratch", "exec.scratch-quota-limit"),
+                ("workspace_access", "exec.workspace-access-invalid"),
+                ("workspace_access", "exec.workspace-scoped-write-unserved"),
+                ("workspace_access", "exec.workspace-subtree-absent"),
+                ("workspace_access", "exec.workspace-subtree-symlink"),
+                ("workspace_access", "exec.workspace-subtree-not-directory"),
+                ("workspace_access", "exec.workspace-subtree-changed"),
+            ] {
+                let rows = document
+                    .pointer(&format!("{prefix}/properties/{member}/x-b10x-refusals"))
+                    .and_then(serde_json::Value::as_array)
+                    .cloned()
+                    .unwrap_or_default();
+                assert!(
+                    rows.iter().any(|row| row["code"] == code),
+                    "{path}: {member} does not publish {code}"
+                );
+            }
+        }
+    }
+
+    /// A member that loses a published refusal, or gains one it never raises, is reported.
+    #[test]
+    fn a_missing_or_invented_refusal_is_reported() {
+        let tree = edited(super::EXEC_START, |document| {
+            document["properties"]["scratch"]
+                .as_object_mut()
+                .expect("object")
+                .remove("x-b10x-refusals");
+        });
+        assert_reported(
+            &failures_of(&tree),
+            "scratch does not declare exec.scratch-quota-unserved (501, unserved)",
+        );
+        let tree = edited(super::SESSION_START, |document| {
+            document["properties"]["exec"]["properties"]["measurements"]["x-b10x-refusals"] = serde_json::json!([
+                { "class": "unserved", "code": "exec.metrics-unserved", "status": 501 },
+                { "class": "refused", "code": "exec.metrics-invented", "status": 422 }
+            ]);
+        });
+        assert_reported(
+            &failures_of(&tree),
+            "measurements declares exec.metrics-invented (422, refused)",
+        );
+    }
+
+    /// Amendment 1: the class check binds every bundle from `0.23.0` on, not `0.23.0` alone.
+    #[test]
+    fn every_later_bundle_runs_the_class_check() {
+        let mut failures = Vec::new();
+        super::super::check_additions("0.24.0", &released("0.22.0"), &mut failures);
+        assert_reported(&failures, "exec lacks scratch, which exec start");
+        let mut failures = Vec::new();
+        super::super::check_additions("1.0.0", &released("0.22.0"), &mut failures);
+        assert_reported(&failures, "exec lacks scratch, which exec start");
     }
 
     #[test]
