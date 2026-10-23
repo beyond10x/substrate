@@ -49,11 +49,12 @@ connection pool removes the handshake and leaves the trust posture unchanged.
    transport error, deadline expiry, other status, wrong content type, oversized or malformed body,
    or `Connection: close` response closes it.
 
-4. **One fresh retry for a stale pooled connection.** If a connection taken from the pool fails
-   before Identity answers (the peer closed it while it was idle), the resolver retries once on a
-   fresh connection inside the same 5 s deadline. The resolution request is a read-only `GET`, so the
-   retry admits nothing that one fresh request would not. A failure on a fresh connection is
-   `auth.authority-unavailable`, as before.
+4. **One fresh retry for a stale pooled connection, only for a request never sent.** If a
+   connection taken from the pool turns out to be closed before the request is written to it (the
+   peer closed it while it was idle), the resolver retries once on a fresh connection inside the
+   same 5 s deadline. Once the request has been written, any failure is
+   `auth.authority-unavailable` and nothing is re-sent, so Identity never receives one hosted
+   request twice. A failure on a fresh connection is `auth.authority-unavailable`, as before.
 
 ## Consequences
 

@@ -6,7 +6,7 @@ use std::io::BufReader;
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::PathBuf;
 use std::str::FromStr as _;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail};
@@ -64,7 +64,41 @@ pub(crate) struct HostedAdmission {
     server_name: ServerName<'static>,
     connector: TlsConnector,
     /// Connections that completed a clean exchange, most recent last (ADR 0040).
-    idle: Mutex<Vec<IdleConnection>>,
+    idle: Arc<Mutex<IdlePool>>,
+}
+
+/// The idle half of the Identity connection pool and whether its reaper is running.
+#[derive(Default)]
+struct IdlePool {
+    entries: Vec<IdleConnection>,
+    reaper: bool,
+}
+
+fn lock_pool(pool: &Mutex<IdlePool>) -> std::sync::MutexGuard<'_, IdlePool> {
+    pool.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Close each idle connection once it has been idle for `IDENTITY_IDLE_TIMEOUT`, whether or not
+/// another resolution arrives. One reaper runs while the pool holds a connection; it holds the
+/// pool only weakly and exits when the pool is empty or gone.
+fn spawn_reaper(pool: Weak<Mutex<IdlePool>>) {
+    tokio::spawn(async move {
+        loop {
+            let deadline = {
+                let Some(pool) = pool.upgrade() else {
+                    return;
+                };
+                let mut state = lock_pool(&pool);
+                state.entries.retain(IdleConnection::usable);
+                let Some(oldest) = state.entries.iter().map(|entry| entry.since).min() else {
+                    state.reaper = false;
+                    return;
+                };
+                oldest + IDENTITY_IDLE_TIMEOUT
+            };
+            tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+        }
+    });
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -165,7 +199,7 @@ impl HostedAdmission {
             port,
             server_name,
             connector,
-            idle: Mutex::new(Vec::new()),
+            idle: Arc::new(Mutex::new(IdlePool::default())),
         })
     }
 
@@ -249,10 +283,13 @@ impl HostedAdmission {
         else {
             return Some(Err(AdmissionFailure::Unavailable));
         };
-        let Ok(response) = connection.sender.send_request(request).await else {
-            return None;
-        };
-        Some(self.read_authority(connection, response).await)
+        match connection.sender.try_send_request(request).await {
+            Ok(response) => Some(self.read_authority(connection, response).await),
+            // hyper hands the request back only when it was never written to the connection, so
+            // Identity cannot have received it and a retry cannot resolve it twice (ADR 0040).
+            Err(error) if error.message().is_some() => None,
+            Err(_) => Some(Err(AdmissionFailure::Unavailable)),
+        }
     }
 
     async fn read_authority(
@@ -294,22 +331,26 @@ impl HostedAdmission {
 
     /// The most recently returned usable idle connection; expired or closed ones are dropped.
     fn checkout(&self) -> Option<IdentityConnection> {
-        let mut idle = self.idle.lock().unwrap_or_else(PoisonError::into_inner);
-        idle.retain(IdleConnection::usable);
-        idle.pop().map(|entry| entry.connection)
+        let mut idle = lock_pool(&self.idle);
+        idle.entries.retain(IdleConnection::usable);
+        idle.entries.pop().map(|entry| entry.connection)
     }
 
     fn checkin(&self, connection: IdentityConnection) {
         if connection.sender.is_closed() {
             return;
         }
-        let mut idle = self.idle.lock().unwrap_or_else(PoisonError::into_inner);
-        idle.retain(IdleConnection::usable);
-        if idle.len() < MAX_IDLE_IDENTITY_CONNECTIONS {
-            idle.push(IdleConnection {
+        let mut idle = lock_pool(&self.idle);
+        idle.entries.retain(IdleConnection::usable);
+        if idle.entries.len() < MAX_IDLE_IDENTITY_CONNECTIONS {
+            idle.entries.push(IdleConnection {
                 connection,
                 since: Instant::now(),
             });
+            if !idle.reaper {
+                idle.reaper = true;
+                spawn_reaper(Arc::downgrade(&self.idle));
+            }
         }
     }
 }
