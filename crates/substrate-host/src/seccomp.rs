@@ -17,34 +17,53 @@ const SOCKET_TYPE_MASK: u32 = 0x0f;
 /// Its `AF_MAX` is 43, so its table predates this family, `AF_SMC` and `AF_MCTP` alike. The number
 /// is the kernel's `include/linux/socket.h` value and is part of a stable ABI: a family number is
 /// never reassigned, because every `socket(2)` ever compiled against it would change meaning.
+#[cfg(test)]
 const AF_QIPCRTR: libc::c_int = 42;
 
 /// The three further families this crate's `libc` does not name, for the same reason.
 ///
 /// The survey measured all three opening inside the confinement argv, so they are spelled out
 /// here rather than waited for.
+#[cfg(test)]
 const AF_KCM: libc::c_int = 41;
+#[cfg(test)]
 const AF_SMC: libc::c_int = 43;
+#[cfg(test)]
 const AF_MCTP: libc::c_int = 45;
 
-/// **The families this profile refuses, and the one list its BPF chain is generated from.**
+/// **The `socket(2)` allowlist of ADR 0039, and the one list its BPF chain is generated from.**
 ///
-/// Written out once and turned into jumps by `refuse_socket_families`, because ten hand-counted
-/// classic-BPF offsets is where an off-by-one hides and an off-by-one here silently *allows*.
-/// `seccomp::tests` asserts this list is exactly the denied half of `FAMILY_POLICY`, so the
-/// filter and the survey cannot drift apart, and every entry is exercised by a forked child.
-const DENIED_FAMILIES: [(&str, libc::c_int); 10] = [
-    ("AF_UNIX", libc::AF_UNIX),
-    ("AF_PACKET", libc::AF_PACKET),
-    ("AF_RDS", libc::AF_RDS),
-    ("AF_PPPOX", libc::AF_PPPOX),
-    ("AF_ALG", libc::AF_ALG),
-    ("AF_VSOCK", libc::AF_VSOCK),
-    ("AF_KCM", AF_KCM),
-    ("AF_QIPCRTR", AF_QIPCRTR),
-    ("AF_SMC", AF_SMC),
-    ("AF_MCTP", AF_MCTP),
+/// A family absent from this list is refused, whatever its type and protocol. A listed family is
+/// admitted only with one of its listed protocol arguments; any other protocol is refused. Each
+/// listed family is allowed because shipped capability needs it: `AF_INET` and `AF_INET6` carry
+/// the egress aperture and name resolution, and `AF_NETLINK`'s `NETLINK_ROUTE` is what glibc
+/// reaches for `getaddrinfo` and interface enumeration. ICMP and `ICMPv6` are not listed: no
+/// shipped path inside the sandbox opens them (the egress helper and forwarder run outside this
+/// program).
+///
+/// Written out once and turned into jumps by `assemble`, because hand-counted classic-BPF offsets
+/// are where an off-by-one hides, and an off-by-one in a refusal chain silently *allows*.
+/// `seccomp::tests` asserts the allowed half of `FAMILY_POLICY` names exactly these families.
+const ALLOWED_SOCKETS: [(&str, libc::c_int, &[libc::c_int]); 3] = [
+    (
+        "AF_INET",
+        libc::AF_INET,
+        &[0, libc::IPPROTO_TCP, libc::IPPROTO_UDP],
+    ),
+    (
+        "AF_INET6",
+        libc::AF_INET6,
+        &[0, libc::IPPROTO_TCP, libc::IPPROTO_UDP],
+    ),
+    ("AF_NETLINK", libc::AF_NETLINK, &[libc::NETLINK_ROUTE]),
 ];
+
+/// Offsets of the syscall arguments in `struct seccomp_data`. Each comparison reads the low 32
+/// bits, which is the width the kernel reads for a family, a protocol, a socket type and an
+/// ioctl request (both supported targets are little-endian).
+const ARGUMENT_0: u32 = 16;
+const ARGUMENT_1: u32 = 24;
+const ARGUMENT_2: u32 = 32;
 
 #[cfg(target_arch = "x86_64")]
 const X32_SYSCALL_BIT: u32 = 0x4000_0000;
@@ -56,22 +75,39 @@ const AUDIT_ARCH: u32 = 0xc000_00b7;
 #[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
 compile_error!("the confinement seccomp profile has no audited architecture for this target");
 
-fn statement(code: u16, value: u32) -> libc::sock_filter {
-    libc::sock_filter {
-        code,
-        jt: 0,
-        jf: 0,
-        k: value,
-    }
+/// A jump target in the program `filters` builds, resolved to an offset by `assemble`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Label {
+    /// The instruction after this one.
+    Next,
+    /// The shared `RET` that refuses with the profile's errno.
+    Deny,
+    /// The shared `RET` that allows the call.
+    Allow,
+    /// The argument checks for `socket(2)`.
+    Socket,
+    /// The protocol check for the `ALLOWED_SOCKETS` entry at this index.
+    Protocols(usize),
+    /// The argument checks for `socketpair(2)`.
+    Socketpair,
+    /// The argument check for `ioctl(2)`.
+    Ioctl,
 }
 
-fn jump(value: u32, yes: u8, no: u8) -> libc::sock_filter {
-    libc::sock_filter {
-        code: JMP_JEQ_K,
-        jt: yes,
-        jf: no,
-        k: value,
-    }
+/// One instruction of the program before its jump offsets are resolved.
+enum Op {
+    Statement(u16, u32),
+    Jump { value: u32, yes: Label, no: Label },
+    Mark(Label),
+}
+
+fn number(value: libc::c_long) -> u32 {
+    u32::try_from(value).expect("a syscall number fits the 32-bit seccomp_data field")
+}
+
+fn word(value: libc::c_int) -> u32 {
+    // Reinterpreting the bits is the point: the kernel compares the argument's low word.
+    value.cast_unsigned()
 }
 
 pub(crate) fn profile() -> Result<File, DriverError> {
@@ -92,90 +128,159 @@ pub(crate) fn profile() -> Result<File, DriverError> {
     Ok(file)
 }
 
+/// The confinement program.
+///
+/// In order: refuse a foreign architecture; refuse `io_uring_setup`; send `socket`, `socketpair`
+/// and `ioctl` to their argument checks; allow everything else. The argument checks are:
+///
+/// * `socket`: the family must be in `ALLOWED_SOCKETS` and the protocol one of its listed values
+///   (ADR 0039). `AF_UNIX` is not listed, so it stays refused for the filesystem reason
+///   `FAMILY_POLICY` records.
+/// * `socketpair`: `AF_UNIX` only, and not as a datagram pair. A Unix datagram socketpair is not
+///   confined to its peer: `connect(2)` can retarget either endpoint to a mounted host socket.
+///   Connection-oriented pairs remain available for process-local IPC. No other family yields a
+///   usable pair, and each creates its sockets the way `socket(2)` does (ADR 0039).
+/// * `ioctl`: `TIOCSETD` is refused; no shipped path changes a terminal's line discipline.
 fn filters(deny: u32) -> Vec<libc::sock_filter> {
-    let mut filters = vec![
-        statement(LD_W_ABS, 4),
-        jump(AUDIT_ARCH, 1, 0),
-        statement(RET_K, deny),
-        statement(LD_W_ABS, 0),
+    let mut program = vec![
+        Op::Statement(LD_W_ABS, 4),
+        Op::Jump {
+            value: AUDIT_ARCH,
+            yes: Label::Next,
+            no: Label::Deny,
+        },
+        Op::Statement(LD_W_ABS, 0),
     ];
-    normalize_syscall_number(&mut filters);
-    filters.extend([
-        jump(
-            u32::try_from(libc::SYS_io_uring_setup).unwrap_or(u32::MAX),
-            0,
-            1,
-        ),
-        statement(RET_K, deny),
-    ]);
-    filters.extend(refuse_socket_families(deny));
-    filters.push(statement(LD_W_ABS, 0));
-    normalize_syscall_number(&mut filters);
-    // A Unix datagram socketpair is not confined to its peer: `connect(2)` can retarget either
-    // endpoint to a mounted host socket. Connection-oriented socketpairs remain available for
-    // process-local IPC, while the repurposable form receives the same EACCES as `socket(AF_UNIX)`.
-    filters.extend([
-        jump(
-            u32::try_from(libc::SYS_socketpair).unwrap_or(u32::MAX),
-            0,
-            6,
-        ),
-        statement(LD_W_ABS, 16),
-        jump(u32::try_from(libc::AF_UNIX).unwrap_or(1), 0, 4),
-        statement(LD_W_ABS, 24),
-        statement(ALU_AND_K, SOCKET_TYPE_MASK),
-        jump(u32::try_from(libc::SOCK_DGRAM).unwrap_or(2), 0, 1),
-        statement(RET_K, deny),
-        statement(RET_K, ALLOW),
-    ]);
-    filters
-}
-
-/// The `socket(2)` half of the profile: refuse every family in `DENIED_FAMILIES`, fall through
-/// for the rest.
-///
-/// The offsets are computed, not written. Classic BPF jumps are *counts of instructions to skip*,
-/// so a ten-family chain has ten of them and each depends on its own position; the version of this
-/// that hand-counted three was already the place a mistake would have been invisible, because an
-/// offset that is one too large does not fail closed — it **allows** the family it was meant to
-/// refuse. Every entry is separately exercised by a forked child in `seccomp::tests`.
-///
-/// The caller appends the `LD_W_ABS 0` this chain jumps forward to, which is where the syscall
-/// number is reloaded for whatever policy follows.
-fn refuse_socket_families(deny: u32) -> Vec<libc::sock_filter> {
-    let count = DENIED_FAMILIES.len();
-    let past_the_chain =
-        u8::try_from(count + 2).expect("the denied family list fits one classic-BPF jump offset");
-    let mut chain = vec![
-        jump(
-            u32::try_from(libc::SYS_socket).unwrap_or(u32::MAX),
-            0,
-            past_the_chain,
-        ),
-        statement(LD_W_ABS, 16),
-    ];
-    for (index, (_, family)) in DENIED_FAMILIES.into_iter().enumerate() {
-        let to_the_refusal =
-            u8::try_from(count - 1 - index).expect("the denied family list fits one jump offset");
-        chain.push(jump(
-            u32::try_from(family).unwrap_or(u32::MAX),
-            to_the_refusal,
-            // Only the last comparison has anywhere to go when it does not match; every earlier
-            // one falls through to the next comparison.
-            u8::from(index + 1 == count),
-        ));
-    }
-    chain.push(statement(RET_K, deny));
-    chain
-}
-
-fn normalize_syscall_number(filters: &mut Vec<libc::sock_filter>) {
     // x32 uses the x86_64 audit architecture with an ABI bit in the syscall number. Compare the
-    // underlying call so an x32 `socket` or `socketpair` cannot skip the policy's native numbers.
+    // underlying call so an x32 `socket`, `socketpair` or `ioctl` cannot skip the native numbers.
     #[cfg(target_arch = "x86_64")]
-    filters.push(statement(ALU_AND_K, !X32_SYSCALL_BIT));
-    #[cfg(not(target_arch = "x86_64"))]
-    let _ = filters;
+    program.push(Op::Statement(ALU_AND_K, !X32_SYSCALL_BIT));
+    for (syscall, target) in [
+        (libc::SYS_io_uring_setup, Label::Deny),
+        (libc::SYS_socket, Label::Socket),
+        (libc::SYS_socketpair, Label::Socketpair),
+        (libc::SYS_ioctl, Label::Ioctl),
+    ] {
+        program.push(Op::Jump {
+            value: number(syscall),
+            yes: target,
+            no: Label::Next,
+        });
+    }
+    program.push(Op::Statement(RET_K, ALLOW));
+
+    program.push(Op::Mark(Label::Socket));
+    program.push(Op::Statement(LD_W_ABS, ARGUMENT_0));
+    let last = ALLOWED_SOCKETS.len() - 1;
+    for (index, (_, family, _)) in ALLOWED_SOCKETS.iter().enumerate() {
+        program.push(Op::Jump {
+            value: word(*family),
+            yes: Label::Protocols(index),
+            no: if index == last {
+                Label::Deny
+            } else {
+                Label::Next
+            },
+        });
+    }
+    for (index, (_, _, protocols)) in ALLOWED_SOCKETS.iter().enumerate() {
+        program.push(Op::Mark(Label::Protocols(index)));
+        program.push(Op::Statement(LD_W_ABS, ARGUMENT_2));
+        let last = protocols.len() - 1;
+        for (position, protocol) in protocols.iter().enumerate() {
+            program.push(Op::Jump {
+                value: word(*protocol),
+                yes: Label::Allow,
+                no: if position == last {
+                    Label::Deny
+                } else {
+                    Label::Next
+                },
+            });
+        }
+    }
+
+    program.extend([
+        Op::Mark(Label::Socketpair),
+        Op::Statement(LD_W_ABS, ARGUMENT_0),
+        Op::Jump {
+            value: word(libc::AF_UNIX),
+            yes: Label::Next,
+            no: Label::Deny,
+        },
+        Op::Statement(LD_W_ABS, ARGUMENT_1),
+        Op::Statement(ALU_AND_K, SOCKET_TYPE_MASK),
+        Op::Jump {
+            value: word(libc::SOCK_DGRAM),
+            yes: Label::Deny,
+            no: Label::Allow,
+        },
+        Op::Mark(Label::Ioctl),
+        Op::Statement(LD_W_ABS, ARGUMENT_1),
+        Op::Jump {
+            value: u32::try_from(libc::TIOCSETD).expect("TIOCSETD fits the 32-bit request word"),
+            yes: Label::Deny,
+            no: Label::Allow,
+        },
+        Op::Mark(Label::Deny),
+        Op::Statement(RET_K, deny),
+        Op::Mark(Label::Allow),
+        Op::Statement(RET_K, ALLOW),
+    ]);
+    assemble(&program)
+}
+
+/// Resolves every label to a forward jump offset and emits the classic-BPF program.
+///
+/// Classic BPF jumps are counts of instructions to skip and can only go forward. A label that is
+/// behind its jump, missing, or more than 255 instructions ahead is a bug in `filters`, so it
+/// panics rather than emitting a program whose refusal lands somewhere else.
+fn assemble(program: &[Op]) -> Vec<libc::sock_filter> {
+    let mut positions = Vec::new();
+    let mut at = 0_usize;
+    for op in program {
+        match op {
+            Op::Mark(label) => positions.push((*label, at)),
+            Op::Statement(..) | Op::Jump { .. } => at += 1,
+        }
+    }
+    let target = |label: Label, from: usize| -> u8 {
+        let to = if label == Label::Next {
+            from + 1
+        } else {
+            positions
+                .iter()
+                .find(|(marked, _)| *marked == label)
+                .unwrap_or_else(|| panic!("seccomp label {label:?} is never marked"))
+                .1
+        };
+        let skip = to
+            .checked_sub(from + 1)
+            .unwrap_or_else(|| panic!("seccomp label {label:?} lies behind its jump"));
+        u8::try_from(skip).expect("a seccomp jump fits one classic-BPF offset")
+    };
+    let mut filters = Vec::with_capacity(at);
+    for op in program {
+        match op {
+            Op::Mark(_) => {}
+            Op::Statement(code, value) => filters.push(libc::sock_filter {
+                code: *code,
+                jt: 0,
+                jf: 0,
+                k: *value,
+            }),
+            Op::Jump { value, yes, no } => {
+                let from = filters.len();
+                filters.push(libc::sock_filter {
+                    code: JMP_JEQ_K,
+                    jt: target(*yes, from),
+                    jf: target(*no, from),
+                    k: *value,
+                });
+            }
+        }
+    }
+    filters
 }
 
 /// One socket family's recorded stance, from the survey below.
@@ -231,13 +336,15 @@ pub(crate) struct FamilyPolicy {
 /// `request_module` on `net-pf-<family>` — and on `net-pf-<family>-proto-<protocol>` — is a
 /// property of `socket(2)` itself, not of a few exotic families. **`AF_INET` does it too**, and
 /// that is measured, not feared: `socket(AF_INET, SOCK_STREAM, IPPROTO_SCTP)` from inside this
-/// argv loaded `sctp` onto the host, where it stayed. It cannot be closed for `AF_INET` without
-/// closing `AF_INET`, and the egress aperture is a TCP listener in the child's own namespace
-/// (`egress::install_all`) while every ordinary program resolves names — so that one is an **accepted
-/// residual, written down**. The families that are denied below are the ones where the same
-/// channel costs nothing to close, because the survey also measured that a confined process can do
-/// nothing with them: an empty network namespace has no interface for `AF_RDS` or `AF_SMC`, no
-/// session for `AF_PPPOX`, no MCTP interface, and no TCP socket for `AF_KCM` to attach.
+/// argv loaded `sctp` onto the host, where it stayed. `AF_INET` itself cannot be refused — the
+/// egress aperture is a TCP listener in the child's own namespace (`egress::install_all`) and every
+/// ordinary program resolves names — so ADR 0039 closes it on the protocol argument instead:
+/// `ALLOWED_SOCKETS` admits each allowed family only with the protocols the runtime needs. Other
+/// kernel autoload paths are not claimed closed by that ADR. The families that are denied below
+/// are the ones where the same channel costs nothing to close, because the survey also measured
+/// that a confined process can do nothing with them: an empty network namespace has no interface
+/// for `AF_RDS` or `AF_SMC`, no session for `AF_PPPOX`, no MCTP interface, and no TCP socket for
+/// `AF_KCM` to attach.
 ///
 /// ### What this list still does not claim
 ///
@@ -266,11 +373,12 @@ pub(crate) const FAMILY_POLICY: [FamilyPolicy; 13] = [
         denied: false,
         reason: "measured confined: a datagram sent to 127.0.0.1:34567 from one sandbox never \
                  reached a socket bound to it in another",
-        host_state: "**mutates it, and this is an accepted residual rather than an absence.** \
-                     Measured: socket(AF_INET, SOCK_STREAM, IPPROTO_SCTP) from inside this argv \
-                     loaded `sctp` onto the host and it persisted after the sandbox exited. \
-                     Closing that would mean refusing AF_INET, which would remove the egress \
-                     aperture and name resolution from every confined workload",
+        host_state: "closed for the protocol argument by ADR 0039. Measured before it: \
+                     socket(AF_INET, SOCK_STREAM, IPPROTO_SCTP) from inside this argv loaded \
+                     `sctp` onto the host and it persisted after the sandbox exited. The family \
+                     stays allowed for the egress aperture and name resolution, but only with \
+                     protocol 0, IPPROTO_TCP or IPPROTO_UDP; any other protocol is refused EACCES \
+                     before the kernel looks it up",
     },
     FamilyPolicy {
         name: "AF_INET6",
@@ -278,8 +386,9 @@ pub(crate) const FAMILY_POLICY: [FamilyPolicy; 13] = [
         socket_type: libc::SOCK_DGRAM,
         denied: false,
         reason: "measured confined, the same way as AF_INET, over [::1]:34567",
-        host_state: "the same accepted residual, measured in the same run: the IPPROTO_SCTP probe \
-                     opened over AF_INET6 as well",
+        host_state: "closed for the protocol argument by ADR 0039, as for AF_INET: the \
+                     IPPROTO_SCTP probe opened over AF_INET6 as well before it, and now only \
+                     protocol 0, IPPROTO_TCP and IPPROTO_UDP are admitted",
     },
     FamilyPolicy {
         name: "AF_NETLINK",
@@ -289,11 +398,12 @@ pub(crate) const FAMILY_POLICY: [FamilyPolicy; 13] = [
         reason: "measured confined: a unicast to a netlink pid bound in another sandbox was \
                  refused EPERM and delivered nothing; netlink address spaces are per network \
                  namespace and the child's own is empty",
-        host_state: "the same residual in principle and **not measured here**: this host's \
-                     modules.alias carries net-pf-16-proto-* entries resolving to netlink_diag, \
-                     openvswitch, batman_adv and others, so a confined process could ask for one. \
-                     Kept regardless, because glibc reaches NETLINK_ROUTE for getaddrinfo and \
-                     interface enumeration and refusing it breaks name resolution everywhere",
+        host_state: "closed for the protocol argument by ADR 0039: only NETLINK_ROUTE is \
+                     admitted, which the kernel always has registered, so no other netlink \
+                     protocol can be asked for. The family stays allowed because glibc reaches \
+                     NETLINK_ROUTE for getaddrinfo and interface enumeration. The delegated case \
+                     in tests/kernel_module_triggers.rs proves a non-ROUTE protocol is refused \
+                     inside an admitted exec and leaves /proc/modules unchanged",
     },
     FamilyPolicy {
         name: "AF_RDS",
@@ -418,7 +528,7 @@ fn clear_cloexec(fd: RawFd) -> Result<(), DriverError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{DENIED_FAMILIES, ERRNO, FAMILY_POLICY, filters};
+    use super::{ALLOWED_SOCKETS, ERRNO, FAMILY_POLICY, filters};
 
     #[cfg(target_arch = "x86_64")]
     const X32_SYSCALL_BIT: libc::c_long = 0x4000_0000;
@@ -469,7 +579,7 @@ mod tests {
         }
         assert_eq!(
             checked,
-            DENIED_FAMILIES.len(),
+            FAMILY_POLICY.len() - ALLOWED_SOCKETS.len(),
             "this case covers the denied families by walking the survey, so a survey that denies \
              a different number covers a different set than the one it reports"
         );
@@ -552,20 +662,28 @@ mod tests {
             );
         }
 
-        // The filter is generated from `DENIED_FAMILIES`; the survey is what a reader consults.
-        // Two lists that disagree would mean one of them is a document about something else.
+        // The filter is generated from `ALLOWED_SOCKETS` (ADR 0039) and refuses every family it
+        // does not list; the survey is what a reader consults. Two lists that disagree would mean
+        // one of them is a document about something else.
         let surveyed: Vec<(&str, libc::c_int)> = FAMILY_POLICY
             .iter()
             .filter(|policy| policy.denied)
             .map(|policy| (policy.name, policy.family))
             .collect();
-        let mut generated: Vec<(&str, libc::c_int)> = DENIED_FAMILIES.to_vec();
-        let mut sorted = surveyed.clone();
-        sorted.sort_by_key(|(_, family)| *family);
+        let mut surveyed_allowed: Vec<(&str, libc::c_int)> = FAMILY_POLICY
+            .iter()
+            .filter(|policy| !policy.denied)
+            .map(|policy| (policy.name, policy.family))
+            .collect();
+        let mut generated: Vec<(&str, libc::c_int)> = ALLOWED_SOCKETS
+            .iter()
+            .map(|(name, family, _)| (*name, *family))
+            .collect();
+        surveyed_allowed.sort_by_key(|(_, family)| *family);
         generated.sort_by_key(|(_, family)| *family);
         assert_eq!(
-            sorted, generated,
-            "the families the BPF chain refuses and the families the survey records as denied are \
+            surveyed_allowed, generated,
+            "the families the BPF chain admits and the families the survey records as allowed are \
              different sets; the filter is what runs and the survey is what is read, so a reader \
              would be told something the sandbox does not do"
         );
@@ -586,6 +704,152 @@ mod tests {
             "the refused set is the confinement floor; changing it is a deliberate act and this \
              is where it is declared"
         );
+    }
+
+    /// ADR 0039 at the profile: every allowlisted (family, type, protocol) triple is not refused
+    /// by this profile.
+    ///
+    /// Asserted as "not `EACCES`", never as success, for `family_answer_matches`'s reason: a
+    /// kernel without the family answers for itself, and that is not this profile speaking.
+    #[test]
+    fn every_allowlisted_socket_triple_is_not_refused() {
+        let triples = [
+            (libc::AF_INET, libc::SOCK_STREAM, 0),
+            (libc::AF_INET, libc::SOCK_STREAM, libc::IPPROTO_TCP),
+            (libc::AF_INET, libc::SOCK_DGRAM, 0),
+            (libc::AF_INET, libc::SOCK_DGRAM, libc::IPPROTO_UDP),
+            (libc::AF_INET6, libc::SOCK_STREAM, 0),
+            (libc::AF_INET6, libc::SOCK_STREAM, libc::IPPROTO_TCP),
+            (libc::AF_INET6, libc::SOCK_DGRAM, 0),
+            (libc::AF_INET6, libc::SOCK_DGRAM, libc::IPPROTO_UDP),
+            (libc::AF_NETLINK, libc::SOCK_RAW, libc::NETLINK_ROUTE),
+            (libc::AF_NETLINK, libc::SOCK_DGRAM, libc::NETLINK_ROUTE),
+        ];
+        for (family, socket_type, protocol) in triples {
+            assert!(
+                profile_child_passes(&|| {
+                    // SAFETY: the child calls socket and close on its own return value only.
+                    unsafe { socket_errno(family, socket_type, protocol) != Some(libc::EACCES) }
+                }),
+                "socket({family}, {socket_type}, {protocol}) is on the ADR 0039 allowlist and \
+                 this profile refused it"
+            );
+        }
+    }
+
+    /// ADR 0039 at the profile: a protocol outside the allowlist, on an allowed family, is
+    /// refused with `EACCES`, natively and through the x32 number.
+    #[test]
+    fn a_protocol_outside_the_allowlist_is_refused_on_every_allowed_family() {
+        const IPPROTO_SCTP: libc::c_int = 132;
+        const NETLINK_NETFILTER: libc::c_int = 12;
+        let triples = [
+            (libc::AF_INET, libc::SOCK_STREAM, IPPROTO_SCTP),
+            (libc::AF_INET6, libc::SOCK_STREAM, IPPROTO_SCTP),
+            (libc::AF_INET, libc::SOCK_DGRAM, libc::IPPROTO_ICMP),
+            (libc::AF_INET6, libc::SOCK_DGRAM, libc::IPPROTO_ICMPV6),
+            (libc::AF_NETLINK, libc::SOCK_RAW, NETLINK_NETFILTER),
+        ];
+        for (family, socket_type, protocol) in triples {
+            assert!(
+                profile_child_passes(&|| {
+                    // SAFETY: the child calls socket and close on its own return value only.
+                    unsafe { socket_errno(family, socket_type, protocol) == Some(libc::EACCES) }
+                }),
+                "socket({family}, {socket_type}, {protocol}) is outside the ADR 0039 allowlist \
+                 and this profile did not refuse it with EACCES"
+            );
+            #[cfg(target_arch = "x86_64")]
+            assert!(
+                profile_child_passes(&|| {
+                    // SAFETY: the child issues one raw syscall and closes nothing it did not get.
+                    let result = unsafe {
+                        libc::syscall(
+                            libc::SYS_socket | X32_SYSCALL_BIT,
+                            family,
+                            socket_type | libc::SOCK_CLOEXEC,
+                            protocol,
+                        )
+                    };
+                    result == -1
+                        && std::io::Error::last_os_error().raw_os_error() == Some(libc::EACCES)
+                }),
+                "socket({family}, {socket_type}, {protocol}) is refused natively and reachable \
+                 through the x32 socket syscall"
+            );
+        }
+    }
+
+    /// ADR 0039 at the profile: `socketpair(2)` stays `AF_UNIX` only.
+    #[test]
+    fn socketpair_outside_af_unix_is_refused() {
+        for family in [libc::AF_INET, libc::AF_INET6, libc::AF_NETLINK] {
+            assert!(
+                profile_child_passes(&|| {
+                    let mut sockets = [-1; 2];
+                    // SAFETY: `sockets` has room for exactly two returned descriptors.
+                    let result = unsafe {
+                        libc::socketpair(
+                            family,
+                            libc::SOCK_STREAM | libc::SOCK_CLOEXEC,
+                            0,
+                            sockets.as_mut_ptr(),
+                        )
+                    };
+                    result == -1
+                        && std::io::Error::last_os_error().raw_os_error() == Some(libc::EACCES)
+                }),
+                "socketpair({family}) was not refused with EACCES"
+            );
+        }
+    }
+
+    /// ADR 0039 at the profile: `ioctl(TIOCSETD)` is refused with `EACCES` before the kernel
+    /// looks at the descriptor, and another terminal ioctl is not.
+    ///
+    /// Issued on descriptor -1 so that no terminal is touched: the profile answers before the
+    /// kernel would answer `EBADF`.
+    #[test]
+    fn the_line_discipline_ioctl_is_refused_and_other_terminal_ioctls_are_not() {
+        assert!(
+            profile_child_passes(&|| {
+                let discipline: libc::c_int = 0;
+                // SAFETY: TIOCSETD reads one int through a pointer that outlives the call.
+                let result = unsafe { libc::ioctl(-1, libc::TIOCSETD, &raw const discipline) };
+                result == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EACCES)
+            }),
+            "ioctl(TIOCSETD) was not refused with EACCES"
+        );
+        assert!(
+            profile_child_passes(&|| {
+                let mut size = libc::winsize {
+                    ws_row: 0,
+                    ws_col: 0,
+                    ws_xpixel: 0,
+                    ws_ypixel: 0,
+                };
+                // SAFETY: TIOCGWINSZ writes one winsize through a pointer that outlives the call.
+                let result = unsafe { libc::ioctl(-1, libc::TIOCGWINSZ, &raw mut size) };
+                result == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EBADF)
+            }),
+            "ioctl(TIOCGWINSZ) must reach the kernel and answer EBADF on descriptor -1"
+        );
+    }
+
+    /// The errno `socket(family, socket_type, protocol)` answered, or `None` if it opened.
+    unsafe fn socket_errno(
+        family: libc::c_int,
+        socket_type: libc::c_int,
+        protocol: libc::c_int,
+    ) -> Option<i32> {
+        // SAFETY: socket takes three integers and returns an owned descriptor or -1.
+        let result = unsafe { libc::socket(family, socket_type | libc::SOCK_CLOEXEC, protocol) };
+        if result >= 0 {
+            // SAFETY: the descriptor was returned by the successful call above.
+            unsafe { libc::close(result) };
+            return None;
+        }
+        std::io::Error::last_os_error().raw_os_error()
     }
 
     fn assert_profile_result(probe: unsafe fn() -> bool) {
