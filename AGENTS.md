@@ -267,7 +267,7 @@ a list, and the six lexical writable-root refusals (422) of ADR 0038 with
 `exec.writable-roots-host-unserved` and `exec.writable-roots-git-unserved` (501), which both lanes
 answer for a host root the daemon did not declare and for every Git root, and the portable lane
 also for the one host root the runner declares, which it cannot prove without confinement — across
-113 cases, and its delegated lane 175, whose four writable-root cases bind that declared root and
+114 cases, and its delegated lane 176, whose four writable-root cases bind that declared root and
 check the host side: the write lands, its parent and sibling do not change, a working directory
 beneath the mount runs there, and the declared path swapped for a symlink is
 `exec.writable-root-not-a-directory` (422). Its read-only-root cases (ADR 0010, bundle `0.23.0`): portable, the `exec.read-only-roots` fact is absent, one root is refused `exec.sandbox-unavailable` (501) by the daemon before dispatch and five roots are `exec.read-only-root-invalid` (422), the lexical rule checked first; delegated, the fact is `{"max_roots": 4}`, four roots are bound, read and refused writes, listed in the applied record and left unchanged on the host, a fifth is `exec.read-only-root-invalid` (422), and an absent host path is `exec.read-only-root-absent` (422) while a plain file and a symlink to a directory are `exec.read-only-root-not-a-directory` (422). Both totals also count a second daemon that declares a

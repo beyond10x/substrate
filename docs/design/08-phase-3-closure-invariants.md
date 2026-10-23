@@ -119,11 +119,12 @@ It refines the earlier phase-3 plan without changing the immutable 0.1.0 bundle.
   header deadline, maximum header count/buffer, body read deadline, and total connection lifetime,
   which is what ends an idle peer. That lifetime bounds a connection which stays un-upgraded. An
   upgraded one leaves it behind at the handshake — hyper resolves the connection future when it
-  hands the socket over — and is bounded by its own stream's lifetime instead, holding the
-  connection's transport slot until that stream ends, so that a connection which upgrades is still
-  counted against the transport's global and per-subject limits rather than dropping out of them
-  (`crates/substrate-daemon/src/runtime.rs`: `UnixTransportPolicy::production` and
-  `admitted_service`). WebSocket frame/message/write bounds,
+  hands the socket over — and is bounded by its own stream's lifetime instead. Its transport slot
+  is handed over to the stream at the upgrade, once the stream's own permit is held, so a
+  connection which upgrades is counted by its stream family's per-subject and deployment caps
+  rather than the transport's, and never by neither; those caps are published as capability facts
+  (ADR 0042; `crates/substrate-daemon/src/runtime.rs`: `UnixTransportPolicy::production`,
+  `admitted_service` and `hand_over_transport`). WebSocket frame/message/write bounds,
   send deadline, total lifetime, catch-up page budget, and global/subject permits are likewise one
   injectable policy. Permit and registry ownership is RAII on every preflight and timeout path.
 - Every transaction that appends an event notifies its source scope after commit. Notification is

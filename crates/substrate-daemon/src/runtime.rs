@@ -65,37 +65,30 @@ impl UnixTransportPolicy {
             // hands the socket to the upgrade, so the timeout around that future is already over
             // before the upgraded socket serves a byte. An upgraded peer is bounded by its own
             // stream's lifetime instead — one hour for an event stream, a metrics stream and a
-            // pipe attachment — and it holds this connection's transport slot for that whole time,
-            // deliberately: an upgraded connection the budget does not count is review finding 4
-            // (`story:upgraded-connections-keep-their-permit`), and counting it is what the
-            // admission in `admitted_service` does.
-            //
-            // That the two bounds disagree by an order of magnitude is a design question and not
-            // an oversight: enforcing five minutes on a stream that publishes one hour would break
-            // a contract to fix a bound. The story that decides it is
-            // `story:transport-admission-and-stream-lifetime-disagree`, and
-            // `app::tests::upgraded_transport_slot` pins what today does — including that sixteen
-            // upgraded streams from one source address deny every co-located caller for the
-            // stream's hour rather than the transport's five minutes.
+            // pipe attachment — and by its stream's caps: the upgraded task hands this
+            // connection's transport slot over to the stream permit it holds
+            // (`hand_over_transport`, ADR 0042), so the transport budget counts connections that
+            // have not upgraded and the published stream caps count the ones that have.
+            // `app::tests::upgraded_transport_slot` measures both halves.
             keep_alive: true,
         }
     }
 }
 
 /// The transport admission one connection was accepted under, shared with everything that
-/// connection is still serving.
+/// connection is still serving until an upgrade hands it over (ADR 0042).
 ///
-/// hyper resolves an upgradeable connection future when it hands the socket to the upgrade, so an
-/// admission owned only by `enforce_connection_lifetime` is released the moment a WebSocket
-/// handshake succeeds and the upgraded socket runs in a task the transport budget no longer
-/// counts. Every listener therefore publishes a clone of this handle in the request extensions,
-/// and every upgraded task in this crate moves one in: the slot returns when the connection and
-/// every socket it produced are gone, not when the handshake succeeds.
-/// `app::metrics::tests::every_websocket_upgrade_keeps_its_transport_admission` is the check that
-/// a route added later cannot leave it behind.
+/// Every listener publishes a clone of this handle in the request extensions
+/// (`admitted_service`), and `enforce_connection_lifetime` holds one for the connection future.
+/// For a connection that never upgrades, the slot returns when the connection and every clone are
+/// gone. For one that upgrades, the upgraded task calls [`hand_over_transport`] with the stream
+/// permit it holds, and the slot returns then, whatever clones remain: from that point the socket
+/// is counted by its stream's per-subject and deployment caps, not by the transport's.
+/// `app::metrics::tests::every_websocket_upgrade_hands_its_transport_admission_to_its_stream` is
+/// the check that a route added later cannot skip the hand-over.
 #[derive(Clone)]
 pub(crate) struct TransportPermit {
-    _slot: Arc<TransportSlot>,
+    slot: Arc<Mutex<Option<TransportSlot>>>,
 }
 
 /// The two admissions one connection holds together: the listener's global bound, and its scope's
@@ -108,11 +101,35 @@ struct TransportSlot {
 impl TransportPermit {
     fn new(global: OwnedSemaphorePermit, scope: OwnedSemaphorePermit) -> Self {
         Self {
-            _slot: Arc::new(TransportSlot {
+            slot: Arc::new(Mutex::new(Some(TransportSlot {
                 _global: global,
                 _scope: scope,
-            }),
+            }))),
         }
+    }
+}
+
+/// A stream family's own admission, held for as long as an upgraded socket serves: an event or
+/// metrics stream permit, or a session attachment permit. Each is counted by a per-subject (or
+/// per-session) cap and a deployment-wide cap, which the capability snapshot publishes
+/// (`events.stream-bounds`, `metrics.stream-bounds`, `sessions.attachment-bounds`).
+pub(crate) trait StreamSlot {}
+
+/// Hands an upgraded connection's transport admission over to the stream it became (ADR 0042).
+///
+/// Releases the transport slot now, even while clones of the admission remain in request
+/// extensions or in `enforce_connection_lifetime`. It borrows the stream permit the caller holds,
+/// so it cannot be called before a stream slot is taken: the socket is counted by the stream's
+/// caps before the transport stops counting it, and at no instant by neither. Called first in
+/// every upgraded task, which runs only after the `101`; a request that fails to upgrade never
+/// reaches it, and its connection keeps the transport slot until it ends. `None` — a route driven
+/// without a transport, as the crate's own tests do — hands over nothing.
+pub(crate) fn hand_over_transport<S: StreamSlot>(
+    transport_admission: Option<TransportPermit>,
+    _stream: &S,
+) {
+    if let Some(admission) = transport_admission {
+        drop(admission.slot.lock().take());
     }
 }
 
@@ -244,10 +261,11 @@ fn http1_builder(policy: UnixTransportPolicy) -> http1::Builder {
 /// One connection's service, carrying the transport admission that connection was accepted under.
 ///
 /// Every request the connection makes arrives with a clone of the admission, which is how the task
-/// an upgrade hands the socket to gets one to hold. hyper resolves an upgradeable connection future
-/// when it hands that socket over, so an admission owned only by `enforce_connection_lifetime` is
-/// released at the handshake and the socket that is still serving stops being counted — 128 global
-/// and 32 per uid on unix, 128 and 16 per source address over TCP and TLS.
+/// an upgrade hands the socket to gets one to hand over. hyper resolves an upgradeable connection
+/// future when it hands that socket over, so the upgraded task, not the connection, decides when
+/// the slot returns: at the hand-over to its stream permit (`hand_over_transport`, ADR 0042). The
+/// transport budget — 128 global and 32 per uid on unix, 128 and 16 per source address over TCP
+/// and TLS — therefore counts every connection that has not upgraded.
 ///
 /// Every `.serve_connection(` under `src/` that goes on to `.with_upgrades()` is served through
 /// here — the three production listeners, and the three in-crate fixtures that stand in for one:
@@ -267,16 +285,15 @@ pub(crate) fn admitted_service<S>(
 /// Holds one connection's admission and bounds the connection future, and neither outlives it.
 ///
 /// `pub(crate)` so the fixtures that stand in for a listener drive this rather than a copy of it:
-/// a change to how the deadline and the admission meet — which is what
-/// `story:transport-admission-and-stream-lifetime-disagree` would change, and this is where the
-/// deadline lives — must reach `app::tests::upgraded_transport_slot`, whose cases are pinned to
-/// today's answer and instruct their reader to invert them when it moves.
+/// a change to how the deadline and the admission meet must reach
+/// `app::tests::upgraded_transport_slot`, which measures the production composition.
 ///
 /// The deadline is on the future passed in. hyper resolves an upgradeable connection future when
 /// it hands the socket to the upgrade, so a connection that upgrades leaves this bound behind at
-/// the handshake and is bounded by its stream's own lifetime from there. The admission does not
-/// leave with it — every request carries a clone (`admitted_service`) and the upgraded task keeps
-/// one — which is deliberate and is what `UnixTransportPolicy::production` records.
+/// the handshake and is bounded by its stream's own lifetime from there. Its transport admission
+/// is released by the upgraded task's `hand_over_transport` once the stream permit holds the
+/// socket (ADR 0042, `story:transport-admission-and-stream-lifetime-disagree`), which is what
+/// `UnixTransportPolicy::production` records.
 pub(crate) async fn enforce_connection_lifetime<P, F, T, E>(
     permit: P,
     lifetime: std::time::Duration,
@@ -2460,24 +2477,37 @@ mod tests {
 
     /// The production unix accept-and-serve loop, over a route that upgrades to a WebSocket and
     /// keeps its socket open the way a session attachment does.
+    ///
+    /// The route takes a slot from `stream_slots` before it answers `101` and refuses `429` when
+    /// none is free, as every served stream family does with its own cap (ADR 0042), so a case can
+    /// observe both budgets: the transport's and the stream's.
     async fn serve_attachable_unix_listener(
         listener: UnixListener,
         allowed: BTreeSet<u32>,
         limits: Arc<ConnectionLimits>,
         policy: UnixTransportPolicy,
+        stream_slots: Arc<Semaphore>,
     ) {
         loop {
             let AcceptedConnection { stream, permit, .. } =
                 accept_authorized(&listener, &allowed, &limits, policy.accept_retry_delay).await;
+            let stream_slots = Arc::clone(&stream_slots);
             let service = Router::new().route(
                 "/attach",
                 axum::routing::get(
                     |transport: Option<Extension<TransportPermit>>,
                      upgrade: axum::extract::ws::WebSocketUpgrade| async move {
-                        // The hand-off the three production listeners make, made here too: the
-                        // admission this connection was accepted under is taken out of the request
-                        // and moved into the upgraded task, so what this fixture measures is the
-                        // production mechanism rather than one written for the test.
+                        // The stream's own admission, taken before the `101` as every served
+                        // stream takes its permit in the handler.
+                        let Ok(stream_slot) = stream_slots.try_acquire_owned() else {
+                            return StatusCode::TOO_MANY_REQUESTS.into_response();
+                        };
+                        let stream_slot = FixtureStreamSlot(stream_slot);
+                        // The hand-over the three production routes make, made here too: the
+                        // admission this connection was accepted under is taken out of the request,
+                        // moved into the upgraded task and handed to the stream slot there, so what
+                        // this fixture measures is the production mechanism rather than one written
+                        // for the test.
                         let transport_admission = transport.map(|Extension(permit)| permit);
                         // Bounded like every served upgrade, so the crate-wide check in
                         // `app::metrics::tests::every_websocket_upgrade_declares_its_frame_message_and_lifetime_bounds`
@@ -2496,9 +2526,8 @@ mod tests {
                                 struct FixturePolicy {
                                     lifetime: std::time::Duration,
                                 }
-                                // Held for as long as this socket serves. hyper has already
-                                // resolved the connection future by the time this task runs.
-                                let _transport_admission = transport_admission;
+                                hand_over_transport(transport_admission, &stream_slot);
+                                let _stream_slot = stream_slot;
                                 let policy = FixturePolicy {
                                     lifetime: std::time::Duration::from_secs(30),
                                 };
@@ -2511,6 +2540,7 @@ mod tests {
                                 })
                                 .await;
                             })
+                            .into_response()
                     },
                 ),
             );
@@ -2528,20 +2558,10 @@ mod tests {
         }
     }
 
-    /// Reads exactly one HTTP response head, leaving every later byte on the socket.
-    async fn read_response_head(stream: &mut UnixStream, deadline: std::time::Duration) -> String {
-        let mut head = Vec::new();
-        let mut byte = [0_u8; 1];
-        while !head.ends_with(b"\r\n\r\n") {
-            assert!(head.len() < 4_096, "bounded response head");
-            tokio::time::timeout(deadline, stream.read_exact(&mut byte))
-                .await
-                .expect("the response head arrives")
-                .expect("read the response head");
-            head.push(byte[0]);
-        }
-        String::from_utf8(head).expect("utf-8 response head")
-    }
+    /// The fixture route's stream permit: a slot of the stream cap the listener was given.
+    struct FixtureStreamSlot(#[allow(dead_code)] OwnedSemaphorePermit);
+
+    impl StreamSlot for FixtureStreamSlot {}
 
     /// What one plain HTTP request on a brand new connection is answered with, or `None` when the
     /// daemon served nothing at all.
@@ -2573,20 +2593,93 @@ mod tests {
         }
     }
 
-    /// **The transport budget counts an upgraded connection for as long as it serves.** hyper
-    /// resolves an upgradeable connection future when it hands the socket to the upgrade, so an
-    /// admission owned only by `enforce_connection_lifetime` is released the moment a WebSocket
-    /// handshake succeeds and the upgraded socket runs in a task the budget no longer counts.
+    /// The response head an upgrade request on a brand new connection is answered with, and the
+    /// connection, or `None` when the daemon served nothing at all (refused at accept, as
+    /// `ask_over_a_new_connection` describes).
+    async fn upgrade_over_a_new_connection(
+        socket_path: &Path,
+        deadline: std::time::Duration,
+    ) -> Option<(String, UnixStream)> {
+        let mut stream = UnixStream::connect(socket_path)
+            .await
+            .expect("connect the upgrading client");
+        stream
+            .write_all(
+                format!(
+                    "GET /attach HTTP/1.1\r\n\
+                     Host: localhost\r\n\
+                     Connection: Upgrade\r\n\
+                     Upgrade: websocket\r\n\
+                     Sec-WebSocket-Version: 13\r\n\
+                     Sec-WebSocket-Key: {HANDSHAKE_KEY}\r\n\r\n"
+                )
+                .as_bytes(),
+            )
+            .await
+            .ok()?;
+        let mut head = Vec::new();
+        let mut byte = [0_u8; 1];
+        while !head.ends_with(b"\r\n\r\n") {
+            assert!(head.len() < 4_096, "bounded response head");
+            match tokio::time::timeout(deadline, stream.read_exact(&mut byte))
+                .await
+                .expect("the connection is refused or served within the deadline")
+            {
+                Ok(_) => head.push(byte[0]),
+                Err(error)
+                    if head.is_empty()
+                        && matches!(
+                            error.kind(),
+                            io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset
+                        ) =>
+                {
+                    return None;
+                }
+                Err(error) => panic!("read the response head: {error}"),
+            }
+        }
+        Some((
+            String::from_utf8(head).expect("utf-8 response head"),
+            stream,
+        ))
+    }
+
+    /// The first upgrade answer on a new connection, polled past refusals at accept: a plain
+    /// connection that just ended may still hold its transport slot until the server observes the
+    /// closed peer.
+    async fn upgrade_when_admitted(
+        socket_path: &Path,
+        deadline: std::time::Duration,
+    ) -> (String, UnixStream) {
+        for _ in 0..100 {
+            if let Some(answer) = upgrade_over_a_new_connection(socket_path, deadline).await {
+                return answer;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        panic!("no upgrade request was admitted at the transport within two seconds");
+    }
+
+    /// **An upgraded connection hands its transport slot to its stream** (ADR 0042, decisions 1
+    /// and 2). hyper resolves an upgradeable connection future when it hands the socket to the
+    /// upgrade, and from then on the socket is counted by its stream's cap, not the transport's.
     ///
-    /// Measured here rather than inferred, and in both directions: with the per-uid budget set to
-    /// one and an upgraded socket provably still serving, the next connection from that uid is
-    /// refused at accept — and once the upgraded socket ends, the same uid is admitted again, so
-    /// the admission is held for the socket's life rather than leaked for the process's.
+    /// Measured here rather than inferred, in three steps, with the per-uid transport budget and
+    /// the fixture route's stream cap both set to one:
     ///
-    /// This case was `an_upgraded_websocket_releases_its_per_uid_connection_permit` and pinned the
-    /// defect `story:upgraded-connections-keep-their-permit` closes. It asserts the guarantee now.
+    /// 1. with an upgraded socket provably still serving, the next plain connection from that uid
+    ///    is served — the transport slot came back at the upgrade;
+    /// 2. a second upgrade from that uid is admitted at the transport and refused `429` by the
+    ///    stream cap — the upgraded socket is still counted, by the stream's budget;
+    /// 3. once the upgraded socket ends, a new upgrade from the same uid is `101` again — the
+    ///    stream slot is held for the socket's life rather than leaked for the process's.
+    ///
+    /// This case was `an_upgraded_websocket_keeps_its_per_uid_connection_permit`, which asserted
+    /// that finding 4's socket kept the transport slot for the stream's lifetime
+    /// (`story:upgraded-connections-keep-their-permit`). ADR 0042 moves what counts it; step 2 is
+    /// finding 4's guarantee in its new form, so the socket is never counted by neither budget.
     #[tokio::test]
-    async fn an_upgraded_websocket_keeps_its_per_uid_connection_permit() {
+    async fn an_upgraded_websocket_hands_its_per_uid_connection_permit_to_its_stream() {
         const DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
 
         let directory = tempfile::tempdir().expect("temporary directory");
@@ -2608,27 +2701,12 @@ mod tests {
             allowed,
             Arc::clone(&limits),
             policy,
+            Arc::new(Semaphore::new(1)),
         ));
 
-        let mut upgrading = UnixStream::connect(&socket_path)
+        let (head, mut upgrading) = upgrade_over_a_new_connection(&socket_path, DEADLINE)
             .await
-            .expect("connect the upgrading client");
-        upgrading
-            .write_all(
-                format!(
-                    "GET /attach HTTP/1.1\r\n\
-                     Host: localhost\r\n\
-                     Connection: Upgrade\r\n\
-                     Upgrade: websocket\r\n\
-                     Sec-WebSocket-Version: 13\r\n\
-                     Sec-WebSocket-Key: {HANDSHAKE_KEY}\r\n\r\n"
-                )
-                .as_bytes(),
-            )
-            .await
-            .expect("send the upgrade request");
-
-        let head = read_response_head(&mut upgrading, DEADLINE).await;
+            .expect("the first connection is admitted");
         assert!(
             head.starts_with("HTTP/1.1 101 "),
             "the websocket upgrade succeeded: {head}"
@@ -2643,33 +2721,46 @@ mod tests {
             "the upgraded socket is serving after the handshake"
         );
 
-        // The guarantee: that upgraded socket still holds the only per-uid slot, so the next plain
-        // HTTP connection from the same uid is refused at accept and answers nothing at all.
+        // 1. The transport slot came back at the upgrade: the hand-over runs before the first
+        // frame, so the only per-uid slot is free while the upgraded socket still serves.
         let served = ask_over_a_new_connection(&socket_path, DEADLINE).await;
-        assert_eq!(
-            served, None,
-            "the upgraded socket is still serving and holds the only per-uid slot, so a second \
-             connection from that uid must be refused at accept; it was served: {served:?}"
+        assert!(
+            served
+                .as_deref()
+                .is_some_and(|answer| answer.starts_with("HTTP/1.1 ")),
+            "the upgraded socket still holds the only per-uid transport slot, so a second \
+             connection from that uid was refused at accept; ADR 0042 hands it to the stream at \
+             the upgrade. It answered: {served:?}"
         );
 
-        // Held for the socket's life, not leaked for the process's: when the upgraded socket ends,
-        // the same uid is admitted again. Polled, because the upgraded task returns its admission
-        // when it observes the closed peer rather than when the peer closes.
+        // 2. Still counted, by the stream's cap.
+        let (refused, refused_stream) = upgrade_when_admitted(&socket_path, DEADLINE).await;
+        assert!(
+            refused.starts_with("HTTP/1.1 429 "),
+            "the upgraded socket holds the only stream slot, so a second upgrade must be refused \
+             by the stream cap: {refused}"
+        );
+        drop(refused_stream);
+
+        // 3. Held for the socket's life, not leaked: when the upgraded socket ends, a new upgrade
+        // from the same uid is served again. Polled, because the upgraded task returns its stream
+        // slot when it observes the closed peer rather than when the peer closes.
         drop(upgrading);
-        let mut answer = None;
+        let mut answer = String::new();
         for _ in 0..100 {
-            answer = ask_over_a_new_connection(&socket_path, DEADLINE).await;
-            if answer.is_some() {
+            let (head, again) = upgrade_when_admitted(&socket_path, DEADLINE).await;
+            answer = head;
+            if answer.starts_with("HTTP/1.1 101 ") {
+                drop(again);
                 break;
             }
+            drop(again);
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
         assert!(
-            answer
-                .as_deref()
-                .is_some_and(|answer| answer.starts_with("HTTP/1.1 ")),
-            "the ended upgraded socket returns its admission, so the same uid is served again; it \
-             answered: {answer:?}"
+            answer.starts_with("HTTP/1.1 101 "),
+            "the ended upgraded socket returns its stream slot, so the same uid upgrades again; \
+             it answered: {answer}"
         );
     }
 }

@@ -29,7 +29,7 @@ use substrate_wire::{
 };
 use tokio::sync::{Notify, Semaphore};
 
-use crate::runtime::TransportPermit;
+use crate::runtime::{StreamSlot, TransportPermit, hand_over_transport};
 
 use super::events::{ControlRate, enforce_stream_send_deadline};
 use super::git_roots::{StartRefusal, admit_start_workspaces, start_workspaces};
@@ -60,7 +60,7 @@ pub(super) struct PipeSessionPolicy {
     write_buffer_bytes: usize,
     send_timeout: std::time::Duration,
     read_poll: std::time::Duration,
-    lifetime: std::time::Duration,
+    pub(super) lifetime: std::time::Duration,
     max_controls_per_window: u32,
     control_window: std::time::Duration,
 }
@@ -163,6 +163,10 @@ impl PipeAttachmentLimits {
 /// session sets `Available` again. So the tombstone barred a session the durable claim had already
 /// barred, while the forgotten permit was real, permanent loss of capacity that the published
 /// `session.attachment-capacity` refusal calls exhausted and retriable.
+/// A session attachment slot: the per-session and global caps the snapshot publishes as
+/// `sessions.attachment-bounds` (ADR 0042).
+impl StreamSlot for PipeAttachmentPermit {}
+
 impl Drop for PipeAttachmentPermit {
     fn drop(&mut self) {
         self.limits
@@ -1316,10 +1320,11 @@ pub(super) async fn pipe_session_attach(
     let mode = session.mode;
     let policy = app.pipe_session_policy;
     // The transport admission this connection was accepted under, moved into the upgraded task
-    // below. hyper resolves an upgradeable connection future when it hands the socket over, so an
-    // admission left with the connection stops counting an attachment that is still serving.
-    // Absent when no listener published one — the crate's own tests drive this route without a
-    // transport.
+    // below and handed over there to the attachment permit already held (ADR 0042): from the
+    // upgrade on, this socket is counted by the published attachment caps, not the transport
+    // budget. A failed upgrade drops it with the callback, ending the connection's hold as the
+    // connection ends. Absent when no listener published one — the crate's own tests drive this
+    // route without a transport.
     let transport_admission = transport_permit.map(|Extension(permit)| permit);
 
     // The claim above is already consumed and the session is no longer attachable, so an upgrade
@@ -1359,8 +1364,7 @@ pub(super) async fn pipe_session_attach(
             );
         })
         .on_upgrade(move |socket| async move {
-            // Held for as long as this attachment serves, so the transport budget counts it.
-            let _transport_admission = transport_admission;
+            hand_over_transport(transport_admission, &permit);
             let completed = tokio::time::timeout(
                 policy.lifetime,
                 run_pipe_attachment(

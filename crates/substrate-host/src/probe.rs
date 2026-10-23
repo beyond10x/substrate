@@ -192,6 +192,13 @@ pub fn probe(config: &HostConfig, openat2: bool) -> CapabilitySnapshot {
             latest_wins: true,
             replay: false,
         }),
+        // ADR 0042: each upgraded stream family's caps, lifetime and refusal, published beside
+        // the stream it bounds. The event stream is always served; the metrics stream exactly
+        // when `metrics.stream` is published; a session attachment exactly when an exec can run.
+        events_stream_bounds: Some(substrate_wire::StreamBoundsFacts::events()),
+        metrics_stream_bounds: (exec && resource_usage.is_some())
+            .then(substrate_wire::StreamBoundsFacts::metrics),
+        sessions_attachment_bounds: exec.then(substrate_wire::AttachmentBoundsFacts::sessions),
         exec_egress_apertures: egress_apertures,
         secrets_slots,
         sessions_pty,
@@ -1482,6 +1489,39 @@ exit 1
                 "the probe that gates every exec fact does not carry {option}, so a backend \
                  which cannot give a confined child a non-nestable user namespace still proves \
                  the confinement floor: {argv:?}"
+            );
+        }
+    }
+
+    /// ADR 0042 decision 4: the event stream's bounds are always published, the metrics
+    /// stream's exactly when `metrics.stream` is, and the session attachment's exactly when exec
+    /// is served. Each tie is asserted rather than a host-dependent value, so the case holds on a
+    /// host that serves exec and on one that does not.
+    #[test]
+    fn the_stream_bound_facts_are_published_beside_the_streams_they_bound() {
+        let facts = probe(&HostConfig::minimum("/does/not/exist"), false).facts;
+        assert_eq!(
+            facts.events_stream_bounds,
+            Some(substrate_wire::StreamBoundsFacts::events())
+        );
+        assert_eq!(
+            facts.metrics_stream_bounds.is_some(),
+            facts.metrics_stream.is_some()
+        );
+        if facts.metrics_stream.is_some() {
+            assert_eq!(
+                facts.metrics_stream_bounds,
+                Some(substrate_wire::StreamBoundsFacts::metrics())
+            );
+        }
+        assert_eq!(
+            facts.sessions_attachment_bounds.is_some(),
+            facts.exec_argv_only.is_some()
+        );
+        if facts.exec_argv_only.is_some() {
+            assert_eq!(
+                facts.sessions_attachment_bounds,
+                Some(substrate_wire::AttachmentBoundsFacts::sessions())
             );
         }
     }

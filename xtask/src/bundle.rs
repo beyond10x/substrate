@@ -47,6 +47,7 @@ use crate::report::Report;
 mod host_process;
 mod read_only_roots;
 mod session_exec_fields;
+mod stream_bounds;
 mod workdir_apertures;
 mod writable_roots;
 
@@ -897,10 +898,13 @@ fn check_additions(version: &str, released: &Tree, failures: &mut Vec<String>) {
     // Design 27 binds every bundle from `0.23.0` on, not only the one that introduced it.
     if session_exec_fields::applies_to(version) {
         session_exec_fields::check(released, failures);
+        // ADR 0042's stream-bound facts bind every bundle from `0.23.0` on, like design 27.
+        stream_bounds::check(released, failures);
     }
     if version == "0.23.0" {
         read_only_roots::check(version, released, failures);
         session_exec_fields::check_introduction(released, failures);
+        stream_bounds::check_introduction(released, failures);
         return;
     }
     if version == "0.22.0" {
