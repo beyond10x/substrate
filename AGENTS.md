@@ -663,3 +663,5 @@ source release.
 ## Executable specification
 
 `spec/ess-inputs.yaml` pins ESS. `cargo xtask check-ess` validates the specification and regenerates the committed suite to check drift. The first projection is the accepted-operation ledger, with its coverage and excluded boundaries documented in `spec/coverage.md`. Existing runtime and immutable-bundle gates remain required. Never describe this bounded projection as full service conformance.
+
+Moving the ESS pin also moves `ESS_VERSION` **and** `ESS_SHA256` in `.github/workflows/gate.yml`; the local gate uses the installed `ess` and does not check the archive, so a stale digest fails only in CI (it happened at 0.67.0 and again at 0.68.0). Take the digest from `gh release view <version> -R beyond10x/ess --json assets` and confirm it with `sha256sum` on the downloaded archive.
