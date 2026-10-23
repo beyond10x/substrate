@@ -398,6 +398,32 @@ must:
    been established here;
 4. pass that root through `--cgroup-root`.
 
+The published daemon image carries the two files item 3 names. Its `daemon` stage
+(`Dockerfile:59-72`) builds `FROM execution-prerequisites` (`Dockerfile:48-57`), which installs
+the Ubuntu `socat` package as `/usr/bin/socat` (`Dockerfile:51-54`) and copies bubblewrap to
+`/usr/bin/bwrap` (`Dockerfile:55`), the default of `--bubblewrap`. That bubblewrap is 0.11.2,
+built non-setuid from a checksum-pinned release tarball in the `sandbox-builder` stage
+(`Dockerfile:33-46`): the version item 3 was measured against, which accepts the
+`--disable-userns` the probe passes (`crates/substrate-host/src/process.rs:64`) and the
+`--assert-userns-disabled` it asserts with (`crates/substrate-host/src/probe.rs:630`). The image
+supplies nothing else the probe needs, so before the probe advertises exec a deployment of it must
+still supply:
+
+1. a delegated cgroup v2 subtree carrying `cpu`, `memory` and `pids`, with the daemon inside it and
+   its `cgroup.procs` writable by the image's UID 65532 (`USER 65532:65532`, `Dockerfile:71`);
+2. a process-free delegation root: the probe refuses a root whose own `cgroup.procs` is not empty;
+3. `--cgroup-root` (or `SUBSTRATE_CGROUP_ROOT`) naming that root, which the image's entrypoint
+   (`Dockerfile:72`) does not pass;
+4. a container runtime that permits bubblewrap's namespaces: a user namespace, and IPC, PID,
+   network and UTS namespaces inside it. A runtime policy that refuses them fails the probe, and
+   every exec is refused `exec.sandbox-unavailable`.
+
+The [container execution](#container-execution) bootstrap supplies items 1 to 3 inside its own
+private cgroup namespace and refuses a caller's `--cgroup-root`; item 4 remains the deployment's,
+through the AppArmor and seccomp profiles that section names. The disposable MCP image's `mcp`
+stage (`Dockerfile:74-82`) is distroless `cc-debian12` and carries neither bubblewrap nor socat,
+so the daemon child it starts serves no exec: every exec is refused `exec.sandbox-unavailable`.
+
 Each exec's CPU bandwidth is derived from its declared CPU time over its timeout and capped at
 `--exec-cpu-cores N` whole cores (`SUBSTRATE_EXEC_CPU_CORES`, default 1). Startup refuses 0, or
 more cores than the daemon process may run on, as `config.exec-cpu-cores-invalid`; it never clamps
