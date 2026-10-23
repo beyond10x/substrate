@@ -21,6 +21,7 @@ mod mcp;
 mod mcp_smoke;
 mod package;
 mod packages;
+mod quota_fixture;
 mod quota_lane;
 mod render;
 mod render_v2;
@@ -88,6 +89,9 @@ enum Command {
     /// Run the ignored real project-quota cases, or refuse by name when their fixture is absent.
     #[command(name = "quota-lane")]
     QuotaLane(quota_lane::Args),
+    /// Provision the project-quota fixture in the checked-in container recipe and run the lane there.
+    #[command(name = "quota-fixture")]
+    QuotaFixture(quota_fixture::Args),
     /// Validate ADR identity, frontmatter, index agreement, and supersession links.
     #[command(name = "check-adrs")]
     Adrs,
@@ -141,6 +145,7 @@ fn dispatch() -> Result<ExitCode> {
         Command::McpBoundary => mcp::check(&repo::root()?)?,
         Command::McpCodexSmoke(args) => return mcp_smoke::run(&args),
         Command::QuotaLane(args) => return quota_lane::run(&args),
+        Command::QuotaFixture(args) => return quota_fixture::run(&args),
         Command::Adrs => adrs::check(&repo::root()?)?,
         Command::CheckJson(args) => return json::run(&args),
         Command::PackageBundle(args) => return package::run(&args),
