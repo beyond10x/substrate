@@ -53,7 +53,12 @@ fn review_probe_entry() {
             let control = errno_line(native);
             // SAFETY: the x32 compat ioctl number with the same arguments.
             let x32 = unsafe {
-                libc::syscall(0x4000_0000 | 0x202, -1, libc::TIOCSETD, &raw const discipline)
+                libc::syscall(
+                    0x4000_0000 | 0x202,
+                    -1,
+                    libc::TIOCSETD,
+                    &raw const discipline,
+                )
             };
             (control, errno_line(x32))
         }
