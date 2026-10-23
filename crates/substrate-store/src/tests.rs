@@ -4825,3 +4825,162 @@ mod adversary_2_unknown_exec_lease_expiry {
         );
     }
 }
+
+/// `session.retire` admits a session in `unknown` only once recovery has recorded its exec's
+/// tree physically absent, as `exec.retire` does for an `unknown` exec.
+mod session_retire_waits_for_proven_absence {
+    use super::*;
+    use crate::SessionRetireReservation;
+
+    const SESSION: &str = "ses_retire_unknown";
+    const EXEC: &str = "ex_retire_unknown";
+
+    /// A ready session whose daemon restarted: reconcile leaves it and its exec `unknown`.
+    fn unknown_session(store: &Store, scope: &Scope) {
+        store
+            .put_workspace(scope, "ws_retire_unknown", &workspace("ws_retire_unknown"))
+            .expect("seed workspace");
+        let start = operation_named(
+            "local:1000",
+            "01JB10SESSIONRETIRE00001",
+            "session.start",
+            SESSION,
+            &"b".repeat(64),
+        );
+        let lease = NewLease {
+            ttl_ms: 60_000,
+            clock: LeaseClock {
+                wall: "2026-08-13T12:00:00Z".parse().expect("time"),
+                boot_id: "boot-test".to_owned(),
+                boottime_ms: 1_000,
+            },
+            authorizing_operation: start.operation.clone(),
+            actor: "test".to_owned(),
+            principal: None,
+        };
+        let mut running = exec(EXEC, "ws_retire_unknown", ExecState::Accepted);
+        running.resource.lease = Some(lease.observation());
+        let provisional = pipe_session(SESSION, EXEC, "ws_retire_unknown", &lease);
+        assert_eq!(
+            store
+                .reserve_pipe_session_start(&start, &provisional, &running, &lease, None)
+                .expect("reserve session"),
+            Reservation::Accepted
+        );
+        running.resource.state = ExecState::Running;
+        let mut ready = provisional;
+        ready.state = SessionState::Ready;
+        ready.attachment = SessionAttachmentState::Available;
+        store
+            .complete_pipe_session_start(
+                scope,
+                &start.operation,
+                "2026-08-13T12:00:01Z",
+                202,
+                &ready,
+                &running,
+                &lease,
+            )
+            .expect("complete session start");
+        store
+            .reconcile_after_restart(
+                "dep_test",
+                "2026-08-13T12:00:03Z".parse().expect("cutoff"),
+                "2026-08-13T12:00:03Z".parse().expect("observed"),
+                64,
+            )
+            .expect("restart reconcile");
+        assert_eq!(
+            store
+                .session(scope, SESSION)
+                .expect("session lookup")
+                .expect("durable session")
+                .state,
+            SessionState::Unknown
+        );
+    }
+
+    fn retire(store: &Store, operation: &str) -> SessionRetireReservation {
+        let retire = operation_named(
+            "local:1000",
+            operation,
+            "session.retire",
+            SESSION,
+            &"5".repeat(64),
+        );
+        store
+            .retire_pipe_session(
+                &retire,
+                SESSION,
+                "2026-08-13T12:00:05Z".parse().expect("time"),
+            )
+            .expect("retire answer")
+    }
+
+    #[test]
+    fn an_unknown_session_not_recorded_absent_is_refused_and_kept() {
+        let store = Store::open(":memory:").expect("open store");
+        let scope = scope("local:1000");
+        unknown_session(&store, &scope);
+
+        let answer = retire(&store, "01JB10SESSIONRETIRE00002");
+        let SessionRetireReservation::Refused(answer) = answer else {
+            panic!("an unknown session not recorded absent is refused: {answer:?}");
+        };
+        assert_eq!(answer.status, 409);
+        let OperationOutcome::Error { error } = answer.outcome else {
+            panic!("a refusal carries an error");
+        };
+        assert_eq!(error.code, "session.not-terminal");
+        assert_eq!(
+            store
+                .session(&scope, SESSION)
+                .expect("session lookup")
+                .expect("the session row is kept")
+                .state,
+            SessionState::Unknown
+        );
+        assert_eq!(
+            store
+                .exec(&scope, EXEC)
+                .expect("exec lookup")
+                .expect("the exec row is kept")
+                .resource
+                .state,
+            ExecState::Unknown
+        );
+    }
+
+    #[test]
+    fn an_unknown_session_recorded_absent_is_retired() {
+        let store = Store::open(":memory:").expect("open store");
+        let scope = scope("local:1000");
+        unknown_session(&store, &scope);
+        let candidate = store
+            .recovery_execs(
+                "dep_test",
+                "2026-08-13T12:00:03Z".parse().expect("cutoff"),
+                8,
+            )
+            .expect("recovery candidates")
+            .into_iter()
+            .find(|candidate| candidate.stored.resource.id == EXEC)
+            .expect("the session's exec is a recovery candidate");
+        store
+            .mark_exec_physically_absent(&candidate, "2026-08-13T12:00:04Z".parse().expect("time"))
+            .expect("recovery records the tree physically absent");
+
+        let answer = retire(&store, "01JB10SESSIONRETIRE00003");
+        assert!(
+            matches!(answer, SessionRetireReservation::Retired(_)),
+            "an unknown session whose tree is recorded absent is retired: {answer:?}"
+        );
+        assert!(
+            store
+                .session(&scope, SESSION)
+                .expect("session lookup")
+                .is_none()
+        );
+        assert!(store.exec(&scope, EXEC).expect("exec lookup").is_none());
+    }
+}

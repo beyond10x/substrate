@@ -2,8 +2,9 @@
 //! 2026-10-23.
 //!
 //! These drive a real run to an `unknown` observation through the host driver's own
-//! `reconcile_cgroup`, not by installing a flagged entry by hand: an empty nested cgroup created
-//! from outside the sandbox while the exec runs keeps its cgroup directory from being removed, so
+//! `reconcile_cgroup`, not by installing a flagged entry by hand: a chain of empty nested cgroups
+//! deeper than the removal walk descends, created from outside the sandbox while the exec runs,
+//! keeps its cgroup directory from being removed, so
 //! the whole tree cannot be proven gone. That measures the line in `run_child` that records the
 //! cgroup as unproven, which the unit's own cases set directly.
 //!
@@ -41,22 +42,40 @@ fn delegated_cgroup_root() -> Option<PathBuf> {
     Some(root)
 }
 
-/// Removes every nested group a case pinned, and the exec cgroup above it, however the case ends,
-/// so a failed case never leaves the shared delegation root refusing the next driver's start.
+/// One level deeper than the host's cgroup removal walk descends (`MAX_EXEC_CGROUP_DEPTH`, 32 in
+/// `src/process.rs`): an empty nested group within that bound is removed depth-first and pins
+/// nothing, so only a chain past it keeps the exec cgroup from being proven empty.
+const PIN_DEPTH: usize = 33;
+
+/// The deepest group of the pinning chain beneath `exec_cgroup`.
+fn pin_chain(exec_cgroup: &Path) -> PathBuf {
+    (0..PIN_DEPTH).fold(exec_cgroup.to_owned(), |path, _| path.join("n"))
+}
+
+/// Removes every pinning chain a case created, deepest first, and the exec cgroup above it,
+/// however the case ends, so a failed case never leaves the shared delegation root refusing the
+/// next driver's start.
 struct Pins(Vec<PathBuf>);
 
 impl Drop for Pins {
     fn drop(&mut self) {
         for pinned in &self.0 {
-            let _ = std::fs::remove_dir(pinned);
-            if let Some(parent) = pinned.parent() {
-                let _ = std::fs::write(parent.join("cgroup.kill"), "1");
+            for dir in pinned.ancestors() {
+                let exec_cgroup = dir
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().starts_with("substrate-"));
+                if !exec_cgroup {
+                    let _ = std::fs::remove_dir(dir);
+                    continue;
+                }
+                let _ = std::fs::write(dir.join("cgroup.kill"), "1");
                 for _ in 0..40 {
-                    if std::fs::remove_dir(parent).is_ok() || !parent.exists() {
+                    if std::fs::remove_dir(dir).is_ok() || !dir.exists() {
                         break;
                     }
                     std::thread::sleep(Duration::from_millis(25));
                 }
+                break;
             }
         }
     }
@@ -130,12 +149,14 @@ async fn run_pinned(
     pins: &mut Pins,
 ) -> ExecObservation {
     let exec_cgroup = cgroup_root.join(format!("substrate-{id}"));
-    let pinned = exec_cgroup.join("pinned");
+    let pinned = pin_chain(&exec_cgroup);
     pins.0.push(pinned.clone());
     let creator = tokio::spawn(async move {
         let deadline = Instant::now() + Duration::from_secs(10);
         while Instant::now() < deadline {
-            if exec_cgroup.join("cgroup.procs").is_file() && std::fs::create_dir(&pinned).is_ok() {
+            if exec_cgroup.join("cgroup.procs").is_file()
+                && std::fs::create_dir_all(&pinned).is_ok()
+            {
                 return true;
             }
             tokio::time::sleep(Duration::from_millis(2)).await;

@@ -747,7 +747,7 @@ pub(crate) fn is_terminal_exec_state(state: ExecState) -> bool {
 
 /// Whether recovery recorded this exec's tree physically absent
 /// (`Store::mark_exec_physically_absent`).
-fn exec_recorded_absent(
+pub(crate) fn exec_recorded_absent(
     connection: &Connection,
     scope: &Scope,
     id: &str,
