@@ -7,6 +7,7 @@
 //! protected `main` is never pushed around. A byte-identical write-once bundle may be reused by a
 //! later daemon release, while a digest mismatch is always refused.
 
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -258,6 +259,286 @@ fn a_release_refuses_without_a_recorded_confinement_lane_run() {
         }),
         "the confinement-evidence step's DELEGATED_CASES pattern no longer matches its source"
     );
+}
+
+const QUOTA_STEP: &str = "Require a recorded quota-lane run for this commit";
+const QUOTA_SOURCE: &str = "crates/substrate-host/src/git/quota_tests.rs";
+
+#[test]
+fn a_release_refuses_without_a_recorded_quota_lane_run() {
+    let require = position(QUOTA_STEP);
+    let announce = position("gh release create \"${VERSION}\"");
+    assert!(require < announce);
+    position("quota_evidence:");
+    position("Quota-lane:");
+    position("refused: no recorded quota lane run for");
+    position("## Quota lane");
+    position("cargo xtask quota-fixture run");
+    assert!(WORKFLOW.contains("quota-evidence: ${{ steps.quota.outputs.evidence }}"));
+    assert!(WORKFLOW.contains("QUOTA_EVIDENCE: ${{ needs.preflight.outputs.quota-evidence }}"));
+}
+
+/// The `run: |` body of the named preflight step, dedented, exactly as the runner would execute it.
+fn step_script(name: &str) -> String {
+    let start = position(&format!("- name: {name}\n"));
+    let mut lines = WORKFLOW[start..].lines().skip(1);
+    for line in lines.by_ref() {
+        if line.trim() == "run: |" {
+            break;
+        }
+        assert!(
+            !line.trim_start().starts_with("- name:"),
+            "step {name:?} has no `run: |` block"
+        );
+    }
+    let mut body = Vec::new();
+    let mut indent = None;
+    for line in lines {
+        if line.trim().is_empty() {
+            body.push(String::new());
+            continue;
+        }
+        let width = line.len() - line.trim_start().len();
+        let indent = *indent.get_or_insert(width);
+        if width < indent {
+            break;
+        }
+        body.push(line[indent..].to_owned());
+    }
+    assert!(
+        !body.is_empty(),
+        "step {name:?} has an empty `run: |` block"
+    );
+    body.join("\n") + "\n"
+}
+
+/// A throwaway Git repository holding one commit and one annotated tag, isolated from every
+/// user-level and system-level Git configuration and hook.
+struct TaggedSource {
+    directory: tempfile::TempDir,
+    sha: String,
+}
+
+const TAG: &str = "9.9.9";
+
+fn git(directory: &Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .current_dir(directory)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .args([
+            "-c",
+            "user.name=release-workflow-test",
+            "-c",
+            "user.email=release-workflow-test@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "-c",
+            "tag.gpgsign=false",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "init.defaultBranch=main",
+        ])
+        .args(args)
+        .output()
+        .expect("git runs");
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout)
+        .expect("utf-8 git output")
+        .trim()
+        .to_owned()
+}
+
+impl TaggedSource {
+    /// `source` becomes the tagged quota-test file; `message` is the annotated tag's message, where
+    /// `{sha}` is replaced with the tagged commit.
+    fn new(source: &str, message: &str) -> Self {
+        let directory = tempfile::tempdir().expect("temporary repository");
+        let root = directory.path();
+        git(root, &["init", "--quiet"]);
+        let file = root.join(QUOTA_SOURCE);
+        fs::create_dir_all(file.parent().expect("quota source parent")).expect("source tree");
+        fs::write(&file, source).expect("quota source");
+        git(root, &["add", "--all"]);
+        git(root, &["commit", "--quiet", "-m", "tagged source"]);
+        let sha = git(root, &["rev-parse", "HEAD"]);
+        let message = message.replace("{sha}", &sha);
+        git(root, &["tag", "--annotate", TAG, "-m", &message]);
+        Self { directory, sha }
+    }
+
+    /// Run the quota step against this repository, as a tag push (`input` empty) or a recovery
+    /// dispatch. Returns the exit success, stderr and what the step wrote to `GITHUB_OUTPUT`.
+    fn run(&self, input: &str) -> (bool, String, String) {
+        let output_file = self.directory.path().join("github-output");
+        fs::write(&output_file, "").expect("GITHUB_OUTPUT");
+        let output = std::process::Command::new("bash")
+            .current_dir(self.directory.path())
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("TAG", TAG)
+            .env("INPUT_EVIDENCE", input)
+            .env("SOURCE_SHA", &self.sha)
+            .env("GITHUB_OUTPUT", &output_file)
+            .args(["-e", "-o", "pipefail", "-c", &step_script(QUOTA_STEP)])
+            .output()
+            .expect("bash runs");
+        (
+            output.status.success(),
+            String::from_utf8_lossy(&output.stderr).into_owned(),
+            fs::read_to_string(&output_file).expect("GITHUB_OUTPUT readable"),
+        )
+    }
+}
+
+fn quota_source(cases: usize) -> String {
+    let mut source = String::from("use super::*;\n\n#[tokio::test]\nasync fn portable() {}\n");
+    for case in 0..cases {
+        write!(
+            source,
+            "\n#[tokio::test]\n#[ignore = \"requires the explicitly delegated ext4 project-quota \
+             fixture\"]\nasync fn real_quota_case_{case}() {{\n}}\n"
+        )
+        .expect("writing to a String cannot fail");
+    }
+    source
+}
+
+fn refused(source: &TaggedSource, input: &str, reason: &str) {
+    let (success, stderr, output) = source.run(input);
+    assert!(!success, "the step accepted what it must refuse: {stderr}");
+    assert!(
+        stderr.contains(reason),
+        "refusal does not name {reason:?}: {stderr}"
+    );
+    assert!(
+        !output.contains("evidence="),
+        "a refusal must not emit evidence: {output}"
+    );
+}
+
+#[test]
+fn the_quota_lane_record_naming_the_tagged_commit_and_its_case_count_is_accepted() {
+    let source = TaggedSource::new(
+        &quota_source(7),
+        "release\n\nQuota-lane: {sha} 7 2026-10-23T10:00:00Z\n",
+    );
+    let (success, stderr, output) = source.run("");
+    assert!(success, "{stderr}");
+    assert_eq!(
+        output.trim(),
+        format!("evidence={} 7 2026-10-23T10:00:00Z", source.sha)
+    );
+
+    // A recovery dispatch carries the same record as an input, for a tag annotated without it.
+    let untrailed = TaggedSource::new(&quota_source(7), "release\n");
+    let (success, stderr, output) =
+        untrailed.run(&format!("{} 7 2026-10-23T10:00:00Z", untrailed.sha));
+    assert!(success, "{stderr}");
+    assert!(output.contains("evidence="), "{output}");
+}
+
+#[test]
+fn the_quota_lane_record_is_refused_when_absent_or_only_a_confinement_record() {
+    let absent = TaggedSource::new(&quota_source(7), "release\n");
+    refused(&absent, "", "refused: no recorded quota lane run for");
+    let confinement_only = TaggedSource::new(
+        &quota_source(7),
+        "release\n\nConfinement-lane: {sha} 167 2026-10-23T10:00:00Z\n",
+    );
+    refused(
+        &confinement_only,
+        "",
+        "refused: no recorded quota lane run for",
+    );
+}
+
+#[test]
+fn the_quota_lane_record_for_another_commit_is_refused() {
+    let source = TaggedSource::new(
+        &quota_source(7),
+        "release\n\nQuota-lane: 0123456789abcdef0123456789abcdef01234567 7 2026-10-23T10:00:00Z\n",
+    );
+    refused(
+        &source,
+        "",
+        "records commit '0123456789abcdef0123456789abcdef01234567'",
+    );
+}
+
+#[test]
+fn the_quota_lane_record_with_another_case_count_is_refused() {
+    let fewer = TaggedSource::new(
+        &quota_source(7),
+        "release\n\nQuota-lane: {sha} 6 2026-10-23T10:00:00Z\n",
+    );
+    refused(&fewer, "", "records 6 real-quota cases;");
+    let word = TaggedSource::new(
+        &quota_source(7),
+        "release\n\nQuota-lane: {sha} seven 2026-10-23T10:00:00Z\n",
+    );
+    refused(
+        &word,
+        "",
+        "records 'seven' where a real-quota case count belongs",
+    );
+    let none_declared = TaggedSource::new(
+        &quota_source(0),
+        "release\n\nQuota-lane: {sha} 0 2026-10-23T10:00:00Z\n",
+    );
+    refused(&none_declared, "", "declares no real_quota_ case");
+}
+
+#[test]
+fn the_quota_lane_record_with_a_timestamp_that_is_not_rfc_3339_utc_is_refused() {
+    for instant in [
+        "2026-10-23",
+        "2026-10-23 10:00:00",
+        "2026-10-23T10:00:00+02:00",
+        "yesterday",
+        "",
+    ] {
+        let source = TaggedSource::new(
+            &quota_source(7),
+            &format!("release\n\nQuota-lane: {{sha}} 7 {instant}\n"),
+        );
+        refused(&source, "", "where an RFC 3339 UTC instant belongs");
+    }
+}
+
+#[test]
+fn the_quota_step_counts_the_repositorys_own_real_quota_cases() {
+    // The step reads the declared case count out of the *tagged* source with a pattern; assert it
+    // against the file it parses, so a reformatting cannot make every release refuse with a
+    // message about the check rather than about the release.
+    let real = fs::read_to_string(repository_root().join(QUOTA_SOURCE)).expect("quota source");
+    let ignored = real
+        .lines()
+        .filter(|line| line.trim_start().starts_with("#[ignore"))
+        .count();
+    assert!(
+        ignored >= 7,
+        "{QUOTA_SOURCE} declares {ignored} ignored cases"
+    );
+    let source = TaggedSource::new(
+        &real,
+        &format!("release\n\nQuota-lane: {{sha}} {ignored} 2026-10-23T10:00:00Z\n"),
+    );
+    let (success, stderr, _) = source.run("");
+    assert!(success, "{stderr}");
+    let off_by_one = TaggedSource::new(
+        &real,
+        &format!(
+            "release\n\nQuota-lane: {{sha}} {} 2026-10-23T10:00:00Z\n",
+            ignored - 1
+        ),
+    );
+    refused(&off_by_one, "", "real-quota cases;");
 }
 
 #[test]

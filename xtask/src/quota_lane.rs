@@ -22,7 +22,7 @@ use anyhow::{Context as _, Result};
 use clap::Args as ClapArgs;
 
 /// Where the cases are declared, relative to the workspace root.
-const SOURCE: &str = "crates/substrate-host/src/git/quota_tests.rs";
+pub(crate) const SOURCE: &str = "crates/substrate-host/src/git/quota_tests.rs";
 /// The package whose library test binary carries them.
 const PACKAGE: &str = "b10x-substrate-host";
 /// The module path the harness names them by; `--exact` is built from it.
@@ -160,7 +160,8 @@ fn report_refusal(cases: &[String], missing: &[String]) {
         eprintln!("quota lane:   not run  {MODULE}::{case}");
     }
     eprintln!(
-        "quota lane: provision the fixture, then \
+        "quota lane: run `cargo xtask quota-fixture run`, which provisions the fixture in a \
+         container and runs this lane there, or provision it yourself and run \
          `{ROOT_VAR}=<dir> {IDS_VAR}=<start>-<end> cargo xtask quota-lane` (AGENTS.md, § *The real \
          project-quota lane*)."
     );
@@ -171,7 +172,7 @@ fn report_refusal(cases: &[String], missing: &[String]) {
 /// Read from the source rather than from `--ignored --list`, so the refusal and the inventory cost
 /// no build: `scripts/delegated-lane.sh` prints the inventory on a host that has no fixture, and a
 /// refusal that had to compile the host crate first would not be a refusal.
-fn declared_cases(source: &str) -> Vec<String> {
+pub(crate) fn declared_cases(source: &str) -> Vec<String> {
     let mut cases = Vec::new();
     let mut ignored = false;
     for line in source.lines() {
