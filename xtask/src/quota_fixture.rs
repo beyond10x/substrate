@@ -18,13 +18,20 @@
 //! invoking user's identity with `SYS_ADMIN` inheritable and ambient before it runs
 //! `quota-lane` against the read-only bind of this checkout.
 //!
-//! A green run whose checkout is clean at `HEAD` ends with the release record
-//! `Quota-lane: <source-sha> <case-count> <RFC 3339 UTC>`, the line `.github/workflows/release.yml`
-//! requires in the annotated tag (AGENTS.md, § *Releases*). A dirty checkout, a lane that ran fewer
-//! cases than the source declares, or any failure prints no record.
+//! The container never sees the live checkout. The run reads `HEAD` once, extracts that commit with
+//! `git archive` into a fresh directory under the target directory, and builds the recipe and runs
+//! the lane from that snapshot; the snapshot is removed afterwards. Its image tag and both volumes
+//! are named per checkout, so two checkouts never share a container build target.
+//!
+//! A green run ends with the release record `Quota-lane: <source-sha> <case-count> <RFC 3339 UTC>`,
+//! the line `.github/workflows/release.yml` requires in the annotated tag (AGENTS.md,
+//! § *Releases*), only when the checkout was clean before the run, is still clean after it, and
+//! `HEAD` did not move. A dirty checkout, a moved `HEAD`, a lane that ran fewer cases than the
+//! snapshot declares, or any failure prints no record.
 
 use std::fs;
 use std::io::{BufRead as _, BufReader};
+use std::os::unix::ffi::OsStrExt as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
@@ -32,15 +39,14 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context as _, Result, bail, ensure};
 use clap::{Args as ClapArgs, Subcommand};
+use sha2::{Digest as _, Sha256};
 
 /// The checked-in recipe, relative to the workspace root.
 pub const RECIPE: &str = "fixtures/quota-lab";
-/// The local image tag the recipe is built under. Never pushed anywhere.
-pub const IMAGE: &str = "b10x-substrate-quota-lab:local";
-/// Build output of the container's own compilations, kept apart from the checkout's `target/`.
-pub const TARGET_VOLUME: &str = "b10x-substrate-quota-lab-target";
-/// The container's crate download cache.
-pub const REGISTRY_VOLUME: &str = "b10x-substrate-quota-lab-cargo-registry";
+/// The local image repository the recipe is built under, tagged per checkout. Never pushed.
+pub const IMAGE_REPOSITORY: &str = "b10x-substrate-quota-lab";
+/// Prefix of the two per-checkout volumes: the container's build output and its crate cache.
+const VOLUME_PREFIX: &str = "b10x-substrate-quota-lab";
 /// Set by the recipe; `inside` refuses to provision anything without it.
 const LAB_MARKER: &str = "B10X_SUBSTRATE_QUOTA_LAB";
 /// The exclusive identity range, as in the recorded run.
@@ -81,7 +87,7 @@ pub struct RunArgs {
     /// Build and run the cases in the release profile, as the recorded 2026-09-05 execution did.
     #[arg(long)]
     pub release: bool,
-    /// Remove the recipe image and both cache volumes after the run.
+    /// Remove this checkout's image tag and its two volumes after the run, and nothing else.
     #[arg(long)]
     pub clean: bool,
 }
@@ -106,8 +112,14 @@ pub fn run(args: &Args) -> Result<ExitCode> {
 
 fn host(args: &RunArgs) -> Result<ExitCode> {
     let root = crate::repo::root()?;
-    let source = fs::read_to_string(root.join(crate::quota_lane::SOURCE))
-        .with_context(|| format!("reading {}", crate::quota_lane::SOURCE))?;
+    // `HEAD` and the clean state are read once, here; everything below runs from this commit.
+    let sha = git_text(&root, &["rev-parse", "HEAD"])?;
+    let clean_before = git_text(&root, &["status", "--porcelain"])?.is_empty();
+    let source = git_text(
+        &root,
+        &["show", &format!("{sha}:{}", crate::quota_lane::SOURCE)],
+    )
+    .with_context(|| format!("reading {} at {sha}", crate::quota_lane::SOURCE))?;
     let declared = crate::quota_lane::declared_cases(&source).len();
     ensure!(
         declared > 0,
@@ -147,25 +159,75 @@ fn host(args: &RunArgs) -> Result<ExitCode> {
         );
         return Ok(ExitCode::FAILURE);
     }
-    let sha = git_text(&root, &["rev-parse", "HEAD"])?;
-    let clean = git_text(&root, &["status", "--porcelain"])?.is_empty();
+    let lab = Lab::for_checkout(&root);
+    let snapshot = Snapshot::of(&root, &sha)?;
+    let outcome = build_and_run(&lab, &snapshot.directory, uid, gid, args.release);
+    drop(snapshot);
+    if args.clean {
+        clean_up(&lab);
+    }
+    let (summary, success) = outcome?;
+    let verdict = verdict(declared, summary, success);
 
+    // Read again after a run that takes minutes: a moved `HEAD` or an edited checkout means the
+    // record would name a commit nobody is looking at any more.
+    let head_after = git_text(&root, &["rev-parse", "HEAD"])?;
+    let clean_after = git_text(&root, &["status", "--porcelain"])?.is_empty();
+    match verdict {
+        Err(reason) => {
+            eprintln!("quota fixture: no record — {reason}");
+            Ok(ExitCode::FAILURE)
+        }
+        Ok(cases) if head_after != sha => {
+            println!(
+                "quota fixture: {cases} cases green at {sha}, but HEAD moved to {head_after} \
+                 during the run; this run is not a release record for any commit"
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+        Ok(cases) if clean_before && clean_after => {
+            println!("quota fixture: green at {sha}; record this line in the annotated tag:");
+            println!("{}", evidence_line(&sha, cases, SystemTime::now()));
+            Ok(ExitCode::SUCCESS)
+        }
+        Ok(cases) => {
+            let when = if clean_before { "after" } else { "before" };
+            println!(
+                "quota fixture: {cases} cases green at the committed {sha}, but the checkout was \
+                 not clean {when} the run; this run is not a release record for any commit"
+            );
+            Ok(ExitCode::SUCCESS)
+        }
+    }
+}
+
+/// Build the recipe from the snapshot and run the lane on it; the container's lane summary, if it
+/// printed one, and whether the container exited successfully.
+fn build_and_run(
+    lab: &Lab,
+    snapshot: &Path,
+    uid: u32,
+    gid: u32,
+    release: bool,
+) -> Result<(Option<LaneSummary>, bool)> {
+    let recipe = snapshot.join(RECIPE);
     let status = Command::new("docker")
-        .args(["build", "--tag", IMAGE, "--file"])
-        .arg(root.join(RECIPE).join("Dockerfile"))
-        .arg(root.join(RECIPE))
+        .args(["build", "--tag", &lab.image, "--file"])
+        .arg(recipe.join("Dockerfile"))
+        .arg(&recipe)
         .status()
         .context("docker build")?;
     ensure!(
         status.success(),
-        "building {IMAGE} from {RECIPE} failed: {status}"
+        "building {} from {RECIPE} failed: {status}",
+        lab.image
     );
 
     let name = format!(
         "substrate-quota-lab-{}",
         ulid::Ulid::generate().to_string().to_lowercase()
     );
-    let invocation = run_argv(&root, uid, gid, args.release, &name);
+    let invocation = run_argv(lab, snapshot, uid, gid, release, &name);
     let mut child = Command::new("docker")
         .args(&invocation)
         .stdout(Stdio::piped())
@@ -181,35 +243,102 @@ fn host(args: &RunArgs) -> Result<ExitCode> {
         println!("{line}");
     }
     let exit = child.wait().context("awaiting the quota-lab container")?;
+    Ok((summary, exit.success()))
+}
 
-    let verdict = verdict(declared, summary, exit.success());
-    if args.clean {
-        clean_up();
-    }
-    match verdict {
-        Err(reason) => {
-            eprintln!("quota fixture: no record — {reason}");
-            Ok(ExitCode::FAILURE)
-        }
-        Ok(cases) if clean => {
-            println!("quota fixture: green at {sha}; record this line in the annotated tag:");
-            println!("{}", evidence_line(&sha, cases, SystemTime::now()));
-            Ok(ExitCode::SUCCESS)
-        }
-        Ok(cases) => {
-            println!(
-                "quota fixture: {cases} cases green, but the checkout differs from {sha}; this \
-                 run is not a release record for any commit"
-            );
-            Ok(ExitCode::SUCCESS)
+/// The image tag and the two volumes one checkout owns, keyed by its canonical path.
+///
+/// Keyed per checkout, not per commit: two checkouts of byte-identical commits still get separate
+/// build targets, and one checkout reuses its own across commits instead of leaving a volume per
+/// commit behind. Reuse is sound because every snapshot is extracted with fresh modification times
+/// (`tar -m`), so Cargo rebuilds every workspace crate and reuses only registry dependencies.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Lab {
+    image: String,
+    target_volume: String,
+    registry_volume: String,
+}
+
+impl Lab {
+    fn for_checkout(root: &Path) -> Self {
+        let digest = Sha256::digest(root.as_os_str().as_bytes());
+        let key = hex::encode(&digest[..8]);
+        Self {
+            image: format!("{IMAGE_REPOSITORY}:{key}"),
+            target_volume: format!("{VOLUME_PREFIX}-target-{key}"),
+            registry_volume: format!("{VOLUME_PREFIX}-cargo-registry-{key}"),
         }
     }
 }
 
-fn clean_up() {
+/// `git archive` of one commit, extracted into a fresh directory under the target directory and
+/// removed when dropped. The container builds and runs from it, never from the live checkout.
+struct Snapshot {
+    directory: PathBuf,
+}
+
+impl Snapshot {
+    fn of(root: &Path, sha: &str) -> Result<Self> {
+        let parent = target_directory(root).join("quota-fixture");
+        fs::create_dir_all(&parent).with_context(|| format!("creating {}", parent.display()))?;
+        let directory = parent.join(format!(
+            "snapshot-{}",
+            ulid::Ulid::generate().to_string().to_lowercase()
+        ));
+        fs::create_dir(&directory).with_context(|| format!("creating {}", directory.display()))?;
+        let snapshot = Self { directory };
+
+        let mut archive = Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(["archive", "--format=tar", sha])
+            .stdout(Stdio::piped())
+            .spawn()
+            .context("git archive")?;
+        let tar = archive.stdout.take().context("piped git archive")?;
+        // `-m`: every file gets the extraction time, newer than anything already in the volume.
+        let extracted = Command::new("tar")
+            .args(["-x", "-m", "-f", "-", "-C"])
+            .arg(&snapshot.directory)
+            .stdin(tar)
+            .status()
+            .context("tar")?;
+        let archived = archive.wait().context("awaiting git archive")?;
+        ensure!(
+            archived.success() && extracted.success(),
+            "snapshotting {sha} into {} failed: git archive {archived}, tar {extracted}",
+            snapshot.directory.display()
+        );
+        Ok(snapshot)
+    }
+}
+
+impl Drop for Snapshot {
+    fn drop(&mut self) {
+        if let Err(error) = fs::remove_dir_all(&self.directory) {
+            eprintln!(
+                "quota fixture: could not remove the snapshot {}: {error}",
+                self.directory.display()
+            );
+        }
+    }
+}
+
+fn target_directory(root: &Path) -> PathBuf {
+    std::env::var_os("CARGO_TARGET_DIR")
+        .filter(|value| !value.is_empty())
+        .map_or_else(|| root.join("target"), |value| root.join(value))
+}
+
+fn clean_up(lab: &Lab) {
     for argv in [
-        vec!["image", "rm", IMAGE],
-        vec!["volume", "rm", TARGET_VOLUME, REGISTRY_VOLUME],
+        vec!["image", "rm", lab.image.as_str()],
+        vec![
+            "volume",
+            "rm",
+            lab.target_volume.as_str(),
+            lab.registry_volume.as_str(),
+        ],
     ] {
         match Command::new("docker").args(&argv).output() {
             Ok(output) if output.status.success() => {}
@@ -257,7 +386,14 @@ fn identity(status: &str) -> Result<(u32, u32)> {
 /// The one `docker run` this verb issues. Docker's default capability set plus `SYS_ADMIN`, as the
 /// recorded run had; the loop device needs `/dev/loop-control`, block major 7 in the device cgroup,
 /// and an `AppArmor` profile that does not deny `mount`. Nothing else, and never `--privileged`.
-fn run_argv(root: &Path, uid: u32, gid: u32, release: bool, name: &str) -> Vec<String> {
+fn run_argv(
+    lab: &Lab,
+    source: &Path,
+    uid: u32,
+    gid: u32,
+    release: bool,
+    name: &str,
+) -> Vec<String> {
     let mut argv: Vec<String> = [
         "run",
         "--rm",
@@ -278,18 +414,24 @@ fn run_argv(root: &Path, uid: u32, gid: u32, release: bool, name: &str) -> Vec<S
     .collect();
     argv.push(format!(
         "type=bind,source={},target={SOURCE_MOUNT},readonly",
-        root.display()
+        source.display()
     ));
     argv.extend([
         "--mount".to_owned(),
-        format!("type=volume,source={TARGET_VOLUME},target={TARGET_MOUNT}"),
+        format!(
+            "type=volume,source={},target={TARGET_MOUNT}",
+            lab.target_volume
+        ),
         "--mount".to_owned(),
-        format!("type=volume,source={REGISTRY_VOLUME},target={REGISTRY_MOUNT}"),
+        format!(
+            "type=volume,source={},target={REGISTRY_MOUNT}",
+            lab.registry_volume
+        ),
         "--workdir".to_owned(),
         SOURCE_MOUNT.to_owned(),
         "--env".to_owned(),
         format!("CARGO_TARGET_DIR={TARGET_MOUNT}/root"),
-        IMAGE.to_owned(),
+        lab.image.clone(),
         "cargo".to_owned(),
         "run".to_owned(),
         "--locked".to_owned(),
@@ -310,8 +452,11 @@ fn run_argv(root: &Path, uid: u32, gid: u32, release: bool, name: &str) -> Vec<S
     argv
 }
 
+/// `(declared, ran, failed)` from a `quota lane:` summary line.
+type LaneSummary = (usize, usize, usize);
+
 /// `quota lane: <declared> declared, <ran> ran, <failed> failed`, as `quota-lane` prints it.
-fn lane_summary(line: &str) -> Option<(usize, usize, usize)> {
+fn lane_summary(line: &str) -> Option<LaneSummary> {
     let rest = line.strip_prefix("quota lane: ")?;
     let mut numbers = Vec::new();
     for (part, label) in rest.split(", ").zip(["declared", "ran", "failed"]) {
@@ -328,11 +473,7 @@ fn lane_summary(line: &str) -> Option<(usize, usize, usize)> {
 }
 
 /// Green only when the container succeeded and its lane ran every case the source declares.
-fn verdict(
-    declared: usize,
-    summary: Option<(usize, usize, usize)>,
-    success: bool,
-) -> Result<usize, String> {
+fn verdict(declared: usize, summary: Option<LaneSummary>, success: bool) -> Result<usize, String> {
     let Some((counted, ran, failed)) = summary else {
         return Err(
             "the container printed no `quota lane:` summary, so no case is known to have \
@@ -573,14 +714,38 @@ fn command(program: &str, args: &[&str]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        IMAGE, RECIPE, evidence_line, identity, lab_guard, lane_summary, rfc3339_utc, run_argv,
-        verdict,
+        IMAGE_REPOSITORY, Lab, RECIPE, evidence_line, identity, lab_guard, lane_summary,
+        rfc3339_utc, run_argv, verdict,
     };
     use std::path::Path;
     use std::time::{Duration, UNIX_EPOCH};
 
     fn root() -> std::path::PathBuf {
         crate::repo::root().expect("workspace root")
+    }
+
+    fn lab() -> Lab {
+        Lab::for_checkout(Path::new("/checkout"))
+    }
+
+    #[test]
+    fn every_checkout_owns_its_image_tag_and_both_volumes() {
+        let one = Lab::for_checkout(Path::new("/work/one/substrate"));
+        let other = Lab::for_checkout(Path::new("/work/other/substrate"));
+        assert_eq!(one, Lab::for_checkout(Path::new("/work/one/substrate")));
+        assert_ne!(one.image, other.image);
+        assert_ne!(one.target_volume, other.target_volume);
+        assert_ne!(one.registry_volume, other.registry_volume);
+        assert!(
+            one.image.starts_with(&format!("{IMAGE_REPOSITORY}:")),
+            "{one:?}"
+        );
+        let argv = run_argv(&one, Path::new("/snapshot"), 1000, 1000, false, "lab");
+        assert!(argv.contains(&format!(
+            "type=volume,source={},target=/target",
+            one.target_volume
+        )));
+        assert!(!argv.iter().any(|arg| arg.contains(&other.target_volume)));
     }
 
     fn base_image(dockerfile: &str) -> Option<String> {
@@ -621,7 +786,7 @@ mod tests {
 
     #[test]
     fn the_container_gets_sys_admin_and_loop_access_and_nothing_privileged() {
-        let argv = run_argv(Path::new("/checkout"), 1000, 1000, false, "lab");
+        let argv = run_argv(&lab(), Path::new("/snapshot"), 1000, 1000, false, "lab");
         assert!(
             !argv.iter().any(|arg| arg.contains("privileged")),
             "{argv:?}"
@@ -639,8 +804,11 @@ mod tests {
             .map(|pair| pair[1].as_str())
             .collect();
         assert_eq!(devices, ["/dev/loop-control"]);
-        assert!(argv.contains(&"type=bind,source=/checkout,target=/src,readonly".to_owned()));
-        let image = argv.iter().position(|arg| arg == IMAGE).expect("image");
+        assert!(argv.contains(&"type=bind,source=/snapshot,target=/src,readonly".to_owned()));
+        let image = argv
+            .iter()
+            .position(|arg| *arg == lab().image)
+            .expect("image");
         assert_eq!(
             argv[image + 1..],
             [
@@ -659,7 +827,7 @@ mod tests {
                 "1000"
             ]
         );
-        let release = run_argv(Path::new("/checkout"), 1000, 1000, true, "lab");
+        let release = run_argv(&lab(), Path::new("/snapshot"), 1000, 1000, true, "lab");
         assert_eq!(release.last().map(String::as_str), Some("--release"));
     }
 

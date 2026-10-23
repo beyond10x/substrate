@@ -358,12 +358,19 @@ impl TaggedSource {
     /// `source` becomes the tagged quota-test file; `message` is the annotated tag's message, where
     /// `{sha}` is replaced with the tagged commit.
     fn new(source: &str, message: &str) -> Self {
+        Self::with_files(&[(QUOTA_SOURCE, source)], message)
+    }
+
+    /// Every `(path, contents)` pair becomes a tracked file of the one tagged commit.
+    fn with_files(files: &[(&str, &str)], message: &str) -> Self {
         let directory = tempfile::tempdir().expect("temporary repository");
         let root = directory.path();
         git(root, &["init", "--quiet"]);
-        let file = root.join(QUOTA_SOURCE);
-        fs::create_dir_all(file.parent().expect("quota source parent")).expect("source tree");
-        fs::write(&file, source).expect("quota source");
+        for (path, contents) in files {
+            let file = root.join(path);
+            fs::create_dir_all(file.parent().expect("source parent")).expect("source tree");
+            fs::write(&file, contents).expect("source file");
+        }
         git(root, &["add", "--all"]);
         git(root, &["commit", "--quiet", "-m", "tagged source"]);
         let sha = git(root, &["rev-parse", "HEAD"]);
@@ -375,6 +382,10 @@ impl TaggedSource {
     /// Run the quota step against this repository, as a tag push (`input` empty) or a recovery
     /// dispatch. Returns the exit success, stderr and what the step wrote to `GITHUB_OUTPUT`.
     fn run(&self, input: &str) -> (bool, String, String) {
+        self.run_step(QUOTA_STEP, input)
+    }
+
+    fn run_step(&self, step: &str, input: &str) -> (bool, String, String) {
         let output_file = self.directory.path().join("github-output");
         fs::write(&output_file, "").expect("GITHUB_OUTPUT");
         let output = std::process::Command::new("bash")
@@ -385,7 +396,7 @@ impl TaggedSource {
             .env("INPUT_EVIDENCE", input)
             .env("SOURCE_SHA", &self.sha)
             .env("GITHUB_OUTPUT", &output_file)
-            .args(["-e", "-o", "pipefail", "-c", &step_script(QUOTA_STEP)])
+            .args(["-e", "-o", "pipefail", "-c", &step_script(step)])
             .output()
             .expect("bash runs");
         (
@@ -410,7 +421,11 @@ fn quota_source(cases: usize) -> String {
 }
 
 fn refused(source: &TaggedSource, input: &str, reason: &str) {
-    let (success, stderr, output) = source.run(input);
+    refused_by(QUOTA_STEP, source, input, reason);
+}
+
+fn refused_by(step: &str, source: &TaggedSource, input: &str, reason: &str) {
+    let (success, stderr, output) = source.run_step(step, input);
     assert!(!success, "the step accepted what it must refuse: {stderr}");
     assert!(
         stderr.contains(reason),
@@ -496,18 +511,24 @@ fn the_quota_lane_record_with_another_case_count_is_refused() {
 
 #[test]
 fn the_quota_lane_record_with_a_timestamp_that_is_not_rfc_3339_utc_is_refused() {
-    for instant in [
-        "2026-10-23",
-        "2026-10-23 10:00:00",
-        "2026-10-23T10:00:00+02:00",
-        "yesterday",
-        "",
-    ] {
+    for instant in ["2026-10-23", "2026-10-23T10:00:00+02:00", "yesterday"] {
         let source = TaggedSource::new(
             &quota_source(7),
             &format!("release\n\nQuota-lane: {{sha}} 7 {instant}\n"),
         );
         refused(&source, "", "where an RFC 3339 UTC instant belongs");
+    }
+    // A space-separated instant or none at all is a record of the wrong shape before it is a
+    // wrong instant.
+    for (instant, fields) in [
+        ("2026-10-23 10:00:00", "has 4 fields"),
+        ("", "has 2 fields"),
+    ] {
+        let source = TaggedSource::new(
+            &quota_source(7),
+            &format!("release\n\nQuota-lane: {{sha}} 7 {instant}\n"),
+        );
+        refused(&source, "", fields);
     }
 }
 
@@ -539,6 +560,138 @@ fn the_quota_step_counts_the_repositorys_own_real_quota_cases() {
         ),
     );
     refused(&off_by_one, "", "real-quota cases;");
+}
+
+#[test]
+fn the_quota_step_counts_only_ignored_real_quota_functions() {
+    // One definition on both sides: `cargo xtask quota-lane` and the fixture record the ignored
+    // `fn real_quota_*` functions; an unignored helper or an ignored function of another name is
+    // not a case for either.
+    let mut text = quota_source(7);
+    text.push_str("\nfn real_quota_fixture_root() {}\n");
+    text.push_str("\n#[tokio::test]\n#[ignore = \"slow\"]\nasync fn another_ignored_case() {}\n");
+    let source = TaggedSource::new(
+        &text,
+        "release\n\nQuota-lane: {sha} 7 2026-10-23T10:00:00Z\n",
+    );
+    let (success, stderr, _) = source.run("");
+    assert!(success, "{stderr}");
+}
+
+const CONFINEMENT_STEP: &str = "Require a recorded confinement-lane run for this commit";
+const RUNTIME_VECTORS: &str = "crates/substrate-daemon/tests/runtime_vectors.rs";
+const DECLARED_DELEGATED: &str = "const DELEGATED_CASES: usize = 167;\n";
+const AT: &str = "2026-10-23T10:00:00Z";
+
+fn confinement_source(message: &str) -> TaggedSource {
+    TaggedSource::with_files(&[(RUNTIME_VECTORS, DECLARED_DELEGATED)], message)
+}
+
+/// A lane step: its name, the trailer it reads, the case count its source declares, and a maker
+/// for a tagged source with that count.
+type LaneStep = (
+    &'static str,
+    &'static str,
+    &'static str,
+    fn(&str) -> TaggedSource,
+);
+
+/// Both lane steps, each with a source it accepts and the trailer name it reads.
+fn lane_steps() -> [LaneStep; 2] {
+    [
+        (
+            CONFINEMENT_STEP,
+            "Confinement-lane",
+            "167",
+            confinement_source,
+        ),
+        (QUOTA_STEP, "Quota-lane", "7", |message| {
+            TaggedSource::new(&quota_source(7), message)
+        }),
+    ]
+}
+
+#[test]
+fn the_confinement_lane_record_naming_the_tagged_commit_and_its_case_count_is_accepted() {
+    let source = confinement_source(&format!("release\n\nConfinement-lane: {{sha}} 167 {AT}\n"));
+    let (success, stderr, output) = source.run_step(CONFINEMENT_STEP, "");
+    assert!(success, "{stderr}");
+    assert_eq!(output.trim(), format!("evidence={} 167 {AT}", source.sha));
+}
+
+#[test]
+fn a_tag_with_two_lane_records_is_refused_by_both_steps() {
+    for (step, trailer, count, make) in lane_steps() {
+        // Two identical records are refused as well: one record per tag, never a choice.
+        for second in [
+            format!("{trailer}: {{sha}} {count} {AT}"),
+            format!("{trailer}: 0123456789abcdef0123456789abcdef01234567 3 {AT}"),
+        ] {
+            let source = make(&format!(
+                "release\n\n{trailer}: {{sha}} {count} {AT}\n{second}\n"
+            ));
+            refused_by(step, &source, "", "carries 2 ");
+        }
+    }
+}
+
+#[test]
+fn a_multi_line_or_wrongly_shaped_dispatch_record_is_refused_by_both_steps() {
+    for (step, _, count, make) in lane_steps() {
+        let source = make("release\n");
+        let sha = source.sha.clone();
+        refused_by(
+            step,
+            &source,
+            &format!("{sha} {count} {AT}\nevidence=forged 0 never"),
+            "spans more than one line",
+        );
+        refused_by(
+            step,
+            &source,
+            &format!("{sha} {count} {AT}\r"),
+            "spans more than one line",
+        );
+        refused_by(
+            step,
+            &source,
+            &format!("{sha} {count} {AT} trailing"),
+            "has 4 fields",
+        );
+        refused_by(step, &source, &format!("{sha} {count}"), "has 2 fields");
+    }
+}
+
+#[test]
+fn a_tag_record_with_an_extra_field_is_refused_by_both_steps() {
+    for (step, trailer, count, make) in lane_steps() {
+        let source = make(&format!(
+            "release\n\n{trailer}: {{sha}} {count} {AT} extra\n"
+        ));
+        refused_by(step, &source, "", "has 4 fields");
+    }
+}
+
+#[test]
+fn a_calendar_impossible_instant_is_refused_by_both_steps() {
+    for (step, trailer, count, make) in lane_steps() {
+        for instant in [
+            "2026-13-45T25:61:61Z",
+            "2026-02-30T10:00:00Z",
+            "2026-10-23T24:00:00Z",
+        ] {
+            let source = make(&format!(
+                "release\n\n{trailer}: {{sha}} {count} {instant}\n"
+            ));
+            refused_by(step, &source, "", "where an RFC 3339 UTC instant belongs");
+        }
+        // A real leap-year day is an instant.
+        let leap = make(&format!(
+            "release\n\n{trailer}: {{sha}} {count} 2028-02-29T23:59:59Z\n"
+        ));
+        let (success, stderr, _) = leap.run_step(step, "");
+        assert!(success, "{step}: {stderr}");
+    }
 }
 
 #[test]

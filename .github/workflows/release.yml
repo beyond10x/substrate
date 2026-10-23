@@ -298,7 +298,8 @@ jobs:
       # Three checks, each a refusal: the recorded commit is this commit (evidence from another
       # commit proves nothing about these bytes), the recorded case count is the count the tagged
       # source itself declares (a lane run against a smaller suite is not this suite), and the
-      # timestamp is a real UTC instant.
+      # timestamp is a real UTC instant by shape and by calendar. The record itself is exactly one
+      # line of exactly three fields, from exactly one trailer.
       - name: Require a recorded confinement-lane run for this commit
         id: confinement
         env:
@@ -311,8 +312,13 @@ jobs:
           carrier="the confinement_evidence workflow input"
           if [ -z "${evidence//[[:space:]]/}" ]; then
             evidence=$(git tag -l --format='%(contents)' "${TAG}" \
-              | sed -n 's/^Confinement-lane:[[:space:]]*//p' | head -n 1)
+              | sed -n 's/^Confinement-lane:[[:space:]]*//p')
             carrier="the annotated tag's Confinement-lane trailer"
+            records=$(printf '%s' "$evidence" | grep -c '' || true)
+            if [ "${records:-0}" -gt 1 ]; then
+              echo "refused: ${TAG} carries ${records} Confinement-lane lines; a release records exactly one." >&2
+              exit 1
+            fi
           fi
 
           if [ -z "${evidence//[[:space:]]/}" ]; then
@@ -326,7 +332,23 @@ jobs:
             exit 1
           fi
 
-          read -r claimed_sha claimed_cases claimed_at _rest <<<"${evidence}"
+          # One line of exactly three fields. A second line would reach GITHUB_OUTPUT unvalidated,
+          # and a fourth field would be published without being checked.
+          case "$evidence" in
+            *$'\n'* | *$'\r'*)
+              echo "refused: ${carrier} spans more than one line; a record is one line of three fields." >&2
+              exit 1
+              ;;
+          esac
+          read -r -a fields <<<"${evidence}"
+          if [ "${#fields[@]}" -ne 3 ]; then
+            echo "refused: ${carrier} has ${#fields[@]} fields; a record is '<sha> <case-count> <RFC 3339 UTC>'." >&2
+            exit 1
+          fi
+          claimed_sha=${fields[0]}
+          claimed_cases=${fields[1]}
+          claimed_at=${fields[2]}
+          evidence="${claimed_sha} ${claimed_cases} ${claimed_at}"
 
           if [ "$claimed_sha" != "$SOURCE_SHA" ]; then
             echo "refused: ${carrier} records commit '${claimed_sha}', not ${SOURCE_SHA}." >&2
@@ -355,7 +377,10 @@ jobs:
             exit 1
           fi
 
-          if ! printf '%s' "$claimed_at" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'; then
+          # The shape, then the calendar: GNU date must read it back as the same UTC instant, so
+          # month 13, 30 February and hour 24 are refused along with every other form.
+          if ! printf '%s' "$claimed_at" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' \
+            || [ "$(date -u -d "$claimed_at" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)" != "$claimed_at" ]; then
             echo "refused: ${carrier} records '${claimed_at}' where an RFC 3339 UTC instant belongs." >&2
             echo "Use the form 2026-09-15T08:30:00Z." >&2
             exit 1
@@ -382,8 +407,13 @@ jobs:
           carrier="the quota_evidence workflow input"
           if [ -z "${evidence//[[:space:]]/}" ]; then
             evidence=$(git tag -l --format='%(contents)' "${TAG}" \
-              | sed -n 's/^Quota-lane:[[:space:]]*//p' | head -n 1)
+              | sed -n 's/^Quota-lane:[[:space:]]*//p')
             carrier="the annotated tag's Quota-lane trailer"
+            records=$(printf '%s' "$evidence" | grep -c '' || true)
+            if [ "${records:-0}" -gt 1 ]; then
+              echo "refused: ${TAG} carries ${records} Quota-lane lines; a release records exactly one." >&2
+              exit 1
+            fi
           fi
 
           if [ -z "${evidence//[[:space:]]/}" ]; then
@@ -397,7 +427,23 @@ jobs:
             exit 1
           fi
 
-          read -r claimed_sha claimed_cases claimed_at _rest <<<"${evidence}"
+          # One line of exactly three fields. A second line would reach GITHUB_OUTPUT unvalidated,
+          # and a fourth field would be published without being checked.
+          case "$evidence" in
+            *$'\n'* | *$'\r'*)
+              echo "refused: ${carrier} spans more than one line; a record is one line of three fields." >&2
+              exit 1
+              ;;
+          esac
+          read -r -a fields <<<"${evidence}"
+          if [ "${#fields[@]}" -ne 3 ]; then
+            echo "refused: ${carrier} has ${#fields[@]} fields; a record is '<sha> <case-count> <RFC 3339 UTC>'." >&2
+            exit 1
+          fi
+          claimed_sha=${fields[0]}
+          claimed_cases=${fields[1]}
+          claimed_at=${fields[2]}
+          evidence="${claimed_sha} ${claimed_cases} ${claimed_at}"
 
           if [ "$claimed_sha" != "$SOURCE_SHA" ]; then
             echo "refused: ${carrier} records commit '${claimed_sha}', not ${SOURCE_SHA}." >&2
@@ -416,8 +462,20 @@ jobs:
             echo "refused: ${quota_source} is absent at ${SOURCE_SHA}." >&2
             exit 1
           fi
-          declared_cases=$(printf '%s\n' "$source_text" \
-            | grep -cE '^[[:space:]]*(async[[:space:]]+)?fn[[:space:]]+real_quota_[A-Za-z0-9_]+[[:space:]]*\(' || true)
+          # The definition `cargo xtask quota-lane` and the fixture use (`declared_cases` in
+          # xtask/src/quota_lane.rs): an `fn real_quota_*` whose attributes since the previous item
+          # include `#[ignore`. An unignored helper of that name is not a case on either side.
+          declared_cases=$(printf '%s\n' "$source_text" | awk '
+            { line = $0; sub(/^[[:space:]]+/, "", line) }
+            line ~ /^#\[ignore/ { ignored = 1; next }
+            line ~ /^(async )?fn / {
+              if (ignored && line ~ /^(async )?fn real_quota_[A-Za-z0-9_]*[^A-Za-z0-9_]/) cases++
+              ignored = 0
+              next
+            }
+            line !~ /^#\[/ && line != "" { ignored = 0 }
+            END { print cases + 0 }
+          ')
           if [ "${declared_cases:-0}" -eq 0 ]; then
             echo "refused: ${quota_source} at ${SOURCE_SHA} declares no real_quota_ case function." >&2
             echo "Fix this check with the cases; a record of zero cases proves nothing." >&2
@@ -428,7 +486,10 @@ jobs:
             exit 1
           fi
 
-          if ! printf '%s' "$claimed_at" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'; then
+          # The shape, then the calendar: GNU date must read it back as the same UTC instant, so
+          # month 13, 30 February and hour 24 are refused along with every other form.
+          if ! printf '%s' "$claimed_at" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' \
+            || [ "$(date -u -d "$claimed_at" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)" != "$claimed_at" ]; then
             echo "refused: ${carrier} records '${claimed_at}' where an RFC 3339 UTC instant belongs." >&2
             echo "Use the form 2026-09-15T08:30:00Z." >&2
             exit 1

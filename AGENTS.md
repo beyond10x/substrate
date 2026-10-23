@@ -332,25 +332,30 @@ read as covering these cases.
 **`cargo xtask quota-fixture run` provisions that fixture and runs the lane in it — one command.**
 It builds the checked-in recipe [`fixtures/quota-lab/Dockerfile`](fixtures/quota-lab/Dockerfile)
 (the release builder's exact pinned `rust` image plus `e2fsprogs`, tagged
-`b10x-substrate-quota-lab:local`, never pushed) and runs one container with Docker's default
+`b10x-substrate-quota-lab:<key>`, never pushed) and runs one container with Docker's default
 capability set plus `SYS_ADMIN` — what the recorded run had, never `--privileged` — and the loop
 access a filesystem image needs: `--device /dev/loop-control`, `--device-cgroup-rule 'b 7:* rmw'`
 and `--security-opt apparmor=unconfined`, because the default AppArmor profile denies `mount`.
-This checkout is bound read-only at `/src`; the container's builds go to the Docker volumes
-`b10x-substrate-quota-lab-target` and `b10x-substrate-quota-lab-cargo-registry`, never to the
-checkout's `target/`. Inside, the hidden `quota-fixture inside` creates a sparse 1 GiB ext4 image with
+The container never sees the live checkout: the verb reads `HEAD` once, extracts that commit with
+`git archive` (modification times reset to the extraction, `tar -m`) into a fresh directory under
+the target directory, builds the recipe from it and binds it read-only at `/src`, and removes it
+after the run. The container's builds go to the Docker volumes
+`b10x-substrate-quota-lab-target-<key>` and `b10x-substrate-quota-lab-cargo-registry-<key>`, never
+to the checkout's `target/`; `<key>` is derived from the checkout's canonical path, so two
+checkouts never share a container build target. Inside, the hidden `quota-fixture inside` creates a sparse 1 GiB ext4 image with
 the `quota` and `project` features, attaches it through one free loop device with automatic detach,
 mounts it `prjquota` at `/quota` (not XFS, which reports an exceeded project quota as `ENOSPC` where
 the cases require `EDQUOT`),
 hands it to the invoking uid and runs `quota-lane` as that uid with
 `setpriv --inh-caps=+sys_admin --ambient-caps=+sys_admin` and `200000-200511`. It refuses to
 provision anything outside that container. `--release` builds the cases in the release profile;
-`--clean` removes the image and both volumes afterwards. The loop device is a host-kernel object
+`--clean` removes this checkout's image tag and its two volumes afterwards, and nothing else. The loop device is a host-kernel object
 for the duration of the run. Docker must work for the invoking user without `sudo`; where it does
 not, the verb refuses and names the cases that did not run.
 
 **A release requires a recorded run of it for the tagged commit** (§ *Releases*). The run ends,
-only when every declared case passed and the checkout is clean at `HEAD`, with the line
+only when every declared case passed, the checkout was clean before the run and is still clean
+after it, and `HEAD` did not move, with the line
 `Quota-lane: <source-sha> <case-count> <RFC 3339 UTC>`; `Confinement-lane:` does not cover these
 cases, because they are in a different crate and outside `DELEGATED_CASES`.
 
@@ -454,7 +459,10 @@ for example `Confinement-lane: 3fafeae65fe6ee9f36c3ba17d49b36a1a0d1a3a3 97 2026-
 record naming any other commit, refuses a case count other than the `DELEGATED_CASES` the tagged
 source itself declares in
 [`crates/substrate-daemon/tests/runtime_vectors.rs`](crates/substrate-daemon/tests/runtime_vectors.rs),
-and refuses a timestamp that is not an RFC 3339 UTC instant. The recorded line is written into the
+and refuses a timestamp that is not an RFC 3339 UTC instant, by shape and by calendar (GNU `date`
+must read it back unchanged, so `2026-02-30T10:00:00Z` is refused). The record is one line of
+exactly three fields: a tag carrying two `Confinement-lane:` lines, a value with a line break or
+carriage return, or a fourth field is refused. The recorded line is written into the
 GitHub release under *Confinement lane* and into both job summaries. A protected-`main` recovery
 dispatch may pass the same value as the workflow's `confinement_evidence` input instead, which is
 the only way to release a tag that was annotated before this condition existed. This records a local
@@ -471,10 +479,12 @@ Quota-lane: <source-sha> <case-count> <RFC 3339 UTC>
 ```
 
 `release.yml` refuses to publish without it, refuses a record naming any other commit, refuses a
-case count other than the number of `real_quota_*` test functions the tagged source declares in
-[`crates/substrate-host/src/git/quota_tests.rs`](crates/substrate-host/src/git/quota_tests.rs), and
-refuses a timestamp that is not an RFC 3339 UTC instant; a `Confinement-lane:` line does not satisfy
-it. The line is written into the GitHub release under *Quota lane* and into both job summaries, and a
+case count other than the number of `#[ignore]`d `real_quota_*` functions the tagged source declares
+in [`crates/substrate-host/src/git/quota_tests.rs`](crates/substrate-host/src/git/quota_tests.rs)
+(the definition `declared_cases` in `xtask/src/quota_lane.rs` uses, so the fixture's record and the
+step agree), and refuses a timestamp that is not an RFC 3339 UTC instant, with the same calendar
+check and the same one-line, three-field rule as `Confinement-lane:`; a `Confinement-lane:` line does
+not satisfy it. The line is written into the GitHub release under *Quota lane* and into both job summaries, and a
 recovery dispatch may pass it as the `quota_evidence` input instead. The step's refusals are executed
 offline against throwaway tagged repositories by `xtask/tests/release_workflow.rs`.
 

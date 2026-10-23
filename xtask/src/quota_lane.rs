@@ -167,7 +167,12 @@ fn report_refusal(cases: &[String], missing: &[String]) {
     );
 }
 
-/// Every `#[ignore]`d test function the source declares, in declaration order.
+/// Every `#[ignore]`d `real_quota_*` function the source declares, in declaration order.
+///
+/// This is the one definition of a real-quota case: `cargo xtask quota-fixture run` records this
+/// count, and the release step `Require a recorded quota-lane run for this commit` counts the same
+/// thing in `awk`. An unignored helper named `real_quota_*` is not a case, and neither is an
+/// ignored function of another name.
 ///
 /// Read from the source rather than from `--ignored --list`, so the refusal and the inventory cost
 /// no build: `scripts/delegated-lane.sh` prints the inventory on a host that has no fixture, and a
@@ -180,7 +185,7 @@ pub(crate) fn declared_cases(source: &str) -> Vec<String> {
         if line.starts_with("#[ignore") {
             ignored = true;
         } else if let Some(name) = function_name(line) {
-            if ignored {
+            if ignored && name.starts_with("real_quota_") {
                 cases.push(name.to_owned());
             }
             ignored = false;
@@ -410,7 +415,11 @@ mod tests {
                       #[ignore]\n\
                       fn real_quota_three() {}\n\
                       // #[ignore] in prose\n\
-                      async fn not_a_case() {}\n";
+                      async fn not_a_case() {}\n\
+                      fn real_quota_helper() {}\n\
+                      #[test]\n\
+                      #[ignore]\n\
+                      fn slow_but_not_quota() {}\n";
         assert_eq!(
             declared_cases(source),
             vec!["real_quota_one".to_owned(), "real_quota_three".to_owned()]
@@ -426,13 +435,18 @@ mod tests {
             cases.len() >= 7,
             "the lane must select every ignored case; found {cases:?}"
         );
-        for case in &cases {
-            assert!(
-                case.starts_with("real_quota_"),
-                "{case} is ignored but is not a real-quota case; the lane's `--exact` selection \
-                 would run it under a fixture it does not need"
-            );
-        }
+        // Every ignored function there is a real-quota case; one that is not would be skipped by
+        // the lane and by the release count alike, so it must not exist unnoticed.
+        let ignored = source
+            .lines()
+            .filter(|line| line.trim_start().starts_with("#[ignore"))
+            .count();
+        assert_eq!(
+            cases.len(),
+            ignored,
+            "{} ignores {ignored} functions but only {cases:?} are real-quota cases",
+            super::SOURCE
+        );
     }
 
     #[test]
