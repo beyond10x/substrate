@@ -38,15 +38,20 @@ reasoned from `modules.alias` rather than measured.
    helper and forwarder that open `AF_INET` stream sockets run outside the child's seccomp program
    (`crates/substrate-host/src/egress.rs`, the `setns` helper). A family absent from the table,
    including every family `DENIED_FAMILIES` named before, is refused.
-2. **`socket(AF_UNIX)` stays refused**, and `socketpair(2)` stays `AF_UNIX` with a
-   non-datagram type only, as before. `socketpair(2)` for any other family is now refused
-   with `EACCES` too. It never yields a usable pair for those families, and it creates sockets the
-   same way `socket(2)` does.
+2. **`socket(AF_UNIX)` stays refused, and `socketpair(2)` admits `AF_UNIX` only as
+   `SOCK_STREAM` or `SOCK_SEQPACKET`** (the type compared under the `0xf` mask). Every other type
+   is refused with `EACCES`. Before this ADR only `SOCK_DGRAM` was refused, but the kernel creates
+   an `AF_UNIX` `SOCK_RAW` pair as a datagram pair, so refusing by one excluded type was not a
+   datagram refusal. `socketpair(2)` for any other family is refused with `EACCES` too. It never
+   yields a usable pair for those families, and it creates sockets the same way `socket(2)` does.
 3. **`ioctl(TIOCSETD)` is refused with `EACCES`.** Pty sessions (ADR 0019) give the child a
    terminal; nothing the runtime ships changes its line discipline.
 4. **Arguments are compared on their low 32 bits**, which is the width the kernel reads for the
-   family, protocol and ioctl request. The syscall number is normalised for x32 before every
-   comparison, as it was before.
+   family, protocol and ioctl request. **On x86_64, every syscall whose number carries the x32
+   bit (`0x40000000`) is refused with `EACCES` before any other check.** The profile used to mask
+   that bit off and compare the native number, but some x32 entries are compat numbers of their
+   own: x32 `ioctl` is 514, not 16, so it walked past the `TIOCSETD` check. Nothing the runtime
+   ships is x32.
 5. **`FamilyPolicy.host_state` stays answered for every surveyed family**, and the allowed rows now
    say what the allowlist closes.
 

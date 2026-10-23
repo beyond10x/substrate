@@ -9,6 +9,8 @@ const ERRNO: u32 = 0x0005_0000;
 const LD_W_ABS: u16 = 0x20;
 const ALU_AND_K: u16 = 0x54;
 const JMP_JEQ_K: u16 = 0x15;
+#[cfg(target_arch = "x86_64")]
+const JMP_JSET_K: u16 = 0x45;
 const RET_K: u16 = 0x06;
 const SOCKET_TYPE_MASK: u32 = 0x0f;
 
@@ -97,7 +99,18 @@ enum Label {
 /// One instruction of the program before its jump offsets are resolved.
 enum Op {
     Statement(u16, u32),
-    Jump { value: u32, yes: Label, no: Label },
+    Jump {
+        value: u32,
+        yes: Label,
+        no: Label,
+    },
+    /// Jumps to `yes` when any bit of `mask` is set in the accumulator.
+    #[cfg(target_arch = "x86_64")]
+    JumpIfAnySet {
+        mask: u32,
+        yes: Label,
+        no: Label,
+    },
     Mark(Label),
 }
 
@@ -130,16 +143,19 @@ pub(crate) fn profile() -> Result<File, DriverError> {
 
 /// The confinement program.
 ///
-/// In order: refuse a foreign architecture; refuse `io_uring_setup`; send `socket`, `socketpair`
-/// and `ioctl` to their argument checks; allow everything else. The argument checks are:
+/// In order: refuse a foreign architecture; on `x86_64` refuse every x32 syscall; refuse
+/// `io_uring_setup`; send `socket`, `socketpair` and `ioctl` to their argument checks; allow
+/// everything else. The argument checks are:
 ///
 /// * `socket`: the family must be in `ALLOWED_SOCKETS` and the protocol one of its listed values
 ///   (ADR 0039). `AF_UNIX` is not listed, so it stays refused for the filesystem reason
 ///   `FAMILY_POLICY` records.
-/// * `socketpair`: `AF_UNIX` only, and not as a datagram pair. A Unix datagram socketpair is not
-///   confined to its peer: `connect(2)` can retarget either endpoint to a mounted host socket.
-///   Connection-oriented pairs remain available for process-local IPC. No other family yields a
-///   usable pair, and each creates its sockets the way `socket(2)` does (ADR 0039).
+/// * `socketpair`: `AF_UNIX` only, and only as `SOCK_STREAM` or `SOCK_SEQPACKET`. A Unix datagram
+///   socketpair is not confined to its peer: `connect(2)` can retarget either endpoint to a
+///   mounted host socket, and the kernel creates a `SOCK_RAW` pair as a datagram pair, so every
+///   other type is refused. Connection-oriented pairs remain available for process-local IPC. No
+///   other family yields a usable pair, and each creates its sockets the way `socket(2)` does
+///   (ADR 0039).
 /// * `ioctl`: `TIOCSETD` is refused; no shipped path changes a terminal's line discipline.
 fn filters(deny: u32) -> Vec<libc::sock_filter> {
     let mut program = vec![
@@ -151,10 +167,16 @@ fn filters(deny: u32) -> Vec<libc::sock_filter> {
         },
         Op::Statement(LD_W_ABS, 0),
     ];
-    // x32 uses the x86_64 audit architecture with an ABI bit in the syscall number. Compare the
-    // underlying call so an x32 `socket`, `socketpair` or `ioctl` cannot skip the native numbers.
+    // x32 uses the x86_64 audit architecture with an ABI bit in the syscall number, and some of
+    // its entries are compat numbers of their own (x32 `ioctl` is 514, not 16), so masking the bit
+    // off would let them past every check written against a native number. Nothing the runtime
+    // ships is x32, so every x32 call is refused before any other check (ADR 0039 decision 4).
     #[cfg(target_arch = "x86_64")]
-    program.push(Op::Statement(ALU_AND_K, !X32_SYSCALL_BIT));
+    program.push(Op::JumpIfAnySet {
+        mask: X32_SYSCALL_BIT,
+        yes: Label::Deny,
+        no: Label::Next,
+    });
     for (syscall, target) in [
         (libc::SYS_io_uring_setup, Label::Deny),
         (libc::SYS_socket, Label::Socket),
@@ -211,9 +233,14 @@ fn filters(deny: u32) -> Vec<libc::sock_filter> {
         Op::Statement(LD_W_ABS, ARGUMENT_1),
         Op::Statement(ALU_AND_K, SOCKET_TYPE_MASK),
         Op::Jump {
-            value: word(libc::SOCK_DGRAM),
-            yes: Label::Deny,
-            no: Label::Allow,
+            value: word(libc::SOCK_STREAM),
+            yes: Label::Allow,
+            no: Label::Next,
+        },
+        Op::Jump {
+            value: word(libc::SOCK_SEQPACKET),
+            yes: Label::Allow,
+            no: Label::Deny,
         },
         Op::Mark(Label::Ioctl),
         Op::Statement(LD_W_ABS, ARGUMENT_1),
@@ -242,6 +269,8 @@ fn assemble(program: &[Op]) -> Vec<libc::sock_filter> {
         match op {
             Op::Mark(label) => positions.push((*label, at)),
             Op::Statement(..) | Op::Jump { .. } => at += 1,
+            #[cfg(target_arch = "x86_64")]
+            Op::JumpIfAnySet { .. } => at += 1,
         }
     }
     let target = |label: Label, from: usize| -> u8 {
@@ -276,6 +305,16 @@ fn assemble(program: &[Op]) -> Vec<libc::sock_filter> {
                     jt: target(*yes, from),
                     jf: target(*no, from),
                     k: *value,
+                });
+            }
+            #[cfg(target_arch = "x86_64")]
+            Op::JumpIfAnySet { mask, yes, no } => {
+                let from = filters.len();
+                filters.push(libc::sock_filter {
+                    code: JMP_JSET_K,
+                    jt: target(*yes, from),
+                    jf: target(*no, from),
+                    k: *mask,
                 });
             }
         }
@@ -834,6 +873,96 @@ mod tests {
             }),
             "ioctl(TIOCGWINSZ) must reach the kernel and answer EBADF on descriptor -1"
         );
+    }
+
+    /// ADR 0039 decision 4: every syscall carrying the x32 bit is refused with `EACCES` before any
+    /// other check, so an x32 compat entry with its own number (x32 `ioctl` is 514, not 16) cannot
+    /// walk past a check written against the native number.
+    ///
+    /// Each call is issued on descriptor -1 or with no side effect, and the native control is
+    /// asserted beside it so the profile is known to be installed.
+    #[cfg(target_arch = "x86_64")]
+    #[test]
+    fn every_x32_syscall_is_refused_before_any_other_check() {
+        assert!(
+            profile_child_passes(&|| {
+                let discipline: libc::c_int = 0;
+                // SAFETY: the x32 compat ioctl number (0x202 = 514) on descriptor -1 with a
+                // pointer that outlives the call.
+                let result = unsafe {
+                    libc::syscall(
+                        X32_SYSCALL_BIT | 0x202,
+                        -1,
+                        libc::TIOCSETD,
+                        &raw const discipline,
+                    )
+                };
+                result == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EACCES)
+            }),
+            "ioctl(TIOCSETD) through the x32 compat number 514 was not refused with EACCES"
+        );
+        for number in [libc::SYS_getpid, libc::SYS_close, libc::SYS_ioctl] {
+            assert!(
+                profile_child_passes(&|| {
+                    // SAFETY: getpid, close(-1) and ioctl(-1, 0) touch no state the child owns.
+                    let result = unsafe { libc::syscall(number | X32_SYSCALL_BIT, -1, 0, 0) };
+                    result == -1
+                        && std::io::Error::last_os_error().raw_os_error() == Some(libc::EACCES)
+                }),
+                "the x32 form of syscall {number} was not refused with EACCES"
+            );
+        }
+    }
+
+    /// ADR 0039 decision 2: an `AF_UNIX` socketpair is admitted as `SOCK_STREAM` or
+    /// `SOCK_SEQPACKET` only. The kernel turns `SOCK_RAW` into a datagram pair, so every other
+    /// type is refused with `EACCES` rather than only `SOCK_DGRAM`.
+    #[test]
+    fn unix_socketpair_admits_only_stream_and_seqpacket() {
+        const SOCK_PACKET: libc::c_int = 10;
+        for (socket_type, refused) in [
+            (libc::SOCK_STREAM, false),
+            (libc::SOCK_SEQPACKET, false),
+            (libc::SOCK_DGRAM, true),
+            (libc::SOCK_RAW, true),
+            (libc::SOCK_RDM, true),
+            (SOCK_PACKET, true),
+            (0, true),
+        ] {
+            assert!(
+                profile_child_passes(&|| {
+                    let mut sockets = [-1; 2];
+                    // SAFETY: `sockets` has room for exactly two returned descriptors.
+                    let result = unsafe {
+                        libc::socketpair(
+                            libc::AF_UNIX,
+                            socket_type | libc::SOCK_CLOEXEC,
+                            0,
+                            sockets.as_mut_ptr(),
+                        )
+                    };
+                    let errno = std::io::Error::last_os_error().raw_os_error();
+                    if result == 0 {
+                        // SAFETY: both descriptors were returned by the call above.
+                        unsafe {
+                            libc::close(sockets[0]);
+                            libc::close(sockets[1]);
+                        }
+                    }
+                    if refused {
+                        result == -1 && errno == Some(libc::EACCES)
+                    } else {
+                        result == 0
+                    }
+                }),
+                "socketpair(AF_UNIX, {socket_type}) must be {}",
+                if refused {
+                    "refused with EACCES"
+                } else {
+                    "admitted"
+                }
+            );
+        }
     }
 
     /// The errno `socket(family, socket_type, protocol)` answered, or `None` if it opened.
