@@ -2445,7 +2445,7 @@ fn root_name_unchecked<'de, D: serde::Deserializer<'de>>(
 }
 
 // The root-name set and the workspace origin are generated from spec/workspaces, not transcribed
-// (ADR 0035). The ESS 0.67.0 decoder checks the root name's alphabet and length bound but not
+// (ADR 0035). The ESS 0.68.0 decoder checks the root name's alphabet and length bound but not
 // the leading-`-` rule, so [`is_root_name`] stays the full predicate (spec/workspaces/README.md).
 #[allow(dead_code, clippy::all, clippy::pedantic)]
 #[rustfmt::skip]
