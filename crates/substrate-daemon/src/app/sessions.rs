@@ -29,7 +29,7 @@ use substrate_wire::{
 };
 use tokio::sync::{Notify, Semaphore};
 
-use crate::runtime::TransportPermit;
+use crate::runtime::{StreamSlot, TransportPermit, hand_over_transport};
 
 use super::events::{ControlRate, enforce_stream_send_deadline};
 use super::git_roots::{StartRefusal, admit_start_workspaces, start_workspaces};
@@ -56,11 +56,12 @@ const CONTAINMENT_BATCH: usize = 64;
 #[derive(Clone, Copy)]
 pub(super) struct PipeSessionPolicy {
     pub(super) global_attachments: usize,
+    pub(super) attachments_per_subject: usize,
     max_message_bytes: usize,
     write_buffer_bytes: usize,
     send_timeout: std::time::Duration,
     read_poll: std::time::Duration,
-    lifetime: std::time::Duration,
+    pub(super) lifetime: std::time::Duration,
     max_controls_per_window: u32,
     control_window: std::time::Duration,
 }
@@ -69,6 +70,7 @@ impl PipeSessionPolicy {
     pub(super) const fn production() -> Self {
         Self {
             global_attachments: 32,
+            attachments_per_subject: 16,
             // One 64-KiB binary frame expands below this bound in the closed base64 JSON shape.
             max_message_bytes: 96 * 1_024,
             write_buffer_bytes: 16 * 1_024,
@@ -99,7 +101,16 @@ impl PipeSessionId {
 
 pub(super) struct PipeAttachmentLimits {
     global: Arc<Semaphore>,
-    attached: ParkingMutex<HashSet<(Scope, PipeSessionId)>>,
+    per_subject: usize,
+    held: ParkingMutex<HeldAttachments>,
+}
+
+/// The attachments held now, by session and by subject, under one lock so a key and its count
+/// never disagree.
+#[derive(Default)]
+struct HeldAttachments {
+    attached: HashSet<(Scope, PipeSessionId)>,
+    by_subject: HashMap<Scope, usize>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -120,17 +131,27 @@ struct PipeAttachmentPermit {
 }
 
 impl PipeAttachmentLimits {
-    pub(super) fn new(global_attachments: usize) -> Arc<Self> {
+    pub(super) fn new(global_attachments: usize, attachments_per_subject: usize) -> Arc<Self> {
         assert!(
             global_attachments > 0,
             "global pipe attachment limit must be nonzero"
         );
+        assert!(
+            attachments_per_subject > 0,
+            "per-subject pipe attachment limit must be nonzero"
+        );
         Arc::new(Self {
             global: Arc::new(Semaphore::new(global_attachments)),
-            attached: ParkingMutex::new(HashSet::new()),
+            per_subject: attachments_per_subject,
+            held: ParkingMutex::new(HeldAttachments::default()),
         })
     }
 
+    /// Takes one attachment slot for `scope`'s subject and `session_id`, or names why not.
+    ///
+    /// The global permit is taken first and dropped again on every refusal below, so a refused
+    /// attach spends no slot. A session already attached keeps its more specific refusal even
+    /// when its subject is also at its per-subject cap (ADR 0042 decision 6).
     fn acquire(
         self: &Arc<Self>,
         scope: &Scope,
@@ -140,9 +161,17 @@ impl PipeAttachmentLimits {
             .try_acquire_owned()
             .map_err(|_| PipeAttachmentRefusal::Capacity)?;
         let key = (scope.clone(), session_id.clone());
-        if !self.attached.lock().insert(key) {
+        let mut held = self.held.lock();
+        if held.attached.contains(&key) {
             return Err(PipeAttachmentRefusal::AlreadyAttached);
         }
+        let subject_count = held.by_subject.entry(scope.clone()).or_insert(0);
+        if *subject_count >= self.per_subject {
+            return Err(PipeAttachmentRefusal::Capacity);
+        }
+        *subject_count += 1;
+        held.attached.insert(key);
+        drop(held);
         Ok(PipeAttachmentPermit {
             limits: Arc::clone(self),
             scope: scope.clone(),
@@ -152,7 +181,11 @@ impl PipeAttachmentLimits {
     }
 }
 
-/// Every permit returns its slot and drops its key, on every path.
+/// A session attachment slot: the per-subject, per-session and global caps the snapshot publishes
+/// as `sessions.attachment-bounds` (ADR 0042).
+impl StreamSlot for PipeAttachmentPermit {}
+
+/// Every permit returns its slot, drops its key and gives its subject's count back, on every path.
 ///
 /// There used to be a second shape here: a permit whose cancellation could not be proven kept a
 /// process-local tombstone — the key stayed in `attached` and `Drop` answered that by *forgetting*
@@ -162,13 +195,20 @@ impl PipeAttachmentLimits {
 /// from then on, `substrate_store` answers `AlreadyClaimed` for all three, and only starting a
 /// session sets `Available` again. So the tombstone barred a session the durable claim had already
 /// barred, while the forgotten permit was real, permanent loss of capacity that the published
-/// `session.attachment-capacity` refusal calls exhausted and retriable.
+/// `session.attachment-capacity` refusal calls exhausted and retriable. The per-subject count is
+/// returned here for the same reason: a subject count that outlived its attachment would be the
+/// same loss, scoped to one subject.
 impl Drop for PipeAttachmentPermit {
     fn drop(&mut self) {
-        self.limits
-            .attached
-            .lock()
+        let mut held = self.limits.held.lock();
+        held.attached
             .remove(&(self.scope.clone(), self.session_id.clone()));
+        if let Some(count) = held.by_subject.get_mut(&self.scope) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                held.by_subject.remove(&self.scope);
+            }
+        }
     }
 }
 
@@ -1316,10 +1356,11 @@ pub(super) async fn pipe_session_attach(
     let mode = session.mode;
     let policy = app.pipe_session_policy;
     // The transport admission this connection was accepted under, moved into the upgraded task
-    // below. hyper resolves an upgradeable connection future when it hands the socket over, so an
-    // admission left with the connection stops counting an attachment that is still serving.
-    // Absent when no listener published one — the crate's own tests drive this route without a
-    // transport.
+    // below and handed over there to the attachment permit already held (ADR 0042): from the
+    // upgrade on, this socket is counted by the published attachment caps, not the transport
+    // budget. A failed upgrade drops it with the callback, ending the connection's hold as the
+    // connection ends. Absent when no listener published one — the crate's own tests drive this
+    // route without a transport.
     let transport_admission = transport_permit.map(|Extension(permit)| permit);
 
     // The claim above is already consumed and the session is no longer attachable, so an upgrade
@@ -1359,8 +1400,7 @@ pub(super) async fn pipe_session_attach(
             );
         })
         .on_upgrade(move |socket| async move {
-            // Held for as long as this attachment serves, so the transport budget counts it.
-            let _transport_admission = transport_admission;
+            hand_over_transport(transport_admission, &permit);
             let completed = tokio::time::timeout(
                 policy.lifetime,
                 run_pipe_attachment(
@@ -2233,7 +2273,7 @@ mod attachment_permit_tests {
 
     #[test]
     fn an_attachment_permit_is_keyed_by_the_session_it_attaches() {
-        let limits = PipeAttachmentLimits::new(4);
+        let limits = PipeAttachmentLimits::new(4, 4);
         let session_id = PipeSessionId("ses_attachment_permit_one".to_owned());
         let permit = limits
             .acquire(&scope(), &session_id)
@@ -2247,6 +2287,69 @@ mod attachment_permit_tests {
         assert!(limits.acquire(&scope(), &other).is_ok());
         drop(permit);
         assert!(limits.acquire(&scope(), &session_id).is_ok());
+    }
+
+    /// ADR 0042 decision 4: one subject holds at most its per-subject share of the attachments,
+    /// a second subject still attaches while the first is at its cap, and a returned attachment
+    /// gives the first subject its slot back.
+    #[test]
+    fn one_subject_is_refused_at_its_attachment_cap_while_another_still_attaches() {
+        let limits = PipeAttachmentLimits::new(4, 2);
+        let first = scope();
+        let second = Scope {
+            deployment: first.deployment.clone(),
+            subject: "local:1001".to_owned(),
+        };
+        let session = |n: u32| PipeSessionId(format!("ses_attachment_subject_{n}"));
+        let held = limits.acquire(&first, &session(1)).expect("first of two");
+        let _second_held = limits.acquire(&first, &session(2)).expect("second of two");
+        assert_eq!(
+            limits.acquire(&first, &session(3)).err(),
+            Some(PipeAttachmentRefusal::Capacity),
+            "the third attachment of one subject is over its per-subject cap"
+        );
+        let _other = limits
+            .acquire(&second, &session(4))
+            .expect("another subject attaches while the first is at its cap");
+        assert_eq!(
+            limits.acquire(&first, &session(1)).err(),
+            Some(PipeAttachmentRefusal::AlreadyAttached),
+            "a session already attached keeps its more specific refusal at the cap"
+        );
+        drop(held);
+        assert!(
+            limits.acquire(&first, &session(3)).is_ok(),
+            "a returned attachment gives its subject the slot back"
+        );
+    }
+
+    /// A per-subject refusal returns the global slot it took: the global cap is not spent by
+    /// subjects that are over their own.
+    #[test]
+    fn a_per_subject_refusal_does_not_spend_a_global_slot() {
+        let limits = PipeAttachmentLimits::new(2, 1);
+        let first = scope();
+        let second = Scope {
+            deployment: first.deployment.clone(),
+            subject: "local:1001".to_owned(),
+        };
+        let _held = limits
+            .acquire(&first, &PipeSessionId("ses_global_one".to_owned()))
+            .expect("first subject's one");
+        for n in 0..8 {
+            assert_eq!(
+                limits
+                    .acquire(&first, &PipeSessionId(format!("ses_global_refused_{n}")))
+                    .err(),
+                Some(PipeAttachmentRefusal::Capacity)
+            );
+        }
+        assert!(
+            limits
+                .acquire(&second, &PipeSessionId("ses_global_two".to_owned()))
+                .is_ok(),
+            "the second global slot is still free after eight per-subject refusals"
+        );
     }
 }
 

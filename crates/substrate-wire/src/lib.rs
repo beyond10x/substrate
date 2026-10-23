@@ -17,7 +17,7 @@ pub const API_VERSION: &str = "v1";
 /// Moving either member is an explicit coordinated promotion (Atlas ADR 0019).
 pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.23.0";
 pub const ADVERTISED_CONTRACT_BUNDLE_SHA256: &str =
-    "41abb057474cb0bb70cbce7eaef099305a80807a8d6b8b9a53befffc41a1e497";
+    "de6d58f941c33c53649624131af77fb86cea2b07db2a0a6bc3c9edcbe4f56c80";
 pub const MAX_FILE_BYTES: u64 = 1_048_576;
 pub const MAX_IO_BYTES: u64 = 1_048_576;
 pub const MAX_LIST_ITEMS: u32 = 1_000;
@@ -128,6 +128,33 @@ pub const EXEC_FIELD_REFUSALS: [ExecFieldRefusal; 9] = [
     ),
 ];
 pub const RESOURCE_USAGE_SAMPLE_INTERVAL_MS: u64 = 1_000;
+/// The fact that publishes the event stream's caps, lifetime and refusal (ADR 0042).
+pub const EVENTS_STREAM_BOUNDS_FACT: &str = "events.stream-bounds";
+/// The fact that publishes the metrics stream's caps, lifetime and refusal (ADR 0042).
+pub const METRICS_STREAM_BOUNDS_FACT: &str = "metrics.stream-bounds";
+/// The fact that publishes the session attachment's caps, lifetime and refusal (ADR 0042).
+pub const SESSIONS_ATTACHMENT_BOUNDS_FACT: &str = "sessions.attachment-bounds";
+/// Event streams one subject may hold at once (ADR 0042, `events.stream-bounds`).
+pub const EVENT_STREAMS_PER_SUBJECT: u32 = 4;
+/// Event streams one deployment serves at once (ADR 0042, `events.stream-bounds`).
+pub const EVENT_STREAMS_GLOBAL: u32 = 64;
+/// The refusal an event stream past either cap earns, `429` (ADR 0042).
+pub const EVENT_STREAM_CAPACITY: &str = "event.stream-capacity";
+/// Metrics streams one subject may hold at once (ADR 0042, `metrics.stream-bounds`).
+pub const METRICS_STREAMS_PER_SUBJECT: u32 = 4;
+/// Metrics streams one deployment serves at once (ADR 0042, `metrics.stream-bounds`).
+pub const METRICS_STREAMS_GLOBAL: u32 = 64;
+/// The refusal a metrics stream past either cap earns, `429` (ADR 0042).
+pub const METRICS_STREAM_CAPACITY: &str = "metrics.stream-capacity";
+/// Session attachments one subject may hold at once (ADR 0042 decision 4,
+/// `sessions.attachment-bounds`).
+pub const SESSION_ATTACHMENTS_PER_SUBJECT: u32 = 16;
+/// Attachments one session may hold at once (ADR 0042, `sessions.attachment-bounds`).
+pub const SESSION_ATTACHMENTS_PER_SESSION: u32 = 1;
+/// Session attachments one deployment serves at once (ADR 0042, `sessions.attachment-bounds`).
+pub const SESSION_ATTACHMENTS_GLOBAL: u32 = 32;
+/// How long an upgraded stream or attachment lives at most, in milliseconds (ADR 0041, ADR 0042).
+pub const UPGRADED_STREAM_LIFETIME_MS: u64 = 3_600_000;
 pub const EXEC_SCRATCH_MOUNT: &str = "/scratch";
 /// Where the workspace appears inside every confined run, and the working directory a start that
 /// names none begins in (design 26 § 1).
@@ -3496,6 +3523,29 @@ pub struct CapabilityFacts {
     pub exec_resource_usage: Option<ResourceUsageFacts>,
     #[serde(rename = "metrics.stream", skip_serializing_if = "Option::is_none")]
     pub metrics_stream: Option<MetricsStreamFacts>,
+    /// The event stream's caps, lifetime and refusal ([`EVENTS_STREAM_BOUNDS_FACT`], ADR 0042).
+    #[serde(
+        rename = "events.stream-bounds",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub events_stream_bounds: Option<StreamBoundsFacts>,
+    /// The metrics stream's caps, lifetime and refusal ([`METRICS_STREAM_BOUNDS_FACT`], ADR
+    /// 0042). Published exactly when `metrics.stream` is.
+    #[serde(
+        rename = "metrics.stream-bounds",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub metrics_stream_bounds: Option<StreamBoundsFacts>,
+    /// The session attachment's caps, lifetime and refusal
+    /// ([`SESSIONS_ATTACHMENT_BOUNDS_FACT`], ADR 0042). Published exactly when exec is served.
+    #[serde(
+        rename = "sessions.attachment-bounds",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub sessions_attachment_bounds: Option<AttachmentBoundsFacts>,
     /// The apertures this deployment declared, by name and pinned destination (ADR 0013).
     ///
     /// Answers "what could this daemon ever reach" — deployment vocabulary, not secret material
@@ -3588,6 +3638,9 @@ impl Default for CapabilityFacts {
             exec_writable_roots_git: None,
             exec_resource_usage: None,
             metrics_stream: None,
+            events_stream_bounds: None,
+            metrics_stream_bounds: None,
+            sessions_attachment_bounds: None,
             exec_egress_apertures: None,
             secrets_slots: None,
             sessions_pty: None,
@@ -3655,6 +3708,67 @@ pub struct MetricsStreamFacts {
     pub sample_interval_ms: u64,
     pub latest_wins: bool,
     pub replay: bool,
+}
+
+/// The caps, lifetime and refusal of one stream family (ADR 0042): `events.stream-bounds` and
+/// `metrics.stream-bounds`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StreamBoundsFacts {
+    pub per_subject: u32,
+    pub global: u32,
+    pub lifetime_ms: u64,
+    pub refusal: String,
+}
+
+impl StreamBoundsFacts {
+    /// The published bounds of the event stream.
+    #[must_use]
+    pub fn events() -> Self {
+        Self {
+            per_subject: EVENT_STREAMS_PER_SUBJECT,
+            global: EVENT_STREAMS_GLOBAL,
+            lifetime_ms: UPGRADED_STREAM_LIFETIME_MS,
+            refusal: EVENT_STREAM_CAPACITY.to_owned(),
+        }
+    }
+
+    /// The published bounds of the metrics stream.
+    #[must_use]
+    pub fn metrics() -> Self {
+        Self {
+            per_subject: METRICS_STREAMS_PER_SUBJECT,
+            global: METRICS_STREAMS_GLOBAL,
+            lifetime_ms: UPGRADED_STREAM_LIFETIME_MS,
+            refusal: METRICS_STREAM_CAPACITY.to_owned(),
+        }
+    }
+}
+
+/// The caps, lifetime and refusal of the session attachment (ADR 0042):
+/// `sessions.attachment-bounds`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttachmentBoundsFacts {
+    pub per_subject: u32,
+    pub per_session: u32,
+    pub global: u32,
+    pub lifetime_ms: u64,
+    pub refusal: String,
+}
+
+impl AttachmentBoundsFacts {
+    /// The published bounds of the session attachment.
+    #[must_use]
+    pub fn sessions() -> Self {
+        Self {
+            per_subject: SESSION_ATTACHMENTS_PER_SUBJECT,
+            per_session: SESSION_ATTACHMENTS_PER_SESSION,
+            global: SESSION_ATTACHMENTS_GLOBAL,
+            lifetime_ms: UPGRADED_STREAM_LIFETIME_MS,
+            refusal: SESSION_ATTACHMENT_CAPACITY.to_owned(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -6244,6 +6358,9 @@ mod host_process_tests;
 
 #[cfg(test)]
 mod writable_root_tests;
+
+#[cfg(test)]
+mod stream_bounds_tests;
 
 #[cfg(test)]
 mod adoption_tests {

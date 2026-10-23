@@ -604,7 +604,9 @@ async fn metrics_stream_lifetime_cancels_session_and_recovers_permits() {
     assert!(limits.scopes.lock().is_empty());
 }
 
-/// Adversary cases against `story:upgraded-connections-keep-their-permit`.
+/// Adversary cases against `story:upgraded-connections-keep-their-permit`, inverted by
+/// `story:transport-admission-and-stream-lifetime-disagree` (ADR 0042): an upgraded socket hands
+/// its transport slot to the stream it became, and is bounded by that stream's published caps.
 ///
 /// Kept in their own module so they carry their own imports and change no line another case
 /// reads. This file is `#[cfg(test)]`-only (`app.rs:28`) and is the crate's designated unit-test
@@ -644,9 +646,12 @@ mod upgraded_transport_slot {
     /// One connection's client half, held open for as long as the binding lives.
     struct Handshake {
         status: u16,
-        /// Held, never read: an open stream is exactly a peer that has not gone away, and a
-        /// dropped one would end the upgraded socket for a reason that is not the one under test.
-        _stream: TcpStream,
+        /// The response head, kept so a refused handshake's body can be read to its length.
+        head: String,
+        /// Held, and read only for a refusal's body: an open stream is exactly a peer that has
+        /// not gone away, and a dropped one would end the upgraded socket for a reason that is not
+        /// the one under test.
+        stream: TcpStream,
     }
 
     impl Handshake {
@@ -678,8 +683,29 @@ mod upgraded_transport_slot {
                 .expect("HTTP handshake status");
             Self {
                 status,
-                _stream: stream,
+                head: head.to_owned(),
+                stream,
             }
+        }
+
+        /// The body of a response that did not upgrade, read to its `content-length`.
+        async fn body(&mut self) -> String {
+            let length = self
+                .head
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())?
+                })
+                .expect("a refusal states its content-length");
+            assert!(length <= 16 * 1_024, "bounded refusal body");
+            let mut body = vec![0_u8; length];
+            self.stream
+                .read_exact(&mut body)
+                .await
+                .expect("read the refusal body");
+            String::from_utf8(body).expect("UTF-8 refusal body")
         }
     }
 
@@ -694,7 +720,7 @@ mod upgraded_transport_slot {
     ///
     /// Returns the address to connect to and the budget the listener admits from, so a case can
     /// read the budget from outside the listener.
-    async fn admitted_listener(
+    pub(super) async fn admitted_listener(
         deployment: &str,
         subjects: u32,
     ) -> (SocketAddr, Arc<TcpConnectionLimits>) {
@@ -735,12 +761,8 @@ mod upgraded_transport_slot {
                             TowerToHyperService::new(admitted_service(&permit, service)),
                         )
                         .with_upgrades();
-                    // The production hand-off itself rather than a copy of its two lines. A fix
-                    // to `story:transport-admission-and-stream-lifetime-disagree` is most
-                    // naturally applied inside `enforce_connection_lifetime`, where the transport
-                    // deadline lives; the cases below are pinned to today's answer and tell their
-                    // reader to invert them when it moves, which only works if such a fix reaches
-                    // them.
+                    // The production composition itself rather than a copy of its two lines, so
+                    // the hand-off ADR 0042 makes in each upgraded task is the one measured here.
                     let _ =
                         enforce_connection_lifetime(permit, CONNECTION_LIFETIME, connection).await;
                 });
@@ -749,39 +771,21 @@ mod upgraded_transport_slot {
         (address, limits)
     }
 
-    /// **This case pins a defect, not a guarantee.**
+    /// **An upgraded stream returns its transport slot at the upgrade** (ADR 0042, decision 1).
     ///
-    /// What it would be right to assert is that the transport's connection lifetime bounds how
-    /// long one connection occupies a transport slot, upgraded or not. That is not what the daemon
-    /// does, and this records what it does instead.
-    ///
-    /// `UnixTransportPolicy::production` states it where it turns keep-alive on — "The outer
-    /// connection lifetime remains the finite bound for idle and upgraded peers"
-    /// (`crates/substrate-daemon/src/runtime.rs:60-62`) — and that sentence is the stated reason
-    /// keep-alive is safe to enable at all.
-    ///
-    /// Since `story:upgraded-connections-keep-their-permit` the admission survives the upgrade and
-    /// nothing carries the lifetime across with it. `enforce_connection_lifetime`'s timeout wraps
-    /// the hyper connection future, which hyper resolves when it hands the socket to the upgrade,
-    /// and the clone the upgraded task holds carries no deadline. Occupancy is therefore bounded
-    /// by the *stream's* lifetime — `EventStreamPolicy::production().lifetime` is one hour
-    /// (`app/events.rs:57`), as are the metrics stream's and the pipe attachment's — rather than
-    /// by the transport's five minutes.
+    /// This case pinned the defect `story:transport-admission-and-stream-lifetime-disagree` named
+    /// as `an_upgraded_stream_holds_its_transport_slot_past_the_connection_lifetime`: since
+    /// `story:upgraded-connections-keep-their-permit` an upgraded socket kept the transport permit
+    /// that admitted it for the stream's hour, not the transport's five minutes. It asserts the
+    /// guarantee now.
     ///
     /// Measured through the production TCP listener's shape and the real `/v1/events/stream`
-    /// route: one upgraded socket holds one of the source's sixteen slots, and goes on holding it
-    /// for five times the transport's connection lifetime and, in production, for the stream's
-    /// hour.
-    ///
-    /// That occupancy is deliberate — an upgraded connection the budget does not count is review
-    /// finding 4, closed by `story:upgraded-connections-keep-their-permit` — while the disagreement
-    /// between a five-minute transport bound and a one-hour stream is the open design question,
-    /// `story:transport-admission-and-stream-lifetime-disagree`. Enforcing the transport's bound on
-    /// an upgraded stream would cut every published one-hour stream at five minutes, which is why
-    /// the answer is a decision and not a patch. **When this case goes red, that story landed —
-    /// invert it back to asserting the guarantee, never relax it.**
+    /// route: once the stream has upgraded, all sixteen of the source's transport slots come back
+    /// — polled, because the hand-off runs in the upgraded task after the `101` is sent — while the
+    /// stream still serves and still holds its own permit, so the socket is counted by the
+    /// stream's cap instead (`an_ended_upgraded_stream_returns_its_stream_slot`).
     #[tokio::test(flavor = "multi_thread")]
-    async fn an_upgraded_stream_holds_its_transport_slot_past_the_connection_lifetime() {
+    async fn an_upgraded_stream_returns_its_transport_slot_at_the_upgrade() {
         let (address, limits) = admitted_listener("dep_upgraded_transport_slot", 1).await;
 
         let upgraded = Handshake::open(address, "/v1/events/stream?limit=1").await;
@@ -790,36 +794,26 @@ mod upgraded_transport_slot {
             "the event stream must upgrade before its admission can be measured"
         );
 
-        // The admission is held at the handshake: fifteen of this source's sixteen slots are
-        // free and the sixteenth is refused, which is one slot occupied by that connection.
-        let held = (0..PER_SOURCE - 1)
-            .map(|index| {
-                limits
-                    .acquire(CLIENT)
-                    .unwrap_or_else(|| panic!("slot {index} of the source's free capacity"))
-            })
-            .collect::<Vec<_>>();
-        assert!(
-            limits.acquire(CLIENT).is_none(),
-            "the upgraded socket must hold the connection's admission while it serves"
-        );
-
-        // Today's behaviour, pinned: nothing carries the transport's deadline across the upgrade,
-        // so the slot is not given back when the connection's time is up. Watched throughout the
-        // window rather than sampled at the end, so a slot returned at any point during it is
-        // caught rather than missed.
-        let window = Instant::now() + OBSERVATION;
+        // The guarantee: the source's whole transport budget is free again while the stream
+        // serves, well inside the transport's connection lifetime, let alone the stream's hour.
+        let window = Instant::now() + CONNECTION_LIFETIME;
+        let mut held = Vec::new();
         while Instant::now() < window {
-            assert!(
-                limits.acquire(CLIENT).is_none(),
-                "the upgraded socket returned the connection's transport slot inside \
-                 {OBSERVATION:?}, five times the transport's connection lifetime of \
-                 {CONNECTION_LIFETIME:?}, which means \
-                 story:transport-admission-and-stream-lifetime-disagree has landed — invert this \
-                 case back to asserting the guarantee rather than relaxing it"
-            );
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            held = (0..PER_SOURCE)
+                .map_while(|_| limits.acquire(CLIENT))
+                .collect::<Vec<_>>();
+            if held.len() == PER_SOURCE {
+                break;
+            }
+            held.clear();
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
+        assert_eq!(
+            held.len(),
+            PER_SOURCE,
+            "the upgraded socket still holds a transport slot {CONNECTION_LIFETIME:?} after its \
+             handshake; ADR 0042 hands it over to the stream at the upgrade"
+        );
         drop(held);
         drop(upgraded);
     }
@@ -851,35 +845,22 @@ mod upgraded_transport_slot {
         }
     }
 
-    /// **This case pins a defect, not a guarantee.**
+    /// **Callers inside their published caps cannot deny a co-located caller transport admission**
+    /// (ADR 0042; the acceptance of `story:transport-admission-and-stream-lifetime-disagree`).
     ///
-    /// What it would be right to assert is that one caller cannot deny a co-located caller
-    /// transport admission for the length of a stream. That is not what the daemon does, and this
-    /// records what it does instead.
+    /// This case pinned the defect as
+    /// `upgraded_streams_hold_a_shared_source_address_past_the_connection_lifetime`. Over TCP and
+    /// TLS the transport scope is the source address — sixteen per `IpAddr` — so every identity
+    /// behind one proxy address shares one counter, and four identities holding four event streams
+    /// each, every one inside the published per-subject cap of four, held all sixteen for the
+    /// stream's hour. It asserts the guarantee now.
     ///
-    /// Over TCP and TLS the transport scope is the source address — `TcpConnectionLimits` counts
-    /// sixteen per `IpAddr` (`runtime.rs:275`) — so every identity behind one proxy address shares
-    /// one counter. Since `story:upgraded-connections-keep-their-permit` an upgraded socket keeps
-    /// its slot, and nothing carries the transport's connection lifetime across the upgrade, so
-    /// the sixteen slots are held for the *stream's* lifetime: one hour
-    /// (`app/events.rs:57`) rather than the transport's five minutes.
-    ///
-    /// Measured, not inferred: four identities, four event streams each — each inside the
-    /// published per-subject cap of four (`app/events.rs:49`), so no caller does anything it is
-    /// not entitled to do — fill the source's sixteen slots, and the next caller from that address
-    /// is refused at accept with nothing served, and stays refused past the transport's connection
-    /// lifetime. `TcpConnectionLimits` will not evict the source entry either: eviction requires
-    /// `available_permits() == per_source` (`runtime.rs`, `acquire`), which a held slot denies.
-    ///
-    /// The occupancy itself is deliberate — an upgraded connection the budget does not count is
-    /// review finding 4, closed by `story:upgraded-connections-keep-their-permit`. What is open is
-    /// the bound that ends it, and raising or re-scoping a sixteen-per-source budget that callers
-    /// inside their own published caps can exhaust is a design decision needing an ADR under
-    /// invariant 8, not a correction: it is
-    /// `story:transport-admission-and-stream-lifetime-disagree`. **When this case goes red, that
-    /// story landed — invert it back to asserting the guarantee, never relax it.**
+    /// Measured, not inferred: the same sixteen streams from the same four identities, and a caller
+    /// sharing that address is served throughout a window five times the transport's connection
+    /// lifetime. Watched throughout rather than sampled at the end, so a refusal at any point inside
+    /// the window is caught.
     #[tokio::test(flavor = "multi_thread")]
-    async fn upgraded_streams_hold_a_shared_source_address_past_the_connection_lifetime() {
+    async fn upgraded_streams_do_not_hold_a_shared_source_address() {
         const DEADLINE: Duration = Duration::from_secs(2);
         const SUBJECTS: u32 = 4;
 
@@ -896,91 +877,120 @@ mod upgraded_transport_slot {
             streams.push(stream);
         }
 
-        // The source's whole transport budget is now held by upgraded sockets, so the next caller
-        // sharing that address is refused at accept and served nothing at all.
-        let denied = ask_over_a_new_connection(address, DEADLINE).await;
-        assert_eq!(
-            denied, None,
-            "sixteen upgraded sockets must hold the source's whole transport budget for this \
-             case to measure what ends the denial; the next caller was served: {denied:?}"
-        );
-
-        // Today's behaviour, pinned: the transport's connection lifetime is not what ends it, so
-        // the co-located caller stays refused for the whole window — and in production for the
-        // stream's hour. Watched throughout rather than sampled at the end, so an admission that
-        // came back at any point during it is caught rather than missed.
         let window = Instant::now() + OBSERVATION;
         while Instant::now() < window {
             let answer = ask_over_a_new_connection(address, DEADLINE).await;
-            assert_eq!(
-                answer, None,
-                "a caller sharing the source address was served inside {OBSERVATION:?}, five times \
-                 the transport's connection lifetime of {CONNECTION_LIFETIME:?}, which means \
-                 story:transport-admission-and-stream-lifetime-disagree has landed — invert this \
-                 case back to asserting the guarantee rather than relaxing it; it answered: \
-                 {answer:?}"
+            assert!(
+                answer
+                    .as_deref()
+                    .is_some_and(|answer| answer.starts_with("HTTP/1.1 ")),
+                "sixteen upgraded streams, each inside its subject's published cap, denied a \
+                 caller sharing their source address transport admission; it answered: {answer:?}"
             );
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
         drop(streams);
     }
 
-    /// **The other direction: a transport slot an upgraded stream holds is a slot it gives back.**
+    /// **Upgraded sockets stay bounded by the deployment's stream cap** (ADR 0042, decision 3).
     ///
-    /// The two cases above pin how long occupancy lasts, and neither of them would notice an
-    /// admission that is never released at all: a listener that leaked one per connection would
-    /// satisfy both, because both only ever observe a slot *not* coming back. That is the failure
-    /// the transport cannot survive — a leaked slot is one the source address never gets back,
-    /// and sixteen of them retire the address for the life of the process, with
-    /// `TcpConnectionLimits` unable to evict the entry because eviction requires every permit to
-    /// be free.
-    ///
-    /// So this is the guarantee, not a pin: the admission is held for exactly as long as the
-    /// upgraded socket serves. The stream is ended the way a client ends one — the socket is
-    /// dropped — and the slot returns without anything else happening.
+    /// The transport no longer counts an upgraded socket, so what bounds them is the stream
+    /// family's own deployment-wide cap, and that bound has to hold where the transport's no
+    /// longer does. Sixty-four event streams from one source address — four times its sixteen
+    /// transport slots — over thirty-two identities, two each, so no per-subject cap binds: every
+    /// one upgrades, and the sixty-fifth is refused `429` `event.stream-capacity`, the refusal the
+    /// `events.stream-bounds` fact publishes, at the published `global` of sixty-four.
     #[tokio::test(flavor = "multi_thread")]
-    async fn an_ended_upgraded_stream_returns_its_transport_slot() {
-        let (address, limits) = admitted_listener("dep_returned_transport_slot", 1).await;
+    async fn upgraded_sockets_stay_bounded_by_the_deployment_stream_cap() {
+        const SUBJECTS: u32 = 32;
+        let global = usize::try_from(substrate_wire::EVENT_STREAMS_GLOBAL).expect("small cap");
+        assert!(
+            global > PER_SOURCE,
+            "the case measures past the transport bound"
+        );
+
+        let (address, _limits) = admitted_listener("dep_deployment_stream_cap", SUBJECTS).await;
+
+        let mut streams = Vec::new();
+        for index in 0..global {
+            let stream = Handshake::open(address, "/v1/events/stream?limit=1").await;
+            assert_eq!(
+                stream.status, 101,
+                "event stream {index} is inside the per-subject and deployment caps and must \
+                 upgrade, whatever the source's transport budget"
+            );
+            streams.push(stream);
+        }
+
+        let mut refused = Handshake::open(address, "/v1/events/stream?limit=1").await;
+        assert_eq!(
+            refused.status, 429,
+            "the stream past the published deployment cap of {global} must be refused"
+        );
+        let body = refused.body().await;
+        assert!(
+            body.contains(&format!("\"{}\"", substrate_wire::EVENT_STREAM_CAPACITY)),
+            "the refusal must carry the code the events.stream-bounds fact publishes: {body}"
+        );
+        drop(streams);
+    }
+
+    /// **The other direction: the stream slot an upgraded socket is counted by is a slot it gives
+    /// back.**
+    ///
+    /// This case was `an_ended_upgraded_stream_returns_its_transport_slot`. Since ADR 0042 the
+    /// budget that counts an upgraded socket is its stream's, so the leak this guards against —
+    /// a slot never returned, retiring capacity for the life of the process — is measured on that
+    /// budget: one identity, so the published per-subject cap of four binds. While the first
+    /// stream serves, three more upgrade and the fifth is refused `429`; once the first is dropped
+    /// the way a client drops one, a new stream upgrades again.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_ended_upgraded_stream_returns_its_stream_slot() {
+        let per_subject =
+            usize::try_from(substrate_wire::EVENT_STREAMS_PER_SUBJECT).expect("small cap");
+        let (address, _limits) = admitted_listener("dep_returned_stream_slot", 1).await;
 
         let upgraded = Handshake::open(address, "/v1/events/stream?limit=1").await;
         assert_eq!(
             upgraded.status, 101,
             "the event stream must upgrade before its admission can be measured"
         );
-
-        // Held while it serves: fifteen of the source's sixteen slots are free and the sixteenth
-        // is refused, which is one slot occupied by that connection.
-        let held = (0..PER_SOURCE - 1)
-            .map(|index| {
-                limits
-                    .acquire(CLIENT)
-                    .unwrap_or_else(|| panic!("slot {index} of the source's free capacity"))
-            })
-            .collect::<Vec<_>>();
-        assert!(
-            limits.acquire(CLIENT).is_none(),
-            "the upgraded socket must hold the connection's admission while it serves"
+        let mut others = Vec::new();
+        for index in 1..per_subject {
+            let stream = Handshake::open(address, "/v1/events/stream?limit=1").await;
+            assert_eq!(
+                stream.status, 101,
+                "stream {index} is inside the subject's cap"
+            );
+            others.push(stream);
+        }
+        let over = Handshake::open(address, "/v1/events/stream?limit=1").await;
+        assert_eq!(
+            over.status, 429,
+            "the upgraded sockets must hold the subject's {per_subject} stream slots while they \
+             serve"
         );
 
-        // And returned when it stops serving. Polled rather than slept exactly once, so a correct
-        // implementation is not held to the scheduler.
         drop(upgraded);
         let window = Instant::now() + OBSERVATION;
-        let mut returned = None;
+        let mut status = 429;
         while Instant::now() < window {
-            returned = limits.acquire(CLIENT);
-            if returned.is_some() {
+            status = Handshake::open(address, "/v1/events/stream?limit=1")
+                .await
+                .status;
+            if status == 101 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert!(
-            returned.is_some(),
-            "the upgraded socket ended and did not return the connection's transport slot within \
-             {OBSERVATION:?}; a leaked admission takes a slot out of the source's budget for the \
-             life of the process, and sixteen of them retire the address"
+        assert_eq!(
+            status, 101,
+            "the upgraded socket ended and did not return its stream slot within {OBSERVATION:?}; \
+             a leaked slot is capacity the published exhausted-and-retriable refusal cannot \
+             recover"
         );
-        drop(held);
+        drop(others);
+        drop(over);
     }
 }
 
@@ -1352,4 +1362,359 @@ fn app_code_spawns_no_detached_task() {
         spawning.is_empty(),
         "detached tasks in the daemon's app code: {spawning:?}"
     );
+}
+
+/// **The caps each stream family enforces are the caps its capability fact publishes** (ADR 0042,
+/// decision 4; `story:the-metrics-stream-cap-is-machine-readable`).
+///
+/// The three production policies and the `substrate_wire` constants the host probe publishes as
+/// `events.stream-bounds`, `metrics.stream-bounds` and `sessions.attachment-bounds` are compared
+/// here, so a policy that moves without its fact fails, and so does a fact that moves without its
+/// policy.
+#[test]
+fn the_stream_policies_enforce_the_bounds_their_facts_publish() {
+    let events = EventStreamPolicy::production();
+    let metrics = MetricsStreamPolicy::production();
+    let sessions = super::sessions::PipeSessionPolicy::production();
+    let published = substrate_wire::StreamBoundsFacts::events();
+    let lifetime = Duration::from_millis(substrate_wire::UPGRADED_STREAM_LIFETIME_MS);
+    assert_eq!(
+        (
+            events.streams_per_subject,
+            events.global_streams,
+            events.lifetime
+        ),
+        (
+            usize::try_from(published.per_subject).expect("small cap"),
+            usize::try_from(published.global).expect("small cap"),
+            lifetime
+        ),
+        "events.stream-bounds"
+    );
+    let published = substrate_wire::StreamBoundsFacts::metrics();
+    assert_eq!(
+        (
+            metrics.streams_per_subject,
+            metrics.global_streams,
+            metrics.lifetime
+        ),
+        (
+            usize::try_from(published.per_subject).expect("small cap"),
+            usize::try_from(published.global).expect("small cap"),
+            lifetime
+        ),
+        "metrics.stream-bounds"
+    );
+    assert_eq!(
+        super::metrics::METRICS_STREAM_CAPACITY,
+        published.refusal,
+        "the metrics stream refuses with the code its fact publishes"
+    );
+    let published = substrate_wire::AttachmentBoundsFacts::sessions();
+    assert_eq!(
+        (
+            sessions.attachments_per_subject,
+            sessions.global_attachments,
+            sessions.lifetime
+        ),
+        (
+            usize::try_from(published.per_subject).expect("small cap"),
+            usize::try_from(published.global).expect("small cap"),
+            lifetime
+        ),
+        "sessions.attachment-bounds"
+    );
+}
+
+/// Security review pass 1 on unit b2 (ADR 0042): integrity conformance checks of the hand-over of
+/// an upgraded connection's transport slot to its stream, through the production TCP listener's
+/// shape (`upgraded_transport_slot::admitted_listener`, reused rather than copied so the crate's
+/// listener inventory checks count no new listener) and the real router.
+///
+/// Each case measures one clause of ADR 0042 against the running composition: no path leaks a
+/// slot of either budget, the two budgets together bound the open sockets under concurrency, and
+/// the bound a client reads from `/v1/machine` is the one the route enforces.
+mod stream_caps_security_pass1 {
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+    use std::time::{Duration, Instant};
+
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+    use tokio::net::TcpStream;
+
+    use super::upgraded_transport_slot::admitted_listener;
+    use crate::runtime::TcpConnectionLimits;
+
+    const HANDSHAKE_KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
+    const CLIENT: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+    /// `TcpConnectionLimits::production`'s per-source bound.
+    const PER_SOURCE: usize = 16;
+    const SETTLE: Duration = Duration::from_secs(3);
+    const EVENTS: &str = "/v1/events/stream?limit=1";
+
+    fn global() -> usize {
+        usize::try_from(substrate_wire::EVENT_STREAMS_GLOBAL).expect("small cap")
+    }
+
+    /// A handshake's status, its response head and the client half, or `None` when the listener
+    /// refused the connection at accept.
+    async fn handshake(address: SocketAddr, path: &str) -> Option<(u16, String, TcpStream)> {
+        let mut stream = TcpStream::connect(address).await.ok()?;
+        let request = format!(
+            "GET {path} HTTP/1.1\r\nHost: {address}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {HANDSHAKE_KEY}\r\n\r\n"
+        );
+        stream.write_all(request.as_bytes()).await.ok()?;
+        let mut head = Vec::new();
+        while !head.ends_with(b"\r\n\r\n") {
+            assert!(head.len() < 16 * 1_024, "bounded handshake response");
+            let mut byte = [0_u8; 1];
+            match tokio::time::timeout(Duration::from_secs(5), stream.read_exact(&mut byte)).await {
+                Ok(Ok(_)) => head.push(byte[0]),
+                Ok(Err(_)) if head.is_empty() => return None,
+                Ok(Err(error)) => panic!("read the handshake response: {error}"),
+                Err(elapsed) => panic!("no handshake response within five seconds: {elapsed}"),
+            }
+        }
+        let head = String::from_utf8(head).expect("ASCII handshake response");
+        let status = head
+            .lines()
+            .next()
+            .and_then(|line| line.split_whitespace().nth(1))
+            .and_then(|value| value.parse::<u16>().ok())
+            .expect("HTTP handshake status");
+        Some((status, head, stream))
+    }
+
+    /// The first answer on a connection the transport admits, retried past refusals at accept.
+    async fn admitted_handshake(address: SocketAddr, path: &str) -> (u16, String, TcpStream) {
+        let deadline = Instant::now() + SETTLE;
+        loop {
+            if let Some(answer) = handshake(address, path).await {
+                return answer;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "no connection was admitted at the transport within {SETTLE:?}"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    }
+
+    /// `count` event stream upgrades at once: the upgraded client halves, and how many were
+    /// refused `429`. Any other answer fails the case.
+    async fn concurrent_upgrades(address: SocketAddr, count: usize) -> (Vec<TcpStream>, usize) {
+        let mut attempts = tokio::task::JoinSet::new();
+        for _ in 0..count {
+            attempts.spawn(async move { admitted_handshake(address, EVENTS).await });
+        }
+        let mut upgraded = Vec::new();
+        let mut refused = 0_usize;
+        while let Some(joined) = attempts.join_next().await {
+            let (status, head, stream) = joined.expect("handshake task");
+            match status {
+                101 => upgraded.push(stream),
+                429 => refused += 1,
+                other => panic!("unexpected handshake status {other}: {head}"),
+            }
+        }
+        (upgraded, refused)
+    }
+
+    /// Waits until the deployment's whole event stream cap upgrades at once again — sixty-four
+    /// concurrent upgrades over a listener whose subjects are at least sixteen, so no per-subject
+    /// cap binds — and says whether it did.
+    async fn deployment_cap_returns(address: SocketAddr) -> bool {
+        let deadline = Instant::now() + SETTLE;
+        while Instant::now() < deadline {
+            let (upgraded, _) = concurrent_upgrades(address, global()).await;
+            let whole = upgraded.len() == global();
+            drop(upgraded);
+            if whole {
+                return true;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        false
+    }
+
+    async fn body(head: &str, stream: &mut TcpStream) -> String {
+        let length = head
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())?
+            })
+            .expect("a refusal states its content-length");
+        let mut body = vec![0_u8; length];
+        stream.read_exact(&mut body).await.expect("read the body");
+        String::from_utf8(body).expect("UTF-8 body")
+    }
+
+    /// Waits until the whole per-source transport budget is free, and says whether it became so.
+    async fn transport_budget_returns(limits: &TcpConnectionLimits) -> bool {
+        let deadline = Instant::now() + SETTLE;
+        while Instant::now() < deadline {
+            let held = (0..PER_SOURCE)
+                .map_while(|_| limits.acquire(CLIENT))
+                .collect::<Vec<_>>();
+            if held.len() == PER_SOURCE {
+                return true;
+            }
+            drop(held);
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        false
+    }
+
+    /// **No aborted handshake leaks a slot of either budget.**
+    ///
+    /// A client that closes mid-upgrade reaches one of two paths: the `101` write fails and the
+    /// upgrade is abandoned (the callback, the stream permit and the transport clone are dropped
+    /// unrun), or the upgrade completes into a socket whose peer has already gone (the upgraded
+    /// task hands over and then ends on end of file). Sixty-four such aborts over sixteen subjects,
+    /// half before reading anything and half after reading the answer, concurrently, and then: the
+    /// source's whole transport budget is free, and the deployment's whole event stream cap of
+    /// sixty-four upgrades at once — sixteen subjects at their per-subject cap of four each, so
+    /// every per-subject and every deployment slot an aborted upgrade took came back.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn aborted_handshakes_leak_no_slot_of_either_budget() {
+        let (address, limits) = admitted_listener("dep_sec_aborted_handshakes", 16).await;
+        let mut aborts = tokio::task::JoinSet::new();
+        for index in 0..64_u32 {
+            aborts.spawn(async move {
+                let Ok(mut stream) = TcpStream::connect(address).await else {
+                    return;
+                };
+                let request = format!(
+                    "GET {EVENTS} HTTP/1.1\r\nHost: {address}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: {HANDSHAKE_KEY}\r\n\r\n"
+                );
+                if stream.write_all(request.as_bytes()).await.is_err() {
+                    return;
+                }
+                if index % 2 == 1 {
+                    let mut some = [0_u8; 16];
+                    let _ =
+                        tokio::time::timeout(Duration::from_millis(500), stream.read(&mut some))
+                            .await;
+                }
+                drop(stream);
+            });
+        }
+        while aborts.join_next().await.is_some() {}
+
+        assert!(
+            transport_budget_returns(&limits).await,
+            "the source's transport budget did not return within {SETTLE:?} of every aborted \
+             handshake ending: an aborted upgrade leaked a transport slot"
+        );
+        assert!(
+            deployment_cap_returns(address).await,
+            "the deployment's event stream cap did not upgrade whole within {SETTLE:?} of every \
+             aborted handshake ending: an aborted upgrade leaked a stream slot"
+        );
+    }
+
+    /// **Under concurrency, the open sockets stay inside transport budget + stream cap, and both
+    /// budgets are returned whole.**
+    ///
+    /// One hundred concurrent upgrades from one source over fifty identities (two each, so no
+    /// per-subject cap binds): exactly the published `global` of sixty-four upgrade and hold, the
+    /// rest are refused — at accept by the source's sixteen transport slots, retried, then `429` by
+    /// the deployment cap — and while the sixty-four serve, all sixteen transport slots are free.
+    /// After every client closes, the same holds a second time: no slot was retired by the race.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_upgrades_stay_inside_both_budgets_and_return_them() {
+        let (address, limits) = admitted_listener("dep_sec_concurrent_upgrades", 50).await;
+        for round in 0..2 {
+            let (upgraded, refused) = concurrent_upgrades(address, 100).await;
+            assert_eq!(
+                (upgraded.len(), refused),
+                (global(), 100 - global()),
+                "round {round}: exactly the deployment cap of {} upgraded sockets is served \
+                 concurrently",
+                global()
+            );
+            assert!(
+                transport_budget_returns(&limits).await,
+                "round {round}: with {} upgraded sockets serving, a transport slot is still \
+                 held: an upgraded socket is counted by both budgets past the upgrade",
+                global()
+            );
+            drop(upgraded);
+            assert!(
+                transport_budget_returns(&limits).await,
+                "round {round}: the transport budget did not return after every client closed"
+            );
+            assert!(
+                deployment_cap_returns(address).await,
+                "round {round}: the deployment's event stream cap did not upgrade whole within \
+                 {SETTLE:?} of every upgraded client closing"
+            );
+        }
+    }
+
+    /// **The bound a client reads is the bound the route enforces.** The `events.stream-bounds`
+    /// fact is read from `/v1/machine` over the same listener, and the route is driven from it: one
+    /// subject upgrades `per_subject` streams and the next is refused with the fact's `refusal`.
+    /// The presence ties of the other two facts are read from the same snapshot.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_event_bounds_a_client_reads_are_the_ones_the_route_enforces() {
+        let (address, _limits) = admitted_listener("dep_sec_fact_drives_route", 1).await;
+        let mut stream = TcpStream::connect(address).await.expect("connect");
+        stream
+            .write_all(
+                format!("GET /v1/machine HTTP/1.1\r\nHost: {address}\r\nConnection: close\r\n\r\n")
+                    .as_bytes(),
+            )
+            .await
+            .expect("send the machine request");
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .await
+            .expect("read the machine response");
+        let response = String::from_utf8(response).expect("UTF-8 response");
+        let (_, json) = response.split_once("\r\n\r\n").expect("a response body");
+        let machine: serde_json::Value = serde_json::from_str(json).expect("JSON machine body");
+        let facts = &machine["result"]["facts"];
+        let bounds = &facts["events.stream-bounds"];
+        let per_subject = usize::try_from(
+            bounds["per_subject"]
+                .as_u64()
+                .expect("the fact publishes per_subject"),
+        )
+        .expect("small cap");
+        let refusal = bounds["refusal"]
+            .as_str()
+            .expect("the fact publishes refusal")
+            .to_owned();
+        assert_eq!(
+            facts.get("metrics.stream-bounds").is_some(),
+            facts.get("metrics.stream").is_some(),
+            "{machine}"
+        );
+        assert_eq!(
+            facts.get("sessions.attachment-bounds").is_some(),
+            facts.get("exec.argv-only").is_some(),
+            "{machine}"
+        );
+
+        let mut open = Vec::new();
+        for index in 0..per_subject {
+            let (status, head, stream) = admitted_handshake(address, EVENTS).await;
+            assert_eq!(
+                status, 101,
+                "stream {index} is inside the published cap: {head}"
+            );
+            open.push(stream);
+        }
+        let (status, head, mut refused) = admitted_handshake(address, EVENTS).await;
+        assert_eq!(status, 429, "past the published per_subject: {head}");
+        let refused_body = body(&head, &mut refused).await;
+        assert!(
+            refused_body.contains(&format!("\"{refusal}\"")),
+            "the refusal is the one the fact publishes, {refusal}: {refused_body}"
+        );
+        drop(open);
+    }
 }

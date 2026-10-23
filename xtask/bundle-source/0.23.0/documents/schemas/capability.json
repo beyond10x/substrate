@@ -451,6 +451,89 @@
           "type": "object",
           "x-b10x-absent-means": "a-start-naming-a-root-is-refused-exec-sandbox-unavailable-before-dispatch",
           "x-b10x-published-only-after": "the-confinement-floor-and-openat2-symlink-free-resolution-are-both-proven"
+        },
+        "events.stream-bounds": {
+          "additionalProperties": false,
+          "description": "The caps that bound concurrent event streams per subject and per deployment, the most an upgraded event stream lives, and the refusal a stream over a cap earns (ADR 0042). From the upgrade on, these caps and not the transport budget count the socket.",
+          "properties": {
+            "global": {
+              "const": 64
+            },
+            "lifetime_ms": {
+              "const": 3600000
+            },
+            "per_subject": {
+              "const": 4
+            },
+            "refusal": {
+              "const": "event.stream-capacity"
+            }
+          },
+          "required": [
+            "per_subject",
+            "global",
+            "lifetime_ms",
+            "refusal"
+          ],
+          "type": "object"
+        },
+        "metrics.stream-bounds": {
+          "additionalProperties": false,
+          "description": "The caps that bound concurrent metrics streams per subject and per deployment, the most an upgraded metrics stream lives, and the refusal a stream over a cap earns (ADR 0042). From the upgrade on, these caps and not the transport budget count the socket.",
+          "properties": {
+            "global": {
+              "const": 64
+            },
+            "lifetime_ms": {
+              "const": 3600000
+            },
+            "per_subject": {
+              "const": 4
+            },
+            "refusal": {
+              "const": "metrics.stream-capacity"
+            }
+          },
+          "required": [
+            "per_subject",
+            "global",
+            "lifetime_ms",
+            "refusal"
+          ],
+          "type": "object",
+          "x-b10x-absent-means": "the-metrics-stream-is-unserved",
+          "x-b10x-published-only-after": "metrics.stream-is-published"
+        },
+        "sessions.attachment-bounds": {
+          "additionalProperties": false,
+          "description": "The caps that bound concurrent session attachments per subject, per session and per deployment, the most an upgraded attachment lives, and the refusal an attachment over the per-subject or global cap earns; a second attachment to one session is refused session.already-attached (ADR 0042). From the upgrade on, these caps and not the transport budget count the socket.",
+          "properties": {
+            "global": {
+              "const": 32
+            },
+            "lifetime_ms": {
+              "const": 3600000
+            },
+            "per_session": {
+              "const": 1
+            },
+            "per_subject": {
+              "const": 16
+            },
+            "refusal": {
+              "const": "session.attachment-capacity"
+            }
+          },
+          "required": [
+            "per_subject",
+            "per_session",
+            "global",
+            "lifetime_ms",
+            "refusal"
+          ],
+          "type": "object",
+          "x-b10x-absent-means": "no-exec-runs-so-no-session-can-be-attached",
+          "x-b10x-published-only-after": "exec.argv-only-is-published"
         }
       },
       "required": [

@@ -283,6 +283,7 @@ impl App {
             metrics_stream_policy,
             pipe_attachment_limits: PipeAttachmentLimits::new(
                 pipe_session_policy.global_attachments,
+                pipe_session_policy.attachments_per_subject,
             ),
             pipe_session_policy,
             allow_unrecorded_sessions: false,

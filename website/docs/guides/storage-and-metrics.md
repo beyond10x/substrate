@@ -137,7 +137,9 @@ and `io_write_bytes`.
 
 `GET /v1/metrics/stream?exec_id=ex_…` upgrades to WebSocket and emits one immediate observation,
 then the latest sample approximately once per second. Slow readers skip intermediate samples. The
-stream has no replay history and closes after a terminal or unavailable observation.
+stream has no replay history and closes after a terminal or unavailable observation. A host that
+does not publish the `metrics.stream` fact serves no stream: the route answers `501` with
+`exec.metrics-unserved` before it upgrades.
 
 The stream is bounded, and the bounds a client can act on carry a code. A subject may hold 4 metrics
 streams at once and a deployment 64; one more is refused `429` with the code
@@ -147,6 +149,12 @@ stream carries samples one way and accepts control frames only, so a data frame 
 Two bounds end the connection instead of naming themselves: a stream is cut after 1 hour, and a
 client frame larger than 1024 bytes is refused by the socket before the daemon sees it. Reconnect in
 each case; nothing is lost, because the stream carries no history to lose.
+
+A client does not have to copy these numbers. Wherever the stream is served, `GET /v1/machine`
+publishes its caps, lifetime and refusal code as the `metrics.stream-bounds` fact:
+`{"per_subject": 4, "global": 64, "lifetime_ms": 3600000, "refusal": "metrics.stream-capacity"}`.
+Once the stream is open, these caps and not the connection limit count it, so holding a stream does
+not take a connection slot from another caller.
 
 Use the durable terminal exec observation when you need a record. Use the WebSocket when you need a
 live display or a local admission signal. Substrate does not turn sampled telemetry into billing or

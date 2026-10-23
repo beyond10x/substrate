@@ -47,3 +47,4 @@ with YAML frontmatter containing `date` and `status`. Draft design questions rem
 | [0039](0039-confined-sockets-are-an-argument-allowlist.md) | Confined sockets are an argument allowlist | accepted |
 | [0040](0040-hosted-admission-resolves-every-request-online-over-a-bounded-connection-pool.md) | Hosted admission resolves every request online over a bounded connection pool | accepted |
 | [0041](0041-a-session-attachment-lives-one-hour-and-is-never-re-attached.md) | A session attachment lives one hour and is never re-attached | accepted |
+| [0042](0042-an-upgraded-connection-hands-its-transport-slot-to-its-stream.md) | An upgraded connection hands its transport slot to its stream | accepted |

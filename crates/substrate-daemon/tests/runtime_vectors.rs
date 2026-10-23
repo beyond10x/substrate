@@ -45,7 +45,7 @@ const DAEMON_OVERRIDE_VARIABLE: &str = "SUBSTRATE_VECTORS_DAEMON";
 /// Pinned independently of the daemon implementation: the clean-room client verifies what ships.
 const ADVERTISED_CONTRACT: &str = "substrate-wire/0.23.0";
 const ADVERTISED_CONTRACT_SHA256: &str =
-    "41abb057474cb0bb70cbce7eaef099305a80807a8d6b8b9a53befffc41a1e497";
+    "de6d58f941c33c53649624131af77fb86cea2b07db2a0a6bc3c9edcbe4f56c80";
 
 fn daemon_binary() -> PathBuf {
     std::env::var_os(DAEMON_OVERRIDE_VARIABLE).map_or_else(|| PathBuf::from(DAEMON), PathBuf::from)
@@ -3007,6 +3007,73 @@ async fn check_promoted_route_inventory(
     covered.len()
 }
 
+/// The caps, lifetime and refusal of each upgraded stream family, as `/v1/machine` publishes them
+/// (ADR 0042, bundle `0.23.0`). Pinned here rather than read from the wire crate: the clean-room
+/// runner links no implementation.
+///
+/// `events.stream-bounds` is published on every host, because the event stream is served on
+/// every host. `metrics.stream-bounds` is published exactly beside `metrics.stream`, and
+/// `sessions.attachment-bounds` exactly beside `exec.argv-only`, because a session is an exec;
+/// the delegated lane serves exec, so it must publish the attachment bounds.
+async fn check_stream_bound_facts(daemon: &Daemon, delegated: bool) -> usize {
+    let (status, machine) = daemon
+        .call("GET", "/v1/machine", "req_clean_stream_bounds", None)
+        .await;
+    assert_eq!(status, 200);
+    let facts = &machine["result"]["facts"];
+    assert_eq!(
+        facts["events.stream-bounds"],
+        json!({
+            "per_subject": 4,
+            "global": 64,
+            "lifetime_ms": 3_600_000,
+            "refusal": "event.stream-capacity"
+        }),
+        "every host publishes the event stream's bounds: {machine}"
+    );
+    let metrics = facts.get("metrics.stream-bounds");
+    assert_eq!(
+        metrics.is_some(),
+        facts.get("metrics.stream").is_some(),
+        "the metrics stream's bounds are published exactly beside metrics.stream: {machine}"
+    );
+    if let Some(metrics) = metrics {
+        assert_eq!(
+            metrics,
+            &json!({
+                "per_subject": 4,
+                "global": 64,
+                "lifetime_ms": 3_600_000,
+                "refusal": "metrics.stream-capacity"
+            })
+        );
+    }
+    let attachments = facts.get("sessions.attachment-bounds");
+    assert_eq!(
+        attachments.is_some(),
+        facts.get("exec.argv-only").is_some(),
+        "the session attachment's bounds are published exactly when exec is served: {machine}"
+    );
+    assert_eq!(
+        attachments.is_some(),
+        delegated,
+        "the delegated lane serves exec and the portable lane does not: {machine}"
+    );
+    if let Some(attachments) = attachments {
+        assert_eq!(
+            attachments,
+            &json!({
+                "per_subject": 16,
+                "per_session": 1,
+                "global": 32,
+                "lifetime_ms": 3_600_000,
+                "refusal": "session.attachment-capacity"
+            })
+        );
+    }
+    1
+}
+
 #[allow(clippy::too_many_lines)] // One sequential journey; splitting it would lose the ordering.
 async fn check_http_journey(
     daemon: &Daemon,
@@ -3042,6 +3109,7 @@ async fn check_http_journey(
     passed += 1;
 
     passed += check_promoted_route_inventory(daemon, &workspace, cgroup_root.is_some()).await;
+    passed += check_stream_bound_facts(daemon, cgroup_root.is_some()).await;
 
     let (status, replay) = daemon
         .call(
@@ -6914,8 +6982,8 @@ async fn check_git_root_refusals(
 // ---------------------------------------------------------------------------------------------
 
 /// The predecessor printed its case count; the port asserts it, so a case cannot vanish quietly.
-const PORTABLE_CASES: usize = 113;
-const DELEGATED_CASES: usize = 175;
+const PORTABLE_CASES: usize = 114;
+const DELEGATED_CASES: usize = 176;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {
