@@ -1,0 +1,74 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "command": {
+      "argv": [
+        "/usr/bin/sleep",
+        "300"
+      ],
+      "hangup": true,
+      "mode": "pty",
+      "operation": "session.start",
+      "window": {
+        "columns": 80,
+        "rows": 24
+      }
+    },
+    "kind": "driver",
+    "port": "lifecycle"
+  },
+  "context": {
+    "authority": "driver-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000"
+  },
+  "covers": [
+    "route.session.start",
+    "session.pty-hangup",
+    "session.pty-controlling-terminal"
+  ],
+  "expected": {
+    "kind": "driver-outcome",
+    "outcome": {
+      "controlling_terminal": true,
+      "hangup_observed_at": "pty-allocation",
+      "hangup_observed_through_a_session": false
+    }
+  },
+  "id": "a-confined-terminal-has-a-controlling-terminal-and-hangs-up-at-the-pty-layer",
+  "layer": "driver",
+  "phase": 4,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/child_controlling_terminal",
+      "expected": true,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/new_session_flag_dropped",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/child_still_running_after_master_close",
+      "expected": false,
+      "operator": "equals"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "session",
+      "name": "durable-pipe",
+      "state": {
+        "exec": "ex_vector",
+        "id": "ses_vector"
+      }
+    }
+  ]
+}

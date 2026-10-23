@@ -144,7 +144,7 @@ fn classify(path: &CString, error: &std::io::Error) -> DriverError {
         // A directory on the way the daemon may not search: the daemon cannot observe the root,
         // so for this host it is not present, said apart in the message, as for a single file.
         Some(libc::EACCES) => DriverError::refused(
-            "exec.read-only-root-absent",
+            substrate_wire::READ_ONLY_ROOT_ABSENT,
             "A declared read-only root is not reachable: a directory on its path is not \
              searchable by this host.",
             ADDRESS,
@@ -157,16 +157,16 @@ fn classify(path: &CString, error: &std::io::Error) -> DriverError {
 
 fn absent() -> DriverError {
     DriverError::refused(
-        "exec.read-only-root-absent",
-        "A declared read-only root is not present on this host.",
+        substrate_wire::READ_ONLY_ROOT_ABSENT,
+        substrate_wire::READ_ONLY_ROOT_ABSENT_MESSAGE,
         ADDRESS,
     )
 }
 
 fn not_a_directory() -> DriverError {
     DriverError::refused(
-        "exec.read-only-root-not-a-directory",
-        "A declared read-only root is not a directory, or is reached through a symlink.",
+        substrate_wire::READ_ONLY_ROOT_NOT_A_DIRECTORY,
+        substrate_wire::READ_ONLY_ROOT_NOT_A_DIRECTORY_MESSAGE,
         ADDRESS,
     )
 }

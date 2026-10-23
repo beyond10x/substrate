@@ -12,8 +12,8 @@ use substrate_wire::{
     ExecutionCapsuleFacts, HostDriverKind, MAX_EXECUTION_CAPSULE_BYTES,
     MAX_EXECUTION_CAPSULE_FILE_BYTES, MAX_EXECUTION_CAPSULE_FILES, MetricsStreamFacts,
     NamespaceFacts, OPERATION_LEDGER_GLOBAL_MAX_BYTES, OPERATION_LEDGER_GLOBAL_MAX_ROWS,
-    OPERATION_LEDGER_SUBJECT_MAX_BYTES, OPERATION_LEDGER_SUBJECT_MAX_ROWS, ResourceUsageFacts,
-    ScratchQuotaFacts, Signal,
+    OPERATION_LEDGER_SUBJECT_MAX_BYTES, OPERATION_LEDGER_SUBJECT_MAX_ROWS, ReadOnlyRootFacts,
+    ResourceUsageFacts, ScratchQuotaFacts, Signal,
 };
 
 use crate::HostConfig;
@@ -150,6 +150,12 @@ pub fn probe(config: &HostConfig, openat2: bool) -> CapabilitySnapshot {
             allocation_unit_bytes: crate::quota::ALLOCATION_UNIT_BYTES,
             max_bytes: substrate_wire::MAX_STORAGE_QUOTA_BYTES,
             max_inodes: substrate_wire::MAX_STORAGE_QUOTA_INODES,
+        }),
+        // ADR 0010: declared roots are pinned with `openat2` and bound by the confinement floor,
+        // so the bound is served exactly when both are; without them a start is refused
+        // `exec.sandbox-unavailable` or `workspace.openat2-unavailable`, never run unmounted.
+        exec_read_only_roots: (exec && workspace).then_some(ReadOnlyRootFacts {
+            max_roots: substrate_wire::MAX_READ_ONLY_ROOTS,
         }),
         // The mechanism itself in a throwaway sandbox — a pinned file bound, run, refused a write,
         // found alone and held by no descriptor in the program — and never a constant (ADR 0033).

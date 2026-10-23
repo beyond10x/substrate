@@ -1,0 +1,23 @@
+{
+  "$schema": "schemas/compatibility.json",
+  "client_visible_changes": [
+    "0.23.0 adds no route and preserves the 44 routes of 0.22.0 (ADR 0010). The exec and session start schemas now publish the optional read_only_roots list the wire crate has always admitted: closed {host_path, mount} entries, each path absolute and canonical, at most MAX_READ_ONLY_ROOTS (4) entries, no mount equal to, beneath or above one substrate owns or another root's. A start that names none serializes and hashes exactly as before.",
+    "The capability facts object (schemas/capability.json) and the observed resource union (schemas/resource.json) are closed, and 0.23.0 adds the optional exec.read-only-roots fact, the closed {max_roots: 4}, to the one and, to every applied confinement shape, an optional read_only_roots member listing each bound root as declared. A client that validates snapshots or resources against predecessor 0.22.0 rejects a snapshot that publishes the fact, or a record of a start that bound a root, until it moves to 0.23.0.",
+    "A correction of emitted members: the exec applied confinement now admits read_only_files and secret_slots in every state, and in the expired and unknown states also read_only_roots, workdir, writable_roots and an aperture network, as the wire crate's AppliedConfinement emits them. Bundles 0.5.0 to 0.22.0 rejected the record of an exec that placed a secret slot, and 0.18.0 to 0.22.0 the record of one that bound a read-only file; their bytes are frozen and keep that defect.",
+    "No refusal is new. The three a declared root has always raised are now published, each a 422 refused before the program starts: exec.read-only-root-invalid for a broken lexical rule, and exec.read-only-root-absent and exec.read-only-root-not-a-directory for a host path that is not present or not a directory reached without a symlink. The daemon answers a start in this order: the capability snapshot and the start's other confinement members first (egress apertures, secret slots, read-only files, writable roots and the working directory, each its rule and then its capability), then the root list's lexical rule, then the roots capability, so a start naming a root on a host that does not publish exec.read-only-roots is refused exec.sandbox-unavailable (501) before dispatch and no root is ever run unmounted. The two host refusals come last, from the driver."
+  ],
+  "contract": "substrate-wire",
+  "development_constraints": [
+    "This development bundle is contract-execution-ready but cannot satisfy a stable dependency.",
+    "Passing the bundle gate proves bundle integrity; it does not claim producer or host-driver conformance.",
+    "No compatibility promise begins before a signed stable release."
+  ],
+  "request_policy": "closed",
+  "response_policy": "closed-route-selected-envelopes",
+  "status": "development",
+  "supported_api_majors": [
+    1,
+    2
+  ],
+  "version": "0.23.0"
+}

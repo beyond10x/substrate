@@ -1705,8 +1705,8 @@ impl ProcessRuntime {
     ) -> Result<Vec<crate::read_only_roots::PinnedRoot>, DriverError> {
         substrate_wire::validate_read_only_roots(roots).map_err(|error| {
             DriverError::refused(
-                "exec.read-only-root-invalid",
-                format!("A declared read-only root is invalid: {error}"),
+                substrate_wire::READ_ONLY_ROOT_INVALID,
+                substrate_wire::read_only_root_invalid_message(&error),
                 "read_only_roots",
             )
         })?;
