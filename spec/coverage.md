@@ -90,7 +90,7 @@ from (id, root name, labels, origin, owner), the entry under the workspace root,
 `Create` (only as far as adoption collides with it), `Adopt` and `Destroy`. What the green check
 establishes:
 
-- The model validates under ESS 0.67.0, and `workspaces-suite.json` is its exact synthesized suite
+- The model validates under ESS 0.68.0, and `workspaces-suite.json` is its exact synthesized suite
   (18 scenarios) plus the five authored scenarios under `workspaces/scenarios/`. Synthesis refuses
   one obligation (`ESS-SYNTH-013`: no view row asserts `.count` of `RootName`).
 - All 23 scenarios pass against ESS's `interpreted` reference. That executes the model, not the
@@ -149,7 +149,7 @@ green check establishes:
 - `ess specify validate --path spec/host-processes` resolves the model, its actors and its 19
   authored scenarios.
 - `spec/host-processes-suite.json` is the exact `ess verify conform synthesize` output;
-  `cargo xtask check-ess` fails on drift. Under ESS 0.67.0 it holds 88 synthesized scenarios
+  `cargo xtask check-ess` fails on drift. Under ESS 0.68.0 it holds 88 synthesized scenarios
   and records 31 refusals: 23 for seven of the eight stream bindings, whose invocation synthesis
   cannot force and whose `drop` publishes nothing (ESS-SYNTH-010); 7 for branches and bindings
   whose arrangement passes through a row-set guard: `StartProcess/name-conflict`, the
