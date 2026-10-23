@@ -45,6 +45,10 @@ use crate::repo;
 use crate::report::Report;
 
 mod host_process;
+mod omitted_entries;
+mod read_only_roots;
+mod session_exec_fields;
+mod stream_bounds;
 mod workdir_apertures;
 mod writable_roots;
 
@@ -892,6 +896,21 @@ fn check_classification(version: &str, released: &Tree, failures: &mut Vec<Strin
 /// A successor that rendered, verified and preserved everything while adding nothing is the failure
 /// this catches; the entries are the acceptance list of the story that cut the bundle.
 fn check_additions(version: &str, released: &Tree, failures: &mut Vec<String>) {
+    // Design 27 binds every bundle from `0.23.0` on, not only the one that introduced it.
+    if session_exec_fields::applies_to(version) {
+        session_exec_fields::check(released, failures);
+        // ADR 0042's stream-bound facts bind every bundle from `0.23.0` on, like design 27.
+        stream_bounds::check(released, failures);
+        // ADR 0043's omitted-entries header binds every bundle from `0.23.0` on as well.
+        omitted_entries::check(released, failures);
+    }
+    if version == "0.23.0" {
+        read_only_roots::check(version, released, failures);
+        session_exec_fields::check_introduction(released, failures);
+        stream_bounds::check_introduction(released, failures);
+        omitted_entries::check_introduction(released, failures);
+        return;
+    }
     if version == "0.22.0" {
         writable_roots::check(version, released, failures);
         return;
@@ -5882,7 +5901,7 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{}: {error}", bundle.display()));
             checked += 1;
         }
-        assert_eq!(checked, 22, "every released bundle must be checked");
+        assert_eq!(checked, 23, "every released bundle must be checked");
     }
 
     /// Class, the other half: if a parameter's name is not a discriminator, then renaming one is

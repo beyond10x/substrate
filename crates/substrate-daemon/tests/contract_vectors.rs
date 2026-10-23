@@ -327,7 +327,7 @@ impl Driver for VectorDriver {
         _root_name: &str,
         _path: &str,
         _query: &FileReadQuery,
-    ) -> Result<FileReadResult, DriverError> {
+    ) -> Result<substrate_host::Listed<FileReadResult>, DriverError> {
         Err(DriverError::not_found())
     }
 

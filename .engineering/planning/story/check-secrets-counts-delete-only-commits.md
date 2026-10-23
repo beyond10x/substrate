@@ -2,9 +2,16 @@
 format: aep.planning-md/3
 id: story:check-secrets-counts-delete-only-commits
 kind: story
-status: draft
+status: implemented
 title: check-secrets accepts a commit that only deletes files
-revision: 2
+scope:
+- confidence: cited
+  path: xtask/src/secrets.rs
+revision: 9
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-23T06:27:15Z", actor: "agent:b10x-chef-orchestrator", revision: 7}
+- {from: "proposed", to: "active", at: "2026-10-23T06:27:15Z", actor: "agent:b10x-chef-orchestrator", revision: 8}
+- {from: "active", to: "implemented", at: "2026-10-23T14:58:54Z", actor: "agent:b10x-chef-orchestrator", revision: 9, decided_on: {"recorded":{"test_result":1,"review_outcome":2,"verification":2}}}
 ---
 ## Problem
 
@@ -21,3 +28,20 @@ Consequence: any delete-only commit that reaches `main` makes `check-secrets` fa
 - The same holds for a commit that only changes a non-archive binary file.
 
 CI checks out with `fetch-depth: 0` (`.github/workflows/gate.yml:57`), so a delete-only commit on any remote branch, merged or not, turns every gate run red: PR #151 failed with `Gitleaks reported Some(553) scanned commits; Git reports 554 with a patch` while the closed #150 branch still held `dfade77d`.
+
+## Scope
+
+Derived 2026-10-23 by `story-scoper`. Each line is **cited** (read from the story or the tree) or
+**inferred** (a reading that could be wrong).
+
+- **Primary surface:** `xtask` (the `check-secrets` verb) — cited
+- **Files:** `xtask/src/secrets.rs:87-94` (the expected-count comparison) — cited
+- **Symbols:** `treeless_commits` (`xtask/src/secrets.rs:138`), `check` (`:15`), `VERSION` (`:11`) — cited
+- **Also likely:** a `#[cfg(test)] mod tests` in `xtask/src/secrets.rs` (none exists today; `tempfile` is already a dev-dependency, `xtask/Cargo.toml:28`); the count becomes a function testable without Gitleaks: commits carrying at least one added/modified or archive diff — inferred
+- **Docs:** `CHANGELOG.md` `[Unreleased]`; the earlier rule is described at `CHANGELOG.md:302` — inferred
+- **Confidence:** high — the story names the file, the comparison, the error text and the Gitleaks source lines
+- **Would collide with:** any unit touching `xtask/src/secrets.rs` or `CHANGELOG.md` `[Unreleased]`
+- **Not established:** rename/copy diffs and merge-parent diffs under `-m`, and whether git's binary classification matches Gitleaks 8.30.1's, are unverified against Gitleaks source.
+
+implementable-here: yes. It is internal gate tooling, so invariant 8 needs no ADR. No credential is needed.
+wire-change: no

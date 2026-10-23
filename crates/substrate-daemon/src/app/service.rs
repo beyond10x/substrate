@@ -283,6 +283,7 @@ impl App {
             metrics_stream_policy,
             pipe_attachment_limits: PipeAttachmentLimits::new(
                 pipe_session_policy.global_attachments,
+                pipe_session_policy.attachments_per_subject,
             ),
             pipe_session_policy,
             allow_unrecorded_sessions: false,
@@ -409,6 +410,11 @@ impl App {
             .await;
         self.reconcile_provisional_resources().await;
         self.persist_completed_execs().await;
+        // An exec recorded `unknown` because the driver could not prove its cgroup empty may
+        // still hold processes, and acknowledging it above did not end them. Every round kills
+        // those trees again, before any early return below, so none waits for a restart. Its
+        // recorded observation stays `unknown`; a failure here is retried next round.
+        let _ = run_maintenance_driver(self.driver.retry_unproven_exec_trees()).await;
         let Ok(clock) = self.lease_clock() else {
             return;
         };

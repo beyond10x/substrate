@@ -95,7 +95,7 @@ The table is the gate's own order (`scripts/gate.sh`).
 | contract bundle 0.2.0 | `python3 scripts/check-contract-bundle-0.2.0.py` |
 | contract bundle 0.3.0 | `python3 scripts/check-contract-bundle-0.3.0.py` |
 | contract bundle 0.4.0 | `python3 scripts/check-contract-bundle-0.4.0.py` |
-| contract bundles 0.5.0–0.22.0 | `cargo xtask check-bundles 0.5.0 … 0.22.0` — bounded parallel fixed-point, compatibility, classification and version-addition checks; `check-bundle <version>` remains the focused form |
+| contract bundles 0.5.0–0.23.0 | `cargo xtask check-bundles 0.5.0 … 0.23.0` — bounded parallel fixed-point, compatibility, classification and version-addition checks; `check-bundle <version>` remains the focused form |
 | contract JSON | `cargo xtask check-json` — every JSON under `contracts/` is classified by exactly one bundled schema, or it fails closed |
 | toolchain | `cargo xtask check-toolchain` |
 
@@ -161,7 +161,7 @@ without running anything, and `scripts/delegated-lane.sh` ends with it so a gree
 cannot be read as covering these cases.
 
 `cargo xtask check-json` fails closed on unclassified or schema-invalid contract JSON and
-meta-validates every Draft 2020-12 schema offline, across all twenty-two released bundles. Classification
+meta-validates every Draft 2020-12 schema offline, across all twenty-three released bundles. Classification
 used to live in a Python module the four checkers imported — shared live machinery, not any one
 bundle's reproducibility proof — so it moved with the rest of the tooling, and the four checkers no
 longer do it. They verify everything else about the bundles they froze.
@@ -398,6 +398,32 @@ must:
    been established here;
 4. pass that root through `--cgroup-root`.
 
+The published daemon image carries the two files item 3 names. Its `daemon` stage
+(`Dockerfile:59-72`) builds `FROM execution-prerequisites` (`Dockerfile:48-57`), which installs
+the Ubuntu `socat` package as `/usr/bin/socat` (`Dockerfile:51-54`) and copies bubblewrap to
+`/usr/bin/bwrap` (`Dockerfile:55`), the default of `--bubblewrap`. That bubblewrap is 0.11.2,
+built non-setuid from a checksum-pinned release tarball in the `sandbox-builder` stage
+(`Dockerfile:33-46`): the version item 3 was measured against, which accepts the
+`--disable-userns` the probe passes (`crates/substrate-host/src/process.rs:64`) and the
+`--assert-userns-disabled` it asserts with (`crates/substrate-host/src/probe.rs:630`). The image
+supplies nothing else the probe needs, so before the probe advertises exec a deployment of it must
+still supply:
+
+1. a delegated cgroup v2 subtree carrying `cpu`, `memory` and `pids`, with the daemon inside it and
+   its `cgroup.procs` writable by the image's UID 65532 (`USER 65532:65532`, `Dockerfile:71`);
+2. a process-free delegation root: the probe refuses a root whose own `cgroup.procs` is not empty;
+3. `--cgroup-root` (or `SUBSTRATE_CGROUP_ROOT`) naming that root, which the image's entrypoint
+   (`Dockerfile:72`) does not pass;
+4. a container runtime that permits bubblewrap's namespaces: a user namespace, and IPC, PID,
+   network and UTS namespaces inside it. A runtime policy that refuses them fails the probe, and
+   every exec is refused `exec.sandbox-unavailable`.
+
+The [container execution](#container-execution) bootstrap supplies items 1 to 3 inside its own
+private cgroup namespace and refuses a caller's `--cgroup-root`; item 4 remains the deployment's,
+through the AppArmor and seccomp profiles that section names. The disposable MCP image's `mcp`
+stage (`Dockerfile:74-82`) is distroless `cc-debian12` and carries neither bubblewrap nor socat,
+so the daemon child it starts serves no exec: every exec is refused `exec.sandbox-unavailable`.
+
 Each exec's CPU bandwidth is derived from its declared CPU time over its timeout and capped at
 `--exec-cpu-cores N` whole cores (`SUBSTRATE_EXEC_CPU_CORES`, default 1). Startup refuses 0, or
 more cores than the daemon process may run on, as `config.exec-cpu-cores-invalid`; it never clamps
@@ -453,7 +479,9 @@ checked against the addressed route before any handler can reserve a durable ope
 invalid, under-scoped and temporarily unresolvable authority answers `auth.credential-absent`,
 `auth.authority-invalid`, `auth.scope-denied` or `auth.authority-unavailable`; there is no cached or
 caller-written fallback. There is no production plaintext fallback and no verification-disable
-flag.
+flag. Every request resolves online, at the cost of one HTTP round trip on a reused keep-alive
+connection: at most 8 idle connections, each closed after 30 seconds idle or after any error,
+refusal or close-requesting response (ADR 0040).
 
 The Rust SDK addresses this listener only when the caller supplies the exact HTTPS origin, PEM
 trust roots, expected DNS identity and an asynchronous Identity access-token provider. It uses the

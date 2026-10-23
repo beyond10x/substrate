@@ -22,11 +22,17 @@ use hyper_util::rt::TokioIo;
 use hyper_util::service::TowerToHyperService;
 use serde_json::Value;
 use substrate_daemon::{App, Identity, router};
-use substrate_host::{HostConfig, HostDriver};
+use substrate_host::{
+    DispatchOutcome, Driver, DriverError, ExecObservation, HostConfig, HostDriver,
+    WorkspaceDestroyProgress,
+};
 use substrate_store::{ExecWrite, NewOperation, Reservation, Scope, Store, StoredExec};
 use substrate_wire::{
-    ConfinementRequest, Exec, ExecExit, ExecKind, ExecState, ExecUsage, NetworkMode, ResourceUsage,
-    SandboxProfile, Workspace, WorkspaceKind, WorkspaceState,
+    CapabilitySnapshot, ConfinementRequest, Exec, ExecExit, ExecKind, ExecOutputQuery,
+    ExecSignalInput, ExecStartInput, ExecState, ExecUsage, FileAbsence, FileObservation,
+    FileReadQuery, FileReadResult, LeaseObservation, MetricsStreamFacts, NetworkMode, OutputSlice,
+    ResourceUsage, SandboxProfile, StreamBoundsFacts, Workspace, WorkspaceCreateInput,
+    WorkspaceKind, WorkspaceState,
 };
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -58,6 +64,141 @@ fn metrics_path() -> String {
     format!("/v1/metrics/stream?exec_id={EXEC_ID}")
 }
 
+/// The real host driver, with the `metrics.stream` fact and its bounds published as a host that
+/// proved resource counters publishes them.
+///
+/// `HostConfig::minimum` proves no exec on a host without delegation, so its snapshot carries no
+/// `metrics.stream`, and the route refuses `exec.metrics-unserved` before the upgrade (ADR 0042
+/// decision 5). These cases are about the stream that a publishing host serves, so the fact is
+/// published here; every call is the host's own, and the stream is fed from the durable store.
+struct MetricsStreamHost {
+    host: Arc<HostDriver>,
+}
+
+#[async_trait::async_trait]
+impl Driver for MetricsStreamHost {
+    fn machine(&self) -> CapabilitySnapshot {
+        let mut machine = self.host.machine();
+        machine.facts.metrics_stream = Some(MetricsStreamFacts {
+            sample_interval_ms: substrate_wire::RESOURCE_USAGE_SAMPLE_INTERVAL_MS,
+            latest_wins: true,
+            replay: false,
+        });
+        machine.facts.metrics_stream_bounds = Some(StreamBoundsFacts::metrics());
+        machine
+    }
+
+    async fn shutdown(&self) -> Result<(), DriverError> {
+        self.host.shutdown().await
+    }
+
+    fn workspace_root_identity(&self, id: &str) -> Result<String, DriverError> {
+        self.host.workspace_root_identity(id)
+    }
+
+    async fn create_workspace(
+        &self,
+        id: &str,
+        root_name: &str,
+        input: &WorkspaceCreateInput,
+    ) -> DispatchOutcome<Workspace> {
+        self.host.create_workspace(id, root_name, input).await
+    }
+
+    async fn observe_workspace(
+        &self,
+        id: &str,
+        root_name: &str,
+        previous: &Workspace,
+    ) -> Result<Workspace, DriverError> {
+        self.host.observe_workspace(id, root_name, previous).await
+    }
+
+    async fn read_workspace_path(
+        &self,
+        workspace_id: &str,
+        root_name: &str,
+        path: &str,
+        query: &FileReadQuery,
+    ) -> Result<substrate_host::Listed<FileReadResult>, DriverError> {
+        self.host
+            .read_workspace_path(workspace_id, root_name, path, query)
+            .await
+    }
+
+    async fn write_workspace_file(
+        &self,
+        workspace_id: &str,
+        root_name: &str,
+        path: &str,
+        content: &[u8],
+    ) -> Result<FileObservation, DriverError> {
+        self.host
+            .write_workspace_file(workspace_id, root_name, path, content)
+            .await
+    }
+
+    async fn delete_workspace_file(
+        &self,
+        workspace_id: &str,
+        root_name: &str,
+        path: &str,
+    ) -> Result<FileAbsence, DriverError> {
+        self.host
+            .delete_workspace_file(workspace_id, root_name, path)
+            .await
+    }
+
+    async fn destroy_workspace(
+        &self,
+        workspace_id: &str,
+        root_name: &str,
+    ) -> Result<WorkspaceDestroyProgress, DriverError> {
+        self.host.destroy_workspace(workspace_id, root_name).await
+    }
+
+    async fn start_exec(
+        &self,
+        id: &str,
+        workspace_root_name: &str,
+        input: &ExecStartInput,
+    ) -> DispatchOutcome<ExecObservation> {
+        self.host.start_exec(id, workspace_root_name, input).await
+    }
+
+    async fn observe_exec(&self, id: &str) -> Result<ExecObservation, DriverError> {
+        self.host.observe_exec(id).await
+    }
+
+    async fn output(&self, id: &str, query: &ExecOutputQuery) -> Result<OutputSlice, DriverError> {
+        self.host.output(id, query).await
+    }
+
+    async fn signal(
+        &self,
+        id: &str,
+        input: &ExecSignalInput,
+    ) -> Result<ExecObservation, DriverError> {
+        self.host.signal(id, input).await
+    }
+
+    fn completed_execs(&self) -> Vec<ExecObservation> {
+        self.host.completed_execs()
+    }
+
+    fn set_exec_lease(&self, id: &str, lease: Option<LeaseObservation>) {
+        self.host.set_exec_lease(id, lease);
+    }
+
+    fn acknowledge_exec(&self, persisted: &ExecObservation) {
+        self.host.acknowledge_exec(persisted);
+    }
+
+    fn discard_superseded_exec(&self, id: &str) {
+        self.host.discard_superseded_exec(id);
+    }
+}
+
 struct Harness {
     _directory: TempDir,
     address: SocketAddr,
@@ -74,9 +215,13 @@ impl Harness {
     async fn open() -> Self {
         let directory = tempfile::tempdir().expect("temporary metrics adversary harness");
         let store = Arc::new(Store::open(directory.path().join("state.db")).expect("state store"));
-        let driver = HostDriver::open(HostConfig::minimum(directory.path().join("workspaces")))
+        let host = HostDriver::open(HostConfig::minimum(directory.path().join("workspaces")))
             .expect("host driver");
-        let app = App::new(Arc::clone(&store), driver, DEPLOYMENT);
+        let app = App::new(
+            Arc::clone(&store),
+            Arc::new(MetricsStreamHost { host }),
+            DEPLOYMENT,
+        );
         seed_streaming_exec(&store);
 
         let listener = TcpListener::bind("127.0.0.1:0")

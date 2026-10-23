@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-23T14:58:56Z",
+  "actor": "agent:b10x-chef-orchestrator",
+  "artifact": "story:session-start-publishes-exec-fields",
+  "kind": "story",
+  "revision": 6,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "bash scripts/gate.sh exit 0; bash scripts/delegated-lane.sh exit 0 (DELEGATED_CASES 180)",
+    "reference": "wave/2026-10-23-next@d8811be0b2538672550186f38c2a6bc8343f82dd"
+  }
+}

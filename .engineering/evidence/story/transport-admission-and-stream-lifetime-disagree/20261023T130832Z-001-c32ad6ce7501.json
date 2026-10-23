@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-23T13:08:32Z",
+  "actor": "agent:b10x-chef-orchestrator",
+  "artifact": "story:transport-admission-and-stream-lifetime-disagree",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "unit gate: daemon unit and pipe_session red then green (43 passed), metrics_stream_adversary 8 passed, wire stream_bounds 3 passed, SDK managed 2 passed, clippy -D warnings five packages, check-bundle and check-json 0.23.0 (361), check-adrs 42, check-links, check-docs; delegated lane deferred to the integration branch (disk under floor)",
+    "reference": "unit/2026-10-23-b2-stream-caps@6e968fb"
+  }
+}

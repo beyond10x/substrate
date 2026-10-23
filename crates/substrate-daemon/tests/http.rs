@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use axum::Extension;
 use axum::body::{Body, to_bytes};
-use axum::http::{Method, Request, StatusCode};
+use axum::http::{HeaderMap, Method, Request, StatusCode};
 use chrono::Utc;
 use serde_json::{Value, json};
 use substrate_daemon::{App, CONTRACT_BUNDLE, CONTRACT_BUNDLE_SHA256, Identity, router};
@@ -45,6 +45,20 @@ impl Harness {
         request_id: &str,
         body: Body,
     ) -> (StatusCode, Value) {
+        let (status, _, body) = self
+            .call_with_headers(subject, method, uri, request_id, body)
+            .await;
+        (status, body)
+    }
+
+    async fn call_with_headers(
+        &self,
+        subject: &str,
+        method: Method,
+        uri: &str,
+        request_id: &str,
+        body: Body,
+    ) -> (StatusCode, HeaderMap, Value) {
         let request = Request::builder()
             .method(method)
             .uri(uri)
@@ -68,11 +82,12 @@ impl Harness {
             CONTRACT_BUNDLE_SHA256
         );
         let status = response.status();
+        let headers = response.headers().clone();
         let bytes = to_bytes(response.into_body(), 2_097_152)
             .await
             .expect("response body");
         let body = serde_json::from_slice(&bytes).expect("JSON response");
-        (status, body)
+        (status, headers, body)
     }
 }
 
@@ -607,7 +622,8 @@ async fn v2_file_mutations_enforce_digest_cas_and_return_bounded_diffs() {
 }
 
 /// A FIFO, a socket and a non-UTF-8 name are entries a confined process can create in its own
-/// workspace. Both listing routes omit them and answer `200`; neither names an escape.
+/// workspace. Both listing routes omit them, answer `200` and count them in the
+/// `x-b10x-omitted-entries` header (ADR 0043); neither names an escape.
 #[tokio::test(flavor = "multi_thread")]
 async fn special_entries_are_omitted_from_both_listing_routes_rather_than_refused() {
     use std::os::unix::ffi::OsStringExt as _;
@@ -667,8 +683,8 @@ async fn special_entries_are_omitted_from_both_listing_routes_rather_than_refuse
     )
     .expect("non-UTF-8 name");
 
-    let (status, page) = harness
-        .call(
+    let (status, page_headers, page) = harness
+        .call_with_headers(
             "local:1000",
             Method::GET,
             &format!("/v1/workspaces/{workspace}/files/mixed?mode=directory&limit_items=100"),
@@ -681,9 +697,14 @@ async fn special_entries_are_omitted_from_both_listing_routes_rather_than_refuse
         page["result"]["items"],
         json!([{"name": "visible.txt", "kind": "file", "size": 6}])
     );
+    // ADR 0043: the page names its three omitted entries in a header, never in the closed body.
+    assert_eq!(
+        page_headers.get(substrate_wire::OMITTED_ENTRIES_HEADER),
+        Some(&axum::http::HeaderValue::from_static("3"))
+    );
 
-    let (status, tree) = harness
-        .call(
+    let (status, tree_headers, tree) = harness
+        .call_with_headers(
             "local:1000",
             Method::GET,
             &format!("/v2/workspaces/{workspace}/tree?limit_items=10&include_hidden=false"),
@@ -699,7 +720,12 @@ async fn special_entries_are_omitted_from_both_listing_routes_rather_than_refuse
             {"path": "mixed/visible.txt", "kind": "file", "size": 6}
         ])
     );
+    // ADR 0043: an omission still sets `truncated`; the header tells it from the limit.
     assert_eq!(tree["result"]["truncated"], true);
+    assert_eq!(
+        tree_headers.get(substrate_wire::OMITTED_ENTRIES_HEADER),
+        Some(&axum::http::HeaderValue::from_static("3"))
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

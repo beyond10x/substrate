@@ -43,7 +43,18 @@ Each is a claim that can be checked. Breaking one is a design change, not a refa
 5. **Operations are durable before driver dispatch**
    (`adr/0005-operations-are-durable-before-driver-dispatch.md`).
 6. **Every released contract bundle directory is immutable.** `contracts/substrate-wire/0.1.0`
-   through `0.22.0` exist; `0.22.0` adds no route and carries ADR 0038: the optional
+   through `0.23.0` exist; `0.23.0` adds no route and publishes ADR 0010's declared read-only
+   roots: the optional `read_only_roots` start list (closed `{host_path, mount}` entries, at most
+   `MAX_READ_ONLY_ROOTS`), the optional `exec.read-only-roots` fact (`max_roots`), the applied
+   `read_only_roots` record and the three refusals a root has always raised, now published with a
+   refusal vector each and held to its `substrate_wire` constant by `cargo xtask check-bundle
+   0.23.0`; the daemon refuses a start naming a root `exec.sandbox-unavailable` (501) before
+   dispatch when the fact is absent, and the exec applied record admits every member the wire
+   crate emits, correcting `secret_slots`, which `0.5.0` to `0.22.0` omit, and `read_only_files`,
+   which `0.18.0` to `0.22.0` omit; and, by design 27, publishes `scratch`, `measurements` and
+   `workspace_access` on the session start, with the refusals they raise on both starts, each held
+   to its `substrate_wire` constant;
+   `0.22.0` added ADR 0038: the optional
    `writable_roots` start list (a closed union of a declared host root and a Git checkout
    workspace, at most eight), the optional `exec.writable-roots.host` and `exec.writable-roots.git`
    facts, the applied `writable_roots` record and eight named refusals, each held to its
@@ -80,8 +91,8 @@ Each is a claim that can be checked. Breaking one is a design change, not a refa
    context and grant attribution (ADR 0011); `0.6.0` added destination-bound egress
    apertures (ADR 0013), and **every earlier directory is frozen** (`STATUS.md:36`,
    `xtask/src/json.rs:152`, `contracts/substrate-wire/0.2.0/README.md:13`).
-   The daemon and Rust SDK advertise `substrate-wire/0.22.0` with the SHA-256 of that bundle's
-   inner `bundle.json` (`crates/substrate-wire/src/lib.rs`); ADR 0038 records the writable-root
+   The daemon and Rust SDK advertise `substrate-wire/0.23.0` with the SHA-256 of that bundle's
+   inner `bundle.json` (`crates/substrate-wire/src/lib.rs`); ADR 0010 records the read-only roots, ADR 0038 the writable-root
    additions, design 26 records the working
    directory and aperture-list additions, design 21 records the Git source and
    observation additions, ADR 0028 records the preceding route promotion, and the gate retains the
@@ -150,7 +161,7 @@ Substrate is confinement. Everything below is the reason it can be trusted with 
   deliberately not committed (`docs/design/09-delegated-context-and-grant-attribution.md` § 6), so
   the vectors are verify-only. They do **not** verify with `delegated_signing_key` in
   `crates/substrate-daemon/tests/runtime_vectors.rs`, whose published seed signs only the
-  documents that runner mints at run time. This holds for bundles `0.17.0` through `0.22.0`. The exception is scoped by rule
+  documents that runner mints at run time. This holds for bundles `0.17.0` through `0.23.0`. The exception is scoped by rule
   **and** by path; a JWT anywhere else, including any other vector, is still a finding. Proven, not
   asserted: the same token in `contracts/substrate-wire/0.7.0/vectors/http/delegated-context-*.json`
   is allowed and in `crates/substrate-daemon/src/` is caught. **Widening this allowlist is a
@@ -183,7 +194,7 @@ In order: `cargo test --workspace --release --locked`, `cargo fmt --all --check`
 `cargo xtask check-licenses`, `cargo xtask check-packages`, `cargo xtask check-mcp-boundary`,
 `check-contract-bundle.py`, `check-contract-bundle-0.2.0.py`,
 `-0.3.0.py`, `-0.4.0.py`, one bounded
-`cargo xtask check-bundles 0.5.0 ... 0.22.0`,
+`cargo xtask check-bundles 0.5.0 ... 0.23.0`,
 `cargo xtask check-json` and `cargo xtask check-toolchain`.
 Green here is the bar for `main`.
 The former brand is fenced org-wide by `scripts/check-org-brand.sh` in the **atlas** repo, not here.
@@ -207,8 +218,8 @@ bundles' reproducibility proof (invariant 6), not as tooling.
 | `package-bundle <version> --out <dir>` | produces a released bundle as a deterministic OCI image layout | no — under `cargo test` |
 | `render-bundle <version> --out <dir>` | produces a bundle tree from `substrate-wire` and `xtask/bundle-source/<version>/`; refuses to write anywhere under `contracts/` | no — under `cargo test` |
 | `check-bundle <version>` | a released bundle whose bytes are not the fixed point of `xtask/bundle-source/<version>/` | no — focused form of the batched gate check |
-| `check-bundles <version>...` | the same checks with a bounded worker count and deterministic version-order reporting | yes, `0.5.0` through `0.22.0` in one invocation |
-| `check-json [<version>...]` | JSON beneath a released bundle that no bundled schema classifies, that its schema rejects, or that is not in deterministic source form | yes, all twenty-two |
+| `check-bundles <version>...` | the same checks with a bounded worker count and deterministic version-order reporting | yes, `0.5.0` through `0.23.0` in one invocation |
+| `check-json [<version>...]` | JSON beneath a released bundle that no bundled schema classifies, that its schema rejects, or that is not in deterministic source form | yes, all twenty-three |
 
 **`cargo xtask package-bundle <version> --out <dir>`** packages a released bundle as a
 deterministic OCI image layout. It is not a gate step of its own: its cases run under
@@ -256,16 +267,19 @@ a list, and the six lexical writable-root refusals (422) of ADR 0038 with
 `exec.writable-roots-host-unserved` and `exec.writable-roots-git-unserved` (501), which both lanes
 answer for a host root the daemon did not declare and for every Git root, and the portable lane
 also for the one host root the runner declares, which it cannot prove without confinement — across
-111 cases, and its delegated lane 167, whose four writable-root cases bind that declared root and
+118 cases, and its delegated lane 180, whose four writable-root cases bind that declared root and
 check the host side: the write lands, its parent and sibling do not change, a working directory
 beneath the mount runs there, and the declared path swapped for a symlink is
-`exec.writable-root-not-a-directory` (422). Both totals also count a second daemon that declares a
+`exec.writable-root-not-a-directory` (422). Its read-only-root cases (ADR 0010, bundle `0.23.0`): portable, the `exec.read-only-roots` fact is absent, one root is refused `exec.sandbox-unavailable` (501) by the daemon before dispatch and five roots are `exec.read-only-root-invalid` (422), the lexical rule checked first; delegated, the fact is `{"max_roots": 4}`, four roots are bound, read and refused writes, listed in the applied record and left unchanged on the host, a fifth is `exec.read-only-root-invalid` (422), and an absent host path is `exec.read-only-root-absent` (422) while a plain file and a symlink to a directory are `exec.read-only-root-not-a-directory` (422). Both totals also count a second daemon that declares a
 Git source served over HTTPS on loopback by `git upload-pack` (ADR 0038 kind 2): it serves
 `workspace.git` and materializes a Git workspace; the portable lane then refuses that workspace as
 a Git root `exec.writable-roots-git-unserved` (501), and the delegated lane mounts it, has a child
 commit in it from a working directory beneath the mount, reads the commit on the host and in the
 change-set route, and refuses an empty workspace, the start's own, one named twice and an unknown
-one before dispatch, each recorded as refused.
+one before dispatch, each recorded as refused. Both lanes also hold four omitted-entry cases (ADR 0043): a
+FIFO beside a file is named by the `x-b10x-omitted-entries` header, count 1, on the v1 directory
+page and on the v2 tree both under its limit and when the limit truncates it, and once the FIFO is gone
+neither listing carries the header and the tree is not truncated.
 Both totals include
 one route/refusal probe for every operation in the promoted registry (the seven host-process routes
 of `0.20.0` among them: unserved on the portable lane, served and refused before anything runs on
@@ -274,6 +288,9 @@ out-of-set neighbour refused as `request.schema-invalid` before dispatch, an exe
 root name refused, a destroy that leaves its files, and, delegated, an exec run in it plus every
 `check_confined_isolation` case run again against it (portable: `exec.sandbox-unavailable`
 instead); the delegated cases also include an interactive shell driven through a `pty` session,
+three raw-pipe sessions that each name one exec field design 27 publishes on the session start
+(`measurements` observed, `workspace_access` read-only applied and a write refused, `scratch`
+refused `exec.scratch-quota-unserved` (501) before dispatch on a host without project quotas),
 programs started in a working directory beneath the workspace and beneath a declared root, an
 absent and a symlinked one refused `exec.workdir-missing` before dispatch, and an aperture list
 refused `exec.aperture-undeclared` for an undeclared name, run with two apertures each reporting its
@@ -320,18 +337,41 @@ to allow for the delegated cases. `cargo xtask quota-lane --inventory` states th
 runs nothing, and `scripts/delegated-lane.sh` closes with it so a green delegated lane cannot be
 read as covering these cases.
 
-**The release confinement-lane record does not cover them either.** `Confinement-lane:` names the
-`DELEGATED_CASES` of
-[`crates/substrate-daemon/tests/runtime_vectors.rs`](crates/substrate-daemon/tests/runtime_vectors.rs)
-(§ *The gate*), and the real-quota cases are in a different crate and outside that count. No release
-condition has ever asserted them; treat kernel project-quota enforcement as proven by the dated
-`quota-lane` run you can point at, and by nothing else.
+**`cargo xtask quota-fixture run` provisions that fixture and runs the lane in it — one command.**
+It builds the checked-in recipe [`fixtures/quota-lab/Dockerfile`](fixtures/quota-lab/Dockerfile)
+(the release builder's exact pinned `rust` image plus `e2fsprogs`, tagged
+`b10x-substrate-quota-lab:<key>`, never pushed) and runs one container with Docker's default
+capability set plus `SYS_ADMIN` — what the recorded run had, never `--privileged` — and the loop
+access a filesystem image needs: `--device /dev/loop-control`, `--device-cgroup-rule 'b 7:* rmw'`
+and `--security-opt apparmor=unconfined`, because the default AppArmor profile denies `mount`.
+The container never sees the live checkout: the verb reads `HEAD` once, extracts that commit with
+`git archive` (modification times reset to the extraction, `tar -m`) into a fresh directory under
+the target directory, builds the recipe from it and binds it read-only at `/src`, and removes it
+after the run. The container's builds go to the Docker volumes
+`b10x-substrate-quota-lab-target-<key>` and `b10x-substrate-quota-lab-cargo-registry-<key>`, never
+to the checkout's `target/`; `<key>` is derived from the checkout's canonical path, so two
+checkouts never share a container build target. Inside, the hidden `quota-fixture inside` creates a sparse 1 GiB ext4 image with
+the `quota` and `project` features, attaches it through one free loop device with automatic detach,
+mounts it `prjquota` at `/quota` (not XFS, which reports an exceeded project quota as `ENOSPC` where
+the cases require `EDQUOT`),
+hands it to the invoking uid and runs `quota-lane` as that uid with
+`setpriv --inh-caps=+sys_admin --ambient-caps=+sys_admin` and `200000-200511`. It refuses to
+provision anything outside that container. `--release` builds the cases in the release profile;
+`--clean` removes this checkout's image tag and its two volumes afterwards, and nothing else. The loop device is a host-kernel object
+for the duration of the run. Docker must work for the invoking user without `sudo`; where it does
+not, the verb refuses and names the cases that did not run.
+
+**A release requires a recorded run of it for the tagged commit** (§ *Releases*). The run ends,
+only when every declared case passed, the checkout was clean before the run and is still clean
+after it, and `HEAD` did not move, with the line
+`Quota-lane: <source-sha> <case-count> <RFC 3339 UTC>`; `Confinement-lane:` does not cover these
+cases, because they are in a different crate and outside `DELEGATED_CASES`.
 
 **The gate verifies every released bundle, not just `0.1.0`.** The four
 `run python3 scripts/check-contract-bundle*.py` lines in `scripts/gate.sh` run the
 four frozen Python checkers, and the line after them runs `cargo xtask check-bundles` for `0.5.0`
-through `0.22.0`, so
-a green gate *is* evidence that all twenty-two still hold. Cutting a successor bundle therefore means
+through `0.23.0`, so
+a green gate *is* evidence that all twenty-three still hold. Cutting a successor bundle therefore means
 **adding its check to `scripts/gate.sh`** — a bundle whose check is not in the gate is unverified
 from the next commit onward.
 
@@ -427,13 +467,34 @@ for example `Confinement-lane: 3fafeae65fe6ee9f36c3ba17d49b36a1a0d1a3a3 97 2026-
 record naming any other commit, refuses a case count other than the `DELEGATED_CASES` the tagged
 source itself declares in
 [`crates/substrate-daemon/tests/runtime_vectors.rs`](crates/substrate-daemon/tests/runtime_vectors.rs),
-and refuses a timestamp that is not an RFC 3339 UTC instant. The recorded line is written into the
+and refuses a timestamp that is not an RFC 3339 UTC instant, by shape and by calendar (GNU `date`
+must read it back unchanged, so `2026-02-30T10:00:00Z` is refused). The record is one line of
+exactly three fields: a tag carrying two `Confinement-lane:` lines, a value with a line break or
+carriage return, or a fourth field is refused. The recorded line is written into the
 GitHub release under *Confinement lane* and into both job summaries. A protected-`main` recovery
 dispatch may pass the same value as the workflow's `confinement_evidence` input instead, which is
 the only way to release a tag that was annotated before this condition existed. This records a local
 run; it does not run the lane in CI, and neither the workflow nor the release notes describe it as if
 it had. Giving the lane a self-hosted runner with both prerequisites would replace this record with a
 required check, and is a separate decision.
+
+**A release also requires a recorded project-quota-lane run for the tagged commit**, in the same
+shape. Before tagging, run `cargo xtask quota-fixture run` at that commit with a clean checkout
+(§ *The real project-quota lane*) and put the line it prints in the annotated tag's message:
+
+```
+Quota-lane: <source-sha> <case-count> <RFC 3339 UTC>
+```
+
+`release.yml` refuses to publish without it, refuses a record naming any other commit, refuses a
+case count other than the number of `#[ignore]`d `real_quota_*` functions the tagged source declares
+in [`crates/substrate-host/src/git/quota_tests.rs`](crates/substrate-host/src/git/quota_tests.rs)
+(the definition `declared_cases` in `xtask/src/quota_lane.rs` uses, so the fixture's record and the
+step agree), and refuses a timestamp that is not an RFC 3339 UTC instant, with the same calendar
+check and the same one-line, three-field rule as `Confinement-lane:`; a `Confinement-lane:` line does
+not satisfy it. The line is written into the GitHub release under *Quota lane* and into both job summaries, and a
+recovery dispatch may pass it as the `quota_evidence` input instead. The step's refusals are executed
+offline against throwaway tagged repositories by `xtask/tests/release_workflow.rs`.
 
 `packages: write` and `id-token: write` exist on the release job and nowhere else; that job holds
 `contents: write` only to create the GitHub release. Everything it does uses the run's own
@@ -602,3 +663,5 @@ source release.
 ## Executable specification
 
 `spec/ess-inputs.yaml` pins ESS. `cargo xtask check-ess` validates the specification and regenerates the committed suite to check drift. The first projection is the accepted-operation ledger, with its coverage and excluded boundaries documented in `spec/coverage.md`. Existing runtime and immutable-bundle gates remain required. Never describe this bounded projection as full service conformance.
+
+Moving the ESS pin also moves `ESS_VERSION` **and** `ESS_SHA256` in `.github/workflows/gate.yml`; the local gate uses the installed `ess` and does not check the archive, so a stale digest fails only in CI (it happened at 0.67.0 and again at 0.68.0). Take the digest from `gh release view <version> -R beyond10x/ess --json assets` and confirm it with `sha256sum` on the downloaded archive.

@@ -1,7 +1,7 @@
 use crate::events::{append_event, commit_effect};
 use crate::execs::{
-    git_roots_admissible, is_terminal_exec_state, load_exec, mark_exec_unknown,
-    record_exec_git_roots, upsert_exec, workspace_admissible,
+    exec_recorded_absent, git_roots_admissible, is_terminal_exec_state, load_exec,
+    mark_exec_unknown, record_exec_git_roots, upsert_exec, workspace_admissible,
 };
 use crate::leases::{freeze_workspace_lease_if_due, upsert_lease};
 use crate::operations::{
@@ -334,14 +334,15 @@ impl Store {
                     operation: Some(new.operation.clone()),
                 },
             )),
+            // A session in `unknown` is retirable only once recovery has recorded its exec's tree
+            // physically absent, as `retire_exec` requires of an `unknown` exec; before that its
+            // processes may still be running.
             Some(value)
                 if !matches!(
                     value.state,
-                    SessionState::Exited
-                        | SessionState::Cancelled
-                        | SessionState::Expired
-                        | SessionState::Unknown
-                ) =>
+                    SessionState::Exited | SessionState::Cancelled | SessionState::Expired
+                ) && (value.state != SessionState::Unknown
+                    || !exec_recorded_absent(&transaction, &new.scope, &value.exec)?) =>
             {
                 Some((
                     409,

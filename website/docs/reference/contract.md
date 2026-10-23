@@ -59,11 +59,18 @@ edits, and patches.
 A directory entry the contract cannot name is omitted from both listings: an entry that is not a
 regular file, directory or symbolic link (a FIFO, socket or device), or whose name is not UTF-8.
 The v1 directory page (`mode=directory`) and the v2 tree leave it out, as they leave out `.git`,
-and the tree never descends into it or counts it toward `limit_items`. The v1 page gives no signal
-that it omitted an entry. The v2 tree answers `truncated: true` for either of two causes: it
-reached `limit_items`, or it omitted at least one such entry, so a retry with a higher limit after
-an omission still answers `truncated: true`. Neither listing refuses because of such an entry;
-`workspace.path-escape` stays the answer for a path that escapes the workspace.
+and the tree never descends into it or counts it toward `limit_items`. Since bundle `0.23.0`
+(ADR 0043) both listings name what they left out in the `x-b10x-omitted-entries` response header:
+the count of such entries, sent only when it is at least 1. On a v1 page it is the directory's
+count, the same on every page; on the v2 tree it covers the part the walk reached, so it is a lower
+bound when the walk reached `limit_items`. A `.git` entry, and a hidden entry the request excludes,
+are not counted. The tree still answers `truncated: true` for either of two causes, as before: it
+reached `limit_items`, or it omitted at least one such entry. The header tells them apart:
+`truncated: true` without it means the limit only, so raising the limit helps; with it, at least one
+entry will stay omitted whatever the limit. The Rust SDK's `Workspace::tree_with_omissions` and
+`Workspace::read_directory_with_omissions` return the count beside the listing. Neither listing
+refuses because of such an entry; `workspace.path-escape` stays the answer for a path that escapes
+the workspace.
 
 Release `0.7.3` advertises `substrate-wire/0.16.0` in `x-b10x-contract` and its inner
 `bundle.json` SHA-256 in `x-b10x-contract-bundle-sha256`. The two headers are one claim. The signed
@@ -140,7 +147,25 @@ across retry. Resource and operation lookup stays within the authenticated subje
 Read [operations and observations](../concepts/operations.md) for retry semantics and
 [status](../status.md) for the implementation boundary.
 
-Development source now advertises `substrate-wire/0.22.0`. It adds no route. An exec or session
+Development source now advertises `substrate-wire/0.23.0`. It adds no route and publishes the
+read-only roots the wire has always admitted (ADR 0010): an exec or session start may name
+`read_only_roots`, at most four `{"host_path": <path>, "mount": <path>}` entries, each path absolute
+and canonical. A host publishes `exec.read-only-roots`, `{"max_roots": 4}`, only when it is
+confined and resolves paths without following a symlink. The applied record lists each bound root
+as declared. No refusal is new: `exec.read-only-root-invalid`, `exec.read-only-root-absent` and
+`exec.read-only-root-not-a-directory` (422) are now published, each with a refusal vector. A
+start naming a root on a host without the fact is refused `exec.sandbox-unavailable` (501) before
+dispatch, after the checks of the start's other confinement members. The exec applied record now
+also admits `secret_slots`, which `0.5.0` to `0.22.0` wrongly reject, and `read_only_files`, which
+`0.18.0` to `0.22.0` wrongly reject. A client that
+validates capability snapshots or resources against `0.22.0` must move to `0.23.0` to accept the
+new fact and record members. The session start's `exec` object now also publishes `scratch`,
+`measurements` and `workspace_access`, each the same schema as on exec start; a session has always
+accepted and applied them. Both starts now publish the refusals those three members have always
+raised, each held to its `substrate_wire` constant, and the daemon refuses a null `scratch`, a
+storage `max_bytes` that is not a multiple of 1024 and a repeated measurement as
+`request.schema-invalid` (422), as the schemas always did.
+`0.22.0` added ADR 0038. An exec or session
 start may name `writable_roots`, at most eight writable mounts outside `/workspace` (ADR 0038). Each
 entry is exactly one of `{"host": <name>, "mount": <path>}`, a directory the operator declared by
 name, or `{"workspace": <workspace id>, "mount": <path>}`, a Git checkout workspace of the caller; a

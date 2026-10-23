@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-23T08:35:37Z",
+  "actor": "agent:b10x-chef-orchestrator",
+  "artifact": "story:daemon-image-serves-exec-or-says-it-cannot",
+  "kind": "story",
+  "revision": 13,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "README claims checked line by line against Dockerfile:33-82, probe.rs, main.rs, container_bootstrap.rs; cargo xtask check-links green",
+    "reference": "unit/2026-10-23-u4-image-statement@b143046"
+  }
+}

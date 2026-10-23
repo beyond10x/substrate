@@ -150,7 +150,14 @@ async fn managed_external_daemon_serves_the_typed_workspace_journey() {
     else {
         panic!("metrics stream handshake must preserve its named refusal")
     };
-    assert_eq!(stream_refusal.code, "resource.not-found");
+    // ADR 0042 decision 5: a host that does not publish `metrics.stream` refuses the route before
+    // it reads the exec.
+    let expected = if managed.client().machine().facts.metrics_stream.is_some() {
+        "resource.not-found"
+    } else {
+        "exec.metrics-unserved"
+    };
+    assert_eq!(stream_refusal.code, expected);
 
     let policy = ExecutionPolicy::builder()
         .timeout(Duration::from_secs(5))
@@ -392,6 +399,88 @@ async fn delegated_external_daemon_serves_pty_metrics_and_cleans_the_process_tre
         !PathBuf::from(&cgroup_root).join(exec_cgroup).exists(),
         "this SDK run's exec cgroup survived orderly shutdown"
     );
+}
+
+/// ADR 0043 through the SDK: a FIFO in the workspace is counted by the two `_with_omissions`
+/// methods, while `tree` and `read_directory` keep their signatures and `tree` still answers
+/// `truncated: true` for the omission, as a consumer that reads it as "incomplete" relies on.
+#[tokio::test]
+async fn managed_listings_answer_the_omitted_entry_count() {
+    let data = tempfile::tempdir().expect("temporary parent");
+    let root = data.path().join("owned");
+    let mut managed = ManagedDaemon::builder()
+        .data_dir(&root)
+        .deployment("sdk_omitted")
+        .external_binary(daemon_binary())
+        .start()
+        .await
+        .expect("managed daemon starts");
+    let workspace = managed
+        .client()
+        .workspace()
+        .empty()
+        .create()
+        .await
+        .expect("workspace create");
+    workspace
+        .replace_file("listing/b.txt", b"b", ExpectedFileState::Absent, true, None)
+        .await
+        .expect("file write with its parent");
+    let fifo = root
+        .join("workspaces")
+        .join(workspace.id())
+        .join("listing/a-fifo");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("run mkfifo");
+    assert!(made.success(), "mkfifo {}", fifo.display());
+
+    let page = workspace
+        .read_directory_with_omissions("listing", None, 32)
+        .await
+        .expect("directory page with its count");
+    assert_eq!(page.omitted_entries, 1, "the FIFO is counted");
+    let names: Vec<&str> = page
+        .listing
+        .items
+        .iter()
+        .map(|item| item.name.as_str())
+        .collect();
+    assert_eq!(names, ["b.txt"]);
+    let plain = workspace
+        .read_directory("listing", None, 32)
+        .await
+        .expect("directory page");
+    assert_eq!(plain.items, page.listing.items, "same page either way");
+
+    let tree = workspace
+        .tree_with_omissions(32, false)
+        .await
+        .expect("tree with its count");
+    assert_eq!(tree.omitted_entries, 1, "the FIFO is counted");
+    assert!(tree.listing.truncated, "an omission still sets truncated");
+    let plain = workspace.tree(32, false).await.expect("tree");
+    assert!(
+        plain.truncated,
+        "tree() keeps answering truncated for an omission (ADR 0043)"
+    );
+    assert_eq!(plain.items, tree.listing.items);
+
+    std::fs::remove_file(&fifo).expect("remove the FIFO");
+    let tree = workspace
+        .tree_with_omissions(32, false)
+        .await
+        .expect("complete tree");
+    assert_eq!(tree.omitted_entries, 0, "no header means nothing omitted");
+    assert!(!tree.listing.truncated);
+    let page = workspace
+        .read_directory_with_omissions("listing", None, 32)
+        .await
+        .expect("complete page");
+    assert_eq!(page.omitted_entries, 0);
+
+    managed.shutdown().await.expect("managed shutdown");
 }
 
 #[cfg(feature = "linked-daemon")]

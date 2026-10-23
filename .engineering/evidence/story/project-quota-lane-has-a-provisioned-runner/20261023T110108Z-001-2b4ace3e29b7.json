@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-23T11:01:08Z",
+  "actor": "agent:b10x-chef-orchestrator",
+  "artifact": "story:project-quota-lane-has-a-provisioned-runner",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "unit gate: quota_fixture_adversary_pass1 8 passed (6 red before the fix), release_workflow 27 passed, xtask unit 225 passed, clippy -D warnings, fmt, check-links; docker fixture 7 declared, 7 ran, 0 failed from a HEAD snapshot",
+    "reference": "unit/2026-10-23-b9-quota-runner@b08ecf4"
+  }
+}

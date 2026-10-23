@@ -3971,6 +3971,75 @@ fn terminal_exec_authority_preserves_full_winner_across_signal_and_expiry() {
 }
 
 #[test]
+fn lease_expiry_of_an_unproven_exec_keeps_it_unknown_and_expires_only_its_lease() {
+    let store = Store::open(":memory:").expect("open store");
+    let scope = scope("local:1000");
+    let leased = |id: &str, state: ExecState| {
+        let mut stored = exec(id, "ws_unproven", state);
+        stored.cgroup = Some(format!("substrate-{id}"));
+        stored.resource.lease = Some(LeaseObservation {
+            ttl_ms: 1_000,
+            renew_by: "2026-08-13T12:00:02Z".parse().expect("renew by"),
+            state: LeaseState::Active,
+            clock_tolerance_ms: substrate_wire::LEASE_CLOCK_TOLERANCE_MS,
+            authorizing_operation: format!("exec-lease-authority-{id}"),
+            actor: "test".to_owned(),
+            principal: None,
+        });
+        stored
+    };
+    let expiry_of = |id: &str| ExpiredLease {
+        scope: scope.clone(),
+        id: id.to_owned(),
+        resource: LeaseResource::Exec {
+            workspace_id: "ws_unproven".to_owned(),
+        },
+    };
+    let at = "2026-08-13T12:00:03Z".parse().expect("time");
+
+    // Durably `unknown`, and the driver no longer knows the id.
+    let durable_unknown = leased("ex_durable_unknown", ExecState::Unknown);
+    seed_exec(&store, &scope, &durable_unknown);
+    authorize_exec_lease(&store, "local:1000", &durable_unknown.resource.id);
+    store
+        .complete_exec_lease_expiry(&expiry_of(&durable_unknown.resource.id), at, None)
+        .expect("expiry of a durable unknown exec");
+
+    // Durably running, and lease cleanup's KILL is answered `unknown`.
+    let running = leased("ex_kill_unknown", ExecState::Running);
+    seed_exec(&store, &scope, &running);
+    authorize_exec_lease(&store, "local:1000", &running.resource.id);
+    let mut answered = running.clone();
+    answered.resource.state = ExecState::Unknown;
+    store
+        .complete_exec_lease_expiry(&expiry_of(&running.resource.id), at, Some(&answered))
+        .expect("expiry answered unknown");
+
+    for id in [&durable_unknown.resource.id, &running.resource.id] {
+        let stored = store
+            .exec(&scope, id)
+            .expect("lookup")
+            .expect("unknown exec retained");
+        assert_eq!(stored.resource.state, ExecState::Unknown, "{id}");
+        assert_eq!(
+            stored.resource.lease.as_ref().expect("lease").state,
+            LeaseState::Expired,
+            "{id}"
+        );
+        assert_eq!(
+            stored.cgroup.as_deref(),
+            Some(format!("substrate-{id}").as_str())
+        );
+    }
+    assert!(
+        store
+            .workspace_has_nonterminal_execs(&scope, "ws_unproven")
+            .expect("unknown check"),
+        "an exec still unknown keeps blocking its workspace's cleanup"
+    );
+}
+
+#[test]
 fn independent_store_connections_commit_only_one_full_terminal_winner() {
     let directory = tempdir().expect("tempdir");
     let path = directory.path().join("shared.db");
@@ -4650,4 +4719,268 @@ fn git_root_workspaces_migrate_from_the_applied_record() {
             ("ex_plain".to_owned(), "[]".to_owned()),
         ]
     );
+}
+
+/// Adversary pass 2 for `story:an-unknown-exec-is-killed-again-before-restart`, wave 2026-10-23.
+mod adversary_2_unknown_exec_lease_expiry {
+    use super::*;
+    use crate::recovery::RecoveryExec;
+
+    /// An `unknown` exec with an active lease, whose lease then expires: it stays `unknown`.
+    fn unknown_exec_whose_lease_expired(store: &Store, scope: &Scope, id: &str) -> StoredExec {
+        let mut stored = exec(id, "ws_unproven", ExecState::Unknown);
+        stored.cgroup = Some(format!("substrate-{id}"));
+        stored.resource.lease = Some(LeaseObservation {
+            ttl_ms: 1_000,
+            renew_by: "2026-08-13T12:00:02Z".parse().expect("renew by"),
+            state: LeaseState::Active,
+            clock_tolerance_ms: substrate_wire::LEASE_CLOCK_TOLERANCE_MS,
+            authorizing_operation: format!("exec-lease-authority-{id}"),
+            actor: "test".to_owned(),
+            principal: None,
+        });
+        seed_exec(store, scope, &stored);
+        authorize_exec_lease(store, "local:1000", id);
+        store
+            .complete_exec_lease_expiry(
+                &ExpiredLease {
+                    scope: scope.clone(),
+                    id: id.to_owned(),
+                    resource: LeaseResource::Exec {
+                        workspace_id: "ws_unproven".to_owned(),
+                    },
+                },
+                "2026-08-13T12:00:03Z".parse().expect("time"),
+                None,
+            )
+            .expect("lease expiry");
+        stored
+    }
+
+    fn retire(store: &Store, id: &str, operation: &str) -> ExecRetireReservation {
+        let retire = operation_named("local:1000", operation, "exec.retire", id, &"4".repeat(64));
+        store
+            .retire_exec(&retire, id, "2026-08-13T12:00:04Z".parse().expect("time"))
+            .expect("retire answer")
+    }
+
+    /// At the base, lease expiry moved a non-terminal exec, `unknown` included, to `expired`,
+    /// which `retire_exec` accepts: an expired lease always left a reclaimable row. Correction
+    /// round 1 keeps it `unknown`, and `retire_exec` refuses every non-terminal exec with
+    /// `exec.not-terminal`. Nothing else deletes an exec row, and every row counts toward the
+    /// subject's exec capacity (`resource_partition_at_capacity`), so an exec whose lease expired
+    /// must still be removable once its lease is gone. Correction round 2 sets the condition:
+    /// once recovery has recorded its tree physically absent.
+    #[test]
+    fn an_unknown_exec_whose_lease_expired_can_still_be_retired() {
+        let store = Store::open(":memory:").expect("open store");
+        let scope = scope("local:1000");
+        let id = "ex_adv2_unknown_retire";
+        let stored = unknown_exec_whose_lease_expired(&store, &scope, id);
+        store
+            .mark_exec_physically_absent(
+                &RecoveryExec {
+                    scope: scope.clone(),
+                    stored,
+                    operation: format!("exec-lease-authority-{id}"),
+                    operation_state: OperationState::Accepted,
+                },
+                "2026-08-13T12:00:03Z".parse().expect("time"),
+            )
+            .expect("recovery records the tree physically absent");
+
+        let answer = retire(&store, id, "01JU2ADV2RETIRE000000001");
+        assert!(
+            matches!(answer, ExecRetireReservation::Retired(_)),
+            "an exec whose lease expired is never left unremovable: {answer:?}"
+        );
+    }
+
+    /// The complement: an `unknown` exec whose tree recovery has not recorded absent may still
+    /// hold processes, so it stays unretirable, whatever its lease did.
+    #[test]
+    fn an_unknown_exec_not_yet_recorded_absent_is_refused_not_terminal() {
+        let store = Store::open(":memory:").expect("open store");
+        let scope = scope("local:1000");
+        let id = "ex_adv2_unknown_present";
+        unknown_exec_whose_lease_expired(&store, &scope, id);
+
+        let answer = retire(&store, id, "01JU2ADV2RETIRE000000002");
+        let ExecRetireReservation::Refused(answer) = answer else {
+            panic!("an unknown exec not recorded absent is refused: {answer:?}");
+        };
+        assert_eq!(answer.status, 409);
+        let OperationOutcome::Error { error } = answer.outcome else {
+            panic!("a refusal carries an error");
+        };
+        assert_eq!(error.code, "exec.not-terminal");
+        assert_eq!(
+            store
+                .exec(&scope, id)
+                .expect("exec lookup")
+                .expect("the row is kept")
+                .resource
+                .state,
+            ExecState::Unknown
+        );
+    }
+}
+
+/// `session.retire` admits a session in `unknown` only once recovery has recorded its exec's
+/// tree physically absent, as `exec.retire` does for an `unknown` exec.
+mod session_retire_waits_for_proven_absence {
+    use super::*;
+    use crate::SessionRetireReservation;
+
+    const SESSION: &str = "ses_retire_unknown";
+    const EXEC: &str = "ex_retire_unknown";
+
+    /// A ready session whose daemon restarted: reconcile leaves it and its exec `unknown`.
+    fn unknown_session(store: &Store, scope: &Scope) {
+        store
+            .put_workspace(scope, "ws_retire_unknown", &workspace("ws_retire_unknown"))
+            .expect("seed workspace");
+        let start = operation_named(
+            "local:1000",
+            "01JB10SESSIONRETIRE00001",
+            "session.start",
+            SESSION,
+            &"b".repeat(64),
+        );
+        let lease = NewLease {
+            ttl_ms: 60_000,
+            clock: LeaseClock {
+                wall: "2026-08-13T12:00:00Z".parse().expect("time"),
+                boot_id: "boot-test".to_owned(),
+                boottime_ms: 1_000,
+            },
+            authorizing_operation: start.operation.clone(),
+            actor: "test".to_owned(),
+            principal: None,
+        };
+        let mut running = exec(EXEC, "ws_retire_unknown", ExecState::Accepted);
+        running.resource.lease = Some(lease.observation());
+        let provisional = pipe_session(SESSION, EXEC, "ws_retire_unknown", &lease);
+        assert_eq!(
+            store
+                .reserve_pipe_session_start(&start, &provisional, &running, &lease, None)
+                .expect("reserve session"),
+            Reservation::Accepted
+        );
+        running.resource.state = ExecState::Running;
+        let mut ready = provisional;
+        ready.state = SessionState::Ready;
+        ready.attachment = SessionAttachmentState::Available;
+        store
+            .complete_pipe_session_start(
+                scope,
+                &start.operation,
+                "2026-08-13T12:00:01Z",
+                202,
+                &ready,
+                &running,
+                &lease,
+            )
+            .expect("complete session start");
+        store
+            .reconcile_after_restart(
+                "dep_test",
+                "2026-08-13T12:00:03Z".parse().expect("cutoff"),
+                "2026-08-13T12:00:03Z".parse().expect("observed"),
+                64,
+            )
+            .expect("restart reconcile");
+        assert_eq!(
+            store
+                .session(scope, SESSION)
+                .expect("session lookup")
+                .expect("durable session")
+                .state,
+            SessionState::Unknown
+        );
+    }
+
+    fn retire(store: &Store, operation: &str) -> SessionRetireReservation {
+        let retire = operation_named(
+            "local:1000",
+            operation,
+            "session.retire",
+            SESSION,
+            &"5".repeat(64),
+        );
+        store
+            .retire_pipe_session(
+                &retire,
+                SESSION,
+                "2026-08-13T12:00:05Z".parse().expect("time"),
+            )
+            .expect("retire answer")
+    }
+
+    #[test]
+    fn an_unknown_session_not_recorded_absent_is_refused_and_kept() {
+        let store = Store::open(":memory:").expect("open store");
+        let scope = scope("local:1000");
+        unknown_session(&store, &scope);
+
+        let answer = retire(&store, "01JB10SESSIONRETIRE00002");
+        let SessionRetireReservation::Refused(answer) = answer else {
+            panic!("an unknown session not recorded absent is refused: {answer:?}");
+        };
+        assert_eq!(answer.status, 409);
+        let OperationOutcome::Error { error } = answer.outcome else {
+            panic!("a refusal carries an error");
+        };
+        assert_eq!(error.code, "session.not-terminal");
+        assert_eq!(
+            store
+                .session(&scope, SESSION)
+                .expect("session lookup")
+                .expect("the session row is kept")
+                .state,
+            SessionState::Unknown
+        );
+        assert_eq!(
+            store
+                .exec(&scope, EXEC)
+                .expect("exec lookup")
+                .expect("the exec row is kept")
+                .resource
+                .state,
+            ExecState::Unknown
+        );
+    }
+
+    #[test]
+    fn an_unknown_session_recorded_absent_is_retired() {
+        let store = Store::open(":memory:").expect("open store");
+        let scope = scope("local:1000");
+        unknown_session(&store, &scope);
+        let candidate = store
+            .recovery_execs(
+                "dep_test",
+                "2026-08-13T12:00:03Z".parse().expect("cutoff"),
+                8,
+            )
+            .expect("recovery candidates")
+            .into_iter()
+            .find(|candidate| candidate.stored.resource.id == EXEC)
+            .expect("the session's exec is a recovery candidate");
+        store
+            .mark_exec_physically_absent(&candidate, "2026-08-13T12:00:04Z".parse().expect("time"))
+            .expect("recovery records the tree physically absent");
+
+        let answer = retire(&store, "01JB10SESSIONRETIRE00003");
+        assert!(
+            matches!(answer, SessionRetireReservation::Retired(_)),
+            "an unknown session whose tree is recorded absent is retired: {answer:?}"
+        );
+        assert!(
+            store
+                .session(&scope, SESSION)
+                .expect("session lookup")
+                .is_none()
+        );
+        assert!(store.exec(&scope, EXEC).expect("exec lookup").is_none());
+    }
 }

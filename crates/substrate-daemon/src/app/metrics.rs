@@ -15,7 +15,7 @@ use substrate_wire::{
     MetricsStreamFrame, MetricsStreamQuery, Success,
 };
 
-use crate::runtime::TransportPermit;
+use crate::runtime::{TransportPermit, hand_over_transport};
 
 use super::events::{
     ClientFrame, ControlRate, EventStreamPermit, classify_client_frame,
@@ -26,8 +26,9 @@ use super::responses::{failure, not_found, request_id, schema_invalid, store_fai
 use super::{App, BODY_LIMIT, Identity};
 
 /// The named refusal a metrics stream over the published capacity earns, in the vocabulary
-/// `app/events.rs` already publishes for the same bound on the event stream.
-pub(super) const METRICS_STREAM_CAPACITY: &str = "metrics.stream-capacity";
+/// `app/events.rs` already publishes for the same bound on the event stream. The capability
+/// snapshot publishes it as the `refusal` of `metrics.stream-bounds` (ADR 0042).
+pub(super) const METRICS_STREAM_CAPACITY: &str = substrate_wire::METRICS_STREAM_CAPACITY;
 
 /// The close a client that sends a data frame earns — RFC 6455's "unacceptable data", the code
 /// `app/events.rs:505` gives on the sibling stream. Named rather than written twice, because
@@ -143,6 +144,21 @@ pub(super) async fn metrics_stream(
     else {
         return schema_invalid(&request_id, None, "query");
     };
+    // The route's published capability predicate is `metrics.stream` (ADR 0042 decision 5): a
+    // host that has not proved the sampling it describes serves no stream, and is refused before
+    // a permit is taken or anything is read.
+    if app.driver.machine().facts.metrics_stream.is_none() {
+        return failure(
+            StatusCode::NOT_IMPLEMENTED,
+            &request_id,
+            None,
+            ErrorClass::Unserved,
+            substrate_wire::EXEC_METRICS_UNSERVED,
+            "The active host has not published the metrics stream.",
+            Some("stream"),
+            false,
+        );
+    }
     let scope = app.scope(&identity);
     // The permit is taken before the first durable read, so a flood of upgrades cannot buy the
     // `observe_exec` and `put_exec` that a stream costs. Every refusal below drops it again.
@@ -162,10 +178,10 @@ pub(super) async fn metrics_stream(
         Ok(_) => {
             let policy = app.metrics_stream_policy;
             // The transport admission this connection was accepted under, moved into the upgraded
-            // task below. hyper resolves an upgradeable connection future when it hands the socket
-            // over, so an admission left with the connection stops counting a socket that is still
-            // serving. Absent when no listener published one — the crate's own tests drive this
-            // route without a transport.
+            // task below and handed over there to the stream permit already held (ADR 0042): from
+            // the upgrade on, this socket is counted by the published metrics stream caps, not the
+            // transport budget. Absent when no listener published one — the crate's own tests
+            // drive this route without a transport.
             let transport_admission = transport.map(|Extension(permit)| permit);
             ws.read_buffer_size(policy.max_input_bytes)
                 .write_buffer_size(policy.write_buffer_bytes)
@@ -177,8 +193,7 @@ pub(super) async fn metrics_stream(
                         .saturating_add(policy.write_buffer_bytes),
                 )
                 .on_upgrade(move |socket| async move {
-                    // Held for as long as this socket serves, so the transport budget counts it.
-                    let _transport_admission = transport_admission;
+                    hand_over_transport(transport_admission, &stream_permit);
                     let session =
                         run_stream(app, scope, query.exec_id, policy, stream_permit, socket);
                     let _completed = enforce_event_stream_lifetime(policy.lifetime, session).await;
@@ -429,10 +444,11 @@ mod tests {
     };
     use substrate_store::{ExecWrite, NewOperation, Reservation, Scope, Store, StoredExec};
     use substrate_wire::{
-        CapabilitySnapshot, ConfinementRequest, Exec, ExecExit, ExecKind, ExecOutputQuery,
-        ExecSignalInput, ExecStartInput, ExecState, ExecUsage, FileAbsence, FileObservation,
-        FileReadQuery, FileReadResult, LeaseObservation, NetworkMode, OutputSlice, ResourceUsage,
-        SandboxProfile, Workspace, WorkspaceCreateInput, WorkspaceKind, WorkspaceState,
+        CapabilityFacts, CapabilitySnapshot, ConfinementRequest, Exec, ExecExit, ExecKind,
+        ExecOutputQuery, ExecSignalInput, ExecStartInput, ExecState, ExecUsage, FileAbsence,
+        FileObservation, FileReadQuery, FileReadResult, HostDriverKind, LeaseObservation,
+        MetricsStreamFacts, NetworkMode, OutputSlice, ResourceUsage, SandboxProfile,
+        StreamBoundsFacts, Workspace, WorkspaceCreateInput, WorkspaceKind, WorkspaceState,
     };
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio::net::{TcpListener, TcpStream};
@@ -466,17 +482,39 @@ mod tests {
         }
     }
 
-    /// A driver that answers nothing. Every metrics sample in these cases is served from the
+    /// A driver that answers nothing but its snapshot. Every metrics sample in these cases is served from the
     /// store, because `load_exec_usage` reads a terminal exec's recorded usage without observing
     /// it again — so a driver call on this path is a bug, and this fake makes it a panic rather
     /// than a silent host read. It also keeps the host *implementation* out of a file that is not
     /// a composition root (`crates/substrate-daemon/tests/driver_port.rs`).
-    struct NoDriver;
+    ///
+    /// The one call it answers is `machine`, because the stream route reads `metrics.stream` from
+    /// the snapshot before it upgrades (ADR 0042 decision 5): `metrics_stream` says whether this
+    /// host publishes that fact, with its bounds beside it as the host probe publishes them.
+    struct NoDriver {
+        metrics_stream: bool,
+    }
 
     #[async_trait::async_trait]
     impl Driver for NoDriver {
         fn machine(&self) -> CapabilitySnapshot {
-            unreachable!("the metrics stream fixture makes no driver call")
+            CapabilitySnapshot {
+                snapshot: format!("sha256:{}", "a".repeat(64)),
+                driver: HostDriverKind::Host,
+                driver_version: "metrics-stream-test".to_owned(),
+                config_generation: 1,
+                probed_at: Utc::now(),
+                valid_until: None,
+                facts: CapabilityFacts {
+                    metrics_stream: self.metrics_stream.then_some(MetricsStreamFacts {
+                        sample_interval_ms: substrate_wire::RESOURCE_USAGE_SAMPLE_INTERVAL_MS,
+                        latest_wins: true,
+                        replay: false,
+                    }),
+                    metrics_stream_bounds: self.metrics_stream.then(StreamBoundsFacts::metrics),
+                    ..CapabilityFacts::default()
+                },
+            }
         }
 
         async fn shutdown(&self) -> Result<(), DriverError> {
@@ -511,7 +549,7 @@ mod tests {
             _root_name: &str,
             _path: &str,
             _query: &FileReadQuery,
-        ) -> Result<FileReadResult, DriverError> {
+        ) -> Result<substrate_host::Listed<FileReadResult>, DriverError> {
             unreachable!("the metrics stream fixture makes no driver call")
         }
 
@@ -601,8 +639,17 @@ mod tests {
 
     impl Harness {
         async fn open() -> Self {
+            Self::publishing(true).await
+        }
+
+        /// A daemon whose host publishes `metrics.stream` exactly when `metrics_stream` is set.
+        async fn publishing(metrics_stream: bool) -> Self {
             let store = Arc::new(Store::open(":memory:").expect("state store"));
-            let app = App::new(Arc::clone(&store), Arc::new(NoDriver), DEPLOYMENT);
+            let app = App::new(
+                Arc::clone(&store),
+                Arc::new(NoDriver { metrics_stream }),
+                DEPLOYMENT,
+            );
             seed_streaming_exec(&store);
 
             let listener = TcpListener::bind("127.0.0.1:0")
@@ -882,6 +929,42 @@ mod tests {
         assert_eq!(refusal["error"]["class"], "exhausted");
         assert_eq!(refusal["error"]["retriable"], true);
         assert_eq!(refusal["error"]["address"], "stream");
+    }
+
+    /// ADR 0042 decision 5: the route's published capability predicate is `metrics.stream`, so a
+    /// host that does not publish it refuses the stream before the upgrade, in the published
+    /// `exec.metrics-unserved` (501), and never serves a stream whose sampling and caps it has not
+    /// published. The refusal takes no stream permit: the host that does publish the fact still
+    /// serves its full per-subject cap afterwards.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_host_without_the_metrics_stream_fact_refuses_the_stream_before_the_upgrade() {
+        let harness = Harness::publishing(false).await;
+        let per_subject = MetricsStreamPolicy::production().streams_per_subject;
+        for _attempt in 0..=per_subject {
+            let refused = harness.stream().await;
+            assert_eq!(
+                refused.status, 501,
+                "a host that publishes no metrics.stream must not upgrade the metrics stream"
+            );
+            let refusal = refused.refusal();
+            assert_eq!(
+                refusal["error"]["code"],
+                substrate_wire::EXEC_METRICS_UNSERVED
+            );
+            assert_eq!(refusal["error"]["class"], "unserved");
+            assert_eq!(refusal["error"]["retriable"], false);
+        }
+
+        let serving = Harness::open().await;
+        let mut held = Vec::new();
+        for _stream in 0..per_subject {
+            let handshake = serving.stream().await;
+            assert_eq!(
+                handshake.status, 101,
+                "a host that publishes metrics.stream serves it"
+            );
+            held.push(handshake);
+        }
     }
 
     /// The cap is a live bound, not a one-way ratchet: a stream that ends gives its permit back.
@@ -1289,54 +1372,54 @@ mod tests {
         );
     }
 
-    /// The statement every upgraded task holds the connection's transport admission with.
+    /// The call every upgraded task hands the connection's transport admission to its stream with.
     ///
     /// One spelling for one thing, so the class check below is a whole-crate rule rather than a
-    /// list of routes somebody has to remember to extend — and the whole binding rather than the
-    /// identifier, because matching the identifier alone passed `drop(transport_admission);`,
-    /// which releases the slot at the handshake and is exactly the defect. Matched against the
-    /// argument list with its whitespace normalised, so a wrapped line is not a failure.
-    const TRANSPORT_ADMISSION: &str =
-        concat!("let _transport", "_admission = transport", "_admission;");
+    /// list of routes somebody has to remember to extend. Matched up to the `&` that borrows the
+    /// stream permit, because that borrow is what makes the hand-off atomic (ADR 0042, decision
+    /// 2): `hand_over_transport` cannot be called without a stream slot to hand the socket to.
+    /// Matched against the argument list with its whitespace normalised, so a wrapped line is not
+    /// a failure.
+    const TRANSPORT_ADMISSION: &str = concat!("hand_over", "_transport(transport", "_admission, &");
 
-    /// Finding 4's class, not its instance: an upgraded socket that serves outside the transport
-    /// budget that let its connection in.
+    /// Finding 4's class, in the form ADR 0042 gives it: an upgraded socket counted by no budget.
     ///
     /// hyper resolves an upgradeable connection future when it hands the socket to the upgrade
     /// (`crates/substrate-daemon/src/runtime.rs`, the three `.with_upgrades()` listeners), so an
-    /// admission left with the connection is released at the handshake and the socket that is
-    /// still serving stops being counted — 128 global and 32 per uid on unix, 128 and 16 per
-    /// source over TCP and TLS. The remedy is one line in every upgraded task: move the
-    /// connection's `TransportPermit` in, so the slot returns when the socket ends rather than
-    /// when the handshake succeeds.
+    /// admission left with the connection is released at the handshake whatever happens next.
+    /// Finding 4 closed that by moving the `TransportPermit` into every upgraded task, which made
+    /// the transport budget count a socket for its stream's hour — and let callers inside every
+    /// published stream cap hold a shared source address's transport slots for that hour
+    /// (`story:transport-admission-and-stream-lifetime-disagree`). ADR 0042 moves the count: every
+    /// upgraded task calls `runtime::hand_over_transport` with the stream permit it holds, so the
+    /// socket is counted by its stream's per-subject and deployment caps from the upgrade on, and
+    /// the transport slot returns.
     ///
-    /// The instance was the per-uid budget, observed through the unix listener by
-    /// `runtime::tests::an_upgraded_websocket_keeps_its_per_uid_connection_permit`. This reads
-    /// every upgrade the crate serves, on the same recursive walk of `src/` and the same masked
-    /// source as its sibling above, so a fourth route cannot be added without one.
+    /// The instance is observed through the unix listener by
+    /// `runtime::tests::an_upgraded_websocket_hands_its_per_uid_connection_permit_to_its_stream`
+    /// and through a TCP one by `app::tests::upgraded_transport_slot`. This reads every upgrade
+    /// the crate serves, on the same recursive walk of `src/` and the same masked source as its
+    /// sibling above, so a fourth route cannot be added without one.
     ///
-    /// **What it checks is a spelling convention, and that cuts both ways.** It requires the
-    /// statement `let _transport_admission = transport_admission;` inside the `.on_upgrade(`
-    /// argument list, and it is worth being exact about what that does and does not establish:
+    /// **What it checks is a spelling convention, and that cuts both ways.** It requires the call
+    /// `hand_over_transport(transport_admission, &…)` inside the `.on_upgrade(` argument list:
     ///
-    /// 1. It proves the admission is *bound for the task's life* — a binding, not a mention, so
-    ///    `drop(transport_admission);` fails it. That matters most where no case can catch the
-    ///    difference: `app/sessions.rs`'s attach route holds the admission on a path no in-crate
-    ///    admitted listener drives, so this check is the whole of what stands behind that line.
-    /// 2. It does not prove the value bound is a live permit. What observes one holding a slot end
-    ///    to end is `runtime::tests::an_upgraded_websocket_keeps_its_per_uid_connection_permit` on
-    ///    the unix listener and `app::tests::upgraded_transport_slot` on a TCP one, both over the
-    ///    event stream; a route added without a partner case is counted on paper only.
-    /// 3. It **fails correct code** that holds the admission some other way — under another name,
-    ///    or inside a tuple or struct built above the chain. The convention is the check: one
-    ///    statement for the thing, spelled inside the task that holds it. A route with a reason to
-    ///    hold it differently has a reason to change this check with it, and that is the
-    ///    conversation this failure buys.
+    /// 1. It proves the admission is *handed over*, not dropped: `drop(transport_admission);`
+    ///    fails it, and so does the old `let` that held the slot for the stream's hour. That
+    ///    matters most where no case can catch the difference: `app/sessions.rs`'s attach route
+    ///    hands over on a path no in-crate admitted listener drives, so this check is the whole of
+    ///    what stands behind that line.
+    /// 2. It does not prove the borrowed value is the permit the handler took before the `101`.
+    ///    What observes the hand-off end to end is the two cases named above, both over the event
+    ///    stream; a route added without a partner case is counted on paper only.
+    /// 3. It **fails correct code** that hands over some other way — under another name, or
+    ///    through a helper. The convention is the check. A route with a reason to differ has a
+    ///    reason to change this check with it, and that is the conversation this failure buys.
     ///
     /// A structural check — the value's *type* traced into the task — needs a parser this crate
     /// does not have and would not gain for one rule.
     #[test]
-    fn every_websocket_upgrade_keeps_its_transport_admission() {
+    fn every_websocket_upgrade_hands_its_transport_admission_to_its_stream() {
         let mut checked = 0_usize;
         for path in crate_sources() {
             let file = path.display().to_string();
@@ -1355,9 +1438,10 @@ mod tests {
                     .join(" ");
                 assert!(
                     held.contains(TRANSPORT_ADMISSION),
-                    "{file}: the upgraded task at byte {index} does not take the connection's \
-                     transport admission with it, so the transport budget stops counting the \
-                     socket at the handshake"
+                    "{file}: the upgraded task at byte {index} does not hand the connection's \
+                     transport admission over to the stream permit it holds (ADR 0042), so the \
+                     socket is either uncounted or counted against the transport for the \
+                     stream's lifetime"
                 );
                 checked += 1;
                 from = index + UPGRADE.len();
@@ -1372,8 +1456,8 @@ mod tests {
     /// The other half of finding 4's class: a listener that serves an upgradeable connection
     /// without publishing the admission that connection was accepted under.
     ///
-    /// The sibling above reads every upgraded task and asserts it keeps the admission. It cannot
-    /// see whether one was ever handed over, and an absent one is silent: the route extracts
+    /// The sibling above reads every upgraded task and asserts it hands the admission over. It
+    /// cannot see whether one was ever published, and an absent one is silent: the route extracts
     /// `Option<Extension<TransportPermit>>`, because the crate's own tests drive these routes
     /// without a transport, so a listener that dropped the layer would go on serving and simply
     /// stop counting. Invariant 3 does not allow a guarantee to go missing quietly, and this is
@@ -1390,13 +1474,13 @@ mod tests {
     /// and no production listener at all.
     ///
     /// The behavioural partners are
-    /// `runtime::tests::an_upgraded_websocket_keeps_its_per_uid_connection_permit` on the unix
-    /// listener and `app::tests::upgraded_transport_slot` on a production-shaped TCP one, and both
-    /// drive the event stream. **The TLS listener has neither, and neither does any route but the
+    /// `runtime::tests::an_upgraded_websocket_hands_its_per_uid_connection_permit_to_its_stream`
+    /// on the unix listener and `app::tests::upgraded_transport_slot` on a production-shaped TCP
+    /// one, and both drive the event stream. **The TLS listener has neither, and neither does any route but the
     /// event stream**: the harness below upgrades the metrics stream through an admitted listener
     /// but observes no slot, and `app/sessions.rs`'s attach route is driven through an admitted
     /// listener by nothing at all. What stands behind those is this check and the sibling above —
-    /// which is why the sibling matches the whole hold statement rather than a mention of it.
+    /// which is why the sibling matches the whole hand-over call rather than a mention of it.
     ///
     /// **`src/` is the whole of its reach, and three listeners live outside it.**
     /// `tests/websocket.rs:110-111`, `tests/metrics_stream_adversary.rs:94-95` and
@@ -1598,6 +1682,14 @@ mod tests {
             format!(
                 "client frame larger than {} bytes is refused by the socket",
                 policy.max_input_bytes
+            ),
+            format!(
+                "as the `{}` fact: `{}`",
+                substrate_wire::METRICS_STREAM_BOUNDS_FACT,
+                serde_json::to_string(&substrate_wire::StreamBoundsFacts::metrics())
+                    .expect("the fact serializes")
+                    .replace(",\"", ", \"")
+                    .replace("\":", "\": ")
             ),
         ] {
             assert!(

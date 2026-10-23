@@ -15,9 +15,9 @@ pub const API_VERSION: &str = "v1";
 ///
 /// This is the SHA-256 of the inner immutable `bundle.json`, not the outer OCI manifest digest.
 /// Moving either member is an explicit coordinated promotion (Atlas ADR 0019).
-pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.22.0";
+pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.23.0";
 pub const ADVERTISED_CONTRACT_BUNDLE_SHA256: &str =
-    "5d551f08c3b680c144359b13ff99a7da2853003c4fcc9665a32b21ce85e146da";
+    "fc88fb9aa9feee20504cc29725a23c19886a2343e2c16757e6c2482e28f49bdc";
 pub const MAX_FILE_BYTES: u64 = 1_048_576;
 pub const MAX_IO_BYTES: u64 = 1_048_576;
 pub const MAX_LIST_ITEMS: u32 = 1_000;
@@ -34,7 +34,127 @@ pub const MIN_STORAGE_QUOTA_BYTES: u64 = 1_048_576;
 pub const MAX_STORAGE_QUOTA_BYTES: u64 = 1_099_511_627_776;
 pub const MIN_STORAGE_QUOTA_INODES: u64 = 16;
 pub const MAX_STORAGE_QUOTA_INODES: u64 = 1_048_576;
+/// The unit a storage quota's `max_bytes` is a multiple of: the schema's `multipleOf` on
+/// `storage-limit` (design 27, amendment 3).
+pub const STORAGE_QUOTA_BYTES_UNIT: u64 = 1_024;
+/// A start asked for `measurements` on a host without the `exec.resource-usage` fact (ADR 0021).
+pub const EXEC_METRICS_UNSERVED: &str = "exec.metrics-unserved";
+/// A start asked for `scratch` on a host without the `exec.scratch-quota` fact (ADR 0020).
+pub const EXEC_SCRATCH_QUOTA_UNSERVED: &str = "exec.scratch-quota-unserved";
+/// A start's `scratch` exceeds, or is not aligned to, the host's proved quota (ADR 0020).
+pub const EXEC_SCRATCH_QUOTA_LIMIT: &str = "exec.scratch-quota-limit";
+/// A start's `workspace_access` broke a rule of [`validate_workspace_access`] (ADR 0023).
+pub const EXEC_WORKSPACE_ACCESS_INVALID: &str = "exec.workspace-access-invalid";
+/// A start asked for read-only or scoped workspace access on a host that has not proved it
+/// (ADR 0023).
+pub const EXEC_WORKSPACE_SCOPED_WRITE_UNSERVED: &str = "exec.workspace-scoped-write-unserved";
+/// A writable workspace subtree is not present (ADR 0023).
+pub const EXEC_WORKSPACE_SUBTREE_ABSENT: &str = "exec.workspace-subtree-absent";
+/// A writable workspace subtree is reached through a symlink (ADR 0023).
+pub const EXEC_WORKSPACE_SUBTREE_SYMLINK: &str = "exec.workspace-subtree-symlink";
+/// A writable workspace subtree is not a directory (ADR 0023).
+pub const EXEC_WORKSPACE_SUBTREE_NOT_DIRECTORY: &str = "exec.workspace-subtree-not-directory";
+/// A writable workspace subtree changed between admission and pinning (ADR 0023).
+pub const EXEC_WORKSPACE_SUBTREE_CHANGED: &str = "exec.workspace-subtree-changed";
+
+/// One refusal an exec field raises, as the bundle publishes it on that member.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExecFieldRefusal {
+    /// The start member that raises it.
+    pub member: &'static str,
+    pub code: &'static str,
+    pub status: u16,
+    pub class: &'static str,
+}
+
+const fn field_refusal(
+    member: &'static str,
+    code: &'static str,
+    status: u16,
+    class: &'static str,
+) -> ExecFieldRefusal {
+    ExecFieldRefusal {
+        member,
+        code,
+        status,
+        class,
+    }
+}
+
+/// Every refusal `measurements`, `scratch` and `workspace_access` raise, on exec start and session
+/// start alike (design 27, amendment 2).
+///
+/// The one place the set is written down for the bundle: from `0.23.0` on, the bundle check asks
+/// each start schema to publish exactly these rows on each member.
+pub const EXEC_FIELD_REFUSALS: [ExecFieldRefusal; 9] = [
+    field_refusal("measurements", EXEC_METRICS_UNSERVED, 501, "unserved"),
+    field_refusal("scratch", EXEC_SCRATCH_QUOTA_UNSERVED, 501, "unserved"),
+    field_refusal("scratch", EXEC_SCRATCH_QUOTA_LIMIT, 507, "exhausted"),
+    field_refusal(
+        "workspace_access",
+        EXEC_WORKSPACE_ACCESS_INVALID,
+        422,
+        "refused",
+    ),
+    field_refusal(
+        "workspace_access",
+        EXEC_WORKSPACE_SCOPED_WRITE_UNSERVED,
+        501,
+        "unserved",
+    ),
+    field_refusal(
+        "workspace_access",
+        EXEC_WORKSPACE_SUBTREE_ABSENT,
+        422,
+        "refused",
+    ),
+    field_refusal(
+        "workspace_access",
+        EXEC_WORKSPACE_SUBTREE_SYMLINK,
+        422,
+        "refused",
+    ),
+    field_refusal(
+        "workspace_access",
+        EXEC_WORKSPACE_SUBTREE_NOT_DIRECTORY,
+        422,
+        "refused",
+    ),
+    field_refusal(
+        "workspace_access",
+        EXEC_WORKSPACE_SUBTREE_CHANGED,
+        422,
+        "refused",
+    ),
+];
 pub const RESOURCE_USAGE_SAMPLE_INTERVAL_MS: u64 = 1_000;
+/// The fact that publishes the event stream's caps, lifetime and refusal (ADR 0042).
+pub const EVENTS_STREAM_BOUNDS_FACT: &str = "events.stream-bounds";
+/// The fact that publishes the metrics stream's caps, lifetime and refusal (ADR 0042).
+pub const METRICS_STREAM_BOUNDS_FACT: &str = "metrics.stream-bounds";
+/// The fact that publishes the session attachment's caps, lifetime and refusal (ADR 0042).
+pub const SESSIONS_ATTACHMENT_BOUNDS_FACT: &str = "sessions.attachment-bounds";
+/// Event streams one subject may hold at once (ADR 0042, `events.stream-bounds`).
+pub const EVENT_STREAMS_PER_SUBJECT: u32 = 4;
+/// Event streams one deployment serves at once (ADR 0042, `events.stream-bounds`).
+pub const EVENT_STREAMS_GLOBAL: u32 = 64;
+/// The refusal an event stream past either cap earns, `429` (ADR 0042).
+pub const EVENT_STREAM_CAPACITY: &str = "event.stream-capacity";
+/// Metrics streams one subject may hold at once (ADR 0042, `metrics.stream-bounds`).
+pub const METRICS_STREAMS_PER_SUBJECT: u32 = 4;
+/// Metrics streams one deployment serves at once (ADR 0042, `metrics.stream-bounds`).
+pub const METRICS_STREAMS_GLOBAL: u32 = 64;
+/// The refusal a metrics stream past either cap earns, `429` (ADR 0042).
+pub const METRICS_STREAM_CAPACITY: &str = "metrics.stream-capacity";
+/// Session attachments one subject may hold at once (ADR 0042 decision 4,
+/// `sessions.attachment-bounds`).
+pub const SESSION_ATTACHMENTS_PER_SUBJECT: u32 = 16;
+/// Attachments one session may hold at once (ADR 0042, `sessions.attachment-bounds`).
+pub const SESSION_ATTACHMENTS_PER_SESSION: u32 = 1;
+/// Session attachments one deployment serves at once (ADR 0042, `sessions.attachment-bounds`).
+pub const SESSION_ATTACHMENTS_GLOBAL: u32 = 32;
+/// How long an upgraded stream or attachment lives at most, in milliseconds (ADR 0041, ADR 0042).
+pub const UPGRADED_STREAM_LIFETIME_MS: u64 = 3_600_000;
 pub const EXEC_SCRATCH_MOUNT: &str = "/scratch";
 /// Where the workspace appears inside every confined run, and the working directory a start that
 /// names none begins in (design 26 § 1).
@@ -70,6 +190,39 @@ pub const EXEC_APERTURE_HOST_LISTED_TWICE: &str = "exec.aperture-host-listed-twi
 /// Small on purpose. A closure that needs many roots is a closure that should be assembled rather
 /// than enumerated, and a long list is a request nobody reviewed.
 pub const MAX_READ_ONLY_ROOTS: u32 = 4;
+/// The fact a host publishes with the served bound on declared read-only roots (ADR 0010, bundle
+/// `0.23.0`).
+pub const EXEC_READ_ONLY_ROOTS_FACT: &str = "exec.read-only-roots";
+/// A declared root broke a lexical rule of [`validate_read_only_roots`]: the bound, the path form,
+/// a reserved, duplicate or overlapping mount (ADR 0010, ADR 0015).
+pub const READ_ONLY_ROOT_INVALID: &str = "exec.read-only-root-invalid";
+/// A declared root's host path is not present, or not reachable, on this host (ADR 0010).
+pub const READ_ONLY_ROOT_ABSENT: &str = "exec.read-only-root-absent";
+/// A declared root's host path is not a directory, or is reached through a symlink (ADR 0010,
+/// design 26 § 3).
+pub const READ_ONLY_ROOT_NOT_A_DIRECTORY: &str = "exec.read-only-root-not-a-directory";
+/// Every refusal a declared read-only root can raise, all `422 refused` before dispatch (ADR 0010).
+///
+/// The one place the set is written down for the bundle: the `0.23.0` additions check asks the
+/// bundle to publish exactly this set.
+pub const READ_ONLY_ROOT_REFUSAL_CODES: [&str; 3] = [
+    READ_ONLY_ROOT_INVALID,
+    READ_ONLY_ROOT_ABSENT,
+    READ_ONLY_ROOT_NOT_A_DIRECTORY,
+];
+/// The message of [`READ_ONLY_ROOT_ABSENT`] for a host path with nothing at it.
+pub const READ_ONLY_ROOT_ABSENT_MESSAGE: &str =
+    "A declared read-only root is not present on this host.";
+/// The message of [`READ_ONLY_ROOT_NOT_A_DIRECTORY`].
+pub const READ_ONLY_ROOT_NOT_A_DIRECTORY_MESSAGE: &str =
+    "A declared read-only root is not a directory, or is reached through a symlink.";
+
+/// The message of [`READ_ONLY_ROOT_INVALID`] for the rule `error` names: one source for the
+/// daemon's answer and the bundle's published one.
+#[must_use]
+pub fn read_only_root_invalid_message(error: &WireValidationError) -> String {
+    format!("A declared read-only root is invalid: {error}")
+}
 /// How many single host files one start may declare read-only (ADR 0033).
 ///
 /// Enough for the handful of programs and configuration files one gate run names, and too few to
@@ -806,7 +959,30 @@ impl StorageLimit {
             && self.max_bytes <= MAX_STORAGE_QUOTA_BYTES
             && self.max_inodes >= MIN_STORAGE_QUOTA_INODES
             && self.max_inodes <= MAX_STORAGE_QUOTA_INODES
+            && self.max_bytes.is_multiple_of(STORAGE_QUOTA_BYTES_UNIT)
     }
+}
+
+/// Decodes a present `scratch`: `null` is refused, not read as absent (design 27, amendment 3).
+fn present_storage_limit<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<StorageLimit>, D::Error> {
+    StorageLimit::deserialize(deserializer).map(Some)
+}
+
+/// Decodes `measurements` as the published list: a repeated measurement is refused, not collapsed
+/// (design 27, amendment 3).
+fn distinct_measurements<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<BTreeSet<ExecMeasurement>, D::Error> {
+    let listed = Vec::<ExecMeasurement>::deserialize(deserializer)?;
+    let distinct: BTreeSet<ExecMeasurement> = listed.iter().copied().collect();
+    if distinct.len() != listed.len() {
+        return Err(serde::de::Error::custom(
+            "measurements lists one measurement twice",
+        ));
+    }
+    Ok(distinct)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1154,6 +1330,14 @@ pub struct FileSlice {
     pub observed_at: DateTime<Utc>,
 }
 
+/// The response header naming how many entries a directory page or a workspace tree omitted
+/// because the wire cannot name them (ADR 0043): a FIFO, socket or device, or a name that is not
+/// UTF-8. Its value is a decimal count of at least 1; it is absent when nothing was omitted. It is
+/// a header and not a body member because [`DirectoryPage`] and [`WorkspaceTree`] are closed, and
+/// it is distinct from [`WorkspaceTree::truncated`], which answers either cause; a tree that is
+/// truncated without this header reached its item limit only.
+pub const OMITTED_ENTRIES_HEADER: &str = "x-b10x-omitted-entries";
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DirectoryPage {
@@ -1209,6 +1393,8 @@ pub struct WorkspaceTreeEntry {
 pub struct WorkspaceTree {
     pub workspace: String,
     pub items: Vec<WorkspaceTreeEntry>,
+    /// The tree is incomplete: the walk reached `limit_items` with entries left, or omitted an entry
+    /// it cannot name. [`OMITTED_ENTRIES_HEADER`] tells the two causes apart (ADR 0043).
     pub truncated: bool,
     pub observed_at: DateTime<Utc>,
 }
@@ -1812,9 +1998,17 @@ pub struct ExecStartInput {
     /// Effective write authority requested for `/workspace` (ADR 0023).
     #[serde(default, skip_serializing_if = "WorkspaceAccess::is_read_write")]
     pub workspace_access: WorkspaceAccess,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        deserialize_with = "present_storage_limit",
+        skip_serializing_if = "Option::is_none"
+    )]
     pub scratch: Option<StorageLimit>,
-    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    #[serde(
+        default,
+        deserialize_with = "distinct_measurements",
+        skip_serializing_if = "BTreeSet::is_empty"
+    )]
     pub measurements: BTreeSet<ExecMeasurement>,
     /// Host directories admitted read-only inside this process (ADR 0010).
     ///
@@ -2251,7 +2445,7 @@ fn root_name_unchecked<'de, D: serde::Deserializer<'de>>(
 }
 
 // The root-name set and the workspace origin are generated from spec/workspaces, not transcribed
-// (ADR 0035). The ESS 0.67.0 decoder checks the root name's alphabet and length bound but not
+// (ADR 0035). The ESS 0.68.0 decoder checks the root name's alphabet and length bound but not
 // the leading-`-` rule, so [`is_root_name`] stays the full predicate (spec/workspaces/README.md).
 #[allow(dead_code, clippy::all, clippy::pedantic)]
 #[rustfmt::skip]
@@ -3283,6 +3477,18 @@ pub struct CapabilityFacts {
     pub exec_inline_capsule: Option<ExecutionCapsuleFacts>,
     #[serde(rename = "exec.scratch-quota", skip_serializing_if = "Option::is_none")]
     pub exec_scratch_quota: Option<ScratchQuotaFacts>,
+    /// The served bound on declared read-only host roots ([`EXEC_READ_ONLY_ROOTS_FACT`], ADR 0010).
+    ///
+    /// Published with the confinement floor the bind rides on and the `openat2` resolution each
+    /// root is pinned with, and absent exactly when one of them is: the daemon then refuses a
+    /// start naming a root `exec.sandbox-unavailable` before dispatch, so no root is ever mounted
+    /// by a host that does not publish this.
+    #[serde(
+        rename = "exec.read-only-roots",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub exec_read_only_roots: Option<ReadOnlyRootFacts>,
     /// The served bound on declared read-only host files (ADR 0033). Absent leaves every start
     /// that declares one `exec.read-only-files-unserved`.
     #[serde(
@@ -3327,6 +3533,29 @@ pub struct CapabilityFacts {
     pub exec_resource_usage: Option<ResourceUsageFacts>,
     #[serde(rename = "metrics.stream", skip_serializing_if = "Option::is_none")]
     pub metrics_stream: Option<MetricsStreamFacts>,
+    /// The event stream's caps, lifetime and refusal ([`EVENTS_STREAM_BOUNDS_FACT`], ADR 0042).
+    #[serde(
+        rename = "events.stream-bounds",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub events_stream_bounds: Option<StreamBoundsFacts>,
+    /// The metrics stream's caps, lifetime and refusal ([`METRICS_STREAM_BOUNDS_FACT`], ADR
+    /// 0042). Published exactly when `metrics.stream` is.
+    #[serde(
+        rename = "metrics.stream-bounds",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub metrics_stream_bounds: Option<StreamBoundsFacts>,
+    /// The session attachment's caps, lifetime and refusal
+    /// ([`SESSIONS_ATTACHMENT_BOUNDS_FACT`], ADR 0042). Published exactly when exec is served.
+    #[serde(
+        rename = "sessions.attachment-bounds",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub sessions_attachment_bounds: Option<AttachmentBoundsFacts>,
     /// The apertures this deployment declared, by name and pinned destination (ADR 0013).
     ///
     /// Answers "what could this daemon ever reach" — deployment vocabulary, not secret material
@@ -3412,12 +3641,16 @@ impl Default for CapabilityFacts {
             exec_signals: None,
             exec_inline_capsule: None,
             exec_scratch_quota: None,
+            exec_read_only_roots: None,
             exec_read_only_files: None,
             exec_workdir: None,
             exec_writable_roots_host: None,
             exec_writable_roots_git: None,
             exec_resource_usage: None,
             metrics_stream: None,
+            events_stream_bounds: None,
+            metrics_stream_bounds: None,
+            sessions_attachment_bounds: None,
             exec_egress_apertures: None,
             secrets_slots: None,
             sessions_pty: None,
@@ -3443,6 +3676,13 @@ pub struct ScratchQuotaFacts {
     pub allocation_unit_bytes: u64,
     pub max_bytes: u64,
     pub max_inodes: u64,
+}
+
+/// The served bound on declared read-only host roots (ADR 0010): at most [`MAX_READ_ONLY_ROOTS`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadOnlyRootFacts {
+    pub max_roots: u32,
 }
 
 /// The served bound on declared read-only host files (ADR 0033).
@@ -3478,6 +3718,67 @@ pub struct MetricsStreamFacts {
     pub sample_interval_ms: u64,
     pub latest_wins: bool,
     pub replay: bool,
+}
+
+/// The caps, lifetime and refusal of one stream family (ADR 0042): `events.stream-bounds` and
+/// `metrics.stream-bounds`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StreamBoundsFacts {
+    pub per_subject: u32,
+    pub global: u32,
+    pub lifetime_ms: u64,
+    pub refusal: String,
+}
+
+impl StreamBoundsFacts {
+    /// The published bounds of the event stream.
+    #[must_use]
+    pub fn events() -> Self {
+        Self {
+            per_subject: EVENT_STREAMS_PER_SUBJECT,
+            global: EVENT_STREAMS_GLOBAL,
+            lifetime_ms: UPGRADED_STREAM_LIFETIME_MS,
+            refusal: EVENT_STREAM_CAPACITY.to_owned(),
+        }
+    }
+
+    /// The published bounds of the metrics stream.
+    #[must_use]
+    pub fn metrics() -> Self {
+        Self {
+            per_subject: METRICS_STREAMS_PER_SUBJECT,
+            global: METRICS_STREAMS_GLOBAL,
+            lifetime_ms: UPGRADED_STREAM_LIFETIME_MS,
+            refusal: METRICS_STREAM_CAPACITY.to_owned(),
+        }
+    }
+}
+
+/// The caps, lifetime and refusal of the session attachment (ADR 0042):
+/// `sessions.attachment-bounds`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AttachmentBoundsFacts {
+    pub per_subject: u32,
+    pub per_session: u32,
+    pub global: u32,
+    pub lifetime_ms: u64,
+    pub refusal: String,
+}
+
+impl AttachmentBoundsFacts {
+    /// The published bounds of the session attachment.
+    #[must_use]
+    pub fn sessions() -> Self {
+        Self {
+            per_subject: SESSION_ATTACHMENTS_PER_SUBJECT,
+            per_session: SESSION_ATTACHMENTS_PER_SESSION,
+            global: SESSION_ATTACHMENTS_GLOBAL,
+            lifetime_ms: UPGRADED_STREAM_LIFETIME_MS,
+            refusal: SESSION_ATTACHMENT_CAPACITY.to_owned(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -5493,8 +5794,8 @@ mod tests {
         let version = ADVERTISED_CONTRACT_BUNDLE
             .strip_prefix("substrate-wire/")
             .expect("advertised contract prefix");
-        assert_eq!(version, "0.22.0", "the reviewed promotion target moved");
-        let bytes = include_bytes!("../../../contracts/substrate-wire/0.22.0/bundle.json");
+        assert_eq!(version, "0.23.0", "the reviewed promotion target moved");
+        let bytes = include_bytes!("../../../contracts/substrate-wire/0.23.0/bundle.json");
         assert_eq!(
             hex::encode(Sha256::digest(bytes)),
             ADVERTISED_CONTRACT_BUNDLE_SHA256
@@ -6067,6 +6368,9 @@ mod host_process_tests;
 
 #[cfg(test)]
 mod writable_root_tests;
+
+#[cfg(test)]
+mod stream_bounds_tests;
 
 #[cfg(test)]
 mod adoption_tests {

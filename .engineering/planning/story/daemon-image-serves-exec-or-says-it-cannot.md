@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:daemon-image-serves-exec-or-says-it-cannot
 kind: story
-status: draft
+status: implemented
 title: The README says what the published daemon image provides for exec and what a deployment must supply
 summary: The daemon stage carries bwrap 0.11.2 and socat (Dockerfile:48-59); README § Serving exec does not say so or name the four deployment prerequisites.
 tags:
@@ -12,7 +12,11 @@ relations:
 scope:
 - confidence: cited
   path: README.md
-revision: 11
+revision: 14
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-23T06:27:15Z", actor: "agent:b10x-chef-orchestrator", revision: 12, decided_on: {"recorded":{"review_outcome":4}}}
+- {from: "proposed", to: "active", at: "2026-10-23T06:27:15Z", actor: "agent:b10x-chef-orchestrator", revision: 13, decided_on: {"recorded":{"review_outcome":4}}}
+- {from: "active", to: "implemented", at: "2026-10-23T14:58:54Z", actor: "agent:b10x-chef-orchestrator", revision: 14, decided_on: {"recorded":{"test_result":1,"review_outcome":4,"verification":2}}}
 ---
 # Story: The daemon image serves exec or says it cannot
 

@@ -23,6 +23,10 @@
 #     so a release with no recorded local run would claim nothing about confinement at all. The
 #     record arrives in the annotated tag's `Confinement-lane:` trailer, or as the
 #     `confinement_evidence` input of a recovery dispatch, and goes into the release notes.
+#   * a tag with no recorded project-quota-lane run for its own commit. The seven `real_quota_*`
+#     cases need a project-quota filesystem no hosted runner has and are outside the confinement
+#     count, so the record arrives in the annotated tag's `Quota-lane:` trailer, written by
+#     `cargo xtask quota-fixture run`, or as the `quota_evidence` input of a recovery dispatch.
 #   * a commit for which `.github/workflows/gate.yml` has not concluded `success`. The gate is the
 #     bar for `main` (AGENTS.md § "The gate"); this workflow reads that workflow's own conclusion
 #     for the exact tagged SHA rather than re-running a lookalike, so "the gate was green for this
@@ -89,6 +93,15 @@ on:
           empty uses the annotated tag's own Confinement-lane trailer
         required: false
         type: string
+      quota_evidence:
+        # Not `required: true`, for the same reason as `confinement_evidence`: the ordinary path
+        # carries the value in the annotated tag's own `Quota-lane:` trailer.
+        description: >-
+          Recorded project-quota-lane run for the tagged commit, as
+          "<source-sha> <case-count> <RFC 3339 UTC>" from `cargo xtask quota-fixture run`;
+          empty uses the annotated tag's own Quota-lane trailer
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -106,7 +119,7 @@ env:
   # Explicit, reviewable publication input. A successor bundle must move this pin in the same
   # change; deriving "largest directory" at release time would silently broaden what a tag ships.
   BUNDLE_IMAGE: ghcr.io/beyond10x/b10x-substrate-wire
-  BUNDLE_VERSION: 0.22.0
+  BUNDLE_VERSION: 0.23.0
   BUNDLE_LAYOUT: target/release-contract-bundle
   GATE_WORKFLOW: gate.yml
 
@@ -125,6 +138,7 @@ jobs:
       source-sha: ${{ steps.tag.outputs.source-sha }}
       gate-run-url: ${{ steps.gate.outputs.run-url }}
       confinement-evidence: ${{ steps.confinement.outputs.evidence }}
+      quota-evidence: ${{ steps.quota.outputs.evidence }}
 
     steps:
       - name: Check out source
@@ -284,7 +298,8 @@ jobs:
       # Three checks, each a refusal: the recorded commit is this commit (evidence from another
       # commit proves nothing about these bytes), the recorded case count is the count the tagged
       # source itself declares (a lane run against a smaller suite is not this suite), and the
-      # timestamp is a real UTC instant.
+      # timestamp is a real UTC instant by shape and by calendar. The record itself is exactly one
+      # line of exactly three fields, from exactly one trailer.
       - name: Require a recorded confinement-lane run for this commit
         id: confinement
         env:
@@ -297,8 +312,13 @@ jobs:
           carrier="the confinement_evidence workflow input"
           if [ -z "${evidence//[[:space:]]/}" ]; then
             evidence=$(git tag -l --format='%(contents)' "${TAG}" \
-              | sed -n 's/^Confinement-lane:[[:space:]]*//p' | head -n 1)
+              | sed -n 's/^Confinement-lane:[[:space:]]*//p')
             carrier="the annotated tag's Confinement-lane trailer"
+            records=$(printf '%s' "$evidence" | grep -c '' || true)
+            if [ "${records:-0}" -gt 1 ]; then
+              echo "refused: ${TAG} carries ${records} Confinement-lane lines; a release records exactly one." >&2
+              exit 1
+            fi
           fi
 
           if [ -z "${evidence//[[:space:]]/}" ]; then
@@ -312,7 +332,23 @@ jobs:
             exit 1
           fi
 
-          read -r claimed_sha claimed_cases claimed_at _rest <<<"${evidence}"
+          # One line of exactly three fields. A second line would reach GITHUB_OUTPUT unvalidated,
+          # and a fourth field would be published without being checked.
+          case "$evidence" in
+            *$'\n'* | *$'\r'*)
+              echo "refused: ${carrier} spans more than one line; a record is one line of three fields." >&2
+              exit 1
+              ;;
+          esac
+          read -r -a fields <<<"${evidence}"
+          if [ "${#fields[@]}" -ne 3 ]; then
+            echo "refused: ${carrier} has ${#fields[@]} fields; a record is '<sha> <case-count> <RFC 3339 UTC>'." >&2
+            exit 1
+          fi
+          claimed_sha=${fields[0]}
+          claimed_cases=${fields[1]}
+          claimed_at=${fields[2]}
+          evidence="${claimed_sha} ${claimed_cases} ${claimed_at}"
 
           if [ "$claimed_sha" != "$SOURCE_SHA" ]; then
             echo "refused: ${carrier} records commit '${claimed_sha}', not ${SOURCE_SHA}." >&2
@@ -341,7 +377,10 @@ jobs:
             exit 1
           fi
 
-          if ! printf '%s' "$claimed_at" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$'; then
+          # The shape, then the calendar: GNU date must read it back as the same UTC instant, so
+          # month 13, 30 February and hour 24 are refused along with every other form.
+          if ! printf '%s' "$claimed_at" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' \
+            || [ "$(date -u -d "$claimed_at" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)" != "$claimed_at" ]; then
             echo "refused: ${carrier} records '${claimed_at}' where an RFC 3339 UTC instant belongs." >&2
             echo "Use the form 2026-09-15T08:30:00Z." >&2
             exit 1
@@ -350,12 +389,122 @@ jobs:
           echo "confinement lane recorded for ${SOURCE_SHA} from ${carrier}: ${evidence}"
           echo "evidence=${evidence}" >> "$GITHUB_OUTPUT"
 
+      # The real project-quota lane, in the confinement step's shape. Its seven `real_quota_*` cases
+      # need a filesystem mounted with project quotas and `SYS_ADMIN` for `quotactl`; neither
+      # `gate.yml` nor the delegated lane runs them, and `Confinement-lane:` counts another crate.
+      # `cargo xtask quota-fixture run` provisions that fixture in a checked-in container recipe and
+      # prints the record. Same carriers, same three refusals; the count is the number of
+      # `real_quota_*` test functions the tagged source declares.
+      - name: Require a recorded quota-lane run for this commit
+        id: quota
+        env:
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+          INPUT_EVIDENCE: ${{ github.event_name == 'workflow_dispatch' && inputs.quota_evidence || '' }}
+          SOURCE_SHA: ${{ steps.tag.outputs.source-sha }}
+        run: |
+          set -euo pipefail
+          evidence="${INPUT_EVIDENCE:-}"
+          carrier="the quota_evidence workflow input"
+          if [ -z "${evidence//[[:space:]]/}" ]; then
+            evidence=$(git tag -l --format='%(contents)' "${TAG}" \
+              | sed -n 's/^Quota-lane:[[:space:]]*//p')
+            carrier="the annotated tag's Quota-lane trailer"
+            records=$(printf '%s' "$evidence" | grep -c '' || true)
+            if [ "${records:-0}" -gt 1 ]; then
+              echo "refused: ${TAG} carries ${records} Quota-lane lines; a release records exactly one." >&2
+              exit 1
+            fi
+          fi
+
+          if [ -z "${evidence//[[:space:]]/}" ]; then
+            echo "refused: no recorded quota lane run for ${SOURCE_SHA}." >&2
+            echo "The real project-quota cases run on no hosted runner and are a release condition." >&2
+            echo "Run 'cargo xtask quota-fixture run' at ${SOURCE_SHA} with a clean checkout on a host" >&2
+            echo "where Docker works without sudo, then record the line it prints either as" >&2
+            echo "  Quota-lane: ${SOURCE_SHA} <case-count> <RFC 3339 UTC>" >&2
+            echo "in the annotated tag's message, or as the quota_evidence input of a" >&2
+            echo "protected-main recovery dispatch. AGENTS.md, section \"Releases\"." >&2
+            exit 1
+          fi
+
+          # One line of exactly three fields. A second line would reach GITHUB_OUTPUT unvalidated,
+          # and a fourth field would be published without being checked.
+          case "$evidence" in
+            *$'\n'* | *$'\r'*)
+              echo "refused: ${carrier} spans more than one line; a record is one line of three fields." >&2
+              exit 1
+              ;;
+          esac
+          read -r -a fields <<<"${evidence}"
+          if [ "${#fields[@]}" -ne 3 ]; then
+            echo "refused: ${carrier} has ${#fields[@]} fields; a record is '<sha> <case-count> <RFC 3339 UTC>'." >&2
+            exit 1
+          fi
+          claimed_sha=${fields[0]}
+          claimed_cases=${fields[1]}
+          claimed_at=${fields[2]}
+          evidence="${claimed_sha} ${claimed_cases} ${claimed_at}"
+
+          if [ "$claimed_sha" != "$SOURCE_SHA" ]; then
+            echo "refused: ${carrier} records commit '${claimed_sha}', not ${SOURCE_SHA}." >&2
+            echo "A lane run against other bytes is not evidence about the tagged source." >&2
+            exit 1
+          fi
+
+          if ! printf '%s' "$claimed_cases" | grep -Eq '^[0-9]+$'; then
+            echo "refused: ${carrier} records '${claimed_cases}' where a real-quota case count belongs." >&2
+            exit 1
+          fi
+
+          # Read from the tagged source, not this checkout.
+          quota_source="crates/substrate-host/src/git/quota_tests.rs"
+          if ! source_text=$(git show "${SOURCE_SHA}:${quota_source}"); then
+            echo "refused: ${quota_source} is absent at ${SOURCE_SHA}." >&2
+            exit 1
+          fi
+          # The definition `cargo xtask quota-lane` and the fixture use (`declared_cases` in
+          # xtask/src/quota_lane.rs): an `fn real_quota_*` whose attributes since the previous item
+          # include `#[ignore`. An unignored helper of that name is not a case on either side.
+          declared_cases=$(printf '%s\n' "$source_text" | awk '
+            { line = $0; sub(/^[[:space:]]+/, "", line) }
+            line ~ /^#\[ignore/ { ignored = 1; next }
+            line ~ /^(async )?fn / {
+              if (ignored && line ~ /^(async )?fn real_quota_[A-Za-z0-9_]*[^A-Za-z0-9_]/) cases++
+              ignored = 0
+              next
+            }
+            line !~ /^#\[/ && line != "" { ignored = 0 }
+            END { print cases + 0 }
+          ')
+          if [ "${declared_cases:-0}" -eq 0 ]; then
+            echo "refused: ${quota_source} at ${SOURCE_SHA} declares no real_quota_ case function." >&2
+            echo "Fix this check with the cases; a record of zero cases proves nothing." >&2
+            exit 1
+          fi
+          if [ "$claimed_cases" != "$declared_cases" ]; then
+            echo "refused: ${carrier} records ${claimed_cases} real-quota cases; ${SOURCE_SHA} declares ${declared_cases}." >&2
+            exit 1
+          fi
+
+          # The shape, then the calendar: GNU date must read it back as the same UTC instant, so
+          # month 13, 30 February and hour 24 are refused along with every other form.
+          if ! printf '%s' "$claimed_at" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' \
+            || [ "$(date -u -d "$claimed_at" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)" != "$claimed_at" ]; then
+            echo "refused: ${carrier} records '${claimed_at}' where an RFC 3339 UTC instant belongs." >&2
+            echo "Use the form 2026-09-15T08:30:00Z." >&2
+            exit 1
+          fi
+
+          echo "quota lane recorded for ${SOURCE_SHA} from ${carrier}: ${evidence}"
+          echo "evidence=${evidence}" >> "$GITHUB_OUTPUT"
+
       - name: Preflight summary
         env:
           VERSION: ${{ steps.tag.outputs.version }}
           SOURCE_SHA: ${{ steps.tag.outputs.source-sha }}
           GATE_RUN_URL: ${{ steps.gate.outputs.run-url }}
           CONFINEMENT_EVIDENCE: ${{ steps.confinement.outputs.evidence }}
+          QUOTA_EVIDENCE: ${{ steps.quota.outputs.evidence }}
         run: |
           {
             echo "### Release preflight"
@@ -366,6 +515,7 @@ jobs:
             echo "| SOURCE_SHA | \`${SOURCE_SHA}\` |"
             echo "| gate run | ${GATE_RUN_URL} |"
             echo "| confinement lane | \`${CONFINEMENT_EVIDENCE}\` |"
+            echo "| quota lane | \`${QUOTA_EVIDENCE}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   release:
@@ -388,6 +538,7 @@ jobs:
       SOURCE_SHA: ${{ needs.preflight.outputs.source-sha }}
       GATE_RUN_URL: ${{ needs.preflight.outputs.gate-run-url }}
       CONFINEMENT_EVIDENCE: ${{ needs.preflight.outputs.confinement-evidence }}
+      QUOTA_EVIDENCE: ${{ needs.preflight.outputs.quota-evidence }}
 
     steps:
       - name: Check out the tagged source
@@ -934,6 +1085,20 @@ jobs:
           not run it either: it refuses to publish without the recorded line above, and that line
           must name this exact commit and the delegated case count this source declares.
 
+          ## Quota lane
+
+          | | |
+          | --- | --- |
+          | recorded run | \`${QUOTA_EVIDENCE}\` |
+          | command | \`cargo xtask quota-fixture run\` |
+          | where | a workstation whose Docker runs the checked-in \`fixtures/quota-lab\` recipe, not this runner |
+
+          The fields are the commit, the number of \`real_quota_*\` cases and when the run finished.
+          Those cases need a filesystem mounted with project quotas, which neither \`gate.yml\` nor
+          the delegated lane has. This workflow does not run them: it refuses to publish without
+          the recorded line above, and that line must name this exact commit and the real-quota
+          case count this source declares.
+
           ## Verify the signatures
 
           All three artifacts are signed keylessly through Sigstore. Each certificate identity is this
@@ -979,6 +1144,9 @@ jobs:
             This release records a local run of that lane (see *Confinement lane* above); recording
             an operator's run is weaker evidence than a runner executing it, and is not described as
             if CI had run it.
+          - **Kernel project-quota enforcement is not exercised by CI.** This release records a
+            local run of the real project-quota lane (see *Quota lane* above), with the same
+            limits as the confinement record.
           NOTES
           echo '--- release notes ---'
           cat release-notes.md
@@ -1039,6 +1207,7 @@ jobs:
             echo "| SOURCE_SHA | \`${SOURCE_SHA}\` |"
             echo "| gate run | ${GATE_RUN_URL} |"
             echo "| confinement lane | \`${CONFINEMENT_EVIDENCE:-<none recorded>}\` |"
+            echo "| quota lane | \`${QUOTA_EVIDENCE:-<none recorded>}\` |"
             echo "| daemon signature step | ${{ steps.verify.outcome }} |"
             echo "| bundle signature step | ${{ steps.bundle-verify.outcome }} |"
             echo "| MCP signature step | ${{ steps.mcp-verify.outcome }} |"

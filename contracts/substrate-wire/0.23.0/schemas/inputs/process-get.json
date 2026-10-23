@@ -1,0 +1,27 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.23.0:input:process-get",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Reads one host-process record of the subject. Another subject's record answers exactly as an absent one (ADR 0036 S6).",
+  "properties": {},
+  "required": [],
+  "title": "process-get operation input",
+  "type": "object",
+  "x-b10x-refusals": [
+    {
+      "class": "refused",
+      "code": "process.host-posture-refused",
+      "status": 403
+    },
+    {
+      "class": "refused",
+      "code": "process.host-subject-mismatch",
+      "status": 403
+    },
+    {
+      "class": "refused",
+      "code": "process.not-found",
+      "status": 404
+    }
+  ]
+}

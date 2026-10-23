@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-23T10:45:19Z",
+  "actor": "agent:b10x-chef-orchestrator",
+  "artifact": "story:nested-exec-cgroups-are-removed-depth-first",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "unit gate: delegated lane EXIT=0 with nested_exec_cgroups_are_removed_depth_first and both bound cases executed, host lib 276 passed",
+    "reference": "unit/2026-10-23-b10b11b12-retire-cgroups-admit@1f60076"
+  }
+}

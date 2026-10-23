@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-23T13:37:08Z",
+  "actor": "agent:b10x-chef-orchestrator",
+  "artifact": "story:directory-listing-names-omitted-entries",
+  "kind": "story",
+  "revision": 6,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "unit gate: runtime vectors red then green, portable 118 and delegated 180 (delegated lane EXIT=0), SDK managed red E0599 then green, wire 117, host 356, xtask 305, daemon 307, sdk 26, adversary file 5 passed, check-bundle and check-json 0.23.0 (361), check-adrs 43, check-links, check-docs, clippy -D warnings and fmt five packages",
+    "reference": "unit/2026-10-23-b5-omitted-entries@e642a10"
+  }
+}

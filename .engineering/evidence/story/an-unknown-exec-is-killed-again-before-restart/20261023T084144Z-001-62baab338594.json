@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-23T08:41:44Z",
+  "actor": "agent:b10x-chef-orchestrator",
+  "artifact": "story:an-unknown-exec-is-killed-again-before-restart",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "unit gate: store 101, host 270 (9 ignored), pipe_session 42, clippy -D warnings, fmt, delegated lane EXIT=0 with adversary_2 and security delegated cases executed",
+    "reference": "unit/2026-10-23-u2-unknown-exec@40afa82"
+  }
+}

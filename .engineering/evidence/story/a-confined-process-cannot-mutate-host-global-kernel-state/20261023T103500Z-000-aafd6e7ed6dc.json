@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-23T10:35:00Z",
+  "actor": "agent:b10x-chef-orchestrator",
+  "artifact": "story:a-confined-process-cannot-mutate-host-global-kernel-state",
+  "kind": "story",
+  "revision": 6,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "unit gate: host crate portable 335 cases, delegated lane EXIT=0 (seccomp_review_pass1 3 passed in an admitted exec, kernel_module_triggers 4 passed, /proc/modules unchanged), clippy -D warnings, rustfmt, check-adrs 40 records",
+    "reference": "unit/2026-10-23-b4-kmod@eafaebf"
+  }
+}

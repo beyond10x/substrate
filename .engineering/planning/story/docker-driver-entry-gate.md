@@ -15,7 +15,24 @@ relations:
 - depends_on: story:pty-sessions
 - depends_on: story:sealed-secret-slots
 - depends_on: story:network-session-authority
-revision: 5
+scope:
+- confidence: cited
+  path: ROADMAP.md
+- confidence: inferred
+  path: crates/substrate-daemon/src/runtime.rs
+- confidence: cited
+  path: crates/substrate-daemon/tests/driver_port.rs
+- confidence: cited
+  path: crates/substrate-daemon/tests/runtime_vectors.rs
+- confidence: cited
+  path: docs/design/01-contract.md
+- confidence: cited
+  path: docs/design/04-security-and-isolation.md
+- confidence: cited
+  path: docs/design/15-docker-driver-entry-gate.md
+- confidence: cited
+  path: docs/plan/03-container-driver.md
+revision: 8
 transitions:
 - {from: "draft", to: "proposed", at: "2026-08-30T12:33:20Z", actor: "human:timo", revision: 5, decided_on: {"recorded":{"specification":1}}, imported: true}
 ---
@@ -68,3 +85,16 @@ Two findings from the draft: the story's acceptance maps plan 03 criterion 3 ont
 harness, but that is criterion 1; and `crates/substrate-daemon/tests/driver_port.rs:7` cites
 `substrate-host/src/lib.rs:171` for `pub trait Driver`, which is `:201` at `d65db79` — a
 text-scanning test, so nothing is broken, but the citation is stale.
+
+## Scope
+
+Derived 2026-10-23 by `story-scoper`. Each line is **cited** (read from the story or the tree) or
+**inferred** (a reading that could be wrong).
+
+- **Primary surface:** the conformance runner `crates/substrate-daemon/tests/runtime_vectors.rs` (driver as a parameter, design 15 § 6) — cited
+- **Files:** `docs/design/04-security-and-isolation.md`, `docs/plan/03-container-driver.md`, `ROADMAP.md`, `docs/design/15-docker-driver-entry-gate.md`, `docs/design/01-contract.md` § 9 — cited
+- **Also likely:** `crates/substrate-daemon/src/runtime.rs:680` (`HostDriver::open`), an ADR — inferred; `crates/substrate-daemon/tests/driver_port.rs:7` carries a stale citation (`lib.rs:370`; the trait is at `crates/substrate-host/src/lib.rs:539`) — cited
+- **Confidence:** medium
+- **Roadmap:** phase 4 reads complete (`ROADMAP.md:21`); the Docker track opens when shared remote conformance is green and the root-equivalence gate (design 15, still `proposed`) is accepted. Two of three opening conditions are unmet.
+- **Stale text:** the acceptance names "`ROADMAP.md` phase 5", which no longer exists; design 15 § 8 names bundle `0.9.0`.
+- **Blocker:** accepting design 15 and assigning its ADR number is an operator decision.

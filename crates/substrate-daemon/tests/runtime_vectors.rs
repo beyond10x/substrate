@@ -43,9 +43,9 @@ const DAEMON: &str = env!("CARGO_BIN_EXE_substrate-daemon");
 const CGROUP_EXEC: &str = env!("CARGO_BIN_EXE_substrate-cgroup-exec");
 const DAEMON_OVERRIDE_VARIABLE: &str = "SUBSTRATE_VECTORS_DAEMON";
 /// Pinned independently of the daemon implementation: the clean-room client verifies what ships.
-const ADVERTISED_CONTRACT: &str = "substrate-wire/0.22.0";
+const ADVERTISED_CONTRACT: &str = "substrate-wire/0.23.0";
 const ADVERTISED_CONTRACT_SHA256: &str =
-    "5d551f08c3b680c144359b13ff99a7da2853003c4fcc9665a32b21ce85e146da";
+    "fc88fb9aa9feee20504cc29725a23c19886a2343e2c16757e6c2482e28f49bdc";
 
 fn daemon_binary() -> PathBuf {
     std::env::var_os(DAEMON_OVERRIDE_VARIABLE).map_or_else(|| PathBuf::from(DAEMON), PathBuf::from)
@@ -298,6 +298,20 @@ async fn request_headed(
     headers: &[(&str, &str)],
     body: Option<&[u8]>,
 ) -> (u16, Value) {
+    let (status, _, payload) =
+        request_with_response_headers(socket, method, path, request_id, headers, body).await;
+    (status, payload)
+}
+
+/// [`request_headed`], also answering the response head's headers, names lower-cased.
+async fn request_with_response_headers(
+    socket: &Path,
+    method: &str,
+    path: &str,
+    request_id: &str,
+    headers: &[(&str, &str)],
+    body: Option<&[u8]>,
+) -> (u16, BTreeMap<String, String>, Value) {
     let mut stream = UnixStream::connect(socket)
         .await
         .unwrap_or_else(|error| panic!("connect {}: {error}", socket.display()));
@@ -327,13 +341,13 @@ async fn request_headed(
             "write {method} {path}: {error}"
         );
     }
-    let (status, headers, body) = read_response(&mut stream).await;
-    assert_contract_headers(&headers);
+    let (status, response_headers, body) = read_response(&mut stream).await;
+    assert_contract_headers(&response_headers);
     let payload: Value = serde_json::from_slice(&body).expect("JSON response body");
     let api_version = if path.starts_with("/v2/") { "v2" } else { "v1" };
     assert_eq!(payload["api_version"], api_version, "{payload}");
     assert_eq!(payload["request_id"], request_id, "{payload}");
-    (status, payload)
+    (status, response_headers, payload)
 }
 
 async fn upgrade_refusal(socket: &Path, path: &str, request_id: &str) -> (u16, Value) {
@@ -716,6 +730,15 @@ impl Daemon {
         body: Option<&[u8]>,
     ) -> (u16, Value) {
         request_headed(&self.socket, method, path, request_id, headers, body).await
+    }
+
+    /// A bodiless `GET` answering the response headers beside the status and payload.
+    async fn get_with_response_headers(
+        &self,
+        path: &str,
+        request_id: &str,
+    ) -> (u16, BTreeMap<String, String>, Value) {
+        request_with_response_headers(&self.socket, "GET", path, request_id, &[], None).await
     }
 
     async fn stream(&self, path: &str) -> EventStream {
@@ -2200,6 +2223,200 @@ async fn check_confined_pty(daemon: &Daemon, workspace: &str, snapshot: &str) ->
     passed
 }
 
+/// A raw-pipe session around `exec`, with one exec-start field set to `value` (design 27).
+fn session_with_exec_field(exec: Value, field: &str, value: Value) -> Value {
+    let mut exec = exec;
+    exec["lease_ttl_ms"] = json!(60_000);
+    exec[field] = value;
+    json!({
+        "exec": exec,
+        "input_limit_bytes": 65_536,
+        "frame_limit_bytes": 16_384,
+        "queued_frames": 8
+    })
+}
+
+/// Attaches to a started session, reads it to its `exit` frame, and returns the exec record once
+/// the daemon has recorded it terminal with `ready` holding.
+async fn run_session_to_exit(
+    daemon: &Daemon,
+    session: &Value,
+    ready: impl Fn(&Value) -> bool,
+) -> (Value, Value) {
+    let session_id = text(&session["result"]["id"]);
+    let exec_id = text(&session["result"]["exec"]);
+    let mut channel =
+        SessionChannel::open(&daemon.socket, &format!("/v1/sessions/{session_id}/attach")).await;
+    // Each program first reads one line, so the session is still ready when the attach arrives.
+    channel.input("go\n").await;
+    let terminal = channel.wait_for_terminal().await;
+    assert_eq!(terminal["kind"], "exit", "{terminal}");
+    drop(channel);
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let (status, observed) = daemon
+            .call(
+                "GET",
+                &format!("/v1/execs/{exec_id}"),
+                "req_clean_session_field_exec",
+                None,
+            )
+            .await;
+        assert_eq!(status, 200, "{observed}");
+        if observed["result"]["state"] == "exited" && ready(&observed["result"]) {
+            return (terminal, observed["result"].clone());
+        }
+        assert!(Instant::now() < deadline, "{observed}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Design 27: each exec-start field the session start publishes in `0.23.0` is served on
+/// `POST /v1/sessions` exactly as on exec start — `measurements` and `workspace_access` honoured,
+/// `scratch` refused by its own named code before dispatch on a host without project quotas.
+#[allow(clippy::too_many_lines)] // Three cases, one per field; splitting them would hide the set.
+async fn check_confined_session_exec_fields(
+    daemon: &Daemon,
+    workspace: &str,
+    snapshot: &str,
+) -> usize {
+    let mut passed = 0;
+    let (status, machine) = daemon
+        .call("GET", "/v1/machine", "req_clean_session_fields_facts", None)
+        .await;
+    assert_eq!(status, 200, "{machine}");
+    let facts = &machine["result"]["facts"];
+    assert!(
+        facts.get("exec.resource-usage").is_some(),
+        "the delegated lane delegates cpu, memory and pids, so it proves usage counters: {machine}"
+    );
+    assert_eq!(
+        facts["exec.workspace-scoped-write"], true,
+        "the delegated lane proves read-only and scoped workspace mounts: {machine}"
+    );
+    assert!(
+        facts.get("exec.scratch-quota").is_none(),
+        "the clean-room daemon declares no project-quota identities: {machine}"
+    );
+
+    // `measurements`: the session's exec record carries usage from the start, and the counters
+    // are observed once the session has ended.
+    let (status, session) = daemon
+        .call(
+            "POST",
+            "/v1/sessions",
+            "req_clean_session_measurements",
+            Some(&mutation(
+                "01JSESSIONFIELDMEASURE01",
+                &session_with_exec_field(
+                    ExecInput::new(
+                        workspace,
+                        snapshot,
+                        &["/bin/sh", "-c", "read line; exit 0"],
+                        false,
+                    )
+                    .build(),
+                    "measurements",
+                    json!(["resource-usage"]),
+                ),
+            )),
+        )
+        .await;
+    assert_eq!(status, 202, "{session}");
+    let exec_id = text(&session["result"]["exec"]);
+    let (status, started) = daemon
+        .call(
+            "GET",
+            &format!("/v1/execs/{exec_id}"),
+            "req_clean_session_measurements_started",
+            None,
+        )
+        .await;
+    assert_eq!(status, 200, "{started}");
+    assert!(
+        started["result"]["usage"]["status"] == "pending"
+            || started["result"]["usage"]["status"] == "observed",
+        "a session that asked for measurements carries usage: {started}"
+    );
+    let (_, observed) = run_session_to_exit(daemon, &session, |record| {
+        record["usage"]["status"] == "observed"
+    })
+    .await;
+    assert_eq!(observed["exit"]["code"], 0, "{observed}");
+    assert_eq!(observed["usage"]["complete"], true, "{observed}");
+    assert!(
+        observed["usage"]["processes_peak"].as_u64() >= Some(1),
+        "{observed}"
+    );
+    passed += 1;
+
+    // `workspace_access`: the grant is applied and stated, and a write to `/workspace` fails
+    // inside the sandbox and leaves the host workspace untouched.
+    let probe = "session-read-only-probe";
+    let program =
+        format!("read line; if echo x > /workspace/{probe}; then exit 0; else exit 9; fi");
+    let (status, session) = daemon
+        .call(
+            "POST",
+            "/v1/sessions",
+            "req_clean_session_workspace_access",
+            Some(&mutation(
+                "01JSESSIONFIELDACCESS001",
+                &session_with_exec_field(
+                    ExecInput::new(workspace, snapshot, &["/bin/sh", "-c", &program], false)
+                        .build(),
+                    "workspace_access",
+                    json!({ "mode": "read-only" }),
+                ),
+            )),
+        )
+        .await;
+    assert_eq!(status, 202, "{session}");
+    let (terminal, observed) = run_session_to_exit(daemon, &session, |_| true).await;
+    assert_eq!(terminal["exit"]["code"], 9, "{terminal}");
+    assert_eq!(observed["exit"]["code"], 9, "{observed}");
+    assert_eq!(
+        observed["applied"]["workspace_access"],
+        json!({ "mode": "read-only" }),
+        "{observed}"
+    );
+    assert!(
+        !daemon.workspaces.join(workspace).join(probe).exists(),
+        "a read-only session wrote the workspace"
+    );
+    passed += 1;
+
+    // `scratch`: the same named refusal exec start gives on a host without the quota fact, before
+    // dispatch and recorded as refused.
+    let operation = "01JSESSIONFIELDSCRATCH01";
+    expect_error(
+        &daemon
+            .call(
+                "POST",
+                "/v1/sessions",
+                "req_clean_session_scratch",
+                Some(&mutation(
+                    operation,
+                    &session_with_exec_field(
+                        ExecInput::new(workspace, snapshot, &["/bin/sh", "-c", "exit 0"], false)
+                            .build(),
+                        "scratch",
+                        json!({ "max_bytes": 1_048_576, "max_inodes": 16 }),
+                    ),
+                )),
+            )
+            .await,
+        501,
+        "exec.scratch-quota-unserved",
+    );
+    assert_eq!(
+        ledger_row(daemon, operation, "req_clean_session_scratch_ledger").await["state"],
+        "refused"
+    );
+    passed += 1;
+    passed
+}
+
 /// The delegated exec-lease sequence: idle-time whole-cgroup expiry, replay, conflict and retire.
 #[allow(clippy::too_many_lines)] // One sequential journey; splitting it would lose the ordering.
 async fn check_exec_lease(daemon: &Daemon, workspace: &str, snapshot: &str, cgroup_root: &Path) {
@@ -2715,7 +2932,7 @@ async fn check_promoted_route_inventory(
     let expected: BTreeSet<String> = {
         let registry = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
-            .join("contracts/substrate-wire/0.22.0/operations.json");
+            .join("contracts/substrate-wire/0.23.0/operations.json");
         let document: Value = serde_json::from_slice(
             &std::fs::read(&registry).expect("promoted operation registry bytes"),
         )
@@ -2813,6 +3030,174 @@ async fn check_promoted_route_inventory(
     covered.len()
 }
 
+/// The caps, lifetime and refusal of each upgraded stream family, as `/v1/machine` publishes them
+/// (ADR 0042, bundle `0.23.0`). Pinned here rather than read from the wire crate: the clean-room
+/// runner links no implementation.
+///
+/// `events.stream-bounds` is published on every host, because the event stream is served on
+/// every host. `metrics.stream-bounds` is published exactly beside `metrics.stream`, and
+/// `sessions.attachment-bounds` exactly beside `exec.argv-only`, because a session is an exec;
+/// the delegated lane serves exec, so it must publish the attachment bounds.
+async fn check_stream_bound_facts(daemon: &Daemon, delegated: bool) -> usize {
+    let (status, machine) = daemon
+        .call("GET", "/v1/machine", "req_clean_stream_bounds", None)
+        .await;
+    assert_eq!(status, 200);
+    let facts = &machine["result"]["facts"];
+    assert_eq!(
+        facts["events.stream-bounds"],
+        json!({
+            "per_subject": 4,
+            "global": 64,
+            "lifetime_ms": 3_600_000,
+            "refusal": "event.stream-capacity"
+        }),
+        "every host publishes the event stream's bounds: {machine}"
+    );
+    let metrics = facts.get("metrics.stream-bounds");
+    assert_eq!(
+        metrics.is_some(),
+        facts.get("metrics.stream").is_some(),
+        "the metrics stream's bounds are published exactly beside metrics.stream: {machine}"
+    );
+    if let Some(metrics) = metrics {
+        assert_eq!(
+            metrics,
+            &json!({
+                "per_subject": 4,
+                "global": 64,
+                "lifetime_ms": 3_600_000,
+                "refusal": "metrics.stream-capacity"
+            })
+        );
+    }
+    let attachments = facts.get("sessions.attachment-bounds");
+    assert_eq!(
+        attachments.is_some(),
+        facts.get("exec.argv-only").is_some(),
+        "the session attachment's bounds are published exactly when exec is served: {machine}"
+    );
+    assert_eq!(
+        attachments.is_some(),
+        delegated,
+        "the delegated lane serves exec and the portable lane does not: {machine}"
+    );
+    if let Some(attachments) = attachments {
+        assert_eq!(
+            attachments,
+            &json!({
+                "per_subject": 16,
+                "per_session": 1,
+                "global": 32,
+                "lifetime_ms": 3_600_000,
+                "refusal": "session.attachment-capacity"
+            })
+        );
+    }
+    1
+}
+
+/// The response header naming how many entries a listing omitted (ADR 0043).
+const OMITTED_ENTRIES_HEADER: &str = "x-b10x-omitted-entries";
+
+/// A directory holding a FIFO answers the omission in `x-b10x-omitted-entries` on the v1
+/// directory page and on the v2 tree; the tree keeps answering `truncated` for it (ADR 0043).
+///
+/// Run on a workspace that holds nothing else yet, so the tree's items and count are exact; the
+/// fixture is removed afterwards, and the same reads then carry no header.
+async fn check_omitted_entries(daemon: &Daemon, workspace: &str) -> usize {
+    let host = daemon.workspaces.join(workspace);
+    let listing = host.join("listing");
+    std::fs::create_dir(&listing).expect("listing directory");
+    std::fs::write(listing.join("b.txt"), b"b").expect("listed file");
+    let fifo = listing.join("a-fifo");
+    let made = std::process::Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("run mkfifo");
+    assert!(made.success(), "mkfifo {}", fifo.display());
+    let page_path =
+        format!("/v1/workspaces/{workspace}/files/listing?mode=directory&limit_items=10");
+    let tree_path = |limit: u32| format!("/v2/workspaces/{workspace}/tree?limit_items={limit}");
+    let mut passed = 0;
+
+    let (status, headers, page) = daemon
+        .get_with_response_headers(&page_path, "req_clean_omitted_page")
+        .await;
+    assert_eq!(status, 200, "{page}");
+    assert_eq!(
+        page["result"]["items"],
+        json!([{ "name": "b.txt", "kind": "file", "size": 1 }])
+    );
+    assert_eq!(
+        headers.get(OMITTED_ENTRIES_HEADER).map(String::as_str),
+        Some("1"),
+        "the v1 directory page names its omitted FIFO: {headers:?}"
+    );
+    passed += 1;
+
+    let (status, headers, tree) = daemon
+        .get_with_response_headers(&tree_path(100), "req_clean_omitted_tree")
+        .await;
+    assert_eq!(status, 200, "{tree}");
+    let paths: Vec<&str> = tree["result"]["items"]
+        .as_array()
+        .expect("tree items")
+        .iter()
+        .map(|item| item["path"].as_str().expect("tree path"))
+        .collect();
+    assert_eq!(paths, ["listing", "listing/b.txt"], "{tree}");
+    assert_eq!(
+        tree["result"]["truncated"], true,
+        "an omission still sets truncated, for compatibility: {tree}"
+    );
+    assert_eq!(
+        headers.get(OMITTED_ENTRIES_HEADER).map(String::as_str),
+        Some("1"),
+        "the v2 tree names its omitted FIFO: {headers:?}"
+    );
+    passed += 1;
+
+    let (status, headers, tree) = daemon
+        .get_with_response_headers(&tree_path(1), "req_clean_omitted_tree_limit")
+        .await;
+    assert_eq!(status, 200, "{tree}");
+    assert_eq!(tree["result"]["items"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        tree["result"]["truncated"], true,
+        "the limit is truncation: {tree}"
+    );
+    assert_eq!(
+        headers.get(OMITTED_ENTRIES_HEADER).map(String::as_str),
+        Some("1"),
+        "the omission is named beside the limit, not folded into it: {headers:?}"
+    );
+    passed += 1;
+
+    std::fs::remove_file(&fifo).expect("remove the FIFO");
+    let (status, page_headers, _) = daemon
+        .get_with_response_headers(&page_path, "req_clean_complete_page")
+        .await;
+    assert_eq!(status, 200);
+    let (status, tree_headers, tree) = daemon
+        .get_with_response_headers(&tree_path(100), "req_clean_complete_tree")
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(tree["result"]["truncated"], false, "{tree}");
+    assert_eq!(
+        (
+            page_headers.get(OMITTED_ENTRIES_HEADER),
+            tree_headers.get(OMITTED_ENTRIES_HEADER)
+        ),
+        (None, None),
+        "a listing that omits nothing carries no omission header"
+    );
+    passed += 1;
+
+    std::fs::remove_dir_all(&listing).expect("remove the listing fixture");
+    passed
+}
+
 #[allow(clippy::too_many_lines)] // One sequential journey; splitting it would lose the ordering.
 async fn check_http_journey(
     daemon: &Daemon,
@@ -2848,6 +3233,8 @@ async fn check_http_journey(
     passed += 1;
 
     passed += check_promoted_route_inventory(daemon, &workspace, cgroup_root.is_some()).await;
+    passed += check_stream_bound_facts(daemon, cgroup_root.is_some()).await;
+    passed += check_omitted_entries(daemon, &workspace).await;
 
     let (status, replay) = daemon
         .call(
@@ -3119,12 +3506,15 @@ async fn check_http_journey(
         passed += check_confined_aperture_ceiling(daemon, &workspace, &snapshot, firehose).await;
         passed += check_confined_secret_slots(daemon, &workspace, &snapshot).await;
         passed += check_confined_pty(daemon, &workspace, &snapshot).await;
+        passed += check_confined_session_exec_fields(daemon, &workspace, &snapshot).await;
         passed += check_confined_read_only_files(daemon, &workspace, &snapshot).await;
+        passed += check_confined_read_only_roots(daemon, &workspace, &snapshot).await;
         passed += check_confined_workdir(daemon, &workspace, &snapshot).await;
         passed +=
             check_confined_aperture_list(daemon, &workspace, &snapshot, inside, firehose).await;
     } else {
         passed += check_read_only_files_unserved(daemon, &workspace, &snapshot).await;
+        passed += check_read_only_roots_unserved(daemon, &workspace, &snapshot).await;
         passed += check_workdir_and_aperture_list_unserved(daemon, &workspace, &snapshot).await;
         passed += check_writable_root_unserved(daemon, &workspace, &snapshot, writable).await;
         // No confinement means no verified mechanism, so the capability is absent and every
@@ -4956,6 +5346,217 @@ async fn check_read_only_file_host_refusals(
 }
 
 // ---------------------------------------------------------------------------------------------
+// Declared read-only roots (ADR 0010, bundle 0.23.0)
+// ---------------------------------------------------------------------------------------------
+
+/// The served bound the 0.23.0 capability schema publishes as `exec.read-only-roots` `max_roots`,
+/// pinned here rather than read from the wire crate: the clean-room runner links no implementation.
+const READ_ONLY_ROOTS_BOUND: usize = 4;
+
+/// The portable journey: no confinement floor, so no roots bound is published and a start naming
+/// roots is refused by the floor's own name, never run with the roots missing (invariant 3).
+async fn check_read_only_roots_unserved(daemon: &Daemon, workspace: &str, snapshot: &str) -> usize {
+    let (status, machine) = daemon
+        .call("GET", "/v1/machine", "req_clean_roroot_fact_absent", None)
+        .await;
+    assert_eq!(status, 200);
+    assert!(
+        machine["result"]["facts"]
+            .get("exec.read-only-roots")
+            .is_none(),
+        "a portable host publishes no read-only roots fact: {machine}"
+    );
+    expect_error(
+        &daemon
+            .call(
+                "POST",
+                "/v1/execs",
+                "req_clean_roroot_unserved",
+                Some(&mutation(
+                    "01JROROOTCLEANUNSERVED01",
+                    &ExecInput::new(workspace, snapshot, &["/usr/bin/true"], true)
+                        .read_only_roots(json!([{
+                            "host_path": "/opt/host/toolchain",
+                            "mount": "/opt/toolchain"
+                        }]))
+                        .build(),
+                )),
+            )
+            .await,
+        501,
+        "exec.sandbox-unavailable",
+    );
+    // Shape before capability: one root over the bound is the caller's mistake on any host.
+    let over_bound: Vec<Value> = (0..=READ_ONLY_ROOTS_BOUND)
+        .map(|index| json!({ "host_path": format!("/opt/host/r{index}"), "mount": format!("/opt/r{index}") }))
+        .collect();
+    expect_error_at(
+        &daemon
+            .call(
+                "POST",
+                "/v1/execs",
+                "req_clean_roroot_portable_bound",
+                Some(&mutation(
+                    "01JROROOTCLEANPORTBOUND1",
+                    &ExecInput::new(workspace, snapshot, &["/usr/bin/true"], true)
+                        .read_only_roots(Value::Array(over_bound))
+                        .build(),
+                )),
+            )
+            .await,
+        422,
+        "exec.read-only-root-invalid",
+        "read_only_roots",
+    );
+    2
+}
+
+/// The delegated journey: the host publishes the wire bound, a start naming that many roots runs
+/// with each one readable and none writable, the applied observation lists exactly the declared
+/// roots, and one root over the bound is refused by name before anything runs.
+async fn check_confined_read_only_roots(daemon: &Daemon, workspace: &str, snapshot: &str) -> usize {
+    let (status, machine) = daemon
+        .call("GET", "/v1/machine", "req_clean_roroot_fact", None)
+        .await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        machine["result"]["facts"]["exec.read-only-roots"],
+        json!({ "max_roots": READ_ONLY_ROOTS_BOUND }),
+        "a delegated host publishes the served roots bound: {machine}"
+    );
+
+    let fixture = tempfile::Builder::new()
+        .prefix("roroot-cleanroom-")
+        .tempdir_in(env!("CARGO_TARGET_TMPDIR"))
+        .expect("fixture under CARGO_TARGET_TMPDIR");
+    let base = std::fs::canonicalize(fixture.path()).expect("canonical fixture");
+    let bound = READ_ONLY_ROOTS_BOUND;
+    let roots: Vec<Value> = (0..=bound)
+        .map(|index| {
+            let host = base.join(format!("root{index}"));
+            std::fs::create_dir(&host).expect("root directory");
+            std::fs::write(host.join("marker"), format!("root {index}\n")).expect("marker");
+            json!({
+                "host_path": host.to_str().expect("UTF-8 fixture"),
+                "mount": format!("/opt/ro-root{index}"),
+            })
+        })
+        .collect();
+    let declared = Value::Array(roots[..bound].to_vec());
+    let script = (0..bound)
+        .map(|index| {
+            format!(
+                "test \"$(cat /opt/ro-root{index}/marker)\" = 'root {index}' \
+                 && ! (echo written >/opt/ro-root{index}/marker) 2>/dev/null \
+                 && ! touch /opt/ro-root{index}/new 2>/dev/null"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" && ");
+
+    let (status, run) = daemon
+        .call(
+            "POST",
+            "/v1/execs",
+            "req_clean_roroot_runs",
+            Some(&mutation(
+                "01JROROOTCLEANRUNS00001",
+                &ExecInput::new(workspace, snapshot, &["/bin/sh", "-c", &script], true)
+                    .read_only_roots(declared.clone())
+                    .build(),
+            )),
+        )
+        .await;
+    assert_eq!(status, 200, "{run}");
+    assert_eq!(
+        run["result"]["exit"],
+        EXITED_CLEANLY(),
+        "every declared root is readable and none is writable: {run}"
+    );
+    assert_eq!(
+        run["result"]["applied"]["read_only_roots"], declared,
+        "the applied observation lists every bound root: {run}"
+    );
+    for index in 0..bound {
+        let host = base.join(format!("root{index}"));
+        assert_eq!(
+            std::fs::read_to_string(host.join("marker")).expect("marker"),
+            format!("root {index}\n"),
+            "the host root is unchanged"
+        );
+        assert!(
+            !host.join("new").exists(),
+            "nothing was created in a host root"
+        );
+    }
+
+    expect_error(
+        &daemon
+            .call(
+                "POST",
+                "/v1/execs",
+                "req_clean_roroot_over_bound",
+                Some(&mutation(
+                    "01JROROOTCLEANOVERBOUND1",
+                    &ExecInput::new(workspace, snapshot, &["/usr/bin/true"], true)
+                        .read_only_roots(Value::Array(roots))
+                        .build(),
+                )),
+            )
+            .await,
+        422,
+        "exec.read-only-root-invalid",
+    );
+
+    2 + check_confined_read_only_root_host_refusals(daemon, workspace, snapshot, &base).await
+}
+
+/// The two host refusals, each for a list the wire crate admits, so only the pinned object can
+/// answer: a path with nothing at it, a regular file, and a symlink to a real directory.
+async fn check_confined_read_only_root_host_refusals(
+    daemon: &Daemon,
+    workspace: &str,
+    snapshot: &str,
+    base: &std::path::Path,
+) -> usize {
+    let file = base.join("plain-file");
+    std::fs::write(&file, "not a directory\n").expect("plain file");
+    let link = base.join("link-to-root0");
+    std::os::unix::fs::symlink(base.join("root0"), &link).expect("symlink to a root");
+    for (index, (host, code)) in [
+        (base.join("absent"), "exec.read-only-root-absent"),
+        (file, "exec.read-only-root-not-a-directory"),
+        (link, "exec.read-only-root-not-a-directory"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        expect_error_at(
+            &daemon
+                .call(
+                    "POST",
+                    "/v1/execs",
+                    &format!("req_clean_roroot_host_{index}"),
+                    Some(&mutation(
+                        &format!("01JROROOTCLEANHOSTREFUSE{index}"),
+                        &ExecInput::new(workspace, snapshot, &["/usr/bin/true"], true)
+                            .read_only_roots(json!([{
+                                "host_path": host.to_str().expect("UTF-8 fixture"),
+                                "mount": "/opt/ro-refused"
+                            }]))
+                            .build(),
+                    )),
+                )
+                .await,
+            422,
+            code,
+            "read_only_roots",
+        );
+    }
+    3
+}
+
+// ---------------------------------------------------------------------------------------------
 // Working directory and several apertures (design 26)
 // ---------------------------------------------------------------------------------------------
 
@@ -6506,8 +7107,8 @@ async fn check_git_root_refusals(
 // ---------------------------------------------------------------------------------------------
 
 /// The predecessor printed its case count; the port asserts it, so a case cannot vanish quietly.
-const PORTABLE_CASES: usize = 111;
-const DELEGATED_CASES: usize = 167;
+const PORTABLE_CASES: usize = 118;
+const DELEGATED_CASES: usize = 180;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {

@@ -20,7 +20,7 @@ use substrate_wire::{
 };
 use tokio::sync::{Semaphore, watch};
 
-use crate::runtime::TransportPermit;
+use crate::runtime::{StreamSlot, TransportPermit, hand_over_transport};
 
 use super::operations::read_bounded_body;
 use super::responses::{
@@ -115,6 +115,10 @@ impl EventStreamLimits {
         })
     }
 }
+
+/// An event or metrics stream slot: the per-subject and global caps the snapshot publishes as
+/// `events.stream-bounds` and `metrics.stream-bounds` (ADR 0042).
+impl StreamSlot for EventStreamPermit {}
 
 impl Drop for EventStreamPermit {
     fn drop(&mut self) {
@@ -256,7 +260,7 @@ pub(super) async fn event_stream(
             &request_id,
             None,
             ErrorClass::Exhausted,
-            "event.stream-capacity",
+            substrate_wire::EVENT_STREAM_CAPACITY,
             "The bounded event stream capacity is exhausted.",
             Some("stream"),
             true,
@@ -278,9 +282,10 @@ pub(super) async fn event_stream(
     }
     let policy = app.event_stream_policy;
     // The transport admission this connection was accepted under, moved into the upgraded task
-    // below. hyper resolves an upgradeable connection future when it hands the socket over, so an
-    // admission left with the connection stops counting a socket that is still serving. Absent
-    // when no listener published one — the crate's own tests drive this route without a transport.
+    // below and handed over there to the stream permit already held (ADR 0042): from the upgrade
+    // on, this socket is counted by the published event stream caps, not the transport budget.
+    // Absent when no listener published one — the crate's own tests drive this route without a
+    // transport.
     let transport_admission = transport.map(|Extension(permit)| permit);
     ws.read_buffer_size(policy.max_input_bytes)
         .write_buffer_size(policy.write_buffer_bytes)
@@ -292,8 +297,7 @@ pub(super) async fn event_stream(
                 .saturating_add(policy.write_buffer_bytes),
         )
         .on_upgrade(move |socket| async move {
-            // Held for as long as this socket serves, so the transport budget counts it.
-            let _transport_admission = transport_admission;
+            hand_over_transport(transport_admission, &stream_permit);
             let session = run_event_stream(
                 app,
                 scope,

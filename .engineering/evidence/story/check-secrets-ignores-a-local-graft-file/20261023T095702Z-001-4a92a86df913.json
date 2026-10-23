@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-23T09:57:02Z",
+  "actor": "agent:b10x-chef-orchestrator",
+  "artifact": "story:check-secrets-ignores-a-local-graft-file",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "unit gate: cargo test -p xtask 221 passed 9 ignored, secrets:: --include-ignored 23 passed, clippy -D warnings, fmt, check-secrets 608 commits",
+    "reference": "unit/2026-10-23-b8b13-docs-secrets@efe2fc8"
+  }
+}

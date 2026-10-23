@@ -33,6 +33,14 @@ const PIPE_FRAME_BYTES: usize = 64 * 1024;
 const PIPE_QUEUED_FRAMES: usize = 16;
 // A full queue is transient until its consumer stalls for this long (ADR 0031).
 const PIPE_OUTPUT_STALL_TIMEOUT: Duration = Duration::from_secs(1);
+// Proof attempts, 25 ms apart, that one retry of an unproven exec tree makes before it leaves the
+// rest to the next maintenance round.
+const UNPROVEN_PROOF_ATTEMPTS: usize = 4;
+// The deepest a cgroup nested under an exec's own may sit, the exec's own at depth 0, for the
+// removal walk to descend to it. Past this the walk refuses and removes nothing.
+const MAX_EXEC_CGROUP_DEPTH: usize = 32;
+// The most cgroups nested under an exec's own that one removal walk visits.
+const MAX_EXEC_NESTED_CGROUPS: usize = 256;
 
 /// The user-namespace posture of every sandbox this crate opens, in one place.
 ///
@@ -180,6 +188,13 @@ struct Execution {
     pipe: Option<PipeState>,
     started_at: Instant,
     scratch: Option<ScratchObservation>,
+    /// Set when the terminal reconciliation could not prove this exec's cgroup empty.
+    ///
+    /// Only that cause: an `unknown` observation also comes from capsule, resolution, scratch and
+    /// metrics failures, none of which leaves a process behind. While set, the tree is killed
+    /// again on every signal and every maintenance round, and the entry is carried into
+    /// [`ProcessRuntime::unproven`] when the daemon acknowledges the observation.
+    cgroup_unproven: AtomicBool,
 }
 
 struct PipeState {
@@ -405,6 +420,7 @@ impl Execution {
             pipe,
             started_at,
             scratch,
+            cgroup_unproven: AtomicBool::new(false),
         }
     }
 }
@@ -415,6 +431,13 @@ pub struct ProcessRuntime {
     backend_binding: Option<crate::probe::ProbedBackend>,
     executions: Arc<Mutex<HashMap<String, Arc<Execution>>>>,
     reservations: Arc<Mutex<HashSet<String>>>,
+    /// Exec id to cgroup name, for every acknowledged exec whose cgroup was never proven empty.
+    ///
+    /// The observation is gone from `executions`, but the tree may not be: `Cgroup` has no `Drop`,
+    /// so nothing else kills it before the next start's `reconcile_orphans`. Each entry holds one
+    /// tracking slot, so the map is bounded by `max_tracked_execs` and an id in it cannot be
+    /// started again. An entry leaves only when its cgroup is proven empty and removed, or is gone.
+    unproven: Arc<Mutex<HashMap<String, String>>>,
     active: Arc<AtomicUsize>,
     quotas: Option<Arc<crate::quota::ProjectQuotas>>,
     /// The workspaces-root descriptor the driver pinned at open: every exec resolves its
@@ -445,6 +468,7 @@ impl ProcessRuntime {
             backend_binding,
             executions: Arc::new(Mutex::new(HashMap::new())),
             reservations: Arc::new(Mutex::new(HashSet::new())),
+            unproven: Arc::new(Mutex::new(HashMap::new())),
             active: Arc::new(AtomicUsize::new(0)),
             quotas,
             workspace_root,
@@ -513,11 +537,42 @@ impl ProcessRuntime {
                 first_error = Some(error);
             }
         }
+        // Trees already acknowledged but never proven gone, so a clean stop leaves the next
+        // start's `reconcile_orphans` as little as possible to refuse on.
+        self.retry_unproven().await;
         if let Some(error) = first_error {
             Err(error)
         } else {
             Ok(())
         }
+    }
+
+    /// Kill again every exec tree whose cgroup was never proven empty, and forget each one that
+    /// now is. The daemon runs this once per maintenance round.
+    ///
+    /// The observation each one recorded stays `unknown`; only the kill is retried.
+    pub async fn retry_unproven(&self) {
+        let mut targets = self
+            .executions
+            .lock()
+            .iter()
+            .filter(|(_, execution)| execution.cgroup_unproven.load(Ordering::Acquire))
+            .filter_map(|(id, execution)| {
+                let name = execution.observation.lock().cgroup.clone()?;
+                Some((id.clone(), name))
+            })
+            .collect::<Vec<_>>();
+        targets.extend(
+            self.unproven
+                .lock()
+                .iter()
+                .map(|(id, name)| (id.clone(), name.clone())),
+        );
+        if targets.is_empty() {
+            return;
+        }
+        let proven = self.kill_unproven(targets).await;
+        self.forget_proven(&proven);
     }
 
     fn reconcile_capsules(&self, process_trees_reconciled: bool) -> Result<(), DriverError> {
@@ -901,9 +956,10 @@ impl ProcessRuntime {
                 Ok(value) => value,
                 Err(error) => return DispatchOutcome::NotDispatched(error),
             };
-        let tracking = match TrackingReservation::acquire(
+        let mut tracking = match TrackingReservation::acquire(
             Arc::clone(&self.executions),
             Arc::clone(&self.reservations),
+            &self.unproven,
             id,
             self.config.max_tracked_execs,
         ) {
@@ -915,8 +971,18 @@ impl ProcessRuntime {
         };
         let cgroup = match Cgroup::create(cgroup_root, id, input, self.config.exec_cpu_cores) {
             Ok(value) => value,
-            Err(outcome) => return outcome,
+            Err(outcome) => {
+                // Created but not proven empty again: the group is this exec's to retry.
+                if matches!(outcome, DispatchOutcome::OutcomeUnknown(_)) {
+                    tracking.carry(cgroup_root, format!("substrate-{id}"));
+                }
+                return outcome;
+            }
         };
+        // Every containment from here on that cannot prove this group empty ends the dispatch
+        // `OutcomeUnknown` without tracking it; the reservation carries the group into the
+        // unproven retry instead of forgetting it.
+        tracking.carry(cgroup_root, cgroup.name().to_owned());
         let scratch = match self.prepare_scratch(id, input.scratch) {
             Ok(scratch) => scratch,
             Err(error) => return contain_cgroup(&cgroup, error),
@@ -1529,12 +1595,15 @@ impl ProcessRuntime {
     }
 
     pub fn observe(&self, id: &str) -> Result<ExecObservation, DriverError> {
-        let execution = self
-            .executions
-            .lock()
-            .get(id)
-            .cloned()
-            .ok_or_else(DriverError::not_found)?;
+        let tracked = self.executions.lock().get(id).cloned();
+        let Some(execution) = tracked else {
+            // Not "not found" while its tree is carried: the daemon records an `unknown` exec the
+            // driver cannot find as physically absent, which releases its workspace.
+            if self.unproven.lock().contains_key(id) {
+                return Err(unproven_tree_error());
+            }
+            return Err(DriverError::not_found());
+        };
         let mut observation = execution.observation.lock().clone();
         if !is_terminal(observation.resource.state)
             && observation.resource.usage.is_some()
@@ -1562,7 +1631,7 @@ impl ProcessRuntime {
             .get(&persisted.resource.id)
             .is_some_and(|execution| *execution.observation.lock() == *persisted);
         if exact_terminal_match {
-            executions.remove(&persisted.resource.id);
+            self.retire(&mut executions, &persisted.resource.id);
         }
     }
 
@@ -1572,7 +1641,90 @@ impl ProcessRuntime {
             .get(id)
             .is_some_and(|execution| is_terminal(execution.observation.lock().resource.state))
         {
-            executions.remove(id);
+            self.retire(&mut executions, id);
+        }
+    }
+
+    /// Stop tracking a terminal exec. A cgroup that was never proven empty is carried into
+    /// `unproven` rather than forgotten with the observation.
+    fn retire(&self, executions: &mut HashMap<String, Arc<Execution>>, id: &str) {
+        let Some(execution) = executions.remove(id) else {
+            return;
+        };
+        if !execution.cgroup_unproven.load(Ordering::Acquire) {
+            return;
+        }
+        let cgroup = execution.observation.lock().cgroup.clone();
+        if let Some(name) = cgroup {
+            self.unproven.lock().insert(id.to_owned(), name);
+        }
+    }
+
+    /// Kill each named exec cgroup again and return the ids whose cgroup is now proven empty and
+    /// removed, or is already gone.
+    ///
+    /// The kill reaches exactly the exec's own cgroup subtree: `Cgroup::existing` admits only a
+    /// `substrate-ex_` name beneath the configured root. A bounded number of short proof attempts
+    /// per call keeps one maintenance round short; an entry not proven here is retried next round.
+    async fn kill_unproven(&self, targets: Vec<(String, String)>) -> Vec<String> {
+        let Some(root) = self.config.cgroup_root.as_deref() else {
+            return Vec::new();
+        };
+        let mut proven = Vec::new();
+        let mut pending = Vec::new();
+        for (id, name) in targets {
+            match Cgroup::existing(root, &name) {
+                Ok(cgroup) => {
+                    let _ = cgroup.kill_all();
+                    pending.push((id, cgroup));
+                }
+                // `Cgroup::existing` answers NotFound for anything that is not a readable regular
+                // `cgroup.procs`; only the kernel's own ENOENT proves the group is gone. Any other
+                // answer keeps the entry, and its tracking slot, for the next round.
+                Err(error) if error.class == crate::DriverErrorClass::NotFound => {
+                    if std::fs::symlink_metadata(root.join(&name).join("cgroup.procs"))
+                        .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+                    {
+                        proven.push(id);
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        for _ in 0..UNPROVEN_PROOF_ATTEMPTS {
+            if pending.is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            pending.retain(|(id, cgroup)| {
+                if cgroup.prove_empty_and_remove().is_ok() {
+                    proven.push(id.clone());
+                    false
+                } else {
+                    let _ = cgroup.kill_all();
+                    true
+                }
+            });
+        }
+        proven
+    }
+
+    /// Forget every id whose tree `kill_unproven` proved gone, tracked or carried.
+    fn forget_proven(&self, proven: &[String]) {
+        if proven.is_empty() {
+            return;
+        }
+        {
+            let executions = self.executions.lock();
+            for id in proven {
+                if let Some(execution) = executions.get(id) {
+                    execution.cgroup_unproven.store(false, Ordering::Release);
+                }
+            }
+        }
+        let mut unproven = self.unproven.lock();
+        for id in proven {
+            unproven.remove(id);
         }
     }
 
@@ -1640,13 +1792,34 @@ impl ProcessRuntime {
         id: &str,
         input: &ExecSignalInput,
     ) -> Result<ExecObservation, DriverError> {
-        let execution = self
-            .executions
-            .lock()
-            .get(id)
-            .cloned()
-            .ok_or_else(DriverError::not_found)?;
+        let tracked = self.executions.lock().get(id).cloned();
+        let Some(execution) = tracked else {
+            // A tree the driver never proved gone is killed again on the way, which is what lease
+            // cleanup's KILL reaches. The answer is `NotFound` only once that tree is proven gone;
+            // until then it is the same failure `observe` gives, so workspace-lease cleanup keeps
+            // the workspace and retries instead of ending it over a live process.
+            let carried = self.unproven.lock().get(id).cloned();
+            if let Some(name) = carried {
+                let proven = self.kill_unproven(vec![(id.to_owned(), name)]).await;
+                self.forget_proven(&proven);
+                if !proven.iter().any(|gone| gone == id) {
+                    return Err(unproven_tree_error());
+                }
+            }
+            return Err(DriverError::not_found());
+        };
         if is_terminal(execution.observation.lock().resource.state) {
+            let unproven_cgroup = execution
+                .cgroup_unproven
+                .load(Ordering::Acquire)
+                .then(|| execution.observation.lock().cgroup.clone())
+                .flatten();
+            if let Some(name) = unproven_cgroup {
+                // The observation stays what it is: `unknown`, whether or not this kill proves
+                // the tree gone.
+                let proven = self.kill_unproven(vec![(id.to_owned(), name)]).await;
+                self.forget_proven(&proven);
+            }
             return Ok(execution.observation.lock().clone());
         }
         if let Some(pipe) = &execution.pipe {
@@ -1702,15 +1875,9 @@ impl ProcessRuntime {
     /// path afterwards changes what is bound (design 26 § 3).
     fn admit_read_only_roots(
         roots: &[substrate_wire::ReadOnlyRoot],
+        published: Option<&substrate_wire::ReadOnlyRootFacts>,
     ) -> Result<Vec<crate::read_only_roots::PinnedRoot>, DriverError> {
-        substrate_wire::validate_read_only_roots(roots).map_err(|error| {
-            DriverError::refused(
-                "exec.read-only-root-invalid",
-                format!("A declared read-only root is invalid: {error}"),
-                "read_only_roots",
-            )
-        })?;
-        crate::read_only_roots::pin(roots)
+        crate::read_only_roots::admit(roots, published)
     }
 
     /// Validates both the wire shape and the live workspace objects ADR 0023 will mount.
@@ -1720,7 +1887,7 @@ impl ProcessRuntime {
     ) -> Result<(), DriverError> {
         substrate_wire::validate_workspace_access(access).map_err(|error| {
             DriverError::refused(
-                "exec.workspace-access-invalid",
+                substrate_wire::EXEC_WORKSPACE_ACCESS_INVALID,
                 format!("The requested workspace access is invalid: {error}"),
                 "workspace_access",
             )
@@ -1730,7 +1897,7 @@ impl ProcessRuntime {
         }
         if published != Some(true) {
             return Err(DriverError::unserved(
-                "exec.workspace-scoped-write-unserved",
+                substrate_wire::EXEC_WORKSPACE_SCOPED_WRITE_UNSERVED,
                 "The active host has not proved read-only and scoped workspace mounts.",
                 "workspace_access",
             ));
@@ -1763,11 +1930,12 @@ impl ProcessRuntime {
                     crate::fs::open_component_beneath(directory, component).map_err(|error| {
                         match error.code {
                             "resource.not-found" => {
-                                refuse("exec.workspace-subtree-absent", "is absent")
+                                refuse(substrate_wire::EXEC_WORKSPACE_SUBTREE_ABSENT, "is absent")
                             }
-                            "workspace.path-escape" => {
-                                refuse("exec.workspace-subtree-symlink", "crosses a symlink")
-                            }
+                            "workspace.path-escape" => refuse(
+                                substrate_wire::EXEC_WORKSPACE_SUBTREE_SYMLINK,
+                                "crosses a symlink",
+                            ),
                             _ => error,
                         }
                     })?;
@@ -1776,20 +1944,20 @@ impl ProcessRuntime {
                 // SAFETY: as above; `next` is live and `status` is a valid out pointer.
                 if unsafe { libc::fstat(next.as_raw_fd(), &raw mut status) } != 0 {
                     return Err(refuse(
-                        "exec.workspace-subtree-not-directory",
+                        substrate_wire::EXEC_WORKSPACE_SUBTREE_NOT_DIRECTORY,
                         "is not a directory",
                     ));
                 }
                 // `O_PATH | O_NOFOLLOW` opens a final symlink itself rather than refusing it.
                 if status.st_mode & libc::S_IFMT == libc::S_IFLNK {
                     return Err(refuse(
-                        "exec.workspace-subtree-symlink",
+                        substrate_wire::EXEC_WORKSPACE_SUBTREE_SYMLINK,
                         "crosses a symlink",
                     ));
                 }
                 if status.st_mode & libc::S_IFMT != libc::S_IFDIR {
                     return Err(refuse(
-                        "exec.workspace-subtree-not-directory",
+                        substrate_wire::EXEC_WORKSPACE_SUBTREE_NOT_DIRECTORY,
                         "is not a directory",
                     ));
                 }
@@ -1830,7 +1998,7 @@ impl ProcessRuntime {
                 for component in path.split('/') {
                     let component = CString::new(component).map_err(|_| {
                         DriverError::refused(
-                            "exec.workspace-access-invalid",
+                            substrate_wire::EXEC_WORKSPACE_ACCESS_INVALID,
                             "A writable workspace subtree contains a NUL byte.",
                             "workspace_access.writable_subtrees",
                         )
@@ -1845,7 +2013,7 @@ impl ProcessRuntime {
                     };
                     if next < 0 {
                         return Err(DriverError::refused(
-                            "exec.workspace-subtree-changed",
+                            substrate_wire::EXEC_WORKSPACE_SUBTREE_CHANGED,
                             format!(
                                 "Writable workspace subtree {path} changed before it could be pinned."
                             ),
@@ -2096,7 +2264,10 @@ impl ProcessRuntime {
                 "exec",
             ));
         }
-        let read_only_roots = Self::admit_read_only_roots(&input.read_only_roots)?;
+        let read_only_roots = Self::admit_read_only_roots(
+            &input.read_only_roots,
+            self.capability.facts.exec_read_only_roots.as_ref(),
+        )?;
         crate::read_only_files::admit(
             &input.read_only_files,
             &input.read_only_roots,
@@ -2170,7 +2341,7 @@ impl ProcessRuntime {
         }
         if !input.measurements.is_empty() && self.capability.facts.exec_resource_usage.is_none() {
             return Err(DriverError::unserved(
-                "exec.metrics-unserved",
+                substrate_wire::EXEC_METRICS_UNSERVED,
                 "The active host has not proved the requested execution resource counters.",
                 "measurements",
             ));
@@ -2178,7 +2349,7 @@ impl ProcessRuntime {
         if let Some(scratch) = input.scratch {
             let Some(fact) = self.capability.facts.exec_scratch_quota.as_ref() else {
                 return Err(DriverError::unserved(
-                    "exec.scratch-quota-unserved",
+                    substrate_wire::EXEC_SCRATCH_QUOTA_UNSERVED,
                     "The active host has not proved hard per-exec scratch quotas.",
                     "scratch",
                 ));
@@ -2189,7 +2360,7 @@ impl ProcessRuntime {
                 || scratch.max_inodes > fact.max_inodes
             {
                 return Err(DriverError::exhausted(
-                    "exec.scratch-quota-limit",
+                    substrate_wire::EXEC_SCRATCH_QUOTA_LIMIT,
                     "The requested scratch quota exceeds or misaligns with the proved host limit.",
                     "scratch",
                 ));
@@ -2526,7 +2697,7 @@ impl ProcessRuntime {
         };
         let quotas = self.quotas.clone().ok_or_else(|| {
             DriverError::unserved(
-                "exec.scratch-quota-unserved",
+                substrate_wire::EXEC_SCRATCH_QUOTA_UNSERVED,
                 "The active host has not proved hard per-exec scratch quotas.",
                 "scratch",
             )
@@ -2686,6 +2857,11 @@ async fn run_child(
     // owned by `apertures`, so killing and reaping the relays cannot invalidate them and no relay
     // can increment a counter after the observation is built.
     let cgroup_reconciled = reconcile_cgroup(&cgroup).await;
+    if !cgroup_reconciled {
+        // Recorded before the observation is published, so no acknowledgement can forget the
+        // tree before it is known to need another kill.
+        execution.cgroup_unproven.store(true, Ordering::Release);
+    }
     let scratch_reconciled = scratch.is_none_or(PreparedScratch::close);
     let aperture_exhausted = ceiling_reached(aperture_exhausted, apertures.as_ref());
     // Asked once more after the wait, for exactly the reason `ceiling_reached` is: the drain raises
@@ -3065,22 +3241,30 @@ struct ActivePermit {
 struct TrackingReservation {
     executions: Arc<Mutex<HashMap<String, Arc<Execution>>>>,
     reservations: Arc<Mutex<HashSet<String>>>,
+    unproven: Arc<Mutex<HashMap<String, String>>>,
     id: String,
     installed: bool,
+    /// The exec's own cgroup, once created: if the reservation ends uninstalled while that group
+    /// is still there, a containment could not prove it empty, and the group moves into the
+    /// unproven retry under the slot this reservation held.
+    carried: Option<(PathBuf, String)>,
 }
 
 impl TrackingReservation {
     fn acquire(
         executions: Arc<Mutex<HashMap<String, Arc<Execution>>>>,
         reservations: Arc<Mutex<HashSet<String>>>,
+        unproven: &Arc<Mutex<HashMap<String, String>>>,
         id: &str,
         maximum: usize,
     ) -> Result<Self, DriverError> {
         let executions_guard = executions.lock();
         let mut reservations_guard = reservations.lock();
+        let unproven_guard = unproven.lock();
         if executions_guard
             .len()
             .saturating_add(reservations_guard.len())
+            .saturating_add(unproven_guard.len())
             >= maximum
         {
             return Err(DriverError::exhausted(
@@ -3089,7 +3273,10 @@ impl TrackingReservation {
                 "exec",
             ));
         }
-        if executions_guard.contains_key(id) || !reservations_guard.insert(id.to_owned()) {
+        if executions_guard.contains_key(id)
+            || unproven_guard.contains_key(id)
+            || !reservations_guard.insert(id.to_owned())
+        {
             return Err(DriverError {
                 class: crate::DriverErrorClass::Conflict,
                 code: "exec.already-exists",
@@ -3098,14 +3285,21 @@ impl TrackingReservation {
                 retriable: false,
             });
         }
+        drop(unproven_guard);
         drop(reservations_guard);
         drop(executions_guard);
         Ok(Self {
             executions,
             reservations,
+            unproven: Arc::clone(unproven),
             id: id.to_owned(),
             installed: false,
+            carried: None,
         })
+    }
+
+    fn carry(&mut self, root: &Path, name: String) {
+        self.carried = Some((root.to_path_buf(), name));
     }
 
     fn install(mut self, execution: Arc<Execution>) {
@@ -3117,9 +3311,19 @@ impl TrackingReservation {
 
 impl Drop for TrackingReservation {
     fn drop(&mut self) {
-        if !self.installed {
-            self.reservations.lock().remove(&self.id);
+        if self.installed {
+            return;
         }
+        // A contained-absent dispatch removed its group, so only ENOENT on `cgroup.procs` lets
+        // the reservation end without carrying it. The entry is in the map before the slot is
+        // released, so the bound on tracked execs also bounds the map.
+        if let Some((root, name)) = self.carried.take()
+            && !std::fs::symlink_metadata(root.join(&name).join("cgroup.procs"))
+                .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        {
+            self.unproven.lock().insert(self.id.clone(), name);
+        }
+        self.reservations.lock().remove(&self.id);
     }
 }
 
@@ -3394,6 +3598,15 @@ const fn is_terminal(state: ExecState) -> bool {
     matches!(
         state,
         ExecState::Exited | ExecState::Cancelled | ExecState::Expired | ExecState::Unknown
+    )
+}
+
+/// What `observe` and `signal` answer for an exec the driver no longer tracks whose cgroup it has
+/// not yet proven gone: never `NotFound`, which the daemon reads as physically absent.
+fn unproven_tree_error() -> DriverError {
+    DriverError::failed(
+        "exec.cgroup-not-empty",
+        "The exec's cgroup has not been proven empty yet.",
     )
 }
 
@@ -3744,6 +3957,15 @@ impl Cgroup {
         Ok(())
     }
 
+    /// Proves this cgroup and every cgroup nested beneath it empty, then removes the nested ones
+    /// deepest first and this one last.
+    ///
+    /// Nothing inside a sandbox can create a nested group, but a process outside it with write
+    /// access to the delegated subtree can, and `rmdir` refuses a cgroup with children: without
+    /// the walk such a group keeps the exec's own cgroup, and its tracking slot, until restart.
+    /// The walk never follows a symlink and is bounded in depth and count; a subtree past either
+    /// bound, or with a member anywhere in it, is refused before anything is removed. Callers kill
+    /// first: `cgroup.kill` already reaches every nested group.
     pub(crate) fn prove_empty_and_remove(&self) -> Result<(), DriverError> {
         let processes =
             std::fs::read_to_string(self.path.join("cgroup.procs")).map_err(|error| {
@@ -3758,12 +3980,95 @@ impl Cgroup {
                 "Exec cgroup still contains processes after observation.",
             ));
         }
+        let nested = self.nested_cgroups()?;
+        for cgroup in &nested {
+            match std::fs::read_to_string(cgroup.join("cgroup.procs")) {
+                Ok(processes) if !processes.trim().is_empty() => {
+                    return Err(DriverError::failed(
+                        "exec.cgroup-not-empty",
+                        "A cgroup nested in the exec cgroup still contains processes.",
+                    ));
+                }
+                // A nested group removed meanwhile, or a directory that is no cgroup and holds
+                // none: no member is listed in it.
+                Ok(_) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(DriverError::failed(
+                        "exec.cgroup-read-failed",
+                        format!("nested cgroup processes: {error}"),
+                    ));
+                }
+            }
+        }
+        // Parents precede their children in the walk, so the reverse removes children first.
+        for cgroup in nested.iter().rev() {
+            match std::fs::remove_dir(cgroup) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => {
+                    return Err(DriverError::failed(
+                        "exec.cgroup-cleanup-failed",
+                        format!("nested cgroup cleanup: {error}"),
+                    ));
+                }
+            }
+        }
         std::fs::remove_dir(&self.path).map_err(|error| {
             DriverError::failed(
                 "exec.cgroup-cleanup-failed",
                 format!("cgroup cleanup: {error}"),
             )
         })
+    }
+
+    /// Every cgroup nested beneath this one, parents before their children, never following a
+    /// symlink. A subtree deeper than [`MAX_EXEC_CGROUP_DEPTH`] or holding more than
+    /// [`MAX_EXEC_NESTED_CGROUPS`] groups is refused as a whole, never answered in part.
+    fn nested_cgroups(&self) -> Result<Vec<PathBuf>, DriverError> {
+        let past_bound = || {
+            DriverError::failed(
+                "exec.cgroup-not-empty",
+                format!(
+                    "The exec cgroup nests cgroups deeper than {MAX_EXEC_CGROUP_DEPTH} levels or \
+                     more than {MAX_EXEC_NESTED_CGROUPS} of them; they are kept for the operator."
+                ),
+            )
+        };
+        // The exec's own cgroup at depth 0, then each nested group in the order it was found.
+        let mut found: Vec<(PathBuf, usize)> = vec![(self.path.clone(), 0)];
+        let mut next = 0;
+        while let Some((path, depth)) = found.get(next).cloned() {
+            next += 1;
+            let entries = match std::fs::read_dir(&path) {
+                Ok(entries) => entries,
+                // A nested group removed during the walk has nothing left to visit.
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound && depth > 0 => {
+                    continue;
+                }
+                Err(error) => {
+                    return Err(DriverError::failed(
+                        "exec.cgroup-read-failed",
+                        format!("cgroup walk: {error}"),
+                    ));
+                }
+            };
+            for entry in entries {
+                let entry = entry.map_err(|error| {
+                    DriverError::failed("exec.cgroup-read-failed", format!("cgroup walk: {error}"))
+                })?;
+                // `DirEntry::file_type` does not follow a symlink, so a link is never descended.
+                if !matches!(entry.file_type(), Ok(kind) if kind.is_dir()) {
+                    continue;
+                }
+                // `found` holds the exec's own cgroup besides the nested ones.
+                if depth + 1 > MAX_EXEC_CGROUP_DEPTH || found.len() > MAX_EXEC_NESTED_CGROUPS {
+                    return Err(past_bound());
+                }
+                found.push((entry.path(), depth + 1));
+            }
+        }
+        Ok(found.into_iter().skip(1).map(|(path, _)| path).collect())
     }
 }
 
@@ -4400,9 +4705,9 @@ mod tests {
         ProcessRuntime::admit_writable_subtrees(&pinned, &scoped("allowed"))
             .expect("real directory admitted");
         for (path, code) in [
-            ("missing", "exec.workspace-subtree-absent"),
-            ("file", "exec.workspace-subtree-not-directory"),
-            ("link", "exec.workspace-subtree-symlink"),
+            ("missing", substrate_wire::EXEC_WORKSPACE_SUBTREE_ABSENT),
+            ("file", substrate_wire::EXEC_WORKSPACE_SUBTREE_NOT_DIRECTORY),
+            ("link", substrate_wire::EXEC_WORKSPACE_SUBTREE_SYMLINK),
         ] {
             let error = ProcessRuntime::admit_writable_subtrees(&pinned, &scoped(path))
                 .expect_err("refused");
@@ -4417,7 +4722,10 @@ mod tests {
             None,
         )
         .expect_err("unserved");
-        assert_eq!(error.code, "exec.workspace-scoped-write-unserved");
+        assert_eq!(
+            error.code,
+            substrate_wire::EXEC_WORKSPACE_SCOPED_WRITE_UNSERVED
+        );
     }
 
     #[test]
@@ -5656,6 +5964,610 @@ mod tests {
         };
         assert_eq!(error.code, "exec.post-spawn-failed");
     }
+
+    fn unproven_capability() -> CapabilitySnapshot {
+        CapabilitySnapshot {
+            snapshot: format!("sha256:{}", "7".repeat(64)),
+            driver: HostDriverKind::Host,
+            driver_version: "test".to_owned(),
+            config_generation: 1,
+            probed_at: chrono::Utc::now(),
+            valid_until: None,
+            facts: CapabilityFacts::default(),
+        }
+    }
+
+    /// Exactly what `run_child` leaves tracked when `reconcile_cgroup` could not prove the cgroup
+    /// empty: an `unknown` terminal observation naming the exec's own cgroup, and the flag
+    /// recording that the cgroup itself, not a capsule or a counter, is what went unproven.
+    fn install_terminal_unknown(
+        runtime: &ProcessRuntime,
+        id: &str,
+        cgroup_unproven: bool,
+    ) -> ExecObservation {
+        let mut observation = running_observation(id);
+        observation.resource.state = ExecState::Unknown;
+        observation.output_complete = true;
+        observation.cgroup = Some(format!("substrate-{id}"));
+        let execution = std::sync::Arc::new(Execution::new(
+            observation.clone(),
+            None,
+            std::time::Instant::now(),
+            None,
+        ));
+        execution
+            .cgroup_unproven
+            .store(cgroup_unproven, std::sync::atomic::Ordering::Release);
+        runtime.executions.lock().insert(id.to_owned(), execution);
+        observation
+    }
+
+    /// Portable bookkeeping: acknowledging an exec whose cgroup was never proven empty does not
+    /// forget the tree. The id moves into the unproven map, keeps its tracking slot and cannot be
+    /// started again; an `unknown` exec whose cgroup *was* proven empty is forgotten as before.
+    #[test]
+    fn an_acknowledged_unproven_exec_keeps_its_cgroup_and_its_tracking_slot() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = ProcessRuntime::new(HostConfig::minimum(root.path()), unproven_capability())
+            .expect("runtime");
+        let unproven = install_terminal_unknown(&runtime, "ex_unproven", true);
+        let proven = install_terminal_unknown(&runtime, "ex_proven", false);
+        let superseded = install_terminal_unknown(&runtime, "ex_superseded", true);
+
+        runtime.acknowledge(&unproven);
+        runtime.acknowledge(&proven);
+        runtime.discard_terminal(&superseded.resource.id);
+
+        assert!(runtime.executions.lock().is_empty());
+        let carried = runtime.unproven.lock().clone();
+        assert_eq!(
+            carried.get("ex_unproven").map(String::as_str),
+            Some("substrate-ex_unproven"),
+            "acknowledge carries the unproven cgroup forward: {carried:?}"
+        );
+        assert_eq!(
+            carried.get("ex_superseded").map(String::as_str),
+            Some("substrate-ex_superseded"),
+            "discarding a superseded observation carries it forward too: {carried:?}"
+        );
+        assert!(
+            !carried.contains_key("ex_proven"),
+            "a proven-empty cgroup is not retried: {carried:?}"
+        );
+
+        let reused = super::TrackingReservation::acquire(
+            std::sync::Arc::clone(&runtime.executions),
+            std::sync::Arc::clone(&runtime.reservations),
+            &runtime.unproven,
+            "ex_unproven",
+            8,
+        );
+        assert_eq!(
+            reused.err().map(|error| error.code),
+            Some("exec.already-exists"),
+            "an id whose tree may still be alive is never started again"
+        );
+        let crowded = super::TrackingReservation::acquire(
+            std::sync::Arc::clone(&runtime.executions),
+            std::sync::Arc::clone(&runtime.reservations),
+            &runtime.unproven,
+            "ex_other",
+            2,
+        );
+        assert_eq!(
+            crowded.err().map(|error| error.code),
+            Some("exec.tracking-capacity"),
+            "each unproven tree holds one tracking slot, which is what bounds the map"
+        );
+        assert!(
+            super::TrackingReservation::acquire(
+                std::sync::Arc::clone(&runtime.executions),
+                std::sync::Arc::clone(&runtime.reservations),
+                &runtime.unproven,
+                "ex_other",
+                3,
+            )
+            .is_ok()
+        );
+    }
+
+    /// Portable: only `ENOENT` on a carried cgroup's `cgroup.procs` proves its tree gone. A path
+    /// that cannot be read for another reason (`ENOTDIR` here) or names something other than a
+    /// regular file keeps the entry and its tracking slot for the next round.
+    #[tokio::test]
+    async fn only_a_missing_cgroup_procs_proves_an_unproven_tree_gone() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = HostConfig::minimum(root.path().join("workspaces"));
+        let cgroup_root = root.path().join("cgroups");
+        std::fs::create_dir(&cgroup_root).expect("cgroup root");
+        config.cgroup_root = Some(cgroup_root.clone());
+        let runtime = ProcessRuntime::new(config, unproven_capability()).expect("runtime");
+        std::fs::write(cgroup_root.join("substrate-ex_notdir"), b"").expect("not a directory");
+        std::fs::create_dir_all(cgroup_root.join("substrate-ex_odd").join("cgroup.procs"))
+            .expect("cgroup.procs that is not a file");
+        {
+            let mut unproven = runtime.unproven.lock();
+            for id in ["ex_gone", "ex_notdir", "ex_odd"] {
+                unproven.insert(id.to_owned(), format!("substrate-{id}"));
+            }
+        }
+
+        runtime.retry_unproven().await;
+
+        let carried = runtime.unproven.lock().clone();
+        assert!(
+            !carried.contains_key("ex_gone"),
+            "a cgroup whose cgroup.procs is absent is proven gone: {carried:?}"
+        );
+        for kept in ["ex_notdir", "ex_odd"] {
+            assert_eq!(
+                carried.get(kept).map(String::as_str),
+                Some(format!("substrate-{kept}").as_str()),
+                "{kept} is not proven gone and keeps its entry: {carried:?}"
+            );
+        }
+        let crowded = super::TrackingReservation::acquire(
+            std::sync::Arc::clone(&runtime.executions),
+            std::sync::Arc::clone(&runtime.reservations),
+            &runtime.unproven,
+            "ex_other",
+            2,
+        );
+        assert_eq!(
+            crowded.err().map(|error| error.code),
+            Some("exec.tracking-capacity"),
+            "each kept entry still holds its tracking slot"
+        );
+    }
+
+    /// Portable: a dispatch whose containment could not prove its cgroup empty ends
+    /// `OutcomeUnknown` and never tracks the exec. Its reservation carries the group, still there,
+    /// into the unproven retry before releasing the slot; a group the containment removed, or a
+    /// reservation that was installed, carries nothing.
+    #[test]
+    fn an_uninstalled_reservation_carries_its_remaining_cgroup_into_the_unproven_retry() {
+        let root = tempfile::tempdir().unwrap();
+        let runtime = ProcessRuntime::new(HostConfig::minimum(root.path()), unproven_capability())
+            .expect("runtime");
+        let cgroups = root.path().join("cgroups");
+        std::fs::create_dir_all(cgroups.join("substrate-ex_left")).expect("remaining group");
+        std::fs::write(cgroups.join("substrate-ex_left").join("cgroup.procs"), b"")
+            .expect("cgroup.procs");
+        let reserve = |id: &str| {
+            super::TrackingReservation::acquire(
+                std::sync::Arc::clone(&runtime.executions),
+                std::sync::Arc::clone(&runtime.reservations),
+                &runtime.unproven,
+                id,
+                8,
+            )
+            .expect("reservation")
+        };
+
+        let mut left = reserve("ex_left");
+        left.carry(&cgroups, "substrate-ex_left".to_owned());
+        let mut removed = reserve("ex_removed");
+        removed.carry(&cgroups, "substrate-ex_removed".to_owned());
+        let mut installed = reserve("ex_installed");
+        installed.carry(&cgroups, "substrate-ex_left".to_owned());
+        let observation = running_observation("ex_installed");
+        installed.install(std::sync::Arc::new(Execution::new(
+            observation,
+            None,
+            std::time::Instant::now(),
+            None,
+        )));
+        drop(left);
+        drop(removed);
+
+        assert!(runtime.reservations.lock().is_empty());
+        let carried = runtime.unproven.lock().clone();
+        assert_eq!(
+            carried.into_iter().collect::<Vec<_>>(),
+            vec![("ex_left".to_owned(), "substrate-ex_left".to_owned())],
+            "only the uninstalled reservation whose group remains is carried"
+        );
+        let reused = super::TrackingReservation::acquire(
+            std::sync::Arc::clone(&runtime.executions),
+            std::sync::Arc::clone(&runtime.reservations),
+            &runtime.unproven,
+            "ex_left",
+            8,
+        );
+        assert_eq!(
+            reused.err().map(|error| error.code),
+            Some("exec.already-exists"),
+            "a carried id is never started again"
+        );
+        let crowded = super::TrackingReservation::acquire(
+            std::sync::Arc::clone(&runtime.executions),
+            std::sync::Arc::clone(&runtime.reservations),
+            &runtime.unproven,
+            "ex_other",
+            2,
+        );
+        assert_eq!(
+            crowded.err().map(|error| error.code),
+            Some("exec.tracking-capacity"),
+            "the carried group keeps the slot its reservation held"
+        );
+    }
+
+    /// Portable: an acknowledged exec whose tree is still carried as unproven is not "not found".
+    /// The daemon's recovery pass records an `unknown` exec the driver answers `NotFound` as
+    /// physically absent, which releases its workspace for cleanup; that must wait until a round
+    /// proves the tree gone.
+    #[tokio::test]
+    async fn a_carried_unproven_exec_is_not_reported_absent_until_its_tree_is_proven_gone() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = HostConfig::minimum(root.path().join("workspaces"));
+        let cgroup_root = root.path().join("cgroups");
+        std::fs::create_dir(&cgroup_root).expect("cgroup root");
+        config.cgroup_root = Some(cgroup_root.clone());
+        let runtime = ProcessRuntime::new(config, unproven_capability()).expect("runtime");
+        let group = cgroup_root.join("substrate-ex_carried");
+        std::fs::create_dir(&group).expect("group");
+        std::fs::write(group.join("cgroup.procs"), b"").expect("cgroup.procs");
+        let observation = install_terminal_unknown(&runtime, "ex_carried", true);
+        runtime.acknowledge(&observation);
+
+        let carried = runtime.observe("ex_carried").expect_err("untracked");
+        assert_ne!(
+            carried.class,
+            crate::DriverErrorClass::NotFound,
+            "a tree not yet proven gone is never answered as absent: {}",
+            carried.code
+        );
+        assert_eq!(carried.code, "exec.cgroup-not-empty");
+
+        std::fs::remove_file(group.join("cgroup.procs")).expect("the group's control file is gone");
+        std::fs::remove_dir(&group).expect("the group is gone");
+        runtime.retry_unproven().await;
+        assert_eq!(
+            runtime.observe("ex_carried").expect_err("forgotten").class,
+            crate::DriverErrorClass::NotFound,
+            "once a round proves the tree gone the exec is absent"
+        );
+    }
+
+    /// `signal` gives a carried exec the same answer `observe` does. Lease cleanup's KILL reaches
+    /// an untracked exec through `signal`, and a workspace lease ends its workspace on `NotFound`:
+    /// a tree not proven gone must keep it.
+    #[tokio::test]
+    async fn signal_does_not_answer_absent_for_a_carried_tree_not_yet_proven_gone() {
+        let root = tempfile::tempdir().unwrap();
+        let mut config = HostConfig::minimum(root.path().join("workspaces"));
+        let cgroup_root = root.path().join("cgroups");
+        std::fs::create_dir(&cgroup_root).expect("cgroup root");
+        config.cgroup_root = Some(cgroup_root.clone());
+        let runtime = ProcessRuntime::new(config, unproven_capability()).expect("runtime");
+        let group = cgroup_root.join("substrate-ex_signalled");
+        std::fs::create_dir(&group).expect("group");
+        std::fs::write(group.join("cgroup.procs"), b"").expect("cgroup.procs");
+        let observation = install_terminal_unknown(&runtime, "ex_signalled", true);
+        runtime.acknowledge(&observation);
+        let kill = substrate_wire::ExecSignalInput {
+            signal: substrate_wire::Signal::Kill,
+            grace_ms: 0,
+        };
+
+        let carried = runtime
+            .signal("ex_signalled", &kill)
+            .await
+            .expect_err("untracked");
+        assert_ne!(
+            carried.class,
+            crate::DriverErrorClass::NotFound,
+            "a tree not yet proven gone is never answered as absent: {}",
+            carried.code
+        );
+        assert_eq!(carried.code, "exec.cgroup-not-empty");
+
+        std::fs::remove_dir_all(&group).expect("the group is gone");
+        assert_eq!(
+            runtime
+                .signal("ex_signalled", &kill)
+                .await
+                .expect_err("proven gone")
+                .class,
+            crate::DriverErrorClass::NotFound,
+            "a signal that proves the tree gone answers absent"
+        );
+        assert_eq!(
+            runtime
+                .observe("ex_signalled")
+                .expect_err("forgotten")
+                .class,
+            crate::DriverErrorClass::NotFound,
+            "and the exec is forgotten"
+        );
+    }
+
+    /// A live process in `directory`'s cgroup, reaped by its own task so its end is observable.
+    fn sleeper_in(
+        directory: &std::path::Path,
+    ) -> tokio::task::JoinHandle<std::io::Result<std::process::ExitStatus>> {
+        let mut child = tokio::process::Command::new("/bin/sleep")
+            .arg("300")
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn sleeper");
+        let pid = child.id().expect("a live sleeper has a pid");
+        std::fs::write(directory.join("cgroup.procs"), pid.to_string())
+            .expect("move the sleeper into the exec cgroup");
+        tokio::spawn(async move { child.wait().await })
+    }
+
+    async fn assert_killed(
+        sleeper: tokio::task::JoinHandle<std::io::Result<std::process::ExitStatus>>,
+        what: &str,
+    ) {
+        use std::os::unix::process::ExitStatusExt as _;
+        let status = tokio::time::timeout(Duration::from_secs(5), sleeper)
+            .await
+            .unwrap_or_else(|_| panic!("{what}: the leftover process is still alive"))
+            .expect("reaper task")
+            .expect("reap");
+        assert_eq!(status.signal(), Some(libc::SIGKILL), "{what}: {status:?}");
+    }
+
+    /// The story's acceptance, against a real cgroup: a process left in an exec's cgroup after
+    /// the exec was recorded `unknown` is killed without a daemon restart, by the lease cleanup's
+    /// own `KILL` and by the per-round maintenance step; the observation stays `unknown`; a tree
+    /// that still cannot be proven empty stays retried and keeps blocking the next start; and a
+    /// cgroup the retry emptied does not block it.
+    ///
+    /// Delegated only. Without `SUBSTRATE_VECTORS_CGROUP_ROOT` naming a cgroup v2 subtree this
+    /// process is inside, the case is **absent, never reported as passed** (invariant 3).
+    #[tokio::test(flavor = "multi_thread")]
+    #[allow(clippy::too_many_lines)] // One delegated lifecycle, unknown to proven gone.
+    async fn an_unproven_exec_tree_is_killed_again_before_restart() {
+        let Some(delegated) = delegated_cgroup_root("unproven-retry") else {
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        let mut config = HostConfig::minimum(root.path());
+        config.cgroup_root = Some(delegated.clone());
+        let runtime = ProcessRuntime::new(config.clone(), unproven_capability()).expect("runtime");
+        let kill = substrate_wire::ExecSignalInput {
+            signal: substrate_wire::Signal::Kill,
+            grace_ms: 0,
+        };
+        let mut leftovers = Vec::new();
+        for id in ["ex_lease", "ex_round", "ex_tracked"] {
+            let cgroup = delegated.join(format!("substrate-{id}"));
+            std::fs::create_dir(&cgroup).unwrap();
+            leftovers.push((id, cgroup.clone(), sleeper_in(&cgroup), sleeper_in(&cgroup)));
+        }
+        // A cgroup whose processes the kill reaches but whose directory cannot be removed: its
+        // processes sit in a group nested deeper than the removal walk descends, so after the
+        // kill it holds none and still cannot be proven empty and removed. (An empty nested group
+        // within the bound is removed depth-first, `nested_exec_cgroups_are_removed_depth_first`.)
+        let stuck = delegated.join("substrate-ex_stuck");
+        std::fs::create_dir(&stuck).unwrap();
+        let mut chain = Vec::new();
+        let mut pinned = stuck.clone();
+        for _ in 0..=super::MAX_EXEC_CGROUP_DEPTH {
+            pinned = pinned.join("n");
+            std::fs::create_dir(&pinned).unwrap();
+            chain.push(pinned.clone());
+        }
+        let stuck_sleeper = sleeper_in(&pinned);
+
+        let lease = install_terminal_unknown(&runtime, "ex_lease", true);
+        let round = install_terminal_unknown(&runtime, "ex_round", true);
+        install_terminal_unknown(&runtime, "ex_tracked", true);
+        let stuck_observation = install_terminal_unknown(&runtime, "ex_stuck", true);
+
+        // Still tracked: the KILL reaches the tree and the answer stays `unknown`.
+        let tracked = runtime
+            .signal("ex_tracked", &kill)
+            .await
+            .expect("a tracked terminal exec answers with its observation");
+        assert_eq!(tracked.resource.state, ExecState::Unknown);
+        let stuck_answer = runtime
+            .signal("ex_stuck", &kill)
+            .await
+            .expect("a tracked terminal exec answers with its observation");
+        assert_eq!(
+            stuck_answer.resource.state,
+            ExecState::Unknown,
+            "a tree that cannot be proven empty is never reported terminated"
+        );
+        assert_killed(stuck_sleeper, "ex_stuck").await;
+
+        // `persist_completed_execs` acknowledges before lease cleanup runs.
+        runtime.acknowledge(&lease);
+        runtime.acknowledge(&round);
+        runtime.acknowledge(&stuck_observation);
+
+        // Lease cleanup's own KILL: the driver no longer tracks the exec and this kill proves its
+        // tree gone, so the answer is `NotFound` and the daemon closes the lease as before.
+        let after_lease = runtime.signal("ex_lease", &kill).await;
+        assert_eq!(
+            after_lease.err().map(|error| error.code),
+            Some("resource.not-found")
+        );
+        // The named maintenance step.
+        runtime.retry_unproven().await;
+
+        for (id, cgroup, first, second) in leftovers {
+            assert_killed(first, id).await;
+            assert_killed(second, id).await;
+            assert!(
+                !cgroup.exists(),
+                "{id}: a cgroup proven empty is removed, so no restart is needed for it"
+            );
+            assert!(!runtime.unproven.lock().contains_key(id), "{id} forgotten");
+        }
+        assert!(
+            runtime.unproven.lock().contains_key("ex_stuck"),
+            "a cgroup that could not be proven empty is retried again next round"
+        );
+        assert_eq!(
+            ProcessRuntime::new(config.clone(), unproven_capability())
+                .err()
+                .map(|error| error.code),
+            Some("exec.cgroup-not-empty"),
+            "the startup refusal for an unproven tree is unchanged"
+        );
+
+        // Back within the bound: the round removes the rest of the chain, deepest first.
+        std::fs::remove_dir(chain.last().expect("a chain")).expect("the deepest group is empty");
+        runtime.retry_unproven().await;
+        assert!(runtime.unproven.lock().is_empty());
+        assert!(!stuck.exists());
+        ProcessRuntime::new(config, unproven_capability())
+            .expect("a cgroup the retry emptied does not block the next start");
+        let _ = std::fs::remove_dir(&delegated);
+    }
+
+    /// The story's acceptance, against a real cgroup: groups a process outside the sandbox nests
+    /// under an exec's cgroup, with members in them, do not keep the exec's cgroup or its tracking
+    /// slot. One retry round kills the members, removes the nested groups deepest first and then
+    /// the exec's own, and the slot is free again without a restart.
+    ///
+    /// Delegated only. Without `SUBSTRATE_VECTORS_CGROUP_ROOT` naming a cgroup v2 subtree this
+    /// process is inside, the case is **absent, never reported as passed** (invariant 3).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn nested_exec_cgroups_are_removed_depth_first() {
+        let Some(delegated) = delegated_cgroup_root("nested-depth-first") else {
+            eprintln!(
+                "nested_exec_cgroups_are_removed_depth_first: absent, no delegated cgroup root"
+            );
+            return;
+        };
+        let root = tempfile::tempdir().unwrap();
+        let mut config = HostConfig::minimum(root.path());
+        config.cgroup_root = Some(delegated.clone());
+        let runtime = ProcessRuntime::new(config.clone(), unproven_capability()).expect("runtime");
+        let cgroup = delegated.join("substrate-ex_nested");
+        let deep = cgroup.join("outer").join("inner");
+        let beside = cgroup.join("beside");
+        std::fs::create_dir(&cgroup).unwrap();
+        std::fs::create_dir_all(&deep).unwrap();
+        std::fs::create_dir(&beside).unwrap();
+        let in_deep = sleeper_in(&deep);
+        let in_beside = sleeper_in(&beside);
+        let observation = install_terminal_unknown(&runtime, "ex_nested", true);
+        runtime.acknowledge(&observation);
+        assert_eq!(
+            super::TrackingReservation::acquire(
+                std::sync::Arc::clone(&runtime.executions),
+                std::sync::Arc::clone(&runtime.reservations),
+                &runtime.unproven,
+                "ex_next",
+                1,
+            )
+            .err()
+            .map(|error| error.code),
+            Some("exec.tracking-capacity"),
+            "the carried tree holds its slot until it is proven gone"
+        );
+
+        runtime.retry_unproven().await;
+
+        assert_killed(in_deep, "nested inner").await;
+        assert_killed(in_beside, "nested beside").await;
+        assert!(!deep.exists(), "the deepest nested group is removed");
+        assert!(!beside.exists(), "a sibling nested group is removed");
+        assert!(!cgroup.exists(), "the exec's own cgroup is removed");
+        assert!(
+            !runtime.unproven.lock().contains_key("ex_nested"),
+            "a tree proven gone is forgotten"
+        );
+        super::TrackingReservation::acquire(
+            std::sync::Arc::clone(&runtime.executions),
+            std::sync::Arc::clone(&runtime.reservations),
+            &runtime.unproven,
+            "ex_next",
+            1,
+        )
+        .expect("the slot is free without a restart");
+        ProcessRuntime::new(config, unproven_capability())
+            .expect("nothing is left to block the next start");
+        let _ = std::fs::remove_dir(&delegated);
+        eprintln!("nested_exec_cgroups_are_removed_depth_first: delegated case executed");
+    }
+
+    /// Portable: the removal walk descends real directories only. A symlink in an exec cgroup is
+    /// never followed, so the directory it names keeps its contents; nested directories are
+    /// removed deepest first.
+    #[test]
+    fn the_nested_cgroup_walk_never_follows_a_symlink() {
+        let root = tempfile::tempdir().unwrap();
+        let top = root.path().join("substrate-ex_walk");
+        let elsewhere = root.path().join("elsewhere");
+        std::fs::create_dir_all(top.join("a").join("b")).unwrap();
+        std::fs::create_dir_all(elsewhere.join("kept")).unwrap();
+        std::fs::write(top.join("cgroup.procs"), b"").unwrap();
+        std::os::unix::fs::symlink(&elsewhere, top.join("link")).unwrap();
+        let cgroup = Cgroup::at(top.clone(), "substrate-ex_walk".to_owned());
+
+        // The top still holds its control files on a plain filesystem, so its own `rmdir` fails;
+        // everything nested beneath it is gone, and nothing behind the symlink was touched.
+        assert!(cgroup.prove_empty_and_remove().is_err());
+        assert!(!top.join("a").exists(), "nested groups are removed");
+        assert!(
+            elsewhere.join("kept").is_dir(),
+            "a symlink is never followed"
+        );
+    }
+
+    /// Portable: past the depth bound the walk refuses and removes nothing, rather than looping
+    /// or reporting part of the subtree as the whole.
+    #[test]
+    fn a_cgroup_nested_past_the_bound_is_refused_and_kept() {
+        let root = tempfile::tempdir().unwrap();
+        let top = root.path().join("substrate-ex_deep");
+        std::fs::create_dir(&top).unwrap();
+        std::fs::write(top.join("cgroup.procs"), b"").unwrap();
+        let mut deepest = top.clone();
+        for _ in 0..=super::MAX_EXEC_CGROUP_DEPTH {
+            deepest = deepest.join("n");
+        }
+        std::fs::create_dir_all(&deepest).unwrap();
+        let cgroup = Cgroup::at(top.clone(), "substrate-ex_deep".to_owned());
+
+        let refused = cgroup.prove_empty_and_remove().expect_err("past the bound");
+        assert_eq!(refused.code, "exec.cgroup-not-empty");
+        assert!(deepest.is_dir(), "nothing is removed past the bound");
+        assert!(top.join("n").is_dir(), "nor above it");
+    }
+
+    /// Portable: past the count bound the walk refuses and removes nothing.
+    #[test]
+    fn a_cgroup_with_more_nested_groups_than_the_bound_is_refused_and_kept() {
+        let root = tempfile::tempdir().unwrap();
+        let top = root.path().join("substrate-ex_wide");
+        std::fs::create_dir(&top).unwrap();
+        std::fs::write(top.join("cgroup.procs"), b"").unwrap();
+        for index in 0..=super::MAX_EXEC_NESTED_CGROUPS {
+            std::fs::create_dir(top.join(format!("g{index}"))).unwrap();
+        }
+        let cgroup = Cgroup::at(top.clone(), "substrate-ex_wide".to_owned());
+
+        let refused = cgroup.prove_empty_and_remove().expect_err("past the bound");
+        assert_eq!(refused.code, "exec.cgroup-not-empty");
+        assert!(top.join("g0").is_dir(), "nothing is removed past the bound");
+    }
+
+    /// Portable: a member in any nested group keeps the whole subtree, nothing removed.
+    #[test]
+    fn a_member_in_a_nested_group_keeps_the_whole_subtree() {
+        let root = tempfile::tempdir().unwrap();
+        let top = root.path().join("substrate-ex_member");
+        let inner = top.join("a").join("b");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::write(top.join("cgroup.procs"), b"").unwrap();
+        std::fs::write(inner.join("cgroup.procs"), b"4242\n").unwrap();
+        let cgroup = Cgroup::at(top.clone(), "substrate-ex_member".to_owned());
+
+        let refused = cgroup.prove_empty_and_remove().expect_err("populated");
+        assert_eq!(refused.code, "exec.cgroup-not-empty");
+        assert!(inner.is_dir(), "a populated nested group is kept");
+    }
+
     /// One admitted exec, run to its terminal observation, or a panic naming the refusal.
     ///
     /// Never a silent skip: the caller has already proved the delegated root, so a refusal here is
@@ -6895,8 +7807,13 @@ mod tests {
             host_path: host_text.clone(),
             mount: "/opt/root".to_owned(),
         }];
-        let roots =
-            ProcessRuntime::admit_read_only_roots(&input.read_only_roots).expect("admitted root");
+        let roots = ProcessRuntime::admit_read_only_roots(
+            &input.read_only_roots,
+            Some(&substrate_wire::ReadOnlyRootFacts {
+                max_roots: substrate_wire::MAX_READ_ONLY_ROOTS,
+            }),
+        )
+        .expect("admitted root");
         let slots = crate::secrets::SecretSlotSet::acquire(&[], &[]).expect("no slots");
         let sync = std::fs::File::open("/dev/null").expect("a barrier descriptor");
         let pinned = crate::fs::pin_workspace_directory(&workspace).expect("pinned workspace");
@@ -6942,6 +7859,88 @@ mod tests {
         );
         assert_eq!(descriptor, roots[0].raw_fd(), "{argv:?}");
         assert_cloexec(descriptor);
+    }
+
+    /// `story:host-admit-checks-the-read-only-roots-fact`: the driver itself refuses a start
+    /// naming a read-only root when its own capability snapshot lacks `exec.read-only-roots`,
+    /// with the daemon's code, class, address and message (`check_read_only_roots` in the daemon's
+    /// `app/operations.rs`), so an embedder that reaches the driver without the daemon is refused
+    /// too. Called through the driver's public `start`; portable, nothing runs.
+    #[tokio::test]
+    async fn the_driver_refuses_read_only_roots_its_snapshot_does_not_publish() {
+        let root = tempfile::tempdir().expect("root");
+        let workspaces = root.path().join("workspaces");
+        let workspace = workspaces.join("ws_test");
+        std::fs::create_dir_all(&workspace).expect("workspace");
+        let host = std::fs::canonicalize(root.path())
+            .expect("canonical root")
+            .join("declared-root");
+        std::fs::create_dir(&host).expect("declared root");
+        let snapshot = format!("sha256:{}", "7".repeat(64));
+        let capability = |facts: CapabilityFacts| CapabilitySnapshot {
+            snapshot: snapshot.clone(),
+            driver: HostDriverKind::Host,
+            driver_version: "test".to_owned(),
+            config_generation: 1,
+            probed_at: chrono::Utc::now(),
+            valid_until: None,
+            facts,
+        };
+        let mut input = pty_exec_input(&snapshot);
+        input.read_only_roots = vec![substrate_wire::ReadOnlyRoot {
+            host_path: host.to_str().expect("UTF-8 root").to_owned(),
+            mount: "/opt/root".to_owned(),
+        }];
+
+        let unpublished = ProcessRuntime::new(
+            HostConfig::minimum(&workspaces),
+            capability(CapabilityFacts::default()),
+        )
+        .expect("runtime");
+        let DispatchOutcome::NotDispatched(refused) =
+            unpublished.start("ex_test", &workspace, &input).await
+        else {
+            panic!("a start naming an unpublished read-only root is refused before dispatch");
+        };
+        assert_eq!(refused.code, "exec.sandbox-unavailable");
+        assert_eq!(refused.class, crate::DriverErrorClass::Unserved);
+        assert_eq!(refused.address.as_deref(), Some("read_only_roots"));
+        assert_eq!(
+            refused.message,
+            "This host does not publish exec.read-only-roots, so no declared read-only root can \
+             be bound."
+        );
+
+        // The control: the same start on a host that publishes the fact passes this check.
+        let published = ProcessRuntime::new(
+            HostConfig::minimum(&workspaces),
+            capability(CapabilityFacts {
+                exec_read_only_roots: Some(substrate_wire::ReadOnlyRootFacts {
+                    max_roots: substrate_wire::MAX_READ_ONLY_ROOTS,
+                }),
+                ..CapabilityFacts::default()
+            }),
+        )
+        .expect("runtime");
+        if let Err(error) = published.admit("ex_test", &workspace, &[], &input) {
+            assert_ne!(
+                error.address.as_deref(),
+                Some("read_only_roots"),
+                "a published fact admits the root: {} {}",
+                error.code,
+                error.message
+            );
+        }
+
+        // An invalid root is still refused by shape first, whatever the fact says (the daemon's
+        // order: 422 before 501).
+        input.read_only_roots[0].host_path = "relative".to_owned();
+        let DispatchOutcome::NotDispatched(invalid) =
+            unpublished.start("ex_test", &workspace, &input).await
+        else {
+            panic!("an invalid root is refused before dispatch");
+        };
+        assert_eq!(invalid.code, substrate_wire::READ_ONLY_ROOT_INVALID);
     }
 
     /// The launch barrier and the info pipe end bubblewrap uses sit above the slot range,
@@ -7133,5 +8132,204 @@ mod tests {
              every sandbox in this crate lets a confined process nest a user namespace",
             sites[0].0
         );
+    }
+}
+
+/// Adversary cases for `story:an-unknown-exec-is-killed-again-before-restart`, wave 2026-10-23.
+///
+/// The unit's own delegated case installs the `cgroup_unproven` flag by hand; nothing drives
+/// `run_child` into an unproven cgroup. This module does, so the line that raises the flag is
+/// under test.
+#[cfg(test)]
+mod adversary_unknown_exec_retry {
+    use std::os::unix::process::ExitStatusExt as _;
+    use std::time::Duration;
+
+    use substrate_wire::{
+        CapabilityFacts, CapabilitySnapshot, CgroupLimitFacts, ExecEnvironment, ExecLimits,
+        ExecStartInput, ExecState, HostDriverKind, NamespaceFacts, NetworkMode, SandboxProfile,
+    };
+
+    use super::ProcessRuntime;
+    use crate::{DispatchOutcome, HostConfig};
+
+    fn delegated(name: &str) -> Option<std::path::PathBuf> {
+        let root = std::path::PathBuf::from(std::env::var_os("SUBSTRATE_VECTORS_CGROUP_ROOT")?);
+        let path = root.join(format!("host-pty-{name}"));
+        if path.is_dir() {
+            let _replaced = std::fs::remove_dir_all(&path);
+        }
+        std::fs::create_dir(&path).ok()?;
+        let controllers = "+cpu +memory +pids";
+        std::fs::write(root.join("cgroup.subtree_control"), controllers).ok()?;
+        std::fs::write(path.join("cgroup.subtree_control"), controllers).ok()?;
+        Some(path)
+    }
+
+    fn capability(snapshot: &str) -> CapabilitySnapshot {
+        CapabilitySnapshot {
+            snapshot: snapshot.to_owned(),
+            driver: HostDriverKind::Host,
+            driver_version: "test".to_owned(),
+            config_generation: 7,
+            probed_at: chrono::Utc::now(),
+            valid_until: None,
+            facts: CapabilityFacts {
+                exec_argv_only: Some(true),
+                exec_namespaces: Some(NamespaceFacts {
+                    user: true,
+                    mount: true,
+                    pid: true,
+                    ipc: true,
+                    uts: true,
+                    network: true,
+                }),
+                exec_no_egress: Some(true),
+                exec_cgroup_limits: Some(CgroupLimitFacts {
+                    processes: true,
+                    memory: true,
+                    cpu: true,
+                }),
+                exec_cgroup_kill: Some(true),
+                exec_output_limit_bytes: Some(65_536),
+                ..CapabilityFacts::default()
+            },
+        }
+    }
+
+    fn input(snapshot: &str, argv: &[&str]) -> ExecStartInput {
+        ExecStartInput {
+            writable_roots: Vec::new(),
+            read_only_roots: Vec::new(),
+            read_only_files: Vec::new(),
+            secret_slots: Vec::new(),
+            workspace: "ws_test".to_owned(),
+            argv: argv.iter().map(|part| (*part).to_owned()).collect(),
+            env: ExecEnvironment {
+                allow: vec![],
+                set: std::collections::BTreeMap::new(),
+            },
+            sandbox: substrate_wire::ConfinementRequest {
+                capability_snapshot: snapshot.to_owned(),
+                network: NetworkMode::None,
+                aperture: None,
+                apertures: Vec::new(),
+                profile: SandboxProfile::Workspace,
+                required: true,
+            },
+            limits: ExecLimits {
+                timeout_ms: 5_000,
+                output_bytes: 65_536,
+                processes: 32,
+                memory_bytes: 67_108_864,
+                cpu_millis: 1_000,
+            },
+            wait: false,
+            workspace_access: substrate_wire::WorkspaceAccess::ReadWrite,
+            scratch: None,
+            measurements: std::collections::BTreeSet::new(),
+            capsule: None,
+            lease_ttl_ms: Some(60_000),
+            workdir: None,
+        }
+    }
+
+    /// A real exec whose cgroup `run_child` cannot prove empty (a nested group pins the
+    /// directory) ends `unknown`. A process that then forks continuously inside that cgroup, after
+    /// the daemon acknowledged the observation, is killed by one `retry_unproven` round; the tree
+    /// stays retried while the directory cannot be removed; once it can, one round removes it and
+    /// the next start is not refused.
+    ///
+    /// Delegated only: absent, never passed, without `SUBSTRATE_VECTORS_CGROUP_ROOT`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_real_exec_left_unproven_by_run_child_is_killed_by_the_next_round() {
+        let Some(root) = delegated("adversary-u2-real") else {
+            return;
+        };
+        let state = tempfile::tempdir().unwrap();
+        let workspace = state.path().join("ws_test");
+        std::fs::create_dir(&workspace).unwrap();
+        let snapshot = format!("sha256:{}", "7".repeat(64));
+        let mut config = HostConfig::minimum(state.path());
+        config.cgroup_root = Some(root.clone());
+        let runtime = ProcessRuntime::new(config.clone(), capability(&snapshot)).expect("runtime");
+
+        let id = "ex_adversary_u2_real";
+        let started = runtime
+            .start(id, &workspace, &input(&snapshot, &["/bin/sleep", "1"]))
+            .await;
+        assert!(
+            matches!(started, DispatchOutcome::Observed(_)),
+            "the delegated lane must dispatch the exec"
+        );
+        let cgroup = root.join(format!("substrate-{id}"));
+        // Pinned by a chain of nested groups deeper than the removal walk descends; an empty
+        // nested group within the bound is removed depth-first and pins nothing.
+        let mut pinned = cgroup.clone();
+        for _ in 0..=super::MAX_EXEC_CGROUP_DEPTH {
+            pinned = pinned.join("n");
+            std::fs::create_dir(&pinned).expect("pin the exec cgroup with a nested chain");
+        }
+
+        let terminal = tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                let observed = runtime.observe(id).expect("tracked");
+                if super::is_terminal(observed.resource.state) {
+                    return observed;
+                }
+                tokio::time::sleep(Duration::from_millis(50)).await;
+            }
+        })
+        .await
+        .expect("the exec reaches a terminal observation");
+        assert_eq!(
+            terminal.resource.state,
+            ExecState::Unknown,
+            "an exec cgroup that cannot be removed is never reported terminated: {terminal:?}"
+        );
+
+        // The survivor: a shell that forks a short-lived child every 10 ms, moved into the
+        // pinned group before its loop starts.
+        let mut survivor = tokio::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("sleep 0.2; while :; do /bin/true & sleep 0.01; done")
+            .kill_on_drop(true)
+            .spawn()
+            .expect("spawn survivor");
+        let pid = survivor.id().expect("live survivor");
+        std::fs::write(pinned.join("cgroup.procs"), pid.to_string()).expect("move survivor");
+        let reaper = tokio::spawn(async move { survivor.wait().await });
+        tokio::time::sleep(Duration::from_millis(400)).await;
+
+        // `persist_completed_execs` acknowledges the observation exactly as recorded.
+        runtime.acknowledge(&terminal);
+        assert!(runtime.observe(id).is_err(), "acknowledged, so untracked");
+
+        // One maintenance round.
+        runtime.retry_unproven().await;
+        let status = tokio::time::timeout(Duration::from_secs(5), reaper)
+            .await
+            .expect("one maintenance round kills the forking survivor")
+            .expect("reaper")
+            .expect("reap");
+        assert_eq!(status.signal(), Some(libc::SIGKILL), "{status:?}");
+        assert!(cgroup.exists(), "still pinned, so not removed");
+        assert_eq!(
+            runtime.unproven.lock().get(id).map(String::as_str),
+            Some("substrate-ex_adversary_u2_real"),
+            "a tree not proven empty stays retried"
+        );
+
+        // Back within the bound: the round removes the rest of the chain, deepest first.
+        std::fs::remove_dir(&pinned).expect("the deepest group is empty after the kill");
+        runtime.retry_unproven().await;
+        assert!(
+            !cgroup.exists(),
+            "one round removes a cgroup it can prove empty"
+        );
+        assert!(runtime.unproven.lock().is_empty());
+        ProcessRuntime::new(config, capability(&snapshot))
+            .expect("a restart after a proven-empty retry is not refused");
+        let _ = std::fs::remove_dir(&root);
     }
 }

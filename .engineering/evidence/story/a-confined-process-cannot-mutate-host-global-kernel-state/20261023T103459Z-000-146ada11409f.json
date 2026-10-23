@@ -1,0 +1,14 @@
+{
+  "at": "2026-10-23T10:34:59Z",
+  "actor": "agent:b10x-chef-orchestrator",
+  "artifact": "story:a-confined-process-cannot-mutate-host-global-kernel-state",
+  "kind": "story",
+  "revision": 6,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:wave-2026-10-23-b4-security-pass-1",
+    "review": "review-result:wave-2026-10-23-b4-security-pass-1",
+    "outcome": "fixed"
+  }
+}

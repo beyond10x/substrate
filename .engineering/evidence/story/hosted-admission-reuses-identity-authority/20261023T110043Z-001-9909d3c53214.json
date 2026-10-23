@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-23T11:00:43Z",
+  "actor": "agent:b10x-chef-orchestrator",
+  "artifact": "story:hosted-admission-reuses-identity-authority",
+  "kind": "story",
+  "revision": 6,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "unit gate: daemon tests 300 passed, hosted_pool_adversary_pass1 8 passed (2 red before the fix), clippy -D warnings, fmt; check-adrs 41 records on the integration branch",
+    "reference": "unit/2026-10-23-b7-identity-pool@6de78f3"
+  }
+}

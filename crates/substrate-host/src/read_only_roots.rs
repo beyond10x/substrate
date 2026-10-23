@@ -10,7 +10,7 @@
 use std::ffi::CString;
 use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd, RawFd};
 
-use substrate_wire::ReadOnlyRoot;
+use substrate_wire::{ReadOnlyRoot, ReadOnlyRootFacts};
 
 use crate::DriverError;
 
@@ -56,6 +56,40 @@ impl PinnedRoot {
             self.mount.clone(),
         ]
     }
+}
+
+/// The driver's own admission of declared roots, in the daemon's order
+/// (`check_read_only_roots` in the daemon's `app/operations.rs`): the wire's lexical rules, then
+/// the fact, then each root opened and checked by descriptor. A start naming a root on a host
+/// whose snapshot does not publish `exec.read-only-roots` is refused `exec.sandbox-unavailable`
+/// with the daemon's message and address, so an embedder that reaches the driver without the
+/// daemon is refused too and no root is ever bound by a host that does not publish it
+/// (invariant 3).
+///
+/// The fact comes before any path is opened: a host that cannot bind a root never resolves a path
+/// the caller named, so its answer says nothing about what is or is not at that path. The
+/// per-root filesystem refusals (`absent`, `not-a-directory`) are answered only by a host that
+/// publishes the fact.
+pub(crate) fn admit(
+    roots: &[ReadOnlyRoot],
+    published: Option<&ReadOnlyRootFacts>,
+) -> Result<Vec<PinnedRoot>, DriverError> {
+    substrate_wire::validate_read_only_roots(roots).map_err(|error| {
+        DriverError::refused(
+            substrate_wire::READ_ONLY_ROOT_INVALID,
+            substrate_wire::read_only_root_invalid_message(&error),
+            ADDRESS,
+        )
+    })?;
+    if !roots.is_empty() && published.is_none() {
+        return Err(DriverError::unserved(
+            "exec.sandbox-unavailable",
+            "This host does not publish exec.read-only-roots, so no declared read-only root can \
+             be bound.",
+            ADDRESS,
+        ));
+    }
+    pin(roots)
 }
 
 /// Opens, checks and pins every declared root, in declaration order. The lexical rules are the
@@ -144,7 +178,7 @@ fn classify(path: &CString, error: &std::io::Error) -> DriverError {
         // A directory on the way the daemon may not search: the daemon cannot observe the root,
         // so for this host it is not present, said apart in the message, as for a single file.
         Some(libc::EACCES) => DriverError::refused(
-            "exec.read-only-root-absent",
+            substrate_wire::READ_ONLY_ROOT_ABSENT,
             "A declared read-only root is not reachable: a directory on its path is not \
              searchable by this host.",
             ADDRESS,
@@ -157,16 +191,16 @@ fn classify(path: &CString, error: &std::io::Error) -> DriverError {
 
 fn absent() -> DriverError {
     DriverError::refused(
-        "exec.read-only-root-absent",
-        "A declared read-only root is not present on this host.",
+        substrate_wire::READ_ONLY_ROOT_ABSENT,
+        substrate_wire::READ_ONLY_ROOT_ABSENT_MESSAGE,
         ADDRESS,
     )
 }
 
 fn not_a_directory() -> DriverError {
     DriverError::refused(
-        "exec.read-only-root-not-a-directory",
-        "A declared read-only root is not a directory, or is reached through a symlink.",
+        substrate_wire::READ_ONLY_ROOT_NOT_A_DIRECTORY,
+        substrate_wire::READ_ONLY_ROOT_NOT_A_DIRECTORY_MESSAGE,
         ADDRESS,
     )
 }

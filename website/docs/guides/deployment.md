@@ -96,7 +96,10 @@ the handler can write durable state:
 Missing, invalid, under-scoped and temporarily unavailable authority returns
 `auth.credential-absent`, `auth.authority-invalid`, `auth.scope-denied` or
 `auth.authority-unavailable`. No stale authority is cached, so a completed Identity revocation
-applies to the next request. Caller-written subject, tenant, actor, UID and forwarded-address
+applies to the next request. The per-request cost is one HTTP round trip to Identity: Substrate
+keeps at most 8 idle keep-alive connections to the Identity origin, closes one after 30 seconds
+idle, and never reuses a connection after an error, a refusal or a response that asked to close it.
+A TCP and TLS handshake happens only when no idle connection is available. Caller-written subject, tenant, actor, UID and forwarded-address
 headers do not become identity. There is no production plaintext fallback, mutual-TLS identity
 mapping, trusted forwarded address, redirect, proxy, or verification-disable switch.
 
