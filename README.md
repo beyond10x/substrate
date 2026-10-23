@@ -479,7 +479,9 @@ checked against the addressed route before any handler can reserve a durable ope
 invalid, under-scoped and temporarily unresolvable authority answers `auth.credential-absent`,
 `auth.authority-invalid`, `auth.scope-denied` or `auth.authority-unavailable`; there is no cached or
 caller-written fallback. There is no production plaintext fallback and no verification-disable
-flag.
+flag. Every request resolves online, at the cost of one HTTP round trip on a reused keep-alive
+connection: at most 8 idle connections, each closed after 30 seconds idle or after any error,
+refusal or close-requesting response (ADR 0040).
 
 The Rust SDK addresses this listener only when the caller supplies the exact HTTPS origin, PEM
 trust roots, expected DNS identity and an asynchronous Identity access-token provider. It uses the

@@ -7,7 +7,7 @@ use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use axum::extract::State;
@@ -126,7 +126,10 @@ fn daemon_command(
         .arg("--hosted-identity-ca-bundle")
         .arg(identity_ca)
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+        .stderr(Stdio::piped())
+        // A failed assertion unwinds before the case's own SIGTERM; the dropped child must not
+        // outlive the test holding the test runner's inherited descriptors.
+        .kill_on_drop(true);
     if let Some(cgroup_root) = std::env::var_os("SUBSTRATE_VECTORS_CGROUP_ROOT") {
         command.arg("--cgroup-root").arg(cgroup_root);
     }
@@ -140,7 +143,11 @@ struct AuthorityState {
     workspace: String,
     exec: String,
     unavailable: String,
+    /// Admitted with `observe`, but the response asks to close the connection.
+    closing: String,
     revoked: Arc<AtomicBool>,
+    /// TCP connections the Identity listener accepted.
+    accepts: Arc<AtomicUsize>,
 }
 
 fn access_credential(fill: char) -> String {
@@ -162,22 +169,24 @@ async fn resolve_authority(State(state): State<AuthorityState>, headers: HeaderM
     if credential == Some(state.unavailable.as_str()) {
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
-    let scope =
-        if credential == Some(state.observe.as_str()) && !state.revoked.load(Ordering::SeqCst) {
-            "observe"
-        } else if credential == Some(state.workspace.as_str()) {
-            "workspaces"
-        } else if credential == Some(state.exec.as_str()) {
-            "exec"
-        } else {
-            return StatusCode::UNAUTHORIZED.into_response();
-        };
+    let closing = credential == Some(state.closing.as_str());
+    let observe =
+        credential == Some(state.observe.as_str()) && !state.revoked.load(Ordering::SeqCst);
+    let scope = if observe || closing {
+        "observe"
+    } else if credential == Some(state.workspace.as_str()) {
+        "workspaces"
+    } else if credential == Some(state.exec.as_str()) {
+        "exec"
+    } else {
+        return StatusCode::UNAUTHORIZED.into_response();
+    };
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("wall time")
         .as_secs();
     let now = i64::try_from(now).expect("wall time fits");
-    Json(json!({
+    let authority = Json(json!({
         "iss": state.origin,
         "sub": "sensitive-subject-marker",
         "aud": "urn:b10x:substrate",
@@ -191,8 +200,12 @@ async fn resolve_authority(State(state): State<AuthorityState>, headers: HeaderM
         "tenant_id": "sensitive-tenant-marker",
         "email": null,
         "groups": []
-    }))
-    .into_response()
+    }));
+    if closing {
+        ([(axum::http::header::CONNECTION, "close")], authority).into_response()
+    } else {
+        authority.into_response()
+    }
 }
 
 async fn start_identity_authority(
@@ -209,7 +222,9 @@ async fn start_identity_authority(
         workspace: access_credential('w'),
         exec: access_credential('e'),
         unavailable: access_credential('u'),
+        closing: access_credential('c'),
         revoked: Arc::new(AtomicBool::new(false)),
+        accepts: Arc::new(AtomicUsize::new(0)),
     };
     let mut certificates = rustls_pemfile::certs(&mut identity.certificate_pem.as_bytes())
         .collect::<Result<Vec<_>, _>>()
@@ -226,11 +241,13 @@ async fn start_identity_authority(
     let service = Router::new()
         .route("/v1/access-authority", get(resolve_authority))
         .with_state(state.clone());
+    let accepts = Arc::clone(&state.accepts);
     let task = tokio::spawn(async move {
         loop {
             let Ok((stream, _)) = listener.accept().await else {
                 return;
             };
+            accepts.fetch_add(1, Ordering::SeqCst);
             let acceptor = acceptor.clone();
             let service = service.clone();
             tokio::spawn(async move {
@@ -1000,6 +1017,98 @@ async fn production_tls_refuses_unverified_routes_and_rotates_atomically() {
         operations, 0,
         "scope refusal reached durable operation admission"
     );
+    authority_task.abort();
+}
+
+async fn hosted_status(stream: &mut TlsStream<TcpStream>, credential: &str) -> String {
+    let request_bytes = format!(
+        "GET /v1/machine HTTP/1.1\r\nHost: substrate.test\r\nAuthorization: Bearer {credential}\r\nConnection: keep-alive\r\n\r\n"
+    );
+    let response = request(stream, request_bytes.as_bytes()).await;
+    let response = String::from_utf8(response).expect("hosted response text");
+    response
+        .get(9..12)
+        .expect("hosted response status")
+        .to_owned()
+}
+
+/// ADR 0040: every hosted request resolves online, over a reused Identity connection, and a
+/// connection is never reused after an error or a response that asked to close it.
+#[tokio::test]
+async fn hosted_admission_reuses_one_identity_connection_and_never_an_errored_one() {
+    let root = TempDir::new().expect("temporary root");
+    let server = current_identity();
+    let authority_identity = identity_for(IDENTITY_NAME, (2025, 1, 1), (2035, 1, 1));
+    let identity_ca = root.path().join("identity-ca.pem");
+    std::fs::write(&identity_ca, &authority_identity.certificate_pem).expect("Identity CA");
+    let (authority, authority_task) = start_identity_authority(&authority_identity).await;
+    let (certificate, private_key) = write_identity(root.path(), &server);
+    let address = unused_address();
+    let mut child = daemon_command(
+        root.path(),
+        address,
+        &certificate,
+        &private_key,
+        &authority.origin,
+        &identity_ca,
+    )
+    .spawn()
+    .expect("spawn TLS daemon");
+    let trusted = connector([server.certificate_der.clone()]);
+    let mut https = connect_when_ready(&mut child, address, &trusted).await;
+    let accepts = || authority.accepts.load(Ordering::SeqCst);
+    assert_eq!(accepts(), 0, "readiness reached Identity");
+
+    assert_eq!(hosted_status(&mut https, &authority.observe).await, "200");
+    assert_eq!(hosted_status(&mut https, &authority.observe).await, "200");
+    assert_eq!(
+        accepts(),
+        1,
+        "two hosted requests did not resolve over one Identity connection"
+    );
+
+    assert_eq!(
+        hosted_status(&mut https, &authority.unavailable).await,
+        "503"
+    );
+    assert_eq!(accepts(), 1, "the pooled connection was not reused");
+    assert_eq!(hosted_status(&mut https, &authority.observe).await, "200");
+    assert_eq!(
+        accepts(),
+        2,
+        "a connection was reused after Identity answered an error"
+    );
+
+    authority.revoked.store(true, Ordering::SeqCst);
+    assert_eq!(
+        hosted_status(&mut https, &authority.observe).await,
+        "401",
+        "a revoked credential was admitted from a pooled resolution"
+    );
+    authority.revoked.store(false, Ordering::SeqCst);
+    assert_eq!(accepts(), 2);
+    assert_eq!(hosted_status(&mut https, &authority.observe).await, "200");
+    assert_eq!(
+        accepts(),
+        3,
+        "a connection was reused after Identity refused the credential"
+    );
+
+    assert_eq!(hosted_status(&mut https, &authority.closing).await, "200");
+    assert_eq!(accepts(), 3);
+    assert_eq!(hosted_status(&mut https, &authority.observe).await, "200");
+    assert_eq!(
+        accepts(),
+        4,
+        "a connection was reused after Identity asked to close it"
+    );
+
+    signal(&child, Signal::SIGTERM);
+    let output = tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
+        .await
+        .expect("TLS daemon shutdown timed out")
+        .expect("wait for TLS daemon");
+    assert!(output.status.success(), "TLS daemon: {output:?}");
     authority_task.abort();
 }
 

@@ -6,8 +6,8 @@ use std::io::BufReader;
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::PathBuf;
 use std::str::FromStr as _;
-use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, bail};
 use axum::body::Body;
@@ -39,6 +39,10 @@ const AUTHORITY_PATH: &str = "/v1/access-authority";
 const MAX_CA_BUNDLE_BYTES: u64 = 1024 * 1024;
 const MAX_AUTHORITY_BYTES: usize = 64 * 1024;
 const RESOLUTION_TIMEOUT: Duration = Duration::from_secs(5);
+/// Idle Identity connections held for reuse (ADR 0040).
+const MAX_IDLE_IDENTITY_CONNECTIONS: usize = 8;
+/// An idle Identity connection older than this is closed, never used (ADR 0040).
+const IDENTITY_IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_AUTHORITY_LIFETIME_SECONDS: i64 = 5 * 60;
 const CLOCK_SKEW_SECONDS: i64 = 30;
 const ALLOWED_SCOPES: [&str; 3] = ["exec", "observe", "workspaces"];
@@ -52,7 +56,6 @@ pub struct HostedIdentityConfig {
     pub ca_bundle: PathBuf,
 }
 
-#[derive(Clone)]
 pub(crate) struct HostedAdmission {
     origin: String,
     authority: String,
@@ -60,6 +63,42 @@ pub(crate) struct HostedAdmission {
     port: u16,
     server_name: ServerName<'static>,
     connector: TlsConnector,
+    /// Connections that completed a clean exchange, most recent last (ADR 0040).
+    idle: Arc<Mutex<IdlePool>>,
+}
+
+/// The idle half of the Identity connection pool and whether its reaper is running.
+#[derive(Default)]
+struct IdlePool {
+    entries: Vec<IdleConnection>,
+    reaper: bool,
+}
+
+fn lock_pool(pool: &Mutex<IdlePool>) -> std::sync::MutexGuard<'_, IdlePool> {
+    pool.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Close each idle connection once it has been idle for `IDENTITY_IDLE_TIMEOUT`, whether or not
+/// another resolution arrives. One reaper runs while the pool holds a connection; it holds the
+/// pool only weakly and exits when the pool is empty or gone.
+fn spawn_reaper(pool: Weak<Mutex<IdlePool>>) {
+    tokio::spawn(async move {
+        loop {
+            let deadline = {
+                let Some(pool) = pool.upgrade() else {
+                    return;
+                };
+                let mut state = lock_pool(&pool);
+                state.entries.retain(IdleConnection::usable);
+                let Some(oldest) = state.entries.iter().map(|entry| entry.since).min() else {
+                    state.reaper = false;
+                    return;
+                };
+                oldest + IDENTITY_IDLE_TIMEOUT
+            };
+            tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)).await;
+        }
+    });
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -93,6 +132,23 @@ struct ConnectionTask(tokio::task::JoinHandle<()>);
 impl Drop for ConnectionTask {
     fn drop(&mut self) {
         self.0.abort();
+    }
+}
+
+/// One HTTP/1.1 connection to Identity. Dropping it closes the connection.
+struct IdentityConnection {
+    sender: http1::SendRequest<Body>,
+    _task: ConnectionTask,
+}
+
+struct IdleConnection {
+    connection: IdentityConnection,
+    since: Instant,
+}
+
+impl IdleConnection {
+    fn usable(&self) -> bool {
+        self.since.elapsed() < IDENTITY_IDLE_TIMEOUT && !self.connection.sender.is_closed()
     }
 }
 
@@ -143,6 +199,7 @@ impl HostedAdmission {
             port,
             server_name,
             connector,
+            idle: Arc::new(Mutex::new(IdlePool::default())),
         })
     }
 
@@ -167,7 +224,24 @@ impl HostedAdmission {
         })
     }
 
+    /// Resolve one credential online. Every call reaches Identity; only the connection is reused
+    /// (ADR 0040).
     async fn resolve(&self, credential: &str) -> Result<ResolvedAuthority, AdmissionFailure> {
+        let mut authorization = HeaderValue::from_str(&format!("Bearer {credential}"))
+            .map_err(|_| AdmissionFailure::Invalid)?;
+        authorization.set_sensitive(true);
+        if let Some(connection) = self.checkout()
+            && let Some(result) = self.exchange(connection, &authorization).await
+        {
+            return result;
+        }
+        let connection = self.connect().await?;
+        self.exchange(connection, &authorization)
+            .await
+            .unwrap_or(Err(AdmissionFailure::Unavailable))
+    }
+
+    async fn connect(&self) -> Result<IdentityConnection, AdmissionFailure> {
         let tcp = TcpStream::connect((self.host.as_str(), self.port))
             .await
             .map_err(|_| AdmissionFailure::Unavailable)?;
@@ -176,28 +250,53 @@ impl HostedAdmission {
             .connect(self.server_name.clone(), tcp)
             .await
             .map_err(|_| AdmissionFailure::Unavailable)?;
-        let (mut sender, connection) = http1::handshake(TokioIo::new(tls))
+        let (sender, connection) = http1::handshake(TokioIo::new(tls))
             .await
             .map_err(|_| AdmissionFailure::Unavailable)?;
-        let _connection = ConnectionTask(tokio::spawn(async move {
+        let task = ConnectionTask(tokio::spawn(async move {
             let _ = connection.await;
         }));
-        let mut authorization = HeaderValue::from_str(&format!("Bearer {credential}"))
-            .map_err(|_| AdmissionFailure::Invalid)?;
-        authorization.set_sensitive(true);
-        let request = Request::builder()
+        Ok(IdentityConnection {
+            sender,
+            _task: task,
+        })
+    }
+
+    /// One request on one connection, `None` when the connection failed before Identity answered.
+    /// The connection returns to the pool only after a clean exchange; on every other path it is
+    /// dropped here, which closes it.
+    async fn exchange(
+        &self,
+        mut connection: IdentityConnection,
+        authorization: &HeaderValue,
+    ) -> Option<Result<ResolvedAuthority, AdmissionFailure>> {
+        if connection.sender.ready().await.is_err() {
+            return None;
+        }
+        let Ok(request) = Request::builder()
             .method(Method::GET)
             .uri(AUTHORITY_PATH)
             .header(header::HOST, &self.authority)
-            .header(header::AUTHORIZATION, authorization)
+            .header(header::AUTHORIZATION, authorization.clone())
             .header("x-b10x-audience", AUDIENCE)
-            .header(header::CONNECTION, "close")
             .body(Body::empty())
-            .map_err(|_| AdmissionFailure::Unavailable)?;
-        let response = sender
-            .send_request(request)
-            .await
-            .map_err(|_| AdmissionFailure::Unavailable)?;
+        else {
+            return Some(Err(AdmissionFailure::Unavailable));
+        };
+        match connection.sender.try_send_request(request).await {
+            Ok(response) => Some(self.read_authority(connection, response).await),
+            // hyper hands the request back only when it was never written to the connection, so
+            // Identity cannot have received it and a retry cannot resolve it twice (ADR 0040).
+            Err(error) if error.message().is_some() => None,
+            Err(_) => Some(Err(AdmissionFailure::Unavailable)),
+        }
+    }
+
+    async fn read_authority(
+        &self,
+        connection: IdentityConnection,
+        response: hyper::Response<hyper::body::Incoming>,
+    ) -> Result<ResolvedAuthority, AdmissionFailure> {
         if response.status() != StatusCode::OK {
             return if response.status().is_server_error()
                 || matches!(
@@ -217,13 +316,59 @@ impl HostedAdmission {
         {
             return Err(AdmissionFailure::Invalid);
         }
+        let keep_alive = response_keeps_alive(&response);
         let bytes = Limited::new(response.into_body(), MAX_AUTHORITY_BYTES)
             .collect()
             .await
             .map_err(|_| AdmissionFailure::Invalid)?
             .to_bytes();
-        serde_json::from_slice(&bytes).map_err(|_| AdmissionFailure::Invalid)
+        let authority = serde_json::from_slice(&bytes).map_err(|_| AdmissionFailure::Invalid)?;
+        if keep_alive {
+            self.checkin(connection);
+        }
+        Ok(authority)
     }
+
+    /// The most recently returned usable idle connection; expired or closed ones are dropped.
+    fn checkout(&self) -> Option<IdentityConnection> {
+        let mut idle = lock_pool(&self.idle);
+        idle.entries.retain(IdleConnection::usable);
+        idle.entries.pop().map(|entry| entry.connection)
+    }
+
+    fn checkin(&self, connection: IdentityConnection) {
+        if connection.sender.is_closed() {
+            return;
+        }
+        let mut idle = lock_pool(&self.idle);
+        idle.entries.retain(IdleConnection::usable);
+        if idle.entries.len() < MAX_IDLE_IDENTITY_CONNECTIONS {
+            idle.entries.push(IdleConnection {
+                connection,
+                since: Instant::now(),
+            });
+            if !idle.reaper {
+                idle.reaper = true;
+                spawn_reaper(Arc::downgrade(&self.idle));
+            }
+        }
+    }
+}
+
+/// An HTTP/1.1 response that does not ask to close its connection.
+fn response_keeps_alive<B>(response: &hyper::Response<B>) -> bool {
+    response.version() == hyper::Version::HTTP_11
+        && !response
+            .headers()
+            .get_all(header::CONNECTION)
+            .iter()
+            .any(|value| {
+                value.to_str().map_or(true, |value| {
+                    value
+                        .split(',')
+                        .any(|token| token.trim().eq_ignore_ascii_case("close"))
+                })
+            })
 }
 
 fn load_connector(path: &std::path::Path) -> anyhow::Result<TlsConnector> {
