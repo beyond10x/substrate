@@ -7,6 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.11.0] — 2026-10-26
+
 ### Added
 
 - Development contract bundle `substrate-wire/0.23.0`, additive over `0.22.0` with no new route.
@@ -40,6 +42,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Changed
 
+- Every workspace package and its exact internal version edges move from 0.10.0 to 0.11.0. Minor:
+  `substrate-wire/0.23.0` adds read-only roots, session-start exec fields and stream bounds.
 - The daemon and the Rust SDK advertise `substrate-wire/0.23.0`.
 - A confined exec's `socket(2)` is an argument allowlist: `AF_INET`/`AF_INET6` with protocol 0,
   TCP or UDP, `AF_NETLINK` with `NETLINK_ROUTE`, and the existing `AF_UNIX` floor;
