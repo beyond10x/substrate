@@ -2,12 +2,13 @@
 format: aep.planning-md/3
 id: task:ess-pin-moves-to-0-69-2
 kind: task
-status: active
+status: implemented
 title: Move the ESS pin to 0.69.2
-revision: 4
+revision: 5
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-26T14:02:17Z", actor: "human:timo", revision: 3}
 - {from: "proposed", to: "active", at: "2026-10-26T14:02:18Z", actor: "human:timo", revision: 4}
+- {from: "active", to: "implemented", at: "2026-10-26T14:25:39Z", actor: "human:timo", revision: 5, decided_on: {"recorded":{"verification":1}}}
 ---
 # Task: move the ESS pin to 0.69.2
 

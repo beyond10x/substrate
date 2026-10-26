@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-26T14:25:39Z",
+  "actor": "human:timo",
+  "artifact": "task:ess-pin-moves-to-0-69-2",
+  "kind": "task",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "verification",
+    "source": "bash scripts/gate.sh with ESS 0.69.2, exit 0 (1281 tests passed, 0 failed); cargo xtask check-ess exit 0",
+    "reference": "deps/ess-0.69.2@98386d0abaf084beb8dde9f4e36a31d78d3eafdf"
+  }
+}
