@@ -64,6 +64,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `Quota-lane: <sha> <case-count> <RFC 3339 UTC>` for the tagged commit. Both lane records are
   refused when they span more than one line, lack exactly three fields, appear twice in the tag,
   or name a timestamp that is not a real UTC instant.
+- The specification, its generated suites and wire types, and CI use ESS 0.69.2 (was 0.68.0);
+  generated vocabulary variants carry their spelling's name, so the hand-written aliases are gone.
 
 ### Fixed
 

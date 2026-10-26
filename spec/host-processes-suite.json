@@ -28506,6 +28506,607 @@
         }
       ]
     },
+    "substrate.host_processes.StartProcess/outcome/name-conflict": {
+      "purpose": "`substrate.host_processes.StartProcess` answers `name-conflict` for an arranged row of the entity its input names, or none",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.StartContainer",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "argv": {
+              "kind": "literal",
+              "value": [
+                "argv.0-1"
+              ]
+            },
+            "keep": {
+              "kind": "literal",
+              "value": false
+            },
+            "keep_reason": {
+              "kind": "literal",
+              "value": "keep_reason-1"
+            },
+            "kind": {
+              "kind": "literal",
+              "value": "k3d"
+            },
+            "lease_ttl_ms": {
+              "kind": "literal",
+              "value": 102.0
+            },
+            "name": {
+              "kind": "literal",
+              "value": "dev-server"
+            },
+            "owner_session_id": {
+              "kind": "literal",
+              "value": "owner_session_id-1"
+            },
+            "owner_session_name": {
+              "kind": "literal",
+              "value": "owner_session_name-1"
+            },
+            "reason": {
+              "kind": "literal",
+              "value": "reason-1"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.StartContainer",
+            "outcome": "started"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "host-process-2",
+          "entity": "substrate.host_processes.HostProcess",
+          "event": "substrate.host_processes.ProcessStarted",
+          "field": "process"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.AdoptProcess",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "name": {
+              "kind": "literal",
+              "value": "name-2"
+            },
+            "reason": {
+              "kind": "literal",
+              "value": "reason-2"
+            },
+            "source": {
+              "kind": "literal",
+              "value": "container"
+            },
+            "source_ref": {
+              "kind": "literal",
+              "value": "source_ref-2"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.AdoptProcess",
+            "outcome": "adopted"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "host-process-3",
+          "entity": "substrate.host_processes.HostProcess",
+          "event": "substrate.host_processes.ProcessAdopted",
+          "field": "process"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.AdoptProcess",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "name": {
+              "kind": "literal",
+              "value": "dev-server"
+            },
+            "reason": {
+              "kind": "literal",
+              "value": "reason-3"
+            },
+            "source": {
+              "kind": "literal",
+              "value": "pid"
+            },
+            "source_ref": {
+              "kind": "literal",
+              "value": "source_ref-3"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.AdoptProcess",
+            "outcome": "adopted"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "host-process-4",
+          "entity": "substrate.host_processes.HostProcess",
+          "event": "substrate.host_processes.ProcessAdopted",
+          "field": "process"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.RecordExit",
+          "actor": "substrate.host_processes.Supervisor",
+          "input": {
+            "exit_code": {
+              "kind": "literal",
+              "value": 104.0
+            },
+            "exit_signal": {
+              "kind": "literal",
+              "value": "exit_signal-3"
+            },
+            "process": {
+              "kind": "instance",
+              "instance": "host-process-4"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.RecordExit",
+            "outcome": "exited"
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.StartContainer",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "argv": {
+              "kind": "literal",
+              "value": [
+                "argv.0-4"
+              ]
+            },
+            "keep": {
+              "kind": "literal",
+              "value": false
+            },
+            "keep_reason": {
+              "kind": "literal",
+              "value": "keep_reason-4"
+            },
+            "kind": {
+              "kind": "literal",
+              "value": "docker"
+            },
+            "lease_ttl_ms": {
+              "kind": "literal",
+              "value": 105.0
+            },
+            "name": {
+              "kind": "literal",
+              "value": "dev-server"
+            },
+            "owner_session_id": {
+              "kind": "literal",
+              "value": "s-1"
+            },
+            "owner_session_name": {
+              "kind": "literal",
+              "value": "owner_session_name-4"
+            },
+            "reason": {
+              "kind": "literal",
+              "value": "reason-4"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.StartContainer",
+            "outcome": "started"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "host-process-5",
+          "entity": "substrate.host_processes.HostProcess",
+          "event": "substrate.host_processes.ProcessStarted",
+          "field": "process"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.StartContainer",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "argv": {
+              "kind": "literal",
+              "value": [
+                "argv.0-5"
+              ]
+            },
+            "keep": {
+              "kind": "literal",
+              "value": false
+            },
+            "keep_reason": {
+              "kind": "literal",
+              "value": "keep_reason-5"
+            },
+            "kind": {
+              "kind": "literal",
+              "value": "k3d"
+            },
+            "lease_ttl_ms": {
+              "kind": "literal",
+              "value": 106.0
+            },
+            "name": {
+              "kind": "literal",
+              "value": "dev-server"
+            },
+            "owner_session_id": {
+              "kind": "literal",
+              "value": "owner_session_id-5"
+            },
+            "owner_session_name": {
+              "kind": "literal",
+              "value": "owner_session_name-5"
+            },
+            "reason": {
+              "kind": "literal",
+              "value": "reason-5"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.StartContainer",
+            "outcome": "started"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "host-process-6",
+          "entity": "substrate.host_processes.HostProcess",
+          "event": "substrate.host_processes.ProcessStarted",
+          "field": "process"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.AdoptProcess",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "name": {
+              "kind": "literal",
+              "value": "name-6"
+            },
+            "reason": {
+              "kind": "literal",
+              "value": "reason-6"
+            },
+            "source": {
+              "kind": "literal",
+              "value": "pid"
+            },
+            "source_ref": {
+              "kind": "literal",
+              "value": "source_ref-6"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.AdoptProcess",
+            "outcome": "adopted"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "host-process-7",
+          "entity": "substrate.host_processes.HostProcess",
+          "event": "substrate.host_processes.ProcessAdopted",
+          "field": "process"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.AdoptProcess",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "name": {
+              "kind": "literal",
+              "value": "dev-server"
+            },
+            "reason": {
+              "kind": "literal",
+              "value": "reason-7"
+            },
+            "source": {
+              "kind": "literal",
+              "value": "unit"
+            },
+            "source_ref": {
+              "kind": "literal",
+              "value": "source_ref-7"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.AdoptProcess",
+            "outcome": "adopted"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "host-process-8",
+          "entity": "substrate.host_processes.HostProcess",
+          "event": "substrate.host_processes.ProcessAdopted",
+          "field": "process"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.RecordExit",
+          "actor": "substrate.host_processes.Supervisor",
+          "input": {
+            "exit_code": {
+              "kind": "literal",
+              "value": 108.0
+            },
+            "exit_signal": {
+              "kind": "literal",
+              "value": "exit_signal-7"
+            },
+            "process": {
+              "kind": "instance",
+              "instance": "host-process-8"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.RecordExit",
+            "outcome": "exited"
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.StartProcess",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "argv": {
+              "kind": "literal",
+              "value": [
+                "argv.0"
+              ]
+            },
+            "cwd": {
+              "kind": "literal",
+              "value": "/srv/app"
+            },
+            "env_passthrough": {
+              "kind": "literal",
+              "value": [
+                "env_passthrough.0"
+              ]
+            },
+            "expires_at": {
+              "kind": "now_offset",
+              "seconds": 97381
+            },
+            "keep": {
+              "kind": "literal",
+              "value": false
+            },
+            "keep_reason": {
+              "kind": "literal",
+              "value": "keep_reason"
+            },
+            "lease_ttl_ms": {
+              "kind": "literal",
+              "value": 3600000.0
+            },
+            "name": {
+              "kind": "literal",
+              "value": "dev-server"
+            },
+            "owner_session_id": {
+              "kind": "literal",
+              "value": "s-1"
+            },
+            "owner_session_name": {
+              "kind": "literal",
+              "value": "worker"
+            },
+            "profile": {
+              "kind": "literal",
+              "value": "host"
+            },
+            "reason": {
+              "kind": "literal",
+              "value": "serve the preview"
+            },
+            "timeout_ms": {
+              "kind": "literal",
+              "value": 201.0
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.StartProcess",
+            "outcome": "name-conflict"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.host_processes.NameConflict",
+          "fields": {
+            "name": "dev-server"
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.LeaseRenewed"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.LogDiscarded"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.OwnerStopped"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessEnded"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessObserved"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessRunning"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.StopRequested"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.StreamEventAppended"
+        }
+      ],
+      "source": [
+        {
+          "kind": "type",
+          "name": "substrate.host_processes.ConfinementProfile"
+        },
+        {
+          "kind": "entity",
+          "name": "substrate.host_processes.HostProcess"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.AdoptProcess"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.RecordExit"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.StartContainer"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.StartProcess"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.AdoptProcess",
+            "outcome": "adopted"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.RecordExit",
+            "outcome": "exited"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.StartContainer",
+            "outcome": "started"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.StartProcess",
+            "outcome": "name-conflict"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.LeaseRenewed"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.LogDiscarded"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.OwnerStopped"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessAdopted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessEnded"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessObserved"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessRunning"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessStarted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.StopRequested"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.StreamEventAppended"
+        },
+        {
+          "kind": "error",
+          "name": "substrate.host_processes.NameConflict"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.host_processes.Subject"
+        }
+      ]
+    },
     "substrate.host_processes.StartProcess/outcome/owner-absent": {
       "purpose": "`substrate.host_processes.StartProcess` answers `owner-absent` for an input that satisfies that branch's guard",
       "steps": [
@@ -30227,6 +30828,2689 @@
         {
           "kind": "error",
           "name": "substrate.host_processes.TimeoutNotPositive"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.host_processes.Subject"
+        }
+      ]
+    },
+    "substrate.host_processes.StopByOwner/outcome/stopping": {
+      "purpose": "`substrate.host_processes.StopByOwner` moves every `substrate.host_processes.HostProcess` its filter selects and no other row, and reports how many",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.StartContainer",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "argv": {
+              "kind": "literal",
+              "value": [
+                "argv.0-1"
+              ]
+            },
+            "keep": {
+              "kind": "literal",
+              "value": false
+            },
+            "keep_reason": {
+              "kind": "literal",
+              "value": "keep_reason-1"
+            },
+            "kind": {
+              "kind": "literal",
+              "value": "k3d"
+            },
+            "lease_ttl_ms": {
+              "kind": "literal",
+              "value": 102.0
+            },
+            "name": {
+              "kind": "literal",
+              "value": "name-1"
+            },
+            "owner_session_id": {
+              "kind": "literal",
+              "value": "s-1"
+            },
+            "owner_session_name": {
+              "kind": "literal",
+              "value": "owner_session_name-1"
+            },
+            "reason": {
+              "kind": "literal",
+              "value": "reason-1"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.StartContainer",
+            "outcome": "started"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "host-process-2",
+          "entity": "substrate.host_processes.HostProcess",
+          "event": "substrate.host_processes.ProcessStarted",
+          "field": "process"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.StartContainer",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "argv": {
+              "kind": "literal",
+              "value": [
+                "argv.0-2"
+              ]
+            },
+            "keep": {
+              "kind": "literal",
+              "value": false
+            },
+            "keep_reason": {
+              "kind": "literal",
+              "value": "keep_reason-2"
+            },
+            "kind": {
+              "kind": "literal",
+              "value": "docker"
+            },
+            "lease_ttl_ms": {
+              "kind": "literal",
+              "value": 103.0
+            },
+            "name": {
+              "kind": "literal",
+              "value": "name-2"
+            },
+            "owner_session_id": {
+              "kind": "literal",
+              "value": "s-1"
+            },
+            "owner_session_name": {
+              "kind": "literal",
+              "value": "owner_session_name-2"
+            },
+            "reason": {
+              "kind": "literal",
+              "value": "reason-2"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.StartContainer",
+            "outcome": "started"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "host-process-3",
+          "entity": "substrate.host_processes.HostProcess",
+          "event": "substrate.host_processes.ProcessStarted",
+          "field": "process"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.StartContainer",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "argv": {
+              "kind": "literal",
+              "value": [
+                "argv.0-3"
+              ]
+            },
+            "keep": {
+              "kind": "literal",
+              "value": false
+            },
+            "keep_reason": {
+              "kind": "literal",
+              "value": "keep_reason-3"
+            },
+            "kind": {
+              "kind": "literal",
+              "value": "k3d"
+            },
+            "lease_ttl_ms": {
+              "kind": "literal",
+              "value": 104.0
+            },
+            "name": {
+              "kind": "literal",
+              "value": "name-3"
+            },
+            "owner_session_id": {
+              "kind": "literal",
+              "value": "s-1"
+            },
+            "owner_session_name": {
+              "kind": "literal",
+              "value": "owner_session_name-3"
+            },
+            "reason": {
+              "kind": "literal",
+              "value": "reason-3"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.StartContainer",
+            "outcome": "started"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "host-process-4",
+          "entity": "substrate.host_processes.HostProcess",
+          "event": "substrate.host_processes.ProcessStarted",
+          "field": "process"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.StartContainer",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "argv": {
+              "kind": "literal",
+              "value": [
+                "argv.0-4"
+              ]
+            },
+            "keep": {
+              "kind": "literal",
+              "value": false
+            },
+            "keep_reason": {
+              "kind": "literal",
+              "value": "keep_reason-4"
+            },
+            "kind": {
+              "kind": "literal",
+              "value": "docker"
+            },
+            "lease_ttl_ms": {
+              "kind": "literal",
+              "value": 105.0
+            },
+            "name": {
+              "kind": "literal",
+              "value": "name-4"
+            },
+            "owner_session_id": {
+              "kind": "literal",
+              "value": "owner_session_id-4"
+            },
+            "owner_session_name": {
+              "kind": "literal",
+              "value": "owner_session_name-4"
+            },
+            "reason": {
+              "kind": "literal",
+              "value": "reason-4"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.StartContainer",
+            "outcome": "started"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "host-process-5",
+          "entity": "substrate.host_processes.HostProcess",
+          "event": "substrate.host_processes.ProcessStarted",
+          "field": "process"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.StartContainer",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "argv": {
+              "kind": "literal",
+              "value": [
+                "argv.0-5"
+              ]
+            },
+            "keep": {
+              "kind": "literal",
+              "value": false
+            },
+            "keep_reason": {
+              "kind": "literal",
+              "value": "keep_reason-5"
+            },
+            "kind": {
+              "kind": "literal",
+              "value": "k3d"
+            },
+            "lease_ttl_ms": {
+              "kind": "literal",
+              "value": 106.0
+            },
+            "name": {
+              "kind": "literal",
+              "value": "name-5"
+            },
+            "owner_session_id": {
+              "kind": "literal",
+              "value": "s-1"
+            },
+            "owner_session_name": {
+              "kind": "literal",
+              "value": "owner_session_name-5"
+            },
+            "reason": {
+              "kind": "literal",
+              "value": "reason-5"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.StartContainer",
+            "outcome": "started"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "host-process-6",
+          "entity": "substrate.host_processes.HostProcess",
+          "event": "substrate.host_processes.ProcessStarted",
+          "field": "process"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.RecordExit",
+          "actor": "substrate.host_processes.Supervisor",
+          "input": {
+            "exit_code": {
+              "kind": "literal",
+              "value": 106.0
+            },
+            "exit_signal": {
+              "kind": "literal",
+              "value": "exit_signal-5"
+            },
+            "process": {
+              "kind": "instance",
+              "instance": "host-process-6"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.RecordExit",
+            "outcome": "exited"
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.StopByOwner",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "except_keep": {
+              "kind": "literal",
+              "value": false
+            },
+            "owner_session_id": {
+              "kind": "literal",
+              "value": "s-1"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.StopByOwner",
+            "outcome": "stopping"
+          }
+        },
+        {
+          "step": "expect_event",
+          "event": "substrate.host_processes.OwnerStopped",
+          "payload": {
+            "owner_session_id": "s-1",
+            "stopped": 3.0
+          },
+          "shape": {
+            "owner_session_id": {
+              "holds": "primitive",
+              "kind": "string"
+            },
+            "stopped": {
+              "holds": "primitive",
+              "kind": "integer"
+            }
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.LeaseRenewed"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.LogDiscarded"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessEnded"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessObserved"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessRunning"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.StopRequested"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.StreamEventAppended"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "argv": {
+                "kind": "literal",
+                "value": [
+                  "argv.0-1"
+                ]
+              },
+              "container_kind": {
+                "kind": "literal",
+                "value": "k3d"
+              },
+              "ended_by": {
+                "kind": "literal",
+                "value": "stop"
+              },
+              "keep": {
+                "kind": "literal",
+                "value": false
+              },
+              "keep_reason": {
+                "kind": "literal",
+                "value": "keep_reason-1"
+              },
+              "lease_ttl_ms": {
+                "kind": "literal",
+                "value": 102.0
+              },
+              "log_discarded_bytes": {
+                "kind": "literal",
+                "value": 0.0
+              },
+              "name": {
+                "kind": "literal",
+                "value": "name-1"
+              },
+              "owner_session_id": {
+                "kind": "literal",
+                "value": "s-1"
+              },
+              "owner_session_name": {
+                "kind": "literal",
+                "value": "owner_session_name-1"
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process-2"
+              },
+              "reason": {
+                "kind": "literal",
+                "value": "reason-1"
+              },
+              "restart": {
+                "kind": "literal",
+                "value": "no"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Stopping"
+              }
+            }
+          }
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "argv": {
+                "kind": "literal",
+                "value": [
+                  "argv.0-2"
+                ]
+              },
+              "container_kind": {
+                "kind": "literal",
+                "value": "docker"
+              },
+              "ended_by": {
+                "kind": "literal",
+                "value": "stop"
+              },
+              "keep": {
+                "kind": "literal",
+                "value": false
+              },
+              "keep_reason": {
+                "kind": "literal",
+                "value": "keep_reason-2"
+              },
+              "lease_ttl_ms": {
+                "kind": "literal",
+                "value": 103.0
+              },
+              "log_discarded_bytes": {
+                "kind": "literal",
+                "value": 0.0
+              },
+              "name": {
+                "kind": "literal",
+                "value": "name-2"
+              },
+              "owner_session_id": {
+                "kind": "literal",
+                "value": "s-1"
+              },
+              "owner_session_name": {
+                "kind": "literal",
+                "value": "owner_session_name-2"
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process-3"
+              },
+              "reason": {
+                "kind": "literal",
+                "value": "reason-2"
+              },
+              "restart": {
+                "kind": "literal",
+                "value": "no"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Stopping"
+              }
+            }
+          }
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "argv": {
+                "kind": "literal",
+                "value": [
+                  "argv.0-3"
+                ]
+              },
+              "container_kind": {
+                "kind": "literal",
+                "value": "k3d"
+              },
+              "ended_by": {
+                "kind": "literal",
+                "value": "stop"
+              },
+              "keep": {
+                "kind": "literal",
+                "value": false
+              },
+              "keep_reason": {
+                "kind": "literal",
+                "value": "keep_reason-3"
+              },
+              "lease_ttl_ms": {
+                "kind": "literal",
+                "value": 104.0
+              },
+              "log_discarded_bytes": {
+                "kind": "literal",
+                "value": 0.0
+              },
+              "name": {
+                "kind": "literal",
+                "value": "name-3"
+              },
+              "owner_session_id": {
+                "kind": "literal",
+                "value": "s-1"
+              },
+              "owner_session_name": {
+                "kind": "literal",
+                "value": "owner_session_name-3"
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process-4"
+              },
+              "reason": {
+                "kind": "literal",
+                "value": "reason-3"
+              },
+              "restart": {
+                "kind": "literal",
+                "value": "no"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Stopping"
+              }
+            }
+          }
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "argv": {
+                "kind": "literal",
+                "value": [
+                  "argv.0-4"
+                ]
+              },
+              "container_kind": {
+                "kind": "literal",
+                "value": "docker"
+              },
+              "keep": {
+                "kind": "literal",
+                "value": false
+              },
+              "keep_reason": {
+                "kind": "literal",
+                "value": "keep_reason-4"
+              },
+              "lease_ttl_ms": {
+                "kind": "literal",
+                "value": 105.0
+              },
+              "log_discarded_bytes": {
+                "kind": "literal",
+                "value": 0.0
+              },
+              "name": {
+                "kind": "literal",
+                "value": "name-4"
+              },
+              "owner_session_id": {
+                "kind": "literal",
+                "value": "owner_session_id-4"
+              },
+              "owner_session_name": {
+                "kind": "literal",
+                "value": "owner_session_name-4"
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process-5"
+              },
+              "reason": {
+                "kind": "literal",
+                "value": "reason-4"
+              },
+              "restart": {
+                "kind": "literal",
+                "value": "no"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Starting"
+              }
+            }
+          }
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "argv": {
+                "kind": "literal",
+                "value": [
+                  "argv.0-5"
+                ]
+              },
+              "container_kind": {
+                "kind": "literal",
+                "value": "k3d"
+              },
+              "ended_by": {
+                "kind": "literal",
+                "value": "exit"
+              },
+              "exit_code": {
+                "kind": "literal",
+                "value": 106.0
+              },
+              "exit_signal": {
+                "kind": "literal",
+                "value": "exit_signal-5"
+              },
+              "keep": {
+                "kind": "literal",
+                "value": false
+              },
+              "keep_reason": {
+                "kind": "literal",
+                "value": "keep_reason-5"
+              },
+              "lease_ttl_ms": {
+                "kind": "literal",
+                "value": 106.0
+              },
+              "log_discarded_bytes": {
+                "kind": "literal",
+                "value": 0.0
+              },
+              "name": {
+                "kind": "literal",
+                "value": "name-5"
+              },
+              "owner_session_id": {
+                "kind": "literal",
+                "value": "s-1"
+              },
+              "owner_session_name": {
+                "kind": "literal",
+                "value": "owner_session_name-5"
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process-6"
+              },
+              "reason": {
+                "kind": "literal",
+                "value": "reason-5"
+              },
+              "restart": {
+                "kind": "literal",
+                "value": "no"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Ended"
+              }
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.StopByOwner",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "except_keep": {
+              "kind": "literal",
+              "value": false
+            },
+            "owner_session_id": {
+              "kind": "literal",
+              "value": "owner_session_id-1"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.StopByOwner",
+            "outcome": "stopping"
+          }
+        },
+        {
+          "step": "expect_event",
+          "event": "substrate.host_processes.OwnerStopped",
+          "payload": {
+            "owner_session_id": "owner_session_id-1",
+            "stopped": 0.0
+          },
+          "shape": {
+            "owner_session_id": {
+              "holds": "primitive",
+              "kind": "string"
+            },
+            "stopped": {
+              "holds": "primitive",
+              "kind": "integer"
+            }
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.LeaseRenewed"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.LogDiscarded"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessEnded"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessObserved"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessRunning"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.StopRequested"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.StreamEventAppended"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "argv": {
+                "kind": "literal",
+                "value": [
+                  "argv.0-1"
+                ]
+              },
+              "container_kind": {
+                "kind": "literal",
+                "value": "k3d"
+              },
+              "ended_by": {
+                "kind": "literal",
+                "value": "stop"
+              },
+              "keep": {
+                "kind": "literal",
+                "value": false
+              },
+              "keep_reason": {
+                "kind": "literal",
+                "value": "keep_reason-1"
+              },
+              "lease_ttl_ms": {
+                "kind": "literal",
+                "value": 102.0
+              },
+              "log_discarded_bytes": {
+                "kind": "literal",
+                "value": 0.0
+              },
+              "name": {
+                "kind": "literal",
+                "value": "name-1"
+              },
+              "owner_session_id": {
+                "kind": "literal",
+                "value": "s-1"
+              },
+              "owner_session_name": {
+                "kind": "literal",
+                "value": "owner_session_name-1"
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process-2"
+              },
+              "reason": {
+                "kind": "literal",
+                "value": "reason-1"
+              },
+              "restart": {
+                "kind": "literal",
+                "value": "no"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Stopping"
+              }
+            }
+          }
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "argv": {
+                "kind": "literal",
+                "value": [
+                  "argv.0-2"
+                ]
+              },
+              "container_kind": {
+                "kind": "literal",
+                "value": "docker"
+              },
+              "ended_by": {
+                "kind": "literal",
+                "value": "stop"
+              },
+              "keep": {
+                "kind": "literal",
+                "value": false
+              },
+              "keep_reason": {
+                "kind": "literal",
+                "value": "keep_reason-2"
+              },
+              "lease_ttl_ms": {
+                "kind": "literal",
+                "value": 103.0
+              },
+              "log_discarded_bytes": {
+                "kind": "literal",
+                "value": 0.0
+              },
+              "name": {
+                "kind": "literal",
+                "value": "name-2"
+              },
+              "owner_session_id": {
+                "kind": "literal",
+                "value": "s-1"
+              },
+              "owner_session_name": {
+                "kind": "literal",
+                "value": "owner_session_name-2"
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process-3"
+              },
+              "reason": {
+                "kind": "literal",
+                "value": "reason-2"
+              },
+              "restart": {
+                "kind": "literal",
+                "value": "no"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Stopping"
+              }
+            }
+          }
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "argv": {
+                "kind": "literal",
+                "value": [
+                  "argv.0-3"
+                ]
+              },
+              "container_kind": {
+                "kind": "literal",
+                "value": "k3d"
+              },
+              "ended_by": {
+                "kind": "literal",
+                "value": "stop"
+              },
+              "keep": {
+                "kind": "literal",
+                "value": false
+              },
+              "keep_reason": {
+                "kind": "literal",
+                "value": "keep_reason-3"
+              },
+              "lease_ttl_ms": {
+                "kind": "literal",
+                "value": 104.0
+              },
+              "log_discarded_bytes": {
+                "kind": "literal",
+                "value": 0.0
+              },
+              "name": {
+                "kind": "literal",
+                "value": "name-3"
+              },
+              "owner_session_id": {
+                "kind": "literal",
+                "value": "s-1"
+              },
+              "owner_session_name": {
+                "kind": "literal",
+                "value": "owner_session_name-3"
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process-4"
+              },
+              "reason": {
+                "kind": "literal",
+                "value": "reason-3"
+              },
+              "restart": {
+                "kind": "literal",
+                "value": "no"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Stopping"
+              }
+            }
+          }
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "argv": {
+                "kind": "literal",
+                "value": [
+                  "argv.0-4"
+                ]
+              },
+              "container_kind": {
+                "kind": "literal",
+                "value": "docker"
+              },
+              "keep": {
+                "kind": "literal",
+                "value": false
+              },
+              "keep_reason": {
+                "kind": "literal",
+                "value": "keep_reason-4"
+              },
+              "lease_ttl_ms": {
+                "kind": "literal",
+                "value": 105.0
+              },
+              "log_discarded_bytes": {
+                "kind": "literal",
+                "value": 0.0
+              },
+              "name": {
+                "kind": "literal",
+                "value": "name-4"
+              },
+              "owner_session_id": {
+                "kind": "literal",
+                "value": "owner_session_id-4"
+              },
+              "owner_session_name": {
+                "kind": "literal",
+                "value": "owner_session_name-4"
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process-5"
+              },
+              "reason": {
+                "kind": "literal",
+                "value": "reason-4"
+              },
+              "restart": {
+                "kind": "literal",
+                "value": "no"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Starting"
+              }
+            }
+          }
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "argv": {
+                "kind": "literal",
+                "value": [
+                  "argv.0-5"
+                ]
+              },
+              "container_kind": {
+                "kind": "literal",
+                "value": "k3d"
+              },
+              "ended_by": {
+                "kind": "literal",
+                "value": "exit"
+              },
+              "exit_code": {
+                "kind": "literal",
+                "value": 106.0
+              },
+              "exit_signal": {
+                "kind": "literal",
+                "value": "exit_signal-5"
+              },
+              "keep": {
+                "kind": "literal",
+                "value": false
+              },
+              "keep_reason": {
+                "kind": "literal",
+                "value": "keep_reason-5"
+              },
+              "lease_ttl_ms": {
+                "kind": "literal",
+                "value": 106.0
+              },
+              "log_discarded_bytes": {
+                "kind": "literal",
+                "value": 0.0
+              },
+              "name": {
+                "kind": "literal",
+                "value": "name-5"
+              },
+              "owner_session_id": {
+                "kind": "literal",
+                "value": "s-1"
+              },
+              "owner_session_name": {
+                "kind": "literal",
+                "value": "owner_session_name-5"
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process-6"
+              },
+              "reason": {
+                "kind": "literal",
+                "value": "reason-5"
+              },
+              "restart": {
+                "kind": "literal",
+                "value": "no"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Ended"
+              }
+            }
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "entity",
+          "name": "substrate.host_processes.HostProcess"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.RecordExit"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.StartContainer"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.StopByOwner"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.RecordExit",
+            "outcome": "exited"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.StartContainer",
+            "outcome": "started"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.StopByOwner",
+            "outcome": "stopping"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.LeaseRenewed"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.LogDiscarded"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.OwnerStopped"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessAdopted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessEnded"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessObserved"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessRunning"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessStarted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.StopRequested"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.StreamEventAppended"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.host_processes.Subject"
+        }
+      ]
+    },
+    "substrate.host_processes.StopByOwner/outcome/stopping-except-keep": {
+      "purpose": "`substrate.host_processes.StopByOwner` moves every `substrate.host_processes.HostProcess` its filter selects and no other row, and reports how many",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.StartContainer",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "argv": {
+              "kind": "literal",
+              "value": [
+                "argv.0-1"
+              ]
+            },
+            "keep": {
+              "kind": "literal",
+              "value": false
+            },
+            "keep_reason": {
+              "kind": "literal",
+              "value": "keep_reason-1"
+            },
+            "kind": {
+              "kind": "literal",
+              "value": "k3d"
+            },
+            "lease_ttl_ms": {
+              "kind": "literal",
+              "value": 102.0
+            },
+            "name": {
+              "kind": "literal",
+              "value": "name-1"
+            },
+            "owner_session_id": {
+              "kind": "literal",
+              "value": "s-1"
+            },
+            "owner_session_name": {
+              "kind": "literal",
+              "value": "owner_session_name-1"
+            },
+            "reason": {
+              "kind": "literal",
+              "value": "reason-1"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.StartContainer",
+            "outcome": "started"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "host-process-2",
+          "entity": "substrate.host_processes.HostProcess",
+          "event": "substrate.host_processes.ProcessStarted",
+          "field": "process"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.StartContainer",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "argv": {
+              "kind": "literal",
+              "value": [
+                "argv.0-2"
+              ]
+            },
+            "keep": {
+              "kind": "literal",
+              "value": false
+            },
+            "keep_reason": {
+              "kind": "literal",
+              "value": "keep_reason-2"
+            },
+            "kind": {
+              "kind": "literal",
+              "value": "docker"
+            },
+            "lease_ttl_ms": {
+              "kind": "literal",
+              "value": 103.0
+            },
+            "name": {
+              "kind": "literal",
+              "value": "name-2"
+            },
+            "owner_session_id": {
+              "kind": "literal",
+              "value": "s-1"
+            },
+            "owner_session_name": {
+              "kind": "literal",
+              "value": "owner_session_name-2"
+            },
+            "reason": {
+              "kind": "literal",
+              "value": "reason-2"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.StartContainer",
+            "outcome": "started"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "host-process-3",
+          "entity": "substrate.host_processes.HostProcess",
+          "event": "substrate.host_processes.ProcessStarted",
+          "field": "process"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.StartContainer",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "argv": {
+              "kind": "literal",
+              "value": [
+                "argv.0-3"
+              ]
+            },
+            "keep": {
+              "kind": "literal",
+              "value": false
+            },
+            "keep_reason": {
+              "kind": "literal",
+              "value": "keep_reason-3"
+            },
+            "kind": {
+              "kind": "literal",
+              "value": "k3d"
+            },
+            "lease_ttl_ms": {
+              "kind": "literal",
+              "value": 104.0
+            },
+            "name": {
+              "kind": "literal",
+              "value": "name-3"
+            },
+            "owner_session_id": {
+              "kind": "literal",
+              "value": "s-1"
+            },
+            "owner_session_name": {
+              "kind": "literal",
+              "value": "owner_session_name-3"
+            },
+            "reason": {
+              "kind": "literal",
+              "value": "reason-3"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.StartContainer",
+            "outcome": "started"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "host-process-4",
+          "entity": "substrate.host_processes.HostProcess",
+          "event": "substrate.host_processes.ProcessStarted",
+          "field": "process"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.StartContainer",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "argv": {
+              "kind": "literal",
+              "value": [
+                "argv.0-4"
+              ]
+            },
+            "keep": {
+              "kind": "literal",
+              "value": false
+            },
+            "keep_reason": {
+              "kind": "literal",
+              "value": "keep_reason-4"
+            },
+            "kind": {
+              "kind": "literal",
+              "value": "docker"
+            },
+            "lease_ttl_ms": {
+              "kind": "literal",
+              "value": 105.0
+            },
+            "name": {
+              "kind": "literal",
+              "value": "name-4"
+            },
+            "owner_session_id": {
+              "kind": "literal",
+              "value": "owner_session_id-4"
+            },
+            "owner_session_name": {
+              "kind": "literal",
+              "value": "owner_session_name-4"
+            },
+            "reason": {
+              "kind": "literal",
+              "value": "reason-4"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.StartContainer",
+            "outcome": "started"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "host-process-5",
+          "entity": "substrate.host_processes.HostProcess",
+          "event": "substrate.host_processes.ProcessStarted",
+          "field": "process"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.StartContainer",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "argv": {
+              "kind": "literal",
+              "value": [
+                "argv.0-5"
+              ]
+            },
+            "keep": {
+              "kind": "literal",
+              "value": true
+            },
+            "keep_reason": {
+              "kind": "literal",
+              "value": "keep_reason-5"
+            },
+            "kind": {
+              "kind": "literal",
+              "value": "k3d"
+            },
+            "name": {
+              "kind": "literal",
+              "value": "name-5"
+            },
+            "owner_session_id": {
+              "kind": "literal",
+              "value": "s-1"
+            },
+            "owner_session_name": {
+              "kind": "literal",
+              "value": "owner_session_name-5"
+            },
+            "reason": {
+              "kind": "literal",
+              "value": "reason-5"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.StartContainer",
+            "outcome": "started"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "host-process-6",
+          "entity": "substrate.host_processes.HostProcess",
+          "event": "substrate.host_processes.ProcessStarted",
+          "field": "process"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.StartContainer",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "argv": {
+              "kind": "literal",
+              "value": [
+                "argv.0-6"
+              ]
+            },
+            "keep": {
+              "kind": "literal",
+              "value": false
+            },
+            "keep_reason": {
+              "kind": "literal",
+              "value": "keep_reason-6"
+            },
+            "kind": {
+              "kind": "literal",
+              "value": "docker"
+            },
+            "lease_ttl_ms": {
+              "kind": "literal",
+              "value": 107.0
+            },
+            "name": {
+              "kind": "literal",
+              "value": "name-6"
+            },
+            "owner_session_id": {
+              "kind": "literal",
+              "value": "s-1"
+            },
+            "owner_session_name": {
+              "kind": "literal",
+              "value": "owner_session_name-6"
+            },
+            "reason": {
+              "kind": "literal",
+              "value": "reason-6"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.StartContainer",
+            "outcome": "started"
+          }
+        },
+        {
+          "step": "capture_instance",
+          "instance": "host-process-7",
+          "entity": "substrate.host_processes.HostProcess",
+          "event": "substrate.host_processes.ProcessStarted",
+          "field": "process"
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.RecordExit",
+          "actor": "substrate.host_processes.Supervisor",
+          "input": {
+            "exit_code": {
+              "kind": "literal",
+              "value": 107.0
+            },
+            "exit_signal": {
+              "kind": "literal",
+              "value": "exit_signal-6"
+            },
+            "process": {
+              "kind": "instance",
+              "instance": "host-process-7"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.RecordExit",
+            "outcome": "exited"
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.StopByOwner",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "except_keep": {
+              "kind": "literal",
+              "value": true
+            },
+            "owner_session_id": {
+              "kind": "literal",
+              "value": "s-1"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.StopByOwner",
+            "outcome": "stopping-except-keep"
+          }
+        },
+        {
+          "step": "expect_event",
+          "event": "substrate.host_processes.OwnerStopped",
+          "payload": {
+            "owner_session_id": "s-1",
+            "stopped": 3.0
+          },
+          "shape": {
+            "owner_session_id": {
+              "holds": "primitive",
+              "kind": "string"
+            },
+            "stopped": {
+              "holds": "primitive",
+              "kind": "integer"
+            }
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.LeaseRenewed"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.LogDiscarded"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessEnded"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessObserved"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessRunning"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.StopRequested"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.StreamEventAppended"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "argv": {
+                "kind": "literal",
+                "value": [
+                  "argv.0-1"
+                ]
+              },
+              "container_kind": {
+                "kind": "literal",
+                "value": "k3d"
+              },
+              "ended_by": {
+                "kind": "literal",
+                "value": "stop"
+              },
+              "keep": {
+                "kind": "literal",
+                "value": false
+              },
+              "keep_reason": {
+                "kind": "literal",
+                "value": "keep_reason-1"
+              },
+              "lease_ttl_ms": {
+                "kind": "literal",
+                "value": 102.0
+              },
+              "log_discarded_bytes": {
+                "kind": "literal",
+                "value": 0.0
+              },
+              "name": {
+                "kind": "literal",
+                "value": "name-1"
+              },
+              "owner_session_id": {
+                "kind": "literal",
+                "value": "s-1"
+              },
+              "owner_session_name": {
+                "kind": "literal",
+                "value": "owner_session_name-1"
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process-2"
+              },
+              "reason": {
+                "kind": "literal",
+                "value": "reason-1"
+              },
+              "restart": {
+                "kind": "literal",
+                "value": "no"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Stopping"
+              }
+            }
+          }
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "argv": {
+                "kind": "literal",
+                "value": [
+                  "argv.0-2"
+                ]
+              },
+              "container_kind": {
+                "kind": "literal",
+                "value": "docker"
+              },
+              "ended_by": {
+                "kind": "literal",
+                "value": "stop"
+              },
+              "keep": {
+                "kind": "literal",
+                "value": false
+              },
+              "keep_reason": {
+                "kind": "literal",
+                "value": "keep_reason-2"
+              },
+              "lease_ttl_ms": {
+                "kind": "literal",
+                "value": 103.0
+              },
+              "log_discarded_bytes": {
+                "kind": "literal",
+                "value": 0.0
+              },
+              "name": {
+                "kind": "literal",
+                "value": "name-2"
+              },
+              "owner_session_id": {
+                "kind": "literal",
+                "value": "s-1"
+              },
+              "owner_session_name": {
+                "kind": "literal",
+                "value": "owner_session_name-2"
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process-3"
+              },
+              "reason": {
+                "kind": "literal",
+                "value": "reason-2"
+              },
+              "restart": {
+                "kind": "literal",
+                "value": "no"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Stopping"
+              }
+            }
+          }
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "argv": {
+                "kind": "literal",
+                "value": [
+                  "argv.0-3"
+                ]
+              },
+              "container_kind": {
+                "kind": "literal",
+                "value": "k3d"
+              },
+              "ended_by": {
+                "kind": "literal",
+                "value": "stop"
+              },
+              "keep": {
+                "kind": "literal",
+                "value": false
+              },
+              "keep_reason": {
+                "kind": "literal",
+                "value": "keep_reason-3"
+              },
+              "lease_ttl_ms": {
+                "kind": "literal",
+                "value": 104.0
+              },
+              "log_discarded_bytes": {
+                "kind": "literal",
+                "value": 0.0
+              },
+              "name": {
+                "kind": "literal",
+                "value": "name-3"
+              },
+              "owner_session_id": {
+                "kind": "literal",
+                "value": "s-1"
+              },
+              "owner_session_name": {
+                "kind": "literal",
+                "value": "owner_session_name-3"
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process-4"
+              },
+              "reason": {
+                "kind": "literal",
+                "value": "reason-3"
+              },
+              "restart": {
+                "kind": "literal",
+                "value": "no"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Stopping"
+              }
+            }
+          }
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "argv": {
+                "kind": "literal",
+                "value": [
+                  "argv.0-4"
+                ]
+              },
+              "container_kind": {
+                "kind": "literal",
+                "value": "docker"
+              },
+              "keep": {
+                "kind": "literal",
+                "value": false
+              },
+              "keep_reason": {
+                "kind": "literal",
+                "value": "keep_reason-4"
+              },
+              "lease_ttl_ms": {
+                "kind": "literal",
+                "value": 105.0
+              },
+              "log_discarded_bytes": {
+                "kind": "literal",
+                "value": 0.0
+              },
+              "name": {
+                "kind": "literal",
+                "value": "name-4"
+              },
+              "owner_session_id": {
+                "kind": "literal",
+                "value": "owner_session_id-4"
+              },
+              "owner_session_name": {
+                "kind": "literal",
+                "value": "owner_session_name-4"
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process-5"
+              },
+              "reason": {
+                "kind": "literal",
+                "value": "reason-4"
+              },
+              "restart": {
+                "kind": "literal",
+                "value": "no"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Starting"
+              }
+            }
+          }
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "argv": {
+                "kind": "literal",
+                "value": [
+                  "argv.0-5"
+                ]
+              },
+              "container_kind": {
+                "kind": "literal",
+                "value": "k3d"
+              },
+              "keep": {
+                "kind": "literal",
+                "value": true
+              },
+              "keep_reason": {
+                "kind": "literal",
+                "value": "keep_reason-5"
+              },
+              "lease_ttl_ms": {
+                "kind": "literal",
+                "value": null
+              },
+              "log_discarded_bytes": {
+                "kind": "literal",
+                "value": 0.0
+              },
+              "name": {
+                "kind": "literal",
+                "value": "name-5"
+              },
+              "owner_session_id": {
+                "kind": "literal",
+                "value": "s-1"
+              },
+              "owner_session_name": {
+                "kind": "literal",
+                "value": "owner_session_name-5"
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process-6"
+              },
+              "reason": {
+                "kind": "literal",
+                "value": "reason-5"
+              },
+              "restart": {
+                "kind": "literal",
+                "value": "no"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Starting"
+              }
+            }
+          }
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "argv": {
+                "kind": "literal",
+                "value": [
+                  "argv.0-6"
+                ]
+              },
+              "container_kind": {
+                "kind": "literal",
+                "value": "docker"
+              },
+              "ended_by": {
+                "kind": "literal",
+                "value": "exit"
+              },
+              "exit_code": {
+                "kind": "literal",
+                "value": 107.0
+              },
+              "exit_signal": {
+                "kind": "literal",
+                "value": "exit_signal-6"
+              },
+              "keep": {
+                "kind": "literal",
+                "value": false
+              },
+              "keep_reason": {
+                "kind": "literal",
+                "value": "keep_reason-6"
+              },
+              "lease_ttl_ms": {
+                "kind": "literal",
+                "value": 107.0
+              },
+              "log_discarded_bytes": {
+                "kind": "literal",
+                "value": 0.0
+              },
+              "name": {
+                "kind": "literal",
+                "value": "name-6"
+              },
+              "owner_session_id": {
+                "kind": "literal",
+                "value": "s-1"
+              },
+              "owner_session_name": {
+                "kind": "literal",
+                "value": "owner_session_name-6"
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process-7"
+              },
+              "reason": {
+                "kind": "literal",
+                "value": "reason-6"
+              },
+              "restart": {
+                "kind": "literal",
+                "value": "no"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Ended"
+              }
+            }
+          }
+        },
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.StopByOwner",
+          "actor": "substrate.host_processes.Subject",
+          "input": {
+            "except_keep": {
+              "kind": "literal",
+              "value": true
+            },
+            "owner_session_id": {
+              "kind": "literal",
+              "value": "owner_session_id-1"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.StopByOwner",
+            "outcome": "stopping-except-keep"
+          }
+        },
+        {
+          "step": "expect_event",
+          "event": "substrate.host_processes.OwnerStopped",
+          "payload": {
+            "owner_session_id": "owner_session_id-1",
+            "stopped": 0.0
+          },
+          "shape": {
+            "owner_session_id": {
+              "holds": "primitive",
+              "kind": "string"
+            },
+            "stopped": {
+              "holds": "primitive",
+              "kind": "integer"
+            }
+          }
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.LeaseRenewed"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.LogDiscarded"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessEnded"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessObserved"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessRunning"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.StopRequested"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.StreamEventAppended"
+        },
+        {
+          "step": "query_view",
+          "view": "substrate.host_processes.HostProcesses"
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "argv": {
+                "kind": "literal",
+                "value": [
+                  "argv.0-1"
+                ]
+              },
+              "container_kind": {
+                "kind": "literal",
+                "value": "k3d"
+              },
+              "ended_by": {
+                "kind": "literal",
+                "value": "stop"
+              },
+              "keep": {
+                "kind": "literal",
+                "value": false
+              },
+              "keep_reason": {
+                "kind": "literal",
+                "value": "keep_reason-1"
+              },
+              "lease_ttl_ms": {
+                "kind": "literal",
+                "value": 102.0
+              },
+              "log_discarded_bytes": {
+                "kind": "literal",
+                "value": 0.0
+              },
+              "name": {
+                "kind": "literal",
+                "value": "name-1"
+              },
+              "owner_session_id": {
+                "kind": "literal",
+                "value": "s-1"
+              },
+              "owner_session_name": {
+                "kind": "literal",
+                "value": "owner_session_name-1"
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process-2"
+              },
+              "reason": {
+                "kind": "literal",
+                "value": "reason-1"
+              },
+              "restart": {
+                "kind": "literal",
+                "value": "no"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Stopping"
+              }
+            }
+          }
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "argv": {
+                "kind": "literal",
+                "value": [
+                  "argv.0-2"
+                ]
+              },
+              "container_kind": {
+                "kind": "literal",
+                "value": "docker"
+              },
+              "ended_by": {
+                "kind": "literal",
+                "value": "stop"
+              },
+              "keep": {
+                "kind": "literal",
+                "value": false
+              },
+              "keep_reason": {
+                "kind": "literal",
+                "value": "keep_reason-2"
+              },
+              "lease_ttl_ms": {
+                "kind": "literal",
+                "value": 103.0
+              },
+              "log_discarded_bytes": {
+                "kind": "literal",
+                "value": 0.0
+              },
+              "name": {
+                "kind": "literal",
+                "value": "name-2"
+              },
+              "owner_session_id": {
+                "kind": "literal",
+                "value": "s-1"
+              },
+              "owner_session_name": {
+                "kind": "literal",
+                "value": "owner_session_name-2"
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process-3"
+              },
+              "reason": {
+                "kind": "literal",
+                "value": "reason-2"
+              },
+              "restart": {
+                "kind": "literal",
+                "value": "no"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Stopping"
+              }
+            }
+          }
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "argv": {
+                "kind": "literal",
+                "value": [
+                  "argv.0-3"
+                ]
+              },
+              "container_kind": {
+                "kind": "literal",
+                "value": "k3d"
+              },
+              "ended_by": {
+                "kind": "literal",
+                "value": "stop"
+              },
+              "keep": {
+                "kind": "literal",
+                "value": false
+              },
+              "keep_reason": {
+                "kind": "literal",
+                "value": "keep_reason-3"
+              },
+              "lease_ttl_ms": {
+                "kind": "literal",
+                "value": 104.0
+              },
+              "log_discarded_bytes": {
+                "kind": "literal",
+                "value": 0.0
+              },
+              "name": {
+                "kind": "literal",
+                "value": "name-3"
+              },
+              "owner_session_id": {
+                "kind": "literal",
+                "value": "s-1"
+              },
+              "owner_session_name": {
+                "kind": "literal",
+                "value": "owner_session_name-3"
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process-4"
+              },
+              "reason": {
+                "kind": "literal",
+                "value": "reason-3"
+              },
+              "restart": {
+                "kind": "literal",
+                "value": "no"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Stopping"
+              }
+            }
+          }
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "argv": {
+                "kind": "literal",
+                "value": [
+                  "argv.0-4"
+                ]
+              },
+              "container_kind": {
+                "kind": "literal",
+                "value": "docker"
+              },
+              "keep": {
+                "kind": "literal",
+                "value": false
+              },
+              "keep_reason": {
+                "kind": "literal",
+                "value": "keep_reason-4"
+              },
+              "lease_ttl_ms": {
+                "kind": "literal",
+                "value": 105.0
+              },
+              "log_discarded_bytes": {
+                "kind": "literal",
+                "value": 0.0
+              },
+              "name": {
+                "kind": "literal",
+                "value": "name-4"
+              },
+              "owner_session_id": {
+                "kind": "literal",
+                "value": "owner_session_id-4"
+              },
+              "owner_session_name": {
+                "kind": "literal",
+                "value": "owner_session_name-4"
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process-5"
+              },
+              "reason": {
+                "kind": "literal",
+                "value": "reason-4"
+              },
+              "restart": {
+                "kind": "literal",
+                "value": "no"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Starting"
+              }
+            }
+          }
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "argv": {
+                "kind": "literal",
+                "value": [
+                  "argv.0-5"
+                ]
+              },
+              "container_kind": {
+                "kind": "literal",
+                "value": "k3d"
+              },
+              "keep": {
+                "kind": "literal",
+                "value": true
+              },
+              "keep_reason": {
+                "kind": "literal",
+                "value": "keep_reason-5"
+              },
+              "lease_ttl_ms": {
+                "kind": "literal",
+                "value": null
+              },
+              "log_discarded_bytes": {
+                "kind": "literal",
+                "value": 0.0
+              },
+              "name": {
+                "kind": "literal",
+                "value": "name-5"
+              },
+              "owner_session_id": {
+                "kind": "literal",
+                "value": "s-1"
+              },
+              "owner_session_name": {
+                "kind": "literal",
+                "value": "owner_session_name-5"
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process-6"
+              },
+              "reason": {
+                "kind": "literal",
+                "value": "reason-5"
+              },
+              "restart": {
+                "kind": "literal",
+                "value": "no"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Starting"
+              }
+            }
+          }
+        },
+        {
+          "step": "expect_view",
+          "view": "substrate.host_processes.HostProcesses",
+          "expectation": {
+            "expect": "contains",
+            "fields": {
+              "argv": {
+                "kind": "literal",
+                "value": [
+                  "argv.0-6"
+                ]
+              },
+              "container_kind": {
+                "kind": "literal",
+                "value": "docker"
+              },
+              "ended_by": {
+                "kind": "literal",
+                "value": "exit"
+              },
+              "exit_code": {
+                "kind": "literal",
+                "value": 107.0
+              },
+              "exit_signal": {
+                "kind": "literal",
+                "value": "exit_signal-6"
+              },
+              "keep": {
+                "kind": "literal",
+                "value": false
+              },
+              "keep_reason": {
+                "kind": "literal",
+                "value": "keep_reason-6"
+              },
+              "lease_ttl_ms": {
+                "kind": "literal",
+                "value": 107.0
+              },
+              "log_discarded_bytes": {
+                "kind": "literal",
+                "value": 0.0
+              },
+              "name": {
+                "kind": "literal",
+                "value": "name-6"
+              },
+              "owner_session_id": {
+                "kind": "literal",
+                "value": "s-1"
+              },
+              "owner_session_name": {
+                "kind": "literal",
+                "value": "owner_session_name-6"
+              },
+              "process": {
+                "kind": "instance",
+                "instance": "host-process-7"
+              },
+              "reason": {
+                "kind": "literal",
+                "value": "reason-6"
+              },
+              "restart": {
+                "kind": "literal",
+                "value": "no"
+              },
+              "state": {
+                "kind": "literal",
+                "value": "Ended"
+              }
+            }
+          }
+        }
+      ],
+      "source": [
+        {
+          "kind": "entity",
+          "name": "substrate.host_processes.HostProcess"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.RecordExit"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.StartContainer"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.StopByOwner"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.RecordExit",
+            "outcome": "exited"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.StartContainer",
+            "outcome": "started"
+          }
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.StopByOwner",
+            "outcome": "stopping-except-keep"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.LeaseRenewed"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.LogDiscarded"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.OwnerStopped"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessAdopted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessEnded"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessObserved"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessRunning"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessStarted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.StopRequested"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.StreamEventAppended"
+        },
+        {
+          "kind": "view",
+          "name": "substrate.host_processes.HostProcesses"
         },
         {
           "kind": "actor",
