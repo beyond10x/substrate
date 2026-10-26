@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-26T15:50:35Z",
+  "actor": "human:timo",
+  "artifact": "task:release-0-11-0",
+  "kind": "task",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "release run https://github.com/beyond10x/substrate/actions/runs/40349695547 success; Confinement-lane 180 and Quota-lane 7 at 2f886f2a",
+    "reference": "tag/0.11.0@2f886f2a2de2ff072a5d3ad755e333f7c8a7166b"
+  }
+}

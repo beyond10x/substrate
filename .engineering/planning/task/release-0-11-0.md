@@ -2,12 +2,13 @@
 format: aep.planning-md/3
 id: task:release-0-11-0
 kind: task
-status: active
+status: implemented
 title: Release Substrate 0.11.0 on ESS 0.69.2 with bundle 0.23.0
-revision: 4
+revision: 5
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-26T14:51:31Z", actor: "human:timo", revision: 3}
 - {from: "proposed", to: "active", at: "2026-10-26T14:51:31Z", actor: "human:timo", revision: 4}
+- {from: "active", to: "implemented", at: "2026-10-26T15:50:35Z", actor: "human:timo", revision: 5, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Outcome
 Publish Substrate 0.11.0 on ESS 0.69.2: development bundle `substrate-wire/0.23.0` (read-only roots, session-start exec fields, stream bounds) with wave 2026-10-23 and the ESS pin move (`task:ess-pin-moves-to-0-69-2`, pull request 157). Daemon and MCP OCI images are built at 0.11.0; the development bundle is `substrate-wire/0.23.0`.
