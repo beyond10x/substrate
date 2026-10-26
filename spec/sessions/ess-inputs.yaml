@@ -1,4 +1,4 @@
 format: ess-inputs/2
-requires: ess 0.68.0
+requires: ess 0.69.2
 specification: [system.yaml, capture.yaml]
 scenarios: []

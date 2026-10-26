@@ -2419,16 +2419,14 @@ mod capture_types;
 pub use capture_types::SubstrateSessionsCaptureMode as CaptureMode;
 impl Copy for CaptureMode {}
 impl Eq for CaptureMode {}
+// The enum is generated, so its default cannot be a `#[default]` on the variant.
+#[allow(clippy::derivable_impls)]
 impl Default for CaptureMode {
     fn default() -> Self {
         Self::Recorded
     }
 }
 impl CaptureMode {
-    #[allow(non_upper_case_globals)]
-    pub const Recorded: Self = Self::V0;
-    #[allow(non_upper_case_globals)]
-    pub const Unrecorded: Self = Self::V1;
     pub fn is_recorded(&self) -> bool {
         *self == Self::Recorded
     }
@@ -2445,7 +2443,7 @@ fn root_name_unchecked<'de, D: serde::Deserializer<'de>>(
 }
 
 // The root-name set and the workspace origin are generated from spec/workspaces, not transcribed
-// (ADR 0035). The ESS 0.68.0 decoder checks the root name's alphabet and length bound but not
+// (ADR 0035). The ESS 0.69.2 decoder checks the root name's alphabet and length bound but not
 // the leading-`-` rule, so [`is_root_name`] stays the full predicate (spec/workspaces/README.md).
 #[allow(dead_code, clippy::all, clippy::pedantic)]
 #[rustfmt::skip]
@@ -2456,12 +2454,9 @@ pub use workspace_types::SubstrateWorkspacesRootName as RootName;
 impl Copy for WorkspaceOrigin {}
 impl Eq for WorkspaceOrigin {}
 impl WorkspaceOrigin {
-    /// The row was written by `workspace.adopt`; destroy forgets it and leaves the directory.
-    #[allow(non_upper_case_globals)]
-    pub const Adopted: Self = Self::V0;
-    /// The row was written by `workspace.create`; destroy removes the directory it made.
-    #[allow(non_upper_case_globals)]
-    pub const Created: Self = Self::V1;
+    // `Adopted`: the row was written by `workspace.adopt`; destroy forgets it and leaves the
+    // directory. `Created`: the row was written by `workspace.create`; destroy removes the
+    // directory it made. Both are generated variants (ESS 0.69 names a variant by its spelling).
     pub fn is_adopted(self) -> bool {
         self == Self::Adopted
     }
@@ -2536,11 +2531,11 @@ impl From<DateTime<Utc>> for ProcessTimestamp {
     }
 }
 
-/// Names the generated variants of one closed vocabulary, which ESS emits as `V0`, `V1`, … in
-/// the sorted order of their spellings, and gives the type the `Copy`, `Eq` and `Hash` a closed
-/// vocabulary has.
+/// Gives one closed vocabulary the `Copy`, `Eq` and `Hash` a closed vocabulary has and its wire
+/// spelling. ESS 0.69 names each generated variant after its spelling, so the variants are the
+/// names the code uses; the macro lists every variant so a new spelling fails to compile here.
 macro_rules! process_vocabulary {
-    ($type:ty { $($(#[$doc:meta])* $name:ident = $variant:ident => $spelling:literal),+ $(,)? }) => {
+    ($type:ty { $($variant:ident => $spelling:literal),+ $(,)? }) => {
         impl Copy for $type {}
         impl Eq for $type {}
         impl std::hash::Hash for $type {
@@ -2548,9 +2543,7 @@ macro_rules! process_vocabulary {
                 self.as_str().hash(state);
             }
         }
-        #[allow(non_upper_case_globals)]
         impl $type {
-            $($(#[$doc])* pub const $name: Self = Self::$variant;)+
             /// The wire spelling, which is also the store column spelling.
             pub const fn as_str(self) -> &'static str {
                 match self {
@@ -2562,57 +2555,57 @@ macro_rules! process_vocabulary {
 }
 
 process_vocabulary!(ProcessState {
-    Ended = V0 => "ended",
-    Running = V1 => "running",
-    Starting = V2 => "starting",
-    Stopping = V3 => "stopping",
+    Ended => "ended",
+    Running => "running",
+    Starting => "starting",
+    Stopping => "stopping",
 });
 process_vocabulary!(ProcessEndedBy {
-    /// The main process exited.
-    Exit = V0 => "exit",
-    /// The `expires_at` deadline was reached (S11).
-    ExpiresAt = V1 => "expires-at",
-    /// The lease expired (S4).
-    LeaseExpiry = V2 => "lease-expiry",
-    /// An explicit stop, of one record or by owner (S5).
-    Stop = V3 => "stop",
-    /// The `timeout_ms` deadline was reached (S11).
-    Timeout = V4 => "timeout",
-    /// The record's cgroup was gone when the daemon reconciled it (S3).
-    Vanished = V5 => "vanished",
+    // The main process exited.
+    Exit => "exit",
+    // The `expires_at` deadline was reached (S11).
+    ExpiresAt => "expires-at",
+    // The lease expired (S4).
+    LeaseExpiry => "lease-expiry",
+    // An explicit stop, of one record or by owner (S5).
+    Stop => "stop",
+    // The `timeout_ms` deadline was reached (S11).
+    Timeout => "timeout",
+    // The record's cgroup was gone when the daemon reconciled it (S3).
+    Vanished => "vanished",
 });
 process_vocabulary!(ProcessDeadlineSource {
-    ExpiresAt = V0 => "expires-at",
-    Timeout = V1 => "timeout",
+    ExpiresAt => "expires-at",
+    Timeout => "timeout",
 });
 process_vocabulary!(ProcessLeaseState {
-    Active = V0 => "active",
-    Expired = V1 => "expired",
-    Expiring = V2 => "expiring",
+    Active => "active",
+    Expired => "expired",
+    Expiring => "expiring",
 });
 process_vocabulary!(ProcessLogStream {
-    Stderr = V0 => "stderr",
-    Stdout = V1 => "stdout",
+    Stderr => "stderr",
+    Stdout => "stdout",
 });
 process_vocabulary!(ProcessLogStreamSelection {
-    Both = V0 => "both",
-    Stderr = V1 => "stderr",
-    Stdout = V2 => "stdout",
+    Both => "both",
+    Stderr => "stderr",
+    Stdout => "stdout",
 });
 process_vocabulary!(ProcessSocketProtocol {
-    Tcp = V0 => "tcp",
-    Udp = V1 => "udp",
+    Tcp => "tcp",
+    Udp => "udp",
 });
 process_vocabulary!(ProcessProfile {
-    /// The one profile this family admits, requested explicitly and never defaulted (S2).
-    Host = V0 => "host",
+    // The one profile this family admits, requested explicitly and never defaulted (S2).
+    Host => "host",
 });
 process_vocabulary!(ProcessConfinement {
-    /// What every host-process record reports (S2).
-    None = V0 => "none",
+    // What every host-process record reports (S2).
+    None => "none",
 });
 process_vocabulary!(ProcessKind {
-    Process = V0 => "process",
+    Process => "process",
 });
 
 impl<T> ProcessPresence<T> {
