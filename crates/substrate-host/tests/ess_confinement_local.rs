@@ -54,6 +54,7 @@ fn open_portable(
         // The setup the scenario names: a runtime program path that does not exist.
         "oci" => AdapterRequest::Oci(OciRequest {
             runtime: PathBuf::from("/nonexistent/substrate-oci-runtime"),
+            writable_roots: Vec::new(),
         }),
         // The setup the scenario names: no cluster configuration.
         "pod" => AdapterRequest::Pod(PodRequest { cluster: None }),
@@ -160,12 +161,13 @@ fn systemd_without_a_user_manager_is_unserved() {
 }
 
 #[test]
-fn oci_is_unserved_in_this_tree() {
+fn oci_without_a_runtime_program_is_unserved() {
     let error = confinement::open(AdapterRequest::Oci(OciRequest {
-        runtime: PathBuf::from("/usr/bin/docker"),
+        runtime: PathBuf::from("/nonexistent/substrate-oci-runtime"),
+        writable_roots: Vec::new(),
     }))
     .err()
-    .expect("oci is absent");
+    .expect("oci is absent without a runtime");
     assert!(
         matches!(
             &error,
