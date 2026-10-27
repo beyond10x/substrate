@@ -143,7 +143,7 @@ actors:
 errors:
   # Each error is one named refusal; the code and the status are the contract's.
   - name: substrate.confinement.AdapterUnserved
-    summary: "`confinement.adapter-unserved`, 501. The adapter cannot open on this host or platform."
+    summary: "`confinement.adapter-unserved`, 501. The adapter cannot open on this host or platform, or the requested adapter and `inner` are not the pair that opened."
     fields:
       - {name: adapter, type: substrate.confinement.AdapterName}
   - name: substrate.confinement.FamilyUnserved
@@ -152,7 +152,7 @@ errors:
       - {name: adapter, type: substrate.confinement.AdapterName}
       - {name: family, type: substrate.confinement.ContractFamily}
   - name: substrate.confinement.FactUnserved
-    summary: "`confinement.fact-unserved`, 501. The adapter did not prove a fact the profile requires; the error names the fact (ADR 0109 decision 2)."
+    summary: "`confinement.fact-unserved`, 501. The adapter did not prove a fact the profile requires, or, at open, a fact the adapter itself must prove (`declared_insecure` for `local`, `image_digest_pinned` for `oci` and `pod`); the error names the fact (ADR 0109 decision 2)."
     fields:
       - {name: adapter, type: substrate.confinement.AdapterName}
       - {name: fact, type: substrate.confinement.Fact}
@@ -211,10 +211,43 @@ commands:
       - {name: served_families, type: "List<substrate.confinement.ContractFamily>"}
       - {name: facts, type: "List<substrate.confinement.Fact>"}
     outcomes:
+      # ADR 0044 decision 3 and atlas ADR 0109 decision 4: `local` is always reported declared
+      # insecure, bare or inside `systemd` (the systemd story: wrapping `local` is still declared
+      # insecure). An open whose proved set lacks `declared_insecure` is refused by that fact's
+      # name, so no `local` row exists that admission could take for a confined adapter.
+      - name: local-not-declared-insecure
+        when:
+          all:
+            - {adapter: [local]}
+            - {not: {exists: {in: facts, as: held, that: held == declared_insecure}}}
+        error: substrate.confinement.FactUnserved
+        payload:
+          substrate.confinement.FactUnserved: {adapter: input.adapter, fact: declared_insecure}
+      - name: systemd-local-not-declared-insecure
+        when:
+          all:
+            - {adapter: [systemd]}
+            - {inner: [local]}
+            - {not: {exists: {in: facts, as: held, that: held == declared_insecure}}}
+        error: substrate.confinement.FactUnserved
+        payload:
+          substrate.confinement.FactUnserved: {adapter: input.adapter, fact: declared_insecure}
+      # The oci story: "the adapter runs only a digest"; the pod story: "an image by digest". An
+      # `oci` or `pod` open that does not prove `image_digest_pinned` is refused by that fact's
+      # name, so admission's digest check holds on every `oci` and `pod` row.
+      - name: image-not-digest-pinned
+        when:
+          all:
+            - {adapter: [oci, pod]}
+            - {not: {exists: {in: facts, as: held, that: held == image_digest_pinned}}}
+        error: substrate.confinement.FactUnserved
+        payload:
+          substrate.confinement.FactUnserved: {adapter: input.adapter, fact: image_digest_pinned}
       # What makes an adapter absent is the host, not the request: `macos` off macOS, `linux` off
       # Linux, `systemd` with no reachable user manager, `oci` with no runtime program, `pod` with
-      # no cluster configuration. `local` always opens.
+      # no cluster configuration. `local` always opens, so it has no such answer.
       - name: unserved
+        when: {adapter: {none_of: [local]}}
         external: the adapter cannot open on this host or platform
         error: substrate.confinement.AdapterUnserved
         payload:
@@ -238,10 +271,12 @@ commands:
   # missing adapter, then what the opened adapter row decides (a missing reason, an unpinned
   # image, the host's policy), then its families and facts, in declaration order. Whether a run is
   # `local` is read from the opened row: `local`, or `systemd` opened around `local`.
-  # UNMAPPED: no source names a refusal for `systemd` requested without `inner`, for `inner` named
-  # beside another adapter, or for an `inner` that differs from the one the open `systemd`
-  # wraps. The model decides by the opened row and records the requested `inner` as sent. Open
-  # question for the owner of the S0 contract.
+  # A requested `inner` that differs from the opened row's, present or absent, is refused
+  # `confinement.adapter-unserved` (the `adapter-unserved` branch). The model takes this decision;
+  # no source states it.
+  # UNMAPPED: `OpenAdapter` accepts `inner` beside an adapter other than `systemd`, and `systemd`
+  # without `inner`. Refusing either at open made ESS 0.70.0 synthesis refuse every admission
+  # (ESS-SYNTH-002), so the model leaves both to the S0 contract's open. Open question.
   # UNMAPPED: ADR 0109 decision 2 and this story make every refusal an audit record
   # (`ProfileRefused`, carrying the adapter and the family or fact named). ESS refuses an event on
   # an outcome that reports an error (`refusal_mutated_state`), so the refusal's audit record is
@@ -275,8 +310,29 @@ commands:
         error: substrate.confinement.ReservedFieldUnserved
         payload:
           substrate.confinement.ReservedFieldUnserved: {field: rate-bounds}
-      - name: adapter-unserved
+      # No row: the adapter did not open on this host.
+      - name: adapter-not-open
         when_related: {via: input.adapter, exists: false}
+        error: substrate.confinement.AdapterUnserved
+        payload:
+          substrate.confinement.AdapterUnserved: {adapter: input.adapter}
+      # The requested adapter is the pair `adapter` and `inner`. One that differs from the opened
+      # row's pair names an adapter that is not open here, so it is refused as one (invariant 3):
+      # `systemd` around `linux` on a scope opened around `local` and the reverse, an `inner`
+      # beside an adapter opened without one, and `systemd` requested without the `inner` it was
+      # opened around. The branch reads the opened row's stored `inner` beside the requested one; it
+      # never compares the requested `adapter` identity with a literal (ESS 0.70.0 synthesis ignores
+      # such a guard, beyond10x/ess#693). Each comparison sits behind a presence test, so no guard
+      # compares an absent `inner` (ESS reads that as unknown and decides no branch).
+      - name: adapter-unserved
+        when_related:
+          via: input.adapter
+          predicate:
+            any:
+              - {all: ["defined(inner)", "not defined(input.inner)"]}
+              - {all: ["not defined(inner)", "defined(input.inner)"]}
+              - {all: ["defined(inner)", "defined(input.inner)", inner == local, input.inner == linux]}
+              - {all: ["defined(inner)", "defined(input.inner)", inner == linux, input.inner == local]}
         error: substrate.confinement.AdapterUnserved
         payload:
           substrate.confinement.AdapterUnserved: {adapter: input.adapter}
@@ -294,8 +350,35 @@ commands:
       # `image_digest_pinned` (`oci`, `pod`) refuses a reference that names no `sha256` digest.
       # UNMAPPED: an `oci` or `pod` profile with no image at all. The model refuses it as unpinned
       # (no digest is named; invariant 3, fail closed); no source says so. Open question.
+      # A pinned reference ends `@sha256:` and exactly 64 lowercase hex characters. ESS 0.70.0 has
+      # no pattern predicate and no substring, so the model states every part of that it can: the
+      # reference names `@sha256:`, ends with a lowercase hex character, and is long enough to hold
+      # a one-character name, `@sha256:` and 64 characters (73). That `@sha256:` is exactly the 64
+      # characters before the end, and that each of them is lowercase hex, is the `oci` and `pod`
+      # adapters' check (README.md, *Image digests*).
       - name: image-unpinned
-        when: {any: ["not defined(image)", {not: {image: {contains: "@sha256:"}}}]}
+        when:
+          any:
+            - "not defined(image)"
+            - {not: {image: {contains: "@sha256:"}}}
+            - image.count < 73
+            - none:
+                - {image: {ends_with: "0"}}
+                - {image: {ends_with: "1"}}
+                - {image: {ends_with: "2"}}
+                - {image: {ends_with: "3"}}
+                - {image: {ends_with: "4"}}
+                - {image: {ends_with: "5"}}
+                - {image: {ends_with: "6"}}
+                - {image: {ends_with: "7"}}
+                - {image: {ends_with: "8"}}
+                - {image: {ends_with: "9"}}
+                - {image: {ends_with: "a"}}
+                - {image: {ends_with: "b"}}
+                - {image: {ends_with: "c"}}
+                - {image: {ends_with: "d"}}
+                - {image: {ends_with: "e"}}
+                - {image: {ends_with: "f"}}
         when_related:
           via: input.adapter
           predicate: {exists: {in: facts, as: held, that: held == image_digest_pinned}}

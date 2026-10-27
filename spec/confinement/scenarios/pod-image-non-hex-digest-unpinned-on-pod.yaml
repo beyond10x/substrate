@@ -1,0 +1,33 @@
+# Adversary probe: `@sha256:latest` is not a sha256 digest (64 lowercase hex); the pod runs "an
+# image by digest", so the reference must be refused confinement.image-unpinned.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: pod-image-non-hex-digest-unpinned-on-pod
+summary: "lane pod: pod with an image whose @sha256: is followed by a non-digest is refused confinement.image-unpinned."
+
+timeline:
+  - at: 2026-10-27T09:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: pod
+      served_families: [process_run, process_watch, output_read, wait, workspace, limits, audit]
+      facts: [image_digest_pinned]
+    outcome: opened
+  - at: 2026-10-27T09:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: pod
+      required_families: [process_run]
+      required_facts: []
+      image: "registry.invalid/run@sha256:latest"
+    outcome: image-unpinned
+    error:
+      name: substrate.confinement.ImageUnpinned
+      fields: {adapter: pod}
+    no_events: [substrate.confinement.ProfileAdmitted]
+
+assert:
+  - view: substrate.confinement.Profiles
+    counts: {at_most: 0}

@@ -3,7 +3,7 @@
 # it is refused the same.
 type: ess-scenario/5
 domain: substrate.confinement
-scenario: macos-s1-adapter-unserved-off-macos-on-portable
+scenario: absent-macos-off-macos-on-portable
 summary: "lane portable: on Linux, opening macos is refused confinement.adapter-unserved, and a profile on macos is refused the same."
 
 timeline:
@@ -26,7 +26,7 @@ timeline:
       adapter: macos
       required_families: [process_run]
       required_facts: []
-    outcome: adapter-unserved
+    outcome: adapter-not-open
     error:
       name: substrate.confinement.AdapterUnserved
       fields: {adapter: macos}

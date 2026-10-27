@@ -1,0 +1,36 @@
+# Adversary probe: the open systemd wraps `local`. A profile that asks for systemd around `linux`
+# asks for an adapter that is not open on this host; invariant 3 makes that a named refusal, not an
+# admission that records `inner: linux` while the run is the unconfined `local`.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: systemd-linux-requested-on-local-scope-unserved-on-delegated
+summary: "lane delegated: with systemd open around local, a profile requesting systemd around linux is refused confinement.adapter-unserved."
+
+timeline:
+  - at: 2026-10-27T09:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: systemd
+      inner: local
+      served_families: [process_run, process_watch, output_read, wait, workspace, limits, audit]
+      facts: [declared_insecure, paths_are_host_paths, whole_tree_kill, local_permitted, host_network]
+    outcome: opened
+  - at: 2026-10-27T09:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: systemd
+      inner: linux
+      required_families: [process_run, limits]
+      required_facts: [whole_tree_kill]
+      local_reason: a client that always sends a reason
+    outcome: adapter-unserved
+    error:
+      name: substrate.confinement.AdapterUnserved
+      fields: {adapter: systemd}
+    no_events: [substrate.confinement.ProfileAdmitted]
+
+assert:
+  - view: substrate.confinement.Profiles
+    counts: {at_most: 0}

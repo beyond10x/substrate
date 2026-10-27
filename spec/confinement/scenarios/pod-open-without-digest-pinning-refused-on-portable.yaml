@@ -1,0 +1,25 @@
+# `story:pod-adapter`: the pod runs an image by digest. An open of `pod` whose proved set lacks
+# `image_digest_pinned` is refused by that fact's name, so admission's digest check holds on every
+# `pod` row.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: pod-open-without-digest-pinning-refused-on-portable
+summary: "lane portable: opening pod without the image_digest_pinned fact is refused confinement.fact-unserved naming image_digest_pinned, and no adapter opens."
+
+timeline:
+  - at: 2026-10-27T09:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: pod
+      served_families: [process_run, process_watch, output_read, wait, workspace, limits, audit]
+      facts: []
+    outcome: image-not-digest-pinned
+    error:
+      name: substrate.confinement.FactUnserved
+      fields: {adapter: pod, fact: image_digest_pinned}
+    no_events: [substrate.confinement.AdapterOpened]
+
+assert:
+  - view: substrate.confinement.Adapters
+    counts: {at_most: 0}
