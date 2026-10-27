@@ -2366,6 +2366,16 @@ impl ProcessRuntime {
                 ));
             }
         }
+        self.admit_command_shape(input)?;
+        self.recheck_backend()?;
+        Ok((pinned, read_only_roots, writable_roots))
+    }
+
+    /// The start's checks of the command itself, in admission's order: argv bounds, the capsule
+    /// entrypoint, the limits against the host's bounds and the closed environment. Both
+    /// [`Self::admit`] and [`Self::render`] run them, so a render never returns an argv for a
+    /// command a start refuses.
+    fn admit_command_shape(&self, input: &ExecStartInput) -> Result<(), DriverError> {
         if input.argv.is_empty()
             || input.argv.len() > 256
             || input.argv.iter().any(|argument| {
@@ -2405,17 +2415,19 @@ impl ProcessRuntime {
                 "limits",
             ));
         }
-        validate_environment(input)?;
-        self.recheck_backend()?;
-        Ok((pinned, read_only_roots, writable_roots))
+        validate_environment(input)
     }
 
     /// The program and argv `start` would hand bubblewrap for `input` in `workspace`, built by the
     /// same [`Self::command`] and spawning nothing (the confinement contract's `render`).
     ///
-    /// The workspace, read-only roots and read-only files are pinned and refused exactly as a
-    /// start pins and refuses them, and the descriptors are closed when this returns, so a number
-    /// in the argv names nothing afterwards. What a start acquires only to run — secret slots, a
+    /// Every check admission makes on the request alone runs here too, in admission's order:
+    /// workspace access, the capability snapshot, the sandbox profile, the working directory, and
+    /// [`Self::admit_command_shape`] (argv, limits, environment). The workspace, read-only roots
+    /// and read-only files are pinned and refused exactly as a start pins and refuses them, and
+    /// the descriptors are closed when this returns, so a number in the argv names nothing
+    /// afterwards. What a render does not ask is what only a start acquires: the host's
+    /// confinement facts and backend identity. What a start acquires only to run — secret slots, a
     /// capsule, scratch, writable roots, an aperture's resolution — is not acquired for a render:
     /// a request naming any of it is refused `confinement.render-unserved` rather than rendered
     /// without it.
@@ -2437,16 +2449,35 @@ impl ProcessRuntime {
                 "render",
             ));
         }
-        crate::workdir::admit(input, self.capability.facts.exec_workdir)?;
+        let read_only_roots = Self::admit_read_only_roots(
+            &input.read_only_roots,
+            self.capability.facts.exec_read_only_roots.as_ref(),
+        )?;
         crate::read_only_files::admit(
             &input.read_only_files,
             &input.read_only_roots,
             self.capability.facts.exec_read_only_files.as_ref(),
         )?;
-        let read_only_roots = Self::admit_read_only_roots(
-            &input.read_only_roots,
-            self.capability.facts.exec_read_only_roots.as_ref(),
+        Self::admit_workspace_access(
+            &input.workspace_access,
+            self.capability.facts.exec_workspace_scoped_write,
         )?;
+        if input.sandbox.capability_snapshot != self.capability.snapshot {
+            return Err(DriverError::refused(
+                "exec.capability-stale",
+                "The admitted capability snapshot is stale.",
+                "capability_snapshot",
+            ));
+        }
+        if !input.sandbox.required || input.sandbox.profile != SandboxProfile::Workspace {
+            return Err(DriverError::refused(
+                "exec.sandbox-invalid",
+                "Phase 2 requires the workspace sandbox.",
+                "sandbox",
+            ));
+        }
+        crate::workdir::admit(input, self.capability.facts.exec_workdir)?;
+        self.admit_command_shape(input)?;
         let read_only_files = crate::read_only_files::pin(&input.read_only_files)?;
         let root = self
             .workspace_root
@@ -3684,50 +3715,10 @@ fn unproven_tree_error() -> DriverError {
 }
 
 fn validate_environment(input: &ExecStartInput) -> Result<(), DriverError> {
-    if input.env.allow.len() > 5 || input.env.set.len() > 64 {
-        return Err(environment_refused());
+    if input.env.allow.len() > 5 {
+        return Err(crate::environment::refused());
     }
-    for (name, value) in &input.env.set {
-        if name.is_empty()
-            || name.len() > 128
-            || !name.bytes().enumerate().all(|(index, byte)| {
-                if index == 0 {
-                    byte.is_ascii_uppercase()
-                } else {
-                    byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_'
-                }
-            })
-            || value.len() > 4096
-            || value.contains('\0')
-            || is_secretish_name(name)
-        {
-            return Err(environment_refused());
-        }
-    }
-    Ok(())
-}
-
-fn is_secretish_name(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    [
-        "authorization",
-        "bearer",
-        "credential",
-        "password",
-        "proxy",
-        "secret",
-        "token",
-    ]
-    .iter()
-    .any(|fragment| lower.contains(fragment))
-}
-
-fn environment_refused() -> DriverError {
-    DriverError::refused(
-        "exec.environment-refused",
-        "Exec environment is outside the closed non-secret shape.",
-        "env",
-    )
+    crate::environment::check(&input.env.set)
 }
 
 const fn baseline_value(name: BaselineEnvironment) -> &'static str {
@@ -4319,8 +4310,8 @@ mod tests {
     use super::{
         Cgroup, ChildChannel, ExecObservation, Execution, PipeState, PipeStream, ProcessRuntime,
         USER_NAMESPACE_ARGV, assert_recorded_posture, close_live_output,
-        contain_spawned_with_reconciliation, drain_capped, is_secretish_name, is_terminal,
-        recorded_sandboxes, recording_backend, wait_terminal_with_hook,
+        contain_spawned_with_reconciliation, drain_capped, is_terminal, recorded_sandboxes,
+        recording_backend, wait_terminal_with_hook,
     };
     use super::{RawFd, bubblewrap_descriptor, inherited_clear_of_slots, pipe};
     use crate::{DispatchOutcome, HostConfig};
@@ -4757,9 +4748,9 @@ mod tests {
             "HTTP_PROXY",
             "CREDENTIAL_FILE",
         ] {
-            assert!(is_secretish_name(name), "{name}");
+            assert!(crate::environment::is_secretish_name(name), "{name}");
         }
-        assert!(!is_secretish_name("VECTOR_VISIBLE"));
+        assert!(!crate::environment::is_secretish_name("VECTOR_VISIBLE"));
     }
 
     #[test]
