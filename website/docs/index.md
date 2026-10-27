@@ -58,5 +58,6 @@ why work should happen and where it should be placed.
 - [Run an ordinary binary](./guides/run-a-command.md) with terminal-visible bounds and metrics.
 - [Understand the system boundary](./concepts/boundary.md) and [model coverage](./concepts/model.md).
 - [See how confinement becomes refusal](./concepts/confinement.md).
+- [Choose a confinement profile](./guides/confinement-profiles.md) when you embed the host crate.
 - [Follow a mutation from operation to observation](./concepts/operations.md).
 - [Check the current status and limitations](./status.md).
