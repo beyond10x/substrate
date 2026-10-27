@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::io::ErrorKind;
-use std::os::unix::net::UnixListener;
+use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::process::Command as HostCommand;
 use std::sync::Arc;
@@ -340,16 +340,19 @@ async fn a_unix_socket_connect_from_a_run_is_refused() {
         .set_nonblocking(true)
         .expect("non-blocking listener");
 
-    let control = HostCommand::new("/usr/bin/nc")
-        .arg("-U")
-        .arg(&socket)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .expect("nc runs");
+    // The control connects from the test process. An unconfined `nc -U` waited for the peer to
+    // close a connection the listener only accepts after `nc` returned, and hung the job
+    // (story:macos-seatbelt-policy-runs-cargo-test, macos-15 run 40452966164).
+    let control = UnixStream::connect(&socket);
     assert!(
-        accepted_within(&listener, Duration::from_secs(5)),
+        control.is_ok(),
         "the unconfined control did not connect: {control:?}"
     );
+    assert!(
+        accepted_within(&listener, Duration::from_secs(5)),
+        "the unconfined control was not accepted"
+    );
+    drop(control);
 
     let profile = ConfinementProfile {
         workspace: Some(workspace.clone()),
@@ -359,7 +362,9 @@ async fn a_unix_socket_connect_from_a_run_is_refused() {
     let attack = outcome(
         &adapter,
         &profile,
-        &bash("/usr/bin/nc -U \"$1\" < /dev/null", &[text(&socket)]),
+        // `-w 2` ends a connection the profile wrongly allows, so the case reports it rather
+        // than waiting out the run's limit.
+        &bash("/usr/bin/nc -w 2 -U \"$1\" < /dev/null", &[text(&socket)]),
     )
     .await
     .expect("the case starts");
