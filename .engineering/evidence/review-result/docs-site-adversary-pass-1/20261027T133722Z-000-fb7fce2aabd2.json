@@ -1,0 +1,15 @@
+{
+  "at": "2026-10-27T13:37:22Z",
+  "actor": "human:timo",
+  "artifact": "review-result:docs-site-adversary-pass-1",
+  "kind": "review-result",
+  "revision": 3,
+  "change": {
+    "change": "redaction",
+    "literal_sha256": "4c459c10d3b176520d9537d7a4d971d4c4986c8eba413754d9c25c5e6d18e4e3",
+    "literal_chars": 74,
+    "replacement": "<tree>/",
+    "count": 1,
+    "reason": "a workstation path, published by mistake"
+  }
+}

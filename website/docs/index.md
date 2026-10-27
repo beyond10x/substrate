@@ -16,7 +16,7 @@ names uncertainty instead of filling it with optimism.
 For example, create a guarded workspace, write an input file, then ask Substrate to run
 `sha256sum` under explicit bounds. The workspace, the start operation and the running exec have
 different identities and lifetimes. [Follow that request](./concepts/operations.md) or
-[try guarded file I/O first](./getting-started.md#try-a-workspace-without-process-execution).
+[try guarded file I/O first](./guides/run-a-command.md#try-a-workspace-without-process-execution).
 
 ## The boundary in one table
 
@@ -56,7 +56,7 @@ why work should happen and where it should be placed.
 
 ## Choose a path
 
-- [Run a local daemon](./getting-started.md) and inspect its verified machine facts.
+- [Run one confined command](./getting-started.md), or [run a local daemon](./guides/run-a-command.md#start-with-an-observable-machine) and inspect its verified machine facts.
 - [See what you can build](./use-cases.md), from test workers to file processors and agent tools.
 - [Run an ordinary binary](./guides/run-a-command.md) with terminal-visible bounds and metrics.
 - [Understand the system boundary](./concepts/boundary.md) and [model coverage](./concepts/model.md).

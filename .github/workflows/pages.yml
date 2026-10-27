@@ -20,18 +20,25 @@ jobs:
   build:
     name: Build documentation
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
           persist-credentials: false
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: website/package-lock.json
       - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c
         with:
           toolchain: '1.97'
-      - name: Validate and build the static documentation
+      - name: Build the Docusaurus site
+        run: npm --prefix website ci && npm --prefix website run build
+      - name: Test the docs checks and bind the built site to its source commit
         run: |
-          cargo test --locked -p xtask docs::
-          cargo xtask build-docs --out website/build --commit "$GITHUB_SHA"
+          cargo test --locked -p xtask -- docs:: site_ux:: site_drift::
+          cargo xtask docs-provenance --site website/build --commit "$GITHUB_SHA"
       - name: Upload the exact built site
         if: github.ref == 'refs/heads/main' && github.event_name == 'push'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a

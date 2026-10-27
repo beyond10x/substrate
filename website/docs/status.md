@@ -73,5 +73,5 @@ The homepage describes durable product boundaries. This page carries the changin
 snapshot. For a real deployment, machine facts take precedence over both: they describe what that
 specific daemon verified at runtime.
 
-Start with [getting started](./getting-started.md), then read
+Start with [getting started](./getting-started.md) or [a local daemon](./guides/run-a-command.md#start-with-an-observable-machine), then read
 [confinement and refusal](./concepts/confinement.md) before enabling execution.

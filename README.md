@@ -13,7 +13,7 @@ the machine cannot confine, it says so — an exec on a host with no delegated c
 It does not decide product policy, run agent loops, or understand connector vendors.
 
 [Public handbook](https://beyond10x.github.io/substrate/docs/) ·
-[Run a local daemon](https://beyond10x.github.io/substrate/docs/getting-started/) ·
+[Run one confined command](https://beyond10x.github.io/substrate/docs/getting-started) ·
 [System model and derivation](https://beyond10x.github.io/substrate/docs/concepts/model/) ·
 [Run a bounded command](https://beyond10x.github.io/substrate/docs/guides/run-a-command/)
 
@@ -177,6 +177,49 @@ deterministic OCI image layout — `0.4.0` reproduces manifest
 eligible release tag, the release workflow copies that exact layout to GHCR with ORAS, confirms the
 remote digest, and signs and verifies the digest before announcement. The workflow's offline
 write-once and ordering assertions run in `xtask/tests/release_workflow.rs`.
+
+### Release binaries
+
+From the release after 0.13.0 on, each GitHub release also carries the daemon and the command-line
+client as prebuilt x86_64 Linux binaries:
+
+| asset | holds |
+|---|---|
+| `substrate-daemon-<version>-x86_64-unknown-linux-gnu.tar.gz` | `substrate-daemon`, `LICENSE`, `THIRD_PARTY_LICENSES.html`, `README.md` |
+| `b10x-substrate-<version>-x86_64-unknown-linux-gnu.tar.gz` | `b10x-substrate`, the same three files |
+| `SHA256SUMS` | the SHA-256 of both archives |
+| `SHA256SUMS.sigstore.json` | the keyless `cosign sign-blob` bundle for `SHA256SUMS` |
+
+The release workflow exports both binaries from the Dockerfile's pinned `builder` stage, the stage
+the images copy from, so they share the image toolchain. The daemon archive holds the daemon of the
+published daemon image byte for byte: a first release run refuses any difference, and a recovery
+run that reuses an already published image archives that image's daemon. The binaries run on
+glibc 2.35 or newer (Ubuntu 22.04, Debian 12 and later) and load two libraries beyond glibc and
+`libgcc_s`: OpenSSL 3 (`libssl3`, `libssl3t64` on Ubuntu 24.04) and zlib (`zlib1g`), both present
+on a stock Ubuntu 22.04 image. Before any image tag moves, the workflow refuses a binary that
+needs a newer glibc or any other shared library, and starts both in a digest-pinned Ubuntu 22.04
+image. A recovery run of a tag whose source predates the `release-binaries` stage publishes no
+archives, no `SHA256SUMS` and no signature, and its release notes say so.
+
+Verify the signature, then the archives. The certificate identity is the release workflow at the
+ref that ran it, which the release notes print:
+`https://github.com/beyond10x/substrate/.github/workflows/release.yml@refs/tags/<version>` for a
+release started by pushing its tag, and
+`https://github.com/beyond10x/substrate/.github/workflows/release.yml@refs/heads/main` for one
+published by a recovery dispatch from `main`. The image and contract-bundle signatures of a
+release carry the same identity, so `cosign verify` of an image takes the same value.
+
+```bash
+cosign verify-blob \
+  --bundle SHA256SUMS.sigstore.json \
+  --certificate-identity "https://github.com/beyond10x/substrate/.github/workflows/release.yml@refs/tags/<version>" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS
+```
+
+The daemon binary alone does not confine anything: execution still needs bubblewrap and a delegated
+cgroup v2 subtree, and without them exec answers `exec.sandbox-unavailable`.
 
 ### Running the daemon
 
