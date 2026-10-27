@@ -3484,6 +3484,54 @@ mod tests {
             println!("FORKING-NEIGHBOUR held");
         }
 
+        /// Adversary, `story:egress-third-install-case-holds-under-load` pass 1. Once the
+        /// installing process keeps the listener for the aperture's lifetime, the forwarder is no
+        /// longer its only owner: a forwarder that dies during the run (its `accept4` error exit,
+        /// or a kill inside the run's cgroup) leaves the socket listening with nobody accepting.
+        /// A child inside then completes a handshake into a backlog nobody drains, where before
+        /// the last descriptor closed with the forwarder and the connect was refused.
+        ///
+        /// The forwarder is killed here and waited for without being reaped, so the aperture's
+        /// own drop still reaps exactly the pid it forked.
+        #[test]
+        fn a_dead_forwarder_leaves_its_aperture_refusing_rather_than_accepting_into_nothing() {
+            let scratch = tempfile::tempdir().unwrap();
+            let model = Destination::serving(b"model".to_vec());
+            let declared = [aperture(
+                "model",
+                "model.example.invalid",
+                model.address,
+                None,
+            )];
+            let script = "if (exec 3<>/dev/tcp/127.0.0.1/443) 2>/dev/null; then printf open; \
+                          else printf refused; fi";
+            let Some(sandbox) = ScriptedSandbox::open(scratch.path(), None, script) else {
+                return;
+            };
+            let installed = install_all(&declared, sandbox.pid, None).expect("install one");
+            let forwarder = installed.apertures()[0].forwarder;
+            // SAFETY: a pid this process forked and has not reaped; `WNOWAIT` leaves it a zombie
+            // for the aperture's drop to reap.
+            unsafe {
+                libc::kill(forwarder, libc::SIGKILL);
+                let mut info: libc::siginfo_t = std::mem::zeroed();
+                let waited = libc::waitid(
+                    libc::P_PID,
+                    libc::id_t::try_from(forwarder).expect("forwarder pid"),
+                    &raw mut info,
+                    libc::WEXITED | libc::WNOWAIT,
+                );
+                assert_eq!(waited, 0, "wait for the killed forwarder");
+            }
+            let printed = sandbox.finish(Duration::from_secs(30));
+            drop(installed);
+            assert_eq!(
+                printed, "refused",
+                "with its forwarder dead, the aperture still completed a connection from inside \
+                 that nothing will ever accept"
+            );
+        }
+
         /// Each ceiling is independent under concurrent connections (ADR 0014 per aperture;
         /// design 26 § 2): four relays at once through a capped aperture and four through an
         /// uncapped one on the same port. The uncapped one passes every byte, and the capped one
