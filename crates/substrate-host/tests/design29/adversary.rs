@@ -941,11 +941,15 @@ async fn adv_linux_render_refuses_a_subtree_as_start_does() {
         args.windows(3)
             .any(|window| window[0] == flag && window[2] == target)
     };
+    // The messages name the binds, not the argv: a rendered argv can carry secret slot values.
     assert!(
         bind("--ro-bind-fd", "/workspace") && bind("--bind-fd", "/workspace/out"),
-        "{NAME}: {args:?}"
+        "{NAME}: render does not bind /workspace read-only and /workspace/out writable"
     );
-    assert!(!bind("--bind-fd", "/workspace"), "{NAME}: {args:?}");
+    assert!(
+        !bind("--bind-fd", "/workspace"),
+        "{NAME}: render binds /workspace writable"
+    );
     assert!(
         differences.is_empty(),
         "{NAME}: render and start disagree:\n{}",

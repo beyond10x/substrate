@@ -26,14 +26,17 @@ use substrate_host::confinement::{
 const CHANGELOG: &str = include_str!("../../../../CHANGELOG.md");
 const GIT: &str = "/usr/bin/git";
 
-/// The `[Unreleased]` section of the CHANGELOG: what the next release tells its consumers.
-fn unreleased() -> &'static str {
-    let start = CHANGELOG
-        .find("## [Unreleased]")
-        .expect("an [Unreleased] section");
-    let rest = &CHANGELOG[start + "## [Unreleased]".len()..];
-    let end = rest.find("\n## [").unwrap_or(rest.len());
-    &rest[..end]
+/// The newest CHANGELOG section, `[Unreleased]` or a release, that adds `workspace_access`: what
+/// the release carrying scoped workspace write tells its consumers.
+fn scoped_write_section() -> &'static str {
+    CHANGELOG
+        .split("\n## [")
+        .skip(1)
+        .find(|section| section.contains("gains `workspace_access`"))
+        .expect(
+            "story:linux-adapter-serves-scoped-workspace-write: a CHANGELOG section adds \
+             `workspace_access`",
+        )
 }
 
 /// Commit b7d677ef says "The CHANGELOG states both limits": a `.git` nested inside a writable
@@ -42,7 +45,7 @@ fn unreleased() -> &'static str {
 /// than closes. A consumer that relies on the `.git` protection learns of them only there.
 #[test]
 fn the_changelog_states_the_two_limits_of_a_scoped_workspace_write() {
-    let section = unreleased().to_ascii_lowercase();
+    let section = scoped_write_section().to_ascii_lowercase();
     let missing: Vec<&str> = [
         ("hard link", "a pre-existing hard link stays writable"),
         (
@@ -56,8 +59,8 @@ fn the_changelog_states_the_two_limits_of_a_scoped_workspace_write() {
     .collect();
     assert!(
         missing.is_empty(),
-        "the [Unreleased] CHANGELOG section does not state these limits of scoped workspace \
-         write: {missing:?}"
+        "story:linux-adapter-serves-scoped-workspace-write: the CHANGELOG section that adds \
+         scoped workspace write does not state these limits of it: {missing:?}"
     );
 }
 

@@ -595,7 +595,8 @@ fn a_narrower_workspace_is_refused_scoped_write_unserved() {
     }
 }
 
-// B9: a `macos` run keeps the last bytes under `Tail`.
+// B9: a `macos` run keeps the last bytes under `Tail`. The numbers come from bash's own `printf`:
+// only the program itself is executable, so `/usr/bin/seq` ends the run with 126.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_run_under_tail_keeps_the_last_bytes() {
     const LAST: u32 = 300_000;
@@ -612,7 +613,10 @@ async fn a_run_under_tail_keeps_the_last_bytes() {
         })
         .expect("admitted");
     let run = adapter
-        .start(&admitted, &bash(&format!("/usr/bin/seq 1 {LAST}"), &[]))
+        .start(
+            &admitted,
+            &bash(&format!("printf '%s\\n' {{1..{LAST}}}"), &[]),
+        )
         .await
         .expect("started");
     let ended = tokio::time::timeout(Duration::from_secs(30), adapter.wait(&run))
