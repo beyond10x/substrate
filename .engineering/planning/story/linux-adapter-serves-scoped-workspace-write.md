@@ -2,16 +2,17 @@
 format: aep.planning-md/3
 id: story:linux-adapter-serves-scoped-workspace-write
 kind: story
-status: active
+status: implemented
 title: The linux adapter serves a scoped workspace write
 tags:
 - adr-0109
 relations:
 - decomposes: epic:confinement-contract-family
-revision: 3
+revision: 4
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-27T13:13:28Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-10-27T13:13:28Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-10-27T18:30:55Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":1,"review_outcome":3}}}
 ---
 ## Outcome
 
