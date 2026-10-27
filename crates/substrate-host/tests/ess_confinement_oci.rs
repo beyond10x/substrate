@@ -247,13 +247,19 @@ fn render_holds_the_bounds_and_the_image_digest_sandbox_lacks() {
     );
     let embedder = args
         .iter()
-        .find_map(|arg| arg.strip_prefix(&format!("{}=", oci::EMBEDDER_LABEL)))
-        .expect("the embedder label");
-    assert_eq!(
-        embedder.split('/').nth(2),
-        Some(std::process::id().to_string().as_str()),
-        "{embedder}"
-    );
+        .find_map(|arg| arg.strip_prefix(&format!("{}=", oci::EMBEDDER_LABEL)));
+    // The embedder identity is read from `/proc`; without it no label is written
+    // (`story:oci-adapter`).
+    if cfg!(target_os = "linux") {
+        let embedder = embedder.expect("the embedder label");
+        assert_eq!(
+            embedder.split('/').nth(2),
+            Some(std::process::id().to_string().as_str()),
+            "{embedder}"
+        );
+    } else {
+        assert_eq!(embedder, None, "{args:?}");
+    }
     let env: Vec<&String> = args
         .windows(2)
         .filter(|window| window[0] == "-e")
