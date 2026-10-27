@@ -150,6 +150,41 @@ process. A profile admitted by one adapter starts only on that adapter, and a st
 profile again against the adapter's own facts. `observe`, `signal` and `render` (the program and
 arguments a start would run, without running it) take the same run or admitted profile.
 
+## Build with the macOS developer tools
+
+Inside the Seatbelt policy, the `/usr/bin/cc` and `xcrun` shims cannot find the compiler or the
+SDK: they ask `xcodebuild` through `/bin/sh`, which no exec subpath allows. So `macos` resolves the
+selected developer tools once, when it opens. It runs `/usr/bin/xcrun --sdk macosx` outside the
+sandbox for the SDK path, `clang` and `ar`, with a cleared environment (`PATH=/usr/bin:/bin` and
+nothing else) and `/` as its working directory, so no `DEVELOPER_DIR` or `TOOLCHAINS` of the
+embedding process chooses the answer. Each answer must be an absolute path that resolves beneath
+the selected developer tools. On a host without developer tools, `xcrun` is not run.
+
+A start then gets these variables, each only when its path lies beneath one of the profile's
+`exec_subpaths`, and only when the command's environment does not name it:
+
+| Variable | Value |
+|---|---|
+| `SDKROOT` | the macOS SDK |
+| `CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER` | `clang` |
+| `CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER` | `clang` |
+| `CC` | `clang` |
+| `AR` | `ar` |
+
+A confined `cargo build` or `cargo test`, and a build script that compiles C, then link without
+reaching the shim. A linker variable outranks a linker a cargo configuration file names; to use
+another, set the variable in the command's environment. Nothing is resolved again at a start, and
+the Seatbelt policy gains no rule.
+
+A start whose exec subpaths reach the developer tools is refused
+`exec.sandbox-developer-tools-unresolved` (501), naming why, before anything runs, when:
+
+- the open could not resolve the SDK, `clang` or `ar`;
+- other developer tools are selected than at open, including when the open found none;
+- the SDK the open resolved is no longer a directory beneath them;
+- the exec subpaths hold the selected developer directory (an Xcode bundle's `Contents/Developer`,
+  or the Command Line Tools directory) but not a value it needs.
+
 ## Refusals
 
 Admission refuses in this order and names the first refusal it meets:
