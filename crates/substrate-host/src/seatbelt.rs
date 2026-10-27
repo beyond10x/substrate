@@ -75,6 +75,11 @@ pub const COMMAND_LINE_TOOLS: &str = "/Library/Developer/CommandLineTools";
 /// credential.
 pub const BUILD_READ_SUBPATHS: [&str; 1] = ["/private/etc/ssl"];
 
+/// The system-wide Xcode preferences, where `xcodebuild -license` records the accepted licence.
+/// `xcrun` and the `cc` shim refuse to run when they cannot see the acceptance, so a policy with an
+/// exec subpath may read this one file. It holds no user data and no credential.
+pub const XCODE_LICENSE_PREFERENCES: &str = "/Library/Preferences/com.apple.dt.Xcode.plist";
+
 /// System directories an exec subpath may name without a declared root.
 pub const SYSTEM_EXEC_SUBPATHS: [&str; 6] = [
     "/bin",
@@ -273,6 +278,10 @@ impl SeatbeltPolicy {
             for subpath in BUILD_READ_SUBPATHS {
                 let _ = writeln!(profile, "(allow file-read* (subpath \"{subpath}\"))");
             }
+            let _ = writeln!(
+                profile,
+                "(allow file-read* (literal \"{XCODE_LICENSE_PREFERENCES}\"))"
+            );
         }
         let mut ancestors: Vec<&Path> = Vec::new();
         for path in &self.sealed {
@@ -713,6 +722,7 @@ mod tests {
             "(allow process-exec (subpath \"/w/space/target\"))",
             "(allow file-read* (literal \"/private/var/db/xcode_select_link\"))",
             "(allow file-read* (subpath \"/private/etc/ssl\"))",
+            "(allow file-read* (literal \"/Library/Preferences/com.apple.dt.Xcode.plist\"))",
         ] {
             assert!(lines.contains(&line), "missing {line}\n{profile}");
         }
@@ -742,6 +752,7 @@ mod tests {
         assert!(!profile.contains(XCODE_SELECT_LINK), "{profile}");
         assert!(!profile.contains("file-map-executable"), "{profile}");
         assert!(!profile.contains("/private/etc/ssl"), "{profile}");
+        assert!(!profile.contains("com.apple.dt.Xcode"), "{profile}");
     }
 
     #[test]

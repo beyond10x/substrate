@@ -3,7 +3,8 @@
 //! Each start renders a [`SeatbeltPolicy`] whose only writable location is the workspace, whose
 //! read-only locations are the declared roots, and whose only executable is the program itself,
 //! and runs the program through `/usr/bin/sandbox-exec` with the run's environment and nothing
-//! else.
+//! else. A `DYLD_` variable in that environment is refused `exec.environment-refused`: it would
+//! steer the dynamic loader of every program the run starts.
 //!
 //! It serves `process_run`, `process_watch`, `output_read`, `wait`, `workspace`,
 //! `filesystem_view` and `audit`. It proves `paths_are_host_paths` (a declared root is visible at
@@ -26,7 +27,8 @@
 //!   must lie in the workspace, a declared read-only root, or a system or developer directory
 //!   ([`seatbelt::SYSTEM_EXEC_SUBPATHS`], [`seatbelt::developer_root`]), else it is refused
 //!   `exec.sandbox-exec-subpath-undeclared`. A policy with an exec subpath may read
-//!   [`seatbelt::XCODE_SELECT_LINK`] and [`seatbelt::BUILD_READ_SUBPATHS`].
+//!   [`seatbelt::XCODE_SELECT_LINK`], [`seatbelt::XCODE_LICENSE_PREFERENCES`] and
+//!   [`seatbelt::BUILD_READ_SUBPATHS`].
 //! - `private_tmpdir`: each start creates a directory beside the host's temporary directory,
 //!   writable by that run alone, sets `TMPDIR` to it, and removes it before `wait` returns, after
 //!   making every directory the run left in it owner-accessible again. A directory that still
@@ -308,6 +310,11 @@ impl MacosAdapter {
     ) -> Result<std::process::Command, ConfinementError> {
         super::check_command(command)?;
         crate::environment::check(&command.env)?;
+        // A `DYLD_` variable steers the dynamic loader of every program the run starts: a library
+        // inserted into it, a search path ahead of the system's. None reaches a confined run.
+        if command.env.keys().any(|name| name.starts_with("DYLD_")) {
+            return Err(crate::environment::refused().into());
+        }
         let program = Path::new(&command.argv[0]);
         if !program.is_absolute() {
             return Err(DriverError::refused(
@@ -1494,5 +1501,46 @@ mod tests {
             .await
             .expect_err("relative");
         assert_eq!(driver_code(&error), seatbelt::PATH_UNREPRESENTABLE);
+    }
+
+    // macos-15 run 40452966164: `DYLD_INSERT_LIBRARIES` reached the confined program
+    // (`a_dyld_variable_does_not_reach_the_confined_program`). Every `DYLD_` variable steers the
+    // dynamic loader, so a start naming one is refused before anything runs.
+    #[tokio::test]
+    async fn a_dynamic_loader_variable_is_refused_before_anything_runs() {
+        let adapter = adapter();
+        let workspace = tempfile::tempdir().expect("workspace");
+        let admitted = adapter
+            .admit(&ConfinementProfile {
+                workspace: Some(workspace.path().to_path_buf()),
+                ..ConfinementProfile::default()
+            })
+            .expect("admitted");
+        for name in [
+            "DYLD_INSERT_LIBRARIES",
+            "DYLD_LIBRARY_PATH",
+            "DYLD_FRAMEWORK_PATH",
+            "DYLD_FALLBACK_LIBRARY_PATH",
+            "DYLD_IMAGE_SUFFIX",
+        ] {
+            let error = adapter
+                .start(
+                    &admitted,
+                    &Command {
+                        argv: vec!["/bin/sh".into()],
+                        env: BTreeMap::from([(name.to_owned(), "/absent.dylib".to_owned())]),
+                    },
+                )
+                .await
+                .expect_err(name);
+            assert_eq!(driver_code(&error), "exec.environment-refused", "{name}");
+        }
+        assert_eq!(
+            std::fs::read_dir(workspace.path())
+                .expect("workspace")
+                .count(),
+            0,
+            "something ran in the workspace"
+        );
     }
 }
