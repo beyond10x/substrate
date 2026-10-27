@@ -1949,4 +1949,88 @@ mod tests {
             "something ran in the workspace"
         );
     }
+
+    // Adversary, story:confined-cargo-build-links-without-the-xcrun-shim, A2: the selected
+    // developer directory (`xcode-select -p`, `…/Xcode.app/Contents/Developer`) is an admitted exec
+    // subpath and holds both the SDK and `clang` the adapter resolved, so its policy can run them;
+    // without `SDKROOT` and the linker its build reaches the `/usr/bin/cc` shim and fails.
+    #[test]
+    fn adversary_a_policy_over_the_selected_developer_directory_gets_sdkroot_and_the_linker() {
+        let tree = developer_tree();
+        let tools = resolved(&tree);
+        let selected = tree.developer.join("Contents/Developer");
+        assert!(tree.sdk.starts_with(&selected) && tree.clang.starts_with(&selected));
+        assert_eq!(
+            tools
+                .environment(std::slice::from_ref(&selected), &BTreeMap::new())
+                .expect("environment"),
+            vec![
+                ("SDKROOT".to_owned(), tree.sdk.clone()),
+                (linker_variable(&apple_host_triple()), tree.clang.clone()),
+            ]
+        );
+    }
+
+    // Adversary, A3: cargo reads the linker of the toolchain's host or `--target` triple, which is
+    // not the architecture the daemon was built for when the toolchain is the other Apple triple
+    // (an x86_64 rustup toolchain on Apple silicon, a daemon under Rosetta, a `--target` build).
+    // The resolved `clang` links both, so a start over the developer tools names it for both.
+    #[test]
+    fn adversary_the_linker_is_named_for_each_apple_darwin_triple() {
+        let tree = developer_tree();
+        let environment = resolved(&tree)
+            .environment(std::slice::from_ref(&tree.developer), &BTreeMap::new())
+            .expect("environment");
+        for triple in ["aarch64-apple-darwin", "x86_64-apple-darwin"] {
+            let name = linker_variable(triple);
+            assert!(
+                environment
+                    .iter()
+                    .any(|(set, value)| *set == name && *value == tree.clang),
+                "{name} is not set: {environment:?}"
+            );
+        }
+    }
+
+    // Adversary, A4: `xcrun --show-sdk-path` names the unversioned `MacOSX.sdk` link, and the
+    // adapter keeps its canonical, versioned target from open for the daemon's lifetime. An SDK
+    // update while the daemon runs replaces the versioned directory and moves the link, and every
+    // later start gets an `SDKROOT` that no longer exists; rustc ignores it, asks `xcrun`, and the
+    // build fails inside the sandbox with no named refusal.
+    #[test]
+    fn adversary_the_sdkroot_a_start_gets_survives_an_sdk_update() {
+        let tree = developer_tree();
+        let sdks = tree
+            .developer
+            .join("Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs");
+        let old = sdks.join("MacOSX15.0.sdk");
+        std::fs::create_dir_all(&old).expect("versioned SDK");
+        let link = sdks.join("MacOSX.sdk");
+        std::os::unix::fs::symlink("MacOSX15.0.sdk", &link).expect("SDK link");
+        let tools = resolve_developer_tools(
+            tree.developer.clone(),
+            answering(Ok(line(&link)), Ok(line(&tree.clang))),
+        );
+        assert!(
+            matches!(tools, DeveloperTools::Resolved { .. }),
+            "{tools:?}"
+        );
+        // The update: the versioned SDK is replaced and the link names its successor.
+        std::fs::remove_dir(&old).expect("old SDK removed");
+        std::fs::create_dir(sdks.join("MacOSX15.2.sdk")).expect("new SDK");
+        std::fs::remove_file(&link).expect("link removed");
+        std::os::unix::fs::symlink("MacOSX15.2.sdk", &link).expect("link moved");
+        let environment = tools
+            .environment(std::slice::from_ref(&tree.developer), &BTreeMap::new())
+            .expect("environment");
+        let (_, sdkroot) = environment
+            .iter()
+            .find(|(name, _)| name == "SDKROOT")
+            .expect("SDKROOT is set");
+        assert!(
+            sdkroot.is_dir(),
+            "SDKROOT {} no longer exists after the update",
+            sdkroot.display()
+        );
+    }
 }
