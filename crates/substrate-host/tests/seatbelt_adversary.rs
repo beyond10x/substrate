@@ -385,7 +385,7 @@ async fn cargo_test(filter: Option<&str>, port: u16) -> Ended {
         &macos(),
         &profile,
         &confinement::Command { argv, env },
-        Duration::from_secs(600),
+        Duration::from_mins(10),
     )
     .await;
     let vendored = workspace.join("vendor/seatbelt-fixture-dep/src/lib.rs");
@@ -563,7 +563,7 @@ async fn the_private_tmpdir_is_per_run_and_gone_after_wait() {
         private_tmpdir: true,
         ..ConfinementProfile::default()
     };
-    let limit = Duration::from_secs(60);
+    let limit = Duration::from_mins(1);
 
     let admitted = adapter.admit(&profile).expect("admitted");
     let first = adapter
