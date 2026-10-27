@@ -7,6 +7,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.13.0] — 2026-10-27
+
 ### Added
 
 - The `macos` adapter resolves the selected developer tools' macOS SDK, `clang` and `ar` with `xcrun` outside the sandbox at open, with a cleared environment and `/` as its working directory, and a start gets `SDKROOT`, `CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER`, `CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER`, `CC` and `AR` for each of them its exec subpaths reach, unless its environment names it, so a confined `cargo build` or `cargo test`, and a build script that compiles C, links without reaching the `/usr/bin/cc` shim, which runs `/bin/sh` and `xcodebuild`. A start over the developer tools is refused `exec.sandbox-developer-tools-unresolved` before anything runs, naming why, when the open could not resolve them, when the selected developer tools changed since the open, when the SDK the open resolved is gone, or when its exec subpaths hold the selected developer directory but not a value it needs; nothing is resolved again at start. The Seatbelt policy gains no rule. `tests/seatbelt_adversary.rs` runs the fixture's `cargo test` with no `RUSTC`, `SDKROOT` or linker set by the caller.
@@ -22,10 +24,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
   `tests/confinement-public-items.txt` lists them. Adding, removing or reshaping any of them changes the list.
 - `b10x-substrate confine run` names its private group `confine-<pid>-<start time>` (the start time is field 22 of `/proc/<pid>/stat`). Before opening, it removes each such group whose owner has exited (including an owner still unreaped), deepest first, if the group holds no process. It never touches a running owner's group and never kills. Each group it leaves holding a process, or cannot remove, is named on one stderr line, and so is an unreadable root. Under `--output json`, these go instead into the verb's one document, as `left_groups` (`path` and `reason`) in `result` or in `error.data`. The exit status does not change.
+- The public site's command-line guide documents `b10x-substrate confine run`; its status page names release 0.12.0, bundle `substrate-wire/0.23.0`, the six confinement adapters and the lane that checks each; the profiles guide describes the `macos` developer-tool resolution and its refusal.
 
 ### Fixed
 
-- An egress aperture's listening socket is shut down when its install is undone or the aperture is dropped. Before, only the installing process's descriptor was closed, so a child another thread forked meanwhile could keep the socket accepting connections from inside the run.
+- An egress aperture's listening socket is shut down when an aperture list fails to install, before its forwarders are killed. Before, only the installing process's descriptor was closed, so a child another thread forked meanwhile could keep the socket accepting connections from inside the run. A list that installs completely closes the installing process's copy without a shutdown, so the forwarder holds the last one and a forwarder that dies mid-run leaves its aperture refusing connections. A descriptor received and then refused inside the install is shut down as well.
+- `scripts/delegated-lane.sh` and `scripts/pod-lane.sh` read each suite's log through a here-string. Piped into `grep -q` under `pipefail`, a log longer than a pipe buffer after a match read as no match, so an `ABSENT` line could pass the lane.
 
 ## [0.12.0] — 2026-10-27
 
