@@ -98,6 +98,7 @@ confinement/mod.rs: #[derive(Debug, Clone, PartialEq, Serialize)] #[serde(tag = 
 confinement/mod.rs: enum AuditRecord > ProfileAdmitted {profile: ProfileId, adapter: AdapterName, #[serde(skip_serializing_if = "Option::is_none")] inner: Option<InnerAdapter>, families: Vec<ContractFamily>, facts: Vec<Fact>, declared_insecure: bool, #[serde(skip_serializing_if = "Option::is_none")] local_reason: Option<String>},
 confinement/mod.rs: enum AuditRecord > ProfileRefused {adapter: AdapterName, #[serde(skip_serializing_if = "Option::is_none")] inner: Option<InnerAdapter>, code: &'static str, #[serde(skip_serializing_if = "Option::is_none")] family: Option<ContractFamily>, #[serde(skip_serializing_if = "Option::is_none")] fact: Option<Fact>, #[serde(skip_serializing_if = "Option::is_none")] field: Option<ReservedField>},
 confinement/mod.rs: enum AuditRecord > RunStarted {run: RunId, profile: ProfileId, adapter: AdapterName, #[serde(skip_serializing_if = "Option::is_none")] inner: Option<InnerAdapter>, #[serde(skip_serializing_if = "Option::is_none")] declared_insecure: Option<String>, program: String},
+confinement/mod.rs: enum AuditRecord > PrivateTmpdirLeft {run: RunId, profile: ProfileId, adapter: AdapterName, path: String, error: String},
 confinement/mod.rs: #[derive(Clone)] pub struct AuditSink(Arc<dyn Fn(&AuditRecord) + Send + Sync>);
 confinement/mod.rs: impl AuditSink > pub fn new(sink: impl Fn(&AuditRecord) + Send + Sync + 'static) -> Self
 confinement/mod.rs: impl AuditSink > pub fn record(&self, record: &AuditRecord)
