@@ -155,3 +155,103 @@ jobs:
             echo "The delegated lane needs a runner inside a delegated cgroup subtree carrying \`cpu\`, \`memory\` and \`pids\`; see README.md, section \"Serving exec\"."
           } >> "$GITHUB_STEP_SUMMARY"
           echo "portable lane: ${{ steps.gate.outcome }} (the gate step). delegated lane: absent — not executed, not passed."
+
+  pod-lane:
+    name: Pod lane
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
+      KIND_VERSION: v0.33.0
+      KIND_SHA256: aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d
+      KIND_NODE_IMAGE: kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5
+      POD_LANE_CLUSTER: substrate-pod-lane
+      POD_LANE_NAMESPACE: substrate-pod-lane
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - name: Install the pinned Rust toolchain
+        run: |
+          channel=$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml | head -1)
+          test -n "$channel"
+          rustup toolchain install "$channel" --profile minimal
+          rustup default "$channel"
+          cargo --version
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          prefix-key: substrate-gate-v1
+          shared-key: pod-lane
+          cache-workspace-crates: "false"
+          cache-all-crates: "false"
+          cache-on-failure: "false"
+
+      - name: Install the pinned kind release
+        run: |
+          mkdir -p "$RUNNER_TEMP/kind-bin"
+          curl --fail --location --retry 3 "https://github.com/kubernetes-sigs/kind/releases/download/$KIND_VERSION/kind-linux-amd64" --output "$RUNNER_TEMP/kind-bin/kind"
+          echo "$KIND_SHA256  $RUNNER_TEMP/kind-bin/kind" | sha256sum --check --strict
+          chmod 0755 "$RUNNER_TEMP/kind-bin/kind"
+          echo "$RUNNER_TEMP/kind-bin" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/kind-bin/kind" version
+          kubectl version --client
+          jq --version
+
+      - name: Create the disposable cluster
+        run: |
+          printf '%s\n' \
+            'kind: Cluster' \
+            'apiVersion: kind.x-k8s.io/v1alpha4' \
+            'nodes:' \
+            '  - role: control-plane' \
+            '    kubeadmConfigPatches:' \
+            '      - |' \
+            '        kind: KubeletConfiguration' \
+            '        podPidsLimit: 1024' > "$RUNNER_TEMP/kind.yaml"
+          kind create cluster --name "$POD_LANE_CLUSTER" --image "$KIND_NODE_IMAGE" --config "$RUNNER_TEMP/kind.yaml" --kubeconfig "$RUNNER_TEMP/admin.yaml" --wait 180s
+
+      - name: Grant the adapter one namespaced role
+        env:
+          KUBECONFIG: ${{ runner.temp }}/admin.yaml
+        run: |
+          ns="$POD_LANE_NAMESPACE"
+          kubectl create namespace "$ns"
+          kubectl label namespace "$ns" pod-security.kubernetes.io/enforce=restricted
+          kubectl -n "$ns" create serviceaccount substrate-pod
+          kubectl -n "$ns" create role substrate-pod --verb=create,get,list,delete --resource=pods,networkpolicies.networking.k8s.io
+          kubectl -n "$ns" create role substrate-pod-log --verb=get --resource=pods/log
+          kubectl -n "$ns" create rolebinding substrate-pod --role=substrate-pod --serviceaccount="$ns:substrate-pod"
+          kubectl -n "$ns" create rolebinding substrate-pod-log --role=substrate-pod-log --serviceaccount="$ns:substrate-pod"
+          token=$(kubectl -n "$ns" create token substrate-pod --duration=1h)
+          echo "::add-mask::$token"
+          umask 077
+          kubectl config view --raw --minify --flatten -o json | jq --arg token "$token" --arg ns "$ns" '
+            .users[0].user = {token: $token}
+            | .contexts[0].context.namespace = $ns
+            | .contexts[0].context.extensions = [{name: "b10x-substrate/pod", extension: {pod_pids_limit: 1024}}]' > "$RUNNER_TEMP/pod.json"
+
+      - name: Run the pod lane
+        env:
+          SUBSTRATE_POD_LANE: "1"
+          SUBSTRATE_POD_KUBECONFIG: ${{ runner.temp }}/pod.json
+        run: cargo test -p b10x-substrate-host --release --locked --test ess_confinement_pod -- --nocapture
+
+      - name: Require that no run object remains
+        env:
+          KUBECONFIG: ${{ runner.temp }}/admin.yaml
+        run: |
+          left=$(kubectl get pods,networkpolicies --all-namespaces --selector=app.kubernetes.io/managed-by=b10x-substrate --output name)
+          echo "objects left: ${left:-none}"
+          test -z "$left"
+
+      - name: Delete the disposable cluster
+        if: always()
+        run: kind delete cluster --name "$POD_LANE_CLUSTER" --kubeconfig "$RUNNER_TEMP/admin.yaml"

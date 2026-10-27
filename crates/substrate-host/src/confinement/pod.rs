@@ -1,21 +1,1283 @@
-//! The `pod` adapter: one Kubernetes Pod per run (ADR 0109 decision 3). A stub in this tree:
-//! `open` answers `confinement.adapter-unserved` until `story:pod-adapter` replaces this file.
+//! The `pod` adapter: one Kubernetes Pod per run (ADR 0109 decision 3,
+//! `docs/design/28-pod-confinement-adapter.md`).
+//!
+//! It renders an admitted profile into one Pod in the namespace the operator's cluster
+//! configuration names, beside a default-deny `NetworkPolicy`, creates both through the cluster API,
+//! polls the Pod's phase, reads its log once it ends and deletes both objects before `wait`
+//! returns. It serves `process_run`, `process_watch`, `output_read`, `wait`, `workspace` (an
+//! `emptyDir` at `/workspace`), `limits` and `audit`, and proves `image_digest_pinned`. It serves no
+//! `filesystem_view` (a Pod reaches no host path) and neither network family: a `NetworkPolicy`'s
+//! enforcement depends on the cluster's network plugin, which the API does not let a client prove.
+//!
+//! The adapter speaks to the API server itself over HTTP/1.1 and TLS with the workspace's own
+//! `hyper` and `rustls`; it admits no Kubernetes client crate and runs no `kubectl`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
-use super::{AdapterName, ConfinementAdapter, ConfinementError};
+use async_trait::async_trait;
+use base64::Engine as _;
+use bytes::Bytes;
+use http_body_util::{BodyExt as _, Full, Limited};
+use hyper::header::{self, HeaderValue};
+use hyper::{Method, Request};
+use hyper_util::rt::TokioIo;
+use parking_lot::Mutex;
+use rustls::ClientConfig;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
+use serde_json::{Map, Value, json};
+use substrate_wire::Signal;
+use tokio::sync::watch;
+use tokio_rustls::TlsConnector;
+use zeroize::Zeroizing;
 
-/// What opening `pod` takes. The adapter story adds what it needs here.
+use super::local::LOCAL_POLICY_ENV;
+use super::{
+    AdapterFacts, AdapterName, AdmittedProfile, Command, ConfinementAdapter, ConfinementError,
+    ConfinementProfile, ContractFamily, Fact, ProcessBounds, RenderedCommand, RunExit, RunId,
+    RunObservation, RunOutput, RunState, image_is_pinned,
+};
+use crate::DriverError;
+
+/// The kubeconfig context extension that carries the operator's Pod settings.
+pub const POD_SETTINGS_EXTENSION: &str = "b10x-substrate/pod";
+/// The uid a run's container runs as when the operator names none.
+pub const POD_DEFAULT_RUN_AS_USER: u32 = 65_532;
+/// The largest output bound a profile may state, and the bound when it states none.
+pub const POD_OUTPUT_LIMIT_BYTES: u64 = 1_048_576;
+/// Runs one adapter tracks; past it, ended runs are forgotten oldest first.
+pub const POD_MAX_TRACKED_RUNS: usize = 128;
+/// The label every object the adapter creates carries, with [`MANAGED_BY`].
+pub const MANAGED_BY_LABEL: &str = "app.kubernetes.io/managed-by";
+pub const MANAGED_BY: &str = "b10x-substrate";
+/// The label naming the run an object belongs to; its value is the run id.
+pub const RUN_LABEL: &str = "b10x-substrate/run";
+/// The one container of a run's Pod.
+pub const CONTAINER: &str = "run";
+/// Where the run's `emptyDir` workspace is mounted.
+pub const WORKSPACE_MOUNT: &str = "/workspace";
+
+/// A `processes` bound the cluster does not hold: no `pod_pids_limit`, or one above the bound.
+pub const POD_PROCESSES_UNSERVED: &str = "confinement.pod-processes-unserved";
+/// A signal the cluster API cannot deliver.
+pub const POD_SIGNAL_UNSERVED: &str = "confinement.pod-signal-unserved";
+/// The cluster API refused or failed a request the run needed.
+pub const POD_API_FAILED: &str = "confinement.pod-api-failed";
+
+/// The linux driver's defaults, for a profile that states no process bounds.
+const DEFAULT_BOUNDS: ProcessBounds = ProcessBounds {
+    timeout_ms: 600_000,
+    processes: 256,
+    memory_bytes: 1 << 30,
+    cpu_millis: 600_000,
+};
+const MAX_CLUSTER_FILE_BYTES: u64 = 1_048_576;
+const MAX_API_BODY_BYTES: usize = 4 * 1_048_576;
+const MAX_ARGV_BYTES: usize = 262_144;
+const MAX_ENV_ENTRIES: usize = 64;
+const API_TIMEOUT: Duration = Duration::from_secs(30);
+const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
+const POLL: Duration = Duration::from_millis(500);
+/// How long past its wall bound a Pod may stay unended before the adapter deletes it.
+const DEADLINE_GRACE: Duration = Duration::from_mins(1);
+/// How long the API may stay unreachable before a run is reported `Unknown`.
+const UNREACHABLE_LIMIT: Duration = Duration::from_mins(2);
+/// Polls of a Pod in a terminal phase whose container has no terminated state yet.
+const TERMINAL_POLLS: u32 = 10;
+const REMOVE_ATTEMPTS: u32 = 60;
+const TERM_GRACE_SECONDS: u64 = 5;
+
+/// What opening `pod` takes.
 #[derive(Debug, Clone)]
 pub struct PodRequest {
-    /// The cluster configuration the operator provides; absent means no cluster.
+    /// The cluster configuration the operator provides, the JSON form of a kubeconfig (design 28);
+    /// absent means no cluster.
     pub cluster: Option<PathBuf>,
 }
 
-pub(crate) fn open(_request: PodRequest) -> Result<Arc<dyn ConfinementAdapter>, ConfinementError> {
-    super::unserved(
+/// What the operator's cluster configuration fixes for every run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PodSettings {
+    /// The current context's namespace: the only one the adapter touches.
+    pub namespace: String,
+    /// The numeric uid and gid the container runs as.
+    pub run_as_user: u32,
+    /// The kubelet's `podPidsLimit` on every node, as the operator states it.
+    pub pod_pids_limit: Option<u32>,
+}
+
+/// How a run's Pod ended, beside its observation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PodTermination {
+    /// The container's terminated reason (`Completed`, `Error`, `OOMKilled`), or the Pod's
+    /// `DeadlineExceeded`.
+    pub reason: Option<String>,
+    /// Containers of the run that ended `OOMKilled`: 0 or 1.
+    pub memory_oom_kills: u64,
+    /// Whether the Pod and its `NetworkPolicy` were both seen gone before the run was reported
+    /// ended.
+    pub objects_removed: bool,
+}
+
+/// `pod`'s declared set (`spec/confinement/confinement.yaml`, above `OpenAdapter`).
+pub fn proof() -> AdapterFacts {
+    AdapterFacts::new(
         AdapterName::Pod,
-        "the pod adapter is not served by this build",
+        None,
+        &[
+            (ContractFamily::ProcessRun, true),
+            (ContractFamily::ProcessWatch, true),
+            (ContractFamily::OutputRead, true),
+            (ContractFamily::Wait, true),
+            (ContractFamily::Workspace, true),
+            (ContractFamily::Limits, true),
+            (ContractFamily::Audit, true),
+        ],
+        &[(Fact::ImageDigestPinned, true)],
     )
+}
+
+pub(crate) fn open(request: PodRequest) -> Result<Arc<dyn ConfinementAdapter>, ConfinementError> {
+    Ok(open_pod(request)?)
+}
+
+/// Opens `pod` and returns the adapter itself, for [`PodAdapter::termination`] and
+/// [`PodAdapter::settings`]. `confinement::open` answers the same.
+///
+/// # Errors
+///
+/// `confinement.adapter-unserved` when there is no cluster configuration, it is unusable
+/// (design 28 names each refused member), or the cluster does not answer the probe.
+pub fn open_pod(request: PodRequest) -> Result<Arc<PodAdapter>, ConfinementError> {
+    let unserved = |detail: String| ConfinementError::AdapterUnserved {
+        adapter: AdapterName::Pod,
+        detail,
+    };
+    let path = request
+        .cluster
+        .ok_or_else(|| unserved("no cluster configuration".to_owned()))?;
+    let bytes = read_bounded(&path).map_err(unserved)?;
+    let (api, settings) = parse_cluster(&bytes).map_err(unserved)?;
+    let api = Arc::new(api);
+    probe(&api).map_err(unserved)?;
+    let adapter = Arc::new(PodAdapter {
+        facts: proof(),
+        api,
+        settings,
+        runs: Mutex::new(Vec::new()),
+    });
+    super::check_open(adapter.facts())?;
+    Ok(adapter)
+}
+
+fn read_bounded(path: &std::path::Path) -> Result<Vec<u8>, String> {
+    use std::io::Read as _;
+    let file = std::fs::File::open(path)
+        .map_err(|error| format!("the cluster configuration cannot be opened: {error}"))?;
+    let metadata = file
+        .metadata()
+        .map_err(|error| format!("the cluster configuration cannot be inspected: {error}"))?;
+    if !metadata.is_file() || metadata.len() > MAX_CLUSTER_FILE_BYTES {
+        return Err("the cluster configuration must be one regular file of at most 1 MiB".into());
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_CLUSTER_FILE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| format!("the cluster configuration cannot be read: {error}"))?;
+    Ok(bytes)
+}
+
+// --- the cluster configuration ---------------------------------------------------------------
+
+fn named<'a>(config: &'a Value, list: &str, name: &str, member: &str) -> Result<&'a Value, String> {
+    config[list]
+        .as_array()
+        .and_then(|entries| entries.iter().find(|entry| entry["name"] == name))
+        .map(|entry| &entry[member])
+        .filter(|value| value.is_object())
+        .ok_or_else(|| format!("the current context names no {member} {name:?}"))
+}
+
+fn text<'a>(object: &'a Value, member: &str) -> Result<Option<&'a str>, String> {
+    match &object[member] {
+        Value::Null => Ok(None),
+        Value::String(value) => Ok(Some(value)),
+        _ => Err(format!("{member} is not a string")),
+    }
+}
+
+fn decode(object: &Value, member: &str) -> Result<Option<Zeroizing<Vec<u8>>>, String> {
+    text(object, member)?
+        .map(|data| {
+            base64::engine::general_purpose::STANDARD
+                .decode(data)
+                .map(Zeroizing::new)
+                .map_err(|_| format!("{member} is not base64"))
+        })
+        .transpose()
+}
+
+/// A DNS-1123 label: what a namespace name must be.
+fn is_dns_label(name: &str) -> bool {
+    let bytes = name.as_bytes();
+    !bytes.is_empty()
+        && bytes.len() <= 63
+        && bytes
+            .iter()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || *byte == b'-')
+        && bytes.first().is_some_and(u8::is_ascii_alphanumeric)
+        && bytes.last().is_some_and(u8::is_ascii_alphanumeric)
+}
+
+fn parse_cluster(bytes: &[u8]) -> Result<(Api, PodSettings), String> {
+    let config: Value = serde_json::from_slice(bytes)
+        .map_err(|_| "the cluster configuration is not the JSON form of a kubeconfig".to_owned())?;
+    let current = config["current-context"]
+        .as_str()
+        .ok_or("the cluster configuration names no current context")?;
+    let context = named(&config, "contexts", current, "context")?;
+    let namespace = text(context, "namespace")?
+        .ok_or("the current context names no namespace")?
+        .to_owned();
+    if !is_dns_label(&namespace) {
+        return Err("the context namespace is not a DNS-1123 label".into());
+    }
+    let settings = settings(context, namespace)?;
+    let cluster_name = text(context, "cluster")?.ok_or("the context names no cluster")?;
+    let user_name = text(context, "user")?.ok_or("the context names no user")?;
+    let cluster = named(&config, "clusters", cluster_name, "cluster")?;
+    let user = named(&config, "users", user_name, "user")?;
+    let api = Api::new(cluster, user, &settings.namespace)?;
+    Ok((api, settings))
+}
+
+fn settings(context: &Value, namespace: String) -> Result<PodSettings, String> {
+    let mut settings = PodSettings {
+        namespace,
+        run_as_user: POD_DEFAULT_RUN_AS_USER,
+        pod_pids_limit: None,
+    };
+    let Some(extension) = context["extensions"].as_array().and_then(|extensions| {
+        extensions
+            .iter()
+            .find(|extension| extension["name"] == POD_SETTINGS_EXTENSION)
+    }) else {
+        return Ok(settings);
+    };
+    let members = extension["extension"]
+        .as_object()
+        .ok_or_else(|| format!("the {POD_SETTINGS_EXTENSION} extension is not an object"))?;
+    let positive = |value: &Value, member: &str| {
+        value
+            .as_u64()
+            .and_then(|value| u32::try_from(value).ok())
+            .filter(|value| *value > 0)
+            .ok_or_else(|| format!("{member} must be a positive 32-bit integer"))
+    };
+    for (member, value) in members {
+        match member.as_str() {
+            "run_as_user" => settings.run_as_user = positive(value, member)?,
+            "pod_pids_limit" => settings.pod_pids_limit = Some(positive(value, member)?),
+            other => {
+                return Err(format!(
+                    "the {POD_SETTINGS_EXTENSION} extension has {other:?}"
+                ));
+            }
+        }
+    }
+    Ok(settings)
+}
+
+/// The kubeconfig members design 28 refuses, because each changes who the adapter is or whom it
+/// trusts.
+const REFUSED_CLUSTER_MEMBERS: [&str; 2] = ["proxy-url", "certificate-authority"];
+const REFUSED_USER_MEMBERS: [&str; 11] = [
+    "exec",
+    "auth-provider",
+    "username",
+    "password",
+    "tokenFile",
+    "client-certificate",
+    "client-key",
+    "as",
+    "as-uid",
+    "as-groups",
+    "as-user-extra",
+];
+
+/// The cluster API, reached as the operator's configuration says.
+struct Api {
+    host: String,
+    port: u16,
+    authority: String,
+    base_path: String,
+    server_name: ServerName<'static>,
+    connector: TlsConnector,
+    bearer: Option<Zeroizing<String>>,
+    namespace: String,
+}
+
+impl Api {
+    fn new(cluster: &Value, user: &Value, namespace: &str) -> Result<Self, String> {
+        if cluster["insecure-skip-tls-verify"] == json!(true) {
+            return Err("insecure-skip-tls-verify is refused".into());
+        }
+        for member in REFUSED_CLUSTER_MEMBERS {
+            if !cluster[member].is_null() {
+                return Err(format!("the cluster member {member} is refused"));
+            }
+        }
+        for member in REFUSED_USER_MEMBERS {
+            if !user[member].is_null() {
+                return Err(format!("the user member {member} is refused"));
+            }
+        }
+        let server =
+            url::Url::parse(text(cluster, "server")?.ok_or("the cluster names no server")?)
+                .map_err(|_| "the cluster server is not a URL".to_owned())?;
+        if server.scheme() != "https"
+            || !server.username().is_empty()
+            || server.password().is_some()
+            || server.query().is_some()
+            || server.fragment().is_some()
+        {
+            return Err("the cluster server must be a plain https URL".into());
+        }
+        let host = match server.host() {
+            Some(url::Host::Domain(domain)) => domain.to_owned(),
+            Some(url::Host::Ipv4(address)) => address.to_string(),
+            Some(url::Host::Ipv6(address)) => address.to_string(),
+            None => return Err("the cluster server names no host".into()),
+        };
+        let port = server
+            .port_or_known_default()
+            .ok_or("the cluster server names no port")?;
+        let name = text(cluster, "tls-server-name")?.map_or_else(|| host.clone(), str::to_owned);
+        let server_name = ServerName::try_from(name)
+            .map_err(|_| "the cluster server name is not a DNS name or an address".to_owned())?;
+        let authority = server[url::Position::BeforeHost..url::Position::AfterPort].to_owned();
+        let base_path = server.path().trim_end_matches('/').to_owned();
+        let bearer = text(user, "token")?
+            .filter(|token| !token.is_empty())
+            .map(|token| Zeroizing::new(token.to_owned()));
+        let connector = connector(cluster, user, bearer.is_some())?;
+        Ok(Self {
+            host,
+            port,
+            authority,
+            base_path,
+            server_name,
+            connector,
+            bearer,
+            namespace: namespace.to_owned(),
+        })
+    }
+
+    fn pods(&self) -> String {
+        format!("/api/v1/namespaces/{}/pods", self.namespace)
+    }
+
+    fn policies(&self) -> String {
+        format!(
+            "/apis/networking.k8s.io/v1/namespaces/{}/networkpolicies",
+            self.namespace
+        )
+    }
+
+    /// One request on its own connection, bounded in time and in body size.
+    async fn call(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&Value>,
+        limit: usize,
+    ) -> Result<(u16, Bytes), String> {
+        tokio::time::timeout(API_TIMEOUT, self.exchange(method, path, body, limit))
+            .await
+            .map_err(|_| "the cluster API did not answer in time".to_owned())?
+    }
+
+    async fn exchange(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&Value>,
+        limit: usize,
+    ) -> Result<(u16, Bytes), String> {
+        let tcp = tokio::net::TcpStream::connect((self.host.as_str(), self.port))
+            .await
+            .map_err(|error| format!("connect: {error}"))?;
+        let tls = self
+            .connector
+            .connect(self.server_name.clone(), tcp)
+            .await
+            .map_err(|error| format!("TLS: {error}"))?;
+        let (mut sender, connection) =
+            hyper::client::conn::http1::handshake::<_, Full<Bytes>>(TokioIo::new(tls))
+                .await
+                .map_err(|error| format!("HTTP: {error}"))?;
+        let driver = tokio::spawn(connection);
+        let mut request = Request::builder()
+            .method(method)
+            .uri(format!("{}{path}", self.base_path))
+            .header(header::HOST, &self.authority)
+            .header(header::ACCEPT, "application/json")
+            .header(header::USER_AGENT, "b10x-substrate-pod");
+        if body.is_some() {
+            request = request.header(header::CONTENT_TYPE, "application/json");
+        }
+        if let Some(token) = &self.bearer {
+            let line = Zeroizing::new(format!("Bearer {}", token.as_str()));
+            let mut value = HeaderValue::from_str(&line)
+                .map_err(|_| "the token is not a header value".to_owned())?;
+            value.set_sensitive(true);
+            request = request.header(header::AUTHORIZATION, value);
+        }
+        let payload = body
+            .map(serde_json::to_vec)
+            .transpose()
+            .map_err(|error| format!("encode: {error}"))?
+            .unwrap_or_default();
+        let request = request
+            .body(Full::new(Bytes::from(payload)))
+            .map_err(|error| format!("request: {error}"))?;
+        let response = sender
+            .send_request(request)
+            .await
+            .map_err(|error| format!("HTTP: {error}"))?;
+        let status = response.status().as_u16();
+        let bytes = Limited::new(response.into_body(), limit)
+            .collect()
+            .await
+            .map_err(|_| "the response body failed or exceeded its bound".to_owned())?
+            .to_bytes();
+        driver.abort();
+        Ok((status, bytes))
+    }
+
+    /// Creates `object` in `collection`.
+    async fn create(&self, collection: &str, object: &Value) -> Result<(), ConfinementError> {
+        match self
+            .call(Method::POST, collection, Some(object), MAX_API_BODY_BYTES)
+            .await
+        {
+            Ok((200..=202, _)) => Ok(()),
+            Ok((status, body)) => Err(api_failed(&format!(
+                "create answered {status}: {}",
+                status_message(&body)
+            ))),
+            Err(error) => Err(api_failed(&error)),
+        }
+    }
+
+    /// The object at `path`, or `None` once it is gone.
+    async fn get(&self, path: &str) -> Result<Option<Value>, String> {
+        match self
+            .call(Method::GET, path, None, MAX_API_BODY_BYTES)
+            .await?
+        {
+            (200, body) => serde_json::from_slice(&body)
+                .map(Some)
+                .map_err(|_| "the API answered something other than JSON".to_owned()),
+            (404, _) => Ok(None),
+            (status, body) => Err(format!("get answered {status}: {}", status_message(&body))),
+        }
+    }
+
+    /// Asks the API to delete the object at `path`; `true` once it answers the object is gone.
+    async fn delete(&self, path: &str, grace_seconds: u64) -> Result<bool, String> {
+        let options = json!({
+            "apiVersion": "v1",
+            "kind": "DeleteOptions",
+            "gracePeriodSeconds": grace_seconds,
+            "propagationPolicy": "Background",
+        });
+        match self
+            .call(Method::DELETE, path, Some(&options), MAX_API_BODY_BYTES)
+            .await?
+        {
+            (404, _) => Ok(true),
+            (200 | 202, _) => Ok(false),
+            (status, body) => Err(format!(
+                "delete answered {status}: {}",
+                status_message(&body)
+            )),
+        }
+    }
+
+    /// Deletes the object at `path` and polls until the API no longer has it.
+    async fn remove(&self, path: &str) -> bool {
+        for _ in 0..REMOVE_ATTEMPTS {
+            if matches!(self.delete(path, 0).await, Ok(true))
+                || matches!(self.get(path).await, Ok(None))
+            {
+                return true;
+            }
+            tokio::time::sleep(POLL).await;
+        }
+        false
+    }
+
+    /// The container's log, at most `limit` bytes plus one; empty while it cannot be read.
+    async fn log(&self, name: &str, limit: usize) -> Result<Vec<u8>, String> {
+        let path = format!(
+            "{}/{name}/log?container={CONTAINER}&limitBytes={}",
+            self.pods(),
+            limit + 1
+        );
+        match self.call(Method::GET, &path, None, limit + 1).await? {
+            (200, body) => Ok(body.to_vec()),
+            _ => Ok(Vec::new()),
+        }
+    }
+}
+
+fn connector(cluster: &Value, user: &Value, bearer: bool) -> Result<TlsConnector, String> {
+    let authority = decode(cluster, "certificate-authority-data")?
+        .ok_or("the cluster names no certificate-authority-data")?;
+    let mut roots = rustls::RootCertStore::empty();
+    for certificate in rustls_pemfile::certs(&mut authority.as_slice()) {
+        roots
+            .add(certificate.map_err(|_| "certificate-authority-data is not PEM".to_owned())?)
+            .map_err(|_| "certificate-authority-data holds an invalid certificate".to_owned())?;
+    }
+    if roots.is_empty() {
+        return Err("certificate-authority-data holds no certificate".into());
+    }
+    let builder = ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .map_err(|_| "no TLS protocol version is available".to_owned())?
+    .with_root_certificates(roots);
+    let certificate = decode(user, "client-certificate-data")?;
+    let key = decode(user, "client-key-data")?;
+    let mut config = match (certificate, key) {
+        (Some(certificate), Some(key)) => {
+            let chain: Vec<CertificateDer<'static>> =
+                rustls_pemfile::certs(&mut certificate.as_slice())
+                    .collect::<Result<_, _>>()
+                    .map_err(|_| "client-certificate-data is not PEM".to_owned())?;
+            let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut key.as_slice())
+                .ok()
+                .flatten()
+                .ok_or("client-key-data holds no private key")?;
+            builder
+                .with_client_auth_cert(chain, key)
+                .map_err(|_| "the client certificate and key do not agree".to_owned())?
+        }
+        (None, None) if bearer => builder.with_no_client_auth(),
+        (None, None) => {
+            return Err("the user carries neither a client certificate nor a token".into());
+        }
+        _ => return Err("a client certificate needs both its certificate and its key".into()),
+    };
+    config.alpn_protocols = vec![b"http/1.1".to_vec()];
+    Ok(TlsConnector::from(Arc::new(config)))
+}
+
+/// The API's own `Status.message`, bounded, or nothing.
+fn status_message(body: &[u8]) -> String {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|status| status["message"].as_str().map(str::to_owned))
+        .map(|message| message.chars().take(300).collect())
+        .unwrap_or_default()
+}
+
+fn api_failed(detail: &str) -> ConfinementError {
+    DriverError::failed(POD_API_FAILED, format!("pod: the cluster API: {detail}")).into()
+}
+
+/// Open's one request: a list of at most one Pod in the namespace, on a thread of its own so
+/// `open` stays synchronous inside or outside a runtime.
+fn probe(api: &Arc<Api>) -> Result<(), String> {
+    let api = Arc::clone(api);
+    std::thread::scope(|scope| {
+        scope
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|error| format!("the probe has no runtime: {error}"))?;
+                runtime.block_on(async {
+                    let path = format!("{}?limit=1", api.pods());
+                    match tokio::time::timeout(
+                        OPEN_TIMEOUT,
+                        api.call(Method::GET, &path, None, MAX_API_BODY_BYTES),
+                    )
+                    .await
+                    {
+                        Ok(Ok((200, _))) => Ok(()),
+                        Ok(Ok((status, body))) => Err(format!(
+                            "the cluster answered the probe {status}: {}",
+                            status_message(&body)
+                        )),
+                        Ok(Err(error)) => Err(format!("the cluster did not answer: {error}")),
+                        Err(_) => Err("the cluster did not answer within 10 seconds".to_owned()),
+                    }
+                })
+            })
+            .join()
+            .map_err(|_| "the probe failed".to_owned())?
+    })
+}
+
+// --- rendering ------------------------------------------------------------------------------
+
+/// The bounds a run is rendered with.
+struct Resolved {
+    deadline_seconds: u64,
+    millicores: u64,
+    memory_bytes: u64,
+    output_limit: usize,
+}
+
+fn limit_unserved(detail: &str) -> ConfinementError {
+    DriverError::exhausted(
+        "exec.limit-unserved",
+        format!("pod: {detail}"),
+        "process_bounds",
+    )
+    .into()
+}
+
+fn resolve(
+    settings: &PodSettings,
+    profile: &ConfinementProfile,
+) -> Result<Resolved, ConfinementError> {
+    let bounds = profile.process_bounds.unwrap_or(DEFAULT_BOUNDS);
+    if bounds.timeout_ms == 0
+        || bounds.timeout_ms > 86_400_000
+        || bounds.processes == 0
+        || bounds.processes > 4096
+        || bounds.memory_bytes < 1_048_576
+        || bounds.memory_bytes > 1_099_511_627_776
+        || bounds.cpu_millis == 0
+        || bounds.cpu_millis > 86_400_000
+    {
+        return Err(limit_unserved(
+            "a bound is outside the linux driver's ranges",
+        ));
+    }
+    let deadline_seconds = bounds.timeout_ms.div_ceil(1000);
+    // A rate that, held for the whole wall bound, spends at most `cpu_millis` of CPU time.
+    let millicores = bounds.cpu_millis / deadline_seconds;
+    if millicores == 0 {
+        return Err(limit_unserved(
+            "the CPU bound is under one millicore over the wall bound",
+        ));
+    }
+    if let Some(stated) = profile.process_bounds
+        && settings
+            .pod_pids_limit
+            .is_none_or(|limit| limit > stated.processes)
+    {
+        return Err(DriverError::unserved(
+            POD_PROCESSES_UNSERVED,
+            "pod: the cluster holds no per-Pod process bound at or below this one",
+            "process_bounds.processes",
+        )
+        .into());
+    }
+    let output = profile
+        .io_bounds
+        .map_or(POD_OUTPUT_LIMIT_BYTES, |io| io.output_bytes);
+    if output == 0 || output > POD_OUTPUT_LIMIT_BYTES {
+        return Err(limit_unserved(
+            "the output bound is outside 1 byte to 1 MiB",
+        ));
+    }
+    Ok(Resolved {
+        deadline_seconds,
+        millicores,
+        memory_bytes: bounds.memory_bytes,
+        output_limit: usize::try_from(output).unwrap_or(usize::MAX),
+    })
+}
+
+/// The refusals design 28 adds to the contract's order, for fields a Pod cannot apply.
+///
+/// # Errors
+///
+/// `confinement.family-unserved` for a host path or a network policy, `exec.secret-slots-unserved`,
+/// `exec.workdir-invalid`, `exec.limit-unserved` and `confinement.pod-processes-unserved`.
+pub fn check_profile(
+    settings: &PodSettings,
+    profile: &ConfinementProfile,
+) -> Result<(), ConfinementError> {
+    let family = |family| ConfinementError::FamilyUnserved {
+        adapter: AdapterName::Pod,
+        family,
+    };
+    if profile.workspace.is_some()
+        || !profile.writable_roots.is_empty()
+        || !profile.read_only_roots.is_empty()
+        || !profile.read_only_files.is_empty()
+    {
+        return Err(family(ContractFamily::FilesystemView));
+    }
+    if profile.network.is_some() {
+        return Err(family(ContractFamily::NetworkEgress));
+    }
+    if !profile.secret_slots.is_empty() {
+        return Err(DriverError::unserved(
+            "exec.secret-slots-unserved",
+            "Sealed secret slots are not served by the pod adapter.",
+            "secret_slots",
+        )
+        .into());
+    }
+    if let Some(workdir) = &profile.workdir {
+        super::relative_workdir(workdir)?;
+    }
+    resolve(settings, profile).map(|_| ())
+}
+
+fn is_secretish(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    [
+        "authorization",
+        "bearer",
+        "credential",
+        "password",
+        "proxy",
+        "secret",
+        "token",
+    ]
+    .iter()
+    .any(|fragment| lower.contains(fragment))
+}
+
+fn check_pod_command(command: &Command) -> Result<(), ConfinementError> {
+    super::check_command(command)?;
+    if command.argv.iter().map(String::len).sum::<usize>() > MAX_ARGV_BYTES
+        || command.argv.iter().any(|arg| arg.contains('\0'))
+    {
+        return Err(DriverError::refused(
+            "exec.argv-invalid",
+            "The argv exceeds 256 KiB or holds a NUL.",
+            "argv",
+        )
+        .into());
+    }
+    let refused = command.env.len() > MAX_ENV_ENTRIES
+        || command.env.iter().any(|(name, value)| {
+            name.len() > 128
+                || !name.bytes().enumerate().all(|(index, byte)| {
+                    byte.is_ascii_uppercase()
+                        || (index > 0 && (byte.is_ascii_digit() || byte == b'_'))
+                })
+                || name.is_empty()
+                || name == LOCAL_POLICY_ENV
+                || is_secretish(name)
+                || value.len() > 4096
+                || value.contains('\0')
+        });
+    if refused {
+        return Err(DriverError::refused(
+            "exec.environment-refused",
+            "Exec environment is outside the closed non-secret shape.",
+            "env",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn metadata(settings: &PodSettings, run: &str) -> Value {
+    json!({
+        "name": run,
+        "namespace": settings.namespace,
+        "labels": {MANAGED_BY_LABEL: MANAGED_BY, RUN_LABEL: run},
+    })
+}
+
+fn security_context(settings: &PodSettings, container: bool) -> Value {
+    let mut context = json!({
+        "runAsNonRoot": true,
+        "runAsUser": settings.run_as_user,
+        "runAsGroup": settings.run_as_user,
+        "seccompProfile": {"type": "RuntimeDefault"},
+    });
+    if container {
+        let members = context.as_object_mut().expect("an object");
+        members.insert("allowPrivilegeEscalation".into(), json!(false));
+        members.insert("privileged".into(), json!(false));
+        members.insert("readOnlyRootFilesystem".into(), json!(true));
+        members.insert("capabilities".into(), json!({"drop": ["ALL"]}));
+    }
+    context
+}
+
+/// The `NetworkPolicy` and the Pod one run creates, in that order.
+fn render_objects(
+    settings: &PodSettings,
+    profile: &ConfinementProfile,
+    command: &Command,
+    run: &str,
+) -> Result<(Value, Value, Resolved), ConfinementError> {
+    check_pod_command(command)?;
+    let Some(image) = profile
+        .image
+        .as_deref()
+        .filter(|image| image_is_pinned(image))
+    else {
+        return Err(ConfinementError::ImageUnpinned {
+            adapter: AdapterName::Pod,
+        });
+    };
+    check_profile(settings, profile)?;
+    let resolved = resolve(settings, profile)?;
+    let working = match &profile.workdir {
+        Some(workdir) => {
+            let relative = super::relative_workdir(workdir)?;
+            let parts: Vec<String> = relative
+                .components()
+                .map(|part| part.as_os_str().to_string_lossy().into_owned())
+                .collect();
+            format!("{WORKSPACE_MOUNT}/{}", parts.join("/"))
+        }
+        None => WORKSPACE_MOUNT.to_owned(),
+    };
+    let mut env: Vec<Value> = command
+        .env
+        .iter()
+        .map(|(name, value)| json!({"name": name, "value": value}))
+        .collect();
+    // ADR 0109 F3 A: inside `pod` the host refuses `local`.
+    env.push(json!({"name": LOCAL_POLICY_ENV, "value": "refuse"}));
+    let resources = json!({
+        "cpu": format!("{}m", resolved.millicores),
+        "memory": resolved.memory_bytes.to_string(),
+    });
+    let policy = json!({
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "metadata": metadata(settings, run),
+        "spec": {
+            "podSelector": {"matchLabels": {RUN_LABEL: run}},
+            "policyTypes": ["Ingress", "Egress"],
+        },
+    });
+    let pod = json!({
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": metadata(settings, run),
+        "spec": {
+            "activeDeadlineSeconds": resolved.deadline_seconds,
+            "automountServiceAccountToken": false,
+            "enableServiceLinks": false,
+            "hostIPC": false,
+            "hostNetwork": false,
+            "hostPID": false,
+            "restartPolicy": "Never",
+            "terminationGracePeriodSeconds": TERM_GRACE_SECONDS,
+            "securityContext": security_context(settings, false),
+            "volumes": [{"name": "workspace", "emptyDir": {}}],
+            "containers": [{
+                "name": CONTAINER,
+                "image": image,
+                "imagePullPolicy": "IfNotPresent",
+                "command": [command.argv[0]],
+                "args": command.argv[1..],
+                "workingDir": working,
+                "env": env,
+                "resources": {"requests": resources, "limits": resources},
+                "securityContext": security_context(settings, true),
+                "volumeMounts": [{"name": "workspace", "mountPath": WORKSPACE_MOUNT}],
+                "stdin": false,
+                "tty": false,
+            }],
+        },
+    });
+    Ok((policy, pod, resolved))
+}
+
+/// The objects one run of `command` under `profile` creates, as a Kubernetes `List`: the
+/// `NetworkPolicy`, then the Pod. Nothing is sent anywhere.
+///
+/// # Errors
+///
+/// Every refusal of design 28 that `start` would answer for this profile and command.
+pub fn render_manifests(
+    settings: &PodSettings,
+    profile: &ConfinementProfile,
+    command: &Command,
+    run: &str,
+) -> Result<Value, ConfinementError> {
+    let (policy, pod, _) = render_objects(settings, profile, command, run)?;
+    let mut list = Map::new();
+    list.insert("apiVersion".into(), json!("v1"));
+    list.insert("kind".into(), json!("List"));
+    list.insert("items".into(), json!([policy, pod]));
+    Ok(Value::Object(list))
+}
+
+// --- runs -----------------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy)]
+enum Phase {
+    Running,
+    Ended(RunExit),
+    Unknown,
+}
+
+#[derive(Default)]
+struct Captured {
+    stdout: Vec<u8>,
+    truncated: bool,
+    /// Read once the container ended or before the adapter deleted it.
+    complete: bool,
+}
+
+struct PodRun {
+    id: RunId,
+    phase: watch::Receiver<Phase>,
+    output_limit: usize,
+    captured: Mutex<Captured>,
+    termination: Mutex<Option<PodTermination>>,
+    signalled: Mutex<Option<Signal>>,
+}
+
+/// The `pod` adapter, opened against one cluster and one namespace.
+pub struct PodAdapter {
+    facts: AdapterFacts,
+    api: Arc<Api>,
+    settings: PodSettings,
+    runs: Mutex<Vec<Arc<PodRun>>>,
+}
+
+impl PodAdapter {
+    /// What the operator's cluster configuration fixes for every run.
+    pub fn settings(&self) -> &PodSettings {
+        &self.settings
+    }
+
+    /// How `run` ended; `None` while it runs.
+    ///
+    /// # Errors
+    ///
+    /// `resource.not-found` for a run this adapter does not track.
+    pub fn termination(&self, run: &RunId) -> Result<Option<PodTermination>, ConfinementError> {
+        Ok(self.run(run)?.termination.lock().clone())
+    }
+
+    fn run(&self, id: &RunId) -> Result<Arc<PodRun>, ConfinementError> {
+        self.runs
+            .lock()
+            .iter()
+            .find(|run| &run.id == id)
+            .cloned()
+            .ok_or_else(super::unknown_run)
+    }
+
+    fn observation(run: &PodRun) -> RunObservation {
+        let (state, exit) = match *run.phase.borrow() {
+            Phase::Running => (RunState::Running, None),
+            Phase::Ended(exit) => (RunState::Ended, Some(exit)),
+            Phase::Unknown => (RunState::Unknown, None),
+        };
+        RunObservation {
+            run: run.id.clone(),
+            adapter: AdapterName::Pod,
+            inner: None,
+            declared_insecure: None,
+            state,
+            exit,
+        }
+    }
+
+    /// Makes room for one more run, forgetting ended runs oldest first.
+    fn reserve(&self) -> Result<(), ConfinementError> {
+        let mut runs = self.runs.lock();
+        while runs.len() >= POD_MAX_TRACKED_RUNS {
+            let Some(ended) = runs
+                .iter()
+                .position(|run| !matches!(*run.phase.borrow(), Phase::Running))
+            else {
+                return Err(DriverError::exhausted(
+                    "exec.tracking-capacity",
+                    "Every tracked pod run is still running.",
+                    "run",
+                )
+                .into());
+            };
+            runs.remove(ended);
+        }
+        Ok(())
+    }
+}
+
+/// Reads the container's log once into `run`, unless it was read already.
+async fn capture(api: &Api, run: &PodRun) {
+    if run.captured.lock().complete {
+        return;
+    }
+    let Ok(mut log) = api.log(run.id.as_str(), run.output_limit).await else {
+        return;
+    };
+    let truncated = log.len() > run.output_limit;
+    log.truncate(run.output_limit);
+    let mut captured = run.captured.lock();
+    if !captured.complete {
+        *captured = Captured {
+            stdout: log,
+            truncated,
+            complete: true,
+        };
+    }
+}
+
+/// How a Pod in a terminal phase ended, once its container says so (or `force`).
+fn ended(pod: &Value, force: bool) -> Option<(RunExit, Option<String>, u64)> {
+    let status = &pod["status"];
+    if !matches!(status["phase"].as_str(), Some("Succeeded" | "Failed")) {
+        return None;
+    }
+    let terminated = status["containerStatuses"]
+        .as_array()
+        .and_then(|containers| containers.iter().find(|c| c["name"] == CONTAINER))
+        .map(|container| &container["state"]["terminated"])
+        .filter(|terminated| terminated.is_object());
+    let pod_reason = status["reason"].as_str().map(str::to_owned);
+    let Some(terminated) = terminated else {
+        return force.then_some((
+            RunExit {
+                code: None,
+                signal: None,
+            },
+            pod_reason,
+            0,
+        ));
+    };
+    let reason = terminated["reason"].as_str().map(str::to_owned);
+    let kills = u64::from(reason.as_deref() == Some("OOMKilled"));
+    let exit = RunExit {
+        code: terminated["exitCode"]
+            .as_i64()
+            .and_then(|code| i32::try_from(code).ok()),
+        signal: terminated["signal"]
+            .as_i64()
+            .filter(|signal| *signal != 0)
+            .and_then(|signal| i32::try_from(signal).ok()),
+    };
+    let reason = if pod_reason.as_deref() == Some("DeadlineExceeded") {
+        pod_reason
+    } else {
+        reason
+    };
+    Some((exit, reason, kills))
+}
+
+/// Follows one run until its Pod ends, then removes the Pod and the policy and reports the end.
+async fn monitor(api: Arc<Api>, run: Arc<PodRun>, phase: watch::Sender<Phase>, give_up: Instant) {
+    let name = run.id.as_str().to_owned();
+    let pod_path = format!("{}/{name}", api.pods());
+    let mut unreachable_since: Option<Instant> = None;
+    let mut terminal_polls = 0_u32;
+    let (outcome, reason, kills) = loop {
+        tokio::time::sleep(POLL).await;
+        let signalled = *run.signalled.lock();
+        match api.get(&pod_path).await {
+            Ok(Some(pod)) => {
+                unreachable_since = None;
+                if let Some((exit, reason, kills)) = ended(&pod, terminal_polls >= TERMINAL_POLLS) {
+                    capture(&api, &run).await;
+                    let exit = signalled.map_or(exit, |signal| RunExit {
+                        code: None,
+                        signal: Some(signal.number()),
+                    });
+                    break (Phase::Ended(exit), reason, kills);
+                }
+                if pod["status"]["phase"] == "Succeeded" || pod["status"]["phase"] == "Failed" {
+                    terminal_polls += 1;
+                }
+                if Instant::now() >= give_up {
+                    capture(&api, &run).await;
+                    let _ = api.delete(&pod_path, 0).await;
+                    let exit = RunExit {
+                        code: None,
+                        signal: Some(Signal::Kill.number()),
+                    };
+                    break (Phase::Ended(exit), Some("DeadlineExceeded".to_owned()), 0);
+                }
+            }
+            // Gone: deleted by a signal, or by someone else, which the adapter cannot account for.
+            Ok(None) => {
+                break match signalled {
+                    Some(signal) => (
+                        Phase::Ended(RunExit {
+                            code: None,
+                            signal: Some(signal.number()),
+                        }),
+                        None,
+                        0,
+                    ),
+                    None => (Phase::Unknown, None, 0),
+                };
+            }
+            Err(_) => {
+                if unreachable_since.get_or_insert_with(Instant::now).elapsed() >= UNREACHABLE_LIMIT
+                {
+                    break (Phase::Unknown, None, 0);
+                }
+            }
+        }
+    };
+    let pod_removed = api.remove(&pod_path).await;
+    let policy_removed = api.remove(&format!("{}/{name}", api.policies())).await;
+    *run.termination.lock() = Some(PodTermination {
+        reason,
+        memory_oom_kills: kills,
+        objects_removed: pod_removed && policy_removed,
+    });
+    run.captured.lock().complete = true;
+    let _ = phase.send(outcome);
+}
+
+#[async_trait]
+impl ConfinementAdapter for PodAdapter {
+    fn facts(&self) -> &AdapterFacts {
+        &self.facts
+    }
+
+    fn check(&self, profile: &ConfinementProfile) -> Result<(), ConfinementError> {
+        check_profile(&self.settings, profile)
+    }
+
+    /// The program and arguments the container runs, after every refusal `start` would make.
+    fn render(
+        &self,
+        admitted: &AdmittedProfile,
+        command: &Command,
+    ) -> Result<RenderedCommand, ConfinementError> {
+        admitted.check_on(&self.facts, false)?;
+        render_objects(
+            &self.settings,
+            admitted.profile(),
+            command,
+            "substrate-run-render",
+        )?;
+        Ok(RenderedCommand {
+            program: PathBuf::from(&command.argv[0]),
+            args: command.argv[1..].to_vec(),
+        })
+    }
+
+    async fn start(
+        &self,
+        admitted: &AdmittedProfile,
+        command: &Command,
+    ) -> Result<RunId, ConfinementError> {
+        admitted.check_on(&self.facts, true)?;
+        let name = format!(
+            "substrate-run-{}",
+            ulid::Ulid::generate().to_string().to_ascii_lowercase()
+        );
+        let (policy, pod, resolved) =
+            render_objects(&self.settings, admitted.profile(), command, &name)?;
+        self.reserve()?;
+        // The policy first, so the Pod is never without it.
+        self.api.create(&self.api.policies(), &policy).await?;
+        if let Err(error) = self.api.create(&self.api.pods(), &pod).await {
+            self.api
+                .remove(&format!("{}/{name}", self.api.policies()))
+                .await;
+            return Err(error);
+        }
+        let id = RunId::new(name);
+        let (sender, phase) = watch::channel(Phase::Running);
+        let run = Arc::new(PodRun {
+            id: id.clone(),
+            phase,
+            output_limit: resolved.output_limit,
+            captured: Mutex::new(Captured::default()),
+            termination: Mutex::new(None),
+            signalled: Mutex::new(None),
+        });
+        let wall = Duration::from_secs(resolved.deadline_seconds);
+        tokio::spawn(monitor(
+            Arc::clone(&self.api),
+            Arc::clone(&run),
+            sender,
+            Instant::now() + wall + DEADLINE_GRACE,
+        ));
+        self.runs.lock().push(run);
+        admitted.audit_start(&id, &command.argv[0]);
+        Ok(id)
+    }
+
+    async fn observe(&self, run: &RunId) -> Result<RunObservation, ConfinementError> {
+        Ok(Self::observation(&*self.run(run)?))
+    }
+
+    /// The container's one log stream as `stdout`: the kubelet interleaves stdout and stderr, and
+    /// the API returns them as one (design 28).
+    async fn output(&self, run: &RunId) -> Result<RunOutput, ConfinementError> {
+        let run = self.run(run)?;
+        let stored = {
+            let captured = run.captured.lock();
+            captured
+                .complete
+                .then(|| (captured.stdout.clone(), captured.truncated))
+        };
+        let (stdout, truncated) = if let Some(stored) = stored {
+            stored
+        } else {
+            let mut log = self
+                .api
+                .log(run.id.as_str(), run.output_limit)
+                .await
+                .map_err(|error| api_failed(&error))?;
+            let truncated = log.len() > run.output_limit;
+            log.truncate(run.output_limit);
+            (log, truncated)
+        };
+        Ok(RunOutput {
+            stdout,
+            stderr: Vec::new(),
+            stdout_truncated: truncated,
+            stderr_truncated: false,
+        })
+    }
+
+    async fn wait(&self, run: &RunId) -> Result<RunObservation, ConfinementError> {
+        let run = self.run(run)?;
+        let mut phase = run.phase.clone();
+        // The monitor holds the sender until it has sent the end.
+        let _ = phase
+            .wait_for(|phase| !matches!(phase, Phase::Running))
+            .await;
+        Ok(Self::observation(&run))
+    }
+
+    /// `Kill` deletes the Pod at once and `Term` with a 5 second grace; the API delivers no other
+    /// signal.
+    async fn signal(&self, run: &RunId, signal: Signal) -> Result<(), ConfinementError> {
+        let run = self.run(run)?;
+        let grace = match signal {
+            Signal::Kill => 0,
+            Signal::Term => TERM_GRACE_SECONDS,
+            Signal::Int => {
+                return Err(DriverError::unserved(
+                    POD_SIGNAL_UNSERVED,
+                    "pod: the cluster API delivers only termination, by deleting the Pod",
+                    "signal",
+                )
+                .into());
+            }
+        };
+        if !matches!(*run.phase.borrow(), Phase::Running) {
+            return Ok(());
+        }
+        run.signalled.lock().get_or_insert(signal);
+        capture(&self.api, &run).await;
+        self.api
+            .delete(&format!("{}/{}", self.api.pods(), run.id.as_str()), grace)
+            .await
+            .map_err(|error| api_failed(&error))?;
+        Ok(())
+    }
 }

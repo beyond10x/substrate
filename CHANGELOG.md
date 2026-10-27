@@ -11,6 +11,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 - The confinement contract is specified as the ESS domain `substrate.confinement` (ADR 0044): ten contract families, six adapters with their declared facts and named refusals, 49 authored scenarios named by adapter and lane, checked against the interpreted reference by `cargo xtask check-ess`.
 - `substrate_host::confinement` implements that contract in Rust (ADR 0044): `ConfinementProfile`, the `ConfinementAdapter` trait, the `linux` adapter over the host driver, the declared-insecure `local` adapter, the six-adapter registry and refusing `macos`, `systemd`, `oci` and `pod` stubs, with the authored scenarios executed by `tests/ess_confinement_local.rs` (portable) and `tests/ess_confinement_linux.rs` (delegated).
+- The `pod` confinement adapter runs each start as one Kubernetes Pod beside a default-deny NetworkPolicy in the operator's namespace (design 28): restricted Pod posture, an image by digest, requests equal to limits, `activeDeadlineSeconds` from the wall bound, both objects deleted after `wait`, a kill or a deadline, and every Pod field a request cannot choose refused by name before any API call; `tests/ess_confinement_pod.rs` checks the rendered Pod against a golden manifest and runs the `pod` lane against a pinned `kind` cluster in the gate workflow's `pod-lane` job.
 
 ### Changed
 
