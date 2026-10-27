@@ -7,11 +7,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- The `macos` adapter resolves the selected developer tools' macOS SDK and `clang` with `xcrun` outside the sandbox at open, and a start whose exec subpaths hold the whole developer root gets `SDKROOT` and the host target's `CARGO_TARGET_<TRIPLE>_LINKER` naming them unless its environment names them, so a confined `cargo build` or `cargo test` links without reaching the `/usr/bin/cc` shim, which runs `/bin/sh` and `xcodebuild`; when the open could not resolve them such a start is refused `exec.sandbox-developer-tools-unresolved` before anything runs. The Seatbelt policy gains no rule. `tests/seatbelt_adversary.rs` runs the fixture's `cargo test` with no `RUSTC`, `SDKROOT` or linker set by the caller.
+
 ### Changed
 
 - The gate workflow's `pod-lane` job runs `scripts/pod-lane.sh`: the `kind` cluster's `ess_confinement_pod`, `adversary_pod` and `security_review_pod` suites, each required by its own `test result:` line with at least one case passed and no case reporting itself absent. The job adds a second ServiceAccount bound to the Pod and NetworkPolicy Role without `pods/log` for the no-log case, and names the kind node for the kubelet-stop case, which now waits for the adapter to remove the run's Pod and NetworkPolicy once the kubelet answers again.
 
 ## [0.12.0] — 2026-10-27
+
+Published by [release run 40469131133](https://github.com/beyond10x/substrate/actions/runs/40469131133)
+from tagged commit `65e1fca7185dfb0a5a116b70b9046b1de5722d68`. All three artifacts were
+keyless-signed and verified against `release.yml@refs/tags/0.12.0` by the release workflow, and each
+digest resolved anonymously:
+
+- Image: `ghcr.io/beyond10x/b10x-substrate-daemon:0.12.0` at `sha256:eca4a8b5118bd012ed9c96d6ffa392d0983ed5375356504c6df56220e4f50802`.
+- Contract bundle: `ghcr.io/beyond10x/b10x-substrate-wire:0.23.0` at `sha256:c2a50222da154028011a794cc93724043943581ba4ee44051c38dd084b759ff5`, unchanged since 0.11.0 and signed again by this release.
+- Disposable MCP image: `ghcr.io/beyond10x/b10x-substrate-mcp:0.12.0` at `sha256:2d365d7041feaff960fab55bcb1405a44c7b790db7936a3f3bdf1b0e78683403`, development-only.
 
 ### Added
 

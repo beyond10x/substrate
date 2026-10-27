@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:confinement-consumer-surface
 kind: story
-status: active
+status: implemented
 title: The consumer surface loom-sdk and takt call
 owner: substrate
 tags:
@@ -26,10 +26,11 @@ scope:
   path: crates/substrate-host/tests/consumer_surface.rs
 - confidence: inferred
   path: scripts/delegated-lane.sh
-revision: 8
+revision: 9
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-27T01:13:04Z", actor: "human:timo", revision: 7, decided_on: {"recorded":{"review_outcome":6}}}
 - {from: "proposed", to: "active", at: "2026-10-27T01:13:04Z", actor: "human:timo", revision: 8, decided_on: {"recorded":{"review_outcome":6}}}
+- {from: "active", to: "implemented", at: "2026-10-27T07:47:38Z", actor: "human:timo", revision: 9, decided_on: {"recorded":{"test_result":1,"review_outcome":7}}}
 ---
 # The consumer surface loom-sdk and takt call is proved and frozen
 

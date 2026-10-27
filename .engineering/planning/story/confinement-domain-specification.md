@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:confinement-domain-specification
 kind: story
-status: active
+status: implemented
 title: The confinement contract is specified as the ESS domain substrate.confinement
 owner: substrate
 tags:
@@ -31,10 +31,11 @@ scope:
   path: spec/coverage.md
 - confidence: inferred
   path: xtask/src/ess.rs
-revision: 8
+revision: 9
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-27T01:13:03Z", actor: "human:timo", revision: 7, decided_on: {"recorded":{"review_outcome":4}}}
 - {from: "proposed", to: "active", at: "2026-10-27T01:13:03Z", actor: "human:timo", revision: 8, decided_on: {"recorded":{"review_outcome":4}}}
+- {from: "active", to: "implemented", at: "2026-10-27T07:47:38Z", actor: "human:timo", revision: 9, decided_on: {"recorded":{"test_result":1,"review_outcome":5}}}
 ---
 # The confinement contract is specified as the ESS domain `substrate.confinement`
 

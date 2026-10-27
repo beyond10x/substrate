@@ -2,9 +2,14 @@
 format: aep.planning-md/3
 id: story:confined-cargo-build-links-without-the-xcrun-shim
 kind: story
-status: draft
+status: active
 title: A confined cargo build links without the xcrun shim
-revision: 1
+relations:
+- decomposes: epic:confinement-contract-family
+revision: 3
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-27T07:24:37Z", actor: "human:timo", revision: 2}
+- {from: "proposed", to: "active", at: "2026-10-27T07:24:38Z", actor: "human:timo", revision: 3}
 ---
 ## Outcome
 
