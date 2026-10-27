@@ -77,16 +77,6 @@ and every declared root, and be unique. A start may declare up to the bound the 
 the applied observation lists every bound file. The program holds no descriptor on the host file:
 the only way to it is the read-only mount.
 
-## One contract, several mechanisms
-
-The guarantees above are the Linux host driver's: the daemon's floor and the `linux` confinement
-adapter's. The host crate offers five more adapters behind the same contract, in the embedding
-process: `local`, `macos`, `systemd`, `oci` and `pod`. Each proves its own families and facts when
-it opens. A profile that needs one an adapter did not prove is refused by name, and nothing falls
-back to another adapter. `local` is declared insecure. Read
-[choose a confinement profile](../guides/confinement-profiles.md) for what each adapter serves and
-how to pick one by its facts.
-
 ## Capability snapshots
 
 Admission binds an operation to a probed backend and configuration generation. Security-critical
@@ -115,6 +105,9 @@ allowlisting. Its seccomp rules close the named AF_UNIX and io_uring paths; they
 minimum confinement floor, not a claim that every kernel interface has been reduced to an allowlist.
 A development execution capsule verifies the capsule's own bytes; it does not attest the host
 kernel, interpreter, libraries, or base system.
+
+The host driver is the `linux` adapter of the confinement contract; [confinement
+adapters](./adapters.md) compares it with the other five.
 
 Read [operations and observations](./operations.md) to see how refusals and uncertain outcomes are
 made durable.

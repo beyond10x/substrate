@@ -147,6 +147,14 @@ across retry. Resource and operation lookup stays within the authenticated subje
 Read [operations and observations](../concepts/operations.md) for retry semantics and
 [status](../status.md) for the implementation boundary.
 
+## Bundle history
+
+Earlier bundle directories remain immutable. This source contract promotion is not a new signed
+daemon release; consumers must pin and test the matching SDK/daemon revision. The SDK refuses an
+older daemon's contract before issuing mutations.
+
+### `0.23.0`
+
 Development source now advertises `substrate-wire/0.23.0`. It adds no route and publishes the
 read-only roots the wire has always admitted (ADR 0010): an exec or session start may name
 `read_only_roots`, at most four `{"host_path": <path>, "mount": <path>}` entries, each path absolute
@@ -165,6 +173,9 @@ accepted and applied them. Both starts now publish the refusals those three memb
 raised, each held to its `substrate_wire` constant, and the daemon refuses a null `scratch`, a
 storage `max_bytes` that is not a multiple of 1024 and a repeated measurement as
 `request.schema-invalid` (422), as the schemas always did.
+
+### `0.22.0`
+
 `0.22.0` added ADR 0038. An exec or session
 start may name `writable_roots`, at most eight writable mounts outside `/workspace` (ADR 0038). Each
 entry is exactly one of `{"host": <name>, "mount": <path>}`, a directory the operator declared by
@@ -179,6 +190,9 @@ naming a kind or name no fact serves is `exec.writable-roots-host-unserved` or
 each bound root with its kind, name or workspace id, host path and mount, and a `workdir` may lie
 beneath a writable root. A client that validates capability snapshots or resources against `0.21.0`
 must move to `0.22.0` to accept the new facts and record member.
+
+### `0.21.0`
+
 `0.21.0` added design 26. An exec or session
 start may name `workdir`, the directory the program starts in: an absolute, lexically normal path
 of at most 4096 bytes at or beneath `/workspace`, a declared read-only root mount, `/scratch` when
@@ -192,6 +206,9 @@ host name, or any but the first declares `localhost`, as `exec.aperture-host-lis
 the child could reach only one of them by that name. A
 client that validates capability snapshots or resources against `0.20.0` must move to `0.21.0` to
 accept the new fact and record forms.
+
+### `0.20.0`
+
 `0.20.0` added the host-process family
 (ADR 0036): seven routes under `/v1/processes` to start, list, read, stop, stop by owner session,
 renew the lease of and tail the log of an unconfined process the daemon supervises in a cgroup of
@@ -200,17 +217,24 @@ its own. Every record says `profile: host` and `confinement: none`. A daemon pub
 these routes only on the personal Unix socket to a peer of its own uid. A client that validates
 capability snapshots or resources against `0.19.0` must move to `0.20.0` to accept the new fact
 and record.
+
+### `0.19.0`
+
 `0.19.0` added the explicit `workspace.adopt`
 operation at `POST /v1/workspaces/adopt`, which serves a directory the operator placed under the
 workspace root, and two required read-only members on the workspace resource: `origin` and
 `root_name`. Workspace ids keep their `ws_` form. A client that validates workspaces against
 `0.18.0` must move to `0.19.0` to accept the new members.
+
+### `0.18.0`
+
 `0.18.0` made the
 `exec.resource-usage.block_io` fact a boolean: a host without the `io` controller publishes it
 `false` and omits `io_read_bytes` and `io_write_bytes` from every usage record instead of refusing
 execution usage. It also added the optional `read_only_files` start field, which binds single host
 files read-only, together with the `exec.read-only-files` fact and that field's named refusals.
+
+### `0.17.0`
+
 `0.17.0` added explicit session capture selection, content-free output counters,
-capture-policy refusals and attachment ceilings; existing requests retain recorded output. Earlier bundle directories remain immutable. This source contract promotion
-is not a new signed daemon release; consumers must pin and test the matching SDK/daemon revision.
-The SDK refuses an older daemon's contract before issuing mutations.
+capture-policy refusals and attachment ceilings; existing requests retain recorded output.

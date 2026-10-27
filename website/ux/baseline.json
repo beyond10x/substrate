@@ -1,0 +1,244 @@
+{
+  "about": "Lower-is-better ratchets of the public site, written by `cargo xtask docs-baseline` and held by `cargo xtask check-docs`. task:<id> counts the link clicks from the landing page to the task's page; page:<page> counts the words of the page's largest and median text block.",
+  "scenarios": {
+    "page:concepts/adapters": {
+      "reading_load.max": {
+        "tolerance": 0,
+        "value": 122.0
+      },
+      "reading_load.median": {
+        "tolerance": 0,
+        "value": 1.0
+      }
+    },
+    "page:concepts/boundary": {
+      "reading_load.max": {
+        "tolerance": 0,
+        "value": 44.0
+      },
+      "reading_load.median": {
+        "tolerance": 0,
+        "value": 6.0
+      }
+    },
+    "page:concepts/confinement": {
+      "reading_load.max": {
+        "tolerance": 0,
+        "value": 124.0
+      },
+      "reading_load.median": {
+        "tolerance": 0,
+        "value": 8.5
+      }
+    },
+    "page:concepts/model": {
+      "reading_load.max": {
+        "tolerance": 0,
+        "value": 61.0
+      },
+      "reading_load.median": {
+        "tolerance": 0,
+        "value": 8.0
+      }
+    },
+    "page:concepts/operations": {
+      "reading_load.max": {
+        "tolerance": 0,
+        "value": 59.0
+      },
+      "reading_load.median": {
+        "tolerance": 0,
+        "value": 7.0
+      }
+    },
+    "page:getting-started": {
+      "reading_load.max": {
+        "tolerance": 0,
+        "value": 52.0
+      },
+      "reading_load.median": {
+        "tolerance": 0,
+        "value": 13.0
+      }
+    },
+    "page:guides/cli": {
+      "reading_load.max": {
+        "tolerance": 0,
+        "value": 80.0
+      },
+      "reading_load.median": {
+        "tolerance": 0,
+        "value": 5.0
+      }
+    },
+    "page:guides/confinement-profiles": {
+      "reading_load.max": {
+        "tolerance": 0,
+        "value": 109.0
+      },
+      "reading_load.median": {
+        "tolerance": 0,
+        "value": 2.5
+      }
+    },
+    "page:guides/deployment": {
+      "reading_load.max": {
+        "tolerance": 0,
+        "value": 119.0
+      },
+      "reading_load.median": {
+        "tolerance": 0,
+        "value": 9.0
+      }
+    },
+    "page:guides/mcp-adapter": {
+      "reading_load.max": {
+        "tolerance": 0,
+        "value": 73.0
+      },
+      "reading_load.median": {
+        "tolerance": 0,
+        "value": 13.5
+      }
+    },
+    "page:guides/run-a-command": {
+      "reading_load.max": {
+        "tolerance": 0,
+        "value": 56.0
+      },
+      "reading_load.median": {
+        "tolerance": 0,
+        "value": 19.0
+      }
+    },
+    "page:guides/rust-sdk": {
+      "reading_load.max": {
+        "tolerance": 0,
+        "value": 64.0
+      },
+      "reading_load.median": {
+        "tolerance": 0,
+        "value": 39.5
+      }
+    },
+    "page:guides/storage-and-metrics": {
+      "reading_load.max": {
+        "tolerance": 0,
+        "value": 137.0
+      },
+      "reading_load.median": {
+        "tolerance": 0,
+        "value": 6.5
+      }
+    },
+    "page:index": {
+      "reading_load.max": {
+        "tolerance": 0,
+        "value": 43.0
+      },
+      "reading_load.median": {
+        "tolerance": 0,
+        "value": 10.0
+      }
+    },
+    "page:reference/contract": {
+      "reading_load.max": {
+        "tolerance": 0,
+        "value": 241.0
+      },
+      "reading_load.median": {
+        "tolerance": 0,
+        "value": 1.0
+      }
+    },
+    "page:reference/contracts": {
+      "reading_load.max": {
+        "tolerance": 0,
+        "value": 84.0
+      },
+      "reading_load.median": {
+        "tolerance": 0,
+        "value": 5.0
+      }
+    },
+    "page:releases": {
+      "reading_load.max": {
+        "tolerance": 0,
+        "value": 40.0
+      },
+      "reading_load.median": {
+        "tolerance": 0,
+        "value": 40.0
+      }
+    },
+    "page:security": {
+      "reading_load.max": {
+        "tolerance": 0,
+        "value": 36.0
+      },
+      "reading_load.median": {
+        "tolerance": 0,
+        "value": 27.0
+      }
+    },
+    "page:status": {
+      "reading_load.max": {
+        "tolerance": 0,
+        "value": 55.0
+      },
+      "reading_load.median": {
+        "tolerance": 0,
+        "value": 10.0
+      }
+    },
+    "page:use-cases": {
+      "reading_load.max": {
+        "tolerance": 0,
+        "value": 59.0
+      },
+      "reading_load.median": {
+        "tolerance": 0,
+        "value": 16.5
+      }
+    },
+    "task:choose-adapter-for-kubernetes": {
+      "screen_only.actions": {
+        "tolerance": 0,
+        "value": 1.0
+      }
+    },
+    "task:confine-run-flags": {
+      "screen_only.actions": {
+        "tolerance": 0,
+        "value": 2.0
+      }
+    },
+    "task:contract-families": {
+      "screen_only.actions": {
+        "tolerance": 0,
+        "value": 1.0
+      }
+    },
+    "task:install-cli": {
+      "screen_only.actions": {
+        "tolerance": 0,
+        "value": 2.0
+      }
+    },
+    "task:refusal-meaning": {
+      "screen_only.actions": {
+        "tolerance": 0,
+        "value": 2.0
+      }
+    },
+    "task:what-changed-in-0-12-0": {
+      "screen_only.actions": {
+        "tolerance": 0,
+        "value": 1.0
+      }
+    }
+  },
+  "tolerances": {
+    "counts": 0
+  }
+}

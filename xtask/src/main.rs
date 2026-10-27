@@ -28,6 +28,8 @@ mod render_v2;
 mod repo;
 mod report;
 mod secrets;
+mod site_drift;
+mod site_ux;
 mod toolchain;
 
 use std::path::PathBuf;
@@ -52,6 +54,8 @@ enum Command {
     CheckEss,
     /// Build the standalone project site and exact-commit provenance.
     BuildDocs(docs::BuildArgs),
+    /// Write the public site's measured UX values as its new ratchet baseline.
+    DocsBaseline(site_ux::BaselineArgs),
     /// Verify final daemon image files and non-root startup capability masks on local Linux Docker.
     #[command(name = "check-image-startup")]
     ImageStartup(image_startup::Args),
@@ -128,6 +132,7 @@ fn dispatch() -> Result<ExitCode> {
         Command::CheckEss => ess::check(&repo::root()?)?,
         Command::CheckDocs => docs::check(&repo::root()?)?,
         Command::BuildDocs(args) => return docs::build(&args),
+        Command::DocsBaseline(args) => return site_ux::write_baseline(&args),
         Command::ImageStartup(args) => return image_startup::run(&args),
         Command::Advisories => advisories::check(&repo::root()?)?,
         Command::Licenses => licenses::check(&repo::root()?)?,

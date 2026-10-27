@@ -11,11 +11,10 @@ because stability is a separate compatibility decision.
 
 Release [0.12.0](https://github.com/beyond10x/substrate/releases/tag/0.12.0), published on
 27 October 2026, ships the daemon and disposable MCP images with the signed
-`substrate-wire/0.23.0` development bundle, unchanged since 0.11.0.
+`substrate-wire/0.23.0` development bundle. [Release notes](./releases.md) lists what changed.
 
-The daemon is a Linux host slice. Treat every capability as deployment-specific and verify it
-through `GET /v1/machine`. The host crate's confinement adapters, which include a macOS one, run in
-the embedding process and sit behind no daemon route.
+The current implementation is a Linux host slice. Treat every capability as deployment-specific and
+verify it through `GET /v1/machine`.
 
 ## Served now
 
@@ -32,31 +31,16 @@ the embedding process and sit behind no daemon route.
 | sessions | leased raw-pipe and probe-gated PTY modes at `/v1/sessions`, with one Unix-WebSocket or authority-bound hosted WSS attachment |
 | Rust SDK source | complete promoted-contract coverage over Unix or explicit-root TLS 1.3 HTTPS/WSS, with serializable observations, exact optional facts, keyed mutations, PTY resize, metrics and snapshots |
 | disposable MCP | private stdio adapter over the SDK; bounded tools/resources, caller operation IDs, portable named refusal and native delegated cleanup evidence; published as a separately signed 0.12.0 image |
+| confinement adapters | in process, through `substrate_host::confinement` and `b10x-substrate confine run`: `local`, `linux`, `macos`, `systemd`, `oci` and `pod`, each declaring its families and facts; see [confinement adapters](./concepts/adapters.md) |
 | capsules | digest-verified read-only runtime material beside a writable workspace |
-| confinement adapters | `local`, `linux`, `macos`, `systemd`, `oci` and `pod` behind one in-process API, `substrate_host::confinement`; see [choose a confinement profile](./guides/confinement-profiles.md) |
-| daemonless confinement | `b10x-substrate confine run` over `linux`, `oci` and the declared-insecure `local`; see the [command line](./guides/cli.md#run-a-command-under-confinement-without-a-daemon) |
 | distribution | Apache-2.0 source plus keyless-signed 0.12.0 daemon and MCP images and the signed 0.23.0 development bundle |
-
-## What proves each adapter
-
-Each adapter is proved on the lane that has its mechanism. A lane that does not run is absent, not
-passed.
-
-| Adapter | Lane |
-|---|---|
-| `local` | the portable lane: the full gate's `cargo test` runs its confinement scenarios |
-| `linux` | the delegated lane, `scripts/delegated-lane.sh`, which needs bubblewrap and a delegated cgroup v2 subtree that hosted CI does not have; it runs locally, and the 0.12.0 tag records one run of it at the tagged commit in its `Confinement-lane:` line |
-| `systemd` | the same delegated lane run, with a reachable user systemd manager |
-| `macos` | the `macos-15` CI job: the host crate's tests, its Seatbelt adversary suite and the `macos` confinement scenarios |
-| `oci` | the full gate job, with `SUBSTRATE_OCI_LANE=1` against Docker |
-| `pod` | the `pod-lane` CI job: the `pod` confinement scenarios against a disposable `kind` cluster, then a check that no run object remains |
 
 ## Explicitly absent
 
 - general workspace backup/restore snapshots (reconciliation snapshots recover observed resource state)
 - workloads, images, volumes, and endpoints
-- Docker and Kubernetes drivers behind the daemon's routes (the `oci` and `pod` confinement
-  adapters are host-crate API)
+- Docker and Kubernetes drivers behind the daemon; the `oci` and `pod` confinement adapters run in
+  the host crate, not behind the daemon
 - cross-machine scheduling
 - stable signed contract-bundle publication
 
@@ -74,11 +58,6 @@ in a broader architecture do not imply served endpoints.
   Identity round trip on a reused keep-alive connection (at most 8 idle, closed after 30 s idle or
   any error), so a completed revocation applies to the next request.
 - One daemon is one trust domain; it is not a multi-tenant isolation layer.
-- The `local` adapter runs an unconfined host process. It is declared insecure, admits a profile
-  only with a stated reason, and the host's operator can forbid it.
-- The `macos` adapter serves no `limits`, `network_egress` or `network_ingress` and does not prove
-  `whole_tree_kill`: Seatbelt sets no process or memory bound and has no egress forwarder, and a
-  child can leave the process group.
 - Release `0.12.0` advertises `substrate-wire/0.23.0` and the SHA-256 of its inner
   `bundle.json` as one claim. The outer OCI package has its own digest. Version `0.15.0`
   deliberately replaced `/v1/pipe-sessions` with `/v1/sessions` and serves no compatibility alias.
