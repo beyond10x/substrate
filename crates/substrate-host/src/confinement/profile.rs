@@ -154,22 +154,41 @@ impl ConfinementProfile {
             .collect()
     }
 
-    /// The reason, when it is present and not blank.
+    /// The reason, when it is present and not blank: it holds at least one [visible
+    /// character](is_visible). Whitespace, format characters (U+200B, U+FEFF, U+2060 and the
+    /// like) and fillers that render as nothing are blank to every reader of the audit record.
     pub fn reason(&self) -> Option<&str> {
         self.local_reason
             .as_deref()
-            .filter(|reason| !reason.trim().is_empty())
+            .filter(|reason| reason.chars().any(is_visible))
     }
 }
 
-/// Whether `image` names its content by digest: it ends in `@sha256:` and exactly 64 lowercase
-/// hexadecimal characters. A tag, an upper-case or short digest, or anything after the digest is
-/// not pinned.
+/// Whether `character` shows as a letter or a digit to a reader: alphanumeric, and not one of the
+/// Hangul fillers Unicode classes as letters although they render as nothing.
+///
+/// The rule admits by class rather than refusing a list of invisible characters, so a format,
+/// control, combining, whitespace or symbol character added to Unicode later is not visible by
+/// default. A reason is words; one made only of punctuation or symbols is no reason either.
+fn is_visible(character: char) -> bool {
+    character.is_alphanumeric()
+        && !matches!(character, '\u{115F}' | '\u{1160}' | '\u{3164}' | '\u{FFA0}')
+}
+
+/// Whether `image` names its content by digest: `name@sha256:` and exactly 64 lowercase
+/// hexadecimal characters, which end the reference. `@sha256:` appears exactly once, and the name
+/// before it is not empty, holds no `@`, no whitespace and no control character, and does not
+/// start with `-` (it would read as an option to a runtime). A tag alone, an upper-case or short
+/// digest, a second digest or anything after the digest is not pinned.
 pub fn image_is_pinned(image: &str) -> bool {
-    let Some((name, digest)) = image.rsplit_once("@sha256:") else {
+    let Some((name, digest)) = image.split_once("@sha256:") else {
         return false;
     };
     !name.is_empty()
+        && !name.starts_with('-')
+        && !name.chars().any(|character| {
+            character == '@' || character.is_whitespace() || character.is_control()
+        })
         && digest.len() == 64
         && digest
             .bytes()

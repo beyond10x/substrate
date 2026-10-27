@@ -3,7 +3,7 @@
 //!
 //! Executes every authored `-on-delegated` scenario of `spec/confinement-suite.json` that opens
 //! only `linux`, against the real adapter over `HostDriver` with a delegated cgroup v2 root, and
-//! starts one confined run through the adapter. The count is read from the suite and must equal
+//! starts one confined run through the adapter. The count is pinned at 9 and must equal
 //! what ran.
 //!
 //! Without `SUBSTRATE_VECTORS_CGROUP_ROOT` naming a cgroup v2 subtree this process is inside, or
@@ -62,6 +62,11 @@ fn open_linux(
     )))
 }
 
+/// The authored `-on-delegated` scenarios of `spec/confinement-suite.json` that open only
+/// `linux`. Pinned, so a scenario lost or renamed out of the lane fails here instead of shrinking
+/// what runs.
+const LINUX_DELEGATED: usize = 9;
+
 #[test]
 fn ess_confinement_delegated_lane_executes_every_authored_linux_scenario() {
     let cgroup_root = match delegated() {
@@ -72,11 +77,13 @@ fn ess_confinement_delegated_lane_executes_every_authored_linux_scenario() {
         }
     };
     let scenarios = support::scenarios("delegated", |adapter| adapter == "linux");
-    assert!(
-        !scenarios.is_empty(),
-        "the suite has no delegated linux scenario"
+    assert_eq!(
+        scenarios.len(),
+        LINUX_DELEGATED,
+        "spec/confinement-suite.json holds another number of authored -on-delegated scenarios \
+         opening only linux than this lane pins"
     );
-    let declared = scenarios.len();
+    let declared = LINUX_DELEGATED;
     let mut hosts = Vec::new();
     let (executed, audited, open_checks) = support::run(&scenarios, |step| {
         assert_eq!(step.adapter, "linux");
@@ -89,7 +96,10 @@ fn ess_confinement_delegated_lane_executes_every_authored_linux_scenario() {
         hosts.push(host);
         adapter
     });
-    assert_eq!(executed, declared, "a delegated linux scenario did not run");
+    assert_eq!(
+        executed, declared,
+        "a delegated linux scenario of spec/confinement-suite.json did not run"
+    );
     let others = support::lane_size("delegated") - declared;
     println!(
         "ESS confinement linux delegated lane: {executed} scenarios executed of {declared} \

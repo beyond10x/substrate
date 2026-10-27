@@ -23,6 +23,21 @@
 //! `network_ingress` is served by no adapter. `paths_are_host_paths`, `sealed_paths`,
 //! `exec_subpaths`, `private_tmpdir` and `host_network` are not proved, and a profile requiring
 //! one is refused `confinement.fact-unserved`.
+//!
+//! Some fields need more of the snapshot than their family's row, and admission refuses them by
+//! name when the snapshot lacks it, so a start never meets a fact admission could have read:
+//!
+//! | field | needs | refused |
+//! |---|---|---|
+//! | `writable_roots` | `exec.writable-roots.host` | `confinement.family-unserved` naming `filesystem_view` |
+//! | a writable root's `host` | that name in `exec.writable-roots.host` | `exec.writable-roots-host-unserved` |
+//! | `workdir` | `exec.workdir` | `exec.workdir-unserved` |
+//! | `network: Egress` names | each name in `exec.egress-apertures` | `exec.aperture-undeclared` |
+//! | `secret_slots` | `secrets.slots` | `exec.secret-slots-unserved` |
+//! | a slot's name | that name in `secrets.slots` | `exec.secret-slot-unknown` |
+//!
+//! Every refusal of a start, by the contract's recheck, the adapter or the driver, writes its
+//! audit record.
 
 use std::path::PathBuf;
 #[cfg(target_os = "linux")]
@@ -77,15 +92,15 @@ mod imp {
 
     use async_trait::async_trait;
     use substrate_wire::{
-        CapabilitySnapshot, ConfinementRequest, ExecEnvironment, ExecLimits, ExecSignalInput,
-        ExecStartInput, ExecState, NetworkMode, SandboxProfile, Signal, WorkspaceAccess,
-        WritableRoot,
+        CapabilityFacts, CapabilitySnapshot, ConfinementRequest, ExecEnvironment, ExecLimits,
+        ExecSignalInput, ExecStartInput, ExecState, NetworkMode, SandboxProfile, Signal,
+        WorkspaceAccess, WritableRoot,
     };
 
     use super::super::{
         AdapterFacts, AdapterName, AdmittedProfile, Command, ConfinementAdapter, ConfinementError,
-        ContractFamily, Fact, Network, ProcessBounds, RenderedCommand, RunExit, RunId,
-        RunObservation, RunOutput, RunState,
+        ConfinementProfile, ContractFamily, Fact, Network, ProcessBounds, RenderedCommand, RunExit,
+        RunId, RunObservation, RunOutput, RunState,
     };
     use super::LinuxRequest;
     use crate::{DispatchOutcome, Driver as _, DriverError, HostDriver, PLATFORM_UNSERVED};
@@ -117,6 +132,7 @@ mod imp {
         let machine = driver.machine();
         Ok(Arc::new(LinuxAdapter {
             facts: proof(&machine),
+            capability: machine.facts,
             snapshot: machine.snapshot,
             driver,
         }))
@@ -173,6 +189,8 @@ mod imp {
 
     pub struct LinuxAdapter {
         facts: AdapterFacts,
+        /// The driver's capability facts as probed at open: what admission reads beyond families.
+        capability: CapabilityFacts,
         snapshot: String,
         driver: Arc<HostDriver>,
     }
@@ -278,6 +296,32 @@ mod imp {
             })
         }
 
+        async fn start_run(
+            &self,
+            admitted: &AdmittedProfile,
+            command: &Command,
+        ) -> Result<RunId, ConfinementError> {
+            admitted.check_on(&self.facts, true)?;
+            super::super::check_command(command)?;
+            let workspace = super::super::workspace_of(admitted)?;
+            let root_name = self.root_name(workspace)?;
+            let input = self.exec_input(admitted, command, &root_name)?;
+            let id = format!(
+                "ex_{}",
+                ulid::Ulid::generate().to_string().to_ascii_lowercase()
+            );
+            match self.driver.start_exec(&id, &root_name, &input).await {
+                DispatchOutcome::Observed(_) => {
+                    let run = RunId::new(id);
+                    admitted.audit_start(&run, &command.argv[0]);
+                    Ok(run)
+                }
+                DispatchOutcome::NotDispatched(error)
+                | DispatchOutcome::ContainedAbsent(error)
+                | DispatchOutcome::OutcomeUnknown(error) => Err(ConfinementError::Driver(error)),
+            }
+        }
+
         fn observation(run: &RunId, observed: &crate::ExecObservation) -> RunObservation {
             let exec = &observed.resource;
             let state = match exec.state {
@@ -305,6 +349,76 @@ mod imp {
             &self.facts
         }
 
+        /// What the snapshot cannot serve beyond the families, in the module table's order.
+        fn check(&self, profile: &ConfinementProfile) -> Result<(), ConfinementError> {
+            let capability = &self.capability;
+            if !profile.writable_roots.is_empty() {
+                let Some(declared) = &capability.exec_writable_roots_host else {
+                    return Err(ConfinementError::FamilyUnserved {
+                        adapter: AdapterName::Linux,
+                        family: ContractFamily::FilesystemView,
+                    });
+                };
+                if let Some(root) = profile
+                    .writable_roots
+                    .iter()
+                    .find(|root| !declared.contains(&root.host))
+                {
+                    return Err(DriverError::unserved(
+                        substrate_wire::EXEC_WRITABLE_ROOTS_HOST_UNSERVED,
+                        format!("The host declared no writable root named {}.", root.host),
+                        "writable_roots",
+                    )
+                    .into());
+                }
+            }
+            if profile.workdir.is_some() && capability.exec_workdir != Some(true) {
+                return Err(DriverError::unserved(
+                    substrate_wire::EXEC_WORKDIR_UNSERVED,
+                    "The host has not proved starting a run in a working directory.",
+                    "workdir",
+                )
+                .into());
+            }
+            if let Some(Network::Egress { apertures }) = &profile.network {
+                let declared = capability.exec_egress_apertures.as_deref().unwrap_or(&[]);
+                if let Some(name) = apertures
+                    .iter()
+                    .find(|name| !declared.iter().any(|aperture| &aperture.name == *name))
+                {
+                    return Err(DriverError::refused(
+                        "exec.aperture-undeclared",
+                        format!("The host declared no egress aperture named {name}."),
+                        "network",
+                    )
+                    .into());
+                }
+            }
+            if !profile.secret_slots.is_empty() {
+                let Some(declared) = &capability.secrets_slots else {
+                    return Err(DriverError::unserved(
+                        "exec.secret-slots-unserved",
+                        "Sealed secret slots are not served by this host.",
+                        "secret_slots",
+                    )
+                    .into());
+                };
+                if let Some(slot) = profile
+                    .secret_slots
+                    .iter()
+                    .find(|slot| !declared.contains(&slot.slot))
+                {
+                    return Err(DriverError::refused(
+                        "exec.secret-slot-unknown",
+                        format!("Secret slot {} is not declared on this host.", slot.slot),
+                        "secret_slots",
+                    )
+                    .into());
+                }
+            }
+            Ok(())
+        }
+
         fn render(
             &self,
             admitted: &AdmittedProfile,
@@ -323,30 +437,15 @@ mod imp {
             Ok(RenderedCommand { program, args })
         }
 
+        /// Every refusal, from the contract's recheck to the driver's dispatch, writes its audit
+        /// record.
         async fn start(
             &self,
             admitted: &AdmittedProfile,
             command: &Command,
         ) -> Result<RunId, ConfinementError> {
-            admitted.check_on(&self.facts, true)?;
-            super::super::check_command(command)?;
-            let workspace = super::super::workspace_of(admitted)?;
-            let root_name = self.root_name(workspace)?;
-            let input = self.exec_input(admitted, command, &root_name)?;
-            let id = format!(
-                "ex_{}",
-                ulid::Ulid::generate().to_string().to_ascii_lowercase()
-            );
-            match self.driver.start_exec(&id, &root_name, &input).await {
-                DispatchOutcome::Observed(_) => {
-                    let run = RunId::new(id);
-                    admitted.audit_start(&run, &command.argv[0]);
-                    Ok(run)
-                }
-                DispatchOutcome::NotDispatched(error)
-                | DispatchOutcome::ContainedAbsent(error)
-                | DispatchOutcome::OutcomeUnknown(error) => Err(ConfinementError::Driver(error)),
-            }
+            let started = self.start_run(admitted, command).await;
+            admitted.audit_refusal(&self.facts, started)
         }
 
         async fn observe(&self, run: &RunId) -> Result<RunObservation, ConfinementError> {
