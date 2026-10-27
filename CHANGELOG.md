@@ -7,6 +7,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- The public site explains each confinement adapter (what it enforces, declares, refuses by name and needs, and when to choose it). It also gains an overview of the contracts with the ten families and eleven facts, release notes rendered from the newest released `CHANGELOG.md` section, and `confine run`; the status page moves to 0.12.0. The page list is grouped, marks the current page, and collapses on narrow screens; tables scroll inside focusable regions.
+- `cargo xtask check-docs` holds the site's adapter matrices, family, fact and lane tables and CLI Commands table to the specification. It also holds the site to lower-is-better UX ratchets in `website/ux/baseline.json` (clicks per reader task, words per text block), which `cargo xtask docs-baseline` rewrites, and checks the `website/ux/findings/` records.
+
 ## [0.12.0] — 2026-10-27
 
 Published by [release run 40469131133](https://github.com/beyond10x/substrate/actions/runs/40469131133)

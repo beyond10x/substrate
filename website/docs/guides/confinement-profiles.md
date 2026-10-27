@@ -30,6 +30,9 @@ opened; which one opened is not something to branch on.
 | `oci` | one Docker or podman container per run, the image named by digest |
 | `pod` | one Kubernetes Pod per run, the image named by digest |
 
+[Confinement adapters](../concepts/adapters.md) explains what each one enforces, declares and
+refuses.
+
 ## Read the facts
 
 `adapter.facts()` returns `AdapterFacts`, read once at open and never raised afterwards:

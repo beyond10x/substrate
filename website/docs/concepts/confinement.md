@@ -106,5 +106,8 @@ minimum confinement floor, not a claim that every kernel interface has been redu
 A development execution capsule verifies the capsule's own bytes; it does not attest the host
 kernel, interpreter, libraries, or base system.
 
+The host driver is the `linux` adapter of the confinement contract; [confinement
+adapters](./adapters.md) compares it with the other five.
+
 Read [operations and observations](./operations.md) to see how refusals and uncertain outcomes are
 made durable.
