@@ -653,6 +653,9 @@ pub struct RunObservation {
     pub declared_insecure: Option<String>,
     pub state: RunState,
     pub exit: Option<RunExit>,
+    /// Processes of the run the kernel's OOM killer ended, once the run has ended; `None` where
+    /// the adapter does not observe it (absent, never zero: invariant 3).
+    pub memory_oom_kills: Option<u64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

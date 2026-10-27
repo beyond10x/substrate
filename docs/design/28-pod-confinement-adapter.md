@@ -34,7 +34,7 @@ incomplete, the adapter does not open: `confinement.adapter-unserved` (501) with
 | cluster `tls-server-name` | the name the server certificate is verified against, when present |
 | user `client-certificate-data` and `client-key-data` | TLS client authentication |
 | user `token` | a bearer token, sent only to that server |
-| context extension `b10x-substrate/pod` | `run_as_user` (default 65532) and `pod_pids_limit` |
+| context extension `b10x-substrate/pod` | `run_as_user` (default 65532), `pod_pids_limit` and `ephemeral_storage_bytes` (default 1 GiB) |
 
 Refused at open, by name, because each would change who the adapter is or whom it trusts:
 `insecure-skip-tls-verify: true`, `proxy-url`, `certificate-authority`, `client-certificate`,
@@ -44,13 +44,19 @@ Refused at open, by name, because each would change who the adapter is or whom i
 token is refused.
 
 Open then lists at most one Pod in the namespace. A cluster that does not answer within 10 seconds,
-or answers anything but 200, does not open (`confinement.adapter-unserved`). The credentials never
-appear in an error, a record or a log line.
+or answers anything but 200, does not open (`confinement.adapter-unserved`). Open next reads the
+log of `substrate-log-access-probe`, a Pod no run is named: the API answers 404 to a credential that
+may read `pods/log` and 403 to one that may not, and without that access no run's output could be
+read, so a 401 or 403 does not open either, nor does any answer but 200, 400 or 404. The
+credentials never appear in an error, a record or a log line.
 
 `pod_pids_limit` is the operator's statement of the kubelet's `podPidsLimit` on every node that may
 run the Pod. The Pod API has no per-Pod process bound and a namespaced client cannot read the
-kubelet's, so this is the one bound the adapter takes on the operator's word; without it, no
-`processes` bound is admitted.
+kubelet's, so this is the one bound the adapter takes on the operator's word. Every run has a
+`processes` bound, the default one included, so without `pod_pids_limit` no profile is admitted.
+
+`ephemeral_storage_bytes`, from 1 MiB to 1 TiB, is the workspace `emptyDir`'s `sizeLimit` and the
+container's `ephemeral-storage` request and limit; it is 1 GiB when the operator states none.
 
 ## Authority: what a request cannot choose
 
@@ -69,7 +75,7 @@ so no profile can reach it, and the golden manifest
 | `spec.hostNetwork`, `spec.hostPID`, `spec.hostIPC` | `false` |
 | `spec.enableServiceLinks` | `false` |
 | `spec.restartPolicy` | `Never` |
-| `spec.volumes` | one `emptyDir`, `workspace`; never a `hostPath` |
+| `spec.volumes` | one `emptyDir`, `workspace`, with `sizeLimit` `ephemeral_storage_bytes`; never a `hostPath` |
 | `securityContext.privileged` | `false` |
 | `securityContext.runAsNonRoot`, `runAsUser`, `runAsGroup` | `true`, the operator's numeric uid twice |
 | `securityContext.readOnlyRootFilesystem` | `true` |
@@ -77,9 +83,9 @@ so no profile can reach it, and the golden manifest
 | `securityContext.capabilities` | `drop: [ALL]`, nothing added |
 | `securityContext.seccompProfile` | `RuntimeDefault` |
 | container `image` | the profile's image, by digest only |
-| container `command` and `args` | the argv, split at its first element; no shell |
-| container `env` | the command's environment plus `SUBSTRATE_CONFINEMENT_LOCAL=refuse` |
-| container `resources` | requests equal to limits, from the profile's bounds |
+| container `command` and `args` | the argv, split at its first element, every `$` written `$$`; no shell |
+| container `env` | the command's environment, every `$` in a value written `$$`, plus `SUBSTRATE_CONFINEMENT_LOCAL=refuse` |
+| container `resources` | requests equal to limits, from the profile's bounds and `ephemeral_storage_bytes` |
 | `spec.activeDeadlineSeconds` | the wall bound, rounded up to whole seconds |
 
 `SUBSTRATE_CONFINEMENT_LOCAL=refuse` is atlas ADR 0109 F3 A: inside `pod` the host's policy fact
@@ -109,7 +115,7 @@ Each is refused before any API call. Admission refusals write a `profile_refused
 | `sealed_paths`, `exec_subpaths`, `private_tmpdir`, `ipc.socket_allowlist`, `ipc.signals_contained` | `confinement.fact-unserved` naming the fact (501) |
 | `secret_slots` (a Pod spec is stored in the cluster) | `exec.secret-slots-unserved` (501) |
 | `workdir` not relative, or with `..` | `exec.workdir-invalid` (422) |
-| `process_bounds.processes` with no `pod_pids_limit`, or below it | `confinement.pod-processes-unserved` (501) |
+| any profile when the operator declared no `pod_pids_limit` (every run has a processes bound, the default included); `process_bounds.processes` below it | `confinement.pod-processes-unserved` (501) |
 | a bound outside the linux driver's ranges, or CPU under 1 millicore | `exec.limit-unserved` (429) |
 | `io_bounds.output_bytes` of 0 or above 1 MiB | `exec.limit-unserved` (429) |
 | an empty argv, or one above 256 KiB | `exec.argv-invalid` (422) |
@@ -129,23 +135,38 @@ With them:
   refused, never rounded up;
 - wall: `activeDeadlineSeconds`; the adapter also deletes a Pod not ended 60 s after the wall
   bound, which covers a Pod that never started (unschedulable, image not pulled);
-- processes: the operator's `pod_pids_limit`, which must be at or below the profile's bound.
+- processes: the operator's `pod_pids_limit`, which must be at or below the profile's bound; a
+  profile without `process_bounds` runs under it.
 
 ## A run
 
-`start` creates the NetworkPolicy, then the Pod; a Pod refused by the API deletes the policy. One
-task per run polls the Pod. When it ends (`Succeeded` or `Failed`), the task reads the container's
-log once, at most the output bound plus one byte, then deletes the Pod and the policy and confirms
-both are gone before `wait` returns. A run whose container ended `OOMKilled` reports
-`memory_oom_kills: 1` in its termination record (`PodAdapter::termination`) and its exit code.
+`start` creates the NetworkPolicy, then the Pod. A Pod create that fails, refused or with its
+answer lost after the API may have stored the Pod (a dropped connection, a 504, the client's
+timeout), deletes the Pod by name and confirms it is gone before it deletes the policy; when the
+Pod's removal is not confirmed the policy stays and the start fails
+`confinement.pod-api-failed` naming the Pod. One task per run polls the Pod. When the API shows
+the container terminated, the task reads the container's log, at most the output bound plus one
+byte, then deletes the Pod and, once the Pod is confirmed gone, the policy, before `wait` reports
+the run ended. A Pod is never force-deleted: every deletion leaves the kubelet a grace of at least
+1 second, so a Pod gone after the adapter's own deletion is the kubelet's confirmation that its
+container stopped. A Pod's removal not confirmed within 2 minutes keeps its policy and reports the
+run `Unknown` while the task keeps trying; so does an API that has not answered for 2 minutes,
+whatever the removal is doing, and a Pod someone else deleted.
+
+`wait` and `observe` carry `memory_oom_kills` once the API has shown the container's terminated
+state: 1 for a container that ended `OOMKilled`, 0 otherwise, absent when it was not shown.
 
 The kubelet keeps one log per container, interleaving stdout and stderr, and the API returns that
-one stream. `output_read` under `pod` reports it as `stdout`, with `stderr` empty.
+one stream. `output_read` under `pod` reports it as `stdout`, with `stderr` empty. A log read is
+tried five times; a log the API does not return is `confinement.pod-api-failed`, never an empty
+output. Only a container the API has not shown started reads as empty.
 
-`signal: Kill` reads the log, then deletes the Pod with a grace period of 0; `signal: Term` deletes
-it with 5 seconds, so the container receives `SIGTERM` and then `SIGKILL`. The run ends with that
-signal. The policy is deleted after the Pod in every case: after `wait`, after a kill and after a
-deadline.
+`signal: Kill` reads the log, then deletes the Pod with a grace period of 1 second; `signal: Term`
+with 5 seconds; the kubelet sends `SIGTERM` and then `SIGKILL`. The run ends with that signal once
+the API shows the container terminated or the Pod gone; a kubelet that has not confirmed it within
+60 seconds leaves the run `Unknown`, because its container may still run. A Pod not ended 60 s
+after the wall bound is deleted the same way and ends as a `Kill`. The policy is deleted after the
+Pod in every case.
 
 ## Not decided here
 
