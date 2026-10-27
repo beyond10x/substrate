@@ -7,6 +7,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- The gate workflow's `pod-lane` job runs `scripts/pod-lane.sh`: the `kind` cluster's `ess_confinement_pod`, `adversary_pod` and `security_review_pod` suites, each required by its own `test result:` line with at least one case passed and no case reporting itself absent. The job adds a second ServiceAccount bound to the Pod and NetworkPolicy Role without `pods/log` for the no-log case, and names the kind node for the kubelet-stop case, which now waits for the adapter to remove the run's Pod and NetworkPolicy once the kubelet answers again.
+
 ## [0.12.0] — 2026-10-27
 
 ### Added
