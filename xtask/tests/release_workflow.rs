@@ -694,6 +694,228 @@ fn a_calendar_impossible_instant_is_refused_by_both_steps() {
     }
 }
 
+const BINARY_ARCHIVES: [&str; 2] = [
+    "substrate-daemon-${VERSION}-${BINARY_TARGET}.tar.gz",
+    "b10x-substrate-${VERSION}-${BINARY_TARGET}.tar.gz",
+];
+const GLIBC_STEP: &str = "Refuse release binaries a glibc 2.35 host cannot load";
+
+#[test]
+fn release_binaries_come_from_the_pinned_builder_stage() {
+    // One pinned builder compiles every shipped binary once, the CLI included, and a scratch
+    // stage exports exactly the two archived binaries; the workflow selects that stage.
+    let build = DOCKERFILE
+        .split_once("cargo build --locked --release")
+        .expect("the builder's one release build")
+        .1
+        .split_once("install -D")
+        .expect("the build's package list ends before the first install")
+        .0;
+    assert!(build.contains("-p b10x-substrate-cli --bin b10x-substrate"));
+    assert!(
+        DOCKERFILE.contains("install -D /src/target/release/b10x-substrate /out/b10x-substrate")
+    );
+    let stage = DOCKERFILE
+        .split_once("FROM scratch AS release-binaries\n")
+        .expect("a scratch stage holding only the release binaries")
+        .1
+        .split("\nFROM ")
+        .next()
+        .expect("release-binaries stage body");
+    assert!(stage.contains("COPY --from=builder /out/substrate-daemon /substrate-daemon"));
+    assert!(stage.contains("COPY --from=builder /out/b10x-substrate /b10x-substrate"));
+    assert!(
+        DOCKERFILE.trim_end().ends_with("FROM daemon AS release"),
+        "`docker build .` must still select the daemon image"
+    );
+
+    position("BINARY_TARGET: x86_64-unknown-linux-gnu");
+    position("GLIBC_CEILING: \"2.35\"");
+    let export = position("--target release-binaries");
+    position("--output \"type=local,dest=${BINARY_DIST}/bin\"");
+    let ceiling = position(&format!("- name: {GLIBC_STEP}\n"));
+    let floor_smoke = position("\"${GLIBC_FLOOR_IMAGE}\"");
+    let package = position("Package the release binaries");
+    let daemon_push = position("docker push \"${IMAGE}:${VERSION}\"");
+    let mcp_push = position("docker push \"${MCP_IMAGE}:${VERSION}\"");
+    // Every binary refusal happens before any image tag is mutated.
+    assert!(export < ceiling && ceiling < floor_smoke && floor_smoke < package);
+    assert!(package < daemon_push && package < mcp_push);
+    // The oldest supported glibc is an exact image, not a moving tag.
+    position("GLIBC_FLOOR_IMAGE: ubuntu:22.04@sha256:");
+    // The archived daemon is the daemon the image carries, on every initial release.
+    let identity = position(
+        "cmp \"${BINARY_DIST}/bin/substrate-daemon\" target/image-under-test/substrate-daemon",
+    );
+    assert!(position("Build, smoke-test and push the daemon image once") < identity);
+}
+
+#[test]
+fn release_binaries_are_archived_summed_signed_and_verified_before_announcement() {
+    for archive in BINARY_ARCHIVES {
+        assert!(
+            occurrences(archive) >= 2,
+            "{archive} must be both packaged and attached"
+        );
+    }
+    let sums = position("sha256sum -- \"${archives[@]}\" > SHA256SUMS");
+    let sign = position(
+        "cosign sign-blob --yes \\\n            --bundle \"${BINARY_DIST}/assets/SHA256SUMS.sigstore.json\"",
+    );
+    let verify = position("cosign verify-blob \\");
+    let announce = position("gh release create \"${VERSION}\"");
+    assert!(sums < sign && sign < verify && verify < announce);
+    // The verification reads the bundle the release attaches, for this workflow at this ref.
+    let verify_step =
+        &step_script("Verify the release-binary checksum signature with the workflow identity");
+    assert!(verify_step.contains("cosign verify-blob \\"));
+    assert!(verify_step.contains("--bundle \"${BINARY_DIST}/assets/SHA256SUMS.sigstore.json\""));
+    assert!(verify_step.contains("--certificate-identity \"${identity}\""));
+    assert!(verify_step.contains(".github/workflows/release.yml@${GITHUB_REF}"));
+    assert!(verify_step.contains("sha256sum --check --strict SHA256SUMS"));
+
+    // All four files go onto the release the workflow creates, while it is still a draft.
+    let create = &WORKFLOW[announce..position("--draft=false")];
+    for asset in BINARY_ARCHIVES
+        .iter()
+        .copied()
+        .chain(["SHA256SUMS\"", "SHA256SUMS.sigstore.json\""])
+    {
+        assert!(
+            create.contains(&format!("\"${{BINARY_DIST}}/assets/{asset}")),
+            "gh release create does not attach {asset}"
+        );
+    }
+    position("## Release binaries");
+    position("cosign verify-blob \\\\");
+    position("| binaries signature step | ${{ steps.binaries-verify.outcome }} |");
+}
+
+/// Runs a release-job step offline with `objdump` and `readelf` replaced by fakes that report
+/// `glibc` symbol versions and `needed` libraries for every binary.
+fn run_glibc_step(glibc: &[&str], needed: &[&str]) -> (bool, String) {
+    let directory = tempfile::tempdir().expect("temporary dist");
+    let root = directory.path();
+    let bin = root.join("dist/bin");
+    fs::create_dir_all(&bin).expect("bin");
+    for binary in ["substrate-daemon", "b10x-substrate"] {
+        fs::write(bin.join(binary), "not an ELF; the fakes answer").expect("binary");
+    }
+    let tools = root.join("tools");
+    fs::create_dir_all(&tools).expect("tools");
+    let mut objdump = String::from("#!/bin/sh\n");
+    for version in glibc {
+        writeln!(
+            objdump,
+            "echo '0000000000000000      DF *UND*  0000000000000000 ({version}) symbol'"
+        )
+        .expect("writing to a String cannot fail");
+    }
+    let mut readelf = String::from("#!/bin/sh\n");
+    for library in needed {
+        writeln!(
+            readelf,
+            "echo ' 0x0000000000000001 (NEEDED)             Shared library: [{library}]'"
+        )
+        .expect("writing to a String cannot fail");
+    }
+    for (name, script) in [("objdump", objdump), ("readelf", readelf)] {
+        let path = tools.join(name);
+        fs::write(&path, script).expect("fake tool");
+        let mut permissions = fs::metadata(&path).expect("metadata").permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+        fs::set_permissions(&path, permissions).expect("executable fake tool");
+    }
+    let path = format!(
+        "{}:{}",
+        tools.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let output = std::process::Command::new("bash")
+        .current_dir(root)
+        .env("PATH", path)
+        .env("BINARY_DIST", "dist")
+        .env("GLIBC_CEILING", "2.35")
+        .args(["-e", "-o", "pipefail", "-c", &step_script(GLIBC_STEP)])
+        .output()
+        .expect("bash runs");
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).into_owned()
+            + &String::from_utf8_lossy(&output.stderr),
+    )
+}
+
+const SHIPPED_LIBRARIES: [&str; 7] = [
+    "libssl.so.3",
+    "libcrypto.so.3",
+    "libz.so.1",
+    "libgcc_s.so.1",
+    "libm.so.6",
+    "libc.so.6",
+    "ld-linux-x86-64.so.2",
+];
+
+#[test]
+fn release_binaries_within_the_glibc_ceiling_and_documented_libraries_are_accepted() {
+    // 0.12.0's daemon, measured: GLIBC_2.34 at most, and exactly these seven libraries.
+    let (success, output) = run_glibc_step(
+        &["GLIBC_2.2.5", "GLIBC_2.4", "GLIBC_2.34", "GLIBC_2.33"],
+        &SHIPPED_LIBRARIES,
+    );
+    assert!(success, "{output}");
+    assert!(output.contains("needs GLIBC_2.34"), "{output}");
+    let (success, output) = run_glibc_step(&["GLIBC_2.35"], &["libc.so.6"]);
+    assert!(success, "{output}");
+}
+
+#[test]
+fn a_release_binary_needing_a_newer_glibc_is_refused() {
+    // Version order, not string order: 2.36 is newer than 2.35, and 2.4 is older.
+    for newest in ["GLIBC_2.36", "GLIBC_2.39", "GLIBC_3.0"] {
+        let (success, output) =
+            run_glibc_step(&["GLIBC_2.4", newest, "GLIBC_2.34"], &SHIPPED_LIBRARIES);
+        assert!(!success, "accepted {newest}: {output}");
+        assert!(
+            output.contains(&format!("refused: substrate-daemon needs {newest}")),
+            "{output}"
+        );
+    }
+    let (success, output) = run_glibc_step(&[], &SHIPPED_LIBRARIES);
+    assert!(!success, "{output}");
+    assert!(output.contains("names no GLIBC symbol version"), "{output}");
+}
+
+#[test]
+fn a_release_binary_needing_an_undocumented_library_is_refused() {
+    let mut needed = SHIPPED_LIBRARIES.to_vec();
+    needed.push("libcurl.so.4");
+    let (success, output) = run_glibc_step(&["GLIBC_2.34"], &needed);
+    assert!(!success, "{output}");
+    assert!(
+        output.contains("refused: substrate-daemon needs libcurl.so.4"),
+        "{output}"
+    );
+}
+
+#[test]
+fn readme_records_what_the_release_binaries_need_at_run_time() {
+    let readme = fs::read_to_string(repository_root().join("README.md")).expect("README");
+    for needle in [
+        "substrate-daemon-<version>-x86_64-unknown-linux-gnu.tar.gz",
+        "b10x-substrate-<version>-x86_64-unknown-linux-gnu.tar.gz",
+        "SHA256SUMS.sigstore.json",
+        "libssl3",
+        "zlib1g",
+        "glibc 2.35",
+    ] {
+        assert!(
+            readme.contains(needle),
+            "README.md does not state {needle:?}"
+        );
+    }
+}
+
 #[test]
 fn development_status_is_verified_and_never_described_as_stable() {
     position("dev.b10x.contract.status");

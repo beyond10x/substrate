@@ -178,6 +178,39 @@ eligible release tag, the release workflow copies that exact layout to GHCR with
 remote digest, and signs and verifies the digest before announcement. The workflow's offline
 write-once and ordering assertions run in `xtask/tests/release_workflow.rs`.
 
+### Release binaries
+
+From the release after 0.13.0 on, each GitHub release also carries the daemon and the command-line
+client as prebuilt x86_64 Linux binaries:
+
+| asset | holds |
+|---|---|
+| `substrate-daemon-<version>-x86_64-unknown-linux-gnu.tar.gz` | `substrate-daemon`, `LICENSE`, `THIRD_PARTY_LICENSES.html`, `README.md` |
+| `b10x-substrate-<version>-x86_64-unknown-linux-gnu.tar.gz` | `b10x-substrate`, the same three files |
+| `SHA256SUMS` | the SHA-256 of both archives |
+| `SHA256SUMS.sigstore.json` | the keyless `cosign sign-blob` bundle for `SHA256SUMS` |
+
+The release workflow exports both binaries from the Dockerfile's pinned `builder` stage, the stage
+the images copy from, so they share the image toolchain; on a first release run it refuses an
+archived daemon that is not byte-identical to the image's. They run on glibc 2.35 or newer (Ubuntu 22.04, Debian 12 and later) and load two libraries
+beyond glibc and `libgcc_s`: OpenSSL 3 (`libssl3`, `libssl3t64` on Ubuntu 24.04) and zlib (`zlib1g`),
+both present on a stock Ubuntu 22.04 image. The workflow refuses a binary that needs a newer glibc
+or any other shared library, and starts both in a digest-pinned Ubuntu 22.04 image before it
+publishes anything. Verify the signature, then the archives; the certificate identity is the
+release workflow at the release tag:
+
+```bash
+cosign verify-blob \
+  --bundle SHA256SUMS.sigstore.json \
+  --certificate-identity "https://github.com/beyond10x/substrate/.github/workflows/release.yml@refs/tags/<version>" \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  SHA256SUMS
+sha256sum --check --ignore-missing SHA256SUMS
+```
+
+The daemon binary alone does not confine anything: execution still needs bubblewrap and a delegated
+cgroup v2 subtree, and without them exec answers `exec.sandbox-unavailable`.
+
 ### Running the daemon
 
 By default `substrate-daemon` serves an owner-permissioned Unix socket. Startup requires at least

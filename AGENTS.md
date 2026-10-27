@@ -428,7 +428,17 @@ and packages the explicitly pinned current development bundle with
 `ghcr.io/beyond10x/b10x-substrate-daemon:<version>` and
 `ghcr.io/beyond10x/b10x-substrate-mcp:<version>`, plus
 `ghcr.io/beyond10x/b10x-substrate-wire:<bundle-version>`; keyless-signs all three digests and verifies
-all three signatures **before** it announces anything. It refuses — publishing nothing — a tag that is
+all three signatures **before** it announces anything. It also exports `substrate-daemon` and the
+`b10x-substrate` CLI from that same builder stage (Dockerfile target `release-binaries`) and attaches
+four files to the GitHub release:
+`substrate-daemon-<version>-x86_64-unknown-linux-gnu.tar.gz`,
+`b10x-substrate-<version>-x86_64-unknown-linux-gnu.tar.gz`, `SHA256SUMS` over both, and
+`SHA256SUMS.sigstore.json`, a keyless `cosign sign-blob --bundle` signature by the same workflow
+identity, which `cosign verify-blob` checks before the release is created. The names are a public
+interface that install instructions link to; do not rename them. Before any image tag moves it refuses a binary that needs a glibc
+newer than 2.35 or a shared library outside the set README.md documents, or that does not start in
+a digest-pinned Ubuntu 22.04 image; on an initial run it refuses an archived daemon that is not
+byte-identical to the image's. It refuses — publishing nothing — a tag that is
 not the bare version form (so `0.2.2-rc.0` produces nothing), a lightweight tag, a commit that is not
 an ancestor of `main`, a version that disagrees with `[workspace.package] version`, a commit for
 which `gate.yml` has not concluded `success`, an existing daemon or MCP version tag on an initial
@@ -505,7 +515,7 @@ offline against throwaway tagged repositories by `xtask/tests/release_workflow.r
 `packages: write` and `id-token: write` exist on the release job and nowhere else; that job holds
 `contents: write` only to create the GitHub release. Everything it does uses the run's own
 `GITHUB_TOKEN`; **the release needs no repository secret at all** (§ *Bot identity*). The GitHub
-release records all artifact digests and exact `cosign verify` commands. **`0.7.7` is the published
+release records all artifact digests and the exact `cosign verify` and `cosign verify-blob` commands. **`0.7.7` is the published
 release**: daemon `ghcr.io/beyond10x/b10x-substrate-daemon:0.7.7` at
 `sha256:5e20467bd03ad7e619ffcf8664dcc6d3323c62fb62eb1f0e25f001333092a409`, disposable MCP
 `ghcr.io/beyond10x/b10x-substrate-mcp:0.7.7` at

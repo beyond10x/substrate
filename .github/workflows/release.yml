@@ -8,7 +8,9 @@
 # `ghcr.io/beyond10x/b10x-substrate-mcp:<version>`, all keyless-signed with cosign. Their
 # digests are written to the GitHub release and emitted as the exact `CHANGELOG.md` stanza that must
 # land through the protected-main pull-request path. `b10x-substrate-*` is the source-package prefix
-# fixed by README.md.
+# fixed by README.md. The GitHub release also carries the daemon and CLI binaries as
+# `<binary>-<version>-x86_64-unknown-linux-gnu.tar.gz`, exported from the same pinned builder stage
+# as the images, with `SHA256SUMS` over both archives and its keyless `cosign sign-blob` bundle.
 #
 # What this workflow refuses, and why each refusal is a refusal rather than a warning:
 #
@@ -35,6 +37,8 @@
 #     disagrees during explicit recovery, or a contract-bundle tag whose digest differs from the
 #     deterministic local package. All canonical tags are write-once. Recovery may verify and reuse
 #     an image already written by this same release; it never replaces an image or bundle tag.
+#   * a release binary that needs a glibc newer than 2.35 (Ubuntu 22.04) or a shared library the
+#     README does not document, or that does not start in that exact Ubuntu 22.04 image.
 #   * a signature that does not verify. Signing and `cosign verify` for **all** artifacts run before
 #     the GitHub release is created, so a Sigstore failure fails the job with nothing announced.
 #     Registry writes cannot be rolled back here, but no release, changelog stanza or digest claim
@@ -121,6 +125,10 @@ env:
   BUNDLE_IMAGE: ghcr.io/beyond10x/b10x-substrate-wire
   BUNDLE_VERSION: 0.23.0
   BUNDLE_LAYOUT: target/release-contract-bundle
+  BINARY_TARGET: x86_64-unknown-linux-gnu
+  BINARY_DIST: target/release-binaries
+  GLIBC_CEILING: "2.35"
+  GLIBC_FLOOR_IMAGE: ubuntu:22.04@sha256:e0f80c829509ef4df9e76bd8944eb7b8ec25cbb379b112a7f9448b2c77a77c9b
   GATE_WORKFLOW: gate.yml
 
 jobs:
@@ -519,7 +527,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
   release:
-    name: Build, sign and publish daemon, MCP adapter and development bundle
+    name: Build, sign and publish daemon, MCP adapter, release binaries and development bundle
     needs: preflight
     runs-on: ubuntu-latest
     # A release build is cold with respect to earlier runs. Within this job, one pinned builder
@@ -775,6 +783,91 @@ jobs:
           DOCKER_CONFIG="$anonymous_config" \
             oras manifest fetch --descriptor "${BUNDLE_IMAGE}@${BUNDLE_DIGEST}" >/dev/null
 
+      # The binaries come from the Dockerfile's pinned `builder` stage, the one the daemon and MCP
+      # images copy from, so the toolchain is the image's and the daemon build below reuses this
+      # exact stage. Every binary refusal runs here, before any image tag is mutated.
+      - name: Export the release binaries from the pinned builder stage
+        run: |
+          set -euo pipefail
+          docker buildx build \
+            --file Dockerfile \
+            --target release-binaries \
+            --platform linux/amd64 \
+            --provenance=false \
+            --sbom=false \
+            --output "type=local,dest=${BINARY_DIST}/bin" \
+            .
+          ls -l "${BINARY_DIST}/bin"
+
+      # The builder's Debian has glibc 2.36, so a 2.35 floor holds only while no symbol newer than
+      # it is linked. Read the requirement off each binary instead of assuming it.
+      - name: Refuse release binaries a glibc 2.35 host cannot load
+        run: |
+          set -euo pipefail
+          allowed='libssl.so.3 libcrypto.so.3 libz.so.1 libgcc_s.so.1 libm.so.6 libc.so.6 ld-linux-x86-64.so.2'
+          for binary in substrate-daemon b10x-substrate; do
+            file="${BINARY_DIST}/bin/${binary}"
+            newest=$(objdump -T "$file" \
+              | { grep -oE 'GLIBC_[0-9]+(\.[0-9]+)+' || true; } \
+              | sort -uV | tail -n 1)
+            if [ -z "$newest" ]; then
+              echo "refused: ${binary} names no GLIBC symbol version; its glibc floor cannot be read." >&2
+              exit 1
+            fi
+            highest=$(printf '%s\n%s\n' "${newest#GLIBC_}" "$GLIBC_CEILING" | sort -V | tail -n 1)
+            if [ "$highest" != "$GLIBC_CEILING" ]; then
+              echo "refused: ${binary} needs ${newest}, newer than glibc ${GLIBC_CEILING} on the oldest supported host." >&2
+              exit 1
+            fi
+            needed=$(readelf -d "$file" | sed -n 's/.*(NEEDED).*\[\(.*\)\]$/\1/p')
+            for library in $needed; do
+              case " ${allowed} " in
+                *" ${library} "*) ;;
+                *)
+                  echo "refused: ${binary} needs ${library}, which is not among the runtime libraries README.md documents." >&2
+                  exit 1
+                  ;;
+              esac
+            done
+            echo "${binary} needs ${newest} (ceiling ${GLIBC_CEILING}) and only: ${needed//$'\n'/ }"
+          done
+
+      - name: Smoke-test the release binaries on the oldest supported glibc
+        run: |
+          set -euo pipefail
+          docker run --rm --network none --read-only \
+            --volume "${PWD}/${BINARY_DIST}/bin:/release-binaries:ro" \
+            "${GLIBC_FLOOR_IMAGE}" \
+            sh -c 'ldd --version | head -n 1 &&
+              /release-binaries/substrate-daemon --help >/dev/null &&
+              /release-binaries/b10x-substrate --help >/dev/null'
+
+      - name: Package the release binaries
+        id: binaries
+        run: |
+          set -euo pipefail
+          epoch=$(git log -1 --format=%ct "${SOURCE_SHA}")
+          mkdir -p "${BINARY_DIST}/assets" "${BINARY_DIST}/stage"
+          archives=(
+            "substrate-daemon-${VERSION}-${BINARY_TARGET}.tar.gz"
+            "b10x-substrate-${VERSION}-${BINARY_TARGET}.tar.gz"
+          )
+          for archive in "${archives[@]}"; do
+            stem=${archive%.tar.gz}
+            binary=${stem%"-${VERSION}-${BINARY_TARGET}"}
+            mkdir -p "${BINARY_DIST}/stage/${stem}"
+            install -m 0755 "${BINARY_DIST}/bin/${binary}" "${BINARY_DIST}/stage/${stem}/${binary}"
+            install -m 0644 LICENSE THIRD_PARTY_LICENSES.html README.md "${BINARY_DIST}/stage/${stem}/"
+            tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@${epoch}" \
+              -C "${BINARY_DIST}/stage" -cf - "${stem}" \
+              | gzip -n -9 > "${BINARY_DIST}/assets/${archive}"
+          done
+          cd "${BINARY_DIST}/assets"
+          sha256sum -- "${archives[@]}" > SHA256SUMS
+          sha256sum --check --strict SHA256SUMS
+          cat SHA256SUMS
+          echo "sums-digest=sha256:$(sha256sum SHA256SUMS | cut -d ' ' -f 1)" >> "$GITHUB_OUTPUT"
+
       # SOURCE_SHA becomes `org.opencontainers.image.revision` on the published daemon target, so
       # the image says which commit produced it.
       - name: Build, smoke-test and push the daemon image once
@@ -853,6 +946,21 @@ jobs:
           esac
           echo "pushed ${IMAGE}:${VERSION} -> ${digest}"
           echo "digest=${digest}" >> "$GITHUB_OUTPUT"
+
+      # On an initial run both builds read one cached builder stage, so the archived daemon is the
+      # image's daemon byte for byte, and a difference is refused. A recovery run reuses an image
+      # an earlier run built; its archive comes from this run's builder.
+      - name: Prove the archived daemon is the image's daemon
+        env:
+          EXISTS: ${{ steps.artifact-state.outputs.daemon-exists }}
+        run: |
+          set -euo pipefail
+          if [ "$EXISTS" = true ]; then
+            echo "recovery: ${IMAGE}:${VERSION} predates this run; the archived daemon is this run's builder output."
+          else
+            cmp "${BINARY_DIST}/bin/substrate-daemon" target/image-under-test/substrate-daemon
+            echo "the archived substrate-daemon is byte-identical to the one in ${IMAGE}:${VERSION}"
+          fi
 
       - name: Build, smoke-test and push the disposable MCP image once
         id: mcp-build
@@ -947,6 +1055,15 @@ jobs:
           set -euo pipefail
           cosign sign --yes "${MCP_IMAGE}@${MCP_DIGEST}"
 
+      # The archives are covered through `SHA256SUMS`; the Sigstore bundle carries the certificate,
+      # signature and transparency-log proof, so verifying needs no registry.
+      - name: Sign the release-binary checksums keylessly
+        run: |
+          set -euo pipefail
+          cosign sign-blob --yes \
+            --bundle "${BINARY_DIST}/assets/SHA256SUMS.sigstore.json" \
+            "${BINARY_DIST}/assets/SHA256SUMS"
+
       # The verification an operator will run, run here first. `--certificate-identity` is exact,
       # not a regex: it is this file, at this tag, and a signature from any other workflow, ref or
       # repository fails. This step is the last thing before anything is announced, so a Sigstore
@@ -979,6 +1096,21 @@ jobs:
             --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
             "${MCP_IMAGE}@${MCP_DIGEST}" > mcp-cosign-verify.json
           jq -e 'length > 0' mcp-cosign-verify.json >/dev/null
+          echo "identity=${identity}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify the release-binary checksum signature with the workflow identity
+        id: binaries-verify
+        run: |
+          set -euo pipefail
+          identity="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}"
+          echo "certificate identity: ${identity}"
+          cosign verify-blob \
+            --bundle "${BINARY_DIST}/assets/SHA256SUMS.sigstore.json" \
+            --certificate-identity "${identity}" \
+            --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+            "${BINARY_DIST}/assets/SHA256SUMS"
+          cd "${BINARY_DIST}/assets"
+          sha256sum --check --strict SHA256SUMS
           echo "identity=${identity}" >> "$GITHUB_OUTPUT"
 
       - name: Prove the image is anonymously retrievable
@@ -1018,6 +1150,8 @@ jobs:
           BUNDLE_IDENTITY: ${{ steps.bundle-verify.outputs.identity }}
           MCP_DIGEST: ${{ steps.mcp-build.outputs.digest }}
           MCP_IDENTITY: ${{ steps.mcp-verify.outputs.identity }}
+          SUMS_DIGEST: ${{ steps.binaries.outputs.sums-digest }}
+          BINARIES_IDENTITY: ${{ steps.binaries-verify.outputs.identity }}
         run: |
           set -euo pipefail
           cat > release-notes.md <<NOTES
@@ -1071,6 +1205,30 @@ jobs:
             ./substrate-wire-${BUNDLE_VERSION}:${BUNDLE_VERSION}
           \`\`\`
 
+          ## Release binaries
+
+          | | |
+          | --- | --- |
+          | daemon | \`substrate-daemon-${VERSION}-${BINARY_TARGET}.tar.gz\` |
+          | command-line client | \`b10x-substrate-${VERSION}-${BINARY_TARGET}.tar.gz\` |
+          | checksums | \`SHA256SUMS\` (\`${SUMS_DIGEST}\`), signed in \`SHA256SUMS.sigstore.json\` |
+          | runs on | x86_64 Linux with glibc 2.35 or newer (Ubuntu 22.04, Debian 12 and later), \`libssl3\` and \`zlib1g\` |
+
+          Both are exported from the pinned builder stage the images are built from, and each
+          archive holds the binary, \`LICENSE\`, \`THIRD_PARTY_LICENSES.html\` and \`README.md\`.
+          Before release this workflow refused any binary needing a newer glibc or an undocumented
+          shared library and started both in \`${GLIBC_FLOOR_IMAGE}\`. Verify the
+          signature first, then the archives:
+
+          \`\`\`console
+          cosign verify-blob \\
+            --bundle SHA256SUMS.sigstore.json \\
+            --certificate-identity ${BINARIES_IDENTITY} \\
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \\
+            SHA256SUMS
+          sha256sum --check --ignore-missing SHA256SUMS
+          \`\`\`
+
           ## Confinement lane
 
           | | |
@@ -1101,9 +1259,9 @@ jobs:
 
           ## Verify the signatures
 
-          All three artifacts are signed keylessly through Sigstore. Each certificate identity is this
-          workflow at the ref that performed the release, so a signature from any other workflow,
-          ref or repository fails:
+          All three OCI artifacts are signed keylessly through Sigstore, and so is \`SHA256SUMS\`
+          (see *Release binaries* above). Each certificate identity is this workflow at the ref that
+          performed the release, so a signature from any other workflow, ref or repository fails:
 
           \`\`\`console
           cosign verify \\
@@ -1139,6 +1297,9 @@ jobs:
             \`--network=none\`. Its tool surface is not a stable contract independent of Substrate.
           - **The binary is not bit-for-bit reproducible.** The digest above is recorded;
             reproducing it from source independently is a later milestone.
+          - **The daemon archive is not a confined host by itself.** Running a confined command
+            still needs bubblewrap and a delegated cgroup v2 subtree on the host; without them the
+            daemon answers \`exec.sandbox-unavailable\`. No arm64 or macOS binary is published.
           - **The delegated execution lane is not exercised by CI.** A host without a delegated
             cgroup v2 subtree answers \`exec.sandbox-unavailable\` rather than running unconfined.
             This release records a local run of that lane (see *Confinement lane* above); recording
@@ -1164,7 +1325,11 @@ jobs:
             --title "${VERSION}" \
             --notes-file release-notes.md \
             --draft \
-            --verify-tag
+            --verify-tag \
+            "${BINARY_DIST}/assets/substrate-daemon-${VERSION}-${BINARY_TARGET}.tar.gz" \
+            "${BINARY_DIST}/assets/b10x-substrate-${VERSION}-${BINARY_TARGET}.tar.gz" \
+            "${BINARY_DIST}/assets/SHA256SUMS" \
+            "${BINARY_DIST}/assets/SHA256SUMS.sigstore.json"
           gh release edit "${VERSION}" --repo "${GITHUB_REPOSITORY}" --draft=false
 
       # All artifact digests also belong in `CHANGELOG.md` under this version's heading (AGENTS.md,
@@ -1176,6 +1341,7 @@ jobs:
           DIGEST: ${{ steps.build.outputs.digest }}
           BUNDLE_DIGEST: ${{ steps.bundle.outputs.digest }}
           MCP_DIGEST: ${{ steps.mcp-build.outputs.digest }}
+          SUMS_DIGEST: ${{ steps.binaries.outputs.sums-digest }}
         run: |
           {
             echo "CHANGELOG.md is protected by the Full gate and is not pushed directly."
@@ -1184,6 +1350,7 @@ jobs:
             echo "Image: \`${IMAGE}:${VERSION}\` at \`${DIGEST}\`, keyless-signed; verify with \`cosign verify\`."
             echo "Contract bundle: \`${BUNDLE_IMAGE}:${BUNDLE_VERSION}\` at \`${BUNDLE_DIGEST}\`, annotated \`development\`, keyless-signed; verify with \`cosign verify\`."
             echo "Disposable MCP image: \`${MCP_IMAGE}:${VERSION}\` at \`${MCP_DIGEST}\`, development-only and keyless-signed; verify with \`cosign verify\`."
+            echo "Release binaries: \`substrate-daemon-${VERSION}-${BINARY_TARGET}.tar.gz\` and \`b10x-substrate-${VERSION}-${BINARY_TARGET}.tar.gz\` on the GitHub release, \`SHA256SUMS\` at \`${SUMS_DIGEST}\`, keyless-signed; verify with \`cosign verify-blob\`."
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Release summary
@@ -1192,6 +1359,7 @@ jobs:
           DIGEST: ${{ steps.build.outputs.digest }}
           BUNDLE_DIGEST: ${{ steps.bundle.outputs.digest }}
           MCP_DIGEST: ${{ steps.mcp-build.outputs.digest }}
+          SUMS_DIGEST: ${{ steps.binaries.outputs.sums-digest }}
         run: |
           {
             echo "### Release ${VERSION}"
@@ -1204,6 +1372,7 @@ jobs:
             echo "| bundle digest | \`${BUNDLE_DIGEST:-<not built>}\` |"
             echo "| disposable MCP image | \`${MCP_IMAGE}:${VERSION}\` |"
             echo "| MCP digest | \`${MCP_DIGEST:-<not built>}\` |"
+            echo "| release binaries | \`${BINARY_TARGET}\`, SHA256SUMS \`${SUMS_DIGEST:-<not built>}\` |"
             echo "| SOURCE_SHA | \`${SOURCE_SHA}\` |"
             echo "| gate run | ${GATE_RUN_URL} |"
             echo "| confinement lane | \`${CONFINEMENT_EVIDENCE:-<none recorded>}\` |"
@@ -1211,6 +1380,7 @@ jobs:
             echo "| daemon signature step | ${{ steps.verify.outcome }} |"
             echo "| bundle signature step | ${{ steps.bundle-verify.outcome }} |"
             echo "| MCP signature step | ${{ steps.mcp-verify.outcome }} |"
+            echo "| binaries signature step | ${{ steps.binaries-verify.outcome }} |"
             echo "| anonymous pull step | ${{ steps.anonymous.outcome }} |"
             echo "| MCP anonymous pull step | ${{ steps.mcp-anonymous.outcome }} |"
             echo "| release publication step | ${{ steps.publish.outcome }} |"
