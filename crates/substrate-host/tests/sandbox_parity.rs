@@ -12,18 +12,21 @@
 //!
 //! The equivalent profile is `sandbox`'s default layout: the working directory bound writable at
 //! `/workspace` and started in, one declared read-only root at its own path, no network, and the
-//! five baseline variables. A row whose second column is `None` has no counterpart in any profile
-//! Substrate serves; those rows are pinned by name ([`BUBBLEWRAP_UNMIRRORED`],
-//! [`DOCKER_UNMIRRORED`]), so an argument Substrate stops carrying fails here rather than joining
-//! that list unnoticed.
+//! five baseline variables, which come from `b10x-substrate confine run`'s own command. A row
+//! whose second column is `None` has no counterpart in any profile Substrate serves; those rows are
+//! pinned by name ([`BUBBLEWRAP_UNMIRRORED`], [`DOCKER_UNMIRRORED`]), so an argument Substrate
+//! stops carrying fails here rather than joining that list unnoticed.
 //!
 //! In a group, `{fd}` is any descriptor number, and `{root}`, `{workspace}`, `{user}` and
 //! `{image}` are the profile's values. `linux` binds a read-only root only on a host that proves
 //! `filesystem_view`, which needs the delegated cgroup v2 root `SUBSTRATE_VECTORS_CGROUP_ROOT`
 //! names; without it that case is **absent, never reported as passed** (invariant 3), and the
 //! portable case asserts every other row.
+//!
+//! Linux only: the `linux` adapter opens nowhere else and the `oci` render reads `/proc/self`
+//! (macos-15 run 40460300228: `linux opens: AdapterUnserved`, `/proc/self: NotFound`).
+#![cfg(target_os = "linux")]
 
-use std::collections::BTreeMap;
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -183,14 +186,6 @@ const DOCKER_ADDED: &[&[&str]] = &[
     &["--log-driver", "none"],
 ];
 
-const BASELINE_ENV: [(&str, &str); 5] = [
-    ("PATH", "/usr/bin:/bin"),
-    ("HOME", "/tmp"),
-    ("LANG", "C.UTF-8"),
-    ("LC_ALL", "C.UTF-8"),
-    ("TZ", "UTC"),
-];
-
 const IMAGE: &str =
     "registry.invalid/run@sha256:0000000000000000000000000000000000000000000000000000000000000000";
 
@@ -272,14 +267,11 @@ fn assert_superset(
     asserted
 }
 
+/// The command `b10x-substrate confine run` itself hands its adapter: its environment is the
+/// verb's, not one this test supplies, so the `--setenv` and `-e` rows hold only while the verb
+/// sets `sandbox`'s five baseline variables (`story:sandbox-repository-parity`).
 fn command() -> Command {
-    Command {
-        argv: vec!["/bin/sh".into(), "-c".into(), "true".into()],
-        env: BASELINE_ENV
-            .iter()
-            .map(|(name, value)| ((*name).to_owned(), (*value).to_owned()))
-            .collect::<BTreeMap<_, _>>(),
-    }
+    b10x_substrate_cli::confine_command(vec!["/bin/sh".into(), "-c".into(), "true".into()])
 }
 
 /// A canonical directory under `CARGO_TARGET_TMPDIR`, holding `workspaces/ws_parity` (the

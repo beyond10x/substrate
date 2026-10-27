@@ -35,19 +35,56 @@ fn host() -> Host {
     }
 }
 
-/// Runs the CLI with `args`, no daemon socket, and `path` as `PATH` when given.
-fn confine(args: &[&str], path: Option<&str>) -> Output {
+/// The verb's own cgroup root variable; the daemon's `SUBSTRATE_CGROUP_ROOT` is never read.
+const ROOT_ENV: &str = "SUBSTRATE_CONFINE_CGROUP_ROOT";
+
+/// Delegated cases share one cgroup root.
+static DELEGATED: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The CLI with no daemon socket, no cgroup root and no local policy from this process.
+fn cli() -> std::process::Command {
     let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_b10x-substrate"));
     command
-        .args(args)
         .env_remove("SUBSTRATE_SOCKET")
         .env_remove("SUBSTRATE_CGROUP_ROOT")
+        .env_remove(ROOT_ENV)
         .env_remove("SUBSTRATE_CONFINEMENT_LOCAL")
         .stdin(std::process::Stdio::null());
+    command
+}
+
+/// Runs the CLI with `args`, no daemon socket, and `path` as `PATH` when given.
+fn confine(args: &[&str], path: Option<&str>) -> Output {
+    let mut command = cli();
+    command.args(args);
     if let Some(path) = path {
         command.env("PATH", path);
     }
     command.output().expect("the CLI runs")
+}
+
+/// The delegated cgroup v2 root `scripts/delegated-lane.sh` names, or `None`, having said the
+/// case is absent.
+fn delegated(case: &str) -> Option<PathBuf> {
+    let root = std::env::var_os("SUBSTRATE_VECTORS_CGROUP_ROOT").map(PathBuf::from);
+    if root.is_none() {
+        println!("confine delegated {case}: ABSENT (SUBSTRATE_VECTORS_CGROUP_ROOT is unset)");
+    }
+    root
+}
+
+/// The groups directly beneath `root` whose names start with `prefix`.
+fn groups(root: &Path, prefix: &str) -> Vec<String> {
+    std::fs::read_dir(root)
+        .map(|entries| {
+            entries
+                .flatten()
+                .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+                .map(|entry| entry.file_name().to_string_lossy().into_owned())
+                .filter(|name| name.starts_with(prefix))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 fn text(bytes: &[u8]) -> String {
@@ -248,14 +285,34 @@ fn an_image_named_by_tag_exits_2_unpinned() {
     );
 }
 
+/// `story:sandbox-repository-parity`, adversary 6: a dry run admits as a run does, and `linux`
+/// without a delegated cgroup root runs nothing, so the render is read on the delegated lane and
+/// the portable lane asserts the refusal the run would meet.
 #[test]
 fn dry_run_prints_the_program_and_argv_one_per_line_and_unshares_the_network() {
+    let _lock = DELEGATED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let host = host();
     let ws = dir(&host);
-    let output = confine(
-        &["confine", "run", "--dry-run", "--dir", &ws, "--", "/bin/sh"],
-        None,
-    );
+    let args = ["confine", "run", "--dry-run", "--dir", &ws, "--", "/bin/sh"];
+    let Some(root) = delegated("dry run render") else {
+        let output = confine(&args, None);
+        assert_eq!(output.status.code(), Some(2), "{}", text(&output.stderr));
+        assert!(
+            text(&output.stderr).contains("confinement.family-unserved: process_run"),
+            "{}",
+            text(&output.stderr)
+        );
+        assert!(output.stdout.is_empty(), "{}", text(&output.stdout));
+        return;
+    };
+    let output = cli()
+        .env(ROOT_ENV, &root)
+        .args(args)
+        .output()
+        .expect("the CLI runs");
+    println!("confine delegated dry run render: executed");
     let stdout = text(&output.stdout);
     assert_eq!(
         output.status.code(),
@@ -318,4 +375,261 @@ fn oci_dry_run_prints_the_runtime_and_its_create_call() {
     );
     assert_eq!(lines.last(), Some(&"/bin/true"), "{stdout}");
     assert!(calls(&host).lines().all(|call| call != "create"));
+}
+
+// --- The cgroup root: the verb's own variable and a private group per invocation -------------
+
+/// A host driver opened on a root kills every run group it finds there, so the verb never reads
+/// the daemon's variable: a root named only by it is not touched, and linux runs nothing.
+#[test]
+fn the_daemons_cgroup_root_variable_is_not_read() {
+    let host = host();
+    let ws = dir(&host);
+    let daemons = host.root.join("daemons-root");
+    std::fs::create_dir_all(daemons.join("substrate-ex_daemon")).expect("a daemon's run group");
+    let mut args = vec!["confine", "run", "--dir", &ws];
+    args.extend(marking());
+    let output = cli()
+        .env("SUBSTRATE_CGROUP_ROOT", &daemons)
+        .args(&args)
+        .output()
+        .expect("the CLI runs");
+    assert_refused(&output, "confinement.family-unserved: process_run", &host);
+    assert!(
+        !text(&output.stderr).contains("cgroup"),
+        "{}",
+        text(&output.stderr)
+    );
+    assert!(daemons.join("substrate-ex_daemon").is_dir());
+}
+
+/// A root the verb cannot make its private group beneath is a named refusal, exit 2, naming the
+/// variable; the driver is never opened on it.
+#[test]
+fn a_cgroup_root_that_is_not_a_cgroup_exits_2_naming_the_variable() {
+    let host = host();
+    let ws = dir(&host);
+    let not_a_cgroup = host.root.join("not-a-cgroup");
+    std::fs::create_dir_all(not_a_cgroup.join("substrate-ex_other")).expect("a run group");
+    let mut args = vec!["confine", "run", "--dry-run", "--dir", &ws];
+    args.extend(marking());
+    let output = cli()
+        .env(ROOT_ENV, &not_a_cgroup)
+        .args(&args)
+        .output()
+        .expect("the CLI runs");
+    assert_refused(&output, "exec.sandbox-unavailable", &host);
+    assert!(
+        text(&output.stderr).contains(ROOT_ENV),
+        "{}",
+        text(&output.stderr)
+    );
+    assert!(output.stdout.is_empty(), "{}", text(&output.stdout));
+    assert!(not_a_cgroup.join("substrate-ex_other").is_dir());
+}
+
+/// Each invocation opens its driver on a private group of its own: a run group already beneath
+/// the root survives a run and a dry run, and no private group is left behind.
+#[test]
+fn a_delegated_run_spares_other_run_groups_and_removes_its_private_group() {
+    let _lock = DELEGATED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(root) = delegated("private group") else {
+        return;
+    };
+    let host = host();
+    let ws = dir(&host);
+    let foreign = root.join("substrate-ex_foreign");
+    std::fs::create_dir(&foreign).expect("a run group the verb does not own");
+    for dry_run in [false, true] {
+        let mut args = vec!["confine", "run", "--dir", &ws];
+        if dry_run {
+            args.push("--dry-run");
+        }
+        args.extend(["--", "/bin/sh", "-c", "echo ran > ran"]);
+        let output = cli()
+            .env(ROOT_ENV, &root)
+            .args(&args)
+            .output()
+            .expect("the CLI runs");
+        let survived = foreign.is_dir();
+        let left = groups(&root, "confine-");
+        assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+        assert!(
+            survived,
+            "dry run {dry_run}: the verb removed a run group it does not own"
+        );
+        assert!(
+            left.is_empty(),
+            "dry run {dry_run}: left {left:?} beneath the root"
+        );
+    }
+    assert!(host.workspace.join("ran").exists(), "the run did not run");
+    let _ = std::fs::remove_dir(&foreign);
+    println!("confine delegated private group: executed");
+}
+
+// --- --image: only oci runs an image -------------------------------------------------------
+
+/// Pinned or tagged, an image under linux or local is the fact those adapters do not prove,
+/// refused before any adapter opens.
+#[test]
+fn an_image_outside_oci_exits_2_naming_image_digest_pinned() {
+    let host = host();
+    let ws = dir(&host);
+    for image in [PINNED, "docker.io/library/alpine:3.20"] {
+        for local in [false, true] {
+            let mut args = vec!["confine", "run", "--image", image, "--dir", &ws];
+            if local {
+                args.extend(["--net", "--local", REASON]);
+            }
+            args.extend(marking());
+            let output = confine(&args, None);
+            assert_refused(
+                &output,
+                "confinement.fact-unserved: image_digest_pinned",
+                &host,
+            );
+        }
+    }
+}
+
+// --- --dir: the host's workspace identity rule is linux's -----------------------------------
+
+/// `oci` binds the workspace by path, so a name holding a dot is a workspace there.
+#[test]
+fn oci_takes_a_workspace_whose_name_holds_a_dot() {
+    let host = host();
+    let path = stand_in_docker(&host);
+    let dotted = host.root.join("my.project");
+    std::fs::create_dir(&dotted).expect("workspace");
+    let output = confine(
+        &[
+            "confine",
+            "run",
+            "--backend",
+            "oci",
+            "--image",
+            PINNED,
+            "--dry-run",
+            "--dir",
+            dotted.to_str().expect("UTF-8"),
+            "--",
+            "/bin/true",
+        ],
+        Some(&path),
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+}
+
+// --- --dry-run: its descriptor numbers are the render's own ---------------------------------
+
+#[test]
+fn a_dry_run_says_its_descriptor_numbers_are_local_to_the_render() {
+    let host = host();
+    let ws = dir(&host);
+    let output = confine(
+        &[
+            "confine",
+            "run",
+            "--net",
+            "--local",
+            REASON,
+            "--dry-run",
+            "--dir",
+            &ws,
+            "--",
+            "/bin/true",
+        ],
+        None,
+    );
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    assert!(
+        text(&output.stderr).contains("descriptor numbers in this argv are local to the render"),
+        "{}",
+        text(&output.stderr)
+    );
+    let output = confine(
+        &[
+            "--output",
+            "json",
+            "confine",
+            "run",
+            "--net",
+            "--local",
+            REASON,
+            "--dry-run",
+            "--dir",
+            &ws,
+            "--",
+            "/bin/true",
+        ],
+        None,
+    );
+    let envelope: serde_json::Value = serde_json::from_slice(&output.stdout).expect("one result");
+    assert!(
+        envelope["result"]["note"]
+            .as_str()
+            .is_some_and(|note| note.contains("local to the render")),
+        "{envelope}"
+    );
+}
+
+// --- Signals: an interrupted run is killed and leaves nothing --------------------------------
+
+#[test]
+fn sigint_kills_the_run_removes_the_state_directory_and_exits_130() {
+    let host = host();
+    let ws = dir(&host);
+    let temp = host.root.join("tmpdir");
+    std::fs::create_dir(&temp).expect("tmpdir");
+    let state = |temp: &Path| groups(temp, "b10x-substrate-confine-");
+    let child = cli()
+        .env("TMPDIR", &temp)
+        .args([
+            "confine",
+            "run",
+            "--net",
+            "--local",
+            REASON,
+            "--dir",
+            &ws,
+            "--",
+            "/bin/sh",
+            "-c",
+            "sleep 2; echo ran > ran",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while state(&temp).is_empty() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no state directory appeared"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    // The run has started once the verb waits on it; the state directory appears before that.
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    let status = std::process::Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .expect("kill");
+    assert!(status.success());
+    let output = child.wait_with_output().expect("the verb ends");
+    std::thread::sleep(std::time::Duration::from_millis(2_500));
+    assert_eq!(output.status.code(), Some(130), "{}", text(&output.stderr));
+    assert!(
+        text(&output.stderr).contains("confine.interrupted"),
+        "{}",
+        text(&output.stderr)
+    );
+    assert!(state(&temp).is_empty(), "left {:?}", state(&temp));
+    assert!(
+        !host.workspace.join("ran").exists(),
+        "the run outlived the interrupted verb"
+    );
 }

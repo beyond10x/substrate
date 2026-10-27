@@ -48,6 +48,7 @@ url.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
+b10x-substrate-cli = { path = "../b10x-substrate-cli", version = "=0.11.0" }
 rcgen = "0.14"
 
 [lints]

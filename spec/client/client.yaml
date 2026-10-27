@@ -199,7 +199,8 @@ types:
       - {name: stderr, type: String}
       - {name: stdout_truncated, type: Boolean}
       - {name: stderr_truncated, type: Boolean}
-  # A dry run answers program and args; a run answers its exit and output.
+  # A dry run answers program, args and a note that descriptor numbers in args are local to the
+  # render; a run answers its exit and output.
   - name: substrate.client.ConfineRunResult
     kind: struct
     fields:
@@ -207,6 +208,7 @@ types:
       - {name: declared_insecure, type: 'Optional<String>'}
       - {name: program, type: 'Optional<String>'}
       - {name: args, type: 'Optional<List<String>>'}
+      - {name: note, type: 'Optional<String>'}
       - {name: exit_code, type: 'Optional<Integer>'}
       - {name: signal, type: 'Optional<Integer>'}
       - {name: stdout, type: 'Optional<String>'}

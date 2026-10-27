@@ -105,6 +105,12 @@
                 "kind": "integer"
               }
             },
+            "note": {
+              "kind": "optional",
+              "of": {
+                "kind": "string"
+              }
+            },
             "program": {
               "kind": "optional",
               "of": {

@@ -75,7 +75,8 @@ callables:
     result: substrate.client.EventPage
     errors: *read_errors
   # Opens a confinement adapter in this process (ADR 0109); no daemon, no socket. A refusal before
-  # anything runs is `refused` (exit 2); a host failure while running is `failed` (exit 1).
+  # anything runs is `refused` (exit 2); a host failure while running is `failed` (exit 1), and
+  # SIGINT or SIGTERM is `failed` with code confine.interrupted (exit 128 plus the signal).
   confine-run:
     target: {kind: local, owner: substrate.client, action: confine-run}
     input: substrate.client.ConfineRunRequest
