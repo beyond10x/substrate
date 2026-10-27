@@ -69,6 +69,19 @@ if [[ -z "${confinement_line}" ]]; then
 fi
 echo "delegated-lane: ${confinement_line}"
 
+# The confinement contract's systemd scenarios, both inner adapters, against a transient user scope
+# the adapter asks this session's user manager for. Required by count for the same reason.
+systemd_log="$(cargo test -p b10x-substrate-host --locked --test ess_confinement_systemd \
+  -- --nocapture --test-threads=1 2>&1)" || { printf '%s\n' "${systemd_log}" >&2; exit 1; }
+printf '%s\n' "${systemd_log}"
+systemd_line="$(printf '%s\n' "${systemd_log}" \
+  | grep -E '^ESS confinement systemd delegated lane: [1-9][0-9]* scenarios executed' || true)"
+if [[ -z "${systemd_line}" ]]; then
+  echo "delegated-lane: the confinement systemd scenarios did not execute" >&2
+  exit 1
+fi
+echo "delegated-lane: ${systemd_line}"
+
 # The public SDK owns a separate clean-room journey against the shipped daemon binary. It proves
 # PTY resize, live metrics and orderly whole-tree cleanup through SDK types only; without this
 # explicit command that test would be absent from the daemon-only lane below.
