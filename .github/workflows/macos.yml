@@ -52,7 +52,7 @@ jobs:
         run: cargo clippy -p b10x-substrate-host --all-targets --locked -- -D warnings
 
       - name: Test the host crate
-        run: cargo test -p b10x-substrate-host --locked
+        run: cargo test -p b10x-substrate-host --locked --no-fail-fast
 
       - name: Run the Seatbelt adversary suite
         run: |
