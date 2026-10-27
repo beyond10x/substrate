@@ -1681,7 +1681,9 @@ mod tests {
 
     /// Security F6 (`story:oci-adapter`): an embedder label reads back exactly, a live embedder is
     /// alive, the same pid with another start time is gone, and another boot or pid namespace is
-    /// never judged.
+    /// never judged. Linux only (`story:oci-adapter`): the identity is read from `/proc`, and
+    /// where it is absent `Embedder::current` is `None` and open sweeps nothing.
+    #[cfg(target_os = "linux")]
     #[test]
     fn an_embedder_label_names_one_process_and_judges_only_its_own_namespace() {
         let this = Embedder::current().expect("this host reports a process identity");
