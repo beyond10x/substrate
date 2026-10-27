@@ -336,9 +336,26 @@ fn sysroot() -> PathBuf {
     fs::canonicalize(text.trim()).expect("the sysroot resolves")
 }
 
+/// The macOS SDK the selected developer tools hold, resolved unconfined, as [`sysroot`] resolves
+/// the toolchain. Under the build policy `xcrun` cannot look an SDK up by name: it asks
+/// `xcodebuild` through `/bin/sh`, which no exec subpath of the fixture's profile allows (macos-15
+/// run 40456837981, `xcrun: error: unable to lookup item 'Path' in SDK 'macosx'`, `cc` exit 72).
+/// Given `SDKROOT`, neither `rustc` nor the `cc` shim looks it up
+/// (`story:macos-seatbelt-policy-runs-cargo-test`).
+fn sdk_root() -> PathBuf {
+    let output = Command::new("/usr/bin/xcrun")
+        .args(["--sdk", "macosx", "--show-sdk-path"])
+        .output()
+        .expect("xcrun runs");
+    assert!(output.status.success(), "{}", report(&output));
+    let text = String::from_utf8(output.stdout).expect("UTF-8 SDK path");
+    fs::canonicalize(text.trim()).expect("the SDK resolves")
+}
+
 /// `cargo test --offline` of a copy of the fixture under the build policy: the toolchain is a
 /// declared root and an exec subpath, so are `target/`, `/usr/bin` (the `cc` and `xcrun` shims)
-/// and the selected developer tools; `.cargo` and `vendor` are sealed; `TMPDIR` is private.
+/// and the selected developer tools; `.cargo` and `vendor` are sealed; `TMPDIR` is private;
+/// `SDKROOT` names the SDK inside the developer tools.
 async fn cargo_test(filter: Option<&str>, port: u16) -> Ended {
     let root = tempfile::tempdir().expect("temporary root");
     let workspace = fs::canonicalize(root.path())
@@ -348,6 +365,13 @@ async fn cargo_test(filter: Option<&str>, port: u16) -> Ended {
     let sysroot = sysroot();
     let toolchain = text(&sysroot).to_owned();
     let developer = seatbelt::developer_root().expect("the runner has developer tools");
+    let sdk = sdk_root();
+    assert!(
+        sdk.starts_with(&developer),
+        "the SDK {} is outside the developer tools {}, so the profile cannot read it",
+        sdk.display(),
+        developer.display()
+    );
     let profile = ConfinementProfile {
         workspace: Some(workspace.clone()),
         read_only_roots: vec![ReadOnlyRoot {
@@ -375,6 +399,7 @@ async fn cargo_test(filter: Option<&str>, port: u16) -> Ended {
         ("HOME", text(&workspace).to_owned()),
         ("CARGO_HOME", text(&workspace.join("cargo-home")).to_owned()),
         ("RUSTC", format!("{toolchain}/bin/rustc")),
+        ("SDKROOT", text(&sdk).to_owned()),
         ("CARGO_TERM_COLOR", "never".to_owned()),
         ("FIXTURE_PORT", port.to_string()),
     ]
