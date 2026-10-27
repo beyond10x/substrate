@@ -7,6 +7,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Changed
+
+- The specification and CI use ESS 0.70.0 (was 0.69.2); the suites, wire types and CLI package regenerate unchanged apart from the generator header.
+
 ## [0.11.0] — 2026-10-26
 
 Published by [release run 40349695547](https://github.com/beyond10x/substrate/actions/runs/40349695547)
