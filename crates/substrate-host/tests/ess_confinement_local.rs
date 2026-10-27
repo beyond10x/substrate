@@ -700,7 +700,9 @@ async fn local_retains(retention: confinement::Retention) {
 
 // Design 29 § 6: an adapter that reads its own pipes answers `output()` while the run is running
 // with what it kept so far. The run prints, says so through a file, then waits for the go-ahead,
-// so the read happens while it is alive and after its bytes were written, with no timing guess.
+// so every read happens while it is alive and after its bytes were written. The bytes can still be
+// in the pipe when the file appears, so the case reads until the drain has them, before the
+// go-ahead; one read raced the drain on main 981eb1f1 and saw nothing.
 #[tokio::test(flavor = "multi_thread")]
 async fn local_output_while_running_is_what_was_kept_so_far() {
     let adapter = local();
@@ -743,7 +745,13 @@ async fn local_output_while_running_is_what_was_kept_so_far() {
         assert!(std::time::Instant::now() < deadline, "never printed");
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     }
-    let during = adapter.output(&run).await.expect("output while running");
+    let during = loop {
+        let during = adapter.output(&run).await.expect("output while running");
+        if !during.stdout.is_empty() || std::time::Instant::now() >= deadline {
+            break during;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
     std::fs::write(workspace.path().join("go"), "").expect("go");
     let ended = adapter.wait(&run).await.expect("waited");
     assert_eq!(ended.exit.as_ref().and_then(|exit| exit.code), Some(0));
