@@ -27,7 +27,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use parking_lot::Mutex;
 use substrate_wire::Signal;
-use tokio::io::{AsyncRead, AsyncReadExt as _};
 use tokio::sync::watch;
 
 use super::{
@@ -36,12 +35,14 @@ use super::{
     RunOutput, RunState,
 };
 use crate::DriverError;
+use crate::output_retention::{Captured, drain};
 
 /// The host's policy variable (ADR 0109 F3 A). Unset, or `permit`, permits `local`; any other
 /// value forbids it, so a misspelt policy fails closed.
 pub const LOCAL_POLICY_ENV: &str = "SUBSTRATE_CONFINEMENT_LOCAL";
 
-/// Each output stream is kept up to this many bytes and drained past it.
+/// Each output stream is kept up to this many bytes, the ones its retention chooses, and drained
+/// past it.
 pub const LOCAL_OUTPUT_LIMIT_BYTES: usize = 1_048_576;
 
 /// Runs one adapter tracks; past it, ended runs are forgotten oldest first, and a start with every
@@ -118,14 +119,6 @@ enum Phase {
     Running,
     Ended(RunExit),
     Unknown,
-}
-
-#[derive(Default)]
-struct Captured {
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-    stdout_truncated: bool,
-    stderr_truncated: bool,
 }
 
 struct LocalRun {
@@ -281,7 +274,10 @@ impl LocalAdapter {
             *sequence += 1;
             RunId::new(format!("local-{pid}-{sequence}"))
         };
-        let captured = Arc::new(Mutex::new(Captured::default()));
+        let captured = Arc::new(Mutex::new(Captured::new(
+            admitted.profile().output_retention,
+            LOCAL_OUTPUT_LIMIT_BYTES,
+        )));
         let (phase, observed) = watch::channel(Phase::Running);
         let stdout = child
             .stdout
@@ -330,34 +326,16 @@ impl LocalAdapter {
     }
 }
 
-async fn drain(mut stream: impl AsyncRead + Unpin, captured: Arc<Mutex<Captured>>, stdout: bool) {
-    let mut buffer = vec![0_u8; 16 * 1024];
-    loop {
-        let read = match stream.read(&mut buffer).await {
-            Ok(0) | Err(_) => return,
-            Ok(read) => read,
-        };
-        let mut captured = captured.lock();
-        let captured = &mut *captured;
-        let (kept, truncated) = if stdout {
-            (&mut captured.stdout, &mut captured.stdout_truncated)
-        } else {
-            (&mut captured.stderr, &mut captured.stderr_truncated)
-        };
-        let room = LOCAL_OUTPUT_LIMIT_BYTES.saturating_sub(kept.len());
-        kept.extend_from_slice(&buffer[..read.min(room)]);
-        *truncated |= read > room;
-    }
-}
-
 #[async_trait]
 impl ConfinementAdapter for LocalAdapter {
     fn facts(&self) -> &AdapterFacts {
         &self.facts
     }
 
-    /// A secret slot needs a sealed descriptor `local` cannot provide.
+    /// A read-only or scoped workspace, which an unconfined process cannot be kept to, and a
+    /// secret slot, which needs a sealed descriptor `local` cannot provide.
     fn check(&self, profile: &ConfinementProfile) -> Result<(), ConfinementError> {
+        super::refuse_workspace_access("local", profile)?;
         if !profile.secret_slots.is_empty() {
             return Err(DriverError::unserved(
                 "exec.secret-slots-unserved",
@@ -402,13 +380,8 @@ impl ConfinementAdapter for LocalAdapter {
 
     async fn output(&self, run: &RunId) -> Result<RunOutput, ConfinementError> {
         let run = self.run(run)?;
-        let captured = run.captured.lock();
-        Ok(RunOutput {
-            stdout: captured.stdout.clone(),
-            stderr: captured.stderr.clone(),
-            stdout_truncated: captured.stdout_truncated,
-            stderr_truncated: captured.stderr_truncated,
-        })
+        let output = run.captured.lock().output();
+        Ok(output)
     }
 
     async fn wait(&self, run: &RunId) -> Result<RunObservation, ConfinementError> {

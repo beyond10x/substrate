@@ -209,6 +209,8 @@ impl Driver for Fixture {
             stderr: Vec::new(),
             stdout_truncated: false,
             stderr_truncated: false,
+            stdout_kept: None,
+            stderr_kept: None,
             output_complete: false,
             cgroup: None,
             leader_pid: None,

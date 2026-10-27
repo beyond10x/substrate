@@ -3,11 +3,14 @@
 
 use std::path::PathBuf;
 
-use substrate_wire::{ReadOnlyFile, ReadOnlyRoot, SecretSlotRequest, WritableHostRoot};
+use substrate_wire::{
+    ReadOnlyFile, ReadOnlyRoot, SecretSlotRequest, WorkspaceAccess, WritableHostRoot,
+};
 
 use super::AuditSink;
 use super::facts::{FACT_ORDER, FAMILY_ORDER, InnerAdapter};
 use super::{ContractFamily, Fact};
+use crate::output_retention::OutputRetention;
 
 /// What a run may reach and how it is bounded.
 ///
@@ -15,6 +18,8 @@ use super::{ContractFamily, Fact};
 /// |---|---|
 /// | `families`, `facts` | themselves: what the client needs beyond its fields |
 /// | `workspace`, `workdir` | `workspace` |
+/// | `workspace_access` other than `ReadWrite` | `workspace` |
+/// | `output_retention` other than `Head` on both streams | `output_read` |
 /// | `writable_roots`, `read_only_roots`, `read_only_files` | `filesystem_view` |
 /// | `sealed_paths` | the fact `sealed_paths` |
 /// | `exec_subpaths` | the fact `exec_subpaths` |
@@ -29,7 +34,9 @@ use super::{ContractFamily, Fact};
 /// | `ingress_routes`, `rate_bounds` | reserved: always refused (ADR 0109 F1 B) |
 ///
 /// `secret_slots` names no family: an adapter that cannot seal a slot refuses it with the host's
-/// own `exec.secret-slots-unserved`.
+/// own `exec.secret-slots-unserved`. Neither does the mode of `workspace_access` beyond its
+/// family: an adapter that cannot bind a read-only or scoped workspace refuses it with the host's
+/// own `exec.workspace-scoped-write-unserved` (design 29 § 4).
 #[derive(Debug, Clone, Default)]
 pub struct ConfinementProfile {
     /// Families the client needs beyond what its fields imply.
@@ -48,6 +55,9 @@ pub struct ConfinementProfile {
     pub workspace: Option<PathBuf>,
     /// A relative path beneath `workspace` to start in (design 26).
     pub workdir: Option<String>,
+    /// What the run may write inside `workspace` (ADR 0023). `ReadWrite`, the default, is the
+    /// whole workspace, as before.
+    pub workspace_access: WorkspaceAccess,
     /// Operator-declared writable host roots outside the workspace (ADR 0038 kind 1).
     pub writable_roots: Vec<WritableHostRoot>,
     /// Host directories mounted read-only (ADR 0010).
@@ -66,6 +76,9 @@ pub struct ConfinementProfile {
     pub ipc: Ipc,
     pub process_bounds: Option<ProcessBounds>,
     pub io_bounds: Option<IoBounds>,
+    /// Which bytes of each output stream the run keeps within its bound (design 29 § 5). `Head`
+    /// on both, the default, is what every adapter kept before.
+    pub output_retention: OutputRetention,
     pub secret_slots: Vec<SecretSlotRequest>,
     /// Where admission, refusal and start records go (ADR 0109 decision 2).
     pub audit: Option<AuditSink>,
@@ -121,7 +134,12 @@ impl ConfinementProfile {
     /// that proves `host_network`, which the profile alone cannot know.
     pub fn required_families(&self) -> Vec<ContractFamily> {
         let implied = |family: &ContractFamily| match family {
-            ContractFamily::Workspace => self.workspace.is_some() || self.workdir.is_some(),
+            ContractFamily::Workspace => {
+                self.workspace.is_some()
+                    || self.workdir.is_some()
+                    || !self.workspace_access.is_read_write()
+            }
+            ContractFamily::OutputRead => !self.output_retention.is_head(),
             ContractFamily::FilesystemView => {
                 !self.writable_roots.is_empty()
                     || !self.read_only_roots.is_empty()

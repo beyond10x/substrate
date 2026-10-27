@@ -1169,3 +1169,67 @@ fn open_removes_a_container_whose_embedder_is_gone() {
     assert!(adapter.orphans_removed() >= 1, "no orphan was removed");
     println!("ESS confinement oci orphans: executed");
 }
+
+// B10: an `oci` run keeps the last bytes under `Tail`.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_oci_run_under_tail_keeps_the_last_bytes() {
+    const NAME: &str = "ESS confinement oci retention tail";
+    const BOUND: usize = 4096;
+    const LAST: u32 = 3000;
+    let runtime = match lane() {
+        Ok(runtime) => runtime,
+        Err(reason) => {
+            println!("{NAME}: ABSENT ({reason})");
+            return;
+        }
+    };
+    let (_ws, workspace) = canonical_tempdir();
+    let adapter = open_lane(&runtime, Vec::new());
+    let admitted = adapter
+        .admit(&ConfinementProfile {
+            image: Some(image()),
+            workspace: Some(workspace),
+            process_bounds: Some(ProcessBounds {
+                timeout_ms: 60_000,
+                processes: 8,
+                memory_bytes: 64 << 20,
+                cpu_millis: 30_000,
+            }),
+            io_bounds: Some(confinement::IoBounds {
+                output_bytes: BOUND as u64,
+            }),
+            output_retention: confinement::OutputRetention {
+                stdout: confinement::Retention::Tail,
+                stderr: confinement::Retention::Head,
+            },
+            ..ConfinementProfile::default()
+        })
+        .expect("admitted");
+    let run = adapter
+        .start(
+            &admitted,
+            &Command {
+                argv: vec!["/bin/sh".into(), "-c".into(), format!("seq 1 {LAST}")],
+                env: BTreeMap::new(),
+            },
+        )
+        .await
+        .expect("started");
+    let ended = tokio::time::timeout(Duration::from_mins(2), adapter.wait(&run))
+        .await
+        .expect("the run ends")
+        .expect("waited");
+    assert_eq!(ended.exit.and_then(|exit| exit.code), Some(0), "{ended:?}");
+    let output = adapter.output(&run).await.expect("output");
+    support::assert_retained(
+        NAME,
+        &support::seq_bytes(LAST),
+        &output.stdout,
+        &output.stdout_kept,
+        confinement::Retention::Tail,
+        BOUND,
+        None,
+    );
+    assert!(output.stdout_truncated);
+    println!("{NAME}: executed");
+}

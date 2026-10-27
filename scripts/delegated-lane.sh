@@ -117,6 +117,23 @@ require_executed security_review_confinement 'security review linux start env: e
   'egress listener review: executed, none held during the run, baseline restored'
 require_executed sandbox_parity \
   'sandbox parity bubblewrap delegated: executed, 23 rows present'
+# Design 29: scoped workspace write and output retention, each case by its own line.
+require_executed ess_confinement_linux \
+  'ESS confinement linux scoped write: executed' \
+  'ESS confinement linux scoped git: executed' \
+  'ESS confinement linux subtree symlink: executed' \
+  'ESS confinement linux nested git: executed' \
+  'ESS confinement linux hard link: executed' \
+  'ESS confinement linux submodule subtree: executed' \
+  'ESS confinement linux planted repository: executed' \
+  'ESS confinement linux output while running: executed' \
+  'ESS confinement linux retention head: executed' \
+  'ESS confinement linux retention tail: executed' \
+  'ESS confinement linux retention per stream: executed'
+require_executed ess_confinement_systemd \
+  'ESS confinement systemd local scoped write: executed' \
+  'ESS confinement systemd linux scoped write: executed' \
+  'ESS confinement systemd local retention tail: executed'
 
 # `b10x-substrate confine run` opens the linux adapter on a private group beneath the delegated
 # root; its delegated cases are absent, exit 0, without it, so each is required by its line.

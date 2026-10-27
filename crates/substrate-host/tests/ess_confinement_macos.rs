@@ -566,3 +566,73 @@ fn render_is_the_sandbox_exec_argv_and_runs_nothing() {
     );
     assert!(!workspace.path().join("marker").exists());
 }
+
+// A9: no Seatbelt probe proves a narrower workspace yet, so `macos` refuses it by name.
+#[test]
+fn a_narrower_workspace_is_refused_scoped_write_unserved() {
+    let adapter = macos();
+    for access in [
+        confinement::WorkspaceAccess::ReadOnly,
+        confinement::WorkspaceAccess::Scoped {
+            writable_subtrees: vec!["out".to_owned()],
+        },
+    ] {
+        let (sink, records) = recording();
+        let error = adapter
+            .admit(&ConfinementProfile {
+                workspace_access: access.clone(),
+                audit: Some(sink),
+                ..ConfinementProfile::default()
+            })
+            .expect_err("refused");
+        assert_eq!(
+            error.code(),
+            substrate_wire::EXEC_WORKSPACE_SCOPED_WRITE_UNSERVED,
+            "{access:?}: {error}"
+        );
+        assert_eq!(error.status(), 501);
+        assert_eq!(events(&records), ["profile_refused"]);
+    }
+}
+
+// B9: a `macos` run keeps the last bytes under `Tail`. The numbers come from bash's own `printf`:
+// only the program itself is executable, so `/usr/bin/seq` ends the run with 126.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_run_under_tail_keeps_the_last_bytes() {
+    const LAST: u32 = 300_000;
+    let adapter = macos();
+    let workspace = tempfile::tempdir().expect("workspace");
+    let admitted = adapter
+        .admit(&ConfinementProfile {
+            workspace: Some(workspace.path().to_path_buf()),
+            output_retention: confinement::OutputRetention {
+                stdout: confinement::Retention::Tail,
+                stderr: confinement::Retention::Head,
+            },
+            ..ConfinementProfile::default()
+        })
+        .expect("admitted");
+    let run = adapter
+        .start(
+            &admitted,
+            &bash(&format!("printf '%s\\n' {{1..{LAST}}}"), &[]),
+        )
+        .await
+        .expect("started");
+    let ended = tokio::time::timeout(Duration::from_secs(30), adapter.wait(&run))
+        .await
+        .expect("the run ends")
+        .expect("waited");
+    assert_eq!(ended.exit.and_then(|exit| exit.code), Some(0));
+    let output = adapter.output(&run).await.expect("output");
+    support::assert_retained(
+        "macos tail",
+        &support::seq_bytes(LAST),
+        &output.stdout,
+        &output.stdout_kept,
+        confinement::Retention::Tail,
+        confinement::macos::MACOS_OUTPUT_LIMIT_BYTES,
+        None,
+    );
+    assert!(output.stdout_truncated);
+}

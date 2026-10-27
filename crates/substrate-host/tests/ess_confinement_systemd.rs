@@ -673,3 +673,119 @@ fn a_dead_embedders_run_is_ended_and_its_scope_reclaimed_by_the_next_open() {
     );
     println!("ESS confinement systemd dead embedder: executed ({reclaimed} scopes reclaimed)");
 }
+
+// A10, around `local`: the inner adapter's refusal, by the host's name.
+#[tokio::test(flavor = "multi_thread")]
+async fn systemd_around_local_refuses_a_narrower_workspace() {
+    const NAME: &str = "ESS confinement systemd local scoped write";
+    let _held = OPENING.lock().await;
+    if let Err(reason) = user_manager() {
+        println!("{NAME}: ABSENT ({reason})");
+        return;
+    }
+    let adapter = open(local_inner()).expect("systemd around local opens");
+    let workspace = tempfile::tempdir().expect("workspace");
+    let error = adapter
+        .admit(&ConfinementProfile {
+            inner: Some(InnerAdapter::Local),
+            local_reason: Some(REASON.into()),
+            workspace: Some(workspace.path().to_path_buf()),
+            workspace_access: support::scoped_out(),
+            ..ConfinementProfile::default()
+        })
+        .expect_err("refused");
+    assert_eq!(
+        error.code(),
+        substrate_wire::EXEC_WORKSPACE_SCOPED_WRITE_UNSERVED,
+        "{error}"
+    );
+    assert_eq!(error.status(), 501);
+    println!("{NAME}: executed");
+}
+
+// A10, around `linux`: served, with A1's assertions.
+#[tokio::test(flavor = "multi_thread")]
+async fn systemd_around_linux_serves_a_scoped_workspace() {
+    const NAME: &str = "ESS confinement systemd linux scoped write";
+    let _held = OPENING.lock().await;
+    if let Err(reason) = user_manager().and_then(|()| bubblewrap()) {
+        println!("{NAME}: ABSENT ({reason})");
+        return;
+    }
+    let host = tempfile::tempdir().expect("host root");
+    let adapter = open(linux_inner(host.path())).expect("systemd around linux opens");
+    let workspace = host.path().join("workspaces").join("ws_scoped");
+    support::scoped_write_workspace(&workspace);
+    let admitted = adapter
+        .admit(&ConfinementProfile {
+            inner: Some(InnerAdapter::Linux),
+            workspace: Some(workspace.clone()),
+            workspace_access: support::scoped_out(),
+            ..ConfinementProfile::default()
+        })
+        .expect("admitted");
+    let run = adapter
+        .start(&admitted, &shell(support::SCOPED_WRITE_SCRIPT))
+        .await
+        .expect("started");
+    let ended = tokio::time::timeout(Duration::from_secs(30), adapter.wait(&run))
+        .await
+        .expect("the run ends")
+        .expect("waited");
+    assert_eq!(ended.state, RunState::Ended, "{ended:?}");
+    let output = adapter.output(&run).await.expect("output");
+    support::assert_scoped_write(NAME, &workspace, &output.stdout);
+    drop(adapter);
+    println!("{NAME}: executed");
+}
+
+// B8: `systemd` around `local` keeps the last bytes under `Tail`.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_systemd_local_run_under_tail_keeps_the_last_bytes() {
+    const NAME: &str = "ESS confinement systemd local retention tail";
+    const BOUND: usize = 4096;
+    const LAST: u32 = 3000;
+    let _held = OPENING.lock().await;
+    if let Err(reason) = user_manager() {
+        println!("{NAME}: ABSENT ({reason})");
+        return;
+    }
+    let adapter = open(local_inner()).expect("systemd around local opens");
+    let workspace = tempfile::tempdir().expect("workspace");
+    let admitted = adapter
+        .admit(&ConfinementProfile {
+            inner: Some(InnerAdapter::Local),
+            local_reason: Some(REASON.into()),
+            workspace: Some(workspace.path().to_path_buf()),
+            io_bounds: Some(confinement::IoBounds {
+                output_bytes: BOUND as u64,
+            }),
+            output_retention: confinement::OutputRetention {
+                stdout: confinement::Retention::Tail,
+                stderr: confinement::Retention::Head,
+            },
+            ..ConfinementProfile::default()
+        })
+        .expect("admitted");
+    let run = adapter
+        .start(&admitted, &shell(&format!("seq 1 {LAST}")))
+        .await
+        .expect("started");
+    let ended = tokio::time::timeout(Duration::from_secs(30), adapter.wait(&run))
+        .await
+        .expect("the run ends")
+        .expect("waited");
+    assert_eq!(ended.exit.as_ref().and_then(|exit| exit.code), Some(0));
+    let output = adapter.output(&run).await.expect("output");
+    support::assert_retained(
+        NAME,
+        &support::seq_bytes(LAST),
+        &output.stdout,
+        &output.stdout_kept,
+        confinement::Retention::Tail,
+        BOUND,
+        None,
+    );
+    assert!(output.stdout_truncated);
+    println!("{NAME}: executed");
+}
