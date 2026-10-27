@@ -109,6 +109,19 @@ require_executed adversary_confinement_s0_delegated \
   'adversary writable root: executed' 'adversary render parity: executed'
 require_executed security_review_confinement 'security review linux start env: executed'
 
+# The confinement module as its consumers call it: every need chosen by facts and run on an
+# adapter not declared insecure. Absent, exit 0, without the delegated root, so required by count.
+consumer_log="$(cargo test -p b10x-substrate-host --locked --test consumer_surface \
+  -- --nocapture --test-threads=1 2>&1)" || { printf '%s\n' "${consumer_log}" >&2; exit 1; }
+printf '%s\n' "${consumer_log}"
+consumer_line="$(printf '%s\n' "${consumer_log}" \
+  | grep -oE 'consumer surface delegated lane: [1-9][0-9]* needs executed of [1-9][0-9]*' || true)"
+if [[ -z "${consumer_line}" ]]; then
+  echo "delegated-lane: the consumer surface needs did not execute" >&2
+  exit 1
+fi
+echo "delegated-lane: ${consumer_line}"
+
 # The public SDK owns a separate clean-room journey against the shipped daemon binary. It proves
 # PTY resize, live metrics and orderly whole-tree cleanup through SDK types only; without this
 # explicit command that test would be absent from the daemon-only lane below.

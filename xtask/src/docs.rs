@@ -19,6 +19,7 @@ const PAGES: &[(&str, &str)] = &[
     ("concepts/operations", "Operations"),
     ("concepts/model", "System model"),
     ("guides/run-a-command", "Run a command"),
+    ("guides/confinement-profiles", "Confinement profiles"),
     ("guides/storage-and-metrics", "Storage and metrics"),
     ("guides/deployment", "Deployment"),
     ("guides/rust-sdk", "Rust SDK"),
