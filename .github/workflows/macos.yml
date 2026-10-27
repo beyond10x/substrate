@@ -57,7 +57,7 @@ jobs:
       - name: Run the Seatbelt adversary suite
         run: |
           cargo test -p b10x-substrate-host --locked --test seatbelt_adversary 2>&1 | tee "$RUNNER_TEMP/adversary.txt"
-          grep -q 'test result: ok. 7 passed; 0 failed' "$RUNNER_TEMP/adversary.txt"
+          grep -q 'test result: ok. 12 passed; 0 failed' "$RUNNER_TEMP/adversary.txt"
 
       - name: Run the macos confinement lane
         run: |
