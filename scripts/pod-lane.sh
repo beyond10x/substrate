@@ -65,4 +65,6 @@ require_suite() {
 
 require_suite ess_confinement_pod
 # One thread: the kill case stops the node's kubelet, which would stall any other run meanwhile.
+# Its two manual `cleanup_pass1` cases print a skip line and return unless
+# SUBSTRATE_POD_MANUAL_CLEANUP=1, which the gate workflow's `pod-lane` job does not set.
 require_suite adversary_pod --test-threads=1
