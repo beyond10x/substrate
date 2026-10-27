@@ -7,6 +7,198 @@
     "output": "output"
   },
   "callables": {
+    "confine-run": {
+      "target": {
+        "kind": "local",
+        "owner": "substrate.client",
+        "action": "confine-run"
+      },
+      "input": {
+        "type_ref": "substrate.client.ConfineRunRequest",
+        "shape": {
+          "kind": "struct",
+          "fields": {
+            "argv": {
+              "kind": "list",
+              "of": {
+                "kind": "string"
+              }
+            },
+            "backend": {
+              "kind": "optional",
+              "of": {
+                "kind": "enum",
+                "variants": [
+                  "linux",
+                  "oci"
+                ]
+              }
+            },
+            "dir": {
+              "kind": "optional",
+              "of": {
+                "kind": "string"
+              }
+            },
+            "dry_run": {
+              "kind": "optional",
+              "of": {
+                "kind": "boolean"
+              }
+            },
+            "image": {
+              "kind": "optional",
+              "of": {
+                "kind": "string"
+              }
+            },
+            "local": {
+              "kind": "optional",
+              "of": {
+                "kind": "string"
+              }
+            },
+            "net": {
+              "kind": "optional",
+              "of": {
+                "kind": "boolean"
+              }
+            },
+            "ro": {
+              "kind": "optional",
+              "of": {
+                "kind": "list",
+                "of": {
+                  "kind": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "result": {
+        "type_ref": "substrate.client.ConfineRunResult",
+        "shape": {
+          "kind": "struct",
+          "fields": {
+            "adapter": {
+              "kind": "string"
+            },
+            "args": {
+              "kind": "optional",
+              "of": {
+                "kind": "list",
+                "of": {
+                  "kind": "string"
+                }
+              }
+            },
+            "declared_insecure": {
+              "kind": "optional",
+              "of": {
+                "kind": "string"
+              }
+            },
+            "exit_code": {
+              "kind": "optional",
+              "of": {
+                "kind": "integer"
+              }
+            },
+            "note": {
+              "kind": "optional",
+              "of": {
+                "kind": "string"
+              }
+            },
+            "program": {
+              "kind": "optional",
+              "of": {
+                "kind": "string"
+              }
+            },
+            "signal": {
+              "kind": "optional",
+              "of": {
+                "kind": "integer"
+              }
+            },
+            "stderr": {
+              "kind": "optional",
+              "of": {
+                "kind": "string"
+              }
+            },
+            "stderr_truncated": {
+              "kind": "optional",
+              "of": {
+                "kind": "boolean"
+              }
+            },
+            "stdout": {
+              "kind": "optional",
+              "of": {
+                "kind": "string"
+              }
+            },
+            "stdout_truncated": {
+              "kind": "optional",
+              "of": {
+                "kind": "boolean"
+              }
+            }
+          }
+        }
+      },
+      "errors": {
+        "failed": {
+          "type_ref": "substrate.client.ConfineRefusalData",
+          "shape": {
+            "kind": "struct",
+            "fields": {
+              "address": {
+                "kind": "optional",
+                "of": {
+                  "kind": "string"
+                }
+              },
+              "code": {
+                "kind": "string"
+              },
+              "message": {
+                "kind": "string"
+              },
+              "status": {
+                "kind": "integer"
+              }
+            }
+          }
+        },
+        "refused": {
+          "type_ref": "substrate.client.ConfineRefusalData",
+          "shape": {
+            "kind": "struct",
+            "fields": {
+              "address": {
+                "kind": "optional",
+                "of": {
+                  "kind": "string"
+                }
+              },
+              "code": {
+                "kind": "string"
+              },
+              "message": {
+                "kind": "string"
+              },
+              "status": {
+                "kind": "integer"
+              }
+            }
+          }
+        }
+      }
+    },
     "events": {
       "target": {
         "kind": "local",
@@ -1255,6 +1447,72 @@
   "commands": [
     {
       "path": [
+        "confine",
+        "run"
+      ],
+      "aliases": [],
+      "callable": "confine-run",
+      "about": "Run a command under a confinement adapter in this process, without a daemon",
+      "arguments": [
+        {
+          "field": "dir",
+          "source": {
+            "kind": "option",
+            "long": "dir"
+          }
+        },
+        {
+          "field": "ro",
+          "source": {
+            "kind": "option",
+            "long": "ro"
+          }
+        },
+        {
+          "field": "net",
+          "source": {
+            "kind": "option",
+            "long": "net"
+          }
+        },
+        {
+          "field": "backend",
+          "source": {
+            "kind": "option",
+            "long": "backend"
+          }
+        },
+        {
+          "field": "image",
+          "source": {
+            "kind": "option",
+            "long": "image"
+          }
+        },
+        {
+          "field": "dry_run",
+          "source": {
+            "kind": "option",
+            "long": "dry-run"
+          }
+        },
+        {
+          "field": "local",
+          "source": {
+            "kind": "option",
+            "long": "local"
+          }
+        },
+        {
+          "field": "argv",
+          "source": {
+            "kind": "trailing"
+          }
+        }
+      ]
+    },
+    {
+      "path": [
         "events"
       ],
       "aliases": [],
@@ -1585,6 +1843,7 @@
     }
   ],
   "obligations": [
+    "handler:confine-run: implement the owner-qualified callable and its declared result/error contract",
     "handler:events: implement the owner-qualified callable and its declared result/error contract",
     "handler:exec-run: implement the owner-qualified callable and its declared result/error contract",
     "handler:exec-show: implement the owner-qualified callable and its declared result/error contract",

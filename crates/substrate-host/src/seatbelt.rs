@@ -7,6 +7,12 @@
 //! executable under that profile through [`SANDBOX_EXEC`], with a cleared environment and its own
 //! process group.
 //!
+//! A build policy (ADR 0109 S2) adds three things a Rust build needs: further writable
+//! directories (a private `TMPDIR`), exec by subpath (a toolchain, `target/`, the developer tools,
+//! each also readable and mappable as code), and sealed paths inside the workspace that stay
+//! unwritable. SBPL applies the last rule that matches, so the sealed denies are rendered after
+//! every allow.
+//!
 //! Rendering is plain string work and compiles everywhere; only macOS can apply the profile.
 //! A path SBPL cannot carry as a plain string literal is refused rather than escaped, and a
 //! missing launcher is the named refusal `exec.sandbox-unavailable`, so no path through this module
@@ -52,12 +58,66 @@ const MACH_SERVICES: [&str; 3] = [
     "com.apple.system.opendirectoryd.libinfo",
 ];
 
+/// The refusal for an exec subpath outside the workspace, the declared read-only roots and the
+/// system and developer directories: exec by subpath would make it readable without a declaration.
+pub const EXEC_SUBPATH_UNDECLARED: &str = "exec.sandbox-exec-subpath-undeclared";
+
+/// The link `xcode-select` keeps to the selected developer directory. The `/usr/bin` tool shims
+/// read it to find the compiler, so a policy with an exec subpath may read it.
+pub const XCODE_SELECT_LINK: &str = "/private/var/db/xcode_select_link";
+
+/// The Command Line Tools root, the developer directory when no Xcode is selected.
+pub const COMMAND_LINE_TOOLS: &str = "/Library/Developer/CommandLineTools";
+
+/// Fixed system directories a policy with an exec subpath may read: the system TLS library's
+/// configuration and trust store. Cargo links the system `libcurl`, whose `LibreSSL` reads
+/// `openssl.cnf` when it starts and exits if the read is refused. They hold no user data and no
+/// credential.
+pub const BUILD_READ_SUBPATHS: [&str; 1] = ["/private/etc/ssl"];
+
+/// The system-wide Xcode preferences, where `xcodebuild -license` records the accepted licence.
+/// `xcrun` and the `cc` shim refuse to run when they cannot see the acceptance, so a policy with an
+/// exec subpath may read this one file. It holds no user data and no credential.
+pub const XCODE_LICENSE_PREFERENCES: &str = "/Library/Preferences/com.apple.dt.Xcode.plist";
+
+/// System directories an exec subpath may name without a declared root.
+pub const SYSTEM_EXEC_SUBPATHS: [&str; 6] = [
+    "/bin",
+    "/sbin",
+    "/usr/bin",
+    "/usr/sbin",
+    "/usr/libexec",
+    COMMAND_LINE_TOOLS,
+];
+
+/// The selected developer tools' root, resolved: the `.app` bundle of a selected Xcode (whose
+/// `Info.plist` and SDKs `xcrun` reads), else the selected directory itself, else the Command Line
+/// Tools when they are installed. `None` on a host without developer tools.
+pub fn developer_root() -> Option<PathBuf> {
+    if let Ok(selected) = std::fs::canonicalize(XCODE_SELECT_LINK) {
+        let bundle = Some(&selected)
+            .filter(|selected| selected.ends_with("Contents/Developer"))
+            .and_then(|selected| selected.ancestors().nth(2))
+            .filter(|bundle| {
+                bundle
+                    .extension()
+                    .is_some_and(|extension| extension == "app")
+            })
+            .map(Path::to_path_buf);
+        return Some(bundle.unwrap_or(selected));
+    }
+    std::fs::canonicalize(COMMAND_LINE_TOOLS).ok()
+}
+
 /// What one confined command may touch.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SeatbeltPolicy {
     workspace: PathBuf,
     read_only: Vec<PathBuf>,
     executables: Vec<PathBuf>,
+    writable: Vec<PathBuf>,
+    exec_subpaths: Vec<PathBuf>,
+    sealed: Vec<PathBuf>,
 }
 
 impl SeatbeltPolicy {
@@ -67,7 +127,33 @@ impl SeatbeltPolicy {
             workspace: workspace.into(),
             read_only: Vec::new(),
             executables: Vec::new(),
+            writable: Vec::new(),
+            exec_subpaths: Vec::new(),
+            sealed: Vec::new(),
         }
+    }
+
+    /// Adds a directory beside the workspace the command may read and write.
+    #[must_use]
+    pub fn writable(mut self, directory: impl Into<PathBuf>) -> Self {
+        self.writable.push(directory.into());
+        self
+    }
+
+    /// Adds a directory beneath which the command may execute, read and map code.
+    #[must_use]
+    pub fn exec_subpath(mut self, directory: impl Into<PathBuf>) -> Self {
+        self.exec_subpaths.push(directory.into());
+        self
+    }
+
+    /// Adds a path that stays unwritable, with everything beneath it. Each directory between the
+    /// workspace and the path is unwritable as itself, so it cannot be renamed or removed; what is
+    /// beneath those directories beside the path stays writable.
+    #[must_use]
+    pub fn sealed(mut self, path: impl Into<PathBuf>) -> Self {
+        self.sealed.push(path.into());
+        self
     }
 
     /// Adds a root the command may read and never write.
@@ -91,29 +177,23 @@ impl SeatbeltPolicy {
     ///
     /// # Errors
     ///
-    /// `exec.sandbox-path-unrepresentable` when a path cannot be resolved.
+    /// `exec.sandbox-path-unrepresentable` when a path cannot be resolved. An exec subpath or a
+    /// sealed path need not exist yet (a build creates `target/`): its nearest existing ancestor
+    /// is resolved and the rest appended.
     pub fn resolved(&self) -> Result<Self, DriverError> {
-        let resolve = |path: &Path| {
-            std::fs::canonicalize(path).map_err(|error| {
-                DriverError::refused(
-                    PATH_UNREPRESENTABLE,
-                    format!("cannot resolve {}: {error}", path.display()),
-                    "seatbelt.path",
-                )
-            })
+        let all = |paths: &[PathBuf], resolve: fn(&Path) -> Result<PathBuf, DriverError>| {
+            paths
+                .iter()
+                .map(|path| resolve(path))
+                .collect::<Result<Vec<_>, _>>()
         };
         Ok(Self {
             workspace: resolve(&self.workspace)?,
-            read_only: self
-                .read_only
-                .iter()
-                .map(|path| resolve(path))
-                .collect::<Result<_, _>>()?,
-            executables: self
-                .executables
-                .iter()
-                .map(|path| resolve(path))
-                .collect::<Result<_, _>>()?,
+            read_only: all(&self.read_only, resolve)?,
+            executables: all(&self.executables, resolve)?,
+            writable: all(&self.writable, resolve)?,
+            exec_subpaths: all(&self.exec_subpaths, resolve_ancestor)?,
+            sealed: all(&self.sealed, resolve_ancestor)?,
         })
     }
 
@@ -132,6 +212,21 @@ impl SeatbeltPolicy {
             .collect::<Result<Vec<_>, _>>()?;
         let executables = self
             .executables
+            .iter()
+            .map(|path| literal(path))
+            .collect::<Result<Vec<_>, _>>()?;
+        let writable = self
+            .writable
+            .iter()
+            .map(|path| literal(path))
+            .collect::<Result<Vec<_>, _>>()?;
+        let exec_subpaths = self
+            .exec_subpaths
+            .iter()
+            .map(|path| literal(path))
+            .collect::<Result<Vec<_>, _>>()?;
+        let sealed = self
+            .sealed
             .iter()
             .map(|path| literal(path))
             .collect::<Result<Vec<_>, _>>()?;
@@ -162,6 +257,54 @@ impl SeatbeltPolicy {
         for executable in &executables {
             let _ = writeln!(profile, "(allow file-read* (literal \"{executable}\"))");
             let _ = writeln!(profile, "(allow process-exec (literal \"{executable}\"))");
+        }
+        for directory in &writable {
+            let _ = writeln!(profile, "(allow file-read* (subpath \"{directory}\"))");
+            let _ = writeln!(profile, "(allow file-write* (subpath \"{directory}\"))");
+        }
+        for directory in &exec_subpaths {
+            let _ = writeln!(profile, "(allow file-read* (subpath \"{directory}\"))");
+            let _ = writeln!(profile, "(allow process-exec (subpath \"{directory}\"))");
+            let _ = writeln!(
+                profile,
+                "(allow file-map-executable (subpath \"{directory}\"))"
+            );
+        }
+        if !exec_subpaths.is_empty() {
+            let _ = writeln!(
+                profile,
+                "(allow file-read* (literal \"{XCODE_SELECT_LINK}\"))"
+            );
+            for subpath in BUILD_READ_SUBPATHS {
+                let _ = writeln!(profile, "(allow file-read* (subpath \"{subpath}\"))");
+            }
+            let _ = writeln!(
+                profile,
+                "(allow file-read* (literal \"{XCODE_LICENSE_PREFERENCES}\"))"
+            );
+        }
+        let mut ancestors: Vec<&Path> = Vec::new();
+        for path in &self.sealed {
+            for ancestor in path.ancestors().skip(1) {
+                if ancestor == self.workspace || !ancestor.starts_with(&self.workspace) {
+                    break;
+                }
+                if !ancestors.contains(&ancestor) {
+                    ancestors.push(ancestor);
+                }
+            }
+        }
+        ancestors.sort();
+        for ancestor in ancestors {
+            // Every ancestor is a prefix of a sealed path that `literal` accepted.
+            let _ = writeln!(
+                profile,
+                "(deny file-write* (literal \"{}\"))",
+                literal(ancestor)?
+            );
+        }
+        for path in &sealed {
+            let _ = writeln!(profile, "(deny file-write* (subpath \"{path}\"))");
         }
         Ok(profile)
     }
@@ -276,6 +419,153 @@ fn probe_with_launcher(launcher: &Path) -> Result<(), DriverError> {
         ));
     }
     Ok(())
+}
+
+/// Which build-policy rules the platform sandbox was seen to enforce (ADR 0109 S2). A field is
+/// `true` only when its probe ran under Seatbelt and both halves held: what the rule allows
+/// happened, and what it refuses did not.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BuildProof {
+    /// A write beneath a sealed path failed while a write beside it succeeded.
+    pub sealed_paths: bool,
+    /// A program beneath an exec subpath ran while one outside every subpath did not.
+    pub exec_subpaths: bool,
+    /// A directory beside the workspace was written through the variable `TMPDIR`.
+    pub private_tmpdir: bool,
+}
+
+/// Probes the three build-policy rules under the platform sandbox. Any failure, a missing
+/// launcher included, leaves that rule unproved; nothing here refuses.
+pub fn probe_build() -> BuildProof {
+    probe_build_with_launcher(Path::new(SANDBOX_EXEC))
+}
+
+fn probe_build_with_launcher(launcher: &Path) -> BuildProof {
+    let Ok(scratch) = tempfile::tempdir() else {
+        return BuildProof::default();
+    };
+    let Ok(root) = std::fs::canonicalize(scratch.path()) else {
+        return BuildProof::default();
+    };
+    let workspace = root.join("workspace");
+    let private = root.join("tmp");
+    if [&workspace, &private, &workspace.join("sealed")]
+        .iter()
+        .any(|directory| std::fs::create_dir(directory).is_err())
+    {
+        return BuildProof::default();
+    }
+    let bash = Path::new("/bin/bash");
+    let runs = |policy: &SeatbeltPolicy, script: &str, env: &[(&str, &Path)]| {
+        policy
+            .command_with_launcher(launcher, bash, ["-c", script, "bash"])
+            .ok()
+            .and_then(|mut command| {
+                command
+                    .envs(env.iter().copied())
+                    .stdout(Stdio::null())
+                    .stderr(Stdio::null())
+                    .status()
+                    .ok()
+            })
+            .is_some_and(|status| status.success())
+    };
+    let probe_policy = || SeatbeltPolicy::new(&workspace).executable(bash);
+    let sealed_paths = runs(
+        &probe_policy().sealed(workspace.join("sealed")),
+        ": > beside || exit 1; if : > sealed/inside; then exit 2; fi 2>/dev/null; exit 0",
+        &[],
+    ) && workspace.join("beside").is_file()
+        && !workspace.join("sealed/inside").exists();
+    let exec_subpaths = runs(
+        &probe_policy().exec_subpath("/usr/bin"),
+        "/usr/bin/true || exit 1; if /bin/echo; then exit 2; fi >/dev/null 2>&1; exit 0",
+        &[],
+    );
+    let private_tmpdir = runs(
+        &probe_policy().writable(&private),
+        ": > \"$TMPDIR/written\"",
+        &[("TMPDIR", private.as_path())],
+    ) && private.join("written").is_file();
+    BuildProof {
+        sealed_paths,
+        exec_subpaths,
+        private_tmpdir,
+    }
+}
+
+fn resolve(path: &Path) -> Result<PathBuf, DriverError> {
+    std::fs::canonicalize(path).map_err(|error| {
+        DriverError::refused(
+            PATH_UNREPRESENTABLE,
+            format!("cannot resolve {}: {error}", path.display()),
+            "seatbelt.path",
+        )
+    })
+}
+
+/// Resolves the nearest existing ancestor of `path` and appends the rest, which must be normal
+/// names: `literal` refuses anything else when the profile is rendered.
+fn resolve_ancestor(path: &Path) -> Result<PathBuf, DriverError> {
+    let mut rest = Vec::new();
+    let mut existing = path;
+    loop {
+        if std::fs::symlink_metadata(existing).is_ok() {
+            let mut resolved = resolve(existing)?;
+            resolved.extend(rest.iter().rev());
+            return Ok(resolved);
+        }
+        match (existing.parent(), existing.file_name()) {
+            (Some(parent), Some(name)) => {
+                rest.push(name);
+                existing = parent;
+            }
+            _ => return resolve(path),
+        }
+    }
+}
+
+/// Checks a workspace-relative path a profile names (a sealed path, a relative exec subpath): not
+/// empty, not absolute, only normal names, and nothing an SBPL string literal cannot carry.
+///
+/// # Errors
+///
+/// `exec.sandbox-path-unrepresentable`.
+pub fn relative_literal(text: &str) -> Result<(), DriverError> {
+    let refuse = |why: &str| {
+        DriverError::refused(
+            PATH_UNREPRESENTABLE,
+            format!("{text:?} {why}"),
+            "seatbelt.path",
+        )
+    };
+    if text.is_empty() || text.starts_with('/') {
+        return Err(refuse("is not a relative path"));
+    }
+    if text
+        .split('/')
+        .any(|segment| matches!(segment, "" | "." | ".."))
+    {
+        return Err(refuse("is not normal"));
+    }
+    if text
+        .chars()
+        .any(|character| character == '"' || character == '\\' || character.is_control())
+    {
+        return Err(refuse(
+            "holds a character an SBPL string literal cannot carry",
+        ));
+    }
+    Ok(())
+}
+
+/// Checks an absolute path a profile names the way the profile will carry it.
+///
+/// # Errors
+///
+/// `exec.sandbox-path-unrepresentable`.
+pub fn absolute_literal(text: &str) -> Result<(), DriverError> {
+    literal(Path::new(text)).map(|_| ())
 }
 
 fn literal(path: &Path) -> Result<&str, DriverError> {
@@ -407,6 +697,141 @@ mod tests {
             .command_with_launcher(&launcher, Path::new("/bin/cat"), ["/etc/passwd"])
             .expect_err("an unlisted program built a command");
         assert_eq!(error.code, PROGRAM_UNLISTED);
+    }
+
+    fn build_policy() -> SeatbeltPolicy {
+        policy()
+            .writable("/t/run")
+            .exec_subpath("/usr/bin")
+            .exec_subpath("/w/space/target")
+            .sealed("/w/space/deep/sealed")
+            .sealed("/w/space/deep/other")
+    }
+
+    #[test]
+    fn a_build_policy_execs_by_subpath_and_seals_paths_last() {
+        let profile = build_policy().profile().expect("profile");
+        let lines: Vec<&str> = profile.lines().collect();
+        assert_eq!(lines[..2], ["(version 1)", "(deny default)"]);
+        for line in [
+            "(allow file-read* (subpath \"/t/run\"))",
+            "(allow file-write* (subpath \"/t/run\"))",
+            "(allow file-read* (subpath \"/usr/bin\"))",
+            "(allow process-exec (subpath \"/usr/bin\"))",
+            "(allow file-map-executable (subpath \"/usr/bin\"))",
+            "(allow process-exec (subpath \"/w/space/target\"))",
+            "(allow file-read* (literal \"/private/var/db/xcode_select_link\"))",
+            "(allow file-read* (subpath \"/private/etc/ssl\"))",
+            "(allow file-read* (literal \"/Library/Preferences/com.apple.dt.Xcode.plist\"))",
+        ] {
+            assert!(lines.contains(&line), "missing {line}\n{profile}");
+        }
+        // The last matching rule decides, so every sealed deny follows every allow, and an
+        // ancestor between the workspace and a sealed path is denied as itself: renaming it away
+        // would move the sealed path out from under its rule.
+        assert_eq!(
+            lines[lines.len() - 3..],
+            [
+                "(deny file-write* (literal \"/w/space/deep\"))",
+                "(deny file-write* (subpath \"/w/space/deep/sealed\"))",
+                "(deny file-write* (subpath \"/w/space/deep/other\"))",
+            ],
+            "{profile}"
+        );
+        assert!(!profile.contains("network"), "{profile}");
+        assert!(!profile.contains("(allow process-exec)"), "{profile}");
+        assert!(
+            !profile.contains("(deny file-write* (literal \"/w/space\"))"),
+            "the workspace itself is not an ancestor to seal: {profile}"
+        );
+    }
+
+    #[test]
+    fn without_an_exec_subpath_the_developer_tools_stay_unreadable() {
+        let profile = policy().writable("/t/run").profile().expect("profile");
+        assert!(!profile.contains(XCODE_SELECT_LINK), "{profile}");
+        assert!(!profile.contains("file-map-executable"), "{profile}");
+        assert!(!profile.contains("/private/etc/ssl"), "{profile}");
+        assert!(!profile.contains("com.apple.dt.Xcode"), "{profile}");
+    }
+
+    #[test]
+    fn unrepresentable_build_paths_are_refused_by_name() {
+        for path in ["/w/quo\"te", "relative", "/w/../up", "/w/back\\slash"] {
+            for policy in [
+                policy().writable(path),
+                policy().exec_subpath(path),
+                policy().sealed(path),
+            ] {
+                let error = policy.profile().expect_err(path);
+                assert_eq!(error.code, PATH_UNREPRESENTABLE, "{path}");
+                assert_eq!(error.class, DriverErrorClass::Refused, "{path}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_relative_subpath_is_normal_and_carries_no_unrepresentable_character() {
+        for accepted in ["target", ".git/hooks", "a/b/c"] {
+            relative_literal(accepted).expect(accepted);
+        }
+        for refused in [
+            "",
+            "/abs",
+            "a/../b",
+            "..",
+            "./a",
+            "a//b",
+            "a/",
+            "quo\"te",
+            "back\\slash",
+            "new\nline",
+        ] {
+            let error = relative_literal(refused).expect_err(refused);
+            assert_eq!(error.code, PATH_UNREPRESENTABLE, "{refused:?}");
+        }
+    }
+
+    #[test]
+    fn a_build_path_not_created_yet_resolves_through_its_existing_ancestor() {
+        let scratch = tempfile::tempdir().expect("scratch");
+        let real = scratch.path().join("real");
+        std::fs::create_dir(&real).expect("real");
+        let link = scratch.path().join("link");
+        std::os::unix::fs::symlink(&real, &link).expect("link");
+        let real = std::fs::canonicalize(&real).expect("canonical");
+        let resolved = SeatbeltPolicy::new(&link)
+            .sealed(link.join("absent/sealed"))
+            .exec_subpath(link.join("target"))
+            .writable(&link)
+            .resolved()
+            .expect("resolved");
+        assert_eq!(resolved.workspace, real);
+        assert_eq!(resolved.sealed, [real.join("absent/sealed")]);
+        assert_eq!(resolved.exec_subpaths, [real.join("target")]);
+        assert_eq!(resolved.writable, [real]);
+    }
+
+    #[test]
+    fn without_the_launcher_no_build_fact_is_proved() {
+        let scratch = tempfile::tempdir().expect("scratch");
+        assert_eq!(
+            probe_build_with_launcher(&scratch.path().join("no-sandbox-exec")),
+            BuildProof::default()
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_platform_sandbox_proves_every_build_fact() {
+        assert_eq!(
+            probe_build(),
+            BuildProof {
+                sealed_paths: true,
+                exec_subpaths: true,
+                private_tmpdir: true,
+            }
+        );
     }
 
     #[cfg(target_os = "macos")]

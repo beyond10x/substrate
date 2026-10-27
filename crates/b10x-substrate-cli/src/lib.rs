@@ -8,6 +8,15 @@
 //! `{"ok":true,"result":…}` on stdout and a failure `{"ok":false,"error":{"code":…,"data":…}}` on
 //! stderr; a daemon refusal is the CLI error `refused` with the daemon's named code in
 //! `error.data.code`. Human output is a line or a table, and a refusal names its code.
+//!
+//! `confine run` is the one verb that needs no daemon: it opens a confinement adapter in this
+//! process ([`confine`]).
+
+mod confine;
+
+pub use confine::{
+    Backend, CGROUP_ROOT_ENV as CONFINE_CGROUP_ROOT_ENV, ConfineRunArgs, command as confine_command,
+};
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -55,6 +64,8 @@ pub enum Output {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    #[command(subcommand)]
+    Confine(ConfineCommand),
     /// Read one page of the daemon's event log
     Events(EventsArgs),
     #[command(subcommand)]
@@ -69,6 +80,13 @@ pub enum Command {
     Session(SessionCommand),
     #[command(subcommand)]
     Workspace(WorkspaceCommand),
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ConfineCommand {
+    /// Run a command under a confinement adapter in this process, without a daemon
+    #[command(after_help = confine::AFTER_HELP)]
+    Run(ConfineRunArgs),
 }
 
 #[derive(Debug, Args)]
@@ -303,6 +321,10 @@ pub fn main_with(args: impl IntoIterator<Item = OsString>) -> ExitCode {
         Err(error) => return usage_error(&error, wants_json),
     };
     let output = cli.output;
+    let command = match cli.command {
+        Command::Confine(ConfineCommand::Run(args)) => return confine::run(output, args),
+        command => command,
+    };
     let socket = cli.socket.clone().or_else(|| {
         std::env::var_os(SOCKET_ENV)
             .filter(|value| !value.is_empty())
@@ -328,7 +350,7 @@ pub fn main_with(args: impl IntoIterator<Item = OsString>) -> ExitCode {
             );
         }
     };
-    match runtime.block_on(run(socket, cli.command)) {
+    match runtime.block_on(run(socket, command)) {
         Ok(Answer::Result { result, human }) => {
             let text = match output {
                 Output::Json => json!({"ok": true, "result": result}).to_string(),
@@ -445,6 +467,10 @@ async fn run(socket: PathBuf, command: Command) -> Result<Answer, Failure> {
             })
         }
         Command::Events(args) => events(&client, args).await,
+        // Dispatched by `main_with` before a socket is needed.
+        Command::Confine(_) => Err(Failure::Usage(
+            "confine run needs no daemon socket".to_owned(),
+        )),
     }
 }
 

@@ -299,6 +299,8 @@ fn probe_workspace_scoped_write(config: &HostConfig) -> bool {
         .args(pinned.bind_args())
         .args(["--chdir", "/workspace", "--", "/bin/sh", "-c"])
         .arg(script)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status();
     drop(pinned);
     status.is_ok_and(|status| status.success())

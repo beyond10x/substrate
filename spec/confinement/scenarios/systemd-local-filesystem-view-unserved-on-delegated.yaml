@@ -1,0 +1,35 @@
+# A scope bounds `local`; it confines nothing. `systemd { inner: local }` refuses a filesystem view
+# `confinement.family-unserved`.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: systemd-local-filesystem-view-unserved-on-delegated
+summary: "lane delegated: systemd around local, asked for a filesystem view, is refused confinement.family-unserved naming filesystem_view."
+
+timeline:
+  - at: 2026-10-27T09:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: systemd
+      inner: local
+      served_families: [process_run, process_watch, output_read, wait, workspace, limits, audit]
+      facts: [declared_insecure, paths_are_host_paths, whole_tree_kill, local_permitted, host_network]
+    outcome: opened
+  - at: 2026-10-27T09:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: systemd
+      inner: local
+      required_families: [process_run, filesystem_view]
+      required_facts: []
+      local_reason: the operator bounds this run on the developer's own machine
+    outcome: family-unserved-filesystem-view
+    error:
+      name: substrate.confinement.FamilyUnserved
+      fields: {adapter: systemd, family: filesystem_view}
+    no_events: [substrate.confinement.ProfileAdmitted]
+
+assert:
+  - view: substrate.confinement.Profiles
+    counts: {at_most: 0}

@@ -1,0 +1,39 @@
+# Setup: the runner is on Linux. `macos` needs Seatbelt (ADR 0037), so `confinement::open(macos)`
+# is refused (`story:macos-adapter-on-seatbelt`: "On Linux the adapter is absent"), and a profile on
+# it is refused the same.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: absent-macos-off-macos-on-portable
+summary: "lane portable: on Linux, opening macos is refused confinement.adapter-unserved, and a profile on macos is refused the same."
+
+timeline:
+  - at: 2026-10-27T09:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: macos
+      served_families: [process_run, process_watch, output_read, wait, workspace, filesystem_view, audit]
+      facts: [paths_are_host_paths, ipc_signals_contained, sealed_paths, exec_subpaths, private_tmpdir]
+    outcome: unserved
+    error:
+      name: substrate.confinement.AdapterUnserved
+      fields: {adapter: macos}
+    no_events: [substrate.confinement.AdapterOpened]
+  - at: 2026-10-27T09:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: macos
+      required_families: [process_run]
+      required_facts: []
+    outcome: adapter-not-open
+    error:
+      name: substrate.confinement.AdapterUnserved
+      fields: {adapter: macos}
+    no_events: [substrate.confinement.ProfileAdmitted]
+
+assert:
+  - view: substrate.confinement.Adapters
+    counts: {at_most: 0}
+  - view: substrate.confinement.Profiles
+    counts: {at_most: 0}

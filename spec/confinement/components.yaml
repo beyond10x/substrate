@@ -1,0 +1,16 @@
+# substrate-host owns the confinement contract (atlas ADR 0109 decision 1, ADR 0044). A client
+# reaches it through substrate-host's Rust API (`confinement::open`, then admission), not through
+# the wire: `reached_by` stays the in-process default, and no route or bundle is derived from it.
+components:
+  - component: substrate-host
+    summary: Opens a confinement adapter, proves its contract families and facts, and admits or refuses a profile against them.
+    owns:
+      domains: [substrate.confinement]
+    accepts:
+      commands:
+        - substrate.confinement.OpenAdapter
+        - substrate.confinement.AdmitProfile
+    publishes:
+      events:
+        - substrate.confinement.AdapterOpened
+        - substrate.confinement.ProfileAdmitted

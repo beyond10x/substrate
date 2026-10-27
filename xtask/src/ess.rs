@@ -16,7 +16,7 @@ fn run(root: &Path, args: &[&str]) -> Result<()> {
         .args(args)
         .current_dir(root)
         .output()
-        .context("ESS 0.69.2 must be installed; see spec/README.md")?;
+        .context("ESS 0.70.0 must be installed; see spec/README.md")?;
     print!("{}", String::from_utf8_lossy(&result.stdout));
     eprint!("{}", String::from_utf8_lossy(&result.stderr));
     ensure!(result.status.success(), "ESS failed: {}", args.join(" "));
@@ -128,6 +128,7 @@ pub fn check(root: &Path) -> Result<Report> {
     check_host_processes(root, dir.path())?;
     check_capture_types(root, dir.path())?;
     check_workspaces(root, dir.path())?;
+    check_confinement(root, dir.path())?;
     run(
         root,
         &[
@@ -300,6 +301,96 @@ fn check_host_processes(root: &Path, scratch: &Path) -> Result<()> {
     ensure!(
         fs::read(types.join("types.rs"))? == fs::read(root.join(HOST_PROCESS_TYPES))?,
         "ESS host-process type drift: regenerate {HOST_PROCESS_TYPES} from {HOST_PROCESSES} with the pinned ESS release"
+    );
+    Ok(())
+}
+
+/// The confinement contract (atlas ADR 0109, Substrate ADR 0044) and every adapter's authored
+/// scenarios, each named for the lane that runs it.
+const CONFINEMENT: &str = "spec/confinement";
+/// The suite `ess verify conform synthesize` derives from [`CONFINEMENT`], committed.
+const CONFINEMENT_SUITE: &str = "spec/confinement-suite.json";
+/// The contract's closed vocabularies generated from [`CONFINEMENT`], committed.
+const CONFINEMENT_TYPES: &str = "crates/substrate-host/src/generated/confinement.rs";
+/// The roots of [`CONFINEMENT_TYPES`].
+const CONFINEMENT_TYPE_ROOTS: [&str; 3] = [
+    "substrate.confinement.ContractFamily",
+    "substrate.confinement.AdapterName",
+    "substrate.confinement.Fact",
+];
+
+/// Validates the confinement specification, checks its committed suite for drift and runs it
+/// against the ESS interpreted reference, then regenerates the contract's types and compares them
+/// with [`CONFINEMENT_TYPES`]. The interpreted run checks the model only; each adapter's own lane
+/// runs the same scenarios against the adapter.
+fn check_confinement(root: &Path, scratch: &Path) -> Result<()> {
+    run(
+        root,
+        &[
+            "specify",
+            "validate",
+            "--path",
+            CONFINEMENT,
+            "--strict-requires",
+        ],
+    )?;
+    let suite = scratch.join("confinement-suite.json");
+    run(
+        root,
+        &[
+            "verify",
+            "conform",
+            "synthesize",
+            "--path",
+            CONFINEMENT,
+            "--scenarios",
+            CONFINEMENT,
+            "--strict-requires",
+            "--out",
+            suite.to_str().context("UTF-8 output path")?,
+        ],
+    )?;
+    ensure!(
+        fs::read(suite)? == fs::read(root.join(CONFINEMENT_SUITE))?,
+        "ESS confinement suite drift: regenerate {CONFINEMENT_SUITE} from {CONFINEMENT} with the pinned ESS release"
+    );
+    run(
+        root,
+        &[
+            "verify",
+            "conform",
+            "run",
+            "--path",
+            CONFINEMENT,
+            "--suite",
+            CONFINEMENT_SUITE,
+            "--target",
+            "interpreted",
+            "--report-format",
+            "2",
+            "--strict-requires",
+        ],
+    )?;
+    let types = scratch.join("confinement-types");
+    let mut args = vec!["generate", "types", "--path", CONFINEMENT];
+    for root in CONFINEMENT_TYPE_ROOTS {
+        args.extend(["--root", root]);
+    }
+    args.extend([
+        "--names",
+        "short",
+        "--target",
+        "rust",
+        "--package",
+        "b10x-substrate-confinement-types",
+        "--out",
+        types.to_str().context("UTF-8 type output")?,
+        "--strict-requires",
+    ]);
+    run(root, &args)?;
+    ensure!(
+        fs::read(types.join("types.rs"))? == fs::read(root.join(CONFINEMENT_TYPES))?,
+        "ESS confinement type drift: regenerate {CONFINEMENT_TYPES} from {CONFINEMENT} with the pinned ESS release"
     );
     Ok(())
 }

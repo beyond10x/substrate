@@ -52,13 +52,22 @@ jobs:
         run: cargo clippy -p b10x-substrate-host --all-targets --locked -- -D warnings
 
       - name: Test the host crate
-        run: cargo test -p b10x-substrate-host --locked
+        run: cargo test -p b10x-substrate-host --locked --no-fail-fast
 
       - name: Run the Seatbelt adversary suite
         run: |
           cargo test -p b10x-substrate-host --locked --test seatbelt_adversary 2>&1 | tee "$RUNNER_TEMP/adversary.txt"
-          grep -q 'test result: ok. 7 passed; 0 failed' "$RUNNER_TEMP/adversary.txt"
+          grep -q 'test result: ok. 12 passed; 0 failed' "$RUNNER_TEMP/adversary.txt"
+
+      - name: Run the macos confinement lane
+        run: |
+          cargo test -p b10x-substrate-host --locked --test ess_confinement_macos -- --nocapture 2>&1 | tee "$RUNNER_TEMP/confinement.txt"
+          grep -q 'test result: ok. 13 passed; 0 failed' "$RUNNER_TEMP/confinement.txt"
+          grep 'ESS confinement macos lane:' "$RUNNER_TEMP/confinement.txt"
 
       - name: Show sandbox denials
         if: failure()
-        run: log show --last 20m --style compact --predicate 'sender == "Sandbox"' | tail -n 300
+        run: |
+          log show --last 30m --style compact --predicate 'sender == "Sandbox"' \
+            | grep -v -e '/dev/dtracehelper' -e 'notification_center' -e '/private/var/run/syslog' -e 'com.apple.logd' -e '/dev/tty' \
+            | tail -n 400 || true

@@ -291,8 +291,8 @@ pub fn check(mut command: Command) -> Result<(), String> {
         ));
     }
     expect(
-        expected_paths.len() == 12,
-        "the binding names twelve commands",
+        expected_paths.len() == 13,
+        "the binding names thirteen commands",
     )?;
     for (path, leaf) in &expected {
         if &observed[path] != leaf {

@@ -1,0 +1,15 @@
+{
+  "at": "2026-10-27T01:01:28Z",
+  "actor": "human:timo",
+  "artifact": "review-result:adr-0109-plan-scope-round-1",
+  "kind": "review-result",
+  "revision": 2,
+  "change": {
+    "change": "redaction",
+    "literal_sha256": "4bf21642f7201dd57360419b08fa5ae658f9056290ff6e10dee710b5ae12eff5",
+    "literal_chars": 89,
+    "replacement": "atlas:architecture/adr/0109-confinement-is-one-substrate-contract-with-adapters.md",
+    "count": 4,
+    "reason": "a machine-local path to the critic's copy of the ADR; replaced by the ADR's path in atlas"
+  }
+}

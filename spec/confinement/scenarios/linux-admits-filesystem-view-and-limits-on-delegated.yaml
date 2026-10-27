@@ -1,0 +1,45 @@
+# `linux` on a delegated cgroup v2 subtree with bubblewrap: the families the exec path serves today
+# (`crates/substrate-host/src/probe.rs`), with whole-tree kill (cgroup kill) and the IPC facts
+# (seccomp socket allowlist, ADR 0039; `--unshare-pid` keeps signals inside the tree).
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: linux-admits-filesystem-view-and-limits-on-delegated
+summary: "lane delegated: linux admits a profile requiring a filesystem view, limits and whole-tree kill, reported declared_insecure: false."
+
+arrange:
+  - instance: run
+    entity: substrate.confinement.Profile
+
+timeline:
+  - at: 2026-10-27T09:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: linux
+      served_families: [process_run, process_watch, output_read, wait, workspace, filesystem_view, limits, audit]
+      facts: [whole_tree_kill, ipc_socket_allowlist, ipc_signals_contained]
+    outcome: opened
+  - at: 2026-10-27T09:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: linux
+      required_families: [process_run, process_watch, output_read, wait, workspace, filesystem_view, limits, audit]
+      required_facts: [whole_tree_kill, ipc_socket_allowlist, ipc_signals_contained]
+    outcome: admitted
+    events:
+      - event: substrate.confinement.ProfileAdmitted
+        payload:
+          adapter: linux
+          families: [process_run, process_watch, output_read, wait, workspace, filesystem_view, limits, audit]
+          facts: [whole_tree_kill, ipc_socket_allowlist, ipc_signals_contained]
+          declared_insecure: false
+    capture: {instance: run, event: substrate.confinement.ProfileAdmitted, field: profile}
+
+assert:
+  - view: substrate.confinement.Profiles
+    contains:
+      profile: {$instance: run}
+      adapter: linux
+      families: [process_run, process_watch, output_read, wait, workspace, filesystem_view, limits, audit]
+      declared_insecure: false

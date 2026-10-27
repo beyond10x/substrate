@@ -1,0 +1,13 @@
+{
+  "at": "2023-11-14T22:13:36Z",
+  "actor": "human:timo",
+  "artifact": "executable-system-specification:confinement",
+  "kind": "executable-system-specification",
+  "revision": 1,
+  "change": {
+    "change": "evidence",
+    "kind": "ess_conformance_v2",
+    "source": "{\"completed_at\":\"1700000016500\",\"conformance_status\":\"inconclusive\",\"counts\":{\"error\":0,\"failed\":0,\"passed\":54,\"skipped\":0,\"total\":54,\"unsupported\":0},\"coverage\":{\"knowledge\":\"unknown\"},\"execution_status\":\"passed\",\"format\":\"ess-conformance-report/2\",\"implementation\":\"interpreted 0.70.0\",\"policy\":\"complete-selection/1\",\"producer_profile\":\"rust-scenario-status/1\",\"report_input\":\"confinement-report-f653f8c.json\",\"report_input_digest\":\"sha256:c0fd2dfd7cad9418fce15365d9b3ecdf7d03516904703154af779e79d90c9bb3\",\"spec_digest\":\"b8eb2e5a5847221dc4a316e2937ed494b586d12ede634a4dd5c066a30cad5e03\",\"specification\":\"substrate/v1\",\"suite\":{\"digest\":\"sha256:077e3ffb0d36ddf50f4729a5657caefbf3aa6306161f5281546907bac96a4701\",\"digest_profile\":\"sha256-json-bytes/1\",\"version\":\"ess-conformance/34\"},\"suite_input\":\"spec/confinement-suite.json\",\"suite_input_digest\":\"sha256:077e3ffb0d36ddf50f4729a5657caefbf3aa6306161f5281546907bac96a4701\"}",
+    "reference": "confinement-report-f653f8c.json@sha256:c0fd2dfd7cad9418fce15365d9b3ecdf7d03516904703154af779e79d90c9bb3"
+  }
+}

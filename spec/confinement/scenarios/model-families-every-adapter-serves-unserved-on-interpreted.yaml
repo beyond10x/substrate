@@ -1,0 +1,77 @@
+# Model only. Every declared adapter serves process_run, process_watch, output_read, wait, workspace
+# and audit, so no adapter lane can reach their `confinement.family-unserved` refusals. This scenario
+# opens an adapter row that serves none of them and checks that each is refused by its own name. It
+# runs only against the interpreted reference: no adapter lane selects a `model-*` scenario, because
+# no real adapter opens with this set.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: model-families-every-adapter-serves-unserved-on-interpreted
+summary: "lane interpreted: an adapter row serving none of the six families every adapter declares refuses each of them confinement.family-unserved by name."
+
+timeline:
+  - at: 2026-10-27T09:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: linux
+      served_families: [limits]
+      facts: []
+    outcome: opened
+  - at: 2026-10-27T09:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input: {adapter: linux, required_families: [process_run], required_facts: []}
+    outcome: family-unserved-process-run
+    error:
+      name: substrate.confinement.FamilyUnserved
+      fields: {adapter: linux, family: process_run}
+    no_events: [substrate.confinement.ProfileAdmitted]
+  - at: 2026-10-27T09:00:02Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input: {adapter: linux, required_families: [process_watch], required_facts: []}
+    outcome: family-unserved-process-watch
+    error:
+      name: substrate.confinement.FamilyUnserved
+      fields: {adapter: linux, family: process_watch}
+    no_events: [substrate.confinement.ProfileAdmitted]
+  - at: 2026-10-27T09:00:03Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input: {adapter: linux, required_families: [output_read], required_facts: []}
+    outcome: family-unserved-output-read
+    error:
+      name: substrate.confinement.FamilyUnserved
+      fields: {adapter: linux, family: output_read}
+    no_events: [substrate.confinement.ProfileAdmitted]
+  - at: 2026-10-27T09:00:04Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input: {adapter: linux, required_families: [wait], required_facts: []}
+    outcome: family-unserved-wait
+    error:
+      name: substrate.confinement.FamilyUnserved
+      fields: {adapter: linux, family: wait}
+    no_events: [substrate.confinement.ProfileAdmitted]
+  - at: 2026-10-27T09:00:05Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input: {adapter: linux, required_families: [workspace], required_facts: []}
+    outcome: family-unserved-workspace
+    error:
+      name: substrate.confinement.FamilyUnserved
+      fields: {adapter: linux, family: workspace}
+    no_events: [substrate.confinement.ProfileAdmitted]
+  - at: 2026-10-27T09:00:06Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input: {adapter: linux, required_families: [audit], required_facts: []}
+    outcome: family-unserved-audit
+    error:
+      name: substrate.confinement.FamilyUnserved
+      fields: {adapter: linux, family: audit}
+    no_events: [substrate.confinement.ProfileAdmitted]
+
+assert:
+  - view: substrate.confinement.Profiles
+    counts: {at_most: 0}

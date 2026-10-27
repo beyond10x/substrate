@@ -1,0 +1,32 @@
+# The Seatbelt policy allows no network (`crates/substrate-host/src/seatbelt.rs`); a profile
+# requiring egress is refused `confinement.family-unserved`.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: macos-s1-network-egress-unserved-on-macos
+summary: "lane macos: macos, asked for network_egress, is refused confinement.family-unserved naming network_egress."
+
+timeline:
+  - at: 2026-10-27T09:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: macos
+      served_families: [process_run, process_watch, output_read, wait, workspace, filesystem_view, audit]
+      facts: [paths_are_host_paths, ipc_signals_contained, sealed_paths, exec_subpaths, private_tmpdir]
+    outcome: opened
+  - at: 2026-10-27T09:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: macos
+      required_families: [process_run, network_egress]
+      required_facts: []
+    outcome: family-unserved-network-egress
+    error:
+      name: substrate.confinement.FamilyUnserved
+      fields: {adapter: macos, family: network_egress}
+    no_events: [substrate.confinement.ProfileAdmitted]
+
+assert:
+  - view: substrate.confinement.Profiles
+    counts: {at_most: 0}

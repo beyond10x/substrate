@@ -1,0 +1,42 @@
+# Setup: `DBUS_SESSION_BUS_ADDRESS` is unset, so no user manager is reachable and
+# `confinement::open(systemd)` is refused (`story:systemd-scope-bounds-provider`). A profile on
+# `systemd { inner: local }` is refused the same.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: absent-systemd-without-user-manager-on-portable
+summary: "lane portable: with DBUS_SESSION_BUS_ADDRESS unset, opening systemd around local is refused confinement.adapter-unserved, and a profile on it is refused the same."
+
+timeline:
+  - at: 2026-10-27T09:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: systemd
+      inner: local
+      served_families: [process_run, process_watch, output_read, wait, workspace, limits, audit]
+      facts: [declared_insecure, paths_are_host_paths, whole_tree_kill, local_permitted, host_network]
+    outcome: unserved
+    error:
+      name: substrate.confinement.AdapterUnserved
+      fields: {adapter: systemd}
+    no_events: [substrate.confinement.AdapterOpened]
+  - at: 2026-10-27T09:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: systemd
+      inner: local
+      required_families: [process_run, limits]
+      required_facts: []
+      local_reason: the operator bounds this run on the developer's own machine
+    outcome: adapter-not-open
+    error:
+      name: substrate.confinement.AdapterUnserved
+      fields: {adapter: systemd}
+    no_events: [substrate.confinement.ProfileAdmitted]
+
+assert:
+  - view: substrate.confinement.Adapters
+    counts: {at_most: 0}
+  - view: substrate.confinement.Profiles
+    counts: {at_most: 0}

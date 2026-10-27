@@ -1,0 +1,44 @@
+# S2, `story:macos-seatbelt-policy-runs-cargo-test`: `macos` proves `sealed_paths`. This admission
+# passes on the macos lane once S2's adapter is in place.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: macos-s2-admits-sealed-paths-on-macos
+summary: "lane macos: macos admits a profile requiring sealed_paths."
+
+arrange:
+  - instance: run
+    entity: substrate.confinement.Profile
+
+timeline:
+  - at: 2026-10-27T09:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: macos
+      served_families: [process_run, process_watch, output_read, wait, workspace, filesystem_view, audit]
+      facts: [paths_are_host_paths, ipc_signals_contained, sealed_paths, exec_subpaths, private_tmpdir]
+    outcome: opened
+  - at: 2026-10-27T09:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: macos
+      required_families: [process_run, filesystem_view]
+      required_facts: [sealed_paths]
+    outcome: admitted
+    events:
+      - event: substrate.confinement.ProfileAdmitted
+        payload:
+          adapter: macos
+          families: [process_run, filesystem_view]
+          facts: [sealed_paths]
+          declared_insecure: false
+    capture: {instance: run, event: substrate.confinement.ProfileAdmitted, field: profile}
+
+assert:
+  - view: substrate.confinement.Profiles
+    contains:
+      profile: {$instance: run}
+      adapter: macos
+      facts: [sealed_paths]
+      declared_insecure: false

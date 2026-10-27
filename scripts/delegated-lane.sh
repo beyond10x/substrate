@@ -55,6 +55,98 @@ export SUBSTRATE_VECTORS_CGROUP_ROOT="${root}"
 # daemon that owns a root and fatal for six drivers that share one.
 cargo test -p b10x-substrate-host --locked -- --nocapture --test-threads=1
 
+# The confinement contract's linux scenarios (ADR 0109) ran above, but a case that reported itself
+# absent exits 0 too. Run them again by name and require the count the case printed, so an absent
+# or empty lane fails here instead of reading as green.
+confinement_log="$(cargo test -p b10x-substrate-host --locked --test ess_confinement_linux \
+  -- --nocapture --test-threads=1 2>&1)" || { printf '%s\n' "${confinement_log}" >&2; exit 1; }
+printf '%s\n' "${confinement_log}"
+confinement_line="$(printf '%s\n' "${confinement_log}" \
+  | grep -E '^ESS confinement linux delegated lane: [1-9][0-9]* scenarios executed' || true)"
+if [[ -z "${confinement_line}" ]]; then
+  echo "delegated-lane: the confinement linux scenarios did not execute" >&2
+  exit 1
+fi
+echo "delegated-lane: ${confinement_line}"
+
+# The confinement contract's systemd scenarios, both inner adapters, against a transient user scope
+# the adapter asks this session's user manager for. Required by count for the same reason.
+systemd_log="$(cargo test -p b10x-substrate-host --locked --test ess_confinement_systemd \
+  -- --nocapture --test-threads=1 2>&1)" || { printf '%s\n' "${systemd_log}" >&2; exit 1; }
+printf '%s\n' "${systemd_log}"
+systemd_line="$(printf '%s\n' "${systemd_log}" \
+  | grep -E '^ESS confinement systemd delegated lane: [1-9][0-9]* scenarios executed' || true)"
+if [[ -z "${systemd_line}" ]]; then
+  echo "delegated-lane: the confinement systemd scenarios did not execute" >&2
+  exit 1
+fi
+echo "delegated-lane: ${systemd_line}"
+
+# The confinement contract's adversary and security-review cases that need the delegated root ran
+# above too, and are absent, exit 0, without it. Run each binary again and require every case's
+# own `executed` line and no `ABSENT` line, so a case that did not run fails here. `-p <package>`
+# first names a package other than the host crate.
+require_executed() {
+  local package=b10x-substrate-host
+  if [[ "$1" == "-p" ]]; then
+    package="$2"
+    shift 2
+  fi
+  local binary="$1"
+  shift
+  local log
+  log="$(cargo test -p "${package}" --locked --test "${binary}" \
+    -- --nocapture --test-threads=1 2>&1)" || { printf '%s\n' "${log}" >&2; exit 1; }
+  printf '%s\n' "${log}"
+  if printf '%s\n' "${log}" | grep -q 'ABSENT'; then
+    echo "delegated-lane: ${binary} reported a case absent" >&2
+    exit 1
+  fi
+  local line
+  for line in "$@"; do
+    if ! printf '%s\n' "${log}" | grep -qF "${line}"; then
+      echo "delegated-lane: ${binary} did not print '${line}'" >&2
+      exit 1
+    fi
+  done
+  echo "delegated-lane: ${binary} executed its delegated cases"
+}
+require_executed adversary_confinement_s0_delegated \
+  'adversary writable root: executed' 'adversary render parity: executed'
+require_executed security_review_confinement 'security review linux start env: executed'
+require_executed sandbox_parity \
+  'sandbox parity bubblewrap delegated: executed, 23 rows present'
+
+# `b10x-substrate confine run` opens the linux adapter on a private group beneath the delegated
+# root; its delegated cases are absent, exit 0, without it, so each is required by its line.
+require_executed -p b10x-substrate-cli confine \
+  'confine delegated dry run render: executed' 'confine delegated private group: executed'
+require_executed -p b10x-substrate-cli confine_adversary \
+  'confine adversary delegated: executed, two runs on one root' \
+  'confine adversary delegated: executed, stderr' \
+  'confine adversary delegated: executed, json envelope' \
+  'confine adversary delegated: executed, relative ro' \
+  'confine adversary delegated: executed, linux run' \
+  'confine adversary delegated: executed, baseline variables'
+require_executed -p b10x-substrate-cli confine_security_review \
+  'security review confine concurrent cgroup root: executed' \
+  'security review confine json stderr: executed' \
+  'security review confine linux env: executed' \
+  'security review confine ro and argv: executed'
+
+# The confinement module as its consumers call it: every need chosen by facts and run on an
+# adapter not declared insecure. Absent, exit 0, without the delegated root, so required by count.
+consumer_log="$(cargo test -p b10x-substrate-host --locked --test consumer_surface \
+  -- --nocapture --test-threads=1 2>&1)" || { printf '%s\n' "${consumer_log}" >&2; exit 1; }
+printf '%s\n' "${consumer_log}"
+consumer_line="$(printf '%s\n' "${consumer_log}" \
+  | grep -oE 'consumer surface delegated lane: [1-9][0-9]* needs executed of [1-9][0-9]*' || true)"
+if [[ -z "${consumer_line}" ]]; then
+  echo "delegated-lane: the consumer surface needs did not execute" >&2
+  exit 1
+fi
+echo "delegated-lane: ${consumer_line}"
+
 # The public SDK owns a separate clean-room journey against the shipped daemon binary. It proves
 # PTY resize, live metrics and orderly whole-tree cleanup through SDK types only; without this
 # explicit command that test would be absent from the daemon-only lane below.

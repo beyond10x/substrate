@@ -81,6 +81,7 @@ succeeds where the profile allows it. "Untested" means no case proves the row ye
 | Destination-bound apertures (ADR 0013) | SBPL matches IP and port, not a hostname | untested; refused by name |
 | Mach service lookup | lookups the dynamic loader and libSystem need are allowed by name | untested |
 | Listing of `/` | `file-read-data` on the literal `/` is allowed: without it the dynamic loader aborts the process (SIGABRT, run 39643245714); the names of top-level entries are observable | untested |
+| Kernel state read through `sysctl` | `(allow sysctl-read)` is unscoped: libSystem and the dynamic loader read `sysctl` values (`hw.*`, `kern.*`) while a process starts, and the profile allows every read rather than naming those values; every readable `sysctl` value, such as the kernel version and hardware facts, is observable | untested; which values libSystem needs is not measured |
 
 ## Consequences
 

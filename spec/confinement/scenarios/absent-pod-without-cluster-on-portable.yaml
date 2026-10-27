@@ -1,0 +1,39 @@
+# Setup: no cluster configuration is present, so `confinement::open(pod)` is refused
+# (`story:pod-adapter`). A profile on `pod` with an image named by digest is refused the same.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: absent-pod-without-cluster-on-portable
+summary: "lane portable: with no cluster configuration, opening pod is refused confinement.adapter-unserved, and a profile on pod is refused the same."
+
+timeline:
+  - at: 2026-10-27T09:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: pod
+      served_families: [process_run, process_watch, output_read, wait, workspace, limits, audit]
+      facts: [image_digest_pinned]
+    outcome: unserved
+    error:
+      name: substrate.confinement.AdapterUnserved
+      fields: {adapter: pod}
+    no_events: [substrate.confinement.AdapterOpened]
+  - at: 2026-10-27T09:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: pod
+      required_families: [process_run]
+      required_facts: []
+      image: "registry.invalid/run@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    outcome: adapter-not-open
+    error:
+      name: substrate.confinement.AdapterUnserved
+      fields: {adapter: pod}
+    no_events: [substrate.confinement.ProfileAdmitted]
+
+assert:
+  - view: substrate.confinement.Adapters
+    counts: {at_most: 0}
+  - view: substrate.confinement.Profiles
+    counts: {at_most: 0}

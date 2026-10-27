@@ -40,7 +40,11 @@ A consumer that wants no deployment at all instead embeds `b10x-substrate-host` 
 `b10x-substrate-wire` in-process from an exact Git revision — that is the seam
 [harness](https://github.com/beyond10x/harness) pins today in
 `crates/harness-substrate/Cargo.toml`, and it is a consumer surface of this repository like the
-other two. The SDK's opt-in linked mode may package the daemon solely to re-execute it as a
+other two. An embedder that only needs to run a command under confinement uses that crate's
+`substrate_host::confinement` module: it opens the adapters the host offers, reads the families and
+facts each proved, and admits a `ConfinementProfile` against them, with a named refusal for
+anything not proved ([choosing a profile](website/docs/guides/confinement-profiles.md)).
+The SDK's opt-in linked mode may package the daemon solely to re-execute it as a
 separate child; resource operations still cross the authenticated Unix socket.
 
 The product and binary name are `substrate`. Rust source packages use the `b10x-substrate-*`

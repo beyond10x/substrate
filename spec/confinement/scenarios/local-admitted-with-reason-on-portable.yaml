@@ -1,0 +1,47 @@
+# ADR 0109 decision 4: `local` is requested by name with a reason, runs on the host filesystem with
+# direct networking, and is reported declared insecure. It serves the six families that claim no
+# confinement (`story:confinement-contract-on-linux-and-local`).
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: local-admitted-with-reason-on-portable
+summary: "lane portable: local with a reason is admitted for the six unconfined families and reported declared_insecure: true with the reason."
+
+arrange:
+  - instance: run
+    entity: substrate.confinement.Profile
+
+timeline:
+  - at: 2026-10-27T09:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: local
+      served_families: [process_run, process_watch, output_read, wait, workspace, audit]
+      facts: [declared_insecure, paths_are_host_paths, local_permitted, host_network]
+    outcome: opened
+  - at: 2026-10-27T09:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: local
+      required_families: [process_run, process_watch, output_read, wait, workspace, audit]
+      required_facts: []
+      local_reason: the operator runs this task on the developer's own machine
+    outcome: admitted-insecure
+    events:
+      - event: substrate.confinement.ProfileAdmitted
+        payload:
+          adapter: local
+          families: [process_run, process_watch, output_read, wait, workspace, audit]
+          facts: []
+          declared_insecure: true
+          local_reason: the operator runs this task on the developer's own machine
+    capture: {instance: run, event: substrate.confinement.ProfileAdmitted, field: profile}
+
+assert:
+  - view: substrate.confinement.Profiles
+    contains:
+      profile: {$instance: run}
+      adapter: local
+      declared_insecure: true
+      local_reason: the operator runs this task on the developer's own machine

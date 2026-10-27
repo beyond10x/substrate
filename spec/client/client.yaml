@@ -102,6 +102,23 @@ types:
     fields:
       - {name: cursor, type: 'Optional<String>'}
       - {name: limit, type: 'Optional<Integer>'}
+  # `confine run` opens a confinement adapter in the CLI's own process (ADR 0109); it reaches no
+  # daemon. Its flags are the sandbox repository's: an unset dir is the current directory, an
+  # unset backend is linux, and `local` names the reason a run is declared insecure.
+  - name: substrate.client.ConfineBackend
+    kind: enum
+    variants: [linux, oci]
+  - name: substrate.client.ConfineRunRequest
+    kind: struct
+    fields:
+      - {name: dir, type: 'Optional<String>'}
+      - {name: ro, type: 'Optional<List<String>>'}
+      - {name: net, type: 'Optional<Boolean>'}
+      - {name: backend, type: 'Optional<substrate.client.ConfineBackend>'}
+      - {name: image, type: 'Optional<String>'}
+      - {name: dry_run, type: 'Optional<Boolean>'}
+      - {name: local, type: 'Optional<String>'}
+      - {name: argv, type: 'List<String>'}
 
   # The CLI's error data. ess-cli resolves error codes to declared types, not to `errors:`
   # declarations, so these restate substrate.client.Refusal and .Unavailable member for member.
@@ -118,6 +135,16 @@ types:
     kind: struct
     fields:
       - {name: reason, type: substrate.client.UnavailableReason}
+  # ConfinementError, crates/substrate-host/src/confinement/mod.rs: its code, the fact, family or
+  # field it names (or the adapter's own words), the status the contract gives the code, and an
+  # address where the host named one.
+  - name: substrate.client.ConfineRefusalData
+    kind: struct
+    fields:
+      - {name: code, type: String}
+      - {name: message, type: String}
+      - {name: status, type: Integer}
+      - {name: address, type: 'Optional<String>'}
 
   # Callable results. A view's result is its row (`ess specify cli` refuses any other shape);
   # these are the rows of the views below, and the command answers.
@@ -172,6 +199,22 @@ types:
       - {name: stderr, type: String}
       - {name: stdout_truncated, type: Boolean}
       - {name: stderr_truncated, type: Boolean}
+  # A dry run answers program, args and a note that descriptor numbers in args are local to the
+  # render; a run answers its exit and output.
+  - name: substrate.client.ConfineRunResult
+    kind: struct
+    fields:
+      - {name: adapter, type: String}
+      - {name: declared_insecure, type: 'Optional<String>'}
+      - {name: program, type: 'Optional<String>'}
+      - {name: args, type: 'Optional<List<String>>'}
+      - {name: note, type: 'Optional<String>'}
+      - {name: exit_code, type: 'Optional<Integer>'}
+      - {name: signal, type: 'Optional<Integer>'}
+      - {name: stdout, type: 'Optional<String>'}
+      - {name: stderr, type: 'Optional<String>'}
+      - {name: stdout_truncated, type: 'Optional<Boolean>'}
+      - {name: stderr_truncated, type: 'Optional<Boolean>'}
   # EventPage, crates/substrate-wire/src/lib.rs. Each item is one wire Event, verbatim.
   - name: substrate.client.EventPage
     kind: struct
