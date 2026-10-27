@@ -1,8 +1,12 @@
 //! The confinement contract's portable lane (`story:confinement-contract-on-linux-and-local`).
 //!
 //! Executes every authored `-on-portable` scenario of `spec/confinement-suite.json` against the
-//! real `local` adapter and the S0 stubs of `macos`, `systemd`, `oci` and `pod`, through
-//! `confinement::open`. The count is read from the suite and must equal what ran. Beside the
+//! real `local` adapter, `systemd` with no user manager, `oci` without a runtime program and
+//! the S0 stubs of `macos` and `pod`, through `confinement::open`. The count is pinned per
+//! host: 18 declared, all executed off macOS; on macOS `absent-macos-off-macos-on-portable` is
+//! named as not executable there, because the adapter it asserts absent is present, and the
+//! other 17 run. Every other `absent-*` scenario opens its adapter with the scenario's own
+//! unreachable setup, so it executes on every host. Beside the
 //! suite: `linux` without a delegated cgroup refuses `limits` by name, each stub refuses to open,
 //! `render` under `linux` produces the bubblewrap argv, and a `local` run reports itself declared
 //! insecure in every observation.
@@ -43,15 +47,19 @@ fn open_portable(
     let request = match step.adapter.as_str() {
         "local" => AdapterRequest::Local(local()),
         "macos" => AdapterRequest::Macos(MacosRequest::default()),
+        // The setup the scenario names: `DBUS_SESSION_BUS_ADDRESS` unset, so no user manager.
         "systemd" => AdapterRequest::Systemd(SystemdRequest {
             inner: match step.inner.as_deref() {
                 Some("local") => InnerRequest::Local(local()),
                 other => panic!("no portable systemd scenario wraps {other:?}"),
             },
+            session_bus: None,
         }),
         // The setup the scenario names: a runtime program path that does not exist.
         "oci" => AdapterRequest::Oci(OciRequest {
             runtime: PathBuf::from("/nonexistent/substrate-oci-runtime"),
+            workspace_root: PathBuf::from("/nonexistent/substrate-oci-workspaces"),
+            writable_roots: Vec::new(),
         }),
         // The setup the scenario names: no cluster configuration.
         "pod" => AdapterRequest::Pod(PodRequest { cluster: None }),
@@ -60,18 +68,57 @@ fn open_portable(
     confinement::open(request)
 }
 
+/// The authored `-on-portable` scenarios `spec/confinement-suite.json` holds. Pinned, so a
+/// scenario lost or renamed out of the lane fails here instead of shrinking what runs.
+const PORTABLE_DECLARED: usize = 18;
+
+/// The portable scenarios this host cannot execute, by name: an `absent-<adapter>-*` scenario on
+/// the platform where that adapter is present.
+#[cfg(target_os = "macos")]
+const NOT_EXECUTABLE_HERE: &[&str] =
+    &["substrate.confinement/authored/absent-macos-off-macos-on-portable"];
+#[cfg(not(target_os = "macos"))]
+const NOT_EXECUTABLE_HERE: &[&str] = &[];
+
+/// What this host executes of the portable lane.
+#[cfg(target_os = "macos")]
+const PORTABLE_EXECUTED: usize = 17;
+#[cfg(not(target_os = "macos"))]
+const PORTABLE_EXECUTED: usize = 18;
+
 #[test]
 fn ess_confinement_portable_lane_executes_every_authored_portable_scenario() {
     let scenarios = support::scenarios("portable", |_| true);
-    let declared = support::lane_size("portable");
-    assert!(declared > 0, "the suite has no portable scenario");
-    assert_eq!(scenarios.len(), declared);
-    let (executed, audited, open_checks) = support::run(&scenarios, open_portable);
-    assert_eq!(executed, declared, "a portable scenario did not run");
+    assert_eq!(
+        scenarios.len(),
+        PORTABLE_DECLARED,
+        "spec/confinement-suite.json holds another number of authored -on-portable scenarios \
+         than this lane pins"
+    );
+    let (executable, not_here) = support::executable_here(scenarios);
+    for id in &not_here {
+        println!("ESS scenario not executable on this host: {id}");
+    }
+    assert_eq!(
+        not_here, NOT_EXECUTABLE_HERE,
+        "spec/confinement-suite.json: the portable scenarios this host cannot execute"
+    );
+    assert_eq!(
+        executable.len(),
+        PORTABLE_EXECUTED,
+        "spec/confinement-suite.json: the portable scenarios this host executes"
+    );
+    let (executed, audited, open_checks) = support::run(&executable, open_portable);
+    assert_eq!(
+        executed, PORTABLE_EXECUTED,
+        "a portable scenario of spec/confinement-suite.json did not run"
+    );
     assert!(audited > 0, "no refusal audit record was asserted");
     println!(
-        "ESS confinement portable lane: {executed} scenarios executed of {declared} declared, \
-         {audited} refusal audit records asserted, {open_checks} open checks refused, 0 failed"
+        "ESS confinement portable lane: {executed} scenarios executed of {PORTABLE_DECLARED} \
+         declared, {} not executable on this host, {audited} refusal audit records asserted, \
+         {open_checks} open checks refused, 0 failed",
+        not_here.len()
     );
 }
 
@@ -128,7 +175,7 @@ fn macos_does_not_open_off_macos() {
 }
 
 #[test]
-fn systemd_is_unserved_in_this_tree() {
+fn systemd_without_a_user_manager_is_unserved() {
     for inner in [
         InnerRequest::Local(LocalRequest::default()),
         InnerRequest::Linux(Box::new(confinement::linux::LinuxRequest::new(
@@ -137,9 +184,12 @@ fn systemd_is_unserved_in_this_tree() {
             ),
         ))),
     ] {
-        let error = confinement::open(AdapterRequest::Systemd(SystemdRequest { inner }))
-            .err()
-            .expect("systemd is absent");
+        let error = confinement::open(AdapterRequest::Systemd(SystemdRequest {
+            inner,
+            session_bus: None,
+        }))
+        .err()
+        .expect("systemd is absent without a session bus");
         assert!(
             matches!(
                 &error,
@@ -155,12 +205,14 @@ fn systemd_is_unserved_in_this_tree() {
 }
 
 #[test]
-fn oci_is_unserved_in_this_tree() {
+fn oci_without_a_runtime_program_is_unserved() {
     let error = confinement::open(AdapterRequest::Oci(OciRequest {
-        runtime: PathBuf::from("/usr/bin/docker"),
+        runtime: PathBuf::from("/nonexistent/substrate-oci-runtime"),
+        workspace_root: PathBuf::from("/nonexistent/substrate-oci-workspaces"),
+        writable_roots: Vec::new(),
     }))
     .err()
-    .expect("oci is absent");
+    .expect("oci is absent without a runtime");
     assert!(
         matches!(
             &error,
@@ -175,7 +227,7 @@ fn oci_is_unserved_in_this_tree() {
 }
 
 #[test]
-fn pod_is_unserved_in_this_tree() {
+fn pod_with_a_nonexistent_kubeconfig_is_unserved() {
     let error = confinement::open(AdapterRequest::Pod(PodRequest {
         cluster: Some(PathBuf::from("/nonexistent/kubeconfig")),
     }))

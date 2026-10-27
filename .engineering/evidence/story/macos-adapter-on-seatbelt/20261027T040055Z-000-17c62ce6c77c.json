@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-27T04:00:55Z",
+  "actor": "human:timo",
+  "artifact": "story:macos-adapter-on-seatbelt",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "macos.yml on macos-15 at 5fe0b40: cargo test -p b10x-substrate-host ok; ess_confinement_macos 13 passed; macos lane 5 of 8 executed (4 macos-s1), 3 macos-s2 refused until S2",
+    "reference": "https://github.com/beyond10x/substrate/actions/runs/40447162832"
+  }
+}

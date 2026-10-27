@@ -7,8 +7,8 @@
 //! (`spec/confinement/confinement.yaml`):
 //!
 //! 1. a reserved field (`confinement.reserved-field-unserved`, 501);
-//! 2. an adapter that did not open, or an `inner` it does not wrap (`confinement.adapter-unserved`,
-//!    501);
+//! 2. an adapter that did not open, an `inner` it does not wrap, or no `inner` on an adapter opened
+//!    around one (`confinement.adapter-unserved`, 501);
 //! 3. on a declared-insecure adapter, a missing or blank reason (`confinement.local-reason-missing`,
 //!    422);
 //! 4. on a digest-pinning adapter, an image not named by digest (`confinement.image-unpinned`, 422);
@@ -17,7 +17,11 @@
 //! 6. the first needed family not served, in [`FAMILY_ORDER`] (`confinement.family-unserved`, 501);
 //! 7. the first required fact not proved, in [`FACT_ORDER`] (`confinement.fact-unserved`, 501).
 //!
-//! Every admission and every refusal writes one record to the profile's [`AuditSink`]. Nothing
+//! A start or render decides the profile again against the opened adapter's own proof, so a
+//! profile admitted against a copied or altered proof is refused there by the same names.
+//!
+//! Every admission and every refusal, at admission or at start, writes one record to the
+//! profile's [`AuditSink`]. Nothing
 //! falls back to another adapter, and nothing degrades (invariant 3). This is substrate-host's
 //! API, not the wire: `HostDriverKind` and every contract bundle are unchanged (ADR 0044
 //! decision 7).
@@ -394,8 +398,15 @@ impl AdmittedProfile {
         }
     }
 
-    /// Refuses a start or render on an adapter other than the one that admitted this profile, and
-    /// a start on an adapter that does not serve `process_run`.
+    /// Refuses a start or render on an adapter other than the one that admitted this profile, a
+    /// profile the contract order refuses against this adapter's own proof, and a start on an
+    /// adapter that does not serve `process_run`.
+    ///
+    /// The instance alone does not prove the admission was made against this proof: an
+    /// [`AdapterFacts`] is `Clone` with public members, so a copy carrying the same instance can
+    /// claim a fact, such as `local_permitted`, the opened adapter never proved. The profile is
+    /// therefore decided again against `facts`, the adapter's own, and refused by that decision's
+    /// name.
     pub(crate) fn check_on(
         &self,
         facts: &AdapterFacts,
@@ -407,6 +418,7 @@ impl AdmittedProfile {
                 detail: "the profile was admitted by another adapter".to_owned(),
             });
         }
+        decide(facts, &self.profile)?;
         if running && !facts.serves(&ContractFamily::ProcessRun) {
             return Err(ConfinementError::FamilyUnserved {
                 adapter: facts.adapter.clone(),
@@ -414,6 +426,23 @@ impl AdmittedProfile {
             });
         }
         Ok(())
+    }
+
+    /// Writes the refusal record of a start `facts`' adapter refused after admission, whatever
+    /// refused it: the contract, the adapter or the host. Every adapter's `start` passes its
+    /// outcome through here, so no refusal leaves without a record (ADR 0109 decision 2).
+    pub(crate) fn audit_refusal<T>(
+        &self,
+        facts: &AdapterFacts,
+        outcome: Result<T, ConfinementError>,
+    ) -> Result<T, ConfinementError> {
+        if let Err(error) = &outcome {
+            audit(
+                &self.profile,
+                &AuditRecord::refused(&facts.adapter, facts.inner, error),
+            );
+        }
+        outcome
     }
 
     /// Writes a start's audit record.
@@ -480,7 +509,9 @@ fn decide(
 ) -> Result<AdmittedProfile, ConfinementError> {
     let adapter = || facts.adapter.clone();
     reserved(profile)?;
-    if profile.inner.is_some() && profile.inner != facts.inner {
+    // Both ways: an `inner` this adapter does not wrap, and an adapter opened around an `inner`
+    // the profile does not name (`confinement.yaml`, `AdmitProfile` outcome `adapter-unserved`).
+    if profile.inner != facts.inner {
         return Err(ConfinementError::AdapterUnserved {
             adapter: adapter(),
             detail: format!(
