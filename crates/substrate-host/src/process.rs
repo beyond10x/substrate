@@ -2410,6 +2410,79 @@ impl ProcessRuntime {
         Ok((pinned, read_only_roots, writable_roots))
     }
 
+    /// The program and argv `start` would hand bubblewrap for `input` in `workspace`, built by the
+    /// same [`Self::command`] and spawning nothing (the confinement contract's `render`).
+    ///
+    /// The workspace, read-only roots and read-only files are pinned and refused exactly as a
+    /// start pins and refuses them, and the descriptors are closed when this returns, so a number
+    /// in the argv names nothing afterwards. What a start acquires only to run — secret slots, a
+    /// capsule, scratch, writable roots, an aperture's resolution — is not acquired for a render:
+    /// a request naming any of it is refused `confinement.render-unserved` rather than rendered
+    /// without it.
+    pub(crate) fn render(
+        &self,
+        workspace: &Path,
+        input: &ExecStartInput,
+    ) -> Result<(PathBuf, Vec<String>), DriverError> {
+        if !input.writable_roots.is_empty()
+            || !input.secret_slots.is_empty()
+            || input.capsule.is_some()
+            || input.scratch.is_some()
+            || input.sandbox.network != substrate_wire::NetworkMode::None
+        {
+            return Err(DriverError::unserved(
+                crate::confinement::RENDER_UNSERVED,
+                "A render does not acquire writable roots, secret slots, a capsule, scratch or an \
+                 aperture, so a request naming one is not rendered.",
+                "render",
+            ));
+        }
+        crate::workdir::admit(input, self.capability.facts.exec_workdir)?;
+        crate::read_only_files::admit(
+            &input.read_only_files,
+            &input.read_only_roots,
+            self.capability.facts.exec_read_only_files.as_ref(),
+        )?;
+        let read_only_roots = Self::admit_read_only_roots(
+            &input.read_only_roots,
+            self.capability.facts.exec_read_only_roots.as_ref(),
+        )?;
+        let read_only_files = crate::read_only_files::pin(&input.read_only_files)?;
+        let root = self
+            .workspace_root
+            .as_deref()
+            .ok_or_else(DriverError::not_found)?;
+        let pinned = crate::fs::pin_workspace_directory_beneath(root, workspace)?;
+        let access = Self::prepare_workspace_access(&pinned, &input.workspace_access)?;
+        drop(pinned);
+        let slots = crate::secrets::SecretSlotSet::acquire(&[], &[])?;
+        let barrier = File::open("/dev/null").map_err(|error| {
+            DriverError::failed("exec.render-failed", format!("render barrier: {error}"))
+        })?;
+        let (command, _seccomp) = self.command(
+            input,
+            barrier.as_raw_fd(),
+            ChildChannel::Quiet,
+            None,
+            &slots,
+            None,
+            None,
+            None,
+            &access,
+            &read_only_files,
+            &read_only_roots,
+            &[],
+        )?;
+        let command = command.as_std();
+        Ok((
+            PathBuf::from(command.get_program()),
+            command
+                .get_args()
+                .map(|part| part.to_string_lossy().into_owned())
+                .collect(),
+        ))
+    }
+
     fn recheck_backend(&self) -> Result<(), DriverError> {
         let Some(probed) = self.backend_binding.as_ref() else {
             return Err(sandbox_unavailable());
