@@ -197,6 +197,12 @@ In order: `cargo test --workspace --release --locked`, `cargo fmt --all --check`
 `cargo xtask check-bundles 0.5.0 ... 0.23.0`,
 `cargo xtask check-json` and `cargo xtask check-toolchain`.
 Green here is the bar for `main`.
+
+**A change does not buy confidence with CI time.** A test runs its scenario once and finishes in
+seconds. Repetition counts, soak loops and load generators are local evidence recorded in the
+planning store, never a test, a CI step or a script the gate calls. A story whose acceptance needs
+"N runs under load" proves it on a workstation and records the run; the case it adds to the suite
+runs once.
 The former brand is fenced org-wide by `scripts/check-org-brand.sh` in the **atlas** repo, not here.
 
 **The gate's own checks are `cargo xtask` verbs**, in the `xtask/` workspace member — anything that
