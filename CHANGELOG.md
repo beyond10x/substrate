@@ -9,6 +9,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [0.12.0] — 2026-10-27
 
+Published by [release run 40469131133](https://github.com/beyond10x/substrate/actions/runs/40469131133)
+from tagged commit `65e1fca7185dfb0a5a116b70b9046b1de5722d68`. All three artifacts were
+keyless-signed and verified against `release.yml@refs/tags/0.12.0` by the release workflow, and each
+digest resolved anonymously:
+
+- Image: `ghcr.io/beyond10x/b10x-substrate-daemon:0.12.0` at `sha256:eca4a8b5118bd012ed9c96d6ffa392d0983ed5375356504c6df56220e4f50802`.
+- Contract bundle: `ghcr.io/beyond10x/b10x-substrate-wire:0.23.0` at `sha256:c2a50222da154028011a794cc93724043943581ba4ee44051c38dd084b759ff5`, unchanged since 0.11.0 and signed again by this release.
+- Disposable MCP image: `ghcr.io/beyond10x/b10x-substrate-mcp:0.12.0` at `sha256:2d365d7041feaff960fab55bcb1405a44c7b790db7936a3f3bdf1b0e78683403`, development-only.
+
 ### Added
 
 - The confinement contract is specified as the ESS domain `substrate.confinement` (ADR 0044): ten contract families, six adapters with their declared facts and named refusals, 49 authored scenarios named by adapter and lane, checked against the interpreted reference by `cargo xtask check-ess`.

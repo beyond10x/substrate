@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:pod-adapter
 kind: story
-status: active
+status: implemented
 title: 'The pod adapter: one Kubernetes Pod per run'
 owner: substrate
 tags:
@@ -27,10 +27,11 @@ scope:
   path: crates/substrate-host/tests/ess_confinement_pod.rs
 - confidence: inferred
   path: docs/design/28-pod-confinement-adapter.md
-revision: 7
+revision: 8
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-27T01:13:04Z", actor: "human:timo", revision: 6, decided_on: {"recorded":{"review_outcome":2}}}
 - {from: "proposed", to: "active", at: "2026-10-27T01:13:04Z", actor: "human:timo", revision: 7, decided_on: {"recorded":{"review_outcome":2}}}
+- {from: "active", to: "implemented", at: "2026-10-27T07:47:38Z", actor: "human:timo", revision: 8, decided_on: {"recorded":{"test_result":1,"review_outcome":5}}}
 ---
 # The `pod` adapter: one Kubernetes Pod per run
 

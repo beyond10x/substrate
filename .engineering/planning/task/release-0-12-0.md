@@ -2,12 +2,13 @@
 format: aep.planning-md/3
 id: task:release-0-12-0
 kind: task
-status: active
+status: implemented
 title: Release Substrate 0.12.0 with the ADR 0109 confinement contract
-revision: 3
+revision: 4
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-27T06:57:27Z", actor: "human:timo", revision: 2, executor: "agent:substrate-adr-0109"}
 - {from: "proposed", to: "active", at: "2026-10-27T06:57:28Z", actor: "human:timo", revision: 3, executor: "agent:substrate-adr-0109"}
+- {from: "active", to: "implemented", at: "2026-10-27T08:09:06Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Outcome
 Publish Substrate 0.12.0 with atlas ADR 0109: the `substrate_host::confinement` contract with its `local`, `linux`, `macos`, `systemd`, `oci` and `pod` adapters, the frozen consumer surface and `b10x-substrate confine run`. Daemon and MCP OCI images are built at 0.12.0; the development bundle stays `substrate-wire/0.23.0` (no wire change).
