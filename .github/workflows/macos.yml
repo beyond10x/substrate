@@ -52,7 +52,7 @@ jobs:
         run: cargo clippy -p b10x-substrate-host --all-targets --locked -- -D warnings
 
       - name: Test the host crate
-        run: cargo test -p b10x-substrate-host --locked
+        run: cargo test -p b10x-substrate-host --locked --no-fail-fast
 
       - name: Run the Seatbelt adversary suite
         run: |
@@ -67,4 +67,7 @@ jobs:
 
       - name: Show sandbox denials
         if: failure()
-        run: log show --last 20m --style compact --predicate 'sender == "Sandbox"' | tail -n 300
+        run: |
+          log show --last 30m --style compact --predicate 'sender == "Sandbox"' \
+            | grep -v -e '/dev/dtracehelper' -e 'notification_center' -e '/private/var/run/syslog' -e 'com.apple.logd' -e '/dev/tty' \
+            | tail -n 400 || true
