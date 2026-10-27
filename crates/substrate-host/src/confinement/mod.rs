@@ -47,11 +47,16 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use async_trait::async_trait;
 use serde::Serialize;
-use substrate_wire::Signal;
 
 pub use crate::confinement_types::{AdapterName, ContractFamily, Fact};
+// The types the module's own public signatures name, so a consumer builds every value it passes
+// from this module alone: `LinuxRequest::new` and `OciRequest` take the host's configuration and
+// declared roots, `ConfinementProfile` holds the wire's root, file and slot types, and
+// `ConfinementAdapter::signal` takes a `Signal`.
+pub use crate::{DeclaredWritableRoot, HostConfig};
 pub use facts::{AdapterFacts, FACT_ORDER, FAMILY_ORDER, InnerAdapter, ReservedField};
 pub use profile::{ConfinementProfile, IoBounds, Ipc, Network, ProcessBounds, image_is_pinned};
+pub use substrate_wire::{ReadOnlyFile, ReadOnlyRoot, SecretSlotRequest, Signal, WritableHostRoot};
 
 use crate::{DriverError, DriverErrorClass};
 

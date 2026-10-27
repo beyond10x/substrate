@@ -32,14 +32,9 @@ use std::sync::Arc;
 
 use substrate_host::confinement::{
     self, AdapterFacts, AdapterRequest, Command, ConfinementAdapter, ConfinementError,
-    ConfinementProfile, ContractFamily, FAMILY_UNSERVED, Fact, RunState, linux::LinuxRequest,
-    local::LocalRequest,
+    ConfinementProfile, ContractFamily, DeclaredWritableRoot, FAMILY_UNSERVED, Fact, HostConfig,
+    ReadOnlyRoot, RunState, WritableHostRoot, linux::LinuxRequest, local::LocalRequest,
 };
-// Named by the confinement module's own public signatures (`LinuxRequest::new` takes a
-// `HostConfig`; `ConfinementProfile` holds the root types) and not re-exported by it, so a
-// consumer cannot build these values from the module alone.
-use substrate_host::{DeclaredWritableRoot, HostConfig};
-use substrate_wire::{ReadOnlyRoot, WritableHostRoot};
 
 /// Every need this file states. Pinned, so a need lost from the list fails here.
 const NEEDS: usize = 5;
