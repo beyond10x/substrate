@@ -1,0 +1,8 @@
+[
+  {"id": "install-cli", "card": "anchor", "route": "/substrate/docs/guides/cli/", "anchor": "install"},
+  {"id": "refusal-meaning", "card": "anchor", "route": "/substrate/docs/concepts/confinement/", "anchor": "refusal-is-part-of-the-contract"},
+  {"id": "choose-adapter-for-kubernetes", "card": "rotating", "route": "/substrate/docs/concepts/adapters/", "anchor": "pod"},
+  {"id": "what-changed-in-0-12-0", "card": "extra", "route": "/substrate/docs/releases/", "anchor": "what-changed-in-the-newest-release"},
+  {"id": "confine-run-flags", "card": "extra", "route": "/substrate/docs/guides/cli/", "anchor": "run-under-a-confinement-adapter-without-a-daemon"},
+  {"id": "contract-families", "card": "extra", "route": "/substrate/docs/reference/contracts/", "anchor": "the-ten-families"}
+]

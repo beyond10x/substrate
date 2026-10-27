@@ -1,0 +1,127 @@
+{
+  "round": "R-01",
+  "date": "2026-10-27",
+  "probe": "Playwright 1.64.1 headless Chromium with @axe-core/playwright 4.14.0 (tags wcag2a, wcag2aa, wcag21a, wcag21aa, wcag22aa), dark theme, gating viewports 1280x800 and 390x844, measured 1440x900, 1024x768 and 768x1024; kept outside the repository",
+  "before": {
+    "gate": {
+      "pages": 90,
+      "scrollX": 0,
+      "clipped": 0,
+      "always_miss": 0,
+      "axe_serious": 1,
+      "tab_miss": 0
+    },
+    "axe_pages_by_rule": {
+      "scrollable-region-focusable@390x844": 1
+    },
+    "docs_article_top_390x844_px": {
+      "381": 17
+    },
+    "tasks": {
+      "install-cli@1280x800": {
+        "actions": 2,
+        "looks": 4,
+        "glance_max": 2
+      },
+      "refusal-meaning@1280x800": {
+        "actions": 2,
+        "looks": 4,
+        "glance_max": 2
+      },
+      "choose-adapter-for-kubernetes@1280x800": "not reached",
+      "what-changed-in-0-12-0@1280x800": "not reached",
+      "confine-run-flags@1280x800": "not reached",
+      "contract-families@1280x800": "not reached",
+      "install-cli@390x844": {
+        "actions": 2,
+        "looks": 4,
+        "glance_max": 2
+      },
+      "refusal-meaning@390x844": {
+        "actions": 2,
+        "looks": 4,
+        "glance_max": 2
+      },
+      "choose-adapter-for-kubernetes@390x844": "not reached",
+      "what-changed-in-0-12-0@390x844": "not reached",
+      "confine-run-flags@390x844": "not reached",
+      "contract-families@390x844": "not reached"
+    }
+  },
+  "after": {
+    "gate": {
+      "pages": 105,
+      "scrollX": 0,
+      "clipped": 0,
+      "always_miss": 0,
+      "axe_serious": 0,
+      "tab_miss": 0
+    },
+    "axe_pages_by_rule": {},
+    "docs_article_top_390x844_px": {
+      "256": 20
+    },
+    "tasks": {
+      "install-cli@1280x800": {
+        "actions": 2,
+        "looks": 4,
+        "glance_max": 2
+      },
+      "refusal-meaning@1280x800": {
+        "actions": 2,
+        "looks": 4,
+        "glance_max": 2
+      },
+      "choose-adapter-for-kubernetes@1280x800": {
+        "actions": 1,
+        "looks": 3,
+        "glance_max": 2
+      },
+      "what-changed-in-0-12-0@1280x800": {
+        "actions": 1,
+        "looks": 3,
+        "glance_max": 2
+      },
+      "confine-run-flags@1280x800": {
+        "actions": 2,
+        "looks": 4,
+        "glance_max": 2
+      },
+      "contract-families@1280x800": {
+        "actions": 1,
+        "looks": 3,
+        "glance_max": 2
+      },
+      "install-cli@390x844": {
+        "actions": 2,
+        "looks": 4,
+        "glance_max": 2
+      },
+      "refusal-meaning@390x844": {
+        "actions": 2,
+        "looks": 4,
+        "glance_max": 2
+      },
+      "choose-adapter-for-kubernetes@390x844": {
+        "actions": 1,
+        "looks": 3,
+        "glance_max": 2
+      },
+      "what-changed-in-0-12-0@390x844": {
+        "actions": 1,
+        "looks": 3,
+        "glance_max": 2
+      },
+      "confine-run-flags@390x844": {
+        "actions": 2,
+        "looks": 4,
+        "glance_max": 2
+      },
+      "contract-families@390x844": {
+        "actions": 1,
+        "looks": 3,
+        "glance_max": 2
+      }
+    }
+  }
+}

@@ -9,9 +9,9 @@ Substrate has a tagged, keyless-signed daemon image and a public, keyless-signed
 development contract bundle. Distribution is proven; the bundle remains a development contract
 because stability is a separate compatibility decision.
 
-Release [0.7.3](https://github.com/beyond10x/substrate/releases/tag/0.7.3), published on
-5 September 2026, ships the daemon and disposable MCP images with the signed
-`substrate-wire/0.16.0` development bundle.
+Release [0.12.0](https://github.com/beyond10x/substrate/releases/tag/0.12.0), published on
+27 October 2026, ships the daemon and disposable MCP images with the signed
+`substrate-wire/0.23.0` development bundle. [Release notes](./releases.md) lists what changed.
 
 The current implementation is a Linux host slice. Treat every capability as deployment-specific and
 verify it through `GET /v1/machine`.
@@ -30,15 +30,17 @@ verify it through `GET /v1/machine`.
 | observations | explicit live and terminal wall, CPU, memory peak/current, process, OOM, block-I/O, and scratch usage facts |
 | sessions | leased raw-pipe and probe-gated PTY modes at `/v1/sessions`, with one Unix-WebSocket or authority-bound hosted WSS attachment |
 | Rust SDK source | complete promoted-contract coverage over Unix or explicit-root TLS 1.3 HTTPS/WSS, with serializable observations, exact optional facts, keyed mutations, PTY resize, metrics and snapshots |
-| disposable MCP | private stdio adapter over the SDK; bounded tools/resources, caller operation IDs, portable named refusal and native delegated cleanup evidence; published as a separately signed 0.7.3 image |
+| disposable MCP | private stdio adapter over the SDK; bounded tools/resources, caller operation IDs, portable named refusal and native delegated cleanup evidence; published as a separately signed 0.12.0 image |
+| confinement adapters | in process, through `substrate_host::confinement` and `b10x-substrate confine run`: `local`, `linux`, `macos`, `systemd`, `oci` and `pod`, each declaring its families and facts; see [confinement adapters](./concepts/adapters.md) |
 | capsules | digest-verified read-only runtime material beside a writable workspace |
-| distribution | Apache-2.0 source plus keyless-signed 0.7.3 daemon and MCP images and the signed 0.16.0 development bundle |
+| distribution | Apache-2.0 source plus keyless-signed 0.12.0 daemon and MCP images and the signed 0.23.0 development bundle |
 
 ## Explicitly absent
 
 - general workspace backup/restore snapshots (reconciliation snapshots recover observed resource state)
 - workloads, images, volumes, and endpoints
-- Docker and Kubernetes drivers
+- Docker and Kubernetes drivers behind the daemon; the `oci` and `pod` confinement adapters run in
+  the host crate, not behind the daemon
 - cross-machine scheduling
 - stable signed contract-bundle publication
 
@@ -56,7 +58,7 @@ in a broader architecture do not imply served endpoints.
   Identity round trip on a reused keep-alive connection (at most 8 idle, closed after 30 s idle or
   any error), so a completed revocation applies to the next request.
 - One daemon is one trust domain; it is not a multi-tenant isolation layer.
-- Release `0.7.3` advertises `substrate-wire/0.16.0` and the SHA-256 of its inner
+- Release `0.12.0` advertises `substrate-wire/0.23.0` and the SHA-256 of its inner
   `bundle.json` as one claim. The outer OCI package has its own digest. Version `0.15.0`
   deliberately replaced `/v1/pipe-sessions` with `/v1/sessions` and serves no compatibility alias.
 - Git materialization needs a configured source and transient Connector authority. The conditional

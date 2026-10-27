@@ -42,6 +42,9 @@ the capability needed to enforce them.
 - **Exact resource facts.** Opted-in runs expose kernel CPU, memory, process, OOM and block-I/O
   observations during and after execution; Substrate does not invent a mean from samples.
 - **Verified capability facts.** A deployment advertises only what it has probed and can enforce.
+- **Six confinement adapters.** The host crate runs a command under `linux`, `macos`, `systemd`,
+  `oci`, `pod` or the declared-insecure `local`, each declaring what it enforces and refusing the
+  rest by name.
 - **Leased resources and events.** Abandoned work becomes a typed transition, and consumers can
   replay a bounded event history.
 
@@ -58,6 +61,9 @@ why work should happen and where it should be placed.
 - [Run an ordinary binary](./guides/run-a-command.md) with terminal-visible bounds and metrics.
 - [Understand the system boundary](./concepts/boundary.md) and [model coverage](./concepts/model.md).
 - [See how confinement becomes refusal](./concepts/confinement.md).
+- [Compare the confinement adapters](./concepts/adapters.md) and what each enforces.
 - [Choose a confinement profile](./guides/confinement-profiles.md) when you embed the host crate.
+- [Read the contracts overview](./reference/contracts.md): what Substrate promises, and where.
 - [Follow a mutation from operation to observation](./concepts/operations.md).
-- [Check the current status and limitations](./status.md).
+- [Check the current status and limitations](./status.md), and [what changed](./releases.md) in
+  the newest release.

@@ -551,6 +551,20 @@ standalone project-site workflow, like Mantle. Do not add unified Website bundle
 route manifests, redirect façades, or global docs reconciliation. Publish no internal plans, ADRs or
 work logs.
 
+`check-docs` also holds what the site derives. The adapter matrices, the family, fact and lane tables
+and the CLI Commands table must match `spec/confinement/`, `spec/confinement-suite.json` and
+`spec/generated/cli/binding.json` (`xtask/src/site_drift.rs`). The *Release notes* page renders the
+newest released `CHANGELOG.md` section at build time. Site changes follow the UI iteration loop in
+`website/ux/` (`xtask/src/site_ux.rs`):
+
+- `baseline.json` holds lower-is-better ratchets: the clicks per task in `tasks.json` and the reading
+  load per page. A value that improves is written back with `cargo xtask docs-baseline` in the same
+  change. A worse value needs `--decision <id>`.
+- Every finding is a `findings/UXF-nnn.md` record. A fixed S1 or S2 finding names a test that
+  exists.
+- A round's browser measurements (Playwright and axe) are taken outside the repository, and only
+  their compact `rounds/R-nn/round.json` is committed.
+
 **Document placement is a rule, not a habit.** Current architecture goes in `architecture/`;
 sequencing in `ROADMAP.md`; observed progress in `STATUS.md`. `docs/plan/` turns design into gates
 and slices and contains no implementation. Work items — epics and stories — are planning
