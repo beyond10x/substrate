@@ -2,12 +2,14 @@
 format: aep.planning-md/3
 id: decision-blocker:macos-s2-cargo-link-in-seatbelt
 kind: decision-blocker
-status: open
+status: cleared
 title: How cargo links inside the macOS S2 Seatbelt policy
 relations:
 - blocks: story:macos-seatbelt-policy-runs-cargo-test
 withholds: test_result
-revision: 1
+revision: 3
+transitions:
+- {from: "open", to: "cleared", at: "2026-10-27T06:33:24Z", actor: "human:timo", revision: 3}
 ---
 ## What is stopped
 
@@ -44,3 +46,16 @@ Recommended: a. Not attempted, because the stop rule fired.
 Security review F1, F2, F4, F5 fixed and F3 kept (its case passed on macos-15), `DYLD_*`
 refusal, two policy read paths (`/private/etc/ssl`, the Xcode licence plist). Integration holds
 none of them until the branch is green.
+
+## Resolution, 2026-10-27
+
+Decided by the delivery orchestrator: option a, with one condition. Resolve the linker
+(`<developer>/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang`) outside the sandbox and pass it
+as the cargo linker, wherever `RUSTC` and `SDKROOT` are resolved today. If that were the macOS
+adapter's own environment setup, it would go there too, so a real `cargo test` under the S2 policy
+links and the case proves the product. `RUSTC` and `SDKROOT` are resolved only by the test
+(`crates/substrate-host/tests/seatbelt_adversary.rs:401`, branch `fix/adr-0109-macos-s2`), so a
+is done in the test, and `story:confined-cargo-build-links-without-the-xcrun-shim` (draft) carries
+the product half, with b (widens exec to `/bin`) and c (a per-user `/var/folders` path the policy
+rules exclude) rejected. Reason: a needs no policy widening; the stop rule fired, so a is the next
+attempt, not a third retry of the same cause.
