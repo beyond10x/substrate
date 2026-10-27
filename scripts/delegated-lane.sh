@@ -124,6 +124,9 @@ require_executed ess_confinement_linux \
   'ESS confinement linux subtree symlink: executed' \
   'ESS confinement linux nested git: executed' \
   'ESS confinement linux hard link: executed' \
+  'ESS confinement linux submodule subtree: executed' \
+  'ESS confinement linux planted repository: executed' \
+  'ESS confinement linux output while running: executed' \
   'ESS confinement linux retention head: executed' \
   'ESS confinement linux retention tail: executed' \
   'ESS confinement linux retention per stream: executed'

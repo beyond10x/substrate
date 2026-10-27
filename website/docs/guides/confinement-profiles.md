@@ -92,6 +92,14 @@ inside it needs no more than `workspace`. A directory outside it is a declared r
 `read_only_roots` for a toolchain, `writable_roots` for an install root the operator declared by
 name.
 
+`workspace_access: Scoped` names the subtrees a run may write; the rest of the workspace is
+read-only. `linux` and `systemd` around it serve it. The run cannot write the root's `.git`, and a
+subtree that is `.git`, lies beneath it or holds a submodule the root's `.gitmodules` registers is
+refused (`confinement.writable-subtree-git`). Limits: an unregistered nested `.git` stays writable,
+and host Git run inside a subtree reads a repository the run created there, so run it in the root.
+A hard link made on the host before the run stays writable through a subtree; the run cannot
+create one (`EXDEV`).
+
 ## Choose an adapter by its facts
 
 Pick the adapter whose facts cover the profile, and prefer one that does not prove

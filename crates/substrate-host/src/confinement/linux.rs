@@ -41,7 +41,9 @@
 //! (`exec.workspace-access-invalid`) and no writable subtree at or beneath `.git`
 //! (`confinement.writable-subtree-git`). A subtree that is absent, a symlink or not a directory
 //! is refused when the start opens the workspace, by the driver's `exec.workspace-subtree-*`
-//! names. `output_retention` is served wherever `output_read` is: the driver keeps the bytes it
+//! names. So is a subtree that is, or holds, a submodule the workspace's `.gitmodules` registers,
+//! read through the pinned workspace descriptor: `confinement.writable-subtree-git`, as `.git`
+//! itself. `output_retention` is served wherever `output_read` is: the driver keeps the bytes it
 //! names within the same bound, and writes its truncation marker only under `Head`.
 //!
 //! Every refusal of a start, by the contract's recheck, the adapter or the driver, writes its
@@ -321,7 +323,7 @@ mod imp {
             let retention = admitted.profile().output_retention;
             match self
                 .driver
-                .start_exec_retaining(&id, &root_name, &input, retention)
+                .start_exec_for_adapter(&id, &root_name, &input, retention)
                 .await
             {
                 DispatchOutcome::Observed(_) => {

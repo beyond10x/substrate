@@ -77,8 +77,9 @@
         "value": 109.0
       },
       "reading_load.median": {
+        "decision": "story:linux-adapter-serves-scoped-workspace-write",
         "tolerance": 0,
-        "value": 2.5
+        "value": 3.0
       }
     },
     "page:guides/deployment": {

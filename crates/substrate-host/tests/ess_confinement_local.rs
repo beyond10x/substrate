@@ -698,6 +698,69 @@ async fn local_retains(retention: confinement::Retention) {
     assert_eq!(output.stderr_kept.observed_bytes, Some(0));
 }
 
+// Design 29 § 6: an adapter that reads its own pipes answers `output()` while the run is running
+// with what it kept so far. The run prints, says so through a file, then waits for the go-ahead,
+// so the read happens while it is alive and after its bytes were written, with no timing guess.
+#[tokio::test(flavor = "multi_thread")]
+async fn local_output_while_running_is_what_was_kept_so_far() {
+    let adapter = local();
+    let workspace = tempfile::tempdir().expect("workspace");
+    let admitted = adapter
+        .admit(&ConfinementProfile {
+            local_reason: Some(REASON.into()),
+            workspace: Some(workspace.path().to_path_buf()),
+            output_retention: confinement::OutputRetention {
+                stdout: confinement::Retention::Tail,
+                stderr: confinement::Retention::Head,
+            },
+            ..ConfinementProfile::default()
+        })
+        .expect("admitted");
+    let run = adapter
+        .start(
+            &admitted,
+            &Command {
+                argv: vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    "printf abc; : > \"$WS/printed\"; i=0; \
+                     while [ ! -e \"$WS/go\" ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done"
+                        .into(),
+                ],
+                env: BTreeMap::from([
+                    ("PATH".to_owned(), "/usr/bin:/bin".to_owned()),
+                    (
+                        "WS".to_owned(),
+                        workspace.path().to_str().expect("utf-8").to_owned(),
+                    ),
+                ]),
+            },
+        )
+        .await
+        .expect("started");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !workspace.path().join("printed").exists() {
+        assert!(std::time::Instant::now() < deadline, "never printed");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let during = adapter.output(&run).await.expect("output while running");
+    std::fs::write(workspace.path().join("go"), "").expect("go");
+    let ended = adapter.wait(&run).await.expect("waited");
+    assert_eq!(ended.exit.as_ref().and_then(|exit| exit.code), Some(0));
+    let after = adapter.output(&run).await.expect("output");
+    assert_eq!(
+        during.stdout, b"abc",
+        "while running: {:?}",
+        during.stdout_kept
+    );
+    assert_eq!(
+        during.stdout_kept.observed_bytes, None,
+        "the total is not known yet"
+    );
+    assert_eq!(after.stdout, b"abc");
+    assert_eq!(after.stdout_kept.observed_bytes, Some(3));
+}
+
 // B2
 #[tokio::test(flavor = "multi_thread")]
 async fn local_head_keeps_the_first_bytes_of_a_long_stream() {

@@ -108,19 +108,48 @@ subtree, because `linkat` across two mounts is `EXDEV`. Nothing else is mounted 
 `/workspace`: `RESERVED_MOUNTS` and `WRITABLE_ROOT_RESERVED_MOUNTS` keep read-only and writable roots
 out of it.
 
+**A subtree that holds a registered submodule is refused.** A submodule's `.git` is a `gitdir:`
+file in its checkout, pointing into the root's `.git/modules/`. A run that may write the checkout
+can replace that file with a repository whose configuration it chose, and a host `git status` in
+the workspace root runs Git in every submodule, so it runs the `core.fsmonitor` the run chose. The
+security review observed this. That is the root's `.git` reached through a file the run may write,
+so the start refuses it with the same `confinement.writable-subtree-git` (422) as a subtree at or
+beneath `.git`: no new name and no wire change. When the start has pinned the workspace and shown
+every subtree to exist, it reads the root's `.gitmodules` through the pinned descriptor (`openat2`
+beneath, no symlinks), at most 1 MiB, and only its `path` keys. Any registered path that equals or
+lies beneath a writable subtree is refused, compared component by component and ASCII
+case-insensitively, as the `.git` rule is. A registered submodule that contains a writable subtree
+has its own `.gitmodules` read the same way. Each submodule is descended into once, and at most 64
+registries are read per start. A `.gitmodules` that is present but cannot be read that way (a
+symlink, not a regular file, over the bound) refuses the start, and so does a walk past 64
+registries. Neither is taken for an empty registry. Only the `linux` adapter's start applies the rule. The daemon's exec route does
+not, so its answers are unchanged (§ 7).
+
 **The threat model is the confined run.** A host process with the workspace owner's uid can rename
 entries before admission. It is outside this boundary, as it is for ADR 0023 on the daemon route.
 
-**Limits the note states rather than closes.** Each is a case for the adversary pass:
+**What `Scoped` protects, and the limits the note states rather than closes.** `Scoped` protects
+the workspace root's `.git` from writes in the run, and it refuses subtrees holding a registered
+submodule. It does not close the following; each is pinned by a delegated case in
+`crates/substrate-host/tests/ess_confinement_linux.rs`:
 
-- A `.git` nested *inside* a writable subtree (a vendored repository, a submodule checkout) stays
-  writable. Finding one needs a walk of the subtree, which is unbounded. A consumer that must keep
-  one closed names a narrower subtree. `sealed_paths` would be the field for it, and § 3 keeps it
-  refused on `linux`.
-- A hard link made **before** the run, between a file in a writable subtree and a file elsewhere in
-  the workspace (`.git` included), is writable through the subtree. A read-only bind restricts the
-  mount, not the inode. This is inferred from mount semantics and not observed. The adversary pass
-  should observe it and record the outcome. The run itself cannot make such a link (`EXDEV`, above).
+- A nested `.git` inside a writable subtree stays writable if no `.gitmodules` registers it (a
+  vendored repository, an unregistered checkout). Finding one needs a walk of the subtree, which is
+  unbounded. A consumer that must keep one closed names a narrower subtree. `sealed_paths` would be
+  the field for it, and § 3 keeps it refused on `linux`. Git's own registry is the index, not
+  `.gitmodules`: a gitlink with no `.gitmodules` entry (an embedded repository added with
+  `git add`, or a `.gitmodules` since removed) is not refused, and a root `git status` still runs
+  Git in it. That was observed with host Git alone, outside a run, by removing `.gitmodules` from
+  the worktree and, separately, from the index and `HEAD`. Reading the index is a design of its own.
+- `Scoped` does not protect host Git run inside a writable subtree from a repository the run
+  creates there. Host Git in `out/` finds `out/.git` before the root's, so it reads the
+  configuration the run wrote, `core.fsmonitor` included. A `ReadWrite` workspace has the same
+  exposure. An operator runs Git on the host in the workspace root, not inside a writable subtree.
+- A hard link made on the host before the run stays writable through a subtree when it links a file
+  there to a file elsewhere in the workspace (`.git` included). A read-only bind restricts the mount,
+  not the inode. This was observed: the host's `.git/config` changed through `out/alias`, while a
+  direct write to `/workspace/.git/config` was refused. The run itself cannot create such a link:
+  `ln .git/config out/link` fails with `EXDEV` ("Invalid cross-device link").
 
 `ReadOnly` is served by the same path with no subtree: `--ro-bind-fd <root> /workspace` alone.
 
@@ -142,8 +171,10 @@ Why not serve it now:
    have to branch on the adapter (invariant 4).
 2. **Scoped write covers what the consumer asked for.** The acceptance needs a write outside the
    named subtrees refused and a write over `.git` refused. With `Scoped`, everything not named is
-   read-only, `.git` included. A deny-list inside a writable tree is then only needed for the
-   nested cases in § 2. They have no consumer yet.
+   read-only, `.git` included, and a subtree holding a registered submodule is refused (§ 2). A
+   deny-list inside a writable tree is then only needed for the limits § 2 states: an unregistered
+   nested `.git`, a repository the run creates for host Git run inside the subtree, and a hard
+   link made on the host before the run. They have no consumer yet.
 3. **ADR 0023's rule would apply.** A fact is published only after a throwaway sandbox proves it.
    A sealed-path probe, its fact source in `CapabilityFacts` and its mount order are a design of
    their own. When a consumer needs a nested seal, that is a later story with its own note.
@@ -256,12 +287,21 @@ The caps come from the stream's existing bound `B`:
 `push(chunk)` adds `chunk.len()` to `observed`. It copies into `head` until `head_cap` is reached.
 Of what is left, it keeps the last `tail_cap` bytes: when the rest of the chunk alone is at least
 `tail_cap` bytes, the ring is cleared and refilled from the chunk's last `tail_cap` bytes. Otherwise
-it appends and pops `len - tail_cap` bytes from the front. Work is linear in the bytes read. Memory
-is at most `B` per stream, as today, and it is allocated as output arrives, so a quiet stream costs
-nothing.
+it first pops from the front what the new bytes would push past `tail_cap`, then appends, so the
+ring never holds more than `tail_cap` bytes, even for a moment. Work is linear in the bytes read.
+Memory is at most `B` per stream, as today, and it is allocated as output arrives, so a quiet
+stream costs nothing. Each buffer grows by doubling its allocation, capped at its share of `B`, so
+neither the head nor the ring is ever allocated beyond it.
 
-`snapshot()` returns `head ++ tail` (one copy, as today's `clone`) with its `KeptOutput`.
-`output()` while the run is running returns the current snapshot.
+`snapshot()` returns `head ++ tail` (one copy, as today's `clone`) with its `KeptOutput`. On the
+adapters that read their own pipes (`local`, `macos`, `systemd` around `local`, and `oci`),
+`output()` while the run is running returns the current snapshot, with `observed_bytes` absent
+until the stream ended. `linux`, and `systemd` around it, report output when the run ends: the host
+driver publishes a run's bytes once its drains ended, so `output()` while the run is running holds
+none of them, whatever the retention, as before this note. `pod` reads the log API and is not
+covered by either statement. `local` and `linux` hold delegated or portable cases for their
+statement; `macos`, `systemd` around `local` and `oci` share `local`'s `Captured` read path and
+are stated from it, not observed.
 
 Properties the unit tests hold:
 
@@ -280,9 +320,10 @@ Properties the unit tests hold:
   when it has no live sender and the output is recorded. It writes `TRUNCATION_MARKER` only under
   `Head`; under the other modes the marker would overwrite kept bytes, and the counts already say
   what is missing. `ExecObservation` gains `stdout_kept` and `stderr_kept`.
-- `HostDriver` gains `pub(crate) async fn start_exec_retaining(&self, id, root_name, input,
-  OutputRetention)`. `Driver::start_exec` calls it with the default, and the `linux` adapter calls
-  it with the profile's value. The `Driver` trait, `start_pipe_session` and every frame forwarded
+- `HostDriver` gains `pub(crate) async fn start_exec_for_adapter(&self, id, root_name, input,
+  OutputRetention)`, which also applies the registered-submodule rule of § 2. Only the `linux`
+  adapter calls it, with the profile's value; `Driver::start_exec` keeps the default retention and
+  no submodule rule. The `Driver` trait, `start_pipe_session` and every frame forwarded
   live are untouched. A session is always `Head`, because only a `pub(crate)` method takes a
   retention, and the daemon crate cannot name it.
 

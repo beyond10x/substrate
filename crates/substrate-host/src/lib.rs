@@ -44,6 +44,8 @@ pub mod seatbelt;
 mod seccomp;
 #[cfg(target_os = "linux")]
 mod secrets;
+#[cfg(target_os = "linux")]
+mod submodules;
 #[cfg(not(target_os = "linux"))]
 mod unsupported;
 #[cfg(target_os = "linux")]
@@ -1165,10 +1167,11 @@ impl HostDriver {
         Ok(self.config.workspace_root.join(root_name))
     }
 
-    /// [`Driver::start_exec`], keeping the bytes of each recorded stream `retention` chooses
-    /// within the same bound (design 29 § 6). `pub(crate)`: only the `linux` confinement adapter
-    /// asks for another retention than the head, so no session and no daemon route can.
-    pub(crate) async fn start_exec_retaining(
+    /// [`Driver::start_exec`] for the `linux` confinement adapter (design 29): keeping the bytes
+    /// of each recorded stream `retention` chooses within the same bound (§ 6), and refusing a
+    /// writable subtree that holds a registered submodule (§ 2). `pub(crate)`, so no session and
+    /// no daemon route can ask for either.
+    pub(crate) async fn start_exec_for_adapter(
         &self,
         id: &str,
         workspace_root_name: &str,
@@ -1179,8 +1182,12 @@ impl HostDriver {
             Ok(value) => value,
             Err(error) => return DispatchOutcome::NotDispatched(error),
         };
+        let adapter = process::AdapterStart {
+            retention,
+            refuse_registered_submodules: true,
+        };
         self.processes
-            .start_retaining(id, &workspace, input, retention)
+            .start_for_adapter(id, &workspace, input, adapter)
             .await
     }
 

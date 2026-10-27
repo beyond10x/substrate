@@ -71,9 +71,10 @@ pub(crate) struct RetentionBuffer {
     retention: Retention,
     head_cap: usize,
     tail_cap: usize,
-    /// Grows to `head_cap`, never beyond.
+    /// Empty until bytes arrive; grows to `head_cap`, never beyond, in length or allocation.
     head: Vec<u8>,
-    /// Grows to `tail_cap`, then drops from the front.
+    /// Empty until bytes arrive; the front is dropped before bytes are added, so it never holds
+    /// or allocates more than `tail_cap`.
     tail: VecDeque<u8>,
     /// Saturating.
     observed: u64,
@@ -107,19 +108,28 @@ impl RetentionBuffer {
             .head_cap
             .saturating_sub(self.head.len())
             .min(chunk.len());
+        self.head.reserve_exact(growth(
+            self.head.len(),
+            self.head.capacity(),
+            take,
+            self.head_cap,
+        ));
         self.head.extend_from_slice(&chunk[..take]);
         let rest = &chunk[take..];
         if self.tail_cap == 0 || rest.is_empty() {
             return;
         }
-        if rest.len() >= self.tail_cap {
-            self.tail.clear();
-            self.tail.extend(&rest[rest.len() - self.tail_cap..]);
-        } else {
-            self.tail.extend(rest);
-            let excess = self.tail.len().saturating_sub(self.tail_cap);
-            self.tail.drain(..excess);
-        }
+        // Trim before extending, so the ring never holds more than its cap, even for a moment.
+        let rest = &rest[rest.len().saturating_sub(self.tail_cap)..];
+        let excess = (self.tail.len() + rest.len()).saturating_sub(self.tail_cap);
+        self.tail.drain(..excess);
+        self.tail.reserve_exact(growth(
+            self.tail.len(),
+            self.tail.capacity(),
+            rest.len(),
+            self.tail_cap,
+        ));
+        self.tail.extend(rest);
     }
 
     /// The stream ended at end of file: its total is known.
@@ -153,6 +163,18 @@ impl RetentionBuffer {
             tail_bytes: self.tail.len() as u64,
         }
     }
+}
+
+/// How many bytes to reserve exactly so a buffer of `len` bytes in `capacity` takes `more`:
+/// none when they fit, else enough to double the capacity, never past `cap`. So a quiet stream
+/// allocates nothing, a growing one reallocates a logarithmic number of times, and no buffer is
+/// ever allocated beyond its share of the bound. `len + more` never exceeds `cap` here.
+fn growth(len: usize, capacity: usize, more: usize, cap: usize) -> usize {
+    let needed = len + more;
+    if needed <= capacity {
+        return 0;
+    }
+    needed.max(capacity.saturating_mul(2)).min(cap) - len
 }
 
 /// Both streams of one run an adapter reads from its own pipes.
@@ -318,6 +340,48 @@ mod tests {
                         bytes.len()
                     );
                 }
+            }
+        }
+    }
+
+    /// A quiet stream costs nothing: the ring allocates nothing when the stream opens. It grows
+    /// with what it keeps, trims before it extends, and never holds or allocates more than its cap,
+    /// even for a moment, so a `Tail` stream stores its bound, not about twice it.
+    #[test]
+    fn the_ring_grows_lazily_and_never_past_its_cap() {
+        for bound in [1, 4, 5, 64, 4096] {
+            for retention in [Retention::Head, Retention::Tail, Retention::HeadAndTail] {
+                let mut buffer = RetentionBuffer::new(retention, bound);
+                let cap = buffer.tail_cap;
+                assert_eq!(buffer.tail.capacity(), 0, "{retention:?} {bound}: at open");
+                assert_eq!(buffer.head.capacity(), 0, "{retention:?} {bound}: at open");
+                let whole = stream(bound * 7 + 3);
+                let mut chunks: Vec<&[u8]> = whole[..bound * 2].chunks(1).collect();
+                chunks.extend(whole[bound * 2..bound * 4].chunks(cap.saturating_sub(1).max(1)));
+                chunks.push(&whole[bound * 4..=bound * 6]);
+                chunks.extend(whole[bound * 6 + 1..].chunks(1));
+                for chunk in chunks {
+                    buffer.push(chunk);
+                    assert!(
+                        buffer.head.capacity() <= buffer.head_cap,
+                        "{retention:?} {bound}: {} allocated for a head of {}",
+                        buffer.head.capacity(),
+                        buffer.head_cap
+                    );
+                    assert!(buffer.tail.len() <= cap, "{retention:?} {bound}");
+                    assert!(
+                        buffer.tail.capacity() <= cap,
+                        "{retention:?} {bound}: {} allocated for a ring of {cap} after a {}-byte \
+                         chunk",
+                        buffer.tail.capacity(),
+                        chunk.len()
+                    );
+                }
+                assert_eq!(
+                    buffer.snapshot().0[buffer.head.len()..],
+                    whole[whole.len() - cap..],
+                    "{retention:?} {bound}"
+                );
             }
         }
     }

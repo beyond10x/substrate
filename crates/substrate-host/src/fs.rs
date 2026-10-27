@@ -1394,6 +1394,34 @@ pub(crate) fn open_component_beneath(
     )
 }
 
+/// Reads the regular file `name` directly beneath the pinned directory `directory`, opened with
+/// `openat2` beneath it without following any link, and at most `max_bytes` of it. An absent file
+/// is `Ok(None)`; a symlink, another kind of file, or one over the bound is an error.
+pub(crate) fn read_regular_beneath(
+    directory: &OwnedFd,
+    name: &str,
+    max_bytes: u64,
+) -> Result<Option<Vec<u8>>, DriverError> {
+    let fd = match openat2(directory.as_raw_fd(), name, FILE_READ_FLAGS, 0) {
+        Ok(fd) => fd,
+        Err(error) if error.class == crate::DriverErrorClass::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let stat = fstat(fd.as_raw_fd())?;
+    if stat.st_mode & libc::S_IFMT != libc::S_IFREG {
+        return Err(path_escape());
+    }
+    let size = u64::try_from(stat.st_size).unwrap_or(u64::MAX);
+    if size > max_bytes {
+        return Err(DriverError::exhausted(
+            "workspace.file-limit",
+            "File exceeds the bound it is read within.",
+            "file",
+        ));
+    }
+    read_bounded_complete(File::from(fd), size, max_bytes).map(Some)
+}
+
 /// [`pin_workspace_directory_beneath`] for a directory the caller has just created and holds by
 /// path, as the capability probe does: the parent is opened by path, following links.
 pub(crate) fn pin_workspace_directory(workspace: &Path) -> Result<OwnedFd, DriverError> {

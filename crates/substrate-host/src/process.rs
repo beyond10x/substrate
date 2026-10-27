@@ -211,6 +211,17 @@ struct PipeState {
     terminal: Option<Arc<crate::pty::PtyMaster>>,
 }
 
+/// What only the `linux` confinement adapter asks of a start beyond its wire request (design 29).
+/// No daemon route and no session sets anything here, so neither changes what the wire answers.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct AdapterStart {
+    /// Which bytes of each recorded stream are kept within the bound (§ 6).
+    pub(crate) retention: OutputRetention,
+    /// Refuse a writable subtree that holds a submodule the workspace registers, as `.git`
+    /// itself is refused: `confinement.writable-subtree-git` (§ 2).
+    pub(crate) refuse_registered_submodules: bool,
+}
+
 #[derive(Debug, Clone, Copy)]
 struct PipeSettings {
     capture: substrate_wire::CaptureMode,
@@ -793,21 +804,21 @@ impl ProcessRuntime {
         workspace: &Path,
         input: &ExecStartInput,
     ) -> DispatchOutcome<ExecObservation> {
-        self.start_inner(id, workspace, &[], input, None, OutputRetention::default())
+        self.start_inner(id, workspace, &[], input, None, AdapterStart::default())
             .await
     }
 
-    /// [`Self::start`], keeping the bytes of each recorded stream `retention` chooses within the
-    /// same bound (design 29 § 6). Only the `linux` confinement adapter asks for another
-    /// retention than the head; no wire request can name one.
-    pub(crate) async fn start_retaining(
+    /// [`Self::start`] with what only the `linux` confinement adapter asks beyond the wire
+    /// request (design 29): another retention than the head, and the registered-submodule rule.
+    /// No wire request can name either.
+    pub(crate) async fn start_for_adapter(
         &self,
         id: &str,
         workspace: &Path,
         input: &ExecStartInput,
-        retention: OutputRetention,
+        adapter: AdapterStart,
     ) -> DispatchOutcome<ExecObservation> {
-        self.start_inner(id, workspace, &[], input, None, retention)
+        self.start_inner(id, workspace, &[], input, None, adapter)
             .await
     }
 
@@ -825,7 +836,7 @@ impl ProcessRuntime {
             git_roots,
             input,
             None,
-            OutputRetention::default(),
+            AdapterStart::default(),
         )
         .await
     }
@@ -935,7 +946,7 @@ impl ProcessRuntime {
             git_roots,
             &input.exec,
             Some(settings),
-            OutputRetention::default(),
+            AdapterStart::default(),
         )
         .await
     }
@@ -948,13 +959,21 @@ impl ProcessRuntime {
         git_roots: &[crate::GitRootBinding],
         input: &ExecStartInput,
         pipe_settings: Option<PipeSettings>,
-        retention: OutputRetention,
+        adapter: AdapterStart,
     ) -> DispatchOutcome<ExecObservation> {
+        let retention = adapter.retention;
         let (pinned, read_only_roots, writable_roots) =
             match self.admit(id, workspace, git_roots, input) {
                 Ok(admitted) => admitted,
                 Err(error) => return DispatchOutcome::NotDispatched(error),
             };
+        // In the directory the run binds, after every subtree was shown to exist (design 29 § 2).
+        if adapter.refuse_registered_submodules
+            && let Err(error) =
+                crate::submodules::refuse_registered_submodules(&pinned, &input.workspace_access)
+        {
+            return DispatchOutcome::NotDispatched(error);
+        }
         let workspace_access =
             match Self::prepare_workspace_access(&pinned, &input.workspace_access) {
                 Ok(value) => value,
@@ -2459,8 +2478,10 @@ impl ProcessRuntime {
     ///
     /// Every check admission makes on the request alone runs here too, in admission's order:
     /// workspace access, the capability snapshot, the sandbox profile, the working directory, and
-    /// [`Self::admit_command_shape`] (argv, limits, environment). The workspace, read-only roots
-    /// and read-only files are pinned and refused exactly as a start pins and refuses them, and
+    /// [`Self::admit_command_shape`] (argv, limits, environment). The workspace, its writable
+    /// subtrees (absent, not a directory, a symlink, or holding a registered submodule),
+    /// read-only roots and read-only files are pinned and refused exactly as a start pins and
+    /// refuses them, and
     /// the descriptors are closed when this returns, so a number in the argv names nothing
     /// afterwards. What a render does not ask is what only a start acquires: the host's
     /// confinement facts and backend identity. What a start acquires only to run — secret slots, a
@@ -2520,6 +2541,11 @@ impl ProcessRuntime {
             .as_deref()
             .ok_or_else(DriverError::not_found)?;
         let pinned = crate::fs::pin_workspace_directory_beneath(root, workspace)?;
+        // The start's own subtree admission and, as the `linux` adapter's start applies it (that
+        // adapter is this function's only caller), the registered-submodule rule, so a render
+        // names the refusal a start names (design 29 §§ 1-2).
+        Self::admit_writable_subtrees(&pinned, &input.workspace_access)?;
+        crate::submodules::refuse_registered_submodules(&pinned, &input.workspace_access)?;
         let access = Self::prepare_workspace_access(&pinned, &input.workspace_access)?;
         drop(pinned);
         let slots = crate::secrets::SecretSlotSet::acquire(&[], &[])?;

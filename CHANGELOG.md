@@ -13,9 +13,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `substrate_host::confinement`, default `ReadWrite` as before. `linux`, and `systemd` around it,
   serve `ReadOnly` and `Scoped` on a host whose probe proved `exec.workspace-scoped-write`: the
   workspace is bound read-only, and each named subtree is bound writable over it by descriptor, so a
-  write elsewhere in the workspace and a write over `.git` fail inside the run. A subtree that is
-  `.git` or lies beneath one is refused `confinement.writable-subtree-git` (422), and a malformed list
-  `exec.workspace-access-invalid` (422). Every other adapter refuses a non-default access
+  write elsewhere in the workspace fails inside the run and `Scoped` protects the workspace root's
+  `.git` from writes in the run. A subtree that is `.git` or lies beneath one is refused
+  `confinement.writable-subtree-git` (422), and so, at start, is a subtree that is or holds a
+  submodule the workspace's `.gitmodules` registers, because the run could replace the submodule's
+  `gitdir:` file and a host `git status` in the root would run Git in it; a malformed list is
+  `exec.workspace-access-invalid` (422). Its limits: a nested `.git` inside a writable subtree stays
+  writable when no `.gitmodules` registers it; `Scoped` does not protect host Git run inside a
+  writable subtree from a repository the run creates there, as `ReadWrite` does not; and a hard link
+  made on the host before the run stays writable through a subtree, while the run cannot create one
+  itself (`EXDEV`). Every other adapter refuses a non-default access
   `exec.workspace-scoped-write-unserved` (501), and so does `linux` on a host without the fact.
   `sealed_paths` stays refused on `linux` (`confinement.fact-unserved`). The surface change is
   additive: a profile built with `..ConfinementProfile::default()` compiles unchanged, and only a
