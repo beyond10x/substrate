@@ -1485,3 +1485,127 @@ fn adversary_a_reexport_retargeted_changes_the_list() {
         )],
     );
 }
+
+/// Adversary probes for `story:public-items-cover-field-types` (pass 1): `reach` is applied to both
+/// sides, so a probe compares a source in which a held type already names the type under test with
+/// the same source after one consumer-visible change to that type. Each `reach` compiles as Rust.
+fn adversary_edits_over(
+    reach: &[(&str, &str, &str)],
+    edits: &[(&str, &str, &str)],
+) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let apply = |sources: &mut Vec<(String, String)>, edits: &[(&str, &str, &str)]| {
+        for (file, from, to) in edits {
+            let source = sources
+                .iter_mut()
+                .find(|(name, _)| name == file)
+                .unwrap_or_else(|| panic!("no source {file}"));
+            assert!(source.1.contains(from), "{file} no longer holds {from:?}");
+            source.1 = source.1.replacen(from, to, 1);
+        }
+    };
+    let mut reached = sources();
+    apply(&mut reached, reach);
+    let mut changed = reached.clone();
+    apply(&mut changed, edits);
+    let (base, after) = (items(&reached), items(&changed));
+    (missing(&after, &base), missing(&base, &after), base)
+}
+
+/// An inherent `impl` may sit in any file of the crate. A `pub fn` added to the module's own
+/// `ConfinementProfile` from `src/lib.rs` is a new method every consumer can call, and the list
+/// reads impls of module types only inside `src/confinement/`.
+#[test]
+fn adversary_a_method_added_to_a_module_type_outside_the_module_changes_the_list() {
+    adversary_assert_changed(
+        "ConfinementProfile gains a method in lib.rs",
+        &[(
+            "lib.rs",
+            "pub mod confinement;\n",
+            "pub mod confinement;\nimpl confinement::ConfinementProfile {\n    pub fn probe(&self) -> u64 {\n        0\n    }\n}\n",
+        )],
+    );
+}
+
+/// The wire defines its own `ConfinementProfile` (`generated/host_process.rs`, the host-process
+/// record's `profile`). Once a held type names `ProcessRecord`, that record is held, and a variant
+/// added to the wire's `ConfinementProfile` it names changes what a consumer must match on.
+#[test]
+fn adversary_a_wire_type_sharing_a_module_type_name_is_held_when_reached() {
+    let (added, removed, base) = adversary_edits_over(
+        &[(
+            "lib.rs",
+            "pub struct SecretSlot {\n    pub name: String,\n",
+            "pub struct SecretSlot {\n    pub name: String,\n    pub record: Option<substrate_wire::ProcessRecord>,\n",
+        )],
+        &[(
+            &format!("{WIRE}generated/host_process.rs"),
+            "pub enum ConfinementProfile {\n    #[serde(rename = \"host\")]\n    Host,\n",
+            "pub enum ConfinementProfile {\n    #[serde(rename = \"host\")]\n    Host,\n    Sandboxed,\n",
+        )],
+    );
+    assert!(
+        base.iter()
+            .any(|line| line.contains("pub struct ProcessRecord")),
+        "the reach did not hold ProcessRecord, so this probe proves nothing"
+    );
+    assert!(
+        !added.is_empty() || !removed.is_empty(),
+        "the wire's ConfinementProfile gained a variant two hops from HostConfig and the list did \
+         not change"
+    );
+}
+
+/// The wire publishes some types under another name (`pub use capture_types::
+/// SubstrateSessionsCaptureMode as CaptureMode`). A held field naming `CaptureMode` hands a consumer
+/// that enum, and a variant added to it is a change to the module's surface.
+#[test]
+fn adversary_a_type_reached_through_a_renaming_reexport_is_held() {
+    let (added, removed, base) = adversary_edits_over(
+        &[(
+            "lib.rs",
+            "pub struct SecretSlot {\n    pub name: String,\n",
+            "pub struct SecretSlot {\n    pub name: String,\n    pub mode: Option<substrate_wire::CaptureMode>,\n",
+        )],
+        &[(
+            &format!("{WIRE}generated/capture.rs"),
+            "    #[serde(rename = \"unrecorded\")]\n    Unrecorded,\n",
+            "    #[serde(rename = \"unrecorded\")]\n    Unrecorded,\n    Sampled,\n",
+        )],
+    );
+    assert!(
+        base.iter().any(|line| line
+            == "lib.rs: struct SecretSlot > pub mode: Option<substrate_wire::CaptureMode>,"),
+        "the reach did not add the field, so this probe proves nothing"
+    );
+    assert!(
+        !added.is_empty() || !removed.is_empty(),
+        "CaptureMode, named by a held field, gained a variant and the list did not change"
+    );
+}
+
+/// A trait impl's associated type is part of the impl's contract: `SecretSlot::from_str(..)?` stops
+/// compiling in a consumer when `type Err` changes. The list records the impl's header only.
+#[test]
+fn adversary_an_associated_type_of_a_trait_impl_on_a_held_type_changes_the_list() {
+    let (added, removed, base) = adversary_edits_over(
+        &[(
+            "lib.rs",
+            "pub struct SecretSlot {\n    pub name: String,\n    pub path: PathBuf,\n}\n",
+            "pub struct SecretSlot {\n    pub name: String,\n    pub path: PathBuf,\n}\n\nimpl std::str::FromStr for SecretSlot {\n    type Err = DriverError;\n\n    fn from_str(_text: &str) -> Result<Self, Self::Err> {\n        Err(DriverError::not_found())\n    }\n}\n",
+        )],
+        &[(
+            "lib.rs",
+            "    type Err = DriverError;\n",
+            "    type Err = std::io::Error;\n",
+        )],
+    );
+    assert!(
+        base.iter()
+            .any(|line| line == "lib.rs: impl std::str::FromStr for SecretSlot"),
+        "the reach did not record the impl, so this probe proves nothing"
+    );
+    assert!(
+        !added.is_empty() || !removed.is_empty(),
+        "SecretSlot's FromStr::Err changed and the list did not change"
+    );
+}

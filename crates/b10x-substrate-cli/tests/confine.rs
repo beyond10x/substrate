@@ -754,6 +754,150 @@ fn a_dead_owners_group_left_holding_a_process_is_named_on_stderr() {
     println!("confine delegated names a populated dead group: executed");
 }
 
+/// The state field of `/proc/<pid>/stat`, or `None` once the process is reaped.
+fn process_state(pid: u32) -> Option<char> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    stat.rsplit_once(')')?
+        .1
+        .split_whitespace()
+        .next()?
+        .chars()
+        .next()
+}
+
+/// Removes `group` and every group beneath it, deepest first, so a red case leaves the shared root
+/// as the cases after it expect.
+fn remove_groups(group: &Path) {
+    if let Ok(entries) = std::fs::read_dir(group) {
+        for entry in entries.flatten() {
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                remove_groups(&entry.path());
+            }
+        }
+    }
+    let _ = std::fs::remove_dir(group);
+}
+
+/// Adversary, `story:confine-run-reaps-killed-groups` pass 1: SIGKILL ends the invocation at once,
+/// but it stays a zombie until its parent waits for it, and a zombie keeps `/proc/<pid>/stat` with
+/// the start time its group's name records. Its group holds no process — a zombie is neither in
+/// `cgroup.procs` nor keeps the group populated — so the next run must remove it. A parent that
+/// kills and starts the next run before it reaps (`std::process::Child::kill` does not wait) is
+/// the ordinary shape of "kill it and start again".
+#[test]
+fn adversary_a_sigkilled_runs_group_is_removed_while_its_invocation_is_unreaped() {
+    let _lock = DELEGATED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(root) = delegated("reaps a killed, unreaped group") else {
+        return;
+    };
+    let host = host();
+    let workspace = |name: &str| {
+        let path = host.root.join(name);
+        std::fs::create_dir(&path).expect("workspace");
+        path.to_str().expect("UTF-8").to_owned()
+    };
+    let (killed_ws, next_ws) = (workspace("ws_killed"), workspace("ws_next"));
+    let spawn = |ws: &str, script: &str| {
+        cli()
+            .env(ROOT_ENV, &root)
+            .args(["confine", "run", "--dir", ws, "--", "/bin/sh", "-c", script])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn")
+    };
+
+    let mut killed = spawn(&killed_ws, ": > started; sleep 30");
+    let killed_group = wait_started(&root, &mut killed, &Path::new(&killed_ws).join("started"));
+    killed.kill().expect("SIGKILL");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while populated(&killed_group) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{} still holds a process: {:?}",
+            killed_group.display(),
+            holders(&killed_group)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let state = process_state(killed.id());
+
+    let next = spawn(&next_ws, "true")
+        .wait_with_output()
+        .expect("next run");
+    let killed_left = killed_group.exists();
+    killed.wait().expect("reap the killed invocation");
+    if killed_left {
+        remove_groups(&killed_group);
+    }
+    assert_eq!(
+        state,
+        Some('Z'),
+        "the killed invocation is not an unreaped zombie"
+    );
+    assert_eq!(next.status.code(), Some(0), "{}", text(&next.stderr));
+    assert!(
+        !killed_left,
+        "the next run left the killed run's empty group {}: its owner {} is dead, unreaped",
+        killed_group.display(),
+        killed.id()
+    );
+    println!("confine delegated reaps a killed, unreaped group: executed");
+}
+
+/// Adversary, `story:confine-run-reaps-killed-groups` pass 1: a live invocation's group is empty
+/// from its `mkdir` until the invocation has moved into its leaf, and only the owner check keeps
+/// the reaper of a concurrent run off it then — the 0.12.0 finding was a reconcile on a shared
+/// root ending another live run. The story's own case cannot see that check: its live group always
+/// holds the live invocation, so a reaper without the owner check passes it. Here the group is in
+/// exactly that window, named for this live test process and holding nothing, and the next run
+/// must leave it.
+#[test]
+fn adversary_a_live_owners_empty_group_is_left_by_the_next_run() {
+    let _lock = DELEGATED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(root) = delegated("leaves a live owner's empty group") else {
+        return;
+    };
+    let host = host();
+    let own = std::fs::read_to_string("/proc/self/stat").expect("this process's stat");
+    let start = own
+        .rsplit_once(')')
+        .and_then(|(_, fields)| fields.split_whitespace().nth(19))
+        .expect("this process's start time")
+        .to_owned();
+    let live = root.join(format!("confine-{}-{start}", std::process::id()));
+    std::fs::create_dir(&live).expect("a live owner's group, before its owner moves in");
+
+    let next = cli()
+        .env(ROOT_ENV, &root)
+        .args([
+            "confine",
+            "run",
+            "--dir",
+            &dir(&host),
+            "--",
+            "/bin/sh",
+            "-c",
+            "true",
+        ])
+        .output()
+        .expect("next run");
+    let kept = live.is_dir();
+    remove_groups(&live);
+    assert_eq!(next.status.code(), Some(0), "{}", text(&next.stderr));
+    assert!(
+        kept,
+        "the next run removed {}, whose owner {} is alive",
+        live.display(),
+        std::process::id()
+    );
+    println!("confine delegated leaves a live owner's empty group: executed");
+}
+
 // --- --image: only oci runs an image -------------------------------------------------------
 
 /// Pinned or tagged, an image under linux or local is the fact those adapters do not prove,
