@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:systemd-scope-bounds-provider
 kind: story
-status: active
+status: implemented
 title: 'The systemd adapter: a delegated user scope as the bounds provider'
 owner: substrate
 tags:
@@ -19,10 +19,11 @@ scope:
   path: crates/substrate-host/tests/ess_confinement_systemd.rs
 - confidence: inferred
   path: scripts/delegated-lane.sh
-revision: 6
+revision: 7
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-27T01:13:04Z", actor: "human:timo", revision: 5, decided_on: {"recorded":{"review_outcome":2}}}
 - {from: "proposed", to: "active", at: "2026-10-27T01:13:04Z", actor: "human:timo", revision: 6, decided_on: {"recorded":{"review_outcome":2}}}
+- {from: "active", to: "implemented", at: "2026-10-27T07:47:38Z", actor: "human:timo", revision: 7, decided_on: {"recorded":{"test_result":1,"review_outcome":4}}}
 ---
 # The `systemd` adapter: a delegated user scope as the bounds provider
 
