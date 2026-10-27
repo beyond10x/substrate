@@ -63,9 +63,11 @@ confinement/mod.rs: pub mod profile;
 confinement/mod.rs: pub mod systemd;
 confinement/mod.rs: pub use crate::confinement_types::{AdapterName, ContractFamily, Fact};
 confinement/mod.rs: pub use crate::{DeclaredWritableRoot, HostConfig};
+confinement/mod.rs: pub use crate::output_retention::{KeptOutput, OutputRetention, Retention};
 confinement/mod.rs: pub use facts::{AdapterFacts, FACT_ORDER, FAMILY_ORDER, InnerAdapter, ReservedField};
 confinement/mod.rs: pub use profile::{ConfinementProfile, IoBounds, Ipc, Network, ProcessBounds, image_is_pinned};
 confinement/mod.rs: pub use substrate_wire::{ReadOnlyFile, ReadOnlyRoot, SecretSlotRequest, Signal, WritableHostRoot};
+confinement/mod.rs: pub use substrate_wire::WorkspaceAccess;
 confinement/mod.rs: pub const ADAPTER_UNSERVED: &str = "confinement.adapter-unserved";
 confinement/mod.rs: pub const FAMILY_UNSERVED: &str = "confinement.family-unserved";
 confinement/mod.rs: pub const FACT_UNSERVED: &str = "confinement.fact-unserved";
@@ -75,6 +77,8 @@ confinement/mod.rs: pub const IMAGE_UNPINNED: &str = "confinement.image-unpinned
 confinement/mod.rs: pub const RESERVED_FIELD_UNSERVED: &str = "confinement.reserved-field-unserved";
 confinement/mod.rs: pub const WORKSPACE_REQUIRED: &str = "confinement.workspace-required";
 confinement/mod.rs: pub const RENDER_UNSERVED: &str = "confinement.render-unserved";
+confinement/mod.rs: pub const WRITABLE_SUBTREE_GIT: &str = "confinement.writable-subtree-git";
+confinement/mod.rs: pub const OUTPUT_RETENTION_UNSERVED: &str = "confinement.output-retention-unserved";
 confinement/mod.rs: pub const ADAPTERS: [AdapterName; 6] = [AdapterName::Local, AdapterName::Linux, AdapterName::Macos, AdapterName::Systemd, AdapterName::Oci, AdapterName::Pod];
 confinement/mod.rs: #[derive(Debug, Clone)] pub enum AdapterRequest
 confinement/mod.rs: enum AdapterRequest > Local(local::LocalRequest),
@@ -146,6 +150,8 @@ confinement/mod.rs: struct RunOutput > pub stdout: Vec<u8>,
 confinement/mod.rs: struct RunOutput > pub stderr: Vec<u8>,
 confinement/mod.rs: struct RunOutput > pub stdout_truncated: bool,
 confinement/mod.rs: struct RunOutput > pub stderr_truncated: bool,
+confinement/mod.rs: struct RunOutput > pub stdout_kept: KeptOutput,
+confinement/mod.rs: struct RunOutput > pub stderr_kept: KeptOutput,
 confinement/mod.rs: #[async_trait] pub trait ConfinementAdapter: Send + Sync
 confinement/mod.rs: trait ConfinementAdapter > fn facts(&self) -> &AdapterFacts;
 confinement/mod.rs: trait ConfinementAdapter > fn check(&self, _profile: &ConfinementProfile) -> Result<(), ConfinementError>
@@ -224,6 +230,7 @@ confinement/profile.rs: struct ConfinementProfile > pub inner: Option<InnerAdapt
 confinement/profile.rs: struct ConfinementProfile > pub local_reason: Option<String>,
 confinement/profile.rs: struct ConfinementProfile > pub workspace: Option<PathBuf>,
 confinement/profile.rs: struct ConfinementProfile > pub workdir: Option<String>,
+confinement/profile.rs: struct ConfinementProfile > pub workspace_access: WorkspaceAccess,
 confinement/profile.rs: struct ConfinementProfile > pub writable_roots: Vec<WritableHostRoot>,
 confinement/profile.rs: struct ConfinementProfile > pub read_only_roots: Vec<ReadOnlyRoot>,
 confinement/profile.rs: struct ConfinementProfile > pub read_only_files: Vec<ReadOnlyFile>,
@@ -234,6 +241,7 @@ confinement/profile.rs: struct ConfinementProfile > pub network: Option<Network>
 confinement/profile.rs: struct ConfinementProfile > pub ipc: Ipc,
 confinement/profile.rs: struct ConfinementProfile > pub process_bounds: Option<ProcessBounds>,
 confinement/profile.rs: struct ConfinementProfile > pub io_bounds: Option<IoBounds>,
+confinement/profile.rs: struct ConfinementProfile > pub output_retention: OutputRetention,
 confinement/profile.rs: struct ConfinementProfile > pub secret_slots: Vec<SecretSlotRequest>,
 confinement/profile.rs: struct ConfinementProfile > pub audit: Option<AuditSink>,
 confinement/profile.rs: struct ConfinementProfile > pub image: Option<String>,
@@ -364,9 +372,27 @@ lib.rs: impl DriverError > pub fn not_found() -> Self
 lib.rs: impl DriverError > pub fn unserved(code: &'static str, message: impl Into<String>, address: &str) -> Self
 lib.rs: impl DriverError > pub fn exhausted(code: &'static str, message: impl Into<String>, address: &str) -> Self
 lib.rs: impl DriverError > pub fn failed(code: &'static str, message: impl Into<String>) -> Self
+output_retention.rs: #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)] pub enum Retention
+output_retention.rs: enum Retention > Head,
+output_retention.rs: enum Retention > Tail,
+output_retention.rs: enum Retention > HeadAndTail,
+output_retention.rs: #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)] pub struct OutputRetention
+output_retention.rs: struct OutputRetention > pub stdout: Retention,
+output_retention.rs: struct OutputRetention > pub stderr: Retention,
+output_retention.rs: #[derive(Debug, Clone, Copy, PartialEq, Eq)] #[non_exhaustive] pub struct KeptOutput
+output_retention.rs: struct KeptOutput > pub retention: Retention,
+output_retention.rs: struct KeptOutput > pub observed_bytes: Option<u64>,
+output_retention.rs: struct KeptOutput > pub head_bytes: u64,
+output_retention.rs: struct KeptOutput > pub tail_bytes: u64,
 substrate-wire/src/lib.rs: #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)] #[serde(deny_unknown_fields)] pub struct WritableHostRoot
 substrate-wire/src/lib.rs: struct WritableHostRoot > pub host: String,
 substrate-wire/src/lib.rs: struct WritableHostRoot > pub mount: String,
+substrate-wire/src/lib.rs: #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)] #[serde(tag = "mode", rename_all = "kebab-case", deny_unknown_fields)] pub enum WorkspaceAccess
+substrate-wire/src/lib.rs: enum WorkspaceAccess > ReadWrite,
+substrate-wire/src/lib.rs: enum WorkspaceAccess > ReadOnly,
+substrate-wire/src/lib.rs: enum WorkspaceAccess > Scoped {writable_subtrees: Vec<String>},
+substrate-wire/src/lib.rs: impl WorkspaceAccess > pub fn is_read_write(&self) -> bool
+substrate-wire/src/lib.rs: impl WorkspaceAccess > pub fn writable_subtrees(&self) -> Option<&[String]>
 substrate-wire/src/lib.rs: #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)] #[serde(rename_all = "UPPERCASE")] pub enum Signal
 substrate-wire/src/lib.rs: enum Signal > Int,
 substrate-wire/src/lib.rs: enum Signal > Term,

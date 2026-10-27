@@ -24,6 +24,9 @@ mod fs;
 mod git;
 pub mod host_process;
 mod observation;
+// Which bytes of a bounded output stream a run keeps (design 29). Published through `confinement`,
+// which re-exports its public types.
+mod output_retention;
 #[cfg(target_os = "linux")]
 mod probe;
 #[cfg(target_os = "linux")]
@@ -70,6 +73,7 @@ use zeroize::Zeroizing;
 
 pub use aperture::EgressAperture;
 pub use observation::{ExecObservation, PipeFrame, PipeStream};
+use output_retention::OutputRetention;
 // The host-process port and the vocabulary its signatures force, at the crate root as `Driver`'s
 // is: a client names these, and never `host_process::HostProcessSupervisor`.
 pub use host_process::{
@@ -1159,6 +1163,25 @@ impl HostDriver {
             ));
         }
         Ok(self.config.workspace_root.join(root_name))
+    }
+
+    /// [`Driver::start_exec`], keeping the bytes of each recorded stream `retention` chooses
+    /// within the same bound (design 29 § 6). `pub(crate)`: only the `linux` confinement adapter
+    /// asks for another retention than the head, so no session and no daemon route can.
+    pub(crate) async fn start_exec_retaining(
+        &self,
+        id: &str,
+        workspace_root_name: &str,
+        input: &ExecStartInput,
+        retention: OutputRetention,
+    ) -> DispatchOutcome<ExecObservation> {
+        let workspace = match self.workspace_path(workspace_root_name) {
+            Ok(value) => value,
+            Err(error) => return DispatchOutcome::NotDispatched(error),
+        };
+        self.processes
+            .start_retaining(id, &workspace, input, retention)
+            .await
     }
 
     pub fn root(&self) -> &Path {

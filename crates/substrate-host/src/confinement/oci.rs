@@ -60,8 +60,9 @@ use substrate_wire::{
     ConfinementRequest, ExecEnvironment, ExecLimits, ExecStartInput, NetworkMode, ReadOnlyFile,
     ReadOnlyRoot, SandboxProfile, Signal, WireValidationError, WorkspaceAccess, WritableRoot,
 };
-use tokio::io::{AsyncRead, AsyncReadExt as _};
 use tokio::sync::watch;
+
+use crate::output_retention::{Captured, drain};
 
 use super::{
     AdapterFacts, AdapterName, AdmittedProfile, Command, ConfinementAdapter, ConfinementError,
@@ -677,14 +678,6 @@ enum Phase {
     Unknown,
 }
 
-#[derive(Default)]
-struct Captured {
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-    stdout_truncated: bool,
-    stderr_truncated: bool,
-}
-
 struct OciRun {
     id: RunId,
     phase: watch::Receiver<Phase>,
@@ -1165,16 +1158,19 @@ impl OciAdapter {
             return Err(create_failed("The container runtime client did not run."));
         };
         let limit = usize::try_from(bounds.output_bytes).unwrap_or(usize::MAX);
-        let captured = Arc::new(Mutex::new(Captured::default()));
+        let captured = Arc::new(Mutex::new(Captured::new(
+            admitted.profile().output_retention,
+            limit,
+        )));
         let readers = [
             child
                 .stdout
                 .take()
-                .map(|stream| tokio::spawn(drain(stream, Arc::clone(&captured), true, limit))),
+                .map(|stream| tokio::spawn(drain(stream, Arc::clone(&captured), true))),
             child
                 .stderr
                 .take()
-                .map(|stream| tokio::spawn(drain(stream, Arc::clone(&captured), false, limit))),
+                .map(|stream| tokio::spawn(drain(stream, Arc::clone(&captured), false))),
         ];
         if !started(&program, &id, &mut child).await {
             let _ = child.start_kill();
@@ -1444,29 +1440,30 @@ async fn remove(program: &Path, run: &RunId) -> bool {
     listed && remaining.iter().all(u8::is_ascii_whitespace)
 }
 
-async fn drain(
-    mut stream: impl AsyncRead + Unpin,
-    captured: Arc<Mutex<Captured>>,
-    stdout: bool,
-    limit: usize,
-) {
-    let mut buffer = vec![0_u8; 16 * 1024];
-    loop {
-        let read = match stream.read(&mut buffer).await {
-            Ok(0) | Err(_) => return,
-            Ok(read) => read,
-        };
-        let mut captured = captured.lock();
-        let captured = &mut *captured;
-        let (kept, truncated) = if stdout {
-            (&mut captured.stdout, &mut captured.stdout_truncated)
-        } else {
-            (&mut captured.stderr, &mut captured.stderr_truncated)
-        };
-        let room = limit.saturating_sub(kept.len());
-        kept.extend_from_slice(&buffer[..read.min(room)]);
-        *truncated |= read > room;
+/// The refusals of `check` that read the profile alone, before the runtime's bounds and mounts.
+///
+/// A read-only or scoped workspace is refused `exec.workspace-scoped-write-unserved`: the runtime
+/// resolves a `--mount` source path in its own process and cannot take a pinned descriptor, so a
+/// subtree swapped for a symlink would redirect a writable bind (design 29 § 4).
+fn check_profile(profile: &ConfinementProfile) -> Result<(), ConfinementError> {
+    super::refuse_workspace_access("oci", profile)?;
+    if !profile.secret_slots.is_empty() {
+        return Err(DriverError::unserved(
+            "exec.secret-slots-unserved",
+            "Sealed secret slots are not served by the oci adapter.",
+            "secret_slots",
+        )
+        .into());
     }
+    if !profile.image.as_deref().is_some_and(reference_is_plain) {
+        return Err(ConfinementError::ImageUnpinned {
+            adapter: AdapterName::Oci,
+        });
+    }
+    if let Some(workdir) = &profile.workdir {
+        super::relative_workdir(workdir)?;
+    }
+    Ok(())
 }
 
 #[async_trait]
@@ -1477,22 +1474,7 @@ impl ConfinementAdapter for OciAdapter {
 
     /// Refuses, after the contract's order, what the runtime could not apply as asked.
     fn check(&self, profile: &ConfinementProfile) -> Result<(), ConfinementError> {
-        if !profile.secret_slots.is_empty() {
-            return Err(DriverError::unserved(
-                "exec.secret-slots-unserved",
-                "Sealed secret slots are not served by the oci adapter.",
-                "secret_slots",
-            )
-            .into());
-        }
-        if !profile.image.as_deref().is_some_and(reference_is_plain) {
-            return Err(ConfinementError::ImageUnpinned {
-                adapter: AdapterName::Oci,
-            });
-        }
-        if let Some(workdir) = &profile.workdir {
-            super::relative_workdir(workdir)?;
-        }
+        check_profile(profile)?;
         self.bounds(profile)?;
         self.check_mounts(profile)
     }
@@ -1523,13 +1505,8 @@ impl ConfinementAdapter for OciAdapter {
 
     async fn output(&self, run: &RunId) -> Result<RunOutput, ConfinementError> {
         let run = self.run(run)?;
-        let captured = run.captured.lock();
-        Ok(RunOutput {
-            stdout: captured.stdout.clone(),
-            stderr: captured.stderr.clone(),
-            stdout_truncated: captured.stdout_truncated,
-            stderr_truncated: captured.stderr_truncated,
-        })
+        let output = run.captured.lock().output();
+        Ok(output)
     }
 
     /// Returns once the run has ended and its container is gone.
@@ -1744,5 +1721,39 @@ mod tests {
         )
         .expect("parsed");
         assert!(!never.started);
+    }
+
+    // A8: a read-only or scoped workspace is refused by name through the pure profile check,
+    // before the image rule; the shared shape and `.git` rules answer first.
+    #[test]
+    fn a_narrower_workspace_is_refused_scoped_write_unserved() {
+        for access in [
+            WorkspaceAccess::ReadOnly,
+            WorkspaceAccess::Scoped {
+                writable_subtrees: vec!["out".to_owned()],
+            },
+        ] {
+            let error = check_profile(&ConfinementProfile {
+                workspace_access: access.clone(),
+                ..ConfinementProfile::default()
+            })
+            .expect_err("refused");
+            assert_eq!(
+                error.code(),
+                substrate_wire::EXEC_WORKSPACE_SCOPED_WRITE_UNSERVED,
+                "{access:?}: {error}"
+            );
+            assert_eq!(error.status(), 501);
+        }
+        let git = check_profile(&ConfinementProfile {
+            workspace_access: WorkspaceAccess::Scoped {
+                writable_subtrees: vec![".git".to_owned()],
+            },
+            ..ConfinementProfile::default()
+        })
+        .expect_err("refused");
+        assert_eq!(git.code(), super::super::WRITABLE_SUBTREE_GIT);
+        let whole = check_profile(&ConfinementProfile::default()).expect_err("no image");
+        assert_eq!(whole.code(), "confinement.image-unpinned");
     }
 }

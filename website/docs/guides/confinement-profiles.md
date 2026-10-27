@@ -66,6 +66,8 @@ Each profile field needs the family or the fact beside it.
 |---|---|
 | `families`, `facts` | themselves, beyond what the fields imply |
 | `workspace`, `workdir` | `workspace` |
+| `workspace_access` other than `ReadWrite` | `workspace` |
+| `output_retention` other than `Head` on both streams | `output_read` |
 | `writable_roots`, `read_only_roots`, `read_only_files` | `filesystem_view` |
 | `sealed_paths` | the fact `sealed_paths` |
 | `exec_subpaths` | the fact `exec_subpaths` |

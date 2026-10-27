@@ -65,7 +65,6 @@ use substrate_wire::{
     MAX_READ_ONLY_ROOTS, READ_ONLY_FILES_UNSERVED, READ_ONLY_ROOT_ABSENT, READ_ONLY_ROOT_INVALID,
     READ_ONLY_ROOT_NOT_A_DIRECTORY, ReadOnlyRoot, Signal,
 };
-use tokio::io::{AsyncRead, AsyncReadExt as _};
 use tokio::sync::watch;
 
 use super::{
@@ -74,9 +73,11 @@ use super::{
     RunOutput, RunState,
 };
 use crate::DriverError;
+use crate::output_retention::{Captured, drain};
 use crate::seatbelt::{self, BuildProof, SeatbeltPolicy};
 
-/// Each output stream is kept up to this many bytes and drained past it.
+/// Each output stream is kept up to this many bytes, the ones its retention chooses, and drained
+/// past it.
 pub const MACOS_OUTPUT_LIMIT_BYTES: usize = 1_048_576;
 
 /// Runs one adapter tracks; past it, ended runs are forgotten oldest first, and a start with every
@@ -423,14 +424,6 @@ enum Phase {
     Running,
     Ended(RunExit),
     Unknown,
-}
-
-#[derive(Default)]
-struct Captured {
-    stdout: Vec<u8>,
-    stderr: Vec<u8>,
-    stdout_truncated: bool,
-    stderr_truncated: bool,
 }
 
 struct MacosRun {
@@ -862,26 +855,6 @@ fn read_only_root(root: &ReadOnlyRoot, workspace: &Path) -> Result<PathBuf, Conf
     Ok(resolved)
 }
 
-async fn drain(mut stream: impl AsyncRead + Unpin, captured: Arc<Mutex<Captured>>, stdout: bool) {
-    let mut buffer = vec![0_u8; 16 * 1024];
-    loop {
-        let read = match stream.read(&mut buffer).await {
-            Ok(0) | Err(_) => return,
-            Ok(read) => read,
-        };
-        let mut captured = captured.lock();
-        let captured = &mut *captured;
-        let (kept, truncated) = if stdout {
-            (&mut captured.stdout, &mut captured.stdout_truncated)
-        } else {
-            (&mut captured.stderr, &mut captured.stderr_truncated)
-        };
-        let room = MACOS_OUTPUT_LIMIT_BYTES.saturating_sub(kept.len());
-        kept.extend_from_slice(&buffer[..read.min(room)]);
-        *truncated |= read > room;
-    }
-}
-
 impl MacosAdapter {
     /// Spawns on the calling task's Tokio runtime; `start` is its one caller.
     fn start_run(
@@ -916,7 +889,10 @@ impl MacosAdapter {
             *sequence += 1;
             RunId::new(format!("macos-{pid}-{sequence}"))
         };
-        let captured = Arc::new(Mutex::new(Captured::default()));
+        let captured = Arc::new(Mutex::new(Captured::new(
+            admitted.profile().output_retention,
+            MACOS_OUTPUT_LIMIT_BYTES,
+        )));
         let (phase, observed) = watch::channel(Phase::Running);
         let stdout = child
             .stdout
@@ -979,10 +955,12 @@ impl ConfinementAdapter for MacosAdapter {
         &self.facts
     }
 
-    /// What the Seatbelt policy cannot carry: a sealed secret slot, a writable root outside the
-    /// workspace, a single read-only file, more roots than the wire bound, and a root that would
-    /// appear anywhere but at its host path (`paths_are_host_paths`).
+    /// What the Seatbelt policy cannot carry: a read-only or scoped workspace (no probe proves it,
+    /// design 29 § 4), a sealed secret slot, a writable root outside the workspace, a single
+    /// read-only file, more roots than the wire bound, and a root that would appear anywhere but
+    /// at its host path (`paths_are_host_paths`).
     fn check(&self, profile: &ConfinementProfile) -> Result<(), ConfinementError> {
+        super::refuse_workspace_access("macos", profile)?;
         if !profile.secret_slots.is_empty() {
             return Err(DriverError::unserved(
                 "exec.secret-slots-unserved",
@@ -1092,13 +1070,8 @@ impl ConfinementAdapter for MacosAdapter {
 
     async fn output(&self, run: &RunId) -> Result<RunOutput, ConfinementError> {
         let run = self.run(run)?;
-        let captured = run.captured.lock();
-        Ok(RunOutput {
-            stdout: captured.stdout.clone(),
-            stderr: captured.stderr.clone(),
-            stdout_truncated: captured.stdout_truncated,
-            stderr_truncated: captured.stderr_truncated,
-        })
+        let output = run.captured.lock().output();
+        Ok(output)
     }
 
     async fn wait(&self, run: &RunId) -> Result<RunObservation, ConfinementError> {

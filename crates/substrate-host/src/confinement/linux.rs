@@ -29,12 +29,20 @@
 //!
 //! | field | needs | refused |
 //! |---|---|---|
+//! | `workspace_access` other than `ReadWrite` | `exec.workspace-scoped-write` | `exec.workspace-scoped-write-unserved` |
 //! | `writable_roots` | `exec.writable-roots.host` | `confinement.family-unserved` naming `filesystem_view` |
 //! | a writable root's `host` | that name in `exec.writable-roots.host` | `exec.writable-roots-host-unserved` |
 //! | `workdir` | `exec.workdir` | `exec.workdir-unserved` |
 //! | `network: Egress` names | each name in `exec.egress-apertures` | `exec.aperture-undeclared` |
 //! | `secret_slots` | `secrets.slots` | `exec.secret-slots-unserved` |
 //! | a slot's name | that name in `secrets.slots` | `exec.secret-slot-unknown` |
+//!
+//! Before any of them, a workspace access meets the rules every adapter shares: the wire's shape
+//! (`exec.workspace-access-invalid`) and no writable subtree at or beneath `.git`
+//! (`confinement.writable-subtree-git`). A subtree that is absent, a symlink or not a directory
+//! is refused when the start opens the workspace, by the driver's `exec.workspace-subtree-*`
+//! names. `output_retention` is served wherever `output_read` is: the driver keeps the bytes it
+//! names within the same bound, and writes its truncation marker only under `Head`.
 //!
 //! Every refusal of a start, by the contract's recheck, the adapter or the driver, writes its
 //! audit record.
@@ -94,13 +102,13 @@ mod imp {
     use substrate_wire::{
         CapabilityFacts, CapabilitySnapshot, ConfinementRequest, ExecEnvironment, ExecLimits,
         ExecSignalInput, ExecStartInput, ExecState, NetworkMode, SandboxProfile, Signal,
-        WorkspaceAccess, WritableRoot,
+        WritableRoot,
     };
 
     use super::super::{
         AdapterFacts, AdapterName, AdmittedProfile, Command, ConfinementAdapter, ConfinementError,
-        ConfinementProfile, ContractFamily, Fact, Network, ProcessBounds, RenderedCommand, RunExit,
-        RunId, RunObservation, RunOutput, RunState,
+        ConfinementProfile, ContractFamily, Fact, KeptOutput, Network, ProcessBounds,
+        RenderedCommand, RunExit, RunId, RunObservation, RunOutput, RunState,
     };
     use super::LinuxRequest;
     use crate::{DispatchOutcome, Driver as _, DriverError, HostDriver, PLATFORM_UNSERVED};
@@ -278,7 +286,7 @@ mod imp {
                     cpu_millis: bounds.cpu_millis,
                 },
                 wait: false,
-                workspace_access: WorkspaceAccess::ReadWrite,
+                workspace_access: profile.workspace_access.clone(),
                 scratch: None,
                 measurements: BTreeSet::new(),
                 read_only_roots: profile.read_only_roots.clone(),
@@ -310,7 +318,12 @@ mod imp {
                 "ex_{}",
                 ulid::Ulid::generate().to_string().to_ascii_lowercase()
             );
-            match self.driver.start_exec(&id, &root_name, &input).await {
+            let retention = admitted.profile().output_retention;
+            match self
+                .driver
+                .start_exec_retaining(&id, &root_name, &input, retention)
+                .await
+            {
                 DispatchOutcome::Observed(_) => {
                     let run = RunId::new(id);
                     admitted.audit_start(&run, &command.argv[0]);
@@ -344,6 +357,90 @@ mod imp {
         }
     }
 
+    /// What the snapshot cannot serve beyond the families, in the module table's order. A free
+    /// function over the probed facts, so deciding it opens no driver.
+    pub(super) fn check_snapshot(
+        capability: &CapabilityFacts,
+        profile: &ConfinementProfile,
+    ) -> Result<(), ConfinementError> {
+        super::super::check_workspace_access(profile)?;
+        if !profile.workspace_access.is_read_write()
+            && capability.exec_workspace_scoped_write != Some(true)
+        {
+            return Err(DriverError::unserved(
+                substrate_wire::EXEC_WORKSPACE_SCOPED_WRITE_UNSERVED,
+                "The host has not proved read-only and scoped workspace mounts.",
+                "workspace_access",
+            )
+            .into());
+        }
+        if !profile.writable_roots.is_empty() {
+            let Some(declared) = &capability.exec_writable_roots_host else {
+                return Err(ConfinementError::FamilyUnserved {
+                    adapter: AdapterName::Linux,
+                    family: ContractFamily::FilesystemView,
+                });
+            };
+            if let Some(root) = profile
+                .writable_roots
+                .iter()
+                .find(|root| !declared.contains(&root.host))
+            {
+                return Err(DriverError::unserved(
+                    substrate_wire::EXEC_WRITABLE_ROOTS_HOST_UNSERVED,
+                    format!("The host declared no writable root named {}.", root.host),
+                    "writable_roots",
+                )
+                .into());
+            }
+        }
+        if profile.workdir.is_some() && capability.exec_workdir != Some(true) {
+            return Err(DriverError::unserved(
+                substrate_wire::EXEC_WORKDIR_UNSERVED,
+                "The host has not proved starting a run in a working directory.",
+                "workdir",
+            )
+            .into());
+        }
+        if let Some(Network::Egress { apertures }) = &profile.network {
+            let declared = capability.exec_egress_apertures.as_deref().unwrap_or(&[]);
+            if let Some(name) = apertures
+                .iter()
+                .find(|name| !declared.iter().any(|aperture| &aperture.name == *name))
+            {
+                return Err(DriverError::refused(
+                    "exec.aperture-undeclared",
+                    format!("The host declared no egress aperture named {name}."),
+                    "network",
+                )
+                .into());
+            }
+        }
+        if !profile.secret_slots.is_empty() {
+            let Some(declared) = &capability.secrets_slots else {
+                return Err(DriverError::unserved(
+                    "exec.secret-slots-unserved",
+                    "Sealed secret slots are not served by this host.",
+                    "secret_slots",
+                )
+                .into());
+            };
+            if let Some(slot) = profile
+                .secret_slots
+                .iter()
+                .find(|slot| !declared.contains(&slot.slot))
+            {
+                return Err(DriverError::refused(
+                    "exec.secret-slot-unknown",
+                    format!("Secret slot {} is not declared on this host.", slot.slot),
+                    "secret_slots",
+                )
+                .into());
+            }
+        }
+        Ok(())
+    }
+
     #[async_trait]
     impl ConfinementAdapter for LinuxAdapter {
         fn facts(&self) -> &AdapterFacts {
@@ -352,72 +449,7 @@ mod imp {
 
         /// What the snapshot cannot serve beyond the families, in the module table's order.
         fn check(&self, profile: &ConfinementProfile) -> Result<(), ConfinementError> {
-            let capability = &self.capability;
-            if !profile.writable_roots.is_empty() {
-                let Some(declared) = &capability.exec_writable_roots_host else {
-                    return Err(ConfinementError::FamilyUnserved {
-                        adapter: AdapterName::Linux,
-                        family: ContractFamily::FilesystemView,
-                    });
-                };
-                if let Some(root) = profile
-                    .writable_roots
-                    .iter()
-                    .find(|root| !declared.contains(&root.host))
-                {
-                    return Err(DriverError::unserved(
-                        substrate_wire::EXEC_WRITABLE_ROOTS_HOST_UNSERVED,
-                        format!("The host declared no writable root named {}.", root.host),
-                        "writable_roots",
-                    )
-                    .into());
-                }
-            }
-            if profile.workdir.is_some() && capability.exec_workdir != Some(true) {
-                return Err(DriverError::unserved(
-                    substrate_wire::EXEC_WORKDIR_UNSERVED,
-                    "The host has not proved starting a run in a working directory.",
-                    "workdir",
-                )
-                .into());
-            }
-            if let Some(Network::Egress { apertures }) = &profile.network {
-                let declared = capability.exec_egress_apertures.as_deref().unwrap_or(&[]);
-                if let Some(name) = apertures
-                    .iter()
-                    .find(|name| !declared.iter().any(|aperture| &aperture.name == *name))
-                {
-                    return Err(DriverError::refused(
-                        "exec.aperture-undeclared",
-                        format!("The host declared no egress aperture named {name}."),
-                        "network",
-                    )
-                    .into());
-                }
-            }
-            if !profile.secret_slots.is_empty() {
-                let Some(declared) = &capability.secrets_slots else {
-                    return Err(DriverError::unserved(
-                        "exec.secret-slots-unserved",
-                        "Sealed secret slots are not served by this host.",
-                        "secret_slots",
-                    )
-                    .into());
-                };
-                if let Some(slot) = profile
-                    .secret_slots
-                    .iter()
-                    .find(|slot| !declared.contains(&slot.slot))
-                {
-                    return Err(DriverError::refused(
-                        "exec.secret-slot-unknown",
-                        format!("Secret slot {} is not declared on this host.", slot.slot),
-                        "secret_slots",
-                    )
-                    .into());
-                }
-            }
-            Ok(())
+            check_snapshot(&self.capability, profile)
         }
 
         fn render(
@@ -456,11 +488,21 @@ mod imp {
 
         async fn output(&self, run: &RunId) -> Result<RunOutput, ConfinementError> {
             let observed = self.driver.observe_exec(run.as_str()).await?;
+            // The driver records both for every run it starts; a record without one says nothing
+            // of the total.
+            let stdout_kept = observed
+                .stdout_kept
+                .unwrap_or_else(|| KeptOutput::unobserved_head(observed.stdout.len()));
+            let stderr_kept = observed
+                .stderr_kept
+                .unwrap_or_else(|| KeptOutput::unobserved_head(observed.stderr.len()));
             Ok(RunOutput {
                 stdout: observed.stdout,
                 stderr: observed.stderr,
                 stdout_truncated: observed.stdout_truncated,
                 stderr_truncated: observed.stderr_truncated,
+                stdout_kept,
+                stderr_kept,
             })
         }
 
@@ -487,6 +529,75 @@ mod imp {
                 )
                 .await?;
             Ok(())
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use substrate_wire::WorkspaceAccess;
+
+        fn scoped() -> ConfinementProfile {
+            ConfinementProfile {
+                workspace_access: WorkspaceAccess::Scoped {
+                    writable_subtrees: vec!["out".to_owned()],
+                },
+                ..ConfinementProfile::default()
+            }
+        }
+
+        // A5: a snapshot that did not prove `exec.workspace-scoped-write` refuses a narrower
+        // workspace by the host's own name, before any start; no driver opens.
+        #[test]
+        fn a_snapshot_without_scoped_write_refuses_a_narrower_workspace() {
+            for access in [
+                WorkspaceAccess::ReadOnly,
+                WorkspaceAccess::Scoped {
+                    writable_subtrees: vec!["out".to_owned()],
+                },
+            ] {
+                for proved in [None, Some(false)] {
+                    let capability = CapabilityFacts {
+                        exec_workspace_scoped_write: proved,
+                        ..CapabilityFacts::default()
+                    };
+                    let profile = ConfinementProfile {
+                        workspace_access: access.clone(),
+                        ..ConfinementProfile::default()
+                    };
+                    let error = check_snapshot(&capability, &profile)
+                        .expect_err("a narrower workspace is refused");
+                    assert_eq!(
+                        error.code(),
+                        substrate_wire::EXEC_WORKSPACE_SCOPED_WRITE_UNSERVED,
+                        "{access:?} {proved:?}: {error}"
+                    );
+                    assert_eq!(error.status(), 501);
+                }
+            }
+        }
+
+        #[test]
+        fn a_snapshot_with_scoped_write_admits_it_and_checks_the_shared_rules_first() {
+            let capability = CapabilityFacts {
+                exec_workspace_scoped_write: Some(true),
+                ..CapabilityFacts::default()
+            };
+            check_snapshot(&capability, &scoped()).expect("served");
+            check_snapshot(&CapabilityFacts::default(), &ConfinementProfile::default())
+                .expect("the whole workspace needs no fact");
+            let git = ConfinementProfile {
+                workspace_access: WorkspaceAccess::Scoped {
+                    writable_subtrees: vec![".git".to_owned()],
+                },
+                ..ConfinementProfile::default()
+            };
+            assert_eq!(
+                check_snapshot(&CapabilityFacts::default(), &git)
+                    .expect_err("refused")
+                    .code(),
+                crate::confinement::WRITABLE_SUBTREE_GIT
+            );
         }
     }
 }

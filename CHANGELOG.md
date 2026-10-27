@@ -7,6 +7,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- The confinement profile gains `workspace_access`, the wire's `WorkspaceAccess`, re-exported from
+  `substrate_host::confinement`, default `ReadWrite` as before. `linux`, and `systemd` around it,
+  serve `ReadOnly` and `Scoped` on a host whose probe proved `exec.workspace-scoped-write`: the
+  workspace is bound read-only, and each named subtree is bound writable over it by descriptor, so a
+  write elsewhere in the workspace and a write over `.git` fail inside the run. A subtree that is
+  `.git` or lies beneath one is refused `confinement.writable-subtree-git` (422), and a malformed list
+  `exec.workspace-access-invalid` (422). Every other adapter refuses a non-default access
+  `exec.workspace-scoped-write-unserved` (501), and so does `linux` on a host without the fact.
+  `sealed_paths` stays refused on `linux` (`confinement.fact-unserved`). The surface change is
+  additive: a profile built with `..ConfinementProfile::default()` compiles unchanged, and only a
+  struct literal that names every field must name the new one.
+- The confinement profile gains `output_retention`, which sets `Head` (the default, unchanged),
+  `Tail` or `HeadAndTail` for stdout and stderr separately, within the same byte bound per stream.
+  `HeadAndTail` keeps the first half of the bound and the last half. `RunOutput` gains `stdout_kept`
+  and `stderr_kept` (`KeptOutput`): the retention applied, the head and tail byte counts, and the
+  bytes the stream produced when the adapter read it to its end. `local`, `linux`, `macos`,
+  `systemd` and `oci` serve all three modes from one shared buffer. `pod` refuses `Tail` and
+  `HeadAndTail` with `confinement.output-retention-unserved` (501), because the log API bounds a
+  read only from its start. No bound changes, and a run that does not set it reports the same bytes
+  as before.
+
 ## [0.13.0] — 2026-10-27
 
 ### Added

@@ -38,8 +38,8 @@ use zeroize::Zeroizing;
 use super::local::LOCAL_POLICY_ENV;
 use super::{
     AdapterFacts, AdapterName, AdmittedProfile, Command, ConfinementAdapter, ConfinementError,
-    ConfinementProfile, ContractFamily, Fact, ProcessBounds, RenderedCommand, RunExit, RunId,
-    RunObservation, RunOutput, RunState, image_is_pinned,
+    ConfinementProfile, ContractFamily, Fact, KeptOutput, ProcessBounds, RenderedCommand, RunExit,
+    RunId, RunObservation, RunOutput, RunState, image_is_pinned,
 };
 use crate::DriverError;
 
@@ -746,10 +746,13 @@ fn resolve(
     })
 }
 
-/// The refusals design 28 adds to the contract's order, for fields a Pod cannot apply.
+/// The refusals designs 28 and 29 add to the contract's order, for fields a Pod cannot apply.
 ///
 /// # Errors
 ///
+/// `exec.workspace-access-invalid`, `confinement.writable-subtree-git` and
+/// `exec.workspace-scoped-write-unserved` for a workspace access other than the whole workspace,
+/// `confinement.output-retention-unserved` for a stream kept by its tail,
 /// `confinement.family-unserved` for a host path or a network policy, `exec.secret-slots-unserved`,
 /// `exec.workdir-invalid`, `exec.limit-unserved` and `confinement.pod-processes-unserved`.
 pub fn check_profile(
@@ -760,6 +763,18 @@ pub fn check_profile(
         adapter: AdapterName::Pod,
         family,
     };
+    // Its workspace is an `emptyDir` the adapter creates, so no part of it can be held read-only.
+    super::refuse_workspace_access("pod", profile)?;
+    // The log API bounds a read only by `limitBytes`, which keeps the first bytes; keeping the
+    // last ones would mean reading a log whose size the adapter cannot bound (design 29 § 6).
+    if !profile.output_retention.is_head() {
+        return Err(DriverError::unserved(
+            super::OUTPUT_RETENTION_UNSERVED,
+            "The pod adapter keeps only the first bytes of each output stream.",
+            "output_retention",
+        )
+        .into());
+    }
     if profile.workspace.is_some()
         || !profile.writable_roots.is_empty()
         || !profile.read_only_roots.is_empty()
@@ -1392,11 +1407,16 @@ impl ConfinementAdapter for PodAdapter {
             None => read_log(&self.api, &run).await,
         };
         let (stdout, truncated) = read.map_err(|error| log_unread(&error))?;
+        // The log API returns the first bytes up to the bound and says nothing of the rest, so
+        // the stream's total is absent, never guessed (design 29 § 6).
+        let stdout_kept = KeptOutput::unobserved_head(stdout.len());
         Ok(RunOutput {
             stdout,
             stderr: Vec::new(),
             stdout_truncated: truncated,
             stderr_truncated: false,
+            stdout_kept,
+            stderr_kept: KeptOutput::unobserved_head(0),
         })
     }
 
@@ -1434,5 +1454,102 @@ impl ConfinementAdapter for PodAdapter {
         request_stop(&self.api, &run, signal, grace)
             .await
             .map_err(|error| api_failed(&error))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::confinement::{OutputRetention, Retention, WorkspaceAccess};
+
+    const IMAGE: &str = "registry.invalid/run@sha256:0000000000000000000000000000000000000000000000000000000000000000";
+
+    fn settings() -> PodSettings {
+        PodSettings {
+            namespace: "substrate-pod-unit".to_owned(),
+            run_as_user: POD_DEFAULT_RUN_AS_USER,
+            pod_pids_limit: Some(1024),
+            ephemeral_storage_bytes: POD_DEFAULT_EPHEMERAL_STORAGE_BYTES,
+        }
+    }
+
+    fn profile() -> ConfinementProfile {
+        ConfinementProfile {
+            image: Some(IMAGE.to_owned()),
+            ..ConfinementProfile::default()
+        }
+    }
+
+    #[test]
+    fn the_unit_profile_is_admitted() {
+        check_profile(&settings(), &profile()).expect("admitted");
+    }
+
+    // A8: the workspace is an `emptyDir` the adapter creates, so a narrower one is refused.
+    #[test]
+    fn a_narrower_workspace_is_refused_scoped_write_unserved() {
+        for access in [
+            WorkspaceAccess::ReadOnly,
+            WorkspaceAccess::Scoped {
+                writable_subtrees: vec!["out".to_owned()],
+            },
+        ] {
+            let error = check_profile(
+                &settings(),
+                &ConfinementProfile {
+                    workspace_access: access.clone(),
+                    ..profile()
+                },
+            )
+            .expect_err("refused");
+            assert_eq!(
+                error.code(),
+                substrate_wire::EXEC_WORKSPACE_SCOPED_WRITE_UNSERVED,
+                "{access:?}: {error}"
+            );
+            assert_eq!(error.status(), 501);
+        }
+    }
+
+    // B11: the log API keeps only the first bytes, so a tail mode on either stream is refused.
+    #[test]
+    fn a_tail_mode_on_either_stream_is_refused_output_retention_unserved() {
+        for retention in [
+            OutputRetention {
+                stdout: Retention::Tail,
+                stderr: Retention::Head,
+            },
+            OutputRetention {
+                stdout: Retention::Head,
+                stderr: Retention::HeadAndTail,
+            },
+            OutputRetention {
+                stdout: Retention::HeadAndTail,
+                stderr: Retention::Tail,
+            },
+        ] {
+            let error = check_profile(
+                &settings(),
+                &ConfinementProfile {
+                    output_retention: retention,
+                    ..profile()
+                },
+            )
+            .expect_err("refused");
+            assert_eq!(
+                error.code(),
+                super::super::OUTPUT_RETENTION_UNSERVED,
+                "{retention:?}: {error}"
+            );
+            assert_eq!(error.status(), 501);
+        }
+        check_profile(
+            &settings(),
+            &ConfinementProfile {
+                output_retention: OutputRetention::default(),
+                ..profile()
+            },
+        )
+        .expect("head on both streams is served");
     }
 }

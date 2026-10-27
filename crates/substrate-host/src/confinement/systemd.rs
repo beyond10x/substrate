@@ -158,7 +158,6 @@ mod imp {
     use async_trait::async_trait;
     use parking_lot::Mutex;
     use substrate_wire::Signal;
-    use tokio::io::{AsyncRead, AsyncReadExt as _};
     use tokio::sync::watch;
 
     use super::super::{
@@ -171,6 +170,7 @@ mod imp {
         SystemdRequest, USER_MANAGER_ENV,
     };
     use crate::DriverError;
+    use crate::output_retention::{Captured, drain};
 
     const CGROUP_FS: &str = "/sys/fs/cgroup";
     /// The leaf of the scope this process moves into, so the scope's root stays process-free.
@@ -756,14 +756,6 @@ mod imp {
         Unknown,
     }
 
-    #[derive(Default)]
-    struct Captured {
-        stdout: Vec<u8>,
-        stderr: Vec<u8>,
-        stdout_truncated: bool,
-        stderr_truncated: bool,
-    }
-
     struct LocalRun {
         id: RunId,
         leader: Leader,
@@ -1025,31 +1017,6 @@ mod imp {
         }
     }
 
-    async fn drain(
-        mut stream: impl AsyncRead + Unpin,
-        captured: Arc<Mutex<Captured>>,
-        stdout: bool,
-        limit: usize,
-    ) {
-        let mut buffer = vec![0_u8; 16 * 1024];
-        loop {
-            let read = match stream.read(&mut buffer).await {
-                Ok(0) | Err(_) => return,
-                Ok(read) => read,
-            };
-            let mut captured = captured.lock();
-            let captured = &mut *captured;
-            let (kept, truncated) = if stdout {
-                (&mut captured.stdout, &mut captured.stdout_truncated)
-            } else {
-                (&mut captured.stderr, &mut captured.stderr_truncated)
-            };
-            let room = limit.saturating_sub(kept.len());
-            kept.extend_from_slice(&buffer[..read.min(room)]);
-            *truncated |= read > room;
-        }
-    }
-
     impl SystemdLocal {
         fn run(&self, id: &RunId) -> Result<Arc<LocalRun>, ConfinementError> {
             self.runs
@@ -1222,13 +1189,8 @@ mod imp {
 
         async fn output(&self, run: &RunId) -> Result<RunOutput, ConfinementError> {
             let run = self.run(run)?;
-            let captured = run.captured.lock();
-            Ok(RunOutput {
-                stdout: captured.stdout.clone(),
-                stderr: captured.stderr.clone(),
-                stdout_truncated: captured.stdout_truncated,
-                stderr_truncated: captured.stderr_truncated,
-            })
+            let output = run.captured.lock().output();
+            Ok(output)
         }
 
         async fn wait(&self, run: &RunId) -> Result<RunObservation, ConfinementError> {
@@ -1304,14 +1266,19 @@ mod imp {
                 );
             };
             let id = RunId::new(format!("systemd-{name}"));
-            let captured = Arc::new(Mutex::new(Captured::default()));
+            let captured = Arc::new(Mutex::new(Captured::new(
+                admitted.profile().output_retention,
+                output_limit,
+            )));
             let (phase, observed) = watch::channel(Phase::Running);
-            let stdout = child.stdout.take().map(|stream| {
-                tokio::spawn(drain(stream, Arc::clone(&captured), true, output_limit))
-            });
-            let stderr = child.stderr.take().map(|stream| {
-                tokio::spawn(drain(stream, Arc::clone(&captured), false, output_limit))
-            });
+            let stdout = child
+                .stdout
+                .take()
+                .map(|stream| tokio::spawn(drain(stream, Arc::clone(&captured), true)));
+            let stderr = child
+                .stderr
+                .take()
+                .map(|stream| tokio::spawn(drain(stream, Arc::clone(&captured), false)));
             let leader = Leader {
                 pid,
                 exited: Arc::new(Mutex::new(false)),

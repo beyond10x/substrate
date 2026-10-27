@@ -284,6 +284,8 @@ impl Driver for PipeFixtureDriver {
             stderr: Vec::new(),
             stdout_truncated: false,
             stderr_truncated: false,
+            stdout_kept: None,
+            stderr_kept: None,
             output_complete: false,
             cgroup: Some(format!("fixture-{id}")),
             leader_pid: Some(1234),
