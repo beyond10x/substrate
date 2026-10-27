@@ -3,7 +3,7 @@
 # same.
 type: ess-scenario/5
 domain: substrate.confinement
-scenario: oci-adapter-unserved-without-runtime-on-portable
+scenario: absent-oci-without-runtime-on-portable
 summary: "lane portable: with the runtime program set to a path that does not exist, opening oci is refused confinement.adapter-unserved, and a profile on oci is refused the same."
 
 timeline:
@@ -27,7 +27,7 @@ timeline:
       required_families: [process_run]
       required_facts: []
       image: "registry.invalid/run@sha256:0000000000000000000000000000000000000000000000000000000000000000"
-    outcome: adapter-unserved
+    outcome: adapter-not-open
     error:
       name: substrate.confinement.AdapterUnserved
       fields: {adapter: oci}

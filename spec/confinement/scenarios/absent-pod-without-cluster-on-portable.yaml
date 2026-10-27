@@ -2,7 +2,7 @@
 # (`story:pod-adapter`). A profile on `pod` with an image named by digest is refused the same.
 type: ess-scenario/5
 domain: substrate.confinement
-scenario: pod-adapter-unserved-without-cluster-on-portable
+scenario: absent-pod-without-cluster-on-portable
 summary: "lane portable: with no cluster configuration, opening pod is refused confinement.adapter-unserved, and a profile on pod is refused the same."
 
 timeline:
@@ -26,7 +26,7 @@ timeline:
       required_families: [process_run]
       required_facts: []
       image: "registry.invalid/run@sha256:0000000000000000000000000000000000000000000000000000000000000000"
-    outcome: adapter-unserved
+    outcome: adapter-not-open
     error:
       name: substrate.confinement.AdapterUnserved
       fields: {adapter: pod}
