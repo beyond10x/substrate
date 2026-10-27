@@ -951,3 +951,241 @@ fn every_third_party_action_is_pinned_to_a_commit() {
         );
     }
 }
+
+/// The whole text of the named release-job step, from its `- name:` line to the next step.
+fn step_block(name: &str) -> &'static str {
+    let rest = &WORKFLOW[position(&format!("- name: {name}\n"))..];
+    let end = rest[1..]
+        .find("\n      - name: ")
+        .map_or(rest.len(), |end| end + 2);
+    &rest[..end]
+}
+
+#[test]
+fn the_archived_daemon_is_compared_with_the_image_before_the_daemon_tag_is_pushed() {
+    // A refusal after `docker push` leaves a write-once daemon tag behind, and the only way on is
+    // a recovery dispatch, whose branch of the comparison step skips `cmp`. So the byte-identity
+    // refusal holds only if it runs before the tag moves, like every other binary refusal.
+    let compare = position(
+        "cmp \"${BINARY_DIST}/bin/substrate-daemon\" target/image-under-test/substrate-daemon",
+    );
+    let daemon_push = position("docker push \"${IMAGE}:${VERSION}\"");
+    assert!(
+        compare < daemon_push,
+        "the archived daemon is compared with the image's at byte {compare}, after the daemon tag \
+         is pushed at byte {daemon_push}"
+    );
+}
+
+#[test]
+fn the_checksum_signature_is_verified_against_one_exact_identity_and_issuer() {
+    let verify =
+        step_script("Verify the release-binary checksum signature with the workflow identity");
+    assert!(!verify.contains("regexp"), "{verify}");
+    assert!(
+        verify.contains("--certificate-oidc-issuer 'https://token.actions.githubusercontent.com'"),
+        "{verify}"
+    );
+    assert!(
+        verify.contains(
+            "identity=\"${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}\""
+        ),
+        "{verify}"
+    );
+    // The command an operator is told to run is exact as well.
+    let notes = &WORKFLOW[position("## Release binaries")..position("## Confinement lane")];
+    assert!(!notes.contains("regexp"), "{notes}");
+    assert!(notes.contains("--certificate-identity ${BINARIES_IDENTITY}"));
+    assert!(
+        notes.contains("--certificate-oidc-issuer https://token.actions.githubusercontent.com")
+    );
+    let readme = fs::read_to_string(repository_root().join("README.md")).expect("README");
+    let section = readme
+        .split_once("### Release binaries")
+        .expect("README release-binaries section")
+        .1
+        .split("\n### ")
+        .next()
+        .expect("section body");
+    assert!(!section.contains("regexp"), "{section}");
+}
+
+#[test]
+fn release_binary_steps_receive_no_token_or_secret() {
+    for step in [
+        "Export the release binaries from the pinned builder stage",
+        GLIBC_STEP,
+        "Smoke-test the release binaries on the oldest supported glibc",
+        "Package the release binaries",
+        "Prove the archived daemon is the image's daemon",
+        "Sign the release-binary checksums keylessly",
+        "Verify the release-binary checksum signature with the workflow identity",
+    ] {
+        let block = step_block(step);
+        for forbidden in ["secrets.", "TOKEN", "--secret", "--build-arg"] {
+            assert!(
+                !block.contains(forbidden),
+                "step {step:?} carries {forbidden:?}:\n{block}"
+            );
+        }
+    }
+}
+
+#[test]
+fn only_the_release_job_holds_packages_and_id_token_write() {
+    let release_job = position("\n  release:\n");
+    for grant in ["packages: write", "id-token: write", "contents: write"] {
+        let lines: Vec<usize> = WORKFLOW
+            .match_indices(grant)
+            .map(|(at, _)| at)
+            .filter(|&at| {
+                let line_start = WORKFLOW[..at].rfind('\n').map_or(0, |n| n + 1);
+                WORKFLOW[line_start..at].trim().is_empty()
+            })
+            .collect();
+        assert_eq!(lines.len(), 1, "{grant} is granted {} times", lines.len());
+        assert!(
+            lines[0] > release_job,
+            "{grant} is granted outside the release job"
+        );
+    }
+    let top = &WORKFLOW[position("\npermissions:\n") + 1..];
+    let top = &top[..top
+        .find("\n\n")
+        .expect("workflow-level permissions block ends")];
+    assert_eq!(top, "permissions:\n  contents: read");
+}
+
+/// Runs the packaging step offline in a tagged throwaway repository and returns the bytes of
+/// every file it wrote to the assets directory, by name.
+fn package_release_binaries(source: &TaggedSource) -> Vec<(String, Vec<u8>)> {
+    let root = source.directory.path();
+    let _ = fs::remove_dir_all(root.join("dist"));
+    let bin = root.join("dist/bin");
+    fs::create_dir_all(&bin).expect("bin");
+    for binary in ["substrate-daemon", "b10x-substrate"] {
+        fs::write(bin.join(binary), format!("{binary} bytes")).expect("binary");
+    }
+    let output_file = root.join("github-output");
+    fs::write(&output_file, "").expect("GITHUB_OUTPUT");
+    let output = std::process::Command::new("bash")
+        .current_dir(root)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("SOURCE_SHA", &source.sha)
+        .env("VERSION", TAG)
+        .env("BINARY_TARGET", "x86_64-unknown-linux-gnu")
+        .env("BINARY_DIST", "dist")
+        .env("GITHUB_OUTPUT", &output_file)
+        .args([
+            "-e",
+            "-o",
+            "pipefail",
+            "-c",
+            &step_script("Package the release binaries"),
+        ])
+        .output()
+        .expect("bash runs");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut assets: Vec<(String, Vec<u8>)> = fs::read_dir(root.join("dist/assets"))
+        .expect("assets")
+        .map(|entry| {
+            let entry = entry.expect("asset entry");
+            (
+                entry.file_name().to_string_lossy().into_owned(),
+                fs::read(entry.path()).expect("asset bytes"),
+            )
+        })
+        .collect();
+    assets.sort();
+    assets
+}
+
+#[test]
+fn release_archives_are_deterministic_named_as_documented_and_summed_exactly() {
+    let source = TaggedSource::with_files(
+        &[
+            ("LICENSE", "licence text\n"),
+            ("THIRD_PARTY_LICENSES.html", "<p>notices</p>\n"),
+            ("README.md", "# readme\n"),
+        ],
+        "release",
+    );
+    let first = package_release_binaries(&source);
+    // Input modification times and the wall clock must not reach the archive bytes.
+    for file in ["LICENSE", "THIRD_PARTY_LICENSES.html", "README.md"] {
+        let status = std::process::Command::new("touch")
+            .args(["-d", "2001-02-03T04:05:06Z"])
+            .arg(source.directory.path().join(file))
+            .status()
+            .expect("touch runs");
+        assert!(status.success());
+    }
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let second = package_release_binaries(&source);
+    assert_eq!(first, second, "packaging the same inputs twice differs");
+
+    let daemon = format!("substrate-daemon-{TAG}-x86_64-unknown-linux-gnu.tar.gz");
+    let cli = format!("b10x-substrate-{TAG}-x86_64-unknown-linux-gnu.tar.gz");
+    let names: Vec<&str> = first.iter().map(|(name, _)| name.as_str()).collect();
+    let mut expected = vec!["SHA256SUMS", cli.as_str(), daemon.as_str()];
+    expected.sort_unstable();
+    assert_eq!(names, expected);
+
+    let sums = String::from_utf8(
+        first
+            .iter()
+            .find(|(name, _)| name == "SHA256SUMS")
+            .expect("SHA256SUMS")
+            .1
+            .clone(),
+    )
+    .expect("utf-8 sums");
+    let mut summed: Vec<&str> = sums
+        .lines()
+        .map(|line| line.split_once("  ").expect("sha256sum line").1)
+        .collect();
+    summed.sort_unstable();
+    let mut archives = vec![daemon.as_str(), cli.as_str()];
+    archives.sort_unstable();
+    assert_eq!(
+        summed, archives,
+        "SHA256SUMS covers exactly the two archives"
+    );
+
+    let assets = source.directory.path().join("dist/assets");
+    for (archive, binary) in [(&daemon, "substrate-daemon"), (&cli, "b10x-substrate")] {
+        let stem = archive.trim_end_matches(".tar.gz");
+        let listing = std::process::Command::new("tar")
+            .args(["--numeric-owner", "-tvzf"])
+            .arg(assets.join(archive))
+            .output()
+            .expect("tar runs");
+        assert!(listing.status.success());
+        let listing = String::from_utf8(listing.stdout).expect("utf-8 listing");
+        let mut entries: Vec<&str> = listing
+            .lines()
+            .map(|line| {
+                assert!(line.contains(" 0/0 "), "entry not owned by 0/0: {line}");
+                line.rsplit(' ').next().expect("entry name")
+            })
+            .collect();
+        entries.sort_unstable();
+        let mut want = vec![
+            format!("{stem}/"),
+            format!("{stem}/{binary}"),
+            format!("{stem}/LICENSE"),
+            format!("{stem}/README.md"),
+            format!("{stem}/THIRD_PARTY_LICENSES.html"),
+        ];
+        want.sort_unstable();
+        assert_eq!(
+            entries, want,
+            "{archive} holds exactly the documented files"
+        );
+    }
+}
