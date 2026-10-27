@@ -14,6 +14,19 @@ fails when the two differ. Earlier releases are in the
 
 ## 0.13.0 (2026-10-27)
 
+Published by [release run 40507411588](https://github.com/beyond10x/substrate/actions/runs/40507411588),
+the protected-`main` recovery dispatch for tag `0.13.0`, from tagged commit
+`c2b95f2882ec1e425459b23ed9e48dae121ae6d3`. The tag-push
+[run 40504625490](https://github.com/beyond10x/substrate/actions/runs/40504625490) pushed the
+daemon image and failed at keyless signing before anything was announced; the recovery run checked
+that image's source-revision label and shipped binary again and reused it. All three artifacts were
+keyless-signed and verified against `release.yml@refs/heads/main` by the release workflow, and each
+digest resolved anonymously:
+
+- Image: `ghcr.io/beyond10x/b10x-substrate-daemon:0.13.0` at `sha256:81a5d4d5d47520483dd6020549d63bb82ec3b636885c4f6aadab02b5a6040f22`.
+- Contract bundle: `ghcr.io/beyond10x/b10x-substrate-wire:0.23.0` at `sha256:c2a50222da154028011a794cc93724043943581ba4ee44051c38dd084b759ff5`, unchanged since 0.11.0 and signed again by this release.
+- Disposable MCP image: `ghcr.io/beyond10x/b10x-substrate-mcp:0.13.0` at `sha256:ae0d64f50b7bae805b5bb4d3ceb24abd8bb4cbe32cbd4b9aeb216840c127f5ec`, development-only.
+
 ### Added in 0.13.0
 
 - The public site explains each confinement adapter (what it enforces, declares, refuses by name and needs, and when to choose it). It also gains an overview of the contracts with the ten families and eleven facts, release notes rendered from the newest released `CHANGELOG.md` section, and `confine run`; the status page moves to 0.12.0. The page list is grouped, marks the current page, and collapses on narrow screens; tables scroll inside focusable regions.
