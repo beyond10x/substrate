@@ -26,6 +26,13 @@
 //! `pub` definition, and a re-export from any other crate fails the test until the scanner reads
 //! that crate too.
 //!
+//! Every type a recorded item names — in a public field, a variant, a signature or a constant's
+//! type — is recorded the same way when the host crate or `substrate-wire` defines it, and so on
+//! to a fixed point (`story:public-items-cover-field-types`): `HostConfig`'s fields hand a consumer
+//! `SecretSlot`, `EgressAperture` and `GitSourceBinding`, so their shapes are part of the module's.
+//! A name is read as a type when it starts with an uppercase letter and holds a lowercase one; a
+//! variant's own name and the item after `Type::` are not mentions.
+//!
 //! It reads every `cfg` arm, so the list is the same on every OS. It also records `pub` items of a
 //! private module, which a consumer cannot reach: over-inclusive, so a change there is flagged
 //! rather than missed. `#[cfg(test)]` modules and function bodies are skipped. Whitespace and line
@@ -787,8 +794,14 @@ fn items(sources: &[(String, String)]) -> Vec<String> {
         .collect();
     let mut out = Vec::new();
     let mut wanted: Vec<(Origin, String)> = Vec::new();
+    let mut module_mentions: Vec<String> = Vec::new();
     for (name, text) in &module {
         for record in scan(name, text) {
+            for mention in mentioned(&record) {
+                if !module_mentions.contains(&mention) {
+                    module_mentions.push(mention);
+                }
+            }
             if record.text.starts_with("pub use ") || record.text.contains("] pub use ") {
                 let (origin, names) = reexport(&record.text, &module);
                 for reexported in names {
@@ -830,24 +843,203 @@ fn items(sources: &[(String, String)]) -> Vec<String> {
             *origin = Origin::Wire;
         }
     }
-    for origin in [Origin::Host, Origin::Wire] {
+    let wire_files: Vec<&(String, String)> = sources
+        .iter()
+        .filter(|(name, _)| name.starts_with(WIRE))
+        .collect();
+    // Every type a held line names is held too, to a fixed point
+    // (`story:public-items-cover-field-types`): a public field, variant or signature that names a
+    // type of the host crate or the wire hands that type to a consumer, so a change to its shape
+    // is a change to the module's surface. Each file is scanned once for the search; the lines
+    // written are `external`'s, as for a re-exported name.
+    let types = TypeIndex::of(&module, &host_files, &wire_files);
+    // Per record of the host crate and the wire: its type, whether it is the wire's, and the type
+    // names it mentions.
+    let records: Vec<(String, bool, Vec<String>)> = host_files
+        .iter()
+        .chain(&wire_files)
+        .flat_map(|(file, text)| {
+            let from_wire = file.starts_with(WIRE);
+            scan(file, text)
+                .into_iter()
+                .map(move |record| (record.subject.clone(), from_wire, mentioned(&record)))
+        })
+        .collect();
+    let mentions_of = |held: &[(Origin, String)]| -> Vec<(bool, String)> {
+        records
+            .iter()
+            .filter(|(subject, _, _)| held.iter().any(|(_, name)| name == subject))
+            .flat_map(|(_, from_wire, names)| names.iter().map(|name| (*from_wire, name.clone())))
+            .collect()
+    };
+    let mut mentions: Vec<(bool, String)> = module_mentions
+        .into_iter()
+        .map(|name| (false, name))
+        .chain(mentions_of(&wanted))
+        .collect();
+    loop {
+        let added = types.named(&mentions, &wanted);
+        if added.is_empty() {
+            break;
+        }
+        mentions = mentions_of(&added);
+        wanted.extend(added);
+    }
+    for (origin, files) in [(Origin::Host, &host_files), (Origin::Wire, &wire_files)] {
         let names: Vec<String> = wanted
             .iter()
             .filter(|(from, _)| *from == origin)
             .map(|(_, name)| name.clone())
             .collect();
-        if names.is_empty() {
-            continue;
+        if !names.is_empty() {
+            out.extend(external(files, &names));
         }
-        let files: Vec<&(String, String)> = sources
-            .iter()
-            .filter(|(name, _)| {
-                !name.starts_with(MODULE) && name.starts_with(WIRE) == (origin == Origin::Wire)
-            })
-            .collect();
-        out.extend(external(&files, &names));
     }
     out
+}
+
+/// The keywords of a `pub` type definition.
+const TYPE_KEYWORDS: [&str; 5] = [
+    "pub struct ",
+    "pub enum ",
+    "pub trait ",
+    "pub type ",
+    "pub union ",
+];
+
+/// The type names one record mentions outside its attributes and string literals: each
+/// identifier that starts with an uppercase letter and holds a lowercase one, so `SecretSlot`
+/// and not `MAX_EGRESS_APERTURES`. A variant's own name is not a mention: `Driver` in
+/// `Driver(#[from] DriverError)` names no type.
+fn mentioned(record: &Record) -> Vec<String> {
+    let variant = record
+        .context
+        .last()
+        .is_some_and(|frame| frame.starts_with("enum ") || frame.contains("] enum "));
+    let text: Vec<char> = record.text.chars().collect();
+    let mut code = String::new();
+    let mut i = 0;
+    while i < text.len() {
+        if text[i] == '"' {
+            i += 1;
+            while i < text.len() && text[i] != '"' {
+                i += if text[i] == '\\' { 2 } else { 1 };
+            }
+            code.push(' ');
+        } else if text[i] == '#' && text.get(i + 1) == Some(&'[') {
+            let mut depth = 0;
+            while i < text.len() {
+                match text[i] {
+                    '[' => depth += 1,
+                    ']' => depth -= 1,
+                    _ => {}
+                }
+                if depth == 0 && text[i] == ']' {
+                    break;
+                }
+                i += 1;
+            }
+            code.push(' ');
+        } else {
+            code.push(text[i]);
+        }
+        i += 1;
+    }
+    let type_like = |word: &str| {
+        word.starts_with(|c: char| c.is_ascii_uppercase())
+            && word.chars().any(|c| c.is_ascii_lowercase())
+    };
+    let mut names: Vec<String> = Vec::new();
+    let mut previous: Option<&str> = None;
+    let mut rest = code.as_str();
+    let mut first = true;
+    while let Some(start) = rest.find(|c: char| c.is_alphanumeric() || c == '_') {
+        let separator = &rest[..start];
+        let word_end = rest[start..]
+            .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .map_or(rest.len(), |end| start + end);
+        let word = &rest[start..word_end];
+        rest = &rest[word_end..];
+        // `ContractFamily::Workspace` is a variant of `ContractFamily`, not the type `Workspace`;
+        // `substrate_wire::Workspace` is the type.
+        let item_of_a_type = separator.trim() == "::" && previous.is_some_and(type_like);
+        let skip = (variant && first) || item_of_a_type;
+        first = false;
+        previous = Some(word);
+        if !skip && type_like(word) && !names.iter().any(|name| name == word) {
+            names.push(word.to_owned());
+        }
+    }
+    names
+}
+
+/// The `pub` type names each part of the workspace defines, read once from the masked code.
+struct TypeIndex {
+    module: Vec<String>,
+    host: Vec<String>,
+    wire: Vec<String>,
+}
+
+impl TypeIndex {
+    fn of(
+        module: &[&(String, String)],
+        host: &[&(String, String)],
+        wire: &[&(String, String)],
+    ) -> Self {
+        let defined = |files: &[&(String, String)]| {
+            let mut names: Vec<String> = Vec::new();
+            for (_, text) in files {
+                for line in code_of(text).lines() {
+                    let line = line.trim_start();
+                    let Some(rest) = TYPE_KEYWORDS
+                        .iter()
+                        .find_map(|keyword| line.strip_prefix(keyword))
+                    else {
+                        continue;
+                    };
+                    let name: String = rest
+                        .chars()
+                        .take_while(|c| c.is_alphanumeric() || *c == '_')
+                        .collect();
+                    if !name.is_empty() && !names.contains(&name) {
+                        names.push(name);
+                    }
+                }
+            }
+            names
+        };
+        Self {
+            module: defined(module),
+            host: defined(host),
+            wire: defined(wire),
+        }
+    }
+
+    /// The types `lines` name that are not held yet, each with the crate whose `pub` type
+    /// definition it names. A name the module defines is the module's own; a name in a host or
+    /// module line resolves in the host crate first and then in the wire, which the host imports
+    /// from; a name in a wire line resolves in the wire only. A name with no `pub` type definition
+    /// in either, such as `String` or `PathBuf`, is not this workspace's.
+    fn named(
+        &self,
+        mentions: &[(bool, String)],
+        wanted: &[(Origin, String)],
+    ) -> Vec<(Origin, String)> {
+        let mut added: Vec<(Origin, String)> = Vec::new();
+        for (from_wire, name) in mentions {
+            if wanted.iter().chain(&added).any(|(_, held)| held == name)
+                || self.module.contains(name)
+            {
+                continue;
+            }
+            if !from_wire && self.host.contains(name) {
+                added.push((Origin::Host, name.clone()));
+            } else if self.wire.contains(name) {
+                added.push((Origin::Wire, name.clone()));
+            }
+        }
+        added
+    }
 }
 
 fn committed() -> Option<Vec<String>> {
@@ -1153,6 +1345,45 @@ fn adversary_the_list_records_the_shape_of_every_type_the_module_reexports() {
         absent.is_empty(),
         "re-exported by confinement, with no record of their shape in the list: {absent:?}"
     );
+}
+
+/// `story:public-items-cover-field-types`: a type named by a public field or signature of a type
+/// the list holds is held as that type is, at any depth. `HostConfig`, which the module
+/// re-exports, names `SecretSlot`, `EgressAperture` and `GitSourceBinding` in public fields;
+/// `ConfinementError::Driver` names `DriverError`, whose public field names `DriverErrorClass`. A
+/// public field or variant added to any of them changes the list, and the added line names it.
+#[test]
+fn a_type_named_by_a_public_field_of_a_held_type_is_held_too() {
+    for (file, from, to, line) in [
+        (
+            "lib.rs",
+            "pub struct SecretSlot {\n    pub name: String,\n",
+            "pub struct SecretSlot {\n    pub name: String,\n    pub probe: u64,\n",
+            "lib.rs: struct SecretSlot > pub probe: u64,",
+        ),
+        (
+            "aperture.rs",
+            "pub struct EgressAperture {\n    pub name: String,\n",
+            "pub struct EgressAperture {\n    pub name: String,\n    pub probe: u64,\n",
+            "aperture.rs: struct EgressAperture > pub probe: u64,",
+        ),
+        (
+            "lib.rs",
+            "pub struct GitSourceBinding {\n    pub name: String,\n",
+            "pub struct GitSourceBinding {\n    pub name: String,\n    pub probe: u64,\n",
+            "lib.rs: struct GitSourceBinding > pub probe: u64,",
+        ),
+        (
+            "lib.rs",
+            "    Failed,\n    NotFound,\n",
+            "    Failed,\n    NotFound,\n    Probe,\n",
+            "lib.rs: enum DriverErrorClass > Probe,",
+        ),
+    ] {
+        let (added, removed) = adversary_edits(&[(file, from, to)]);
+        assert_eq!(added, [line], "a field or variant added in {file}");
+        assert!(removed.is_empty(), "{removed:?}");
+    }
 }
 
 #[test]
