@@ -273,6 +273,12 @@ confinement/systemd.rs: mod imp > pub const DEFAULT_BOUNDS: ProcessBounds = Proc
 confinement/systemd.rs: mod imp > impl Drop for LinuxHold
 confinement/systemd.rs: mod imp > #[async_trait] impl ConfinementAdapter for SystemdLinux
 confinement/systemd.rs: mod imp > #[async_trait] impl ConfinementAdapter for SystemdLocal
+aperture.rs: #[derive(Debug, Clone, PartialEq, Eq)] pub struct EgressAperture
+aperture.rs: struct EgressAperture > pub name: String,
+aperture.rs: struct EgressAperture > pub host: String,
+aperture.rs: struct EgressAperture > pub port: u16,
+aperture.rs: struct EgressAperture > pub pinned: SocketAddr,
+aperture.rs: struct EgressAperture > pub max_bytes: Option<u64>,
 generated/confinement.rs: #[derive(Debug, Clone, PartialEq, ::serde::Serialize, ::serde::Deserialize)] pub enum AdapterName
 generated/confinement.rs: enum AdapterName > #[serde(rename = "linux")] Linux,
 generated/confinement.rs: enum AdapterName > #[serde(rename = "local")] Local,
@@ -303,6 +309,14 @@ generated/confinement.rs: enum Fact > #[serde(rename = "paths_are_host_paths")] 
 generated/confinement.rs: enum Fact > #[serde(rename = "private_tmpdir")] PrivateTmpdir,
 generated/confinement.rs: enum Fact > #[serde(rename = "sealed_paths")] SealedPaths,
 generated/confinement.rs: enum Fact > #[serde(rename = "whole_tree_kill")] WholeTreeKill,
+lib.rs: #[derive(Debug, Clone)] pub struct GitSourceBinding
+lib.rs: struct GitSourceBinding > pub name: String,
+lib.rs: struct GitSourceBinding > pub base_url: url::Url,
+lib.rs: struct GitSourceBinding > pub ca_bundle: Option<PathBuf>,
+lib.rs: impl GitSourceBinding > pub fn new(name: impl Into<String>, base_url: impl AsRef<str>, ca_bundle: Option<PathBuf>) -> Result<Self, DriverError>
+lib.rs: #[derive(Debug, Clone, PartialEq, Eq)] pub struct SecretSlot
+lib.rs: struct SecretSlot > pub name: String,
+lib.rs: struct SecretSlot > pub path: PathBuf,
 lib.rs: #[derive(Debug, Clone, PartialEq, Eq)] pub struct DeclaredWritableRoot
 lib.rs: struct DeclaredWritableRoot > pub name: String,
 lib.rs: struct DeclaredWritableRoot > pub path: PathBuf,
@@ -332,6 +346,24 @@ lib.rs: struct HostConfig > pub exec_cpu_cores: u32,
 lib.rs: struct HostConfig > pub host_processes: bool,
 lib.rs: struct HostConfig > pub writable_roots: Vec<DeclaredWritableRoot>,
 lib.rs: impl HostConfig > pub fn minimum(workspace_root: impl Into<PathBuf>) -> Self
+lib.rs: #[derive(Debug, Clone, Copy, PartialEq, Eq)] pub enum DriverErrorClass
+lib.rs: enum DriverErrorClass > Refused,
+lib.rs: enum DriverErrorClass > Conflict,
+lib.rs: enum DriverErrorClass > Unserved,
+lib.rs: enum DriverErrorClass > Exhausted,
+lib.rs: enum DriverErrorClass > Failed,
+lib.rs: enum DriverErrorClass > NotFound,
+lib.rs: #[derive(Debug, Error)] pub struct DriverError
+lib.rs: struct DriverError > pub class: DriverErrorClass,
+lib.rs: struct DriverError > pub code: &'static str,
+lib.rs: struct DriverError > pub message: String,
+lib.rs: struct DriverError > pub address: Option<String>,
+lib.rs: struct DriverError > pub retriable: bool,
+lib.rs: impl DriverError > pub fn refused(code: &'static str, message: impl Into<String>, address: &str) -> Self
+lib.rs: impl DriverError > pub fn not_found() -> Self
+lib.rs: impl DriverError > pub fn unserved(code: &'static str, message: impl Into<String>, address: &str) -> Self
+lib.rs: impl DriverError > pub fn exhausted(code: &'static str, message: impl Into<String>, address: &str) -> Self
+lib.rs: impl DriverError > pub fn failed(code: &'static str, message: impl Into<String>) -> Self
 substrate-wire/src/lib.rs: #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)] #[serde(deny_unknown_fields)] pub struct WritableHostRoot
 substrate-wire/src/lib.rs: struct WritableHostRoot > pub host: String,
 substrate-wire/src/lib.rs: struct WritableHostRoot > pub mount: String,
@@ -340,6 +372,120 @@ substrate-wire/src/lib.rs: enum Signal > Int,
 substrate-wire/src/lib.rs: enum Signal > Term,
 substrate-wire/src/lib.rs: enum Signal > Kill,
 substrate-wire/src/lib.rs: impl Signal > pub const fn number(self) -> i32
+substrate-wire/src/lib.rs: #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)] #[serde(deny_unknown_fields)] pub struct CapabilitySnapshot
+substrate-wire/src/lib.rs: struct CapabilitySnapshot > pub snapshot: String,
+substrate-wire/src/lib.rs: struct CapabilitySnapshot > pub driver: HostDriverKind,
+substrate-wire/src/lib.rs: struct CapabilitySnapshot > pub driver_version: String,
+substrate-wire/src/lib.rs: struct CapabilitySnapshot > pub config_generation: u64,
+substrate-wire/src/lib.rs: struct CapabilitySnapshot > pub probed_at: DateTime<Utc>,
+substrate-wire/src/lib.rs: struct CapabilitySnapshot > #[serde(skip_serializing_if = "Option::is_none")] pub valid_until: Option<DateTime<Utc>>,
+substrate-wire/src/lib.rs: struct CapabilitySnapshot > pub facts: CapabilityFacts,
+substrate-wire/src/lib.rs: #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)] pub enum HostDriverKind
+substrate-wire/src/lib.rs: enum HostDriverKind > #[serde(rename = "host")] Host,
+substrate-wire/src/lib.rs: #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)] #[serde(deny_unknown_fields)] pub struct CapabilityFacts
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "events.pull", skip_serializing_if = "Option::is_none")] pub events_pull: Option<bool>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "events.stream", skip_serializing_if = "Option::is_none")] pub events_stream: Option<bool>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "events.retention-events", skip_serializing_if = "Option::is_none")] pub events_retention_events: Option<u64>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "operation.ledger-subject-max-rows")] pub operation_ledger_subject_max_rows: u64,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "operation.ledger-subject-max-bytes")] pub operation_ledger_subject_max_bytes: u64,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "operation.ledger-global-max-rows")] pub operation_ledger_global_max_rows: u64,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "operation.ledger-global-max-bytes")] pub operation_ledger_global_max_bytes: u64,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "leases.explicit", skip_serializing_if = "Option::is_none")] pub leases_explicit: Option<bool>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "leases.clock-tolerance-ms", skip_serializing_if = "Option::is_none")] pub leases_clock_tolerance_ms: Option<u64>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "workspace.guarded-io", skip_serializing_if = "Option::is_none")] pub workspace_guarded_io: Option<bool>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "workspace.openat2-beneath", skip_serializing_if = "Option::is_none")] pub workspace_openat2_beneath: Option<bool>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "workspace.atomic-replace", skip_serializing_if = "Option::is_none")] pub workspace_atomic_replace: Option<bool>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "workspace.max-current", skip_serializing_if = "Option::is_none")] pub workspace_max_current: Option<u64>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "workspace.max-file-bytes", skip_serializing_if = "Option::is_none")] pub workspace_max_file_bytes: Option<u64>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "workspace.read-limit-bytes", skip_serializing_if = "Option::is_none")] pub workspace_read_limit_bytes: Option<u64>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "workspace.list-limit-items", skip_serializing_if = "Option::is_none")] pub workspace_list_limit_items: Option<u32>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "workspace.storage-quota", skip_serializing_if = "Option::is_none")] pub workspace_storage_quota: Option<StorageQuotaFacts>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "workspace.git", skip_serializing_if = "Option::is_none")] pub workspace_git: Option<bool>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "exec.argv-only", skip_serializing_if = "Option::is_none")] pub exec_argv_only: Option<bool>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "exec.namespaces", skip_serializing_if = "Option::is_none")] pub exec_namespaces: Option<NamespaceFacts>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "exec.no-egress", skip_serializing_if = "Option::is_none")] pub exec_no_egress: Option<bool>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "exec.workspace-scoped-write", skip_serializing_if = "Option::is_none")] pub exec_workspace_scoped_write: Option<bool>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "exec.cgroup-limits", skip_serializing_if = "Option::is_none")] pub exec_cgroup_limits: Option<CgroupLimitFacts>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "exec.cgroup-kill", skip_serializing_if = "Option::is_none")] pub exec_cgroup_kill: Option<bool>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "exec.output-limit-bytes", skip_serializing_if = "Option::is_none")] pub exec_output_limit_bytes: Option<u64>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "exec.max-current", skip_serializing_if = "Option::is_none")] pub exec_max_current: Option<u64>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "exec.signals", skip_serializing_if = "Option::is_none")] pub exec_signals: Option<Vec<Signal>>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "exec.inline-capsule", skip_serializing_if = "Option::is_none")] pub exec_inline_capsule: Option<ExecutionCapsuleFacts>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "exec.scratch-quota", skip_serializing_if = "Option::is_none")] pub exec_scratch_quota: Option<ScratchQuotaFacts>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "exec.read-only-roots", default, skip_serializing_if = "Option::is_none")] pub exec_read_only_roots: Option<ReadOnlyRootFacts>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "exec.read-only-files", skip_serializing_if = "Option::is_none")] pub exec_read_only_files: Option<ReadOnlyFileFacts>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "exec.workdir", default, skip_serializing_if = "Option::is_none")] pub exec_workdir: Option<bool>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "exec.writable-roots.host", default, skip_serializing_if = "Option::is_none")] pub exec_writable_roots_host: Option<Vec<String>>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "exec.writable-roots.git", default, skip_serializing_if = "Option::is_none")] pub exec_writable_roots_git: Option<bool>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "exec.resource-usage", skip_serializing_if = "Option::is_none")] pub exec_resource_usage: Option<ResourceUsageFacts>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "metrics.stream", skip_serializing_if = "Option::is_none")] pub metrics_stream: Option<MetricsStreamFacts>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "events.stream-bounds", default, skip_serializing_if = "Option::is_none")] pub events_stream_bounds: Option<StreamBoundsFacts>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "metrics.stream-bounds", default, skip_serializing_if = "Option::is_none")] pub metrics_stream_bounds: Option<StreamBoundsFacts>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "sessions.attachment-bounds", default, skip_serializing_if = "Option::is_none")] pub sessions_attachment_bounds: Option<AttachmentBoundsFacts>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "exec.egress-apertures", skip_serializing_if = "Option::is_none")] pub exec_egress_apertures: Option<Vec<EgressApertureFact>>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "secrets.slots", skip_serializing_if = "Option::is_none")] pub secrets_slots: Option<Vec<String>>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "sessions.pty", skip_serializing_if = "Option::is_none")] pub sessions_pty: Option<bool>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "sessions.unrecorded", default, skip_serializing_if = "Option::is_none")] pub sessions_unrecorded: Option<bool>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "snapshot.provenance-events", skip_serializing_if = "Option::is_none")] pub snapshot_provenance_events: Option<u64>,
+substrate-wire/src/lib.rs: struct CapabilityFacts > #[serde(rename = "process.host", default, skip_serializing_if = "Option::is_none")] pub process_host: Option<bool>,
+substrate-wire/src/lib.rs: impl Default for CapabilityFacts
+substrate-wire/src/lib.rs: #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)] #[serde(deny_unknown_fields)] pub struct StorageQuotaFacts
+substrate-wire/src/lib.rs: struct StorageQuotaFacts > pub allocation_unit_bytes: u64,
+substrate-wire/src/lib.rs: struct StorageQuotaFacts > pub max_bytes: u64,
+substrate-wire/src/lib.rs: struct StorageQuotaFacts > pub max_inodes: u64,
+substrate-wire/src/lib.rs: #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)] #[serde(deny_unknown_fields)] pub struct ScratchQuotaFacts
+substrate-wire/src/lib.rs: struct ScratchQuotaFacts > pub mount: String,
+substrate-wire/src/lib.rs: struct ScratchQuotaFacts > pub allocation_unit_bytes: u64,
+substrate-wire/src/lib.rs: struct ScratchQuotaFacts > pub max_bytes: u64,
+substrate-wire/src/lib.rs: struct ScratchQuotaFacts > pub max_inodes: u64,
+substrate-wire/src/lib.rs: #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)] #[serde(deny_unknown_fields)] pub struct ReadOnlyRootFacts
+substrate-wire/src/lib.rs: struct ReadOnlyRootFacts > pub max_roots: u32,
+substrate-wire/src/lib.rs: #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)] #[serde(deny_unknown_fields)] pub struct ReadOnlyFileFacts
+substrate-wire/src/lib.rs: struct ReadOnlyFileFacts > pub max_files: u32,
+substrate-wire/src/lib.rs: #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)] #[serde(deny_unknown_fields)] pub struct ResourceUsageFacts
+substrate-wire/src/lib.rs: struct ResourceUsageFacts > pub wall_time: bool,
+substrate-wire/src/lib.rs: struct ResourceUsageFacts > pub cpu_time: bool,
+substrate-wire/src/lib.rs: struct ResourceUsageFacts > pub memory_current: bool,
+substrate-wire/src/lib.rs: struct ResourceUsageFacts > pub memory_peak: bool,
+substrate-wire/src/lib.rs: struct ResourceUsageFacts > pub processes_current: bool,
+substrate-wire/src/lib.rs: struct ResourceUsageFacts > pub processes_peak: bool,
+substrate-wire/src/lib.rs: struct ResourceUsageFacts > pub process_limit_hits: bool,
+substrate-wire/src/lib.rs: struct ResourceUsageFacts > pub memory_oom_kills: bool,
+substrate-wire/src/lib.rs: struct ResourceUsageFacts > pub block_io: bool,
+substrate-wire/src/lib.rs: #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)] #[serde(deny_unknown_fields)] pub struct MetricsStreamFacts
+substrate-wire/src/lib.rs: struct MetricsStreamFacts > pub sample_interval_ms: u64,
+substrate-wire/src/lib.rs: struct MetricsStreamFacts > pub latest_wins: bool,
+substrate-wire/src/lib.rs: struct MetricsStreamFacts > pub replay: bool,
+substrate-wire/src/lib.rs: #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)] #[serde(deny_unknown_fields)] pub struct StreamBoundsFacts
+substrate-wire/src/lib.rs: struct StreamBoundsFacts > pub per_subject: u32,
+substrate-wire/src/lib.rs: struct StreamBoundsFacts > pub global: u32,
+substrate-wire/src/lib.rs: struct StreamBoundsFacts > pub lifetime_ms: u64,
+substrate-wire/src/lib.rs: struct StreamBoundsFacts > pub refusal: String,
+substrate-wire/src/lib.rs: impl StreamBoundsFacts > pub fn events() -> Self
+substrate-wire/src/lib.rs: impl StreamBoundsFacts > pub fn metrics() -> Self
+substrate-wire/src/lib.rs: #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)] #[serde(deny_unknown_fields)] pub struct AttachmentBoundsFacts
+substrate-wire/src/lib.rs: struct AttachmentBoundsFacts > pub per_subject: u32,
+substrate-wire/src/lib.rs: struct AttachmentBoundsFacts > pub per_session: u32,
+substrate-wire/src/lib.rs: struct AttachmentBoundsFacts > pub global: u32,
+substrate-wire/src/lib.rs: struct AttachmentBoundsFacts > pub lifetime_ms: u64,
+substrate-wire/src/lib.rs: struct AttachmentBoundsFacts > pub refusal: String,
+substrate-wire/src/lib.rs: impl AttachmentBoundsFacts > pub fn sessions() -> Self
+substrate-wire/src/lib.rs: #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)] #[serde(deny_unknown_fields)] pub struct ExecutionCapsuleFacts
+substrate-wire/src/lib.rs: struct ExecutionCapsuleFacts > pub mount: String,
+substrate-wire/src/lib.rs: struct ExecutionCapsuleFacts > pub max_files: u32,
+substrate-wire/src/lib.rs: struct ExecutionCapsuleFacts > pub max_file_bytes: u64,
+substrate-wire/src/lib.rs: struct ExecutionCapsuleFacts > pub max_total_bytes: u64,
+substrate-wire/src/lib.rs: #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)] #[serde(deny_unknown_fields)] pub struct NamespaceFacts
+substrate-wire/src/lib.rs: struct NamespaceFacts > pub user: bool,
+substrate-wire/src/lib.rs: struct NamespaceFacts > pub mount: bool,
+substrate-wire/src/lib.rs: struct NamespaceFacts > pub pid: bool,
+substrate-wire/src/lib.rs: struct NamespaceFacts > pub ipc: bool,
+substrate-wire/src/lib.rs: struct NamespaceFacts > pub uts: bool,
+substrate-wire/src/lib.rs: struct NamespaceFacts > pub network: bool,
+substrate-wire/src/lib.rs: #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)] #[serde(deny_unknown_fields)] pub struct CgroupLimitFacts
+substrate-wire/src/lib.rs: struct CgroupLimitFacts > pub processes: bool,
+substrate-wire/src/lib.rs: struct CgroupLimitFacts > pub memory: bool,
+substrate-wire/src/lib.rs: struct CgroupLimitFacts > pub cpu: bool,
 substrate-wire/src/lib.rs: #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)] #[serde(deny_unknown_fields)] pub struct ReadOnlyRoot
 substrate-wire/src/lib.rs: struct ReadOnlyRoot > pub host_path: String,
 substrate-wire/src/lib.rs: struct ReadOnlyRoot > pub mount: String,
@@ -349,3 +495,7 @@ substrate-wire/src/lib.rs: struct ReadOnlyFile > pub mount: String,
 substrate-wire/src/lib.rs: #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)] #[serde(deny_unknown_fields)] pub struct SecretSlotRequest
 substrate-wire/src/lib.rs: struct SecretSlotRequest > pub slot: String,
 substrate-wire/src/lib.rs: struct SecretSlotRequest > pub fd: u32,
+substrate-wire/src/lib.rs: #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)] #[serde(deny_unknown_fields)] pub struct EgressApertureFact
+substrate-wire/src/lib.rs: struct EgressApertureFact > pub name: String,
+substrate-wire/src/lib.rs: struct EgressApertureFact > pub destination: String,
+substrate-wire/src/lib.rs: struct EgressApertureFact > #[serde(default, skip_serializing_if = "Option::is_none")] pub max_bytes: Option<u64>,

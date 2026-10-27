@@ -21,15 +21,15 @@ use serde_json::{Value, json};
 use substrate_host::confinement::{
     self, AdapterName, AdapterRequest, AdmittedProfile, Command, ConfinementAdapter,
     ConfinementError, ConfinementProfile, ContractFamily, Fact, HostConfig, Network, ReadOnlyRoot,
-    RunObservation, Signal, image_is_pinned, linux::LinuxRequest, local::LocalRequest,
-    oci::OciRequest,
+    RenderedCommand, RunObservation, Signal, image_is_pinned, linux::LinuxRequest,
+    local::LocalRequest, oci::OciRequest,
 };
 use substrate_host::{DriverError, DriverErrorClass};
 use tokio::signal::unix::{SignalKind, signal};
 
 use crate::{EXIT_FAILURE, EXIT_USAGE, Output, to_json, write_line};
 
-use self::cgroup::PrivateCgroup;
+use self::cgroup::{Leftover, PrivateCgroup};
 
 /// The variable naming the delegated cgroup v2 root `linux` runs beneath. It is the CLI's own:
 /// the daemon's `SUBSTRATE_CGROUP_ROOT` is never read here, because a host driver opened on a root
@@ -233,24 +233,48 @@ pub fn run(output: Output, args: ConfineRunArgs) -> ExitCode {
             return fail(
                 output,
                 &Failure::Usage(format!("starting the runtime: {error}")),
+                &[],
             );
         }
     };
+    // What the reaper left, under `--output json`; text output names each on stderr at once.
+    let mut left = Vec::new();
     let outcome = runtime.block_on(async {
         let mut interrupts = Interrupts::new()
             .map_err(|error| Failure::Usage(format!("catching signals: {error}")))?;
-        confine(output, args, &mut interrupts).await
+        confine(output, args, &mut interrupts, &mut left).await
     });
     match outcome {
         Ok(status) => status,
-        Err(failure) => fail(output, &failure),
+        Err(failure) => fail(output, &failure, &left),
     }
+}
+
+/// `document` with what the reaper left, if anything, as `left_groups` in its `result`, or in its
+/// `error.data`: under `--output json` the verb writes one document, so these join it rather than
+/// add lines beside it.
+fn with_left(mut document: Value, left: &[Leftover]) -> Value {
+    if left.is_empty() {
+        return document;
+    }
+    let groups: Vec<Value> = left
+        .iter()
+        .map(|leftover| json!({"path": leftover.path.to_string_lossy(), "reason": leftover.reason}))
+        .collect();
+    let slot = if document["ok"] == true {
+        &mut document["result"]
+    } else {
+        &mut document["error"]["data"]
+    };
+    slot["left_groups"] = Value::Array(groups);
+    document
 }
 
 async fn confine(
     output: Output,
     args: ConfineRunArgs,
     interrupts: &mut Interrupts,
+    left: &mut Vec<Leftover>,
 ) -> Result<ExitCode, Failure> {
     let chosen = Chosen::of(&args);
     // The image is checked before any adapter is chosen or asked anything: only `oci` runs one,
@@ -292,7 +316,7 @@ async fn confine(
         .map_err(|error| Failure::Usage(format!("a private state directory: {error}")))?;
     // Dropped after the adapter, so the driver is gone before its group is removed.
     let private = match chosen {
-        Chosen::Linux => private_cgroup()?,
+        Chosen::Linux => private_cgroup(output, left)?,
         Chosen::Local | Chosen::Oci => None,
     };
     let request = request(
@@ -325,37 +349,51 @@ async fn confine(
             }));
         }
         let rendered = adapter.render(&admitted, &command)?;
-        let program = rendered.program.to_string_lossy().into_owned();
-        match output {
-            Output::Json => write_line(
-                &mut std::io::stdout(),
-                &json!({"ok": true, "result": {
+        report_dry_run(output, &admitted, &rendered, left);
+        return Ok(ExitCode::SUCCESS);
+    }
+    let status = run_to_end(output, &adapter, &admitted, &command, interrupts, left).await;
+    drop(adapter);
+    drop(private);
+    status
+}
+
+/// Writes a dry run's render: one document under `--output json`, otherwise the program and its
+/// arguments one per line on stdout and the dry-run note on stderr.
+fn report_dry_run(
+    output: Output,
+    admitted: &AdmittedProfile,
+    rendered: &RenderedCommand,
+    left: &[Leftover],
+) {
+    let program = rendered.program.to_string_lossy().into_owned();
+    match output {
+        Output::Json => write_line(
+            &mut std::io::stdout(),
+            &with_left(
+                json!({"ok": true, "result": {
                     "adapter": name(admitted.adapter()),
                     "declared_insecure": admitted.insecure_reason(),
                     "program": program,
                     "args": rendered.args,
                     "note": DRY_RUN_NOTE,
-                }})
-                .to_string(),
-            ),
-            Output::Human => {
-                let mut stdout = std::io::stdout().lock();
-                for line in std::iter::once(&program).chain(&rendered.args) {
-                    let _ = writeln!(stdout, "{line}");
-                }
-                let _ = stdout.flush();
-                write_line(
-                    &mut std::io::stderr(),
-                    &format!("b10x-substrate: {DRY_RUN_NOTE}"),
-                );
+                }}),
+                left,
+            )
+            .to_string(),
+        ),
+        Output::Human => {
+            let mut stdout = std::io::stdout().lock();
+            for line in std::iter::once(&program).chain(&rendered.args) {
+                let _ = writeln!(stdout, "{line}");
             }
+            let _ = stdout.flush();
+            write_line(
+                &mut std::io::stderr(),
+                &format!("b10x-substrate: {DRY_RUN_NOTE}"),
+            );
         }
-        return Ok(ExitCode::SUCCESS);
     }
-    let status = run_to_end(output, &adapter, &admitted, &command, interrupts).await;
-    drop(adapter);
-    drop(private);
-    status
 }
 
 /// What a dry run says about its own output.
@@ -384,13 +422,31 @@ fn check_workspace_name(workspace: &Path) -> Result<(), Failure> {
     Ok(())
 }
 
-/// The private group of [`CGROUP_ROOT_ENV`], or none when it is unset.
-fn private_cgroup() -> Result<Option<PrivateCgroup>, Failure> {
+/// The private group of [`CGROUP_ROOT_ENV`], or none when it is unset. What the reaper left is
+/// named on stderr under text output, one line each, and kept in `left` for the document under
+/// `--output json`.
+fn private_cgroup(
+    output: Output,
+    left: &mut Vec<Leftover>,
+) -> Result<Option<PrivateCgroup>, Failure> {
     let Some(root) = std::env::var_os(CGROUP_ROOT_ENV).filter(|value| !value.is_empty()) else {
         return Ok(None);
     };
     let root = PathBuf::from(root);
-    PrivateCgroup::create(&root).map(Some).map_err(|reason| {
+    let created = PrivateCgroup::create(&root, left);
+    if output == Output::Human {
+        for leftover in left.drain(..) {
+            write_line(
+                &mut std::io::stderr(),
+                &format!(
+                    "b10x-substrate: {}: {}",
+                    leftover.path.display(),
+                    leftover.reason
+                ),
+            );
+        }
+    }
+    created.map(Some).map_err(|reason| {
         Failure::Refused(ConfinementError::Driver(DriverError::unserved(
             "exec.sandbox-unavailable",
             format!(
@@ -485,6 +541,7 @@ async fn run_to_end(
     admitted: &AdmittedProfile,
     command: &Command,
     interrupts: &mut Interrupts,
+    left: &[Leftover],
 ) -> Result<ExitCode, Failure> {
     let run = adapter.start(admitted, command).await?;
     let ended = tokio::select! {
@@ -500,16 +557,19 @@ async fn run_to_end(
     match output {
         Output::Json => write_line(
             &mut std::io::stdout(),
-            &json!({"ok": true, "result": {
-                "adapter": name(&ended.adapter),
-                "declared_insecure": ended.declared_insecure,
-                "exit_code": ended.exit.and_then(|exit| exit.code),
-                "signal": ended.exit.and_then(|exit| exit.signal),
-                "stdout": String::from_utf8_lossy(&ran.stdout),
-                "stderr": String::from_utf8_lossy(&ran.stderr),
-                "stdout_truncated": ran.stdout_truncated,
-                "stderr_truncated": ran.stderr_truncated,
-            }})
+            &with_left(
+                json!({"ok": true, "result": {
+                    "adapter": name(&ended.adapter),
+                    "declared_insecure": ended.declared_insecure,
+                    "exit_code": ended.exit.and_then(|exit| exit.code),
+                    "signal": ended.exit.and_then(|exit| exit.signal),
+                    "stdout": String::from_utf8_lossy(&ran.stdout),
+                    "stderr": String::from_utf8_lossy(&ran.stderr),
+                    "stdout_truncated": ran.stdout_truncated,
+                    "stderr_truncated": ran.stderr_truncated,
+                }}),
+                left,
+            )
             .to_string(),
         ),
         Output::Human => {
@@ -582,7 +642,7 @@ fn detail(error: &ConfinementError) -> (String, Option<String>) {
     }
 }
 
-fn fail(output: Output, failure: &Failure) -> ExitCode {
+fn fail(output: Output, failure: &Failure, left: &[Leftover]) -> ExitCode {
     let (code, data, status, human) = match failure {
         Failure::Refused(error) | Failure::Failed(error) => {
             let (message, address) = detail(error);
@@ -640,7 +700,11 @@ fn fail(output: Output, failure: &Failure) -> ExitCode {
         }
     };
     let text = match output {
-        Output::Json => json!({"ok": false, "error": {"code": code, "data": data}}).to_string(),
+        Output::Json => with_left(
+            json!({"ok": false, "error": {"code": code, "data": data}}),
+            left,
+        )
+        .to_string(),
         Output::Human => format!("b10x-substrate: {human}"),
     };
     write_line(&mut std::io::stderr(), &text);

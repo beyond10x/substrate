@@ -14,6 +14,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ### Changed
 
 - The gate workflow's `pod-lane` job runs `scripts/pod-lane.sh`: the `kind` cluster's `ess_confinement_pod`, `adversary_pod` and `security_review_pod` suites, each required by its own `test result:` line with at least one case passed and no case reporting itself absent. The job adds a second ServiceAccount bound to the Pod and NetworkPolicy Role without `pods/log` for the no-log case, and names the kind node for the kubelet-stop case, which now waits for the adapter to remove the run's Pod and NetworkPolicy once the kubelet answers again.
+- `tests/confinement_public_items.rs` now freezes every type the `confinement` module's public items reach, to a fixed point, beside the module's own items. From the host crate that adds `SecretSlot`, `EgressAperture`, `GitSourceBinding`, `DriverError` and `DriverErrorClass`. From `substrate-wire` it adds `CapabilitySnapshot`, `CapabilityFacts`, `HostDriverKind`, `EgressApertureFact` and the fact types `CapabilityFacts` holds (`StorageQuotaFacts`, `ScratchQuotaFacts`, `ReadOnlyRootFacts`, `ReadOnlyFileFacts`, `ResourceUsageFacts`, `MetricsStreamFacts`, `StreamBoundsFacts`, `AttachmentBoundsFacts`, `ExecutionCapsuleFacts`, `NamespaceFacts`, `CgroupLimitFacts`). The list also covers:
+  - an `impl` of a module type in any file of the host crate;
+  - the associated types and constants of trait impls on held types;
+  - a wire type that shares a name with a module type;
+  - a type reached through a renaming `pub use … as …`.
+
+  `tests/confinement-public-items.txt` lists them. Adding, removing or reshaping any of them changes the list.
+- `b10x-substrate confine run` names its private group `confine-<pid>-<start time>` (the start time is field 22 of `/proc/<pid>/stat`). Before opening, it removes each such group whose owner has exited (including an owner still unreaped), deepest first, if the group holds no process. It never touches a running owner's group and never kills. Each group it leaves holding a process, or cannot remove, is named on one stderr line, and so is an unreadable root. Under `--output json`, these go instead into the verb's one document, as `left_groups` (`path` and `reason`) in `result` or in `error.data`. The exit status does not change.
+
+### Fixed
+
+- An egress aperture's listening socket is shut down when its install is undone or the aperture is dropped. Before, only the installing process's descriptor was closed, so a child another thread forked meanwhile could keep the socket accepting connections from inside the run.
 
 ## [0.12.0] — 2026-10-27
 

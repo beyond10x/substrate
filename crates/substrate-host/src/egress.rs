@@ -374,6 +374,9 @@ impl Drop for SharedCounters {
 /// where there is no cgroup there is still no orphan.
 pub(crate) struct InstalledAperture {
     forwarder: libc::pid_t,
+    /// Kept so that teardown can end the listening socket itself, not only this process's
+    /// descriptor for it: see [`Listener`].
+    _listener: Listener,
     counters: SharedCounters,
     name: String,
     destination: String,
@@ -415,6 +418,28 @@ impl InstalledAperture {
             let bytes = self.counters.read();
             bytes.to_destination.saturating_add(bytes.from_destination) >= ceiling
         })
+    }
+}
+
+/// The listening socket an aperture's helper made inside the run's namespace, as the installing
+/// process holds it.
+///
+/// Dropping it shuts the socket down before closing this descriptor. A socket stops listening when
+/// its *last* descriptor closes, and this process does not hold the last one: any child another
+/// thread forks while the descriptor is open holds a copy until that child closes its inherited
+/// table or execs, however briefly. Killing and reaping the forwarder therefore did not by itself
+/// stop the listener answering inside; on a loaded host a copy outlived both, and a connection from
+/// inside was accepted by a set that had been refused. `shutdown` acts on the socket every copy
+/// shares, so from that point no copy accepts and a connection inside is refused.
+struct Listener(OwnedFd);
+
+impl Drop for Listener {
+    fn drop(&mut self) {
+        // SAFETY: `shutdown` on a descriptor this value owns; its result is not needed, because
+        // the descriptor is closed right after whether or not the socket was still listening.
+        unsafe {
+            libc::shutdown(self.0.as_raw_fd(), libc::SHUT_RDWR);
+        }
     }
 }
 
@@ -494,20 +519,22 @@ fn install_one(
     sandbox_pid: u32,
     cgroup_procs: Option<&Path>,
 ) -> Result<InstalledAperture, DriverError> {
-    let listener = listen_inside(sandbox_pid, listen, cgroup_procs)?;
+    // A `Listener` from here on, so a failure below shuts the socket down rather than only closing
+    // this descriptor for it.
+    let listener = Listener(listen_inside(sandbox_pid, listen, cgroup_procs)?);
     let counters =
         SharedCounters::new().map_err(|error| install_failed("aperture byte counters", &error))?;
     let cgroup = open_cgroup(cgroup_procs)?;
     let forwarder = spawn_forwarder(
-        &listener,
+        &listener.0,
         aperture.pinned,
         &counters,
         cgroup.as_ref(),
         aperture.max_bytes,
     )?;
-    drop(listener);
     Ok(InstalledAperture {
         forwarder,
+        _listener: listener,
         counters,
         name: aperture.name.clone(),
         destination: aperture.pinned.to_string(),
@@ -1245,12 +1272,14 @@ fn probe_through_sandbox(bubblewrap: &Path, destination: SocketAddr) -> bool {
         // aperture is installed — and then reached from inside the sandbox, which is the claim.
         let installed = SharedCounters::new().ok().and_then(|counters| {
             let listen = SocketAddrV4::new(Ipv4Addr::LOCALHOST, destination.port());
-            let listener = listen_inside(sandbox_pid, listen, None).ok()?;
+            let listener = Listener(listen_inside(sandbox_pid, listen, None).ok()?);
             // The probe proves the *mechanism*, never a declaration: no ceiling, because there is
             // no operator statement here to enforce.
-            let forwarder = spawn_forwarder(&listener, destination, &counters, None, None).ok()?;
+            let forwarder =
+                spawn_forwarder(&listener.0, destination, &counters, None, None).ok()?;
             Some(InstalledAperture {
                 forwarder,
+                _listener: listener,
                 counters,
                 name: String::new(),
                 destination: destination.to_string(),
@@ -3286,6 +3315,173 @@ mod tests {
                 printed, "127.0.0.1=refused 127.0.0.2=refused 127.0.0.3=refused ",
                 "a forwarder of a refused set still answers inside the namespace"
             );
+        }
+
+        /// Another thread of this process forking throughout an install, as the daemon's other
+        /// runs and this binary's other cases do. Each child holds a copy of every descriptor the
+        /// process had when it forked, for `hold`, as any forked child does until it closes its
+        /// inherited table or execs — a forwarder's listener among them when the fork lands while
+        /// the installing thread still has it open. At most `MAX_CHILDREN` are forked, so a slow
+        /// install cannot fill the host's process table.
+        struct ForkingNeighbour {
+            stop: Arc<AtomicBool>,
+            handle: Option<std::thread::JoinHandle<usize>>,
+        }
+
+        impl ForkingNeighbour {
+            const MAX_CHILDREN: usize = 4096;
+
+            fn start(hold: Duration) -> Self {
+                let stop = Arc::new(AtomicBool::new(false));
+                let stopped = Arc::clone(&stop);
+                let hold = libc::c_int::try_from(hold.as_millis()).expect("hold in milliseconds");
+                let handle = std::thread::spawn(move || {
+                    let mut children = Vec::new();
+                    while !stopped.load(Ordering::Acquire) && children.len() < Self::MAX_CHILDREN {
+                        // SAFETY: the child calls only `poll` with no descriptors and `_exit`,
+                        // both async-signal-safe, and never returns into Rust code.
+                        let pid = unsafe { libc::fork() };
+                        if pid == 0 {
+                            // SAFETY: post-fork child, async-signal-safe calls only.
+                            unsafe {
+                                libc::poll(std::ptr::null_mut(), 0, hold);
+                                libc::_exit(0);
+                            }
+                        }
+                        assert!(pid > 0, "fork");
+                        children.push(pid);
+                        std::thread::sleep(Duration::from_micros(200));
+                    }
+                    for pid in &children {
+                        let mut status = 0;
+                        // SAFETY: reaping a child this thread forked.
+                        unsafe {
+                            libc::waitpid(*pid, &raw mut status, 0);
+                        }
+                    }
+                    children.len()
+                });
+                Self {
+                    stop,
+                    handle: Some(handle),
+                }
+            }
+
+            /// Stops forking; the children forked so far keep their copies until `hold` ends.
+            fn stop(&self) {
+                self.stop.store(true, Ordering::Release);
+            }
+
+            /// Waits for every child, and returns how many there were.
+            fn join(mut self) -> usize {
+                self.stop();
+                self.handle
+                    .take()
+                    .expect("joined once")
+                    .join()
+                    .expect("the forking thread")
+            }
+        }
+
+        impl Drop for ForkingNeighbour {
+            fn drop(&mut self) {
+                self.stop();
+                if let Some(handle) = self.handle.take() {
+                    let _ = handle.join();
+                }
+            }
+        }
+
+        const FORKING_HELPER: &str =
+            "egress::tests::observed_inside::forking_neighbour_third_install_helper";
+        const FORKING_HELPER_ENV: &str = "SUBSTRATE_TEST_FORKING_NEIGHBOUR_HELPER";
+
+        /// The case above, with a neighbour thread forking throughout the install
+        /// (`story:egress-third-install-case-holds-under-load`). A forwarder's listener copied
+        /// into a neighbour's child outlives the forwarder that was killed and reaped, so a set
+        /// whose teardown relied on the last descriptor closing still answered inside. Each
+        /// listener is shut down at the socket, which every copy shares.
+        ///
+        /// The install runs in a process of its own, this test binary running only
+        /// [`forking_neighbour_third_install_helper`]: the neighbour's children copy every
+        /// descriptor of the process they fork from, and in this one they would hold the other
+        /// cases' terminals and pipes too.
+        #[test]
+        fn a_failed_third_install_leaves_no_listener_answering_while_another_thread_forks() {
+            let output = std::process::Command::new(std::env::current_exe().expect("test binary"))
+                .args([
+                    FORKING_HELPER,
+                    "--exact",
+                    "--ignored",
+                    "--nocapture",
+                    "--test-threads=1",
+                ])
+                .env(FORKING_HELPER_ENV, "1")
+                .output()
+                .expect("run the helper");
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let report = format!("{stdout}{}", String::from_utf8_lossy(&output.stderr));
+            assert!(output.status.success(), "the helper failed: {report}");
+            assert!(
+                stdout.contains("test result: ok. 1 passed;"),
+                "the helper did not run exactly once: {report}"
+            );
+            if stdout.contains("FORKING-NEIGHBOUR absent") {
+                return;
+            }
+            assert!(
+                stdout.contains("FORKING-NEIGHBOUR held"),
+                "the helper ran without reaching its assertion: {report}"
+            );
+        }
+
+        /// Run only by the case above, in a process of its own.
+        #[test]
+        #[ignore = "run by a_failed_third_install_leaves_no_listener_answering_while_another_thread_forks"]
+        fn forking_neighbour_third_install_helper() {
+            if std::env::var_os(FORKING_HELPER_ENV).is_none() {
+                return;
+            }
+            let scratch = tempfile::tempdir().unwrap();
+            let model = Destination::serving(b"model".to_vec());
+            let audit = Destination::serving(b"audit".to_vec());
+            let declared = [
+                aperture("model", "model.example.invalid", model.address, None),
+                aperture("audit", "audit.example.invalid", audit.address, None),
+                aperture(
+                    "broken",
+                    "broken.example.invalid",
+                    "[::1]:9".parse().unwrap(),
+                    None,
+                ),
+            ];
+            let script = "for a in 127.0.0.1 127.0.0.2 127.0.0.3; do \
+                            if (exec 3<>/dev/tcp/$a/443) 2>/dev/null; then printf '%s=open ' $a; \
+                            else printf '%s=refused ' $a; fi; done";
+            let Some(sandbox) = ScriptedSandbox::open(scratch.path(), None, script) else {
+                println!("FORKING-NEIGHBOUR absent");
+                return;
+            };
+            let neighbour = ForkingNeighbour::start(Duration::from_secs(2));
+            let refused = install_all(&declared, sandbox.pid, None);
+            neighbour.stop();
+            let Err(refusal) = refused else {
+                panic!("a set with an uninstallable third member was installed");
+            };
+            assert!(
+                refusal.message.contains("Only IPv4"),
+                "the set was refused before its third member: {}",
+                refusal.message
+            );
+            let printed = sandbox.finish(Duration::from_secs(30));
+            let forked = neighbour.join();
+            assert!(forked > 0, "the neighbour forked nothing");
+            assert_eq!(
+                printed, "127.0.0.1=refused 127.0.0.2=refused 127.0.0.3=refused ",
+                "a forwarder of a refused set still answers inside the namespace while {forked} \
+                 children of a neighbour thread held the descriptors of the install"
+            );
+            println!("FORKING-NEIGHBOUR held");
         }
 
         /// Each ceiling is independent under concurrent connections (ADR 0014 per aperture;
