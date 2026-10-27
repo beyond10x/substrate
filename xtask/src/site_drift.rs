@@ -199,8 +199,9 @@ fn table<'a>(page: &'a Rendered, heading: &str) -> Option<&'a Vec<Vec<String>>> 
         .map(|(_, rows)| rows)
 }
 
-/// A `yes` cell is declared by every open of that column, `yes` and `probed` together are exactly
-/// what some open declared, and `—` is never declared.
+/// A cell holds one of the docs-system chip words. `TRUE` is declared by every open of that
+/// column; `TRUE` and `UNKNOWN` together are exactly what some open declared, `UNKNOWN` meaning
+/// the open-time probe proves it on the host; `FALSE` is never declared.
 fn matrix(
     page: &Rendered,
     heading: &str,
@@ -244,9 +245,9 @@ fn matrix(
                 .is_some_and(|s| s.contains(member));
             let ever = set.union.contains(member);
             let holds = match cell.as_str() {
-                "yes" => always,
-                "probed" => ever,
-                "—" => !ever,
+                "TRUE" => always,
+                "UNKNOWN" => ever,
+                "FALSE" => !ever,
                 _ => false,
             };
             if !holds {
@@ -299,7 +300,7 @@ fn lanes(page: &Rendered, suite: &Value, failures: &mut Vec<String>) -> Result<(
     }
     let total: usize = counts.values().sum();
     if !page
-        .html
+        .text
         .contains(&format!("holds {total} authored scenarios"))
     {
         failures.push(format!(
@@ -372,7 +373,7 @@ fn cli(page: &Rendered, binding: &Value, failures: &mut Vec<String>) -> Result<(
         ));
     }
     for option in options {
-        if !page.html.contains(&format!("--{option}")) {
+        if !page.text.contains(&format!("--{option}")) {
             failures.push(format!("{CLI}: never names --{option}"));
         }
     }
@@ -427,16 +428,20 @@ mod tests {
             matrix(&page(cells), "m", &rows, &columns, &declared, &mut failures);
             failures
         };
-        assert!(run(["yes", "probed", "—"]).is_empty());
-        assert!(run(["probed", "probed", "—"]).is_empty());
+        assert!(run(["TRUE", "UNKNOWN", "FALSE"]).is_empty());
+        assert!(run(["UNKNOWN", "UNKNOWN", "FALSE"]).is_empty());
         assert_eq!(
-            run(["yes", "yes", "—"]).len(),
+            run(["TRUE", "TRUE", "FALSE"]).len(),
             1,
             "b is not always declared"
         );
-        assert_eq!(run(["yes", "—", "—"]).len(), 1, "b is sometimes declared");
         assert_eq!(
-            run(["yes", "probed", "probed"]).len(),
+            run(["TRUE", "FALSE", "FALSE"]).len(),
+            1,
+            "b is sometimes declared"
+        );
+        assert_eq!(
+            run(["TRUE", "UNKNOWN", "UNKNOWN"]).len(),
             1,
             "c is never declared"
         );

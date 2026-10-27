@@ -17,7 +17,7 @@ The current starting point is an owner-permissioned Unix socket:
 - the daemon governs one owner trust domain;
 - callers may connect directly without a platform network hop.
 
-This is the posture used in [getting started](../getting-started.md).
+This is the posture used in [run a bounded command](./run-a-command.md#start-with-an-observable-machine).
 
 ## Organization and hosted shapes
 

@@ -32,41 +32,41 @@ declares, never by its name or the operating system; the
 
 ## Compare adapters
 
-`yes` means the adapter always declares it once it opens. `probed` means it declares it only when
-its open-time probe, or the operator's configuration, proved it on this host. `—` means it never
-does. `cargo xtask check-docs` holds both tables to the declared sets in the specification's
+`TRUE` means the adapter always declares it once it opens. `UNKNOWN` means it declares it only
+when proved by the open-time probe on this host, or by the operator's configuration. `FALSE`
+means it never does. `cargo xtask check-docs` holds both tables to the declared sets in the specification's
 scenarios.
 
 ### Families by adapter
 
 | Family | local | linux | macos | systemd (local) | systemd (linux) | oci | pod |
 |---|---|---|---|---|---|---|---|
-| `process_run` | yes | probed | yes | yes | probed | yes | yes |
-| `process_watch` | yes | probed | yes | yes | probed | yes | yes |
-| `output_read` | yes | probed | yes | yes | probed | yes | yes |
-| `wait` | yes | probed | yes | yes | probed | yes | yes |
-| `workspace` | yes | probed | yes | yes | probed | yes | yes |
-| `filesystem_view` | — | probed | yes | — | probed | yes | — |
-| `network_egress` | — | probed | — | — | — | — | — |
-| `network_ingress` | — | — | — | — | — | — | — |
-| `limits` | — | probed | — | yes | yes | probed | yes |
-| `audit` | yes | yes | yes | yes | yes | yes | yes |
+| `process_run` | TRUE | UNKNOWN | TRUE | TRUE | UNKNOWN | TRUE | TRUE |
+| `process_watch` | TRUE | UNKNOWN | TRUE | TRUE | UNKNOWN | TRUE | TRUE |
+| `output_read` | TRUE | UNKNOWN | TRUE | TRUE | UNKNOWN | TRUE | TRUE |
+| `wait` | TRUE | UNKNOWN | TRUE | TRUE | UNKNOWN | TRUE | TRUE |
+| `workspace` | TRUE | UNKNOWN | TRUE | TRUE | UNKNOWN | TRUE | TRUE |
+| `filesystem_view` | FALSE | UNKNOWN | TRUE | FALSE | UNKNOWN | TRUE | FALSE |
+| `network_egress` | FALSE | UNKNOWN | FALSE | FALSE | FALSE | FALSE | FALSE |
+| `network_ingress` | FALSE | FALSE | FALSE | FALSE | FALSE | FALSE | FALSE |
+| `limits` | FALSE | UNKNOWN | FALSE | TRUE | TRUE | UNKNOWN | TRUE |
+| `audit` | TRUE | TRUE | TRUE | TRUE | TRUE | TRUE | TRUE |
 
 ### Facts by adapter
 
 | Fact | local | linux | macos | systemd (local) | systemd (linux) | oci | pod |
 |---|---|---|---|---|---|---|---|
-| `declared_insecure` | yes | — | — | yes | — | — | — |
-| `paths_are_host_paths` | yes | — | yes | yes | — | — | — |
-| `whole_tree_kill` | — | probed | — | yes | yes | — | — |
-| `local_permitted` | probed | — | — | probed | — | — | — |
-| `ipc_socket_allowlist` | — | probed | — | — | probed | — | — |
-| `ipc_signals_contained` | — | probed | yes | — | probed | — | — |
-| `sealed_paths` | — | — | probed | — | — | — | — |
-| `exec_subpaths` | — | — | probed | — | — | — | — |
-| `private_tmpdir` | — | — | probed | — | — | — | — |
-| `host_network` | yes | — | — | yes | — | — | — |
-| `image_digest_pinned` | — | — | — | — | — | yes | yes |
+| `declared_insecure` | TRUE | FALSE | FALSE | TRUE | FALSE | FALSE | FALSE |
+| `paths_are_host_paths` | TRUE | FALSE | TRUE | TRUE | FALSE | FALSE | FALSE |
+| `whole_tree_kill` | FALSE | UNKNOWN | FALSE | TRUE | TRUE | FALSE | FALSE |
+| `local_permitted` | UNKNOWN | FALSE | FALSE | UNKNOWN | FALSE | FALSE | FALSE |
+| `ipc_socket_allowlist` | FALSE | UNKNOWN | FALSE | FALSE | UNKNOWN | FALSE | FALSE |
+| `ipc_signals_contained` | FALSE | UNKNOWN | TRUE | FALSE | UNKNOWN | FALSE | FALSE |
+| `sealed_paths` | FALSE | FALSE | UNKNOWN | FALSE | FALSE | FALSE | FALSE |
+| `exec_subpaths` | FALSE | FALSE | UNKNOWN | FALSE | FALSE | FALSE | FALSE |
+| `private_tmpdir` | FALSE | FALSE | UNKNOWN | FALSE | FALSE | FALSE | FALSE |
+| `host_network` | TRUE | FALSE | FALSE | TRUE | FALSE | FALSE | FALSE |
+| `image_digest_pinned` | FALSE | FALSE | FALSE | FALSE | FALSE | TRUE | TRUE |
 
 Every refusal in the sections below comes after the contract's own order (a reserved field, an
 adapter that did not open, a missing reason, an unpinned image, the host's policy, then the first

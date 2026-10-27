@@ -34,11 +34,12 @@ UXF-007 is a known loss: the release-note bullets come from `CHANGELOG.md`.
 
 ## The per-merge gate
 
-`cargo xtask check-docs` holds the site to the ratchets in [baseline.json](./baseline.json) on
-every merge, without a browser. It checks:
+Two commands hold the site to the ratchets in [baseline.json](./baseline.json) on every merge,
+without a browser:
 
-- the click count of each task in [tasks.json](./tasks.json) from the landing page;
-- the largest and the median text block of each page.
+- `cargo xtask check-docs` checks the largest and the median text block of each page from the
+  Markdown, and needs no Node toolchain;
+- `cargo xtask docs-provenance` checks the click count of each task in [tasks.json](./tasks.json)
+  from the landing page of the built site.
 
-The same command also checks the finding records and holds the derived tables to the
-specification. The browser measurements above are taken once per round, outside the repository.
+`check-docs` also checks the finding records and holds the derived tables to the specification. The browser measurements above are taken once per round, outside the repository.

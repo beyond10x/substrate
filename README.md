@@ -13,7 +13,7 @@ the machine cannot confine, it says so — an exec on a host with no delegated c
 It does not decide product policy, run agent loops, or understand connector vendors.
 
 [Public handbook](https://beyond10x.github.io/substrate/docs/) ·
-[Run a local daemon](https://beyond10x.github.io/substrate/docs/getting-started/) ·
+[Run one confined command](https://beyond10x.github.io/substrate/docs/getting-started) ·
 [System model and derivation](https://beyond10x.github.io/substrate/docs/concepts/model/) ·
 [Run a bounded command](https://beyond10x.github.io/substrate/docs/guides/run-a-command/)
 

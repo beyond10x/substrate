@@ -1,26 +1,30 @@
-//! The public site's per-merge UX gate: static, hermetic measurements of the rendered pages held
-//! to lower-is-better ratchets in `website/ux/baseline.json`, and the finding records' rules.
+//! The public site's per-merge UX gate: static, hermetic measurements held to lower-is-better
+//! ratchets in `website/ux/baseline.json`, and the finding records' rules.
 //!
 //! The browser measurements of a round (layout at each viewport, axe-core, keyboard, the
 //! screen-only bot at each viewport) run outside the repository; their results land in the round
-//! files under `website/ux/rounds/`. What this gate measures needs only the rendered HTML: how many
-//! link clicks each task in `website/ux/tasks.json` takes from the landing page, and the reading
-//! load of each page in words per text block.
-use crate::docs::{Rendered, attributes, read_public};
+//! files under `website/ux/rounds/`. This gate measures two things. The reading load of each page
+//! in words per text block needs only the Markdown, so `cargo xtask check-docs` holds it on every
+//! merge. How many link clicks each task in `website/ux/tasks.json` takes from the start page needs
+//! the built HTML, so `cargo xtask docs-provenance` holds it after the docs build.
+use crate::docs::{BASE, Rendered, attribute_list, attribute_values, read_public};
 use anyhow::{Context, Result, ensure};
 use clap::Args;
 use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode};
 
 pub(crate) const BASELINE: &str = "website/ux/baseline.json";
 const TASKS: &str = "website/ux/tasks.json";
 const FINDINGS: &str = "website/ux/findings";
-const START: &str = "/substrate/";
+const START: &str = BASE;
 const CLICKS: &str = "screen_only.actions";
 const BLOCK_MAX: &str = "reading_load.max";
 const BLOCK_MEDIAN: &str = "reading_load.median";
+/// The scenarios measured from the Markdown, and those measured from the built site.
+const PAGE_SCOPE: &str = "page:";
+const TASK_SCOPE: &str = "task:";
 const CLASSES: [&str; 7] = [
     "layout",
     "cue",
@@ -55,31 +59,15 @@ pub struct BaselineArgs {
     /// The decision that admits a value worse than the current baseline.
     #[arg(long)]
     decision: Option<String>,
+    /// A built site (`website/build`) to measure the task clicks from; without it the committed
+    /// task values are kept.
+    #[arg(long)]
+    site: Option<PathBuf>,
 }
 
-/// Each task's click count from the landing page and each page's reading load.
-fn measure(
-    root: &Path,
-    rendered: &BTreeMap<&str, Rendered>,
-    pages: &BTreeMap<String, String>,
-) -> Result<Measured> {
-    let tasks: Value = serde_json::from_str(&read_public(root, TASKS)?)?;
+/// Each page's reading load, from its Markdown.
+fn measure_pages(rendered: &BTreeMap<&str, Rendered>) -> Measured {
     let mut measured = Measured::new();
-    for task in tasks.as_array().context("tasks.json is a list")? {
-        let id = task["id"].as_str().context("a task has an id")?;
-        let target = task["route"].as_str().context("a task has a route")?;
-        let anchor = task["anchor"].as_str().unwrap_or_default();
-        let page = pages
-            .get(target)
-            .with_context(|| format!("task {id}: no published route {target}"))?;
-        ensure!(
-            anchor.is_empty() || attributes(page, "id").contains(&anchor),
-            "task {id}: {target} has no #{anchor}"
-        );
-        let clicks = clicks(pages, target)
-            .with_context(|| format!("task {id}: {target} cannot be reached from {START}"))?;
-        measured.insert(format!("task:{id}"), [(CLICKS, count(clicks))].into());
-    }
     for (page, page_rendered) in rendered {
         let mut blocks = page_rendered.blocks.clone();
         blocks.sort_unstable();
@@ -90,8 +78,34 @@ fn measure(
             n => count(blocks[n / 2 - 1] + blocks[n / 2]) / 2.0,
         };
         measured.insert(
-            format!("page:{page}"),
+            format!("{PAGE_SCOPE}{page}"),
             [(BLOCK_MAX, max), (BLOCK_MEDIAN, median)].into(),
+        );
+    }
+    measured
+}
+
+/// Each task's click count from the start page of the built site, whose pages are keyed by
+/// their `/x/` route.
+fn measure_tasks(root: &Path, pages: &BTreeMap<String, String>) -> Result<Measured> {
+    let tasks: Value = serde_json::from_str(&read_public(root, TASKS)?)?;
+    let mut measured = Measured::new();
+    for task in tasks.as_array().context("tasks.json is a list")? {
+        let id = task["id"].as_str().context("a task has an id")?;
+        let target = task["route"].as_str().context("a task has a route")?;
+        let anchor = task["anchor"].as_str().unwrap_or_default();
+        let page = pages
+            .get(target)
+            .with_context(|| format!("task {id}: no published route {target}"))?;
+        ensure!(
+            anchor.is_empty() || attribute_values(page, "id").contains(anchor),
+            "task {id}: {target} has no #{anchor}"
+        );
+        let clicks = clicks(pages, target)
+            .with_context(|| format!("task {id}: {target} cannot be reached from {START}"))?;
+        measured.insert(
+            format!("{TASK_SCOPE}{id}"),
+            [(CLICKS, count(clicks))].into(),
         );
     }
     Ok(measured)
@@ -102,7 +116,22 @@ fn count(n: usize) -> f64 {
     f64::from(u32::try_from(n).unwrap_or(u32::MAX))
 }
 
-/// The fewest link clicks from the landing page to `target`, following every link a page shows.
+/// The route a link on the site reaches, in the `/x/` form pages are keyed by: `/substrate/docs/x`,
+/// `/substrate/docs/x/` and `/substrate/docs/x#a` all reach `/substrate/docs/x/`.
+fn reached(href: &str) -> Option<String> {
+    let path = href.split(['#', '?']).next().unwrap_or_default();
+    let path = path.strip_prefix("pathname://").unwrap_or(path);
+    if !path.starts_with(BASE) {
+        return None;
+    }
+    Some(if path.ends_with('/') {
+        path.to_owned()
+    } else {
+        format!("{path}/")
+    })
+}
+
+/// The fewest link clicks from the start page to `target`, following every link a page shows.
 fn clicks(pages: &BTreeMap<String, String>, target: &str) -> Option<usize> {
     let mut seen = BTreeSet::from([START.to_owned()]);
     let mut queue = VecDeque::from([(START.to_owned(), 0)]);
@@ -110,10 +139,10 @@ fn clicks(pages: &BTreeMap<String, String>, target: &str) -> Option<usize> {
         if at == target {
             return Some(depth);
         }
-        for href in attributes(&pages[&at], "href") {
-            let path = href.split_once('#').map_or(href, |(path, _)| path);
-            if pages.contains_key(path) && seen.insert(path.to_owned()) {
-                queue.push_back((path.to_owned(), depth + 1));
+        for href in attribute_list(&pages[&at], "href") {
+            let Some(path) = reached(&href) else { continue };
+            if pages.contains_key(&path) && seen.insert(path.clone()) {
+                queue.push_back((path, depth + 1));
             }
         }
     }
@@ -127,9 +156,15 @@ fn tolerance(value: &Value) -> f64 {
     value["tolerance"].as_f64().unwrap_or_default()
 }
 
-/// The ratchet: a measured value may be neither worse nor better than its baseline, every value
-/// has a baseline and every baseline a value, and a baseline worse than `main`'s names a decision.
-fn ratchet(measured: &Measured, baseline: &Value, main: Option<&Value>) -> Vec<String> {
+/// The ratchet over the baseline scenarios whose names start with `scope`: a measured value may
+/// be neither worse nor better than its baseline, every value has a baseline and every baseline a
+/// value, and a baseline worse than `main`'s names a decision.
+fn ratchet(
+    measured: &Measured,
+    baseline: &Value,
+    main: Option<&Value>,
+    scope: &str,
+) -> Vec<String> {
     let mut failures = Vec::new();
     for (scenario, metrics) in measured {
         for (metric, value) in metrics {
@@ -152,7 +187,12 @@ fn ratchet(measured: &Measured, baseline: &Value, main: Option<&Value>) -> Vec<S
             }
         }
     }
-    for (scenario, metrics) in baseline["scenarios"].as_object().into_iter().flatten() {
+    let scoped = baseline["scenarios"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .filter(|(scenario, _)| scenario.starts_with(scope));
+    for (scenario, metrics) in scoped {
         for (metric, base) in metrics.as_object().into_iter().flatten() {
             if !measured
                 .get(scenario)
@@ -264,30 +304,60 @@ fn asset_exists(root: &Path, asset: &str) -> bool {
         && read_public(root, file).is_ok_and(|source| source.contains(&format!("fn {test}(")))
 }
 
-/// Every UX failure: the ratchet against the committed baseline and `main`'s, and the findings.
-pub(crate) fn check(
-    root: &Path,
-    rendered: &BTreeMap<&str, Rendered>,
-    pages: &BTreeMap<String, String>,
-) -> Result<Vec<String>> {
-    let measured = measure(root, rendered, pages)?;
-    let baseline: Value = serde_json::from_str(&read_public(root, BASELINE)?)?;
-    let mut failures = ratchet(&measured, &baseline, main_baseline(root).as_ref());
+fn committed_baseline(root: &Path) -> Result<Value> {
+    Ok(serde_json::from_str(&read_public(root, BASELINE)?)?)
+}
+
+/// The Markdown half of the UX gate: the reading-load ratchet against the committed baseline and
+/// `main`'s, and the findings.
+pub(crate) fn check(root: &Path, rendered: &BTreeMap<&str, Rendered>) -> Result<Vec<String>> {
+    let measured = measure_pages(rendered);
+    let mut failures = ratchet(
+        &measured,
+        &committed_baseline(root)?,
+        main_baseline(root).as_ref(),
+        PAGE_SCOPE,
+    );
     failures.extend(findings(root)?);
     Ok(failures)
 }
 
+/// The built-site half of the UX gate: the click ratchet of every task, on the pages the docs
+/// build wrote.
+pub(crate) fn check_site(root: &Path, pages: &BTreeMap<String, String>) -> Result<Vec<String>> {
+    let measured = measure_tasks(root, pages)?;
+    Ok(ratchet(
+        &measured,
+        &committed_baseline(root)?,
+        main_baseline(root).as_ref(),
+        TASK_SCOPE,
+    ))
+}
+
 /// Write the measured values as the new baseline. A value worse than the baseline it replaces is
-/// written only with `--decision`, which it then carries.
+/// written only with `--decision`, which it then carries. Without `--site`, the task values are
+/// carried over unchanged.
 pub fn write_baseline(args: &BaselineArgs) -> Result<ExitCode> {
     let root = crate::repo::root()?;
-    let rendered = crate::docs::rendered(&root)?;
-    let pages = crate::docs::pages_from(&root, &rendered)?;
-    let measured = measure(&root, &rendered, &pages)?;
     let before: Value = read_public(&root, BASELINE)
         .ok()
         .and_then(|text| serde_json::from_str(&text).ok())
         .unwrap_or(Value::Null);
+    let mut measured = measure_pages(&crate::docs::rendered(&root)?);
+    if let Some(site) = &args.site {
+        measured.extend(measure_tasks(&root, &crate::docs::built_pages(site)?)?);
+    } else {
+        for (scenario, metrics) in before["scenarios"].as_object().into_iter().flatten() {
+            if !scenario.starts_with(TASK_SCOPE) {
+                continue;
+            }
+            let values = metrics
+                .get(CLICKS)
+                .and_then(|base| base["value"].as_f64())
+                .map(|value| (CLICKS, value));
+            measured.insert(scenario.clone(), values.into_iter().collect());
+        }
+    }
     let mut scenarios = Map::new();
     let mut worse = Vec::new();
     for (scenario, metrics) in &measured {
@@ -316,7 +386,7 @@ pub fn write_baseline(args: &BaselineArgs) -> Result<ExitCode> {
         worse.join("\n")
     );
     let baseline = json!({
-        "about": "Lower-is-better ratchets of the public site, written by `cargo xtask docs-baseline` and held by `cargo xtask check-docs`. task:<id> counts the link clicks from the landing page to the task's page; page:<page> counts the words of the page's largest and median text block.",
+        "about": "Lower-is-better ratchets of the public site, written by `cargo xtask docs-baseline`. task:<id> counts the link clicks from the start page to the task's page on the built site, held by `cargo xtask docs-provenance`; page:<page> counts the words of the page's largest and median text block, held by `cargo xtask check-docs`.",
         "scenarios": scenarios,
         "tolerances": {"counts": 0},
     });
@@ -368,12 +438,10 @@ mod tests {
     #[test]
     fn the_committed_baseline_holds_the_rendered_site() {
         let root = crate::repo::root().unwrap();
-        let rendered = crate::docs::rendered(&root).unwrap();
-        let pages = crate::docs::pages_from(&root, &rendered).unwrap();
-        let measured = measure(&root, &rendered, &pages).unwrap();
+        let measured = measure_pages(&crate::docs::rendered(&root).unwrap());
         let committed: Value =
             serde_json::from_str(&read_public(&root, BASELINE).unwrap()).unwrap();
-        let failures = ratchet(&measured, &committed, None);
+        let failures = ratchet(&measured, &committed, None, PAGE_SCOPE);
         assert!(failures.is_empty(), "{failures:#?}");
     }
     #[test]
@@ -383,7 +451,8 @@ mod tests {
             ratchet(
                 &values(&[("task:a", CLICKS, 2.0), ("task:b", CLICKS, 2.0)]),
                 &base,
-                None
+                None,
+                TASK_SCOPE
             )
             .is_empty()
         );
@@ -391,12 +460,14 @@ mod tests {
             &values(&[("task:a", CLICKS, 3.0), ("task:b", CLICKS, 2.0)]),
             &base,
             None,
+            TASK_SCOPE,
         );
         assert!(worse[0].contains("worse"), "{worse:?}");
         let better = ratchet(
             &values(&[("task:a", CLICKS, 1.0), ("task:b", CLICKS, 2.0)]),
             &base,
             None,
+            TASK_SCOPE,
         );
         assert!(better[0].contains("improved"), "{better:?}");
         let missing = ratchet(
@@ -407,9 +478,10 @@ mod tests {
             ]),
             &base,
             None,
+            TASK_SCOPE,
         );
         assert!(missing[0].contains("no task:c"), "{missing:?}");
-        let stale = ratchet(&values(&[("task:a", CLICKS, 2.0)]), &base, None);
+        let stale = ratchet(&values(&[("task:a", CLICKS, 2.0)]), &base, None, TASK_SCOPE);
         assert!(stale[0].contains("no longer measured"), "{stale:?}");
     }
     #[test]
@@ -420,13 +492,15 @@ mod tests {
             &now,
             &baseline(&[("task:a", CLICKS, 2.0, None)]),
             Some(&main),
+            TASK_SCOPE,
         );
         assert!(loosened[0].contains("without a decision"), "{loosened:?}");
         assert!(
             ratchet(
                 &now,
                 &baseline(&[("task:a", CLICKS, 2.0, Some("D1"))]),
-                Some(&main)
+                Some(&main),
+                TASK_SCOPE
             )
             .is_empty()
         );
@@ -452,6 +526,47 @@ mod tests {
         assert_eq!(clicks(&pages, "/substrate/docs/b/"), Some(1));
         assert_eq!(clicks(&pages, "/substrate/docs/c/"), Some(2));
         assert_eq!(clicks(&pages, "/substrate/docs/orphan/"), None);
+    }
+    #[test]
+    fn built_links_reach_their_route_in_every_written_form() {
+        assert_eq!(
+            reached("/substrate/docs/x").as_deref(),
+            Some("/substrate/docs/x/")
+        );
+        assert_eq!(
+            reached("/substrate/docs/x/").as_deref(),
+            Some("/substrate/docs/x/")
+        );
+        assert_eq!(
+            reached("/substrate/docs/x#a").as_deref(),
+            Some("/substrate/docs/x/")
+        );
+        assert_eq!(
+            reached("pathname:///substrate/").as_deref(),
+            Some("/substrate/")
+        );
+        assert_eq!(reached("https://example.com/substrate/"), None);
+        let pages: BTreeMap<String, String> = [
+            (START, "<a class=b href=/substrate/docs>d</a>"),
+            ("/substrate/docs/", "<a href=/substrate/docs/c#x>c</a>"),
+            ("/substrate/docs/c/", ""),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_owned(), v.to_owned()))
+        .collect();
+        assert_eq!(clicks(&pages, "/substrate/docs/c/"), Some(2));
+    }
+    #[test]
+    fn each_half_of_the_gate_holds_only_its_own_scenarios() {
+        let base = baseline(&[
+            ("task:a", CLICKS, 2.0, None),
+            ("page:p", BLOCK_MAX, 9.0, None),
+        ]);
+        let pages = values(&[("page:p", BLOCK_MAX, 9.0)]);
+        assert!(ratchet(&pages, &base, None, PAGE_SCOPE).is_empty());
+        let tasks = values(&[("task:a", CLICKS, 2.0)]);
+        assert!(ratchet(&tasks, &base, None, TASK_SCOPE).is_empty());
+        assert!(!ratchet(&tasks, &base, None, PAGE_SCOPE).is_empty());
     }
     #[test]
     fn a_closed_serious_finding_without_a_live_regression_asset_fails() {
