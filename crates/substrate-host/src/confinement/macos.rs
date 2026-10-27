@@ -25,7 +25,7 @@
 //!   must lie in the workspace, a declared read-only root, or a system or developer directory
 //!   ([`seatbelt::SYSTEM_EXEC_SUBPATHS`], [`seatbelt::developer_root`]), else it is refused
 //!   `exec.sandbox-exec-subpath-undeclared`. A policy with an exec subpath may read
-//!   [`seatbelt::XCODE_SELECT_LINK`].
+//!   [`seatbelt::XCODE_SELECT_LINK`] and [`seatbelt::BUILD_READ_SUBPATHS`].
 //! - `private_tmpdir`: each start creates a directory beside the host's temporary directory,
 //!   writable by that run alone, sets `TMPDIR` to it, and removes it before `wait` returns. A
 //!   render cannot name a directory only a start creates, so it is `confinement.render-unserved`.

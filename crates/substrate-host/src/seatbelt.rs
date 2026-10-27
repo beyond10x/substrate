@@ -69,6 +69,11 @@ pub const XCODE_SELECT_LINK: &str = "/private/var/db/xcode_select_link";
 /// The Command Line Tools root, the developer directory when no Xcode is selected.
 pub const COMMAND_LINE_TOOLS: &str = "/Library/Developer/CommandLineTools";
 
+/// Fixed system directories a policy with an exec subpath may read: the LibreSSL configuration
+/// and trust store. Cargo links the system libcurl, whose LibreSSL reads `openssl.cnf` when it
+/// starts and exits if the read is refused. They hold no user data and no credential.
+pub const BUILD_READ_SUBPATHS: [&str; 1] = ["/private/etc/ssl"];
+
 /// System directories an exec subpath may name without a declared root.
 pub const SYSTEM_EXEC_SUBPATHS: [&str; 6] = [
     "/bin",
@@ -264,6 +269,9 @@ impl SeatbeltPolicy {
                 profile,
                 "(allow file-read* (literal \"{XCODE_SELECT_LINK}\"))"
             );
+            for subpath in BUILD_READ_SUBPATHS {
+                let _ = writeln!(profile, "(allow file-read* (subpath \"{subpath}\"))");
+            }
         }
         let mut ancestors: Vec<&Path> = Vec::new();
         for path in &self.sealed {
@@ -703,6 +711,7 @@ mod tests {
             "(allow file-map-executable (subpath \"/usr/bin\"))",
             "(allow process-exec (subpath \"/w/space/target\"))",
             "(allow file-read* (literal \"/private/var/db/xcode_select_link\"))",
+            "(allow file-read* (subpath \"/private/etc/ssl\"))",
         ] {
             assert!(lines.contains(&line), "missing {line}\n{profile}");
         }
@@ -731,6 +740,7 @@ mod tests {
         let profile = policy().writable("/t/run").profile().expect("profile");
         assert!(!profile.contains(XCODE_SELECT_LINK), "{profile}");
         assert!(!profile.contains("file-map-executable"), "{profile}");
+        assert!(!profile.contains("/private/etc/ssl"), "{profile}");
     }
 
     #[test]
