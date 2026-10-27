@@ -9,7 +9,7 @@ tags:
 relations:
 - decomposes: epic:confinement-contract-family
 - depends_on: story:pod-adapter
-revision: 1
+revision: 2
 ---
 # A run read Unknown leaves no NetworkPolicy behind
 
@@ -31,7 +31,7 @@ Adversary pass 1 on `story:pod-lane-runs-adversary-and-security` (branch
   31 s each) and stops, so a kubelet absence of about two minutes leaves the policy with the
   adapter alive.
 
-Red cases: `crates/substrate-host/tests/adversary_pod_cleanup_pass1.rs`
+Red cases: `crates/substrate-host/tests/adversary_pod.rs`, module `cleanup_pass1` (runs only with `SUBSTRATE_POD_MANUAL_CLEANUP=1`)
 (`adversary_lane_a_run_read_unknown_leaves_nothing_once_its_process_has_ended`, 77 s;
 `adversary_lane_a_run_read_unknown_is_removed_after_a_longer_kubelet_absence`, 158 s). Both wait
 on the adapter's fixed 60 s `STOP_CONFIRM`, so they run manually against a kind cluster and are
