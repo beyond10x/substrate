@@ -13,6 +13,7 @@
   ],
   "format": "ess-cli-artifacts/1",
   "obligations": [
+    "handler:confine-run: implement the owner-qualified callable and its declared result/error contract",
     "handler:events: implement the owner-qualified callable and its declared result/error contract",
     "handler:exec-run: implement the owner-qualified callable and its declared result/error contract",
     "handler:exec-show: implement the owner-qualified callable and its declared result/error contract",

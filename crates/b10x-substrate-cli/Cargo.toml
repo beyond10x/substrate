@@ -22,6 +22,8 @@ b10x-substrate-sdk = { path = "../b10x-substrate-sdk", version = "=0.11.0" }
 clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+substrate-host = { package = "b10x-substrate-host", path = "../substrate-host", version = "=0.11.0" }
+tempfile.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]

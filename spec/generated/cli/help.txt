@@ -3,6 +3,7 @@ Drive a Substrate daemon over its Unix socket
 Usage: b10x-substrate [OPTIONS] <COMMAND>
 
 Commands:
+  confine      
   events       Read one page of the daemon's event log
   exec         
   machine      Show the daemon's capability snapshot and facts
