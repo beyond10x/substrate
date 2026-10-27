@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-27T06:48:45Z",
+  "actor": "human:timo",
+  "artifact": "story:macos-seatbelt-policy-runs-cargo-test",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "macos.yml on macos-15 at 38395576: seatbelt_adversary 12 passed 0 failed; security_review_macos 7 passed; ess_confinement_macos 13 passed; macos lane 8 of 8 scenarios executed (4 macos-s1, 3 macos-s2), 0 failed",
+    "reference": "https://github.com/beyond10x/substrate/actions/runs/40462814842"
+  }
+}
