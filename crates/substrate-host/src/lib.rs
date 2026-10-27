@@ -17,6 +17,7 @@ pub mod confinement;
 mod confinement_types;
 #[cfg(target_os = "linux")]
 mod egress;
+mod environment;
 #[cfg(target_os = "linux")]
 mod fs;
 #[cfg(target_os = "linux")]

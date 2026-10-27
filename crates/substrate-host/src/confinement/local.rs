@@ -5,6 +5,19 @@
 //! `paths_are_host_paths` and `host_network`, and `local_permitted` unless the host's policy
 //! forbids it (F3 A). It is opened only by name, a profile on it needs a reason, and every
 //! observation carries that reason. Nothing falls back to it.
+//!
+//! Declared insecure is not unchecked: a start holds the environment to the host driver's closed,
+//! non-secret shape (`exec.environment-refused`), refuses a working directory reached through a
+//! symbolic link (`exec.workdir-missing`), and rechecks the adapter's own proof, so a host whose
+//! policy forbids `local` never runs a profile admitted elsewhere.
+//!
+//! A run is `Running` until its leader has exited and every process holding its output has closed
+//! it. The leader is left unreaped for all of that time, so its pid, which is the run's process
+//! group id, cannot be reused, and a signal reaches every member of the group still there. Then
+//! the leader is reaped and the run waits, up to [`LOCAL_GROUP_SETTLE`], for the group to be
+//! empty, so a member it killed has been reaped too when `wait` returns. A member that closed its
+//! output and outlives that bound is not tracked: once the leader is reaped the group id may come
+//! to name another process, and a signal is not sent.
 
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::PathBuf;
@@ -34,6 +47,18 @@ pub const LOCAL_OUTPUT_LIMIT_BYTES: usize = 1_048_576;
 /// Runs one adapter tracks; past it, ended runs are forgotten oldest first, and a start with every
 /// tracked run still running is refused `exec.tracking-capacity`.
 pub const LOCAL_MAX_TRACKED_RUNS: usize = 128;
+
+/// How long a run, its leader reaped and its output closed, waits for the rest of its process
+/// group to be gone, killed members reaped by whoever inherited them, before it reports itself
+/// ended anyway.
+pub const LOCAL_GROUP_SETTLE: std::time::Duration = std::time::Duration::from_secs(1);
+
+/// Whether any process, a zombie included, is still in process group `group`.
+fn group_remains(group: i32) -> bool {
+    // SAFETY: signal 0 checks existence and permission and delivers nothing; no memory is involved.
+    let present = unsafe { libc::kill(-group, 0) } == 0;
+    present || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+}
 
 /// Where the decision to permit `local` comes from.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -109,9 +134,10 @@ struct LocalRun {
     reason: Option<String>,
     phase: watch::Receiver<Phase>,
     captured: Arc<Mutex<Captured>>,
-    /// Set, under this lock, after the leader exited and before it is reaped: while it is false
-    /// the leader is at least a zombie, so its pid still names this run's process group.
-    leader_exited: Arc<Mutex<bool>>,
+    /// Set, under this lock, once the leader has exited and the run's output has closed, just
+    /// before the leader is reaped: while it is false the leader is at least a zombie, so its pid
+    /// still names this run's process group.
+    reaped: Arc<Mutex<bool>>,
 }
 
 /// Blocks until `pid` has exited, without reaping it.
@@ -189,6 +215,9 @@ impl LocalAdapter {
         Ok(())
     }
 
+    /// The directory a start runs in: the workspace, or the workdir beneath it. Every component
+    /// of the workdir must be a directory itself, never a symbolic link, so the run starts beneath
+    /// the workspace as `linux` does (design 26); one that is not is `exec.workdir-missing`.
     fn directory(admitted: &AdmittedProfile) -> Result<PathBuf, ConfinementError> {
         let workspace = super::workspace_of(admitted)?;
         if !workspace.is_dir() {
@@ -197,16 +226,106 @@ impl LocalAdapter {
         let Some(workdir) = &admitted.profile().workdir else {
             return Ok(workspace.clone());
         };
-        let directory = workspace.join(super::relative_workdir(workdir)?);
-        if !directory.is_dir() {
-            return Err(DriverError::refused(
+        let relative = super::relative_workdir(workdir)?;
+        let missing = || {
+            ConfinementError::from(DriverError::refused(
                 substrate_wire::EXEC_WORKDIR_MISSING,
                 "The working directory is not a directory beneath the workspace.",
                 "workdir",
-            )
-            .into());
+            ))
+        };
+        let mut directory = workspace.clone();
+        for component in relative.components() {
+            directory.push(component);
+            let entry = std::fs::symlink_metadata(&directory).map_err(|_| missing())?;
+            if !entry.file_type().is_dir() {
+                return Err(missing());
+            }
         }
         Ok(directory)
+    }
+
+    /// Spawns on the calling task's Tokio runtime; `start` is its one caller.
+    fn start_run(
+        &self,
+        admitted: &AdmittedProfile,
+        command: &Command,
+    ) -> Result<RunId, ConfinementError> {
+        admitted.check_on(&self.facts, true)?;
+        super::check_command(command)?;
+        crate::environment::check(&command.env)?;
+        let directory = Self::directory(admitted)?;
+        self.reserve()?;
+        let mut child = tokio::process::Command::new(&command.argv[0]);
+        child
+            .args(&command.argv[1..])
+            .env_clear()
+            .envs(&command.env)
+            .current_dir(&directory)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            // Its own process group, so a signal reaches what it started and stayed in the group.
+            // This is not whole-tree kill, which `local` does not prove.
+            .process_group(0);
+        let mut child = child.spawn().map_err(|error| {
+            DriverError::failed("exec.spawn-failed", format!("local spawn: {error}"))
+        })?;
+        let pid = child
+            .id()
+            .and_then(|pid| i32::try_from(pid).ok())
+            .ok_or_else(|| DriverError::failed("exec.spawn-failed", "local spawn: no pid"))?;
+        let id = {
+            let mut sequence = self.sequence.lock();
+            *sequence += 1;
+            RunId::new(format!("local-{pid}-{sequence}"))
+        };
+        let captured = Arc::new(Mutex::new(Captured::default()));
+        let (phase, observed) = watch::channel(Phase::Running);
+        let stdout = child
+            .stdout
+            .take()
+            .map(|stream| tokio::spawn(drain(stream, Arc::clone(&captured), true)));
+        let stderr = child
+            .stderr
+            .take()
+            .map(|stream| tokio::spawn(drain(stream, Arc::clone(&captured), false)));
+        let reaped = Arc::new(Mutex::new(false));
+        let reaping = Arc::clone(&reaped);
+        tokio::spawn(async move {
+            let _ = tokio::task::spawn_blocking(move || await_exit_unreaped(pid)).await;
+            // A process the run started may still hold its output, and the run is not over until
+            // it lets go. The leader stays a zombie meanwhile, pinning the group id for `signal`.
+            for reader in [stdout, stderr].into_iter().flatten() {
+                let _ = reader.await;
+            }
+            *reaping.lock() = true;
+            let ended = child.wait().await;
+            // A member killed while the run ran is a zombie until whoever inherited it reaps it;
+            // the run is over once the group is empty. A member that outlives the bound is not
+            // tracked (the group id may since name another process), and the run ends anyway.
+            let settle = tokio::time::Instant::now() + LOCAL_GROUP_SETTLE;
+            while group_remains(pid) && tokio::time::Instant::now() < settle {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            let _ = phase.send(match ended {
+                Ok(status) => Phase::Ended(RunExit {
+                    code: status.code(),
+                    signal: status.signal(),
+                }),
+                Err(_) => Phase::Unknown,
+            });
+        });
+        self.runs.lock().push(Arc::new(LocalRun {
+            id: id.clone(),
+            pid,
+            reason: admitted.insecure_reason().map(str::to_owned),
+            phase: observed,
+            captured,
+            reaped,
+        }));
+        admitted.audit_start(&id, &command.argv[0]);
+        Ok(id)
     }
 }
 
@@ -254,84 +373,25 @@ impl ConfinementAdapter for LocalAdapter {
         admitted: &AdmittedProfile,
         command: &Command,
     ) -> Result<RenderedCommand, ConfinementError> {
+        // A start's refusals, short of spawning: a render never answers a command a start refuses.
         admitted.check_on(&self.facts, false)?;
         super::check_command(command)?;
+        crate::environment::check(&command.env)?;
+        Self::directory(admitted)?;
         Ok(RenderedCommand {
             program: PathBuf::from(&command.argv[0]),
             args: command.argv[1..].to_vec(),
         })
     }
 
+    /// Every refusal, from the contract's recheck to the spawn, writes its audit record.
     async fn start(
         &self,
         admitted: &AdmittedProfile,
         command: &Command,
     ) -> Result<RunId, ConfinementError> {
-        admitted.check_on(&self.facts, true)?;
-        super::check_command(command)?;
-        let directory = Self::directory(admitted)?;
-        self.reserve()?;
-        let mut child = tokio::process::Command::new(&command.argv[0]);
-        child
-            .args(&command.argv[1..])
-            .env_clear()
-            .envs(&command.env)
-            .current_dir(&directory)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            // Its own process group, so a signal reaches what it started and stayed in the group.
-            // This is not whole-tree kill, which `local` does not prove.
-            .process_group(0);
-        let mut child = child.spawn().map_err(|error| {
-            DriverError::failed("exec.spawn-failed", format!("local spawn: {error}"))
-        })?;
-        let pid = child
-            .id()
-            .and_then(|pid| i32::try_from(pid).ok())
-            .ok_or_else(|| DriverError::failed("exec.spawn-failed", "local spawn: no pid"))?;
-        let id = {
-            let mut sequence = self.sequence.lock();
-            *sequence += 1;
-            RunId::new(format!("local-{pid}-{sequence}"))
-        };
-        let captured = Arc::new(Mutex::new(Captured::default()));
-        let (phase, observed) = watch::channel(Phase::Running);
-        let stdout = child
-            .stdout
-            .take()
-            .map(|stream| tokio::spawn(drain(stream, Arc::clone(&captured), true)));
-        let stderr = child
-            .stderr
-            .take()
-            .map(|stream| tokio::spawn(drain(stream, Arc::clone(&captured), false)));
-        let leader_exited = Arc::new(Mutex::new(false));
-        let exited = Arc::clone(&leader_exited);
-        tokio::spawn(async move {
-            let _ = tokio::task::spawn_blocking(move || await_exit_unreaped(pid)).await;
-            *exited.lock() = true;
-            let ended = child.wait().await;
-            for reader in [stdout, stderr].into_iter().flatten() {
-                let _ = reader.await;
-            }
-            let _ = phase.send(match ended {
-                Ok(status) => Phase::Ended(RunExit {
-                    code: status.code(),
-                    signal: status.signal(),
-                }),
-                Err(_) => Phase::Unknown,
-            });
-        });
-        self.runs.lock().push(Arc::new(LocalRun {
-            id: id.clone(),
-            pid,
-            reason: admitted.insecure_reason().map(str::to_owned),
-            phase: observed,
-            captured,
-            leader_exited,
-        }));
-        admitted.audit_start(&id, &command.argv[0]);
-        Ok(id)
+        let started = self.start_run(admitted, command);
+        admitted.audit_refusal(&self.facts, started)
     }
 
     async fn observe(&self, run: &RunId) -> Result<RunObservation, ConfinementError> {
@@ -363,9 +423,10 @@ impl ConfinementAdapter for LocalAdapter {
     async fn signal(&self, run: &RunId, signal: Signal) -> Result<(), ConfinementError> {
         let run = self.run(run)?;
         // Held across `kill`: the run's task cannot reap the leader meanwhile, so the group id
-        // cannot have been reused by another process.
-        let exited = run.leader_exited.lock();
-        if *exited {
+        // cannot have been reused by another process. Until it is reaped the run is `Running`,
+        // and the signal goes to every member of the group, the leader exited or not.
+        let reaped = run.reaped.lock();
+        if *reaped {
             return Ok(());
         }
         // SAFETY: `kill` with a negative pid signals one process group; no memory is involved.

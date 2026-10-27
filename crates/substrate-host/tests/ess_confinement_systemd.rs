@@ -229,6 +229,7 @@ async fn a_systemd_local_run_is_bounded_and_a_kill_leaves_no_process_of_its_tree
     let memory_bytes = 64 << 20;
     let admitted = adapter
         .admit(&ConfinementProfile {
+            inner: Some(InnerAdapter::Local),
             local_reason: Some(REASON.into()),
             workspace: Some(workspace.path().to_path_buf()),
             facts: vec![Fact::WholeTreeKill],
@@ -343,6 +344,7 @@ async fn a_systemd_local_run_ends_at_its_timeout_and_its_cpu_budget() {
     ] {
         let admitted = adapter
             .admit(&ConfinementProfile {
+                inner: Some(InnerAdapter::Local),
                 local_reason: Some(REASON.into()),
                 workspace: Some(workspace.path().to_path_buf()),
                 process_bounds: Some(bounds),
