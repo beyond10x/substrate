@@ -467,8 +467,8 @@ fn private_tmpdir() -> Result<(tempfile::TempDir, PathBuf), ConfinementError> {
 }
 
 /// Removes a run's private `TMPDIR` once the run has ended. What the run left there may refuse
-/// its owner (a directory `chmod 000`, a user immutable flag), so every entry is first made
-/// removable; a directory that still cannot be removed is audited and logged by name.
+/// its owner (a directory `chmod 000`), so every directory is first made owner-accessible; one
+/// that still cannot be removed (a user immutable flag, for one) is audited and logged by name.
 fn remove_private_tmpdir(admitted: &AdmittedProfile, run: &RunId, path: &Path) {
     make_removable(path);
     if let Err(error) = std::fs::remove_dir_all(path) {
@@ -482,9 +482,8 @@ fn remove_private_tmpdir(admitted: &AdmittedProfile, run: &RunId, path: &Path) {
     }
 }
 
-/// Gives the owner read, write and search on every directory beneath `path` and, on macOS,
-/// clears the user flags of every entry, without following a symbolic link. Best effort: the
-/// removal that follows decides.
+/// Gives the owner read, write and search on every directory beneath `path`, never through a
+/// symbolic link. Best effort: the removal that follows decides.
 fn make_removable(path: &Path) {
     use std::os::unix::fs::PermissionsExt as _;
     let mut pending = vec![path.to_path_buf()];
@@ -492,7 +491,6 @@ fn make_removable(path: &Path) {
         let Ok(metadata) = std::fs::symlink_metadata(&entry) else {
             continue;
         };
-        clear_user_flags(&entry);
         if !metadata.is_dir() {
             continue;
         }
@@ -503,21 +501,6 @@ fn make_removable(path: &Path) {
         }
     }
 }
-
-#[cfg(target_os = "macos")]
-fn clear_user_flags(path: &Path) {
-    use std::os::unix::ffi::OsStrExt as _;
-    let Ok(text) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
-        return;
-    };
-    // SAFETY: `text` is a NUL-terminated path that outlives the call; `lchflags` does not follow
-    // a final symbolic link and touches no memory of ours. Clearing every flag the owner may
-    // clear; a system flag stays and the removal reports it.
-    let _ = unsafe { libc::lchflags(text.as_ptr(), 0) };
-}
-
-#[cfg(not(target_os = "macos"))]
-fn clear_user_flags(_path: &Path) {}
 
 /// Whether `path` is absolute and normal: no empty, `.` or `..` segment and no trailing slash.
 fn is_absolute_normal(path: &str) -> bool {
