@@ -66,12 +66,12 @@ fn ess_confinement_portable_lane_executes_every_authored_portable_scenario() {
     let declared = support::lane_size("portable");
     assert!(declared > 0, "the suite has no portable scenario");
     assert_eq!(scenarios.len(), declared);
-    let (executed, audited) = support::run(&scenarios, open_portable);
+    let (executed, audited, open_checks) = support::run(&scenarios, open_portable);
     assert_eq!(executed, declared, "a portable scenario did not run");
     assert!(audited > 0, "no refusal audit record was asserted");
     println!(
         "ESS confinement portable lane: {executed} scenarios executed of {declared} declared, \
-         {audited} refusal audit records asserted, 0 failed"
+         {audited} refusal audit records asserted, {open_checks} open checks refused, 0 failed"
     );
 }
 

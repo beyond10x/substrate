@@ -20,7 +20,7 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use substrate_host::confinement::{
-    self, AdapterName, AuditRecord, AuditSink, ConfinementAdapter, ConfinementError,
+    self, AdapterFacts, AdapterName, AuditRecord, AuditSink, ConfinementAdapter, ConfinementError,
     ConfinementProfile, ContractFamily, Fact, InnerAdapter,
 };
 
@@ -181,6 +181,8 @@ pub struct Target<'a> {
     audit: Arc<Mutex<Vec<AuditRecord>>>,
     /// Refusal audit records asserted, across the scenario.
     pub refusals_audited: usize,
+    /// Opens refused by `confinement::check_open` on the scenario's declared set.
+    pub open_checks_refused: usize,
 }
 
 impl<'a> Target<'a> {
@@ -200,6 +202,7 @@ impl<'a> Target<'a> {
             view: String::new(),
             audit: Arc::new(Mutex::new(Vec::new())),
             refusals_audited: 0,
+            open_checks_refused: 0,
         }
     }
 
@@ -249,6 +252,41 @@ impl<'a> Target<'a> {
             served_families: strings(&input["served_families"]),
             facts: strings(&input["facts"]),
         };
+        // The open's input is the proved set. A set lacking a fact the adapter itself must prove is
+        // refused by the same check `confinement::open` applies to every real proof, before any
+        // adapter is asked to open: no real `local` can be made to prove less.
+        let declared = AdapterFacts::new(
+            adapter_name(&step.adapter),
+            step.inner.as_deref().map(inner),
+            &step
+                .served_families
+                .iter()
+                .map(|name| (family(name), true))
+                .collect::<Vec<_>>(),
+            &step
+                .facts
+                .iter()
+                .map(|name| (fact(name), true))
+                .collect::<Vec<_>>(),
+        );
+        if let Err(error) = confinement::check_open(&declared) {
+            let (_, name, fields) = refusal(&error);
+            assert_eq!(
+                name, "FactUnserved",
+                "an open check refuses by fact: {error}"
+            );
+            assert_eq!(fields["adapter"], json!(step.adapter));
+            self.open_checks_refused += 1;
+            self.outcome = match (step.adapter.as_str(), step.inner.as_deref()) {
+                ("local", _) => "local-not-declared-insecure",
+                ("systemd", Some("local")) => "systemd-local-not-declared-insecure",
+                ("oci" | "pod", _) => "image-not-digest-pinned",
+                (other, _) => panic!("the model names no open check for {other}"),
+            }
+            .into();
+            self.error = Some((format!("{PREFIX}{name}"), fields));
+            return;
+        }
         match (self.opener)(&step) {
             Ok(adapter) => {
                 let facts = adapter.facts();
@@ -322,6 +360,7 @@ impl<'a> Target<'a> {
             ..ConfinementProfile::default()
         };
         self.audit.lock().clear();
+        let opened = self.opened.contains_key(&name);
         let result = match self.opened.get(&name) {
             Some(adapter) => adapter.admit(&profile),
             None => Err(confinement::admit_unopened(&adapter_name(&name), &profile)),
@@ -365,7 +404,13 @@ impl<'a> Target<'a> {
                     );
                 }
                 self.refusals_audited += 1;
-                self.outcome = outcome;
+                // The model names `confinement.adapter-unserved` by why: no opened row, or an
+                // opened row whose `inner` is not the requested one.
+                self.outcome = if !opened && outcome == "adapter-unserved" {
+                    "adapter-not-open".into()
+                } else {
+                    outcome
+                };
                 self.error = Some((format!("{PREFIX}{error_name}"), fields));
             }
         }
@@ -527,14 +572,15 @@ impl<'a> Target<'a> {
     }
 }
 
-/// Runs each scenario with a fresh target, and returns how many ran and how many refusal audit
-/// records were asserted.
+/// Runs each scenario with a fresh target, and returns how many ran, how many refusal audit
+/// records were asserted and how many opens `confinement::check_open` refused.
 pub fn run(
     scenarios: &[(String, Value)],
     mut opener: impl FnMut(&OpenStep) -> Result<Arc<dyn ConfinementAdapter>, ConfinementError>,
-) -> (usize, usize) {
+) -> (usize, usize, usize) {
     let mut executed = 0;
     let mut audited = 0;
+    let mut open_checks = 0;
     for (id, scenario) in scenarios {
         println!("ESS scenario: {id}");
         let opener: &mut Opener<'_> = &mut opener;
@@ -543,7 +589,8 @@ pub fn run(
             target.step(step);
         }
         audited += target.refusals_audited;
+        open_checks += target.open_checks_refused;
         executed += 1;
     }
-    (executed, audited)
+    (executed, audited, open_checks)
 }

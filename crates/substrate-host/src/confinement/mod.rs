@@ -101,16 +101,47 @@ impl AdapterRequest {
 ///
 /// # Errors
 ///
-/// `confinement.adapter-unserved` when the adapter cannot open on this host or platform; a host
-/// failure the adapter met while opening, as [`ConfinementError::Driver`].
+/// `confinement.adapter-unserved` when the adapter cannot open on this host or platform;
+/// `confinement.fact-unserved` when its proof lacks a fact the adapter itself must prove
+/// ([`check_open`]); a host failure the adapter met while opening, as
+/// [`ConfinementError::Driver`].
 pub fn open(request: AdapterRequest) -> Result<Arc<dyn ConfinementAdapter>, ConfinementError> {
-    match request {
+    let adapter = match request {
         AdapterRequest::Local(request) => Ok(local::open(request)),
         AdapterRequest::Linux(request) => linux::open(*request),
         AdapterRequest::Macos(request) => macos::open(request),
         AdapterRequest::Systemd(request) => systemd::open(request),
         AdapterRequest::Oci(request) => oci::open(request),
         AdapterRequest::Pod(request) => pod::open(request),
+    }?;
+    check_open(adapter.facts())?;
+    Ok(adapter)
+}
+
+/// The facts an adapter must prove to open at all, checked on every proof [`open`] returns.
+///
+/// `local`, and `systemd` around it, is always declared insecure (ADR 0044 decision 3, atlas ADR
+/// 0109 decision 4), so no `local` adapter exists that admission could take for a confined one.
+/// `oci` and `pod` run only an image named by digest, so admission's digest check holds on every
+/// one of them. A proof without its fact is refused by that fact's name, never opened.
+///
+/// # Errors
+///
+/// `confinement.fact-unserved` naming `declared_insecure` or `image_digest_pinned`.
+pub fn check_open(facts: &AdapterFacts) -> Result<(), ConfinementError> {
+    let required = match (&facts.adapter, facts.inner) {
+        (AdapterName::Local, _) | (AdapterName::Systemd, Some(InnerAdapter::Local)) => {
+            Some(Fact::DeclaredInsecure)
+        }
+        (AdapterName::Oci | AdapterName::Pod, _) => Some(Fact::ImageDigestPinned),
+        _ => None,
+    };
+    match required {
+        Some(fact) if !facts.proves(&fact) => Err(ConfinementError::FactUnserved {
+            adapter: facts.adapter.clone(),
+            fact,
+        }),
+        _ => Ok(()),
     }
 }
 

@@ -78,7 +78,7 @@ fn ess_confinement_delegated_lane_executes_every_authored_linux_scenario() {
     );
     let declared = scenarios.len();
     let mut hosts = Vec::new();
-    let (executed, audited) = support::run(&scenarios, |step| {
+    let (executed, audited, open_checks) = support::run(&scenarios, |step| {
         assert_eq!(step.adapter, "linux");
         let host = tempfile::tempdir().expect("host root");
         let aperture = step
@@ -93,8 +93,8 @@ fn ess_confinement_delegated_lane_executes_every_authored_linux_scenario() {
     let others = support::lane_size("delegated") - declared;
     println!(
         "ESS confinement linux delegated lane: {executed} scenarios executed of {declared} \
-         declared for linux, {audited} refusal audit records asserted, 0 failed; {others} \
-         delegated scenarios on other adapters not executed by this case"
+         declared for linux, {audited} refusal audit records asserted, {open_checks} open checks refused, 0 \
+         failed; {others} delegated scenarios on other adapters not executed by this case"
     );
 }
 
