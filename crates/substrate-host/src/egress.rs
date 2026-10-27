@@ -374,9 +374,6 @@ impl Drop for SharedCounters {
 /// where there is no cgroup there is still no orphan.
 pub(crate) struct InstalledAperture {
     forwarder: libc::pid_t,
-    /// Kept so that teardown can end the listening socket itself, not only this process's
-    /// descriptor for it: see [`Listener`].
-    _listener: Listener,
     counters: SharedCounters,
     name: String,
     destination: String,
@@ -422,7 +419,7 @@ impl InstalledAperture {
 }
 
 /// The listening socket an aperture's helper made inside the run's namespace, as the installing
-/// process holds it.
+/// process holds it from the handback until the whole list is installed, and no longer.
 ///
 /// Dropping it shuts the socket down before closing this descriptor. A socket stops listening when
 /// its *last* descriptor closes, and this process does not hold the last one: any child another
@@ -431,7 +428,23 @@ impl InstalledAperture {
 /// stop the listener answering inside; on a loaded host a copy outlived both, and a connection from
 /// inside was accepted by a set that had been refused. `shutdown` acts on the socket every copy
 /// shares, so from that point no copy accepts and a connection inside is refused.
+///
+/// Once every aperture is installed, [`Listener::release`] closes this process's descriptor
+/// *without* that shutdown. The forwarder's copy is then the one the run depends on: a forwarder
+/// that dies during the run takes the listener with it, and a connection inside is refused rather
+/// than completed into a backlog nothing accepts.
+#[derive(Debug)]
 struct Listener(OwnedFd);
+
+impl Listener {
+    /// Closes this process's descriptor and leaves the socket listening for the forwarder.
+    fn release(self) {
+        let listener = std::mem::ManuallyDrop::new(self);
+        // SAFETY: `listener` is never dropped or read again, so the descriptor moves out of it
+        // exactly once and is closed exactly once, here.
+        drop(unsafe { std::ptr::read(&raw const listener.0) });
+    }
+}
 
 impl Drop for Listener {
     fn drop(&mut self) {
@@ -503,25 +516,28 @@ pub(crate) fn install_all(
 ) -> Result<InstalledApertures, DriverError> {
     let addresses = listen_addresses(apertures.len())?;
     let mut installed = Vec::with_capacity(apertures.len());
+    let mut listeners = Vec::with_capacity(apertures.len());
     for (aperture, address) in apertures.iter().zip(addresses) {
         let listen = SocketAddrV4::new(address, aperture.port);
-        // All or nothing: the `?` drops `installed`, and each value in it kills and reaps its own
-        // forwarder on the way out.
-        installed.push(install_one(aperture, listen, sandbox_pid, cgroup_procs)?);
+        // All or nothing: the `?` drops `listeners` first, shutting every earlier socket down, and
+        // then `installed`, each value in which kills and reaps its own forwarder.
+        let (one, listener) = install_one(aperture, listen, sandbox_pid, cgroup_procs)?;
+        installed.push(one);
+        listeners.push(listener);
     }
+    listeners.into_iter().for_each(Listener::release);
     Ok(InstalledApertures { installed })
 }
 
 /// Installs one aperture on `listen`: its listener inside, then its own counters and forwarder.
+/// The listener comes back beside the aperture for [`install_all`] to hold until the list is in.
 fn install_one(
     aperture: &EgressAperture,
     listen: SocketAddrV4,
     sandbox_pid: u32,
     cgroup_procs: Option<&Path>,
-) -> Result<InstalledAperture, DriverError> {
-    // A `Listener` from here on, so a failure below shuts the socket down rather than only closing
-    // this descriptor for it.
-    let listener = Listener(listen_inside(sandbox_pid, listen, cgroup_procs)?);
+) -> Result<(InstalledAperture, Listener), DriverError> {
+    let listener = listen_inside(sandbox_pid, listen, cgroup_procs)?;
     let counters =
         SharedCounters::new().map_err(|error| install_failed("aperture byte counters", &error))?;
     let cgroup = open_cgroup(cgroup_procs)?;
@@ -532,15 +548,17 @@ fn install_one(
         cgroup.as_ref(),
         aperture.max_bytes,
     )?;
-    Ok(InstalledAperture {
-        forwarder,
-        _listener: listener,
-        counters,
-        name: aperture.name.clone(),
-        destination: aperture.pinned.to_string(),
-        max_bytes: aperture.max_bytes,
-        listen,
-    })
+    Ok((
+        InstalledAperture {
+            forwarder,
+            counters,
+            name: aperture.name.clone(),
+            destination: aperture.pinned.to_string(),
+            max_bytes: aperture.max_bytes,
+            listen,
+        },
+        listener,
+    ))
 }
 
 /// Creates the listening socket **inside** the sandbox's network namespace and hands it back.
@@ -555,7 +573,7 @@ fn listen_inside(
     sandbox_pid: u32,
     listen: SocketAddrV4,
     cgroup_procs: Option<&Path>,
-) -> Result<OwnedFd, DriverError> {
+) -> Result<Listener, DriverError> {
     let address = sockaddr_in(*listen.ip(), listen.port());
     let netns = File::open(format!("/proc/{sandbox_pid}/ns/net"))
         .map_err(|error| install_failed("sandbox network namespace", &error))?;
@@ -1272,14 +1290,14 @@ fn probe_through_sandbox(bubblewrap: &Path, destination: SocketAddr) -> bool {
         // aperture is installed — and then reached from inside the sandbox, which is the claim.
         let installed = SharedCounters::new().ok().and_then(|counters| {
             let listen = SocketAddrV4::new(Ipv4Addr::LOCALHOST, destination.port());
-            let listener = Listener(listen_inside(sandbox_pid, listen, None).ok()?);
+            let listener = listen_inside(sandbox_pid, listen, None).ok()?;
             // The probe proves the *mechanism*, never a declaration: no ceiling, because there is
             // no operator statement here to enforce.
             let forwarder =
                 spawn_forwarder(&listener.0, destination, &counters, None, None).ok()?;
+            listener.release();
             Some(InstalledAperture {
                 forwarder,
-                _listener: listener,
                 counters,
                 name: String::new(),
                 destination: destination.to_string(),
@@ -1432,7 +1450,8 @@ unsafe fn send_descriptor(socket: RawFd, descriptor: RawFd) -> bool {
 
 /// Receives one descriptor sent as `SCM_RIGHTS`, or nothing if the sender failed before sending.
 enum HelperHandback {
-    Descriptor(OwnedFd),
+    // A `Listener` from receipt on, so every refusal after it shuts the socket down.
+    Descriptor(Listener),
     Failure { stage: i32, errno: i32 },
     Missing,
 }
@@ -1500,7 +1519,7 @@ fn receive_descriptor(socket: RawFd) -> HelperHandback {
             }
             let descriptor = std::ptr::read_unaligned(libc::CMSG_DATA(header).cast::<RawFd>());
             return if descriptor >= 0 {
-                HelperHandback::Descriptor(OwnedFd::from_raw_fd(descriptor))
+                HelperHandback::Descriptor(Listener(OwnedFd::from_raw_fd(descriptor)))
             } else {
                 HelperHandback::Missing
             };
@@ -3482,6 +3501,54 @@ mod tests {
                  children of a neighbour thread held the descriptors of the install"
             );
             println!("FORKING-NEIGHBOUR held");
+        }
+
+        /// Adversary, `story:egress-third-install-case-holds-under-load` pass 1. Once the
+        /// installing process keeps the listener for the aperture's lifetime, the forwarder is no
+        /// longer its only owner: a forwarder that dies during the run (its `accept4` error exit,
+        /// or a kill inside the run's cgroup) leaves the socket listening with nobody accepting.
+        /// A child inside then completes a handshake into a backlog nobody drains, where before
+        /// the last descriptor closed with the forwarder and the connect was refused.
+        ///
+        /// The forwarder is killed here and waited for without being reaped, so the aperture's
+        /// own drop still reaps exactly the pid it forked.
+        #[test]
+        fn a_dead_forwarder_leaves_its_aperture_refusing_rather_than_accepting_into_nothing() {
+            let scratch = tempfile::tempdir().unwrap();
+            let model = Destination::serving(b"model".to_vec());
+            let declared = [aperture(
+                "model",
+                "model.example.invalid",
+                model.address,
+                None,
+            )];
+            let script = "if (exec 3<>/dev/tcp/127.0.0.1/443) 2>/dev/null; then printf open; \
+                          else printf refused; fi";
+            let Some(sandbox) = ScriptedSandbox::open(scratch.path(), None, script) else {
+                return;
+            };
+            let installed = install_all(&declared, sandbox.pid, None).expect("install one");
+            let forwarder = installed.apertures()[0].forwarder;
+            // SAFETY: a pid this process forked and has not reaped; `WNOWAIT` leaves it a zombie
+            // for the aperture's drop to reap.
+            unsafe {
+                libc::kill(forwarder, libc::SIGKILL);
+                let mut info: libc::siginfo_t = std::mem::zeroed();
+                let waited = libc::waitid(
+                    libc::P_PID,
+                    libc::id_t::try_from(forwarder).expect("forwarder pid"),
+                    &raw mut info,
+                    libc::WEXITED | libc::WNOWAIT,
+                );
+                assert_eq!(waited, 0, "wait for the killed forwarder");
+            }
+            let printed = sandbox.finish(Duration::from_secs(30));
+            drop(installed);
+            assert_eq!(
+                printed, "refused",
+                "with its forwarder dead, the aperture still completed a connection from inside \
+                 that nothing will ever accept"
+            );
         }
 
         /// Each ceiling is independent under concurrent connections (ADR 0014 per aperture;

@@ -641,3 +641,286 @@ fn review_delegated_ro_and_argv_stay_inside_the_declared_set() {
     );
     println!("security review confine ro and argv: executed");
 }
+
+// --- The reaper after findings F1 and R1 (`story:confine-run-reaps-killed-groups`) -----------
+
+/// Security review of the reaper after F1 and R1: a zombie owner counts as gone, and what the
+/// reaper leaves is named, on stderr under text output and under `--output json` inside the verb's
+/// one document as `left_groups`.
+///
+/// The change is safe because of one fact: counting a zombie owner as gone only lets the reaper
+/// reach its `holds_process` check, and a group that still holds a live process is never removed.
+/// The first case measures that fact for a zombie owner. The other two measure the one-document
+/// rule on the paths the change's own case does not take, a refusal after the reaper ran and an
+/// interrupted run, where `left_groups` belongs in `error.data`.
+mod reaper_review {
+    use std::path::{Path, PathBuf};
+    use std::process::Output;
+    use std::time::{Duration, Instant};
+
+    use super::{DELEGATED, ROOT_ENV, cli, host, path, text};
+
+    fn delegated(case: &str) -> Option<PathBuf> {
+        let root = super::delegated();
+        if root.is_none() {
+            println!(
+                "security review confine reaper {case}: ABSENT (SUBSTRATE_VECTORS_CGROUP_ROOT is \
+                 unset)"
+            );
+        }
+        root
+    }
+
+    /// The state (field 3) and start time (field 22) of `/proc/<pid>/stat`.
+    fn stat_fields(pid: u32) -> Option<(char, u64)> {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let mut fields = stat.rsplit_once(')')?.1.split_whitespace();
+        let state = fields.next()?.chars().next()?;
+        Some((state, fields.nth(18)?.parse().ok()?))
+    }
+
+    fn procs(group: &Path) -> Vec<String> {
+        std::fs::read_to_string(group.join("cgroup.procs"))
+            .map(|text| text.lines().map(str::to_owned).collect())
+            .unwrap_or_default()
+    }
+
+    /// A `confine-<pid>-<start time>` group whose owner is a zombie this case has not waited for,
+    /// holding a second process this case started and moved into it.
+    struct ZombieOwnersGroup {
+        group: PathBuf,
+        owner: std::process::Child,
+        holder: std::process::Child,
+    }
+
+    impl ZombieOwnersGroup {
+        fn new(root: &Path) -> Self {
+            let mut owner = std::process::Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .expect("the owner");
+            let pid = owner.id();
+            let (_, start) = stat_fields(pid).expect("the owner's start time");
+            // `Child::kill` sends SIGKILL and does not wait: the owner stays a zombie.
+            owner.kill().expect("end the owner");
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while stat_fields(pid).map(|(state, _)| state) != Some('Z') {
+                assert!(Instant::now() < deadline, "the owner never became a zombie");
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let group = root.join(format!("confine-{pid}-{start}"));
+            std::fs::create_dir(&group).expect("the zombie owner's group");
+            let holder = std::process::Command::new("sleep")
+                .arg("30")
+                .spawn()
+                .expect("the held process");
+            std::fs::write(group.join("cgroup.procs"), holder.id().to_string())
+                .expect("move the held process into the group");
+            Self {
+                group,
+                owner,
+                holder,
+            }
+        }
+
+        fn named_in(&self, groups: &serde_json::Value) -> bool {
+            groups.as_array().is_some_and(|groups| {
+                groups.iter().any(|group| {
+                    group["path"].as_str() == self.group.to_str() && group["reason"].is_string()
+                })
+            })
+        }
+    }
+
+    impl Drop for ZombieOwnersGroup {
+        fn drop(&mut self) {
+            let _ = self.holder.kill();
+            let _ = self.holder.wait();
+            let _ = self.owner.wait();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while std::fs::remove_dir(&self.group).is_err()
+                && self.group.exists()
+                && Instant::now() < deadline
+            {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
+
+    /// The one JSON document a failed `--output json` invocation writes on stderr, asserting it is
+    /// the only line there and that stdout is empty.
+    fn the_one_error_document(output: &Output) -> serde_json::Value {
+        let stderr = text(&output.stderr);
+        assert_eq!(
+            text(&output.stdout),
+            "",
+            "a failed json invocation wrote on stdout"
+        );
+        let lines: Vec<&str> = stderr.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "under --output json stderr carries exactly one document: {stderr:?}"
+        );
+        serde_json::from_str(lines[0]).expect("the line is one JSON document")
+    }
+
+    /// R1 meets F1: the owner is a zombie, so it counts as gone, and its group still holds a live
+    /// process. The group is not removed, its process runs on, and the json document names it.
+    #[test]
+    fn review_delegated_a_zombie_owners_group_holding_a_process_is_kept_and_named() {
+        let _lock = DELEGATED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(root) = delegated("zombie owner") else {
+            return;
+        };
+        let host = host();
+        let workspace = host.workspace("ws_zombie");
+        let mut zombie = ZombieOwnersGroup::new(&root);
+        let output = cli()
+            .env(ROOT_ENV, &root)
+            .args([
+                "--output",
+                "json",
+                "confine",
+                "run",
+                "--dir",
+                path(&workspace),
+                "--",
+                "/bin/sh",
+                "-c",
+                "true",
+            ])
+            .output()
+            .expect("the CLI runs");
+        let owner_state = stat_fields(zombie.owner.id()).map(|(state, _)| state);
+        assert_eq!(
+            owner_state,
+            Some('Z'),
+            "the owner was not a zombie throughout"
+        );
+        assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+        assert!(
+            zombie.group.is_dir(),
+            "the run removed {}, whose zombie owner's group held a live process",
+            zombie.group.display()
+        );
+        assert!(
+            zombie.holder.try_wait().expect("try_wait").is_none(),
+            "the run ended the process held in {}",
+            zombie.group.display()
+        );
+        assert_eq!(procs(&zombie.group), [zombie.holder.id().to_string()]);
+        assert_eq!(text(&output.stderr), "", "json wrote beside its document");
+        let document: serde_json::Value =
+            serde_json::from_slice(&output.stdout).expect("one JSON document on stdout");
+        assert!(
+            zombie.named_in(&document["result"]["left_groups"]),
+            "the document does not name {}: {document}",
+            zombie.group.display()
+        );
+        println!("security review confine reaper zombie owner: executed");
+    }
+
+    /// A refusal that comes after the reaper ran (`--net` is refused at admission, after the
+    /// private group is made): one document on stderr, exit 2, the group named in
+    /// `error.data.left_groups`.
+    #[test]
+    fn review_delegated_a_json_refusal_after_the_reaper_names_the_group_in_error_data() {
+        let _lock = DELEGATED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(root) = delegated("json refusal") else {
+            return;
+        };
+        let host = host();
+        let workspace = host.workspace("ws_refused");
+        let zombie = ZombieOwnersGroup::new(&root);
+        let output = cli()
+            .env(ROOT_ENV, &root)
+            .args([
+                "--output",
+                "json",
+                "confine",
+                "run",
+                "--net",
+                "--dir",
+                path(&workspace),
+                "--",
+                "/bin/sh",
+                "-c",
+                "echo ran > ran",
+            ])
+            .output()
+            .expect("the CLI runs");
+        assert_eq!(output.status.code(), Some(2), "{}", text(&output.stderr));
+        let document = the_one_error_document(&output);
+        assert_eq!(document["ok"], false, "{document}");
+        assert!(
+            zombie.named_in(&document["error"]["data"]["left_groups"]),
+            "the refusal does not name {} in error.data.left_groups: {document}",
+            zombie.group.display()
+        );
+        assert!(document["result"].is_null(), "{document}");
+        assert!(!workspace.join("ran").exists(), "the refused run ran");
+        println!("security review confine reaper json refusal: executed");
+    }
+
+    /// SIGINT during the run: exit 130, one document on stderr, `confine.interrupted` with the
+    /// group named in `error.data.left_groups`.
+    #[test]
+    fn review_delegated_a_json_interrupt_names_the_group_in_error_data() {
+        let _lock = DELEGATED
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let Some(root) = delegated("json interrupt") else {
+            return;
+        };
+        let host = host();
+        let workspace = host.workspace("ws_interrupted");
+        let zombie = ZombieOwnersGroup::new(&root);
+        let marker = workspace.join("started");
+        let child = cli()
+            .env(ROOT_ENV, &root)
+            .args([
+                "--output",
+                "json",
+                "confine",
+                "run",
+                "--dir",
+                path(&workspace),
+                "--",
+                "/bin/sh",
+                "-c",
+                ": > started; sleep 30",
+            ])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn");
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while !marker.exists() {
+            assert!(Instant::now() < deadline, "the run never started");
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let sent = std::process::Command::new("kill")
+            .args(["-INT", &child.id().to_string()])
+            .status()
+            .expect("kill");
+        assert!(sent.success());
+        let output = child.wait_with_output().expect("the verb ends");
+        assert_eq!(output.status.code(), Some(130), "{}", text(&output.stderr));
+        let document = the_one_error_document(&output);
+        assert_eq!(
+            document["error"]["data"]["code"], "confine.interrupted",
+            "{document}"
+        );
+        assert!(
+            zombie.named_in(&document["error"]["data"]["left_groups"]),
+            "the interrupt does not name {} in error.data.left_groups: {document}",
+            zombie.group.display()
+        );
+        println!("security review confine reaper json interrupt: executed");
+    }
+}

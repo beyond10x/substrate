@@ -113,7 +113,8 @@ require_executed() {
 }
 require_executed adversary_confinement_s0_delegated \
   'adversary writable root: executed' 'adversary render parity: executed'
-require_executed security_review_confinement 'security review linux start env: executed'
+require_executed security_review_confinement 'security review linux start env: executed' \
+  'egress listener review: executed, none held during the run, baseline restored'
 require_executed sandbox_parity \
   'sandbox parity bubblewrap delegated: executed, 23 rows present'
 
@@ -138,7 +139,10 @@ require_executed -p b10x-substrate-cli confine_security_review \
   'security review confine concurrent cgroup root: executed' \
   'security review confine json stderr: executed' \
   'security review confine linux env: executed' \
-  'security review confine ro and argv: executed'
+  'security review confine ro and argv: executed' \
+  'security review confine reaper zombie owner: executed' \
+  'security review confine reaper json refusal: executed' \
+  'security review confine reaper json interrupt: executed'
 
 # The confinement module as its consumers call it: every need chosen by facts and run on an
 # adapter not declared insecure. Absent, exit 0, without the delegated root, so required by count.
