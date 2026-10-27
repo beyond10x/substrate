@@ -220,6 +220,16 @@ struct Record {
 /// The type an `impl` header is for, by its last path segment: `Signal` for
 /// `impl<'de> Deserialize<'de> for Signal` and for `impl Signal`.
 fn self_type(signature: &str) -> String {
+    self_path(signature)
+        .rsplit("::")
+        .next()
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// The path of the type an `impl` header is for, as written: `confinement::Profile` for
+/// `impl confinement::Profile`.
+fn self_path(signature: &str) -> String {
     let mut rest = signature.trim_start();
     rest = rest.strip_prefix("unsafe ").unwrap_or(rest).trim_start();
     rest = rest.strip_prefix("impl").unwrap_or(rest).trim_start();
@@ -240,12 +250,10 @@ fn self_type(signature: &str) -> String {
     if let Some(index) = rest.rfind(" for ") {
         rest = &rest[index + " for ".len()..];
     }
-    let path: String = rest
-        .trim_start()
+    rest.trim_start()
         .chars()
         .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == ':')
-        .collect();
-    path.rsplit("::").next().unwrap_or_default().to_owned()
+        .collect()
 }
 
 /// What a statement is, and whether it is plain `pub`.
@@ -412,6 +420,7 @@ fn scan(file: &str, source: &str) -> Vec<Record> {
             })
             .sum();
         let container = stack.last().expect("root frame");
+        let in_trait_impl = container.kind == Kind::Impl && container.label.contains(" for ");
         let (kind, public, label) = classify(&code_text.iter().collect::<String>(), container.kind);
         let last = trimmed.chars().last();
         let header = matches!(
@@ -445,6 +454,9 @@ fn scan(file: &str, source: &str) -> Vec<Record> {
             Kind::Fn | Kind::Const | Kind::Type if container_kind == Kind::Trait => {
                 enclosing_public
             }
+            // A trait impl's associated type or constant is part of what the impl promises:
+            // `SecretSlot::from_str(..)?` stops compiling when `type Err` changes.
+            Kind::Const | Kind::Type if in_trait_impl => true,
             Kind::Impl => signature.contains(" for "),
             _ => public,
         };
@@ -694,9 +706,19 @@ fn codes_naming(files: &[&(String, String)], names: &[String]) -> Vec<Option<Str
 
 /// The lines of `files` that belong to `names`: each name's one `pub` definition with its fields
 /// or variants, and every `impl` for it. A name without exactly one definition is one
-/// [`UNRESOLVED`] line, which the committed-list test refuses.
-fn external(files: &[&(String, String)], names: &[String]) -> Vec<String> {
-    let codes = codes_naming(files, names);
+/// [`UNRESOLVED`] line, which the committed-list test refuses. An `impl` written for one of
+/// `aliases` (`(alias, name)`, from `pub use … as …`) is an `impl` for its name.
+fn external(
+    files: &[&(String, String)],
+    names: &[String],
+    aliases: &[(String, String)],
+) -> Vec<String> {
+    let subjects: Vec<String> = names
+        .iter()
+        .cloned()
+        .chain(aliases.iter().map(|(alias, _)| alias.clone()))
+        .collect();
+    let codes = codes_naming(files, &subjects);
     let mut scanned = vec![false; files.len()];
     let mut out = Vec::new();
     for name in names {
@@ -708,10 +730,20 @@ fn external(files: &[&(String, String)], names: &[String]) -> Vec<String> {
             ));
             continue;
         }
+        let spellings: Vec<&String> = std::iter::once(name)
+            .chain(
+                aliases
+                    .iter()
+                    .filter(|(_, of)| of == name)
+                    .map(|(alias, _)| alias),
+            )
+            .collect();
         for (index, code) in codes.iter().enumerate() {
             if code.as_ref().is_some_and(|code| {
                 code.lines().any(|line| {
-                    defines(line, name) || (has_word(line, "impl") && has_word(line, name))
+                    defines(line, name)
+                        || (has_word(line, "impl")
+                            && spellings.iter().any(|spelling| has_word(line, spelling)))
                 })
             }) {
                 scanned[index] = true;
@@ -725,7 +757,7 @@ fn external(files: &[&(String, String)], names: &[String]) -> Vec<String> {
         out.extend(
             scan(file, text)
                 .iter()
-                .filter(|record| names.contains(&record.subject))
+                .filter(|record| subjects.contains(&record.subject))
                 .map(|record| line(file, record)),
         );
     }
@@ -794,7 +826,7 @@ fn items(sources: &[(String, String)]) -> Vec<String> {
         .collect();
     let mut out = Vec::new();
     let mut wanted: Vec<(Origin, String)> = Vec::new();
-    let mut module_mentions: Vec<String> = Vec::new();
+    let mut module_mentions: Vec<(bool, String)> = Vec::new();
     for (name, text) in &module {
         for record in scan(name, text) {
             for mention in mentioned(&record) {
@@ -853,36 +885,22 @@ fn items(sources: &[(String, String)]) -> Vec<String> {
     // is a change to the module's surface. Each file is scanned once for the search; the lines
     // written are `external`'s, as for a re-exported name.
     let types = TypeIndex::of(&module, &host_files, &wire_files);
-    // Per record of the host crate and the wire: its type, whether it is the wire's, and the type
-    // names it mentions.
-    let records: Vec<(String, bool, Vec<String>)> = host_files
+    let host_scans: Vec<HostScan> = host_files
         .iter()
-        .chain(&wire_files)
-        .flat_map(|(file, text)| {
-            let from_wire = file.starts_with(WIRE);
-            scan(file, text)
-                .into_iter()
-                .map(move |record| (record.subject.clone(), from_wire, mentioned(&record)))
-        })
+        .map(|(file, text)| (file.clone(), code_of(text), scan(file, text)))
         .collect();
-    let mentions_of = |held: &[(Origin, String)]| -> Vec<(bool, String)> {
-        records
-            .iter()
-            .filter(|(subject, _, _)| held.iter().any(|(_, name)| name == subject))
-            .flat_map(|(_, from_wire, names)| names.iter().map(|name| (*from_wire, name.clone())))
-            .collect()
-    };
-    let mut mentions: Vec<(bool, String)> = module_mentions
+    impls_elsewhere(&host_scans, &types, &mut out, &mut module_mentions);
+    let records = mentioning(&host_scans, &wire_files);
+    let mut mentions: Vec<Mention> = module_mentions
         .into_iter()
-        .map(|name| (false, name))
-        .chain(mentions_of(&wanted))
+        .chain(mentions_of(&records, &types, &wanted))
         .collect();
     loop {
         let added = types.named(&mentions, &wanted);
         if added.is_empty() {
             break;
         }
-        mentions = mentions_of(&added);
+        mentions = mentions_of(&records, &types, &added);
         wanted.extend(added);
     }
     for (origin, files) in [(Origin::Host, &host_files), (Origin::Wire, &wire_files)] {
@@ -892,10 +910,141 @@ fn items(sources: &[(String, String)]) -> Vec<String> {
             .map(|(_, name)| name.clone())
             .collect();
         if !names.is_empty() {
-            out.extend(external(files, &names));
+            out.extend(external(files, &names, &types.aliases_of(origin, &names)));
         }
     }
     out
+}
+
+/// A type name a record mentions, with whether it is the wire's.
+type Mention = (bool, String);
+
+/// One record of the host crate or the wire: its type, whether it is the wire's, and what it
+/// mentions.
+type Mentioning = (String, bool, Vec<Mention>);
+
+/// One host file outside the module: its name, its masked code and its records.
+type HostScan = (String, String, Vec<Record>);
+
+/// Writes the lines of every `impl` of a module type that sits in a host file outside the module,
+/// and adds what they mention to `mentions`: its methods, and the trait impls on it, are the module
+/// type's surface wherever they are written.
+fn impls_elsewhere(
+    host_scans: &[HostScan],
+    types: &TypeIndex,
+    out: &mut Vec<String>,
+    mentions: &mut Vec<Mention>,
+) {
+    for (file, code, records) in host_scans {
+        for record in records {
+            if impl_of_module_type(record, code, types) {
+                for mention in mentioned(record) {
+                    if !mentions.contains(&mention) {
+                        mentions.push(mention);
+                    }
+                }
+                out.push(line(file, record));
+            }
+        }
+    }
+}
+
+/// Every record of the host crate outside the module and of the wire, as [`Mentioning`].
+fn mentioning(host_scans: &[HostScan], wire_files: &[&(String, String)]) -> Vec<Mentioning> {
+    host_scans
+        .iter()
+        .flat_map(|(_, _, records)| records)
+        .map(|record| (record.subject.clone(), false, mentioned(record)))
+        .chain(wire_files.iter().flat_map(|(file, text)| {
+            scan(file, text)
+                .into_iter()
+                .map(|record| (record.subject.clone(), true, mentioned(&record)))
+        }))
+        .collect()
+}
+
+/// What the records of the `held` types mention, an `impl` written for an alias of one included.
+/// A name mentioned in a wire record is the wire's.
+fn mentions_of(
+    records: &[Mentioning],
+    types: &TypeIndex,
+    held: &[(Origin, String)],
+) -> Vec<Mention> {
+    let subjects: Vec<Mention> = held
+        .iter()
+        .flat_map(|(origin, name)| {
+            let wire = *origin == Origin::Wire;
+            std::iter::once((wire, name.clone())).chain(
+                types
+                    .aliases_of(*origin, std::slice::from_ref(name))
+                    .into_iter()
+                    .map(move |(alias, _)| (wire, alias)),
+            )
+        })
+        .collect();
+    records
+        .iter()
+        .filter(|(subject, from_wire, _)| {
+            subjects
+                .iter()
+                .any(|(wire, name)| wire == from_wire && name == subject)
+        })
+        .flat_map(|(_, from_wire, names)| {
+            names
+                .iter()
+                .map(|(wire, name)| (*from_wire || *wire, name.clone()))
+        })
+        .collect()
+}
+
+/// The `impl` header a record of a host file sits in, or is.
+fn impl_header(record: &Record) -> Option<&str> {
+    let is_impl = |text: &str| {
+        let text = text.rsplit("] ").next().unwrap_or(text);
+        text.starts_with("impl") || text.starts_with("unsafe impl")
+    };
+    record
+        .context
+        .iter()
+        .find(|frame| is_impl(frame))
+        .map(String::as_str)
+        .or_else(|| is_impl(&record.text).then_some(record.text.as_str()))
+}
+
+/// Whether a record of a host file outside the module is part of an `impl` for one of the
+/// module's types. The type is the module's when the header's path or the file's `use` of the
+/// name runs through `confinement`; it is not when either runs through `substrate_wire` or the
+/// file defines a type of that name itself; otherwise it is when no other host file defines a
+/// `pub` type of that name.
+fn impl_of_module_type(record: &Record, code: &str, types: &TypeIndex) -> bool {
+    let Some(header) = impl_header(record) else {
+        return false;
+    };
+    let path = self_path(header.rsplit("] ").next().unwrap_or(header));
+    let name = path.rsplit("::").next().unwrap_or_default();
+    if !types.module.iter().any(|known| known == name) {
+        return false;
+    }
+    let import = code.split(';').find_map(|statement| {
+        let (_, path) = statement.rsplit_once("use ")?;
+        has_word(path, name).then_some(path)
+    });
+    let through = |segment: &str| {
+        has_word(&path, segment) || import.is_some_and(|import| has_word(import, segment))
+    };
+    let defines_here = code.lines().any(|line| {
+        let line = without_visibility(line);
+        ["struct ", "enum ", "trait ", "type ", "union "]
+            .iter()
+            .any(|keyword| {
+                line.strip_prefix(keyword)
+                    .is_some_and(|rest| starts_with_word(rest, name))
+            })
+    });
+    if through("substrate_wire") || defines_here {
+        return false;
+    }
+    through("confinement") || !types.host.iter().any(|known| known == name)
 }
 
 /// The keywords of a `pub` type definition.
@@ -910,8 +1059,9 @@ const TYPE_KEYWORDS: [&str; 5] = [
 /// The type names one record mentions outside its attributes and string literals: each
 /// identifier that starts with an uppercase letter and holds a lowercase one, so `SecretSlot`
 /// and not `MAX_EGRESS_APERTURES`. A variant's own name is not a mention: `Driver` in
-/// `Driver(#[from] DriverError)` names no type.
-fn mentioned(record: &Record) -> Vec<String> {
+/// `Driver(#[from] DriverError)` names no type. Each name comes with whether its path starts at
+/// `substrate_wire`, which names the wire's type even where the module defines one of that name.
+fn mentioned(record: &Record) -> Vec<(bool, String)> {
     let variant = record
         .context
         .last()
@@ -949,10 +1099,11 @@ fn mentioned(record: &Record) -> Vec<String> {
         word.starts_with(|c: char| c.is_ascii_uppercase())
             && word.chars().any(|c| c.is_ascii_lowercase())
     };
-    let mut names: Vec<String> = Vec::new();
+    let mut names: Vec<(bool, String)> = Vec::new();
     let mut previous: Option<&str> = None;
     let mut rest = code.as_str();
     let mut first = true;
+    let mut wire_path = false;
     while let Some(start) = rest.find(|c: char| c.is_alphanumeric() || c == '_') {
         let separator = &rest[..start];
         let word_end = rest[start..]
@@ -960,24 +1111,47 @@ fn mentioned(record: &Record) -> Vec<String> {
             .map_or(rest.len(), |end| start + end);
         let word = &rest[start..word_end];
         rest = &rest[word_end..];
+        let continues_path = separator.trim() == "::";
+        wire_path = (continues_path && wire_path) || word == "substrate_wire";
         // `ContractFamily::Workspace` is a variant of `ContractFamily`, not the type `Workspace`;
         // `substrate_wire::Workspace` is the type.
-        let item_of_a_type = separator.trim() == "::" && previous.is_some_and(type_like);
+        let item_of_a_type = continues_path && previous.is_some_and(type_like);
         let skip = (variant && first) || item_of_a_type;
         first = false;
         previous = Some(word);
-        if !skip && type_like(word) && !names.iter().any(|name| name == word) {
-            names.push(word.to_owned());
+        let mention = (wire_path, word.to_owned());
+        if !skip && type_like(word) && !names.contains(&mention) {
+            names.push(mention);
         }
     }
     names
 }
 
-/// The `pub` type names each part of the workspace defines, read once from the masked code.
+/// What one `pub use` renames: `(alias, name)` for each `name as alias` in it.
+fn renamed(statement: &str) -> Vec<(String, String)> {
+    let statement = normalize(statement);
+    let list = statement
+        .split_once("::{")
+        .map_or(statement.as_str(), |(_, list)| list);
+    list.trim_end_matches(['}', ';', ' '])
+        .split(',')
+        .filter_map(|item| {
+            let (path, alias) = item.split_once(" as ")?;
+            let name = path.trim().rsplit("::").next()?.trim();
+            Some((alias.trim().to_owned(), name.to_owned()))
+        })
+        .filter(|(alias, name)| !alias.is_empty() && !name.is_empty() && alias != "_")
+        .collect()
+}
+
+/// The `pub` type names each part of the workspace defines, read once from the masked code, and
+/// the names its `pub use … as …` items publish them under.
 struct TypeIndex {
     module: Vec<String>,
     host: Vec<String>,
     wire: Vec<String>,
+    host_aliases: Vec<(String, String)>,
+    wire_aliases: Vec<(String, String)>,
 }
 
 impl TypeIndex {
@@ -986,6 +1160,21 @@ impl TypeIndex {
         host: &[&(String, String)],
         wire: &[&(String, String)],
     ) -> Self {
+        let aliases = |files: &[&(String, String)], defined: &[String]| {
+            let mut aliases: Vec<(String, String)> = Vec::new();
+            for (_, text) in files {
+                let code = code_of(text);
+                for (index, _) in code.match_indices("pub use ") {
+                    let statement = code[index..].split(';').next().unwrap_or_default();
+                    for alias in renamed(statement) {
+                        if defined.contains(&alias.1) && !aliases.contains(&alias) {
+                            aliases.push(alias);
+                        }
+                    }
+                }
+            }
+            aliases
+        };
         let defined = |files: &[&(String, String)]| {
             let mut names: Vec<String> = Vec::new();
             for (_, text) in files {
@@ -1008,37 +1197,75 @@ impl TypeIndex {
             }
             names
         };
+        let (host_types, wire_types) = (defined(host), defined(wire));
         Self {
             module: defined(module),
-            host: defined(host),
-            wire: defined(wire),
+            host_aliases: aliases(host, &host_types),
+            wire_aliases: aliases(wire, &wire_types),
+            host: host_types,
+            wire: wire_types,
         }
     }
 
-    /// The types `lines` name that are not held yet, each with the crate whose `pub` type
-    /// definition it names. A name the module defines is the module's own; a name in a host or
-    /// module line resolves in the host crate first and then in the wire, which the host imports
-    /// from; a name in a wire line resolves in the wire only. A name with no `pub` type definition
-    /// in either, such as `String` or `PathBuf`, is not this workspace's.
+    /// The name `name` resolves to among `defined`, directly or through one of `aliases`.
+    fn resolve(defined: &[String], aliases: &[(String, String)], name: &str) -> Option<String> {
+        if defined.iter().any(|known| known == name) {
+            return Some(name.to_owned());
+        }
+        aliases
+            .iter()
+            .find(|(alias, _)| alias == name)
+            .map(|(_, original)| original.clone())
+    }
+
+    /// The types `mentions` name that are not held yet, each with the crate whose `pub` type
+    /// definition it names, by its defined name when the mention uses a `pub use … as …` alias.
+    /// A mention in a wire line, or by a path that starts at `substrate_wire`, resolves in the
+    /// wire only, even where the module defines a type of that name; any other mention of a name
+    /// the module defines is the module's own, and the rest resolve in the host crate first and
+    /// then in the wire, which the host imports from. A name with no `pub` type definition in
+    /// either, such as `String` or `PathBuf`, is not this workspace's.
     fn named(
         &self,
         mentions: &[(bool, String)],
         wanted: &[(Origin, String)],
     ) -> Vec<(Origin, String)> {
         let mut added: Vec<(Origin, String)> = Vec::new();
-        for (from_wire, name) in mentions {
-            if wanted.iter().chain(&added).any(|(_, held)| held == name)
-                || self.module.contains(name)
+        for (wire, name) in mentions {
+            let wire_type = || {
+                Self::resolve(&self.wire, &self.wire_aliases, name)
+                    .map(|found| (Origin::Wire, found))
+            };
+            let found = if *wire {
+                wire_type()
+            } else if self.module.contains(name) {
+                None
+            } else {
+                Self::resolve(&self.host, &self.host_aliases, name)
+                    .map(|found| (Origin::Host, found))
+                    .or_else(wire_type)
+            };
+            if let Some(found) = found
+                && !wanted.contains(&found)
+                && !added.contains(&found)
             {
-                continue;
-            }
-            if !from_wire && self.host.contains(name) {
-                added.push((Origin::Host, name.clone()));
-            } else if self.wire.contains(name) {
-                added.push((Origin::Wire, name.clone()));
+                added.push(found);
             }
         }
         added
+    }
+
+    /// The aliases of the held names of `origin`, as `(alias, name)`.
+    fn aliases_of(&self, origin: Origin, names: &[String]) -> Vec<(String, String)> {
+        let aliases = match origin {
+            Origin::Wire => &self.wire_aliases,
+            _ => &self.host_aliases,
+        };
+        aliases
+            .iter()
+            .filter(|(_, name)| names.contains(name))
+            .cloned()
+            .collect()
     }
 }
 

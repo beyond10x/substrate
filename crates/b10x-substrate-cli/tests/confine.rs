@@ -754,6 +754,49 @@ fn a_dead_owners_group_left_holding_a_process_is_named_on_stderr() {
     println!("confine delegated names a populated dead group: executed");
 }
 
+/// Under `--output json` the verb writes one document, so the group the reaper left is named in
+/// it, as `result.left_groups`, and nothing is written beside it on stderr.
+#[test]
+fn a_dead_owners_group_left_holding_a_process_is_named_in_the_json_document() {
+    let _lock = DELEGATED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(root) = delegated("names a populated dead group in json") else {
+        return;
+    };
+    let host = host();
+    let ws = dir(&host);
+    let dead = DeadOwnersGroup::new(&root);
+    let output = cli()
+        .env(ROOT_ENV, &root)
+        .args([
+            "--output", "json", "confine", "run", "--dir", &ws, "--", "/bin/sh", "-c", "true",
+        ])
+        .output()
+        .expect("the CLI runs");
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    assert_eq!(
+        text(&output.stderr),
+        "",
+        "under --output json nothing is written beside the document"
+    );
+    let document: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("one JSON document on stdout");
+    let named = document["result"]["left_groups"]
+        .as_array()
+        .is_some_and(|groups| {
+            groups.iter().any(|group| {
+                group["path"].as_str() == dead.group.to_str() && group["reason"].is_string()
+            })
+        });
+    assert!(
+        named,
+        "the document does not name {} in result.left_groups: {document}",
+        dead.group.display()
+    );
+    println!("confine delegated names a populated dead group in json: executed");
+}
+
 /// The state field of `/proc/<pid>/stat`, or `None` once the process is reaped.
 fn process_state(pid: u32) -> Option<char> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
