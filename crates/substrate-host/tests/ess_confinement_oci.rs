@@ -1166,10 +1166,6 @@ fn open_removes_a_container_whose_embedder_is_gone() {
         foreign_left,
         "a container of another pid namespace was removed"
     );
-    assert!(
-        adapter.orphans_removed() >= 1,
-        "{}",
-        adapter.orphans_removed()
-    );
+    assert!(adapter.orphans_removed() >= 1, "no orphan was removed");
     println!("ESS confinement oci orphans: executed");
 }
