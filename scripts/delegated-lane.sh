@@ -55,6 +55,20 @@ export SUBSTRATE_VECTORS_CGROUP_ROOT="${root}"
 # daemon that owns a root and fatal for six drivers that share one.
 cargo test -p b10x-substrate-host --locked -- --nocapture --test-threads=1
 
+# The confinement contract's linux scenarios (ADR 0109) ran above, but a case that reported itself
+# absent exits 0 too. Run them again by name and require the count the case printed, so an absent
+# or empty lane fails here instead of reading as green.
+confinement_log="$(cargo test -p b10x-substrate-host --locked --test ess_confinement_linux \
+  -- --nocapture --test-threads=1 2>&1)" || { printf '%s\n' "${confinement_log}" >&2; exit 1; }
+printf '%s\n' "${confinement_log}"
+confinement_line="$(printf '%s\n' "${confinement_log}" \
+  | grep -E '^ESS confinement linux delegated lane: [1-9][0-9]* scenarios executed' || true)"
+if [[ -z "${confinement_line}" ]]; then
+  echo "delegated-lane: the confinement linux scenarios did not execute" >&2
+  exit 1
+fi
+echo "delegated-lane: ${confinement_line}"
+
 # The public SDK owns a separate clean-room journey against the shipped daemon binary. It proves
 # PTY resize, live metrics and orderly whole-tree cleanup through SDK types only; without this
 # explicit command that test would be absent from the daemon-only lane below.
