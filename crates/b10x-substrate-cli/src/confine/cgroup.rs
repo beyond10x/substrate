@@ -8,15 +8,31 @@
 //! root to hold none directly), and hands that group to the driver: the driver's reconcile only
 //! ever reads this invocation's own groups. On drop the process moves back to the group it came
 //! from, whatever is left beneath the private group is killed, and the group is removed.
+//!
+//! `SIGKILL` skips the drop, so a killed invocation leaves its group. The group's name records its
+//! owner as `confine-<pid>-<start time>`, and the next invocation on the root removes every such
+//! group whose owner is gone and that holds no process, before it makes its own.
 
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 /// The controllers a host driver's cgroup root must give its children.
 const CONTROLLERS: [&str; 3] = ["cpu", "memory", "pids"];
 
+/// The name of every private group starts with this, then `<pid>-<start time>` of its owner.
+const PREFIX: &str = "confine-";
+
 /// Where this process sits while its private group is the driver's root.
 const LEAF: &str = "cli";
+
+/// A group a killed run left that the reaper did not remove, or a root it could not read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Leftover {
+    /// The group, or the root when the root could not be read.
+    pub path: PathBuf,
+    /// Why it is left, in words.
+    pub reason: String,
+}
 
 /// One invocation's private group, removed when dropped.
 #[derive(Debug)]
@@ -32,7 +48,9 @@ impl PrivateCgroup {
     ///
     /// Why the group cannot be made: `root` is not a delegated cgroup v2 root this process runs
     /// beneath without being in it directly, or a controller, directory or move was refused.
-    pub fn create(root: &Path) -> Result<Self, String> {
+    ///
+    /// What the reaper leaves is appended to `left`, whether or not the group can be made.
+    pub fn create(root: &Path, left: &mut Vec<Leftover>) -> Result<Self, String> {
         let root = std::fs::canonicalize(root).map_err(|error| format!("{error}"))?;
         if !root.join("cgroup.controllers").is_file() {
             return Err("not a cgroup v2 directory".to_owned());
@@ -46,10 +64,9 @@ impl PrivateCgroup {
             ));
         }
         enable(&root)?;
-        let stamp = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_nanos());
-        let group = root.join(format!("confine-{}-{stamp}", std::process::id()));
+        let start = start_time("self").ok_or("this process's start time is unreadable")?;
+        left.extend(reap(&root));
+        let group = root.join(format!("{PREFIX}{}-{start}", std::process::id()));
         std::fs::create_dir(&group)
             .map_err(|error| format!("creating {}: {error}", group.display()))?;
         let private = Self { group, origin };
@@ -141,6 +158,103 @@ fn in_group(group: &Path) -> bool {
     current_cgroup().is_some_and(|current| current.starts_with(group))
 }
 
+/// The start time of the process `pid` (or `self`), in clock ticks since boot: field 22 of
+/// `/proc/<pid>/stat`. With the pid it names one process for the life of the boot, where the pid
+/// alone is reused.
+fn start_time(pid: &str) -> Option<u64> {
+    stat(pid).map(|(_, start)| start)
+}
+
+/// The state (field 3) and start time (field 22) of `/proc/<pid>/stat`.
+fn stat(pid: &str) -> Option<(char, u64)> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    // The command name, field 2, is parenthesised and may hold spaces and parentheses itself.
+    let (_, fields) = stat.rsplit_once(')')?;
+    let mut fields = fields.split_whitespace();
+    let state = fields.next()?.chars().next()?;
+    Some((state, fields.nth(18)?.parse().ok()?))
+}
+
+/// Whether the process that owns a group named for `pid` and `start` still runs. A process that
+/// has exited but not yet been waited for keeps its `/proc` entry and start time as a zombie
+/// (`Z`, or `X` while it is torn down); it holds no process in any group and bounds nothing, so it
+/// is gone.
+fn owner_runs(pid: &str, start: u64) -> bool {
+    matches!(stat(pid), Some((state, started)) if started == start && !matches!(state, 'Z' | 'X'))
+}
+
+/// The owner a private group's name records: `confine-<pid>-<start time>`.
+fn owner(name: &str) -> Option<(&str, u64)> {
+    let (pid, start) = name.strip_prefix(PREFIX)?.split_once('-')?;
+    if pid.is_empty() || !pid.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    Some((pid, start.parse().ok()?))
+}
+
+/// Whether `group` or any group beneath it holds a process, or cannot be read.
+fn holds_process(group: &Path) -> bool {
+    match std::fs::read_to_string(group.join("cgroup.procs")) {
+        Ok(procs) if procs.trim().is_empty() => {}
+        _ => return true,
+    }
+    std::fs::read_dir(group).map_or(true, |entries| {
+        entries.flatten().any(|entry| {
+            entry.file_type().is_ok_and(|kind| kind.is_dir()) && holds_process(&entry.path())
+        })
+    })
+}
+
+/// Removes the private groups beneath `root` that an invocation killed by `SIGKILL` left behind:
+/// each `confine-<pid>-<start time>` whose owner is gone — no process `pid`, one started at
+/// another time, which is the pid reused, or a zombie its parent has not yet waited for — and that
+/// holds no process, deepest first.
+///
+/// A group whose owner runs is never touched, whatever it holds, and a group holding any process
+/// is left until it holds none: this removes, it never kills. `rmdir` on a cgroup that a process
+/// joined in between fails with `EBUSY`, so nothing here can end a process.
+///
+/// It returns what it leaves, for the caller to report: a dead owner's group that still holds a
+/// process (which no timeout or whole-tree kill bounds any longer), a group it could not remove,
+/// and a root it could not read. None of them changes the invocation's own outcome.
+fn reap(root: &Path) -> Vec<Leftover> {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) => {
+            return vec![Leftover {
+                path: root.to_path_buf(),
+                reason: format!("cannot be read to remove groups killed runs left: {error}"),
+            }];
+        }
+    };
+    let mut left = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some((pid, start)) = name.to_str().and_then(owner) else {
+            continue;
+        };
+        if owner_runs(pid, start) || !entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+            continue;
+        }
+        let group = entry.path();
+        if holds_process(&group) {
+            left.push(Leftover {
+                path: group,
+                reason: format!(
+                    "left: its owner {pid} is gone and a process still runs in it, or it cannot \
+                     be read"
+                ),
+            });
+        } else if !remove_tree(&group) {
+            left.push(Leftover {
+                path: group,
+                reason: "could not be removed; the run that made it is gone".to_owned(),
+            });
+        }
+    }
+    left
+}
+
 /// Removes `group` and every group beneath it, deepest first; `true` once `group` is gone.
 fn remove_tree(group: &Path) -> bool {
     if let Ok(entries) = std::fs::read_dir(group) {
@@ -151,4 +265,56 @@ fn remove_tree(group: &Path) -> bool {
         }
     }
     std::fs::remove_dir(group).is_ok() || !group.exists()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_group_name_records_its_owner_and_only_that_process_matches_it() {
+        let pid = std::process::id().to_string();
+        let start = start_time("self").expect("this process's start time");
+        assert_eq!(start_time(&pid), Some(start));
+        let name = format!("{PREFIX}{pid}-{start}");
+        assert_eq!(owner(&name), Some((pid.as_str(), start)));
+        // The same pid started at another time is the pid reused, not the owner.
+        assert_ne!(start_time(&pid), Some(start + 1));
+        for other in [
+            "confine-",
+            "confine-12",
+            "confine--5",
+            "confine-1x-5",
+            "substrate-ex_1-5",
+        ] {
+            assert_eq!(owner(other), None, "{other}");
+        }
+    }
+
+    #[test]
+    fn an_exited_owner_not_yet_waited_for_does_not_run() {
+        let pid = std::process::id().to_string();
+        assert!(owner_runs(&pid, start_time("self").expect("start time")));
+        let mut child = std::process::Command::new("true").spawn().expect("spawn");
+        let child_pid = child.id().to_string();
+        let start = start_time(&child_pid).expect("the child's start time");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while stat(&child_pid).map(|(state, _)| state) != Some('Z') {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "the child never exited"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert_eq!(
+            start_time(&child_pid),
+            Some(start),
+            "a zombie keeps its start time"
+        );
+        assert!(
+            !owner_runs(&child_pid, start),
+            "a zombie counted as a running owner"
+        );
+        child.wait().expect("reap");
+    }
 }

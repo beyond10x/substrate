@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-27T11:00:17Z",
+  "actor": "human:timo",
+  "artifact": "story:pod-lane-runs-adversary-and-security",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "gate.yml Pod lane on 7a09bd58 (scripts/pod-lane.sh, adversary_pod 9 passed with the folded cleanup module skipping): success",
+    "reference": "https://github.com/beyond10x/substrate/actions/runs/40492166509"
+  }
+}

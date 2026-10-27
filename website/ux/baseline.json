@@ -78,7 +78,7 @@
       },
       "reading_load.median": {
         "tolerance": 0,
-        "value": 3.0
+        "value": 2.5
       }
     },
     "page:guides/deployment": {

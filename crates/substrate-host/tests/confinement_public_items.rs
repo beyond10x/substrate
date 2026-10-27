@@ -26,6 +26,13 @@
 //! `pub` definition, and a re-export from any other crate fails the test until the scanner reads
 //! that crate too.
 //!
+//! Every type a recorded item names — in a public field, a variant, a signature or a constant's
+//! type — is recorded the same way when the host crate or `substrate-wire` defines it, and so on
+//! to a fixed point (`story:public-items-cover-field-types`): `HostConfig`'s fields hand a consumer
+//! `SecretSlot`, `EgressAperture` and `GitSourceBinding`, so their shapes are part of the module's.
+//! A name is read as a type when it starts with an uppercase letter and holds a lowercase one; a
+//! variant's own name and the item after `Type::` are not mentions.
+//!
 //! It reads every `cfg` arm, so the list is the same on every OS. It also records `pub` items of a
 //! private module, which a consumer cannot reach: over-inclusive, so a change there is flagged
 //! rather than missed. `#[cfg(test)]` modules and function bodies are skipped. Whitespace and line
@@ -213,6 +220,16 @@ struct Record {
 /// The type an `impl` header is for, by its last path segment: `Signal` for
 /// `impl<'de> Deserialize<'de> for Signal` and for `impl Signal`.
 fn self_type(signature: &str) -> String {
+    self_path(signature)
+        .rsplit("::")
+        .next()
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// The path of the type an `impl` header is for, as written: `confinement::Profile` for
+/// `impl confinement::Profile`.
+fn self_path(signature: &str) -> String {
     let mut rest = signature.trim_start();
     rest = rest.strip_prefix("unsafe ").unwrap_or(rest).trim_start();
     rest = rest.strip_prefix("impl").unwrap_or(rest).trim_start();
@@ -233,12 +250,10 @@ fn self_type(signature: &str) -> String {
     if let Some(index) = rest.rfind(" for ") {
         rest = &rest[index + " for ".len()..];
     }
-    let path: String = rest
-        .trim_start()
+    rest.trim_start()
         .chars()
         .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == ':')
-        .collect();
-    path.rsplit("::").next().unwrap_or_default().to_owned()
+        .collect()
 }
 
 /// What a statement is, and whether it is plain `pub`.
@@ -405,6 +420,7 @@ fn scan(file: &str, source: &str) -> Vec<Record> {
             })
             .sum();
         let container = stack.last().expect("root frame");
+        let in_trait_impl = container.kind == Kind::Impl && container.label.contains(" for ");
         let (kind, public, label) = classify(&code_text.iter().collect::<String>(), container.kind);
         let last = trimmed.chars().last();
         let header = matches!(
@@ -438,6 +454,9 @@ fn scan(file: &str, source: &str) -> Vec<Record> {
             Kind::Fn | Kind::Const | Kind::Type if container_kind == Kind::Trait => {
                 enclosing_public
             }
+            // A trait impl's associated type or constant is part of what the impl promises:
+            // `SecretSlot::from_str(..)?` stops compiling when `type Err` changes.
+            Kind::Const | Kind::Type if in_trait_impl => true,
             Kind::Impl => signature.contains(" for "),
             _ => public,
         };
@@ -687,9 +706,19 @@ fn codes_naming(files: &[&(String, String)], names: &[String]) -> Vec<Option<Str
 
 /// The lines of `files` that belong to `names`: each name's one `pub` definition with its fields
 /// or variants, and every `impl` for it. A name without exactly one definition is one
-/// [`UNRESOLVED`] line, which the committed-list test refuses.
-fn external(files: &[&(String, String)], names: &[String]) -> Vec<String> {
-    let codes = codes_naming(files, names);
+/// [`UNRESOLVED`] line, which the committed-list test refuses. An `impl` written for one of
+/// `aliases` (`(alias, name)`, from `pub use … as …`) is an `impl` for its name.
+fn external(
+    files: &[&(String, String)],
+    names: &[String],
+    aliases: &[(String, String)],
+) -> Vec<String> {
+    let subjects: Vec<String> = names
+        .iter()
+        .cloned()
+        .chain(aliases.iter().map(|(alias, _)| alias.clone()))
+        .collect();
+    let codes = codes_naming(files, &subjects);
     let mut scanned = vec![false; files.len()];
     let mut out = Vec::new();
     for name in names {
@@ -701,10 +730,20 @@ fn external(files: &[&(String, String)], names: &[String]) -> Vec<String> {
             ));
             continue;
         }
+        let spellings: Vec<&String> = std::iter::once(name)
+            .chain(
+                aliases
+                    .iter()
+                    .filter(|(_, of)| of == name)
+                    .map(|(alias, _)| alias),
+            )
+            .collect();
         for (index, code) in codes.iter().enumerate() {
             if code.as_ref().is_some_and(|code| {
                 code.lines().any(|line| {
-                    defines(line, name) || (has_word(line, "impl") && has_word(line, name))
+                    defines(line, name)
+                        || (has_word(line, "impl")
+                            && spellings.iter().any(|spelling| has_word(line, spelling)))
                 })
             }) {
                 scanned[index] = true;
@@ -718,7 +757,7 @@ fn external(files: &[&(String, String)], names: &[String]) -> Vec<String> {
         out.extend(
             scan(file, text)
                 .iter()
-                .filter(|record| names.contains(&record.subject))
+                .filter(|record| subjects.contains(&record.subject))
                 .map(|record| line(file, record)),
         );
     }
@@ -787,8 +826,14 @@ fn items(sources: &[(String, String)]) -> Vec<String> {
         .collect();
     let mut out = Vec::new();
     let mut wanted: Vec<(Origin, String)> = Vec::new();
+    let mut module_mentions: Vec<(bool, String)> = Vec::new();
     for (name, text) in &module {
         for record in scan(name, text) {
+            for mention in mentioned(&record) {
+                if !module_mentions.contains(&mention) {
+                    module_mentions.push(mention);
+                }
+            }
             if record.text.starts_with("pub use ") || record.text.contains("] pub use ") {
                 let (origin, names) = reexport(&record.text, &module);
                 for reexported in names {
@@ -830,24 +875,398 @@ fn items(sources: &[(String, String)]) -> Vec<String> {
             *origin = Origin::Wire;
         }
     }
-    for origin in [Origin::Host, Origin::Wire] {
+    let wire_files: Vec<&(String, String)> = sources
+        .iter()
+        .filter(|(name, _)| name.starts_with(WIRE))
+        .collect();
+    // Every type a held line names is held too, to a fixed point
+    // (`story:public-items-cover-field-types`): a public field, variant or signature that names a
+    // type of the host crate or the wire hands that type to a consumer, so a change to its shape
+    // is a change to the module's surface. Each file is scanned once for the search; the lines
+    // written are `external`'s, as for a re-exported name.
+    let types = TypeIndex::of(&module, &host_files, &wire_files);
+    let host_scans: Vec<HostScan> = host_files
+        .iter()
+        .map(|(file, text)| (file.clone(), code_of(text), scan(file, text)))
+        .collect();
+    impls_elsewhere(&host_scans, &types, &mut out, &mut module_mentions);
+    let records = mentioning(&host_scans, &wire_files);
+    let mut mentions: Vec<Mention> = module_mentions
+        .into_iter()
+        .chain(mentions_of(&records, &types, &wanted))
+        .collect();
+    loop {
+        let added = types.named(&mentions, &wanted);
+        if added.is_empty() {
+            break;
+        }
+        mentions = mentions_of(&records, &types, &added);
+        wanted.extend(added);
+    }
+    for (origin, files) in [(Origin::Host, &host_files), (Origin::Wire, &wire_files)] {
         let names: Vec<String> = wanted
             .iter()
             .filter(|(from, _)| *from == origin)
             .map(|(_, name)| name.clone())
             .collect();
-        if names.is_empty() {
-            continue;
+        if !names.is_empty() {
+            out.extend(external(files, &names, &types.aliases_of(origin, &names)));
         }
-        let files: Vec<&(String, String)> = sources
-            .iter()
-            .filter(|(name, _)| {
-                !name.starts_with(MODULE) && name.starts_with(WIRE) == (origin == Origin::Wire)
-            })
-            .collect();
-        out.extend(external(&files, &names));
     }
     out
+}
+
+/// A type name a record mentions, with whether it is the wire's.
+type Mention = (bool, String);
+
+/// One record of the host crate or the wire: its type, whether it is the wire's, and what it
+/// mentions.
+type Mentioning = (String, bool, Vec<Mention>);
+
+/// One host file outside the module: its name, its masked code and its records.
+type HostScan = (String, String, Vec<Record>);
+
+/// Writes the lines of every `impl` of a module type that sits in a host file outside the module,
+/// and adds what they mention to `mentions`: its methods, and the trait impls on it, are the module
+/// type's surface wherever they are written.
+fn impls_elsewhere(
+    host_scans: &[HostScan],
+    types: &TypeIndex,
+    out: &mut Vec<String>,
+    mentions: &mut Vec<Mention>,
+) {
+    for (file, code, records) in host_scans {
+        for record in records {
+            if impl_of_module_type(record, code, types) {
+                for mention in mentioned(record) {
+                    if !mentions.contains(&mention) {
+                        mentions.push(mention);
+                    }
+                }
+                out.push(line(file, record));
+            }
+        }
+    }
+}
+
+/// Every record of the host crate outside the module and of the wire, as [`Mentioning`].
+fn mentioning(host_scans: &[HostScan], wire_files: &[&(String, String)]) -> Vec<Mentioning> {
+    host_scans
+        .iter()
+        .flat_map(|(_, _, records)| records)
+        .map(|record| (record.subject.clone(), false, mentioned(record)))
+        .chain(wire_files.iter().flat_map(|(file, text)| {
+            scan(file, text)
+                .into_iter()
+                .map(|record| (record.subject.clone(), true, mentioned(&record)))
+        }))
+        .collect()
+}
+
+/// What the records of the `held` types mention, an `impl` written for an alias of one included.
+/// A name mentioned in a wire record is the wire's.
+fn mentions_of(
+    records: &[Mentioning],
+    types: &TypeIndex,
+    held: &[(Origin, String)],
+) -> Vec<Mention> {
+    let subjects: Vec<Mention> = held
+        .iter()
+        .flat_map(|(origin, name)| {
+            let wire = *origin == Origin::Wire;
+            std::iter::once((wire, name.clone())).chain(
+                types
+                    .aliases_of(*origin, std::slice::from_ref(name))
+                    .into_iter()
+                    .map(move |(alias, _)| (wire, alias)),
+            )
+        })
+        .collect();
+    records
+        .iter()
+        .filter(|(subject, from_wire, _)| {
+            subjects
+                .iter()
+                .any(|(wire, name)| wire == from_wire && name == subject)
+        })
+        .flat_map(|(_, from_wire, names)| {
+            names
+                .iter()
+                .map(|(wire, name)| (*from_wire || *wire, name.clone()))
+        })
+        .collect()
+}
+
+/// The `impl` header a record of a host file sits in, or is.
+fn impl_header(record: &Record) -> Option<&str> {
+    let is_impl = |text: &str| {
+        let text = text.rsplit("] ").next().unwrap_or(text);
+        text.starts_with("impl") || text.starts_with("unsafe impl")
+    };
+    record
+        .context
+        .iter()
+        .find(|frame| is_impl(frame))
+        .map(String::as_str)
+        .or_else(|| is_impl(&record.text).then_some(record.text.as_str()))
+}
+
+/// Whether a record of a host file outside the module is part of an `impl` for one of the
+/// module's types. The type is the module's when the header's path or the file's `use` of the
+/// name runs through `confinement`; it is not when either runs through `substrate_wire` or the
+/// file defines a type of that name itself; otherwise it is when no other host file defines a
+/// `pub` type of that name.
+fn impl_of_module_type(record: &Record, code: &str, types: &TypeIndex) -> bool {
+    let Some(header) = impl_header(record) else {
+        return false;
+    };
+    let path = self_path(header.rsplit("] ").next().unwrap_or(header));
+    let name = path.rsplit("::").next().unwrap_or_default();
+    if !types.module.iter().any(|known| known == name) {
+        return false;
+    }
+    let import = code.split(';').find_map(|statement| {
+        let (_, path) = statement.rsplit_once("use ")?;
+        has_word(path, name).then_some(path)
+    });
+    let through = |segment: &str| {
+        has_word(&path, segment) || import.is_some_and(|import| has_word(import, segment))
+    };
+    let defines_here = code.lines().any(|line| {
+        let line = without_visibility(line);
+        ["struct ", "enum ", "trait ", "type ", "union "]
+            .iter()
+            .any(|keyword| {
+                line.strip_prefix(keyword)
+                    .is_some_and(|rest| starts_with_word(rest, name))
+            })
+    });
+    if through("substrate_wire") || defines_here {
+        return false;
+    }
+    through("confinement") || !types.host.iter().any(|known| known == name)
+}
+
+/// The keywords of a `pub` type definition.
+const TYPE_KEYWORDS: [&str; 5] = [
+    "pub struct ",
+    "pub enum ",
+    "pub trait ",
+    "pub type ",
+    "pub union ",
+];
+
+/// The type names one record mentions outside its attributes and string literals: each
+/// identifier that starts with an uppercase letter and holds a lowercase one, so `SecretSlot`
+/// and not `MAX_EGRESS_APERTURES`. A variant's own name is not a mention: `Driver` in
+/// `Driver(#[from] DriverError)` names no type. Each name comes with whether its path starts at
+/// `substrate_wire`, which names the wire's type even where the module defines one of that name.
+fn mentioned(record: &Record) -> Vec<(bool, String)> {
+    let variant = record
+        .context
+        .last()
+        .is_some_and(|frame| frame.starts_with("enum ") || frame.contains("] enum "));
+    let text: Vec<char> = record.text.chars().collect();
+    let mut code = String::new();
+    let mut i = 0;
+    while i < text.len() {
+        if text[i] == '"' {
+            i += 1;
+            while i < text.len() && text[i] != '"' {
+                i += if text[i] == '\\' { 2 } else { 1 };
+            }
+            code.push(' ');
+        } else if text[i] == '#' && text.get(i + 1) == Some(&'[') {
+            let mut depth = 0;
+            while i < text.len() {
+                match text[i] {
+                    '[' => depth += 1,
+                    ']' => depth -= 1,
+                    _ => {}
+                }
+                if depth == 0 && text[i] == ']' {
+                    break;
+                }
+                i += 1;
+            }
+            code.push(' ');
+        } else {
+            code.push(text[i]);
+        }
+        i += 1;
+    }
+    let type_like = |word: &str| {
+        word.starts_with(|c: char| c.is_ascii_uppercase())
+            && word.chars().any(|c| c.is_ascii_lowercase())
+    };
+    let mut names: Vec<(bool, String)> = Vec::new();
+    let mut previous: Option<&str> = None;
+    let mut rest = code.as_str();
+    let mut first = true;
+    let mut wire_path = false;
+    while let Some(start) = rest.find(|c: char| c.is_alphanumeric() || c == '_') {
+        let separator = &rest[..start];
+        let word_end = rest[start..]
+            .find(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .map_or(rest.len(), |end| start + end);
+        let word = &rest[start..word_end];
+        rest = &rest[word_end..];
+        let continues_path = separator.trim() == "::";
+        wire_path = (continues_path && wire_path) || word == "substrate_wire";
+        // `ContractFamily::Workspace` is a variant of `ContractFamily`, not the type `Workspace`;
+        // `substrate_wire::Workspace` is the type.
+        let item_of_a_type = continues_path && previous.is_some_and(type_like);
+        let skip = (variant && first) || item_of_a_type;
+        first = false;
+        previous = Some(word);
+        let mention = (wire_path, word.to_owned());
+        if !skip && type_like(word) && !names.contains(&mention) {
+            names.push(mention);
+        }
+    }
+    names
+}
+
+/// What one `pub use` renames: `(alias, name)` for each `name as alias` in it.
+fn renamed(statement: &str) -> Vec<(String, String)> {
+    let statement = normalize(statement);
+    let list = statement
+        .split_once("::{")
+        .map_or(statement.as_str(), |(_, list)| list);
+    list.trim_end_matches(['}', ';', ' '])
+        .split(',')
+        .filter_map(|item| {
+            let (path, alias) = item.split_once(" as ")?;
+            let name = path.trim().rsplit("::").next()?.trim();
+            Some((alias.trim().to_owned(), name.to_owned()))
+        })
+        .filter(|(alias, name)| !alias.is_empty() && !name.is_empty() && alias != "_")
+        .collect()
+}
+
+/// The `pub` type names each part of the workspace defines, read once from the masked code, and
+/// the names its `pub use … as …` items publish them under.
+struct TypeIndex {
+    module: Vec<String>,
+    host: Vec<String>,
+    wire: Vec<String>,
+    host_aliases: Vec<(String, String)>,
+    wire_aliases: Vec<(String, String)>,
+}
+
+impl TypeIndex {
+    fn of(
+        module: &[&(String, String)],
+        host: &[&(String, String)],
+        wire: &[&(String, String)],
+    ) -> Self {
+        let aliases = |files: &[&(String, String)], defined: &[String]| {
+            let mut aliases: Vec<(String, String)> = Vec::new();
+            for (_, text) in files {
+                let code = code_of(text);
+                for (index, _) in code.match_indices("pub use ") {
+                    let statement = code[index..].split(';').next().unwrap_or_default();
+                    for alias in renamed(statement) {
+                        if defined.contains(&alias.1) && !aliases.contains(&alias) {
+                            aliases.push(alias);
+                        }
+                    }
+                }
+            }
+            aliases
+        };
+        let defined = |files: &[&(String, String)]| {
+            let mut names: Vec<String> = Vec::new();
+            for (_, text) in files {
+                for line in code_of(text).lines() {
+                    let line = line.trim_start();
+                    let Some(rest) = TYPE_KEYWORDS
+                        .iter()
+                        .find_map(|keyword| line.strip_prefix(keyword))
+                    else {
+                        continue;
+                    };
+                    let name: String = rest
+                        .chars()
+                        .take_while(|c| c.is_alphanumeric() || *c == '_')
+                        .collect();
+                    if !name.is_empty() && !names.contains(&name) {
+                        names.push(name);
+                    }
+                }
+            }
+            names
+        };
+        let (host_types, wire_types) = (defined(host), defined(wire));
+        Self {
+            module: defined(module),
+            host_aliases: aliases(host, &host_types),
+            wire_aliases: aliases(wire, &wire_types),
+            host: host_types,
+            wire: wire_types,
+        }
+    }
+
+    /// The name `name` resolves to among `defined`, directly or through one of `aliases`.
+    fn resolve(defined: &[String], aliases: &[(String, String)], name: &str) -> Option<String> {
+        if defined.iter().any(|known| known == name) {
+            return Some(name.to_owned());
+        }
+        aliases
+            .iter()
+            .find(|(alias, _)| alias == name)
+            .map(|(_, original)| original.clone())
+    }
+
+    /// The types `mentions` name that are not held yet, each with the crate whose `pub` type
+    /// definition it names, by its defined name when the mention uses a `pub use … as …` alias.
+    /// A mention in a wire line, or by a path that starts at `substrate_wire`, resolves in the
+    /// wire only, even where the module defines a type of that name; any other mention of a name
+    /// the module defines is the module's own, and the rest resolve in the host crate first and
+    /// then in the wire, which the host imports from. A name with no `pub` type definition in
+    /// either, such as `String` or `PathBuf`, is not this workspace's.
+    fn named(
+        &self,
+        mentions: &[(bool, String)],
+        wanted: &[(Origin, String)],
+    ) -> Vec<(Origin, String)> {
+        let mut added: Vec<(Origin, String)> = Vec::new();
+        for (wire, name) in mentions {
+            let wire_type = || {
+                Self::resolve(&self.wire, &self.wire_aliases, name)
+                    .map(|found| (Origin::Wire, found))
+            };
+            let found = if *wire {
+                wire_type()
+            } else if self.module.contains(name) {
+                None
+            } else {
+                Self::resolve(&self.host, &self.host_aliases, name)
+                    .map(|found| (Origin::Host, found))
+                    .or_else(wire_type)
+            };
+            if let Some(found) = found
+                && !wanted.contains(&found)
+                && !added.contains(&found)
+            {
+                added.push(found);
+            }
+        }
+        added
+    }
+
+    /// The aliases of the held names of `origin`, as `(alias, name)`.
+    fn aliases_of(&self, origin: Origin, names: &[String]) -> Vec<(String, String)> {
+        let aliases = match origin {
+            Origin::Wire => &self.wire_aliases,
+            _ => &self.host_aliases,
+        };
+        aliases
+            .iter()
+            .filter(|(_, name)| names.contains(name))
+            .cloned()
+            .collect()
+    }
 }
 
 fn committed() -> Option<Vec<String>> {
@@ -1155,6 +1574,45 @@ fn adversary_the_list_records_the_shape_of_every_type_the_module_reexports() {
     );
 }
 
+/// `story:public-items-cover-field-types`: a type named by a public field or signature of a type
+/// the list holds is held as that type is, at any depth. `HostConfig`, which the module
+/// re-exports, names `SecretSlot`, `EgressAperture` and `GitSourceBinding` in public fields;
+/// `ConfinementError::Driver` names `DriverError`, whose public field names `DriverErrorClass`. A
+/// public field or variant added to any of them changes the list, and the added line names it.
+#[test]
+fn a_type_named_by_a_public_field_of_a_held_type_is_held_too() {
+    for (file, from, to, line) in [
+        (
+            "lib.rs",
+            "pub struct SecretSlot {\n    pub name: String,\n",
+            "pub struct SecretSlot {\n    pub name: String,\n    pub probe: u64,\n",
+            "lib.rs: struct SecretSlot > pub probe: u64,",
+        ),
+        (
+            "aperture.rs",
+            "pub struct EgressAperture {\n    pub name: String,\n",
+            "pub struct EgressAperture {\n    pub name: String,\n    pub probe: u64,\n",
+            "aperture.rs: struct EgressAperture > pub probe: u64,",
+        ),
+        (
+            "lib.rs",
+            "pub struct GitSourceBinding {\n    pub name: String,\n",
+            "pub struct GitSourceBinding {\n    pub name: String,\n    pub probe: u64,\n",
+            "lib.rs: struct GitSourceBinding > pub probe: u64,",
+        ),
+        (
+            "lib.rs",
+            "    Failed,\n    NotFound,\n",
+            "    Failed,\n    NotFound,\n    Probe,\n",
+            "lib.rs: enum DriverErrorClass > Probe,",
+        ),
+    ] {
+        let (added, removed) = adversary_edits(&[(file, from, to)]);
+        assert_eq!(added, [line], "a field or variant added in {file}");
+        assert!(removed.is_empty(), "{removed:?}");
+    }
+}
+
 #[test]
 fn adversary_a_dropped_bound_on_an_impl_trait_argument_changes_the_list() {
     adversary_assert_changed(
@@ -1252,5 +1710,129 @@ fn adversary_a_reexport_retargeted_changes_the_list() {
             "pub use substrate_wire::{ReadOnlyFile, ReadOnlyRoot, SecretSlotRequest, Signal, WritableHostRoot};",
             "pub use substrate_wire::{ReadOnlyFile, ReadOnlyRoot, SecretSlotRequest, WritableHostRoot};\npub use crate::Signal;",
         )],
+    );
+}
+
+/// Adversary probes for `story:public-items-cover-field-types` (pass 1): `reach` is applied to both
+/// sides, so a probe compares a source in which a held type already names the type under test with
+/// the same source after one consumer-visible change to that type. Each `reach` compiles as Rust.
+fn adversary_edits_over(
+    reach: &[(&str, &str, &str)],
+    edits: &[(&str, &str, &str)],
+) -> (Vec<String>, Vec<String>, Vec<String>) {
+    let apply = |sources: &mut Vec<(String, String)>, edits: &[(&str, &str, &str)]| {
+        for (file, from, to) in edits {
+            let source = sources
+                .iter_mut()
+                .find(|(name, _)| name == file)
+                .unwrap_or_else(|| panic!("no source {file}"));
+            assert!(source.1.contains(from), "{file} no longer holds {from:?}");
+            source.1 = source.1.replacen(from, to, 1);
+        }
+    };
+    let mut reached = sources();
+    apply(&mut reached, reach);
+    let mut changed = reached.clone();
+    apply(&mut changed, edits);
+    let (base, after) = (items(&reached), items(&changed));
+    (missing(&after, &base), missing(&base, &after), base)
+}
+
+/// An inherent `impl` may sit in any file of the crate. A `pub fn` added to the module's own
+/// `ConfinementProfile` from `src/lib.rs` is a new method every consumer can call, and the list
+/// reads impls of module types only inside `src/confinement/`.
+#[test]
+fn adversary_a_method_added_to_a_module_type_outside_the_module_changes_the_list() {
+    adversary_assert_changed(
+        "ConfinementProfile gains a method in lib.rs",
+        &[(
+            "lib.rs",
+            "pub mod confinement;\n",
+            "pub mod confinement;\nimpl confinement::ConfinementProfile {\n    pub fn probe(&self) -> u64 {\n        0\n    }\n}\n",
+        )],
+    );
+}
+
+/// The wire defines its own `ConfinementProfile` (`generated/host_process.rs`, the host-process
+/// record's `profile`). Once a held type names `ProcessRecord`, that record is held, and a variant
+/// added to the wire's `ConfinementProfile` it names changes what a consumer must match on.
+#[test]
+fn adversary_a_wire_type_sharing_a_module_type_name_is_held_when_reached() {
+    let (added, removed, base) = adversary_edits_over(
+        &[(
+            "lib.rs",
+            "pub struct SecretSlot {\n    pub name: String,\n",
+            "pub struct SecretSlot {\n    pub name: String,\n    pub record: Option<substrate_wire::ProcessRecord>,\n",
+        )],
+        &[(
+            &format!("{WIRE}generated/host_process.rs"),
+            "pub enum ConfinementProfile {\n    #[serde(rename = \"host\")]\n    Host,\n",
+            "pub enum ConfinementProfile {\n    #[serde(rename = \"host\")]\n    Host,\n    Sandboxed,\n",
+        )],
+    );
+    assert!(
+        base.iter()
+            .any(|line| line.contains("pub struct ProcessRecord")),
+        "the reach did not hold ProcessRecord, so this probe proves nothing"
+    );
+    assert!(
+        !added.is_empty() || !removed.is_empty(),
+        "the wire's ConfinementProfile gained a variant two hops from HostConfig and the list did \
+         not change"
+    );
+}
+
+/// The wire publishes some types under another name (`pub use capture_types::
+/// SubstrateSessionsCaptureMode as CaptureMode`). A held field naming `CaptureMode` hands a consumer
+/// that enum, and a variant added to it is a change to the module's surface.
+#[test]
+fn adversary_a_type_reached_through_a_renaming_reexport_is_held() {
+    let (added, removed, base) = adversary_edits_over(
+        &[(
+            "lib.rs",
+            "pub struct SecretSlot {\n    pub name: String,\n",
+            "pub struct SecretSlot {\n    pub name: String,\n    pub mode: Option<substrate_wire::CaptureMode>,\n",
+        )],
+        &[(
+            &format!("{WIRE}generated/capture.rs"),
+            "    #[serde(rename = \"unrecorded\")]\n    Unrecorded,\n",
+            "    #[serde(rename = \"unrecorded\")]\n    Unrecorded,\n    Sampled,\n",
+        )],
+    );
+    assert!(
+        base.iter().any(|line| line
+            == "lib.rs: struct SecretSlot > pub mode: Option<substrate_wire::CaptureMode>,"),
+        "the reach did not add the field, so this probe proves nothing"
+    );
+    assert!(
+        !added.is_empty() || !removed.is_empty(),
+        "CaptureMode, named by a held field, gained a variant and the list did not change"
+    );
+}
+
+/// A trait impl's associated type is part of the impl's contract: `SecretSlot::from_str(..)?` stops
+/// compiling in a consumer when `type Err` changes. The list records the impl's header only.
+#[test]
+fn adversary_an_associated_type_of_a_trait_impl_on_a_held_type_changes_the_list() {
+    let (added, removed, base) = adversary_edits_over(
+        &[(
+            "lib.rs",
+            "pub struct SecretSlot {\n    pub name: String,\n    pub path: PathBuf,\n}\n",
+            "pub struct SecretSlot {\n    pub name: String,\n    pub path: PathBuf,\n}\n\nimpl std::str::FromStr for SecretSlot {\n    type Err = DriverError;\n\n    fn from_str(_text: &str) -> Result<Self, Self::Err> {\n        Err(DriverError::not_found())\n    }\n}\n",
+        )],
+        &[(
+            "lib.rs",
+            "    type Err = DriverError;\n",
+            "    type Err = std::io::Error;\n",
+        )],
+    );
+    assert!(
+        base.iter()
+            .any(|line| line == "lib.rs: impl std::str::FromStr for SecretSlot"),
+        "the reach did not record the impl, so this probe proves nothing"
+    );
+    assert!(
+        !added.is_empty() || !removed.is_empty(),
+        "SecretSlot's FromStr::Err changed and the list did not change"
     );
 }

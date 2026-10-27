@@ -62,6 +62,11 @@ const MACH_SERVICES: [&str; 3] = [
 /// system and developer directories: exec by subpath would make it readable without a declaration.
 pub const EXEC_SUBPATH_UNDECLARED: &str = "exec.sandbox-exec-subpath-undeclared";
 
+/// The refusal for a start whose exec subpaths hold the developer tools when the SDK or the
+/// toolchain `clang` could not be resolved outside the sandbox: inside it, cargo would link through
+/// the `/usr/bin/cc` shim, which runs `/bin/sh` and `xcodebuild` and fails.
+pub const DEVELOPER_TOOLS_UNRESOLVED: &str = "exec.sandbox-developer-tools-unresolved";
+
 /// The link `xcode-select` keeps to the selected developer directory. The `/usr/bin` tool shims
 /// read it to find the compiler, so a policy with an exec subpath may read it.
 pub const XCODE_SELECT_LINK: &str = "/private/var/db/xcode_select_link";

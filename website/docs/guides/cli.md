@@ -135,6 +135,12 @@ What no flag changes:
   by `SUBSTRATE_CONFINE_CGROUP_ROOT`, which the caller must run beneath, and removes it at exit.
   The daemon's `SUBSTRATE_CGROUP_ROOT` is not read, so concurrent invocations and a daemon on the
   same root never reconcile each other's runs.
+- **A killed run's group.** `SIGKILL` skips the removal at exit. The next invocation on the same
+  root removes each `confine-<pid>-<start time>` group whose owner has exited, if it holds no
+  process. It never kills: a group still holding a process stays.
+- **Groups left behind.** Each group it leaves or cannot remove is named on one stderr line. Under
+  `--output json` they go into the one document as `left_groups` instead. The exit status does not
+  change.
 - **Without that variable** `linux` runs nothing. A plain run is refused
   `confinement.family-unserved: process_run`, a run with `--ro` names `filesystem_view` first, and
   a run with `--net` is refused `confinement.fact-unserved: host_network`.
