@@ -11,6 +11,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 - The confinement contract is specified as the ESS domain `substrate.confinement` (ADR 0044): ten contract families, six adapters with their declared facts and named refusals, 49 authored scenarios named by adapter and lane, checked against the interpreted reference by `cargo xtask check-ess`.
 - `substrate_host::confinement` implements that contract in Rust (ADR 0044): `ConfinementProfile`, the `ConfinementAdapter` trait, the `linux` adapter over the host driver, the declared-insecure `local` adapter, the six-adapter registry and refusing `macos`, `systemd`, `oci` and `pod` stubs, with the authored scenarios executed by `tests/ess_confinement_local.rs` (portable) and `tests/ess_confinement_linux.rs` (delegated).
+- The `oci` confinement adapter runs each run in one Docker or podman container (ADR 0044 decision 8): the image by sha256 digest only, no network, every capability dropped, a read-only root, the profile's bounds as `--pids-limit`, `--memory`, `--memory-swap` and `--cpus`, and the container removed after `wait`, a kill or a timeout; `tests/ess_confinement_oci.rs` executes the `oci` scenarios against Docker where `SUBSTRATE_OCI_LANE=1`, which the CI gate job sets.
 
 ### Changed
 
