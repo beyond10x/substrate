@@ -119,8 +119,10 @@ The host driver behind the contract: bubblewrap, namespaces, cgroup v2, seccomp 
   (`exec.aperture-undeclared`); a workspace that is not a directory directly beneath the driver's
   workspace root (`workspace.path-escape`); secret slots the host does not serve
   (`exec.secret-slots-unserved`, `exec.secret-slot-unknown`).
-- **Needs.** Linux, bubblewrap and a delegated cgroup v2 root for `limits` and
-  `whole_tree_kill`; without that root, `limits` is not served.
+- **Needs.** Linux, a bubblewrap binary that can set up the run's namespaces, a delegated cgroup v2
+  root, `close_range`, and an embedder that does not run as uid 0. The open-time probe needs all
+  of them. Without any one, `linux` serves only `workspace` and `audit`, proves none of its facts
+  and runs nothing.
 - **Choose it when** the run must be confined on Linux and its whole process tree bounded and
   killed.
 
@@ -196,15 +198,19 @@ One Docker or podman container per run, the image named by digest only.
   `filesystem_view` and `audit`, `limits` when the runtime reports memory, swap, pids and CPU quota
   control, and the fact `image_digest_pinned`. It does not prove `ipc_socket_allowlist`: a Unix
   socket beneath a bound root is reachable from the container.
-- **Refuses by name.** An image that is not `name@sha256:` and 64 lowercase hex characters
-  (`confinement.image-unpinned`); a pinned image the runtime does not hold
-  (`confinement.image-absent`); `network_egress` (`confinement.family-unserved`); a bound host
-  path that is, or holds, a socket the runtime is reached through
-  (`confinement.runtime-socket-exposed`); a path the runtime's `--mount` value cannot carry
-  exactly, holding `,`, `"`, `:`, a line break or NUL (`confinement.path-unrepresentable`); every
-  start when the runtime reports no pids, memory, swap and CPU control, and bounds outside what
-  it accepts (`exec.limit-unserved`); a workspace that is not a directory directly
-  beneath the operator's workspace root (`workspace.path-escape`).
+- **Refuses by name.**
+  - An image that is not `name@sha256:` and 64 lowercase hex characters
+    (`confinement.image-unpinned`), and a pinned image the runtime does not hold
+    (`confinement.image-absent`).
+  - `network_egress` (`confinement.family-unserved`).
+  - A bound host path that is, or holds, a socket the runtime is reached through
+    (`confinement.runtime-socket-exposed`), and a path the runtime's `--mount` value cannot carry
+    exactly, holding `,`, `"`, `:`, a line break or NUL (`confinement.path-unrepresentable`).
+  - At admission, a profile when the runtime reports no pids, memory, swap and CPU control, or
+    whose process bounds, output bound (1 byte to 1 MiB) or CPU share over the wall bound fall
+    outside what the runtime accepts (`exec.limit-unserved`).
+  - A workspace that is not a directory directly beneath the operator's workspace root
+    (`workspace.path-escape`).
 - **Needs.** A runtime program (`docker`, `podman` or an absolute path) whose `info` answers and
   reports seccomp, and an embedder that does not run as uid 0. Open fails closed as
   `confinement.adapter-unserved` otherwise. On a rootful host the runtime's socket is
@@ -217,7 +223,7 @@ One Docker or podman container per run, the image named by digest only.
 One Kubernetes Pod per run, beside a default-deny NetworkPolicy, in the namespace the operator's
 cluster configuration names. The adapter speaks to the API server itself; it runs no `kubectl`.
 
-- **Enforces.** `runAsNonRoot` with the operator's uid, the `RuntimeDefault` seccomp profile, no
+- **Enforces.** `runAsNonRoot` with the operator's uid (65532 when none is named), the `RuntimeDefault` seccomp profile, no
   privilege escalation, a read-only root filesystem, every capability dropped, no host network,
   PID or IPC namespace, no service account token, requests equal to limits, an `emptyDir`
   workspace at `/workspace` with a 1 GiB size and ephemeral-storage bound unless the operator
@@ -236,8 +242,8 @@ cluster configuration names. The adapter speaks to the API server itself; it run
   delivers only termination (`confinement.pod-signal-unserved`); an argv over 256 KiB or holding a
   NUL (`exec.argv-invalid`); a request the API refused or failed (`confinement.pod-api-failed`).
 - **Needs.** The JSON form of a kubeconfig whose current context names a namespace, a cluster and a
-  user, with the `b10x-substrate/pod` context extension (`run_as_user`, `pod_pids_limit`,
-  `ephemeral_storage_bytes`); without `pod_pids_limit` no profile is admitted. The credential must
+  user. The optional `b10x-substrate/pod` context extension sets `run_as_user`, `pod_pids_limit` and
+  `ephemeral_storage_bytes`; without `pod_pids_limit` no profile is admitted. The credential must
   read `pods/log`. Open is refused `confinement.adapter-unserved` without a configuration, with an
   unusable one, when the cluster does not answer, or without log access.
 - **Choose it when** the run belongs on a cluster rather than a host, and needs no host path.

@@ -133,9 +133,11 @@ What no flag changes:
   closed, and there is no default shell: the program and its arguments after `--` are required.
 - **Cgroup.** `linux` runs in a private group it makes beneath the delegated cgroup v2 root named
   by `SUBSTRATE_CONFINE_CGROUP_ROOT`, which the caller must run beneath, and removes it at exit.
-  Without that variable `linux` runs nothing: it is refused
-  `confinement.family-unserved: process_run`. The daemon's `SUBSTRATE_CGROUP_ROOT` is not read, so
-  concurrent invocations and a daemon on the same root never reconcile each other's runs.
+  The daemon's `SUBSTRATE_CGROUP_ROOT` is not read, so concurrent invocations and a daemon on the
+  same root never reconcile each other's runs.
+- **Without that variable** `linux` runs nothing. A plain run is refused
+  `confinement.family-unserved: process_run`, a run with `--ro` names `filesystem_view` first, and
+  a run with `--net` is refused `confinement.fact-unserved: host_network`.
 - **Exit status.** The command's own status, or 128 plus the signal that ended it. A refusal before
   anything runs exits 2 and a host failure 1; `--output json` tells them apart from a command that
   itself exits 1 or 2. `SIGINT` and `SIGTERM` kill the run, remove its private state directory and
