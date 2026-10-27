@@ -6,6 +6,16 @@ This generated package installs an unavailable handler. Application behavior ent
 
 ## Commands
 
+### `confine run`
+
+Run a command under a confinement adapter in this process, without a daemon
+
+Callable: `confine-run`. Input: `substrate.client.ConfineRunRequest`. Result: `substrate.client.ConfineRunResult`.
+
+Error `failed`: `substrate.client.ConfineRefusalData`.
+
+Error `refused`: `substrate.client.ConfineRefusalData`.
+
 ### `events`
 
 Read one page of the daemon's event log
@@ -128,6 +138,7 @@ Error `unavailable`: `substrate.client.UnavailableData`.
 
 ## Runtime obligations
 
+- handler:confine-run: implement the owner-qualified callable and its declared result/error contract
 - handler:events: implement the owner-qualified callable and its declared result/error contract
 - handler:exec-run: implement the owner-qualified callable and its declared result/error contract
 - handler:exec-show: implement the owner-qualified callable and its declared result/error contract

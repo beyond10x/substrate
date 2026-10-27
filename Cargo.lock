@@ -246,6 +246,7 @@ dependencies = [
 name = "b10x-substrate-cli"
 version = "0.11.0"
 dependencies = [
+ "b10x-substrate-host",
  "b10x-substrate-sdk",
  "clap",
  "serde",

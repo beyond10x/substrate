@@ -108,6 +108,8 @@ require_executed() {
 require_executed adversary_confinement_s0_delegated \
   'adversary writable root: executed' 'adversary render parity: executed'
 require_executed security_review_confinement 'security review linux start env: executed'
+require_executed sandbox_parity \
+  'sandbox parity bubblewrap delegated: executed, 23 rows present'
 
 # The confinement module as its consumers call it: every need chosen by facts and run on an
 # adapter not declared insecure. Absent, exit 0, without the delegated root, so required by count.

@@ -74,7 +74,30 @@ callables:
     input: substrate.client.EventsRequest
     result: substrate.client.EventPage
     errors: *read_errors
+  # Opens a confinement adapter in this process (ADR 0109); no daemon, no socket. A refusal before
+  # anything runs is `refused` (exit 2); a host failure while running is `failed` (exit 1).
+  confine-run:
+    target: {kind: local, owner: substrate.client, action: confine-run}
+    input: substrate.client.ConfineRunRequest
+    result: substrate.client.ConfineRunResult
+    errors:
+      refused: substrate.client.ConfineRefusalData
+      failed: substrate.client.ConfineRefusalData
 commands:
+  # ess-cli/2 has no valueless flag and no repeated option, so --net and --dry-run are booleans
+  # and --ro a JSON list here; the CLI also accepts --net and --dry-run alone and --ro repeated.
+  - path: [confine, run]
+    callable: confine-run
+    about: Run a command under a confinement adapter in this process, without a daemon
+    arguments:
+      - {field: dir, source: {kind: option, long: dir}}
+      - {field: ro, source: {kind: option, long: ro}}
+      - {field: net, source: {kind: option, long: net}}
+      - {field: backend, source: {kind: option, long: backend}}
+      - {field: image, source: {kind: option, long: image}}
+      - {field: dry_run, source: {kind: option, long: dry-run}}
+      - {field: local, source: {kind: option, long: local}}
+      - {field: argv, source: {kind: trailing}}
   - path: [machine]
     callable: machine
     about: Show the daemon's capability snapshot and facts

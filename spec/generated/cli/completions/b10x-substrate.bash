@@ -19,6 +19,9 @@ _b10x__substrate() {
             b10x__substrate,completions)
                 cmd="b10x__substrate__subcmd__completions"
                 ;;
+            b10x__substrate,confine)
+                cmd="b10x__substrate__subcmd__confine"
+                ;;
             b10x__substrate,events)
                 cmd="b10x__substrate__subcmd__events"
                 ;;
@@ -43,6 +46,18 @@ _b10x__substrate() {
             b10x__substrate,workspace)
                 cmd="b10x__substrate__subcmd__workspace"
                 ;;
+            b10x__substrate__subcmd__confine,help)
+                cmd="b10x__substrate__subcmd__confine__subcmd__help"
+                ;;
+            b10x__substrate__subcmd__confine,run)
+                cmd="b10x__substrate__subcmd__confine__subcmd__run"
+                ;;
+            b10x__substrate__subcmd__confine__subcmd__help,help)
+                cmd="b10x__substrate__subcmd__confine__subcmd__help__subcmd__help"
+                ;;
+            b10x__substrate__subcmd__confine__subcmd__help,run)
+                cmd="b10x__substrate__subcmd__confine__subcmd__help__subcmd__run"
+                ;;
             b10x__substrate__subcmd__exec,help)
                 cmd="b10x__substrate__subcmd__exec__subcmd__help"
                 ;;
@@ -63,6 +78,9 @@ _b10x__substrate() {
                 ;;
             b10x__substrate__subcmd__help,completions)
                 cmd="b10x__substrate__subcmd__help__subcmd__completions"
+                ;;
+            b10x__substrate__subcmd__help,confine)
+                cmd="b10x__substrate__subcmd__help__subcmd__confine"
                 ;;
             b10x__substrate__subcmd__help,events)
                 cmd="b10x__substrate__subcmd__help__subcmd__events"
@@ -87,6 +105,9 @@ _b10x__substrate() {
                 ;;
             b10x__substrate__subcmd__help,workspace)
                 cmd="b10x__substrate__subcmd__help__subcmd__workspace"
+                ;;
+            b10x__substrate__subcmd__help__subcmd__confine,run)
+                cmd="b10x__substrate__subcmd__help__subcmd__confine__subcmd__run"
                 ;;
             b10x__substrate__subcmd__help__subcmd__exec,run)
                 cmd="b10x__substrate__subcmd__help__subcmd__exec__subcmd__run"
@@ -182,7 +203,7 @@ _b10x__substrate() {
 
     case "${cmd}" in
         b10x__substrate)
-            opts="-h --socket --output --help events exec machine metrics operation session workspace completions help"
+            opts="-h --socket --output --help confine events exec machine metrics operation session workspace completions help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 1 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -210,6 +231,120 @@ _b10x__substrate() {
                 return 0
             fi
             case "${prev}" in
+                --socket)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --output)
+                    COMPREPLY=($(compgen -W "human json" -- "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        b10x__subcmd__substrate__subcmd__confine)
+            opts="-h --socket --output --help run help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --socket)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --output)
+                    COMPREPLY=($(compgen -W "human json" -- "${cur}"))
+                    return 0
+                    ;;
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        b10x__subcmd__substrate__subcmd__confine__subcmd__help)
+            opts="run help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        b10x__subcmd__substrate__subcmd__confine__subcmd__help__subcmd__help)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        b10x__subcmd__substrate__subcmd__confine__subcmd__help__subcmd__run)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        b10x__subcmd__substrate__subcmd__confine__subcmd__run)
+            opts="-h --dir --ro --net --backend --image --dry-run --local --socket --output --help"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                --dir)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --ro)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --net)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --backend)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --image)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --dry-run)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
+                --local)
+                    COMPREPLY=($(compgen -f "${cur}"))
+                    return 0
+                    ;;
                 --socket)
                     COMPREPLY=($(compgen -f "${cur}"))
                     return 0
@@ -406,7 +541,7 @@ _b10x__substrate() {
             return 0
             ;;
         b10x__subcmd__substrate__subcmd__help)
-            opts="events exec machine metrics operation session workspace completions help"
+            opts="confine events exec machine metrics operation session workspace completions help"
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 2 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
@@ -422,6 +557,34 @@ _b10x__substrate() {
         b10x__subcmd__substrate__subcmd__help__subcmd__completions)
             opts=""
             if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        b10x__subcmd__substrate__subcmd__help__subcmd__confine)
+            opts="run"
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 3 ]] ; then
+                COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+                return 0
+            fi
+            case "${prev}" in
+                *)
+                    COMPREPLY=()
+                    ;;
+            esac
+            COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
+            return 0
+            ;;
+        b10x__subcmd__substrate__subcmd__help__subcmd__confine__subcmd__run)
+            opts=""
+            if [[ ${cur} == -* || ${COMP_CWORD} -eq 4 ]] ; then
                 COMPREPLY=( $(compgen -W "${opts}" -- "${cur}") )
                 return 0
             fi
