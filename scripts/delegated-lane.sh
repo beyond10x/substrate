@@ -84,12 +84,18 @@ echo "delegated-lane: ${systemd_line}"
 
 # The confinement contract's adversary and security-review cases that need the delegated root ran
 # above too, and are absent, exit 0, without it. Run each binary again and require every case's
-# own `executed` line and no `ABSENT` line, so a case that did not run fails here.
+# own `executed` line and no `ABSENT` line, so a case that did not run fails here. `-p <package>`
+# first names a package other than the host crate.
 require_executed() {
+  local package=b10x-substrate-host
+  if [[ "$1" == "-p" ]]; then
+    package="$2"
+    shift 2
+  fi
   local binary="$1"
   shift
   local log
-  log="$(cargo test -p b10x-substrate-host --locked --test "${binary}" \
+  log="$(cargo test -p "${package}" --locked --test "${binary}" \
     -- --nocapture --test-threads=1 2>&1)" || { printf '%s\n' "${log}" >&2; exit 1; }
   printf '%s\n' "${log}"
   if printf '%s\n' "${log}" | grep -q 'ABSENT'; then
@@ -110,6 +116,23 @@ require_executed adversary_confinement_s0_delegated \
 require_executed security_review_confinement 'security review linux start env: executed'
 require_executed sandbox_parity \
   'sandbox parity bubblewrap delegated: executed, 23 rows present'
+
+# `b10x-substrate confine run` opens the linux adapter on a private group beneath the delegated
+# root; its delegated cases are absent, exit 0, without it, so each is required by its line.
+require_executed -p b10x-substrate-cli confine \
+  'confine delegated dry run render: executed' 'confine delegated private group: executed'
+require_executed -p b10x-substrate-cli confine_adversary \
+  'confine adversary delegated: executed, two runs on one root' \
+  'confine adversary delegated: executed, stderr' \
+  'confine adversary delegated: executed, json envelope' \
+  'confine adversary delegated: executed, relative ro' \
+  'confine adversary delegated: executed, linux run' \
+  'confine adversary delegated: executed, baseline variables'
+require_executed -p b10x-substrate-cli confine_security_review \
+  'security review confine concurrent cgroup root: executed' \
+  'security review confine json stderr: executed' \
+  'security review confine linux env: executed' \
+  'security review confine ro and argv: executed'
 
 # The confinement module as its consumers call it: every need chosen by facts and run on an
 # adapter not declared insecure. Absent, exit 0, without the delegated root, so required by count.
