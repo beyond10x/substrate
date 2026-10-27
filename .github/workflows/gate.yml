@@ -244,12 +244,19 @@ jobs:
             .users[0].user = {token: $token}
             | .contexts[0].context.namespace = $ns
             | .contexts[0].context.extensions = [{name: "b10x-substrate/pod", extension: {pod_pids_limit: 1024}}]' > "$RUNNER_TEMP/pod.json"
+          kubectl -n "$ns" create serviceaccount substrate-pod-nolog
+          kubectl -n "$ns" create rolebinding substrate-pod-nolog --role=substrate-pod --serviceaccount="$ns:substrate-pod-nolog"
+          token=$(kubectl -n "$ns" create token substrate-pod-nolog --duration=1h)
+          echo "::add-mask::$token"
+          jq --arg token "$token" '.users[0].user = {token: $token}' "$RUNNER_TEMP/pod.json" > "$RUNNER_TEMP/pod-nolog.json"
 
       - name: Run the pod lane
         env:
           SUBSTRATE_POD_LANE: "1"
           SUBSTRATE_POD_KUBECONFIG: ${{ runner.temp }}/pod.json
-        run: cargo test -p b10x-substrate-host --release --locked --test ess_confinement_pod -- --nocapture
+          SUBSTRATE_POD_KUBECONFIG_NOLOG: ${{ runner.temp }}/pod-nolog.json
+          SUBSTRATE_POD_KIND_NODE: ${{ env.POD_LANE_CLUSTER }}-control-plane
+        run: bash scripts/pod-lane.sh
 
       - name: Require that no run object remains
         env:
