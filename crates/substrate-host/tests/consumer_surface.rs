@@ -32,8 +32,9 @@ use std::sync::Arc;
 
 use substrate_host::confinement::{
     self, AdapterFacts, AdapterRequest, Command, ConfinementAdapter, ConfinementError,
-    ConfinementProfile, ContractFamily, DeclaredWritableRoot, FAMILY_UNSERVED, Fact, HostConfig,
-    ReadOnlyRoot, RunState, WritableHostRoot, linux::LinuxRequest, local::LocalRequest,
+    ConfinementProfile, ContractFamily, DeclaredWritableRoot, FAMILY_ORDER, FAMILY_UNSERVED, Fact,
+    HostConfig, Network, ReadOnlyRoot, RunState, WritableHostRoot, linux::LinuxRequest,
+    local::LocalRequest,
 };
 
 /// Every need this file states. Pinned, so a need lost from the list fails here.
@@ -310,12 +311,19 @@ fn profile_for(
     (profile, command)
 }
 
-/// The first family `profile` needs that `facts` does not serve, in the contract's order.
+/// The first family `profile` needs that `facts` does not serve, in the contract's order: the
+/// families of `required_families()`, plus `audit` for a sink and `network_egress` for an isolated
+/// network on an adapter that proves `host_network`, as the page's `needed` states.
 fn first_unserved(profile: &ConfinementProfile, facts: &AdapterFacts) -> Option<ContractFamily> {
-    profile
-        .required_families()
-        .into_iter()
-        .find(|family| !facts.serves(family))
+    let implied = profile.required_families();
+    FAMILY_ORDER.into_iter().find(|family| {
+        let needed = implied.contains(family)
+            || (*family == ContractFamily::Audit && profile.audit.is_some())
+            || (*family == ContractFamily::NetworkEgress
+                && profile.network == Some(Network::Isolated)
+                && facts.proves(&Fact::HostNetwork));
+        needed && !facts.serves(family)
+    })
 }
 
 fn serves(profile: &ConfinementProfile, facts: &AdapterFacts) -> bool {
