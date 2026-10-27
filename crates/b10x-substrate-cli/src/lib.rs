@@ -14,7 +14,9 @@
 
 mod confine;
 
-pub use confine::{Backend, ConfineRunArgs};
+pub use confine::{
+    Backend, CGROUP_ROOT_ENV as CONFINE_CGROUP_ROOT_ENV, ConfineRunArgs, command as confine_command,
+};
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -83,6 +85,7 @@ pub enum Command {
 #[derive(Debug, Subcommand)]
 pub enum ConfineCommand {
     /// Run a command under a confinement adapter in this process, without a daemon
+    #[command(after_help = confine::AFTER_HELP)]
     Run(ConfineRunArgs),
 }
 
