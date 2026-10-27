@@ -1,0 +1,46 @@
+# `story:oci-adapter`: a container per run with the profile's bounds as runtime flags, the image by
+# digest. Setup: a container runtime answers on the runner.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: oci-admits-limits-by-digest-on-oci
+summary: "lane oci: oci admits a profile requiring a filesystem view and limits with an image named by digest, reported declared_insecure: false."
+
+arrange:
+  - instance: run
+    entity: substrate.confinement.Profile
+
+timeline:
+  - at: 2026-10-27T09:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: oci
+      served_families: [process_run, process_watch, output_read, wait, workspace, filesystem_view, limits, audit]
+      facts: [image_digest_pinned]
+    outcome: opened
+  - at: 2026-10-27T09:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: oci
+      required_families: [process_run, process_watch, output_read, wait, workspace, filesystem_view, limits, audit]
+      required_facts: [image_digest_pinned]
+      image: "registry.invalid/run@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    outcome: admitted
+    events:
+      - event: substrate.confinement.ProfileAdmitted
+        payload:
+          adapter: oci
+          families: [process_run, process_watch, output_read, wait, workspace, filesystem_view, limits, audit]
+          facts: [image_digest_pinned]
+          declared_insecure: false
+    capture: {instance: run, event: substrate.confinement.ProfileAdmitted, field: profile}
+
+assert:
+  - view: substrate.confinement.Profiles
+    contains:
+      profile: {$instance: run}
+      adapter: oci
+      families: [process_run, process_watch, output_read, wait, workspace, filesystem_view, limits, audit]
+      facts: [image_digest_pinned]
+      declared_insecure: false

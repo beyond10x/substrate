@@ -1,0 +1,32 @@
+# No adapter serves `network_ingress` yet (ADR 0109 F1 B reserves ingress routes); `linux` refuses a
+# profile requiring it `confinement.family-unserved`.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: linux-network-ingress-unserved-on-delegated
+summary: "lane delegated: linux, asked for network_ingress, is refused confinement.family-unserved naming network_ingress."
+
+timeline:
+  - at: 2026-10-27T09:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: linux
+      served_families: [process_run, process_watch, output_read, wait, workspace, filesystem_view, limits, audit]
+      facts: [whole_tree_kill, ipc_socket_allowlist, ipc_signals_contained]
+    outcome: opened
+  - at: 2026-10-27T09:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: linux
+      required_families: [process_run, network_ingress]
+      required_facts: []
+    outcome: family-unserved-network-ingress
+    error:
+      name: substrate.confinement.FamilyUnserved
+      fields: {adapter: linux, family: network_ingress}
+    no_events: [substrate.confinement.ProfileAdmitted]
+
+assert:
+  - view: substrate.confinement.Profiles
+    counts: {at_most: 0}

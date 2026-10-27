@@ -1,0 +1,33 @@
+# `story:pod-adapter`: a filesystem view of host paths is not served inside a Pod; a profile requiring
+# one is refused `confinement.family-unserved` before any API call.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: pod-filesystem-view-unserved-on-pod
+summary: "lane pod: pod, asked for a filesystem view, is refused confinement.family-unserved naming filesystem_view."
+
+timeline:
+  - at: 2026-10-27T09:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: pod
+      served_families: [process_run, process_watch, output_read, wait, workspace, limits, audit]
+      facts: [image_digest_pinned]
+    outcome: opened
+  - at: 2026-10-27T09:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: pod
+      required_families: [process_run, filesystem_view]
+      required_facts: []
+      image: "registry.invalid/run@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+    outcome: family-unserved-filesystem-view
+    error:
+      name: substrate.confinement.FamilyUnserved
+      fields: {adapter: pod, family: filesystem_view}
+    no_events: [substrate.confinement.ProfileAdmitted]
+
+assert:
+  - view: substrate.confinement.Profiles
+    counts: {at_most: 0}

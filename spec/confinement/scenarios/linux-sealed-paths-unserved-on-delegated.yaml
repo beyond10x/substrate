@@ -1,0 +1,32 @@
+# `story:confinement-contract-on-linux-and-local` lists `sealed_paths` among the facts `linux` does
+# not prove, so a profile requiring it is refused `confinement.fact-unserved`.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: linux-sealed-paths-unserved-on-delegated
+summary: "lane delegated: linux, asked for sealed_paths, is refused confinement.fact-unserved naming sealed_paths."
+
+timeline:
+  - at: 2026-10-27T09:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: linux
+      served_families: [process_run, process_watch, output_read, wait, workspace, filesystem_view, limits, audit]
+      facts: [whole_tree_kill, ipc_socket_allowlist, ipc_signals_contained]
+    outcome: opened
+  - at: 2026-10-27T09:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: linux
+      required_families: [process_run, filesystem_view]
+      required_facts: [sealed_paths]
+    outcome: fact-unserved-sealed-paths
+    error:
+      name: substrate.confinement.FactUnserved
+      fields: {adapter: linux, fact: sealed_paths}
+    no_events: [substrate.confinement.ProfileAdmitted]
+
+assert:
+  - view: substrate.confinement.Profiles
+    counts: {at_most: 0}
