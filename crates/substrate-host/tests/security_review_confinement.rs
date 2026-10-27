@@ -5,6 +5,7 @@
 //! without `SUBSTRATE_VECTORS_CGROUP_ROOT`.
 
 use std::collections::BTreeMap;
+#[cfg(target_os = "linux")]
 use std::path::Path;
 use std::sync::Arc;
 
