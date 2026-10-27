@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-27T11:08:40Z",
+  "actor": "human:timo",
+  "artifact": "story:egress-third-install-case-holds-under-load",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "a_failed_third_install_leaves_no_listener_answering_while_another_thread_forks: one run without the listener shutdown FAILED (exit 101), one run with it ok 1 passed; at 1dbac9b0 egress tests ok 32 passed and delegated lane EXIT=0; gate.yml Full gate on 7a09bd58: success",
+    "reference": "https://github.com/beyond10x/substrate/actions/runs/40492166509"
+  }
+}

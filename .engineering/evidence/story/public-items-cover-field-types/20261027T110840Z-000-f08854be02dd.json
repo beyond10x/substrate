@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-27T11:08:40Z",
+  "actor": "human:timo",
+  "artifact": "story:public-items-cover-field-types",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "gate.yml Full gate on 7a09bd58 runs tests/confinement_public_items.rs (18 passed locally at 979e5c8a): success",
+    "reference": "https://github.com/beyond10x/substrate/actions/runs/40492166509"
+  }
+}

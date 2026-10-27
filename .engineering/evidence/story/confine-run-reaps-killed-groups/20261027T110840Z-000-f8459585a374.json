@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-27T11:08:40Z",
+  "actor": "human:timo",
+  "artifact": "story:confine-run-reaps-killed-groups",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "bash scripts/delegated-lane.sh at 633106d7: EXIT=0, reaper cases executed; gate.yml Full gate on 7a09bd58: success",
+    "reference": "https://github.com/beyond10x/substrate/actions/runs/40492166509"
+  }
+}
