@@ -470,6 +470,164 @@ fn a_delegated_run_spares_other_run_groups_and_removes_its_private_group() {
     println!("confine delegated private group: executed");
 }
 
+fn procs(group: &Path) -> Vec<String> {
+    std::fs::read_to_string(group.join("cgroup.procs"))
+        .map(|text| text.lines().map(str::to_owned).collect())
+        .unwrap_or_default()
+}
+
+/// The private group of the invocation `pid` beneath `root` once its command is running: the
+/// command wrote `marker`, a run group beneath the group holds the run's processes and the
+/// invocation's own leaf holds only the invocation. Before the command runs, bubblewrap may still
+/// sit in the leaf, or sit in the run group without its parent-death signal set, and a SIGKILL
+/// then can leave it running, reparented, for as long as the command runs.
+fn started_group(root: &Path, pid: u32, marker: &Path) -> Option<PathBuf> {
+    let name = groups(root, &format!("confine-{pid}-")).pop()?;
+    let group = root.join(name);
+    let running = groups(&group, "substrate-ex_")
+        .iter()
+        .any(|run| !procs(&group.join(run)).is_empty());
+    (marker.exists() && running && procs(&group.join("cli")) == [pid.to_string()]).then_some(group)
+}
+
+/// Each process at or beneath `group`, by group, with its parent and command line.
+fn holders(group: &Path) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut pending = vec![group.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for pid in procs(&dir) {
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default();
+            let ppid = stat
+                .rsplit_once(')')
+                .and_then(|(_, rest)| rest.split_whitespace().nth(1))
+                .unwrap_or("?")
+                .to_owned();
+            let cmdline = std::fs::read(format!("/proc/{pid}/cmdline"))
+                .map(|bytes| String::from_utf8_lossy(&bytes).replace('\0', " "))
+                .unwrap_or_default();
+            let at = dir.strip_prefix(group).unwrap_or(&dir).display();
+            found.push(format!("{at}: {pid} (ppid {ppid}) {cmdline}"));
+        }
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            pending.extend(
+                entries
+                    .flatten()
+                    .map(|entry| entry.path())
+                    .filter(|path| path.is_dir()),
+            );
+        }
+    }
+    found
+}
+
+/// Waits until `child`'s command has started beneath `root` and written `marker`, and returns
+/// its private group.
+fn wait_started(root: &Path, child: &mut std::process::Child, marker: &Path) -> PathBuf {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        if let Some(group) = started_group(root, child.id(), marker) {
+            return group;
+        }
+        if let Some(status) = child.try_wait().expect("try_wait") {
+            panic!("the invocation ended before its run started: {status:?}");
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the run never started"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// Whether any group at or beneath `group` holds a process.
+fn populated(group: &Path) -> bool {
+    std::fs::read_to_string(group.join("cgroup.events"))
+        .is_ok_and(|events| events.lines().any(|line| line == "populated 1"))
+}
+
+/// `story:confine-run-reaps-killed-groups`: SIGKILL cannot be caught, so a run killed by it leaves
+/// its private group behind. The next invocation on the same root removes that group once it holds
+/// no process, and leaves a live invocation's group, and the run in it, alone.
+#[test]
+fn a_sigkilled_runs_group_is_removed_by_the_next_run_and_a_live_ones_is_not() {
+    let _lock = DELEGATED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(root) = delegated("reaps a killed group") else {
+        return;
+    };
+    let host = host();
+    let workspace = |name: &str| {
+        let path = host.root.join(name);
+        std::fs::create_dir(&path).expect("workspace");
+        path.to_str().expect("UTF-8").to_owned()
+    };
+    let (killed_ws, live_ws, next_ws) = (
+        workspace("ws_killed"),
+        workspace("ws_live"),
+        workspace("ws_next"),
+    );
+    let spawn = |ws: &str, script: &str| {
+        cli()
+            .env(ROOT_ENV, &root)
+            .args(["confine", "run", "--dir", ws, "--", "/bin/sh", "-c", script])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("spawn")
+    };
+
+    let mut killed = spawn(&killed_ws, ": > started; sleep 30");
+    let killed_group = wait_started(&root, &mut killed, &Path::new(&killed_ws).join("started"));
+    killed.kill().expect("SIGKILL");
+    killed.wait().expect("reap the killed invocation");
+    // The sandbox dies with its parent; the group is reaped only once it holds no process.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    while populated(&killed_group) {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "{} still holds a process: {:?}",
+            killed_group.display(),
+            holders(&killed_group)
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    assert!(
+        killed_group.is_dir(),
+        "SIGKILL removed {}, so this case proves nothing",
+        killed_group.display()
+    );
+
+    let mut live = spawn(&live_ws, ": > started; sleep 3; echo survived > survived");
+    let live_group = wait_started(&root, &mut live, &Path::new(&live_ws).join("started"));
+
+    let next = spawn(&next_ws, "true")
+        .wait_with_output()
+        .expect("next run");
+    let killed_left = killed_group.exists();
+    let live_kept = live_group.is_dir();
+    let live = live.wait_with_output().expect("the live run ends");
+    assert_eq!(next.status.code(), Some(0), "{}", text(&next.stderr));
+    assert!(
+        !killed_left,
+        "the next run left the killed run's group {}",
+        killed_group.display()
+    );
+    assert!(
+        live_kept,
+        "the next run removed the live run's group {}",
+        live_group.display()
+    );
+    assert_eq!(live.status.code(), Some(0), "{}", text(&live.stderr));
+    assert!(
+        Path::new(&live_ws).join("survived").exists(),
+        "the live run did not finish its command"
+    );
+    let left = groups(&root, "confine-");
+    assert!(left.is_empty(), "left {left:?} beneath the root");
+    println!("confine delegated reaps a killed group: executed");
+}
+
 // --- --image: only oci runs an image -------------------------------------------------------
 
 /// Pinned or tagged, an image under linux or local is the fact those adapters do not prove,

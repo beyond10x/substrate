@@ -120,7 +120,8 @@ require_executed sandbox_parity \
 # `b10x-substrate confine run` opens the linux adapter on a private group beneath the delegated
 # root; its delegated cases are absent, exit 0, without it, so each is required by its line.
 require_executed -p b10x-substrate-cli confine \
-  'confine delegated dry run render: executed' 'confine delegated private group: executed'
+  'confine delegated dry run render: executed' 'confine delegated private group: executed' \
+  'confine delegated reaps a killed group: executed'
 require_executed -p b10x-substrate-cli confine_adversary \
   'confine adversary delegated: executed, two runs on one root' \
   'confine adversary delegated: executed, stderr' \
