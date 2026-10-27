@@ -9,7 +9,7 @@ owner: substrate
 tags:
 - adr-0109
 - confinement
-revision: 1
+revision: 3
 ---
 # Epic: Confinement is one contract family with an adapter per mechanism
 
@@ -40,6 +40,8 @@ refuse `local` through a policy fact). The operator's words are quoted in
 
 ## Order
 
+0. `story:ess-pin-0-70-0` — the ESS pin moves to the newest release on its own, wire bytes
+   unchanged.
 1. `story:confinement-domain-specification` — the ESS domain `substrate.confinement` (profiles,
    families, adapters, capability facts, refusals, one scenario per promise and adapter) and
    Substrate ADR 0044 recording ADR 0109 locally (invariant 8: a contract change has its ADR before
@@ -52,7 +54,8 @@ refuse `local` through a policy fact). The operator's words are quoted in
 3. One story per adapter: `story:macos-adapter-on-seatbelt` (S1) and
    `story:macos-seatbelt-policy-runs-cargo-test` (S2), `story:systemd-scope-bounds-provider`,
    `story:oci-adapter`, `story:pod-adapter`.
-4. `story:confinement-consumer-surface` — what loom-sdk and takt call.
+4. `story:confinement-consumer-surface` — the surface loom-sdk and takt call, proved by a
+   consumer-written test and frozen by a committed list of its public items.
 5. `story:sandbox-repository-parity` — the `sandbox` repository's bubblewrap and Docker settings
    covered by Substrate, proved by its mirror test moved here; a `b10x-substrate confine run` verb
    the O6 loop can switch to.
@@ -63,12 +66,22 @@ refuse `local` through a policy fact). The operator's words are quoted in
   (`HostDriverKind` variants, ADR 0037 decision 5) is the next epic's first story.
 - Filling the reserved ingress-route and rate-bound fields (ADR 0109 F1 B): refused by name here.
 - Downstream hops: loom L1, takt T1, mantle M1, Atlas's O6 loop switch (it still calls the
-  `b10x-sandbox` binary), and conductor/autodev (F2 A). Archiving `beyond10x/sandbox` is the
-  operator's act.
+  `b10x-sandbox` binary), conductor/autodev (F2 A), and the `substrate` node with edges from loom
+  and mantle in `agent-stack/stack.yaml` (ADR 0109 consequences; that file is the `agent-stack`
+  repository's). Archiving `beyond10x/sandbox` is the operator's act.
 - Plan 03's Docker *driver* behind the wire (`epic:container-driver-entry`) and the Kubernetes
   namespace *driver* (`epic:kubernetes-deployment-and-driver`): those serve the whole wire contract
   through the daemon; the `oci` and `pod` adapters here serve the confinement contract through
   substrate-host's API.
+
+## Delivery
+
+The operator, 2026-10-27: "do all changes against a single integration branch, provide 1 single
+PR in the end". Every unit merges into one integration branch, and the epic ships as one pull
+request. The release after that merge is a separate step under the coordinator's grant
+("releases through substrate's own process", `approval-record:adr-0109-confinement-plan`) and
+follows `AGENTS.md` § Releases, including the `Confinement-lane:` and `Quota-lane:` tag records;
+no story claims it.
 
 ## Done when
 

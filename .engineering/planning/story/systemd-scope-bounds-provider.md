@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:systemd-scope-bounds-provider
 kind: story
-status: draft
+status: active
 title: 'The systemd adapter: a delegated user scope as the bounds provider'
 owner: substrate
 tags:
@@ -14,14 +14,15 @@ scope:
 - confidence: inferred
   path: CHANGELOG.md
 - confidence: inferred
-  path: crates/substrate-host/src/confinement/mod.rs
-- confidence: inferred
   path: crates/substrate-host/src/confinement/systemd.rs
 - confidence: inferred
   path: crates/substrate-host/tests/ess_confinement_systemd.rs
 - confidence: inferred
   path: scripts/delegated-lane.sh
-revision: 2
+revision: 6
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-27T01:13:04Z", actor: "human:timo", revision: 5, decided_on: {"recorded":{"review_outcome":2}}}
+- {from: "proposed", to: "active", at: "2026-10-27T01:13:04Z", actor: "human:timo", revision: 6, decided_on: {"recorded":{"review_outcome":2}}}
 ---
 # The `systemd` adapter: a delegated user scope as the bounds provider
 
@@ -31,8 +32,8 @@ delegated cgroup v2 subtree `linux` needs (`scripts/delegated-lane.sh` does the 
 does it once, in Substrate: it asks the user's systemd manager for a transient scope with
 `Delegate=yes`, moves the exec's process tree into it, and serves `limits` (pids, memory+swap, CPU
 from the scope's controllers) and whole-tree kill (`cgroup.kill`) to the adapter it wraps. Wrapping
-`local` gives a bounded but unconfined run; wrapping `linux` gives `linux` its delegated root
-without a caller-side `systemd-run`.
+`local` gives a bounded but unconfined run, still reported `declared_insecure`; wrapping `linux`
+gives `linux` its delegated root without a caller-side `systemd-run`.
 
 ## Acceptance
 
@@ -44,15 +45,19 @@ without a caller-side `systemd-run`.
 - Without a reachable user manager (`systemctl --user` fails, or `DBUS_SESSION_BUS_ADDRESS` unset)
   the open is refused `confinement.adapter-unserved`, and the `systemd` lane's cases are absent,
   never passed.
-- `crates/substrate-host/tests/ess_confinement_systemd.rs` executes the `systemd` scenarios under
-  `scripts/delegated-lane.sh`, and the lane's summary names the count.
-- Adversary pass plus security-reviewer pass (confinement, cgroup delegation).
+- `crates/substrate-host/tests/ess_confinement_systemd.rs` executes every `systemd` scenario of the
+  suite (both `inner` variants) under `scripts/delegated-lane.sh`, and the lane's summary names the
+  count.
+- An `aep:adversary` pass and an `aep:security-reviewer` pass (cgroup delegation) are each recorded
+  as a `review-result` that `reviews:` this story, and each of their findings has a
+  `review_outcome` record: `fixed` in this story, or `escalated` with a filed story id.
 
 ## Scope
 
-`crates/substrate-host/src/confinement/systemd.rs` (new), `crates/substrate-host/src/confinement/mod.rs`
-(registration), `crates/substrate-host/tests/ess_confinement_systemd.rs` (new),
-`scripts/delegated-lane.sh`, `CHANGELOG.md`.
+`crates/substrate-host/src/confinement/systemd.rs` (replaces the S0 stub),
+`crates/substrate-host/tests/ess_confinement_systemd.rs` (new), `scripts/delegated-lane.sh`,
+`CHANGELOG.md` (one line under `## [Unreleased]`; the other units of its wave add theirs, and the
+merge into the integration branch keeps every line).
 
 ## Depends on
 
