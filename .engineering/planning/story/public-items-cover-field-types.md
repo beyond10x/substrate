@@ -2,17 +2,18 @@
 format: aep.planning-md/3
 id: story:public-items-cover-field-types
 kind: story
-status: active
+status: implemented
 title: The public-items freeze covers the field types of re-exported types
 tags:
 - adr-0109
 relations:
 - decomposes: epic:confinement-contract-family
 - depends_on: story:confinement-consumer-surface
-revision: 3
+revision: 4
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-27T07:24:39Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-10-27T07:24:39Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-10-27T13:17:26Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Outcome
 

@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-27T14:30:00Z",
+  "actor": "human:timo",
+  "artifact": "task:release-0-13-0",
+  "kind": "task",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "release.yml run 40507411588 (recovery dispatch) for tag 0.13.0: success; Confinement-lane c2b95f28 180 cases, Quota-lane c2b95f28 7 cases; tag-push run 40504625490 failed at keyless signing",
+    "reference": "https://github.com/beyond10x/substrate/actions/runs/40507411588"
+  }
+}
