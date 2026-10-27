@@ -22,17 +22,28 @@ bounded only by the handed-over credentials and namespace enforcement.
 The `oci` confinement adapter (ADR 0044 decision 8, `crates/substrate-host/src/confinement/oci.rs`)
 holds that authority: whoever may call the operator's container runtime may start a privileged
 container. The adapter therefore takes no runtime flag from a profile. A profile reaches the
-runtime only through a fixed argument list, each value one argument: the run's own uid and gid,
-`--network none`, `--cap-drop ALL`, `no-new-privileges`, a read-only root with a private `/tmp`,
+runtime only through a fixed argument list, each value one argument: the run's own uid and gid
+(an embedder running as uid 0 is `confinement.adapter-unserved`), `--init`, `--network none`,
+`--ipc none`, `--cap-drop ALL`, `no-new-privileges`, a read-only root with a private `/tmp`,
 the runtime's default seccomp profile (an `open` whose `info` reports none is
-`confinement.adapter-unserved`), the profile's bounds, and the image after `--`, by sha256 digest,
-with a name that cannot be read as a flag. Host paths are bound only as the workspace, read-only
-roots and files, and writable roots the operator declared, each checked on the host to be what it
-claims and reached without a symlink, and refused `confinement.path-unrepresentable` when it holds
-a `:`. The runtime resolves a bind's path itself, after that check, so a path swapped between the
-check and the bind is bound as swapped: the `linux` adapter binds a pinned descriptor and does not
-have this gap. A container whose embedder dies runs on until it ends, unbounded by the adapter's
-timeout, and keeps the run's label for an operator to find.
+`confinement.adapter-unserved`), the profile's bounds or the defaults (a runtime without limit
+control runs nothing, `exec.limit-unserved`), `--pull never` (an image the runtime does not hold
+is `confinement.image-absent`), and the image after `--`, by sha256 digest, with a name that
+cannot be read as a flag. The command's environment passes the `linux` driver's rule. Host paths
+are bound only with `--mount type=bind`, which refuses a missing source rather than creating it,
+as the workspace (a directory directly beneath the operator's workspace root), read-only roots
+and files, and writable roots the operator declared, each checked on the host to be what it
+claims and reached without a symlink, refused `confinement.path-unrepresentable` when it holds a
+`,`, `"`, `:`, line break or NUL, and refused `confinement.runtime-socket-exposed` when it is, or
+holds, a socket the runtime is reached through. The runtime resolves a bind's path itself, after
+that check, so a path swapped between the check and the bind is bound as swapped: the `linux`
+adapter binds a pinned descriptor and does not have this gap. Every other Unix socket beneath a
+bound root is reachable from the container: a read-only bind does not stop `connect(2)`, and
+`oci` does not prove `ipc_socket_allowlist`, so a profile that requires it is refused
+`confinement.fact-unserved`. A container whose embedder dies runs on, unbounded by the adapter's
+timeout, until it ends or until the next `open` on that host removes it: each container is
+labelled with its embedder's boot, pid namespace, pid and start time, and `open` removes those
+whose embedder is gone (`OciAdapter::orphans_removed` reports how many).
 
 ## 2. Host filesystem
 

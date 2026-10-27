@@ -115,6 +115,11 @@ jobs:
           echo "== lanes this job will run =="
           echo "portable lane:  RUNS   — cargo test runs tests/runtime_vectors.rs with no SUBSTRATE_VECTORS_CGROUP_ROOT"
           echo "delegated lane: ABSENT — no delegated cgroup root is passed; the lane is not executed and is not claimed to pass"
+          if command -v docker >/dev/null 2>&1 && docker info --format '{{.ServerVersion}}' >/dev/null 2>&1; then
+            echo "oci lane:       RUNS   — SUBSTRATE_OCI_LANE=1 against Docker $(docker info --format '{{.ServerVersion}}'); an unusable runtime fails the oci cases"
+          else
+            echo "oci lane:       RUNS   — SUBSTRATE_OCI_LANE=1, and no usable Docker answers here, so the oci cases fail rather than report ABSENT"
+          fi
 
       - name: Install the pinned licence inventory tool
         run: |
@@ -152,10 +157,11 @@ jobs:
             echo "| --- | --- |"
             echo "| portable | \`${{ steps.gate.outcome }}\` — carried by the gate step; its log shows how far the gate got |"
             echo "| delegated (bubblewrap + cgroup delegation) | **absent** — not executed on a hosted runner, and never reported as passed |"
+            echo "| oci (\`SUBSTRATE_OCI_LANE=1\`, Docker) | \`${{ steps.gate.outcome }}\` — carried by the gate step's \`cargo test\`; real containers, never ABSENT on this job |"
             echo
             echo "The delegated lane needs a runner inside a delegated cgroup subtree carrying \`cpu\`, \`memory\` and \`pids\`; see README.md, section \"Serving exec\"."
           } >> "$GITHUB_STEP_SUMMARY"
-          echo "portable lane: ${{ steps.gate.outcome }} (the gate step). delegated lane: absent — not executed, not passed."
+          echo "portable lane: ${{ steps.gate.outcome }} (the gate step). oci lane: ${{ steps.gate.outcome }} (the gate step). delegated lane: absent — not executed, not passed."
 
   pod-lane:
     name: Pod lane
