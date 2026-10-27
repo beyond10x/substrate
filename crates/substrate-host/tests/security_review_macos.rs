@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use substrate_host::confinement::{
     self, AdapterRequest, ConfinementAdapter, ConfinementProfile, RunState, macos::MacosRequest,
 };
+use substrate_host::seatbelt;
 
 const BASH: &str = "/bin/bash";
 const LIMIT: Duration = Duration::from_secs(45);
@@ -398,5 +399,140 @@ async fn a_dyld_variable_does_not_reach_the_confined_program() {
             "a DYLD_ variable reached the confined program: {}",
             ended.report()
         ),
+    }
+}
+
+// story:confined-cargo-build-links-without-the-xcrun-shim. `open` runs `/usr/bin/xcrun`, outside
+// the sandbox, for "the selected developer tools'" SDK and `clang` (macos.rs module documentation),
+// where the selection is what `seatbelt::developer_root` reads from the `xcode-select` link. The
+// `/usr/bin/xcrun` shim hands the call to the `xcrun` beneath `DEVELOPER_DIR` when the environment
+// names one. Each case below re-runs this test binary with a `DEVELOPER_DIR` naming a scratch
+// directory, so the variable reaches only that child process and no other case.
+
+/// Set in the child process a case re-runs this binary as.
+const DEVELOPER_DIR_CHILD: &str = "SUBSTRATE_REVIEW_DEVELOPER_DIR_CHILD";
+
+/// Runs the case `name` alone in a child of this test binary, with `DEVELOPER_DIR` set to
+/// `developer`, and requires that it ran and passed there.
+fn rerun_with_developer_dir(name: &str, developer: &Path) -> String {
+    let output = HostCommand::new(std::env::current_exe().expect("the test binary"))
+        .args([name, "--exact", "--nocapture", "--test-threads=1"])
+        .env(DEVELOPER_DIR_CHILD, "1")
+        .env("DEVELOPER_DIR", developer)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("the child runs");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        output.status.success() && stdout.contains("1 passed"),
+        "the child run of {name} did not pass: {}; stdout {stdout:?}; stderr {stderr:?}",
+        output.status
+    );
+    stdout
+}
+
+/// An executable shell script at `path`.
+fn script(path: &Path, body: &str) {
+    use std::os::unix::fs::PermissionsExt as _;
+    fs::create_dir_all(path.parent().expect("a parent")).expect("script directory");
+    fs::write(path, format!("#!/bin/sh\n{body}")).expect("script");
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("executable");
+}
+
+/// The variable cargo reads the host target's linker from.
+fn host_linker_variable() -> String {
+    format!(
+        "CARGO_TARGET_{}_APPLE_DARWIN_LINKER",
+        std::env::consts::ARCH.to_ascii_uppercase()
+    )
+}
+
+// What `open` runs unconfined is the selected developer tools' `xcrun`, never one the embedding
+// process's environment names: the Seatbelt probes clear the environment of everything they run
+// (`seatbelt.rs`, `env_clear`), and a binary the open runs outside the sandbox is chosen the same
+// way. The scratch `xcrun` records each call and fails, so the open has nothing to use from it.
+#[tokio::test(flavor = "multi_thread")]
+async fn open_runs_no_xcrun_the_embedding_environment_names() {
+    if std::env::var_os(DEVELOPER_DIR_CHILD).is_some() {
+        let _ = macos();
+        return;
+    }
+    let (_root, root) = canonical_tempdir();
+    let developer = root.join("Developer");
+    let marker = root.join("xcrun-ran");
+    script(
+        &developer.join("usr/bin/xcrun"),
+        &format!("printf '%s\\n' \"$*\" >> '{}'\nexit 1\n", text(&marker)),
+    );
+    rerun_with_developer_dir(
+        "open_runs_no_xcrun_the_embedding_environment_names",
+        &developer,
+    );
+    let ran = fs::read_to_string(&marker).unwrap_or_default();
+    assert!(
+        ran.is_empty(),
+        "opening the macos adapter ran {} outside the sandbox, a program the embedding process's \
+         DEVELOPER_DIR named and not the selected developer tools' xcrun, with the arguments: {ran}",
+        text(&developer.join("usr/bin/xcrun"))
+    );
+}
+
+// Whatever `xcrun` answers, a start never gets an `SDKROOT` or a linker outside the developer root
+// its exec subpaths hold: here a scratch `xcrun` names its own SDK and `clang` beside the selected
+// developer tools, and a start whose exec subpath is the selected developer root is either refused
+// `exec.sandbox-developer-tools-unresolved` before anything runs or runs with both beneath that
+// root.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_xcrun_named_by_the_environment_cannot_name_the_linker() {
+    if std::env::var_os(DEVELOPER_DIR_CHILD).is_none() {
+        let (_root, root) = canonical_tempdir();
+        let developer = root.join("Developer");
+        let sdk = developer.join("SDKs/MacOSX.sdk");
+        let clang = developer.join("usr/bin/clang");
+        fs::create_dir_all(&sdk).expect("scratch SDK");
+        script(&clang, "exit 0\n");
+        script(
+            &developer.join("usr/bin/xcrun"),
+            &format!(
+                "case \"$*\" in\n*--show-sdk-path*) printf '%s\\n' '{}' ;;\n*--find*) printf \
+                 '%s\\n' '{}' ;;\n*) exit 1 ;;\nesac\n",
+                text(&sdk),
+                text(&clang)
+            ),
+        );
+        rerun_with_developer_dir(
+            "an_xcrun_named_by_the_environment_cannot_name_the_linker",
+            &developer,
+        );
+        return;
+    }
+    let adapter = macos();
+    let selected = seatbelt::developer_root().expect("the runner has developer tools");
+    let (_root, workspace) = canonical_tempdir();
+    let profile = ConfinementProfile {
+        workspace: Some(workspace.clone()),
+        exec_subpaths: vec![text(&selected).to_owned()],
+        ..ConfinementProfile::default()
+    };
+    let linker = host_linker_variable();
+    let command = bash(
+        &format!("printf '%s\\n%s\\n' \"${{SDKROOT-unset}}\" \"${{{linker}-unset}}\""),
+        &[],
+    );
+    match outcome(&adapter, &profile, &command).await {
+        Err(code) => assert_eq!(code, seatbelt::DEVELOPER_TOOLS_UNRESOLVED),
+        Ok(ended) => {
+            let lines: Vec<&str> = ended.stdout.lines().collect();
+            assert_eq!(lines.len(), 2, "{}", ended.report());
+            for value in lines {
+                assert!(
+                    Path::new(value).starts_with(&selected),
+                    "a start whose exec subpath is {} got {value}, outside it: {}",
+                    text(&selected),
+                    ended.report()
+                );
+            }
+        }
     }
 }

@@ -11,6 +11,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 - The `macos` adapter resolves the selected developer tools' macOS SDK and `clang` with `xcrun` outside the sandbox at open, and a start whose exec subpaths hold the whole developer root gets `SDKROOT` and the host target's `CARGO_TARGET_<TRIPLE>_LINKER` naming them unless its environment names them, so a confined `cargo build` or `cargo test` links without reaching the `/usr/bin/cc` shim, which runs `/bin/sh` and `xcodebuild`; when the open could not resolve them such a start is refused `exec.sandbox-developer-tools-unresolved` before anything runs. The Seatbelt policy gains no rule. `tests/seatbelt_adversary.rs` runs the fixture's `cargo test` with no `RUSTC`, `SDKROOT` or linker set by the caller.
 
+### Changed
+
+- The gate workflow's `pod-lane` job runs `scripts/pod-lane.sh`: the `kind` cluster's `ess_confinement_pod`, `adversary_pod` and `security_review_pod` suites, each required by its own `test result:` line with at least one case passed and no case reporting itself absent. The job adds a second ServiceAccount bound to the Pod and NetworkPolicy Role without `pods/log` for the no-log case, and names the kind node for the kubelet-stop case, which now waits for the adapter to remove the run's Pod and NetworkPolicy once the kubelet answers again.
+
 ## [0.12.0] — 2026-10-27
 
 ### Added

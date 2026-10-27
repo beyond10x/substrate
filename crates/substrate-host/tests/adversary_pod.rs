@@ -575,7 +575,7 @@ async fn adversary_lane_a_kill_reported_ended_left_no_running_container() {
         return;
     };
     let adapter = pod::open_pod(PodRequest {
-        cluster: Some(kubeconfig),
+        cluster: Some(kubeconfig.clone()),
     })
     .expect("opens");
     let admitted = adapter.admit(&admitted_profile()).expect("admitted");
@@ -621,6 +621,40 @@ async fn adversary_lane_a_kill_reported_ended_left_no_running_container() {
         ended.state,
         ended.exit
     );
+    // story:pod-lane-runs-adversary-and-security: a run read `Unknown` is removed by the adapter
+    // once the kubelet answers again ("the adapter keeps trying", pod.rs). Wait for that here, in
+    // the process that holds the adapter, so the CI pod lane's no-leftover check sees the result
+    // instead of a NetworkPolicy left only because the test ended first.
+    let deadline = std::time::Instant::now() + Duration::from_mins(3);
+    loop {
+        let left = leftovers(&kubeconfig, &adapter.settings().namespace, run.as_str());
+        if left.is_empty() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the adapter left {left} after the kubelet returned"
+        );
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+/// The run's objects still in the cluster, read with `kubectl` rather than the adapter.
+fn leftovers(kubeconfig: &std::path::Path, namespace: &str, run: &str) -> String {
+    let output = std::process::Command::new("kubectl")
+        .arg("--kubeconfig")
+        .arg(kubeconfig)
+        .args(["--namespace", namespace, "get", "pods,networkpolicies"])
+        .arg(format!("--selector=b10x-substrate/run={run}"))
+        .args(["--output", "name"])
+        .output()
+        .expect("kubectl runs");
+    assert!(
+        output.status.success(),
+        "kubectl: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("utf-8")
 }
 
 /// `UNREACHABLE_LIMIT` (pod.rs): "How long the API may stay unreachable before a run is reported
