@@ -191,13 +191,23 @@ client as prebuilt x86_64 Linux binaries:
 | `SHA256SUMS.sigstore.json` | the keyless `cosign sign-blob` bundle for `SHA256SUMS` |
 
 The release workflow exports both binaries from the Dockerfile's pinned `builder` stage, the stage
-the images copy from, so they share the image toolchain; on a first release run it refuses an
-archived daemon that is not byte-identical to the image's. They run on glibc 2.35 or newer (Ubuntu 22.04, Debian 12 and later) and load two libraries
-beyond glibc and `libgcc_s`: OpenSSL 3 (`libssl3`, `libssl3t64` on Ubuntu 24.04) and zlib (`zlib1g`),
-both present on a stock Ubuntu 22.04 image. The workflow refuses a binary that needs a newer glibc
-or any other shared library, and starts both in a digest-pinned Ubuntu 22.04 image before it
-publishes anything. Verify the signature, then the archives; the certificate identity is the
-release workflow at the release tag:
+the images copy from, so they share the image toolchain. The daemon archive holds the daemon of the
+published daemon image byte for byte: a first release run refuses any difference, and a recovery
+run that reuses an already published image archives that image's daemon. The binaries run on
+glibc 2.35 or newer (Ubuntu 22.04, Debian 12 and later) and load two libraries beyond glibc and
+`libgcc_s`: OpenSSL 3 (`libssl3`, `libssl3t64` on Ubuntu 24.04) and zlib (`zlib1g`), both present
+on a stock Ubuntu 22.04 image. Before any image tag moves, the workflow refuses a binary that
+needs a newer glibc or any other shared library, and starts both in a digest-pinned Ubuntu 22.04
+image. A recovery run of a tag whose source predates the `release-binaries` stage publishes no
+archives, no `SHA256SUMS` and no signature, and its release notes say so.
+
+Verify the signature, then the archives. The certificate identity is the release workflow at the
+ref that ran it, which the release notes print:
+`https://github.com/beyond10x/substrate/.github/workflows/release.yml@refs/tags/<version>` for a
+release started by pushing its tag, and
+`https://github.com/beyond10x/substrate/.github/workflows/release.yml@refs/heads/main` for one
+published by a recovery dispatch from `main`. The image and contract-bundle signatures of a
+release carry the same identity, so `cosign verify` of an image takes the same value.
 
 ```bash
 cosign verify-blob \

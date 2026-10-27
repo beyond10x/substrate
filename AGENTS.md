@@ -437,8 +437,11 @@ four files to the GitHub release:
 identity, which `cosign verify-blob` checks before the release is created. The names are a public
 interface that install instructions link to; do not rename them. Before any image tag moves it refuses a binary that needs a glibc
 newer than 2.35 or a shared library outside the set README.md documents, or that does not start in
-a digest-pinned Ubuntu 22.04 image; on an initial run it refuses an archived daemon that is not
-byte-identical to the image's. It refuses — publishing nothing — a tag that is
+a digest-pinned Ubuntu 22.04 image, or an archived daemon that is not byte for byte the daemon of
+the image being published (a recovery run that reuses a published image archives that image's
+daemon). Only a recovery dispatch of a tag whose source predates the `release-binaries` stage
+publishes without the four files, and its release notes and summary say so; a tag push without the
+stage is refused. It refuses — publishing nothing — a tag that is
 not the bare version form (so `0.2.2-rc.0` produces nothing), a lightweight tag, a commit that is not
 an ancestor of `main`, a version that disagrees with `[workspace.package] version`, a commit for
 which `gate.yml` has not concluded `success`, an existing daemon or MCP version tag on an initial
