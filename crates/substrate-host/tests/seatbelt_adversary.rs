@@ -352,10 +352,44 @@ fn sdk_root() -> PathBuf {
     fs::canonicalize(text.trim()).expect("the SDK resolves")
 }
 
+/// The developer tools' `clang`, resolved unconfined as [`sdk_root`] resolves the SDK, for cargo
+/// to link with directly. The `/usr/bin/cc` shim asks `xcodebuild -find clang` through `/bin/sh`,
+/// which no exec subpath of the fixture's profile allows (macos-15 run 40460300228, `cc` exit 72,
+/// `sh -c '…xcodebuild … -find clang' failed with exit code 32512`). Naming the linker is the
+/// test's half of `decision-blocker:macos-s2-cargo-link-in-seatbelt` (option a, no policy change,
+/// no widened exec) for `story:macos-seatbelt-policy-runs-cargo-test`; the product half is
+/// `story:confined-cargo-build-links-without-the-xcrun-shim`.
+fn linker() -> PathBuf {
+    let output = Command::new("/usr/bin/xcrun")
+        .args(["--sdk", "macosx", "--find", "clang"])
+        .output()
+        .expect("xcrun runs");
+    assert!(output.status.success(), "{}", report(&output));
+    let text = String::from_utf8(output.stdout).expect("UTF-8 clang path");
+    fs::canonicalize(text.trim()).expect("clang resolves")
+}
+
+/// The variable cargo reads the linker of the host target from: `CARGO_TARGET_<TRIPLE>_LINKER`,
+/// the triple `rustc` names as its host, upper-cased with `-` as `_`.
+fn linker_variable(rustc: &str) -> String {
+    let output = Command::new(rustc).arg("-vV").output().expect("rustc runs");
+    assert!(output.status.success(), "{}", report(&output));
+    let text = String::from_utf8(output.stdout).expect("UTF-8 rustc version");
+    let host = text
+        .lines()
+        .find_map(|line| line.strip_prefix("host: "))
+        .expect("rustc names its host");
+    format!(
+        "CARGO_TARGET_{}_LINKER",
+        host.trim().to_ascii_uppercase().replace(['-', '.'], "_")
+    )
+}
+
 /// `cargo test --offline` of a copy of the fixture under the build policy: the toolchain is a
 /// declared root and an exec subpath, so are `target/`, `/usr/bin` (the `cc` and `xcrun` shims)
 /// and the selected developer tools; `.cargo` and `vendor` are sealed; `TMPDIR` is private;
-/// `SDKROOT` names the SDK inside the developer tools.
+/// `SDKROOT` names the SDK inside the developer tools and the host target's linker is their
+/// `clang`.
 async fn cargo_test(filter: Option<&str>, port: u16) -> Ended {
     let root = tempfile::tempdir().expect("temporary root");
     let workspace = fs::canonicalize(root.path())
@@ -372,6 +406,15 @@ async fn cargo_test(filter: Option<&str>, port: u16) -> Ended {
         sdk.display(),
         developer.display()
     );
+    let clang = linker();
+    assert!(
+        clang.starts_with(&developer),
+        "clang {} is outside the developer tools {}, so the profile cannot run it",
+        clang.display(),
+        developer.display()
+    );
+    let rustc = format!("{toolchain}/bin/rustc");
+    let linker_name = linker_variable(&rustc);
     let profile = ConfinementProfile {
         workspace: Some(workspace.clone()),
         read_only_roots: vec![ReadOnlyRoot {
@@ -398,8 +441,9 @@ async fn cargo_test(filter: Option<&str>, port: u16) -> Ended {
         ("PATH", "/usr/bin:/bin".to_owned()),
         ("HOME", text(&workspace).to_owned()),
         ("CARGO_HOME", text(&workspace.join("cargo-home")).to_owned()),
-        ("RUSTC", format!("{toolchain}/bin/rustc")),
+        ("RUSTC", rustc),
         ("SDKROOT", text(&sdk).to_owned()),
+        (linker_name.as_str(), text(&clang).to_owned()),
         ("CARGO_TERM_COLOR", "never".to_owned()),
         ("FIXTURE_PORT", port.to_string()),
     ]
