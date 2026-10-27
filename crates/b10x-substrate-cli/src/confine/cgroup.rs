@@ -54,7 +54,7 @@ impl PrivateCgroup {
         }
         enable(&root)?;
         let start = start_time("self").ok_or("this process's start time is unreadable")?;
-        reap(&root);
+        reap(&root, &mut std::io::stderr());
         let group = root.join(format!("{PREFIX}{}-{start}", std::process::id()));
         std::fs::create_dir(&group)
             .map_err(|error| format!("creating {}: {error}", group.display()))?;
@@ -186,9 +186,21 @@ fn holds_process(group: &Path) -> bool {
 /// A group whose owner runs is never touched, whatever it holds, and a group holding any process
 /// is left until it holds none: this removes, it never kills. `rmdir` on a cgroup that a process
 /// joined in between fails with `EBUSY`, so nothing here can end a process.
-fn reap(root: &Path) {
-    let Ok(entries) = std::fs::read_dir(root) else {
-        return;
+///
+/// What it leaves it names on `report`, one line each: a dead owner's group that still holds a
+/// process (which no timeout or whole-tree kill bounds any longer), a group it could not remove,
+/// and a root it could not read. None of them changes the invocation's own outcome.
+fn reap(root: &Path, report: &mut impl std::io::Write) {
+    let entries = match std::fs::read_dir(root) {
+        Ok(entries) => entries,
+        Err(error) => {
+            let _ = writeln!(
+                report,
+                "b10x-substrate: cannot read {} to remove groups killed runs left: {error}",
+                root.display()
+            );
+            return;
+        }
     };
     for entry in entries.flatten() {
         let name = entry.file_name();
@@ -199,8 +211,19 @@ fn reap(root: &Path) {
             continue;
         }
         let group = entry.path();
-        if !holds_process(&group) {
-            remove_tree(&group);
+        if holds_process(&group) {
+            let _ = writeln!(
+                report,
+                "b10x-substrate: left {}: its owner {pid} is gone and a process still runs in it, \
+                 or it cannot be read",
+                group.display()
+            );
+        } else if !remove_tree(&group) {
+            let _ = writeln!(
+                report,
+                "b10x-substrate: could not remove {}, left by a run that is gone",
+                group.display()
+            );
         }
     }
 }
