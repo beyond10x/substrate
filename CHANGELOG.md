@@ -11,6 +11,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 - The confinement contract is specified as the ESS domain `substrate.confinement` (ADR 0044): ten contract families, six adapters with their declared facts and named refusals, 49 authored scenarios named by adapter and lane, checked against the interpreted reference by `cargo xtask check-ess`.
 - `substrate_host::confinement` implements that contract in Rust (ADR 0044): `ConfinementProfile`, the `ConfinementAdapter` trait, the `linux` adapter over the host driver, the declared-insecure `local` adapter, the six-adapter registry and refusing `macos`, `systemd`, `oci` and `pod` stubs, with the authored scenarios executed by `tests/ess_confinement_local.rs` (portable) and `tests/ess_confinement_linux.rs` (delegated).
+- The `macos` confinement adapter (ADR 0037, ADR 0109 S1) runs a command under a Seatbelt profile through `confinement::open`, refuses `limits`, `network_egress`, `whole_tree_kill` and a read-only root mounted away from its host path by name, fails closed on the Seatbelt probe, and is proved on the `macos-15` job.
 
 ### Changed
 
