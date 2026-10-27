@@ -226,7 +226,8 @@ impl ConfinementError {
     }
 }
 
-/// One audit record (ADR 0109 decision 2): an admission, a refusal or a start.
+/// One audit record (ADR 0109 decision 2): an admission, a refusal or a start, or a private
+/// `TMPDIR` a run left behind.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "event", rename_all = "snake_case")]
 pub enum AuditRecord {
@@ -264,6 +265,15 @@ pub enum AuditRecord {
         declared_insecure: Option<String>,
         program: String,
     },
+    /// A run's private `TMPDIR` that could not be removed after the run ended: it is still on the
+    /// host at `path`.
+    PrivateTmpdirLeft {
+        run: RunId,
+        profile: ProfileId,
+        adapter: AdapterName,
+        path: String,
+        error: String,
+    },
 }
 
 impl AuditRecord {
@@ -290,7 +300,8 @@ impl AuditRecord {
 }
 
 /// Where a profile's audit records go. Called synchronously, once per record, on the thread that
-/// admitted or started; a sink that blocks blocks that call.
+/// admitted or started (for `private_tmpdir_left`, on the task that ended the run); a sink that
+/// blocks blocks that call.
 #[derive(Clone)]
 pub struct AuditSink(Arc<dyn Fn(&AuditRecord) + Send + Sync>);
 
@@ -456,6 +467,25 @@ impl AdmittedProfile {
                 inner: self.inner,
                 declared_insecure: self.insecure_reason().map(str::to_owned),
                 program: program.to_owned(),
+            },
+        );
+    }
+
+    /// Writes the record of a private `TMPDIR` a run left behind because its removal failed.
+    pub(crate) fn audit_private_tmpdir_left(
+        &self,
+        run: &RunId,
+        path: &std::path::Path,
+        error: &std::io::Error,
+    ) {
+        audit(
+            &self.profile,
+            &AuditRecord::PrivateTmpdirLeft {
+                run: run.clone(),
+                profile: self.id.clone(),
+                adapter: self.adapter.clone(),
+                path: path.display().to_string(),
+                error: error.to_string(),
             },
         );
     }

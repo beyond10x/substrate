@@ -21,13 +21,16 @@
 //!   `exec.sandbox-path-unrepresentable`, because the rule would name another path than the one
 //!   the kernel checks.
 //! - `exec_subpaths`: programs beneath a listed directory may run, and the directory is readable
-//!   and mappable as code. A relative entry is beneath the workspace (`target`); an absolute one
+//!   and mappable as code. A relative entry is beneath the workspace (`target`), refused
+//!   `exec.sandbox-path-unrepresentable` when a part of it is a symbolic link; an absolute one
 //!   must lie in the workspace, a declared read-only root, or a system or developer directory
 //!   ([`seatbelt::SYSTEM_EXEC_SUBPATHS`], [`seatbelt::developer_root`]), else it is refused
 //!   `exec.sandbox-exec-subpath-undeclared`. A policy with an exec subpath may read
 //!   [`seatbelt::XCODE_SELECT_LINK`] and [`seatbelt::BUILD_READ_SUBPATHS`].
 //! - `private_tmpdir`: each start creates a directory beside the host's temporary directory,
-//!   writable by that run alone, sets `TMPDIR` to it, and removes it before `wait` returns. A
+//!   writable by that run alone, sets `TMPDIR` to it, and removes it before `wait` returns, after
+//!   making every directory the run left in it owner-accessible again. A directory that still
+//!   cannot be removed is a `private_tmpdir_left` audit record and a warning, never silence. A
 //!   render cannot name a directory only a start creates, so it is `confinement.render-unserved`.
 //!
 //! `open` fails closed: off macOS, or when [`seatbelt::probe`] does not show the sandbox enforcing
@@ -374,6 +377,17 @@ fn canonical(path: &Path, address: &str) -> Result<PathBuf, ConfinementError> {
 /// A sealed path beneath the resolved workspace, refused when any part of it that exists is a
 /// symbolic link: the rule would seal the link's target and leave the link itself replaceable.
 fn sealed_path(workspace: &Path, path: &str) -> Result<PathBuf, ConfinementError> {
+    beneath_without_symlink(workspace, path, "sealed path", "sealed_paths")
+}
+
+/// `path` beneath the resolved workspace, refused `exec.sandbox-path-unrepresentable` when it is
+/// not a normal relative path or when any part of it that exists is a symbolic link.
+fn beneath_without_symlink(
+    workspace: &Path,
+    path: &str,
+    what: &str,
+    field: &str,
+) -> Result<PathBuf, ConfinementError> {
     seatbelt::relative_literal(path)?;
     let mut current = workspace.to_path_buf();
     for name in path.split('/') {
@@ -383,10 +397,10 @@ fn sealed_path(workspace: &Path, path: &str) -> Result<PathBuf, ConfinementError
                 return Err(DriverError::refused(
                     seatbelt::PATH_UNREPRESENTABLE,
                     format!(
-                        "the sealed path {path} is reached through the symbolic link {}",
+                        "the {what} {path} is reached through the symbolic link {}",
                         current.display()
                     ),
-                    "sealed_paths",
+                    field,
                 )
                 .into());
             }
@@ -397,16 +411,17 @@ fn sealed_path(workspace: &Path, path: &str) -> Result<PathBuf, ConfinementError
     Ok(workspace.join(path))
 }
 
-/// An exec subpath, resolved: a relative one beneath the workspace (it need not exist yet), an
-/// absolute one only inside the workspace, a declared root, or a system or developer directory.
+/// An exec subpath, resolved: a relative one beneath the workspace (it need not exist yet, and
+/// no part of it that exists may be a symbolic link, which would carry the rule out of the
+/// workspace), an absolute one only inside the workspace, a declared root, or a system or
+/// developer directory.
 fn exec_subpath(
     workspace: &Path,
     declared: &[PathBuf],
     subpath: &str,
 ) -> Result<PathBuf, ConfinementError> {
     if !subpath.starts_with('/') {
-        seatbelt::relative_literal(subpath)?;
-        return Ok(workspace.join(subpath));
+        return beneath_without_symlink(workspace, subpath, "exec subpath", "exec_subpaths");
     }
     seatbelt::absolute_literal(subpath)?;
     let resolved = canonical(Path::new(subpath), "exec_subpaths")?;
@@ -449,6 +464,59 @@ fn private_tmpdir() -> Result<(tempfile::TempDir, PathBuf), ConfinementError> {
     let resolved = std::fs::canonicalize(directory.path()).map_err(failed)?;
     Ok((directory, resolved))
 }
+
+/// Removes a run's private `TMPDIR` once the run has ended. What the run left there may refuse
+/// its owner (a directory `chmod 000`, a user immutable flag), so every entry is first made
+/// removable; a directory that still cannot be removed is audited and logged by name.
+fn remove_private_tmpdir(admitted: &AdmittedProfile, run: &RunId, path: &Path) {
+    make_removable(path);
+    if let Err(error) = std::fs::remove_dir_all(path) {
+        tracing::warn!(
+            run = run.as_str(),
+            path = %path.display(),
+            %error,
+            "the macos private TMPDIR could not be removed after the run"
+        );
+        admitted.audit_private_tmpdir_left(run, path, &error);
+    }
+}
+
+/// Gives the owner read, write and search on every directory beneath `path` and, on macOS,
+/// clears the user flags of every entry, without following a symbolic link. Best effort: the
+/// removal that follows decides.
+fn make_removable(path: &Path) {
+    use std::os::unix::fs::PermissionsExt as _;
+    let mut pending = vec![path.to_path_buf()];
+    while let Some(entry) = pending.pop() {
+        let Ok(metadata) = std::fs::symlink_metadata(&entry) else {
+            continue;
+        };
+        clear_user_flags(&entry);
+        if !metadata.is_dir() {
+            continue;
+        }
+        let mode = metadata.permissions().mode() | 0o700;
+        let _ = std::fs::set_permissions(&entry, std::fs::Permissions::from_mode(mode));
+        if let Ok(children) = std::fs::read_dir(&entry) {
+            pending.extend(children.flatten().map(|child| child.path()));
+        }
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn clear_user_flags(path: &Path) {
+    use std::os::unix::ffi::OsStrExt as _;
+    let Ok(text) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return;
+    };
+    // SAFETY: `text` is a NUL-terminated path that outlives the call; `lchflags` does not follow
+    // a final symbolic link and touches no memory of ours. Clearing every flag the owner may
+    // clear; a system flag stays and the removal reports it.
+    let _ = unsafe { libc::lchflags(text.as_ptr(), 0) };
+}
+
+#[cfg(not(target_os = "macos"))]
+fn clear_user_flags(_path: &Path) {}
 
 /// Whether `path` is absolute and normal: no empty, `.` or `..` segment and no trailing slash.
 fn is_absolute_normal(path: &str) -> bool {
@@ -571,6 +639,8 @@ impl MacosAdapter {
             .map(|stream| tokio::spawn(drain(stream, Arc::clone(&captured), false)));
         let reaped = Arc::new(Mutex::new(false));
         let reaping = Arc::clone(&reaped);
+        let ending = admitted.clone();
+        let ending_id = id.clone();
         tokio::spawn(async move {
             let _ = tokio::task::spawn_blocking(move || await_exit_unreaped(pid)).await;
             // A process the run started may still hold its output, and the run is not over until
@@ -587,8 +657,13 @@ impl MacosAdapter {
             while group_remains(pid) && tokio::time::Instant::now() < settle {
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             }
-            // Removed before the run is observed ended, so `wait` never returns while it exists.
-            drop(private);
+            // Removed before the run is observed ended, so `wait` never returns while it exists
+            // unless its removal failed, which is audited.
+            if let Some((directory, resolved)) = private {
+                // The removal below decides; the guard must not try again, silently.
+                let _ = directory.keep();
+                remove_private_tmpdir(&ending, &ending_id, &resolved);
+            }
             let _ = phase.send(match ended {
                 Ok(status) => Phase::Ended(RunExit {
                     code: status.code(),
@@ -1039,6 +1114,112 @@ mod tests {
                 "{sealed}"
             );
         }
+    }
+
+    // Security F1: the relative entry would otherwise resolve through the link and make its target
+    // readable and executable.
+    #[test]
+    fn a_relative_exec_subpath_reached_through_a_symlink_is_refused() {
+        let workspace = tempfile::tempdir().expect("workspace");
+        let outside = tempfile::tempdir().expect("outside");
+        std::fs::create_dir(outside.path().join("bin")).expect("bin");
+        std::os::unix::fs::symlink(outside.path(), workspace.path().join("target")).expect("link");
+        for subpath in ["target", "target/bin", "target/absent"] {
+            let admitted = admitted_in(
+                workspace.path(),
+                ConfinementProfile {
+                    exec_subpaths: vec![subpath.into()],
+                    ..ConfinementProfile::default()
+                },
+            );
+            let error =
+                MacosAdapter::policy(&admitted, Path::new("/bin/sh"), None).expect_err(subpath);
+            assert_eq!(
+                driver_code(&error),
+                seatbelt::PATH_UNREPRESENTABLE,
+                "{subpath}"
+            );
+        }
+        let admitted = admitted_in(
+            workspace.path(),
+            ConfinementProfile {
+                exec_subpaths: vec!["built/later".into()],
+                ..ConfinementProfile::default()
+            },
+        );
+        MacosAdapter::policy(&admitted, Path::new("/bin/sh"), None)
+            .expect("a relative exec subpath not created yet");
+    }
+
+    /// A directory the owner cannot read, write or search, holding a file.
+    fn locked_tree(parent: &Path) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt as _;
+        let private = parent.join("private");
+        let kept = private.join("kept");
+        std::fs::create_dir_all(&kept).expect("kept");
+        std::fs::write(kept.join("file"), b"x").expect("file");
+        std::fs::set_permissions(&kept, std::fs::Permissions::from_mode(0o000)).expect("lock");
+        private
+    }
+
+    // Security F2: what the run left in its TMPDIR does not keep the TMPDIR.
+    #[test]
+    fn a_private_tmpdir_holding_a_locked_directory_is_removed() {
+        let parent = tempfile::tempdir().expect("parent");
+        let private = locked_tree(parent.path());
+        let (sink, records) = recording();
+        let admitted = admitted_in(
+            parent.path(),
+            ConfinementProfile {
+                audit: Some(sink),
+                ..ConfinementProfile::default()
+            },
+        );
+        let before = records.lock().len();
+        remove_private_tmpdir(&admitted, &RunId::new("macos-1-1".to_owned()), &private);
+        assert!(!private.exists(), "the private TMPDIR outlived its removal");
+        assert_eq!(records.lock().len(), before, "a removal was audited");
+    }
+
+    // Security F2: a TMPDIR that cannot be removed is audited by name, never reported gone.
+    #[test]
+    fn a_private_tmpdir_that_cannot_be_removed_is_audited() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let parent = tempfile::tempdir().expect("parent");
+        let holder = parent.path().join("holder");
+        std::fs::create_dir(&holder).expect("holder");
+        let private = locked_tree(&holder);
+        std::fs::set_permissions(&holder, std::fs::Permissions::from_mode(0o500)).expect("hold");
+        let (sink, records) = recording();
+        let admitted = admitted_in(
+            parent.path(),
+            ConfinementProfile {
+                audit: Some(sink),
+                ..ConfinementProfile::default()
+            },
+        );
+        let before = records.lock().len();
+        remove_private_tmpdir(&admitted, &RunId::new("macos-1-1".to_owned()), &private);
+        let left = private.exists();
+        std::fs::set_permissions(&holder, std::fs::Permissions::from_mode(0o700)).expect("free");
+        let kept = private.join("kept");
+        if kept.exists() {
+            std::fs::set_permissions(&kept, std::fs::Permissions::from_mode(0o700))
+                .expect("unlock");
+        }
+        assert!(left, "the parent did not hold the private TMPDIR");
+        let records = records.lock();
+        assert_eq!(records.len(), before + 1, "{records:?}");
+        let record = serde_json::to_value(&records[before]).expect("record");
+        assert_eq!(record["event"], "private_tmpdir_left", "{record}");
+        assert_eq!(record["run"], "macos-1-1", "{record}");
+        assert_eq!(record["path"], private.to_str().expect("UTF-8"), "{record}");
+        assert!(
+            record["error"]
+                .as_str()
+                .is_some_and(|error| !error.is_empty()),
+            "{record}"
+        );
     }
 
     #[test]
