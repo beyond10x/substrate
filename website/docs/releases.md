@@ -14,6 +14,16 @@ fails when the two differ. Earlier releases are in the
 
 ## 0.14.0 (2026-10-27)
 
+Published by [release run 40558015370](https://github.com/beyond10x/substrate/actions/runs/40558015370)
+for tag `0.14.0` at commit `0b9d50c6105cacc7f959eb41d5e65f252084a282`. All three images and the
+binaries' `SHA256SUMS` were keyless-signed and verified against `release.yml@refs/tags/0.14.0` by
+the release workflow, and each digest resolved anonymously:
+
+- Image: `ghcr.io/beyond10x/b10x-substrate-daemon:0.14.0` at `sha256:a22fc8a1707ac750eb86115422e26ecfb2fde64fb3df588e9fced32ef2a52182`.
+- Contract bundle: `ghcr.io/beyond10x/b10x-substrate-wire:0.23.0` at `sha256:c2a50222da154028011a794cc93724043943581ba4ee44051c38dd084b759ff5`, unchanged since 0.11.0 and signed again by this release.
+- Disposable MCP image: `ghcr.io/beyond10x/b10x-substrate-mcp:0.14.0` at `sha256:c6844980db262412db962228bb263421e285d57226e7c8a3a28fbbb85d589d42`, development-only.
+- Binaries: `substrate-daemon-0.14.0-x86_64-unknown-linux-gnu.tar.gz` and `b10x-substrate-0.14.0-x86_64-unknown-linux-gnu.tar.gz`, listed in `SHA256SUMS` (`sha256:521435c3007898ade2a021e13f799dd5789fddc44f81cfce051d186b6c67f480`) and signed in `SHA256SUMS.sigstore.json`.
+
 ### Added in 0.14.0
 
 - The confinement profile gains `workspace_access`, the wire's `WorkspaceAccess`, re-exported from
