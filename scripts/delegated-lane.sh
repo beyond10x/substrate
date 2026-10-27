@@ -82,6 +82,33 @@ if [[ -z "${systemd_line}" ]]; then
 fi
 echo "delegated-lane: ${systemd_line}"
 
+# The confinement contract's adversary and security-review cases that need the delegated root ran
+# above too, and are absent, exit 0, without it. Run each binary again and require every case's
+# own `executed` line and no `ABSENT` line, so a case that did not run fails here.
+require_executed() {
+  local binary="$1"
+  shift
+  local log
+  log="$(cargo test -p b10x-substrate-host --locked --test "${binary}" \
+    -- --nocapture --test-threads=1 2>&1)" || { printf '%s\n' "${log}" >&2; exit 1; }
+  printf '%s\n' "${log}"
+  if printf '%s\n' "${log}" | grep -q 'ABSENT'; then
+    echo "delegated-lane: ${binary} reported a case absent" >&2
+    exit 1
+  fi
+  local line
+  for line in "$@"; do
+    if ! printf '%s\n' "${log}" | grep -qF "${line}"; then
+      echo "delegated-lane: ${binary} did not print '${line}'" >&2
+      exit 1
+    fi
+  done
+  echo "delegated-lane: ${binary} executed its delegated cases"
+}
+require_executed adversary_confinement_s0_delegated \
+  'adversary writable root: executed' 'adversary render parity: executed'
+require_executed security_review_confinement 'security review linux start env: executed'
+
 # The public SDK owns a separate clean-room journey against the shipped daemon binary. It proves
 # PTY resize, live metrics and orderly whole-tree cleanup through SDK types only; without this
 # explicit command that test would be absent from the daemon-only lane below.

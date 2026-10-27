@@ -66,6 +66,37 @@ pub fn lane_size(lane: &str) -> usize {
     scenarios(lane, |_| true).len()
 }
 
+/// The adapters bound to one platform: each is absent on every other host, and present on its own
+/// whatever a request says. The absence of any other adapter (`systemd` without a user manager,
+/// `oci` without a runtime, `pod` without a cluster) is set up by the request the opener makes, so
+/// it holds on every host.
+const PLATFORM_ADAPTERS: [(&str, bool); 2] = [
+    ("linux", cfg!(target_os = "linux")),
+    ("macos", cfg!(target_os = "macos")),
+];
+
+/// Splits `scenarios` into those this host can execute and those it cannot: an
+/// `absent-<adapter>-*` scenario whose adapter is bound to this host's platform, where it is
+/// present and the absence the scenario asserts cannot be observed. Such a scenario is neither
+/// passed nor dropped: the caller names each one and counts it apart.
+pub fn executable_here(scenarios: Vec<(String, Value)>) -> (Vec<(String, Value)>, Vec<String>) {
+    let present_here = |id: &str| {
+        id.strip_prefix(AUTHORED)
+            .and_then(|name| name.strip_prefix("absent-"))
+            .is_some_and(|rest| {
+                PLATFORM_ADAPTERS
+                    .iter()
+                    .any(|(adapter, present)| *present && rest.starts_with(&format!("{adapter}-")))
+            })
+    };
+    let (absent_unobservable, executable): (Vec<_>, Vec<_>) =
+        scenarios.into_iter().partition(|(id, _)| present_here(id));
+    (
+        executable,
+        absent_unobservable.into_iter().map(|(id, _)| id).collect(),
+    )
+}
+
 fn text(value: &Value) -> &str {
     value
         .as_str()
