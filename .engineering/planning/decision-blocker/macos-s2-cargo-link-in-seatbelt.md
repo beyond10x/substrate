@@ -7,7 +7,7 @@ title: How cargo links inside the macOS S2 Seatbelt policy
 relations:
 - blocks: story:macos-seatbelt-policy-runs-cargo-test
 withholds: test_result
-revision: 3
+revision: 4
 transitions:
 - {from: "open", to: "cleared", at: "2026-10-27T06:33:24Z", actor: "human:timo", revision: 3}
 ---
@@ -59,3 +59,10 @@ is done in the test, and `story:confined-cargo-build-links-without-the-xcrun-shi
 the product half, with b (widens exec to `/bin`) and c (a per-user `/var/folders` path the policy
 rules exclude) rejected. Reason: a needs no policy widening; the stop rule fired, so a is the next
 attempt, not a third retry of the same cause.
+
+## Attribution
+
+The `open -> cleared` transition at revision 3 records actor `human:timo`, the CLI's default
+(`human:$USER`). The clearing decision was the delivery orchestrator's (session
+`b10x-chef-orchestrator`, decision D75, under its delivery grant), not Timo's. The transition is
+pushed and is not rewritten.
