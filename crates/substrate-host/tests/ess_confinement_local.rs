@@ -58,6 +58,7 @@ fn open_portable(
         // The setup the scenario names: a runtime program path that does not exist.
         "oci" => AdapterRequest::Oci(OciRequest {
             runtime: PathBuf::from("/nonexistent/substrate-oci-runtime"),
+            workspace_root: PathBuf::from("/nonexistent/substrate-oci-workspaces"),
             writable_roots: Vec::new(),
         }),
         // The setup the scenario names: no cluster configuration.
@@ -207,6 +208,7 @@ fn systemd_without_a_user_manager_is_unserved() {
 fn oci_without_a_runtime_program_is_unserved() {
     let error = confinement::open(AdapterRequest::Oci(OciRequest {
         runtime: PathBuf::from("/nonexistent/substrate-oci-runtime"),
+        workspace_root: PathBuf::from("/nonexistent/substrate-oci-workspaces"),
         writable_roots: Vec::new(),
     }))
     .err()

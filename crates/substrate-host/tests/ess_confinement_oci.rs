@@ -59,6 +59,12 @@ fn canonical_tempdir() -> (tempfile::TempDir, PathBuf) {
     (dir, path)
 }
 
+/// The operator's workspace root these cases declare: every [`canonical_tempdir`] sits directly
+/// beneath it.
+fn workspace_root() -> PathBuf {
+    std::fs::canonicalize(std::env::temp_dir()).expect("canonical temporary directory")
+}
+
 // ---- portable: a stand-in runtime answers `info` ----
 
 /// Stand-in runtime programs, written once before any of them runs.
@@ -79,7 +85,17 @@ fn fakes() -> &'static Fakes {
             )
         };
         let seccomp = "\"name=seccomp,profile=builtin\"";
+        // A podman whose API socket is beneath `held/`, a directory beside the stand-ins.
+        std::fs::create_dir(root.join("held")).expect("socket directory");
+        let podman = format!(
+            "{{\"host\":{{\"security\":{{\"seccompEnabled\":true,\"rootless\":true}},\
+             \"cgroupControllers\":[\"cpu\",\"memory\",\"pids\"],\"cpus\":4,\
+             \"remoteSocket\":{{\"exists\":true,\"path\":\"unix://{}/held/podman.sock\"}}}},\
+             \"version\":{{\"Version\":\"5.0.0\"}}}}",
+            root.display()
+        );
         for (name, info) in [
+            ("podman-socket", Some(podman)),
             ("docker-ok", Some(docker(seccomp, true))),
             ("docker-no-limits", Some(docker(seccomp, false))),
             (
@@ -138,6 +154,7 @@ fn open_fake(
 ) -> Result<Arc<dyn ConfinementAdapter>, ConfinementError> {
     confinement::open(AdapterRequest::Oci(OciRequest {
         runtime: fake(name),
+        workspace_root: workspace_root(),
         writable_roots,
     }))
 }
@@ -149,6 +166,7 @@ fn pair(args: &[String], flag: &str) -> Option<String> {
 }
 
 #[test]
+#[allow(clippy::too_many_lines)] // One rendered argv, then each flag it holds.
 fn render_holds_the_bounds_and_the_image_digest_sandbox_lacks() {
     let (_ws, workspace) = canonical_tempdir();
     std::fs::create_dir(workspace.join("sub")).expect("workdir");
@@ -192,9 +210,14 @@ fn render_holds_the_bounds_and_the_image_digest_sandbox_lacks() {
     assert_eq!(pair(args, "--cpus").as_deref(), Some("0.500"));
     assert_eq!(pair(args, "--").as_deref(), Some(PINNED));
     assert!(!args.iter().any(|arg| arg.contains("seccomp")), "{args:?}");
-    // The posture, and the command after the image.
-    assert_eq!(&args[..2], ["run", "--rm"]);
+    // The posture, and the command after the image. The container is created, then started
+    // attached, inspected and removed: never `--rm`, which would discard its state.
+    assert_eq!(args[0], "create", "{args:?}");
+    assert!(!args.iter().any(|arg| arg == "--rm"), "{args:?}");
+    assert!(args.iter().any(|arg| arg == "--init"), "{args:?}");
     for (flag, value) in [
+        ("--pull", "never"),
+        ("--ipc", "none"),
         ("--network", "none"),
         ("--cap-drop", "ALL"),
         ("--security-opt", "no-new-privileges"),
@@ -206,17 +229,30 @@ fn render_holds_the_bounds_and_the_image_digest_sandbox_lacks() {
         assert_eq!(pair(args, flag).as_deref(), Some(value), "{flag}: {args:?}");
     }
     assert!(args.iter().any(|arg| arg == "--read-only"));
+    assert!(!args.iter().any(|arg| arg == "-v"), "{args:?}");
     let binds: Vec<&String> = args
         .windows(2)
-        .filter(|window| window[0] == "-v")
+        .filter(|window| window[0] == "--mount")
         .map(|window| &window[1])
         .collect();
     assert_eq!(
         binds,
         [
-            &format!("{}:/workspace", workspace.display()),
-            &format!("{}:/opt/ro:ro", read_only.display()),
+            &format!("type=bind,source={},target=/workspace", workspace.display()),
+            &format!(
+                "type=bind,source={},target=/opt/ro,readonly",
+                read_only.display()
+            ),
         ]
+    );
+    let embedder = args
+        .iter()
+        .find_map(|arg| arg.strip_prefix(&format!("{}=", oci::EMBEDDER_LABEL)))
+        .expect("the embedder label");
+    assert_eq!(
+        embedder.split('/').nth(2),
+        Some(std::process::id().to_string().as_str()),
+        "{embedder}"
     );
     let env: Vec<&String> = args
         .windows(2)
@@ -259,6 +295,7 @@ fn open_fails_closed_without_a_runtime_seccomp_or_info() {
     ] {
         let error = confinement::open(AdapterRequest::Oci(OciRequest {
             runtime: runtime.clone(),
+            workspace_root: workspace_root(),
             writable_roots: Vec::new(),
         }))
         .err()
@@ -282,6 +319,7 @@ fn open_fails_closed_without_a_runtime_seccomp_or_info() {
 fn open_reads_rootless_and_proves_image_digest_pinned() {
     let probe = oci::probe(&OciRequest {
         runtime: fake("docker-ok"),
+        workspace_root: workspace_root(),
         writable_roots: Vec::new(),
     })
     .expect("probed");
@@ -522,9 +560,10 @@ fn a_declared_writable_root_is_bound_writable_and_checked_on_the_host() {
     let admitted = adapter.admit(&profile("cache")).expect("admitted");
     let rendered = adapter.render(&admitted, &command).expect("rendered");
     assert!(
-        rendered
-            .args
-            .contains(&format!("{}:/cache", cache.display())),
+        rendered.args.contains(&format!(
+            "type=bind,source={},target=/cache",
+            cache.display()
+        )),
         "{:?}",
         rendered.args
     );
@@ -560,7 +599,120 @@ fn render_refuses_an_environment_the_runtime_cannot_carry_exactly() {
     }
 }
 
+/// Security F1 (`story:oci-adapter`): the workspace is a directory directly beneath the operator's
+/// workspace root, as under `linux`; anything else is `workspace.path-escape`, and the refused
+/// render leaves an audit record.
+#[test]
+fn a_workspace_not_directly_beneath_the_workspace_root_is_refused_and_audited() {
+    let (_ws, workspace) = canonical_tempdir();
+    std::fs::create_dir(workspace.join("nested")).expect("nested");
+    let adapter = open_fake("docker-ok", Vec::new()).expect("opens");
+    let command = Command {
+        argv: vec!["/bin/true".into()],
+        env: BTreeMap::new(),
+    };
+    for refused in [PathBuf::from("/"), workspace.join("nested")] {
+        let (sink, records) = recording();
+        let admitted = adapter
+            .admit(&ConfinementProfile {
+                image: Some(PINNED.into()),
+                workspace: Some(refused.clone()),
+                audit: Some(sink),
+                ..ConfinementProfile::default()
+            })
+            .expect("admitted");
+        let error = adapter
+            .render(&admitted, &command)
+            .expect_err("a workspace elsewhere is refused");
+        assert_eq!(
+            error.code(),
+            "workspace.path-escape",
+            "{}",
+            refused.display()
+        );
+        let records = events(&records);
+        assert_eq!(records.len(), 2, "{records:?}");
+        assert_eq!(records[1]["event"], "profile_refused");
+        assert_eq!(records[1]["code"], "workspace.path-escape");
+    }
+    let admitted = adapter
+        .admit(&ConfinementProfile {
+            image: Some(PINNED.into()),
+            workspace: Some(workspace),
+            ..ConfinementProfile::default()
+        })
+        .expect("admitted");
+    adapter
+        .render(&admitted, &command)
+        .expect("a workspace directly beneath the root renders");
+}
+
+/// Security F4 (`story:oci-adapter`): a workspace, read-only root or writable root that is, or
+/// holds, the socket the runtime reports is refused by name.
+#[test]
+fn a_bind_holding_the_runtime_socket_is_refused_by_name() {
+    let holder = fakes().root.join("held");
+    let adapter = open_fake(
+        "podman-socket",
+        vec![DeclaredWritableRoot {
+            name: "held".into(),
+            path: holder.clone(),
+        }],
+    )
+    .expect("opens");
+    let (_ws, workspace) = canonical_tempdir();
+    let command = Command {
+        argv: vec!["/bin/true".into()],
+        env: BTreeMap::new(),
+    };
+    let base = || ConfinementProfile {
+        image: Some(PINNED.into()),
+        workspace: Some(workspace.clone()),
+        ..ConfinementProfile::default()
+    };
+    for (case, profile) in [
+        (
+            "the workspace",
+            ConfinementProfile {
+                workspace: Some(fakes().root.clone()),
+                ..base()
+            },
+        ),
+        (
+            "a read-only root",
+            ConfinementProfile {
+                read_only_roots: vec![ReadOnlyRoot {
+                    host_path: holder.display().to_string(),
+                    mount: "/opt/held".into(),
+                }],
+                ..base()
+            },
+        ),
+        (
+            "a writable root",
+            ConfinementProfile {
+                writable_roots: vec![WritableHostRoot {
+                    host: "held".into(),
+                    mount: "/held".into(),
+                }],
+                ..base()
+            },
+        ),
+    ] {
+        let admitted = adapter.admit(&profile).expect(case);
+        let error = adapter.render(&admitted, &command).expect_err(case);
+        assert_eq!(error.code(), oci::RUNTIME_SOCKET_EXPOSED, "{case}: {error}");
+    }
+    let admitted = adapter.admit(&base()).expect("admitted");
+    adapter
+        .render(&admitted, &command)
+        .expect("a workspace beside the socket renders");
+}
+
 // ---- the oci lane: a real container runtime ----
+
+/// Held while an adapter opens, so the orphan case's sweep is the only one in this process.
+static OPENING: Mutex<()> = Mutex::new(());
 
 /// The runtime's program, or the reason the lane is absent.
 fn lane() -> Result<PathBuf, String> {
@@ -579,8 +731,10 @@ fn open_lane(
     runtime: &Path,
     writable_roots: Vec<DeclaredWritableRoot>,
 ) -> Arc<dyn ConfinementAdapter> {
+    let _opening = OPENING.lock();
     let adapter = confinement::open(AdapterRequest::Oci(OciRequest {
         runtime: runtime.to_path_buf(),
+        workspace_root: workspace_root(),
         writable_roots,
     }))
     .unwrap_or_else(|error| panic!("{LANE_ENV}=1 and oci does not open: {error}"));
@@ -923,4 +1077,93 @@ fn an_egress_profile_is_refused_before_any_container_starts() {
         .collect();
     assert_eq!(events, ["profile_refused"], "no run started");
     println!("ESS confinement oci egress: executed");
+}
+
+/// Creates (never starts) a container carrying the `oci` labels and `embedder`, returning its id.
+fn labelled_container(runtime: &Path, embedder: &str) -> String {
+    let output = std::process::Command::new(runtime)
+        .args([
+            "create",
+            "--pull",
+            "never",
+            "--label",
+            &format!("{}=oci", oci::LABEL),
+            "--label",
+            &format!("{}={embedder}", oci::EMBEDDER_LABEL),
+            "--entrypoint",
+            "",
+            "--",
+            &image(),
+            "/bin/true",
+        ])
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("the runtime runs");
+    assert!(output.status.success(), "create: {output:?}");
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
+fn exists(runtime: &Path, id: &str) -> bool {
+    std::process::Command::new(runtime)
+        .args(["container", "inspect", "--format", "{{.Id}}", id])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("the runtime runs")
+        .success()
+}
+
+/// Security F6 (`story:oci-adapter`): `open` removes a labelled container whose embedder is gone
+/// and reports how many it removed; one whose embedder it cannot judge (another pid namespace)
+/// stays.
+#[test]
+fn open_removes_a_container_whose_embedder_is_gone() {
+    let runtime = match lane() {
+        Ok(runtime) => runtime,
+        Err(reason) => {
+            println!("ESS confinement oci orphans: ABSENT ({reason})");
+            return;
+        }
+    };
+    drop(open_lane(&runtime, Vec::new()));
+    let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id").expect("boot id");
+    let namespace = std::fs::read_link("/proc/self/ns/pid").expect("pid namespace");
+    let namespace = namespace
+        .to_str()
+        .and_then(|link| link.strip_prefix("pid:["))
+        .and_then(|link| link.strip_suffix(']'))
+        .expect("pid:[inode]")
+        .to_owned();
+    let pid = std::process::id();
+    let _opening = OPENING.lock();
+    // This process, but started at tick 0: a process that is gone.
+    let orphan = labelled_container(&runtime, &format!("{}/{namespace}/{pid}/0", boot.trim()));
+    let foreign = labelled_container(&runtime, &format!("{}/1/{pid}/0", boot.trim()));
+    let opened = oci::open_adapter(OciRequest {
+        runtime: runtime.clone(),
+        workspace_root: workspace_root(),
+        writable_roots: Vec::new(),
+    });
+    let orphan_left = exists(&runtime, &orphan);
+    let foreign_left = exists(&runtime, &foreign);
+    for id in [&orphan, &foreign] {
+        let _ = std::process::Command::new(&runtime)
+            .args(["rm", "--force", id])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .status();
+    }
+    let adapter = opened.expect("opens");
+    assert!(!orphan_left, "the orphan remains");
+    assert!(
+        foreign_left,
+        "a container of another pid namespace was removed"
+    );
+    assert!(
+        adapter.orphans_removed() >= 1,
+        "{}",
+        adapter.orphans_removed()
+    );
+    println!("ESS confinement oci orphans: executed");
 }
