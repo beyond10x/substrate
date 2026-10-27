@@ -182,6 +182,8 @@ fn runtime() -> tokio::runtime::Runtime {
         .expect("runtime")
 }
 
+/// Red until `story:pod-unknown-cleanup-outlives-adapter` lands. Not in `scripts/pod-lane.sh`:
+/// run it by hand against a kind cluster with the pod lane's variables and `--test-threads=1`.
 #[test]
 fn adversary_lane_a_run_read_unknown_leaves_nothing_once_its_process_has_ended() {
     let Some((kubeconfig, kind_node)) = lane() else {
@@ -209,6 +211,8 @@ fn adversary_lane_a_run_read_unknown_leaves_nothing_once_its_process_has_ended()
     );
 }
 
+/// Red until `story:pod-unknown-cleanup-outlives-adapter` lands. Not in `scripts/pod-lane.sh`:
+/// run it by hand against a kind cluster with the pod lane's variables and `--test-threads=1`.
 #[tokio::test(flavor = "multi_thread")]
 async fn adversary_lane_a_run_read_unknown_is_removed_after_a_longer_kubelet_absence() {
     let Some((kubeconfig, kind_node)) = lane() else {
