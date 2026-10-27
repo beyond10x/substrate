@@ -7,6 +7,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- The GitHub release carries prebuilt x86_64 Linux binaries: `substrate-daemon-<version>-x86_64-unknown-linux-gnu.tar.gz` and `b10x-substrate-<version>-x86_64-unknown-linux-gnu.tar.gz`, each with `LICENSE`, `THIRD_PARTY_LICENSES.html` and `README.md`, plus `SHA256SUMS` over both and `SHA256SUMS.sigstore.json`, a keyless `cosign sign-blob` bundle by the release workflow's identity, verified with `cosign verify-blob` before the release is created. The binaries come from the Dockerfile's pinned `builder` stage (new target `release-binaries`, which now also builds the CLI). Before any image tag moves, the workflow refuses a binary that needs a glibc newer than 2.35 or a shared library other than OpenSSL 3, zlib, `libgcc_s` and glibc's own, that does not start in a digest-pinned Ubuntu 22.04 image, or an archived daemon that is not byte for byte the daemon of the image being published; a recovery run that reuses a published image archives that image's daemon. A recovery dispatch of a tag whose source predates the `release-binaries` stage publishes the release without binaries and says so in its notes and summary; a tag push without the stage is refused. README.md § *Release binaries* states the runtime needs, the verification commands and both signing identities (`@refs/tags/<version>` for a tag push, `@refs/heads/main` for a recovery dispatch).
+
 ### Changed
 
 - The public site is built with Docusaurus on the shared Docs System, with the same pages, paths, grouping and heading IDs, and the start page unchanged. The Mermaid diagrams on the operations and system model pages render as diagrams, code blocks are highlighted, and the adapter matrices show `TRUE`, `UNKNOWN` (proved by the open-time probe on this host) and `FALSE` chips.
