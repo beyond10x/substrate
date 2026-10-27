@@ -128,7 +128,7 @@ pub(crate) fn open(
 
 /// The Apple targets the developer tools' `clang` links for. Cargo reads the linker of the
 /// toolchain's host or `--target` triple, which need not be the architecture this adapter was
-/// built for (an x86_64 toolchain on Apple silicon, a daemon under Rosetta), so each is named.
+/// built for (an `x86_64` toolchain on Apple silicon, a daemon under Rosetta), so each is named.
 const APPLE_DARWIN_TRIPLES: [&str; 2] = ["aarch64-apple-darwin", "x86_64-apple-darwin"];
 
 /// The environment `/usr/bin/xcrun` runs in at open: nothing of the embedding process's, so no
@@ -1837,7 +1837,11 @@ mod tests {
             Vec::new()
         );
         let error = DeveloperTools::Absent
-            .environment_at(Some(other.as_path()), &[other.clone()], &BTreeMap::new())
+            .environment_at(
+                Some(other.as_path()),
+                std::slice::from_ref(&other),
+                &BTreeMap::new(),
+            )
             .expect_err("selected after an open that found none");
         assert!(error.to_string().contains("found none"), "{error}");
     }
