@@ -1,16 +1,14 @@
-//! The confinement contract's macos lane (`story:macos-adapter-on-seatbelt`, S1).
+//! The confinement contract's macos lane (`story:macos-adapter-on-seatbelt`, S1, and
+//! `story:macos-seatbelt-policy-runs-cargo-test`, S2).
 //!
 //! Executes every authored `-on-macos` scenario of `spec/confinement-suite.json` against the real
 //! `macos` adapter, opened through `confinement::open` on a macOS host, and `absent-linux-*`
-//! against `linux`, which is absent here. The count is read from the suite and must equal what
-//! ran.
+//! against `linux`, which is absent here. The count is pinned, the suite must hold exactly it, and
+//! it must equal what ran.
 //!
-//! Every macos open step states the final declared set, after
-//! `story:macos-seatbelt-policy-runs-cargo-test` (S2). S1's adapter proves that set less
-//! `sealed_paths`, `exec_subpaths` and `private_tmpdir`, so the runner compares the adapter's facts
-//! with the declared set less exactly those three, and each `macos-s2-*` admission is asserted
-//! refused `confinement.fact-unserved` by the fact it requires. S2 flips both: it removes the
-//! subtraction and runs `macos-s2-*` through the runner.
+//! Every macos open step states the final declared set, `sealed_paths`, `exec_subpaths` and
+//! `private_tmpdir` included, and the adapter must have proved exactly that set; each
+//! `macos-s2-*` admission runs through the runner like every other scenario.
 //!
 //! Beside the suite: a run is confined to its workspace and its declared read-only roots, a root
 //! that would appear anywhere but at its host path is refused by name, and `limits`,
@@ -26,7 +24,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::Mutex;
-use serde_json::{Value, json};
+use serde_json::json;
 use substrate_host::confinement::{
     self, AdapterName, AdapterRequest, AuditRecord, AuditSink, Command, ConfinementAdapter,
     ConfinementError, ConfinementProfile, ContractFamily, Fact, Network, ProcessBounds, RunState,
@@ -37,8 +35,6 @@ use substrate_host::seatbelt::SANDBOX_EXEC;
 use substrate_wire::{READ_ONLY_ROOT_INVALID, ReadOnlyRoot};
 
 const BASH: &str = "/bin/bash";
-const OPEN: &str = "substrate.confinement.OpenAdapter";
-const ADMIT: &str = "substrate.confinement.AdmitProfile";
 
 fn macos() -> Arc<dyn ConfinementAdapter> {
     confinement::open(AdapterRequest::Macos(MacosRequest::default()))
@@ -67,42 +63,6 @@ fn fact_name(fact: &Fact) -> String {
         .to_owned()
 }
 
-fn is_s2(id: &str) -> bool {
-    id.contains("/macos-s2-")
-}
-
-/// The scenario with every macos open step's declared set less [`S2_FACTS`], each of which it must
-/// declare: S1's adapter proves exactly that.
-fn s1_declared(id: &str, scenario: &Value) -> Value {
-    let mut scenario = scenario.clone();
-    for step in scenario["steps"].as_array_mut().expect("steps") {
-        if step["command"] != OPEN || step["input"]["adapter"]["value"] != "macos" {
-            continue;
-        }
-        let facts = step["input"]["facts"]["value"]
-            .as_array_mut()
-            .expect("the open step declares facts");
-        for fact in &S2_FACTS {
-            let name = json!(fact_name(fact));
-            assert!(
-                facts.contains(&name),
-                "{id} no longer declares {name}: the subtraction for {S2_STORY} is stale"
-            );
-            facts.retain(|held| *held != name);
-        }
-    }
-    scenario
-}
-
-fn strings(value: &Value) -> Vec<String> {
-    value
-        .as_array()
-        .expect("a list")
-        .iter()
-        .map(|item| item.as_str().expect("text").to_owned())
-        .collect()
-}
-
 fn recording() -> (AuditSink, Arc<Mutex<Vec<AuditRecord>>>) {
     let records = Arc::new(Mutex::new(Vec::new()));
     let sink_records = Arc::clone(&records);
@@ -125,102 +85,51 @@ fn events(records: &Mutex<Vec<AuditRecord>>) -> Vec<String> {
         .collect()
 }
 
-/// A `macos-s2-*` admission S1 refuses: the scenario expects S2's admission, and S1 answers
-/// `confinement.fact-unserved` naming the S2 fact the profile requires.
-fn refused_until_s2(id: &str, scenario: &Value) {
-    let steps = scenario["steps"].as_array().expect("steps");
-    let admit = steps
-        .iter()
-        .find(|step| step["command"] == ADMIT && step["step"] == "execute_command")
-        .unwrap_or_else(|| panic!("{id} admits no profile"));
-    let expected = steps
-        .iter()
-        .find(|step| step["step"] == "expect_outcome" && step["outcome"]["command"] == ADMIT)
-        .unwrap_or_else(|| panic!("{id} expects no admission outcome"));
-    assert_eq!(
-        expected["outcome"]["outcome"], "admitted",
-        "{id} is an S2 admission"
-    );
-    let input = &admit["input"];
-    let families: Vec<ContractFamily> = strings(&input["required_families"]["value"])
-        .iter()
-        .map(|name| serde_json::from_value(json!(name)).expect("family"))
-        .collect();
-    let facts: Vec<Fact> = strings(&input["required_facts"]["value"])
-        .iter()
-        .map(|name| serde_json::from_value(json!(name)).expect("fact"))
-        .collect();
-    let pending = facts
-        .iter()
-        .find(|fact| S2_FACTS.contains(fact))
-        .unwrap_or_else(|| panic!("{id} requires no S2 fact"))
-        .clone();
-    let (sink, records) = recording();
-    let result = macos().admit(&ConfinementProfile {
-        families,
-        facts,
-        audit: Some(sink),
-        ..ConfinementProfile::default()
-    });
-    match result {
-        Err(ConfinementError::FactUnserved {
-            adapter: AdapterName::Macos,
-            fact,
-        }) => assert_eq!(
-            fact, pending,
-            "{id}: refused by another fact than the S2 one it requires; {S2_STORY} flips this"
-        ),
-        Ok(_) => panic!(
-            "{id} is admitted: {S2_STORY} has landed, so run it through the suite runner and \
-             drop this refusal"
-        ),
-        Err(other) => panic!("{id}: expected confinement.fact-unserved until {S2_STORY}: {other}"),
-    }
-    assert_eq!(events(&records), ["profile_refused"], "{id}");
-}
+/// The authored `-on-macos` scenarios `spec/confinement-suite.json` holds. Pinned, so a scenario
+/// lost or renamed out of the lane fails here instead of shrinking what runs.
+const MACOS_DECLARED: usize = 8;
+
+/// Of those, the `macos-s1-*` and the `macos-s2-*` scenarios; the rest are `absent-*`.
+const MACOS_S1: usize = 4;
+const MACOS_S2: usize = 3;
 
 #[test]
 fn ess_confinement_macos_lane_executes_every_authored_macos_scenario() {
     let scenarios = support::scenarios("macos", |_| true);
-    let declared = support::lane_size("macos");
-    assert!(declared > 0, "the suite has no macos scenario");
-    assert_eq!(scenarios.len(), declared);
-    let (pending, runnable): (Vec<_>, Vec<_>) =
-        scenarios.into_iter().partition(|(id, _)| is_s2(id));
-    let s1 = runnable
-        .iter()
-        .filter(|(id, _)| id.contains("/macos-s1-"))
-        .count();
-    assert!(s1 > 0, "the suite has no macos-s1 scenario");
-    assert!(
-        runnable
-            .iter()
-            .all(|(id, _)| id.contains("/macos-s1-") || id.contains("/absent-")),
-        "a macos-lane scenario is neither S1's, S2's nor an absent adapter's: {:?}",
-        runnable.iter().map(|(id, _)| id).collect::<Vec<_>>()
+    let declared = MACOS_DECLARED;
+    assert_eq!(
+        scenarios.len(),
+        declared,
+        "spec/confinement-suite.json holds another number of authored -on-macos scenarios than \
+         this lane pins"
     );
-    let runnable: Vec<(String, Value)> = runnable
-        .iter()
-        .map(|(id, scenario)| (id.clone(), s1_declared(id, scenario)))
-        .collect();
-    let (executed, audited, _) = support::run(&runnable, open_macos_lane);
-    assert_eq!(executed, runnable.len(), "a macos scenario did not run");
+    let count = |stage: &str| {
+        scenarios
+            .iter()
+            .filter(|(id, _)| id.contains(&format!("/macos-{stage}-")))
+            .count()
+    };
+    let (s1, s2) = (count("s1"), count("s2"));
+    assert_eq!(s1, MACOS_S1, "the macos-s1 scenarios this lane pins");
+    assert_eq!(s2, MACOS_S2, "the macos-s2 scenarios for {S2_STORY}");
+    assert!(
+        scenarios.iter().all(|(id, _)| id.contains("/macos-s1-")
+            || id.contains("/macos-s2-")
+            || id.contains("/absent-")),
+        "a macos-lane scenario is neither S1's, S2's nor an absent adapter's: {:?}",
+        scenarios.iter().map(|(id, _)| id).collect::<Vec<_>>()
+    );
+    let (executed, audited, _) = support::run(&scenarios, open_macos_lane);
+    assert_eq!(executed, declared, "a macos scenario did not run");
     assert!(audited > 0, "no refusal audit record was asserted");
-    for (id, scenario) in &pending {
-        println!("ESS scenario (refused until {S2_STORY}): {id}");
-        refused_until_s2(id, scenario);
-    }
-    assert_eq!(executed + pending.len(), declared);
     println!(
-        "ESS confinement macos lane: {executed} scenarios executed ({s1} macos-s1), {} macos-s2 \
-         refused until {S2_STORY}, of {declared} declared; {audited} refusal audit records \
-         asserted, 0 failed",
-        pending.len()
+        "ESS confinement macos lane: {executed} scenarios executed ({s1} macos-s1, {s2} macos-s2) \
+         of {declared} declared; {audited} refusal audit records asserted, 0 failed"
     );
 }
 
 #[test]
-fn s2_facts_are_absent_and_a_profile_requiring_each_is_refused_by_name() {
+fn s2_facts_are_proved_and_a_profile_requiring_each_is_admitted() {
     let adapter = macos();
     let facts = adapter.facts();
     assert!(!facts.declared_insecure());
@@ -228,8 +137,8 @@ fn s2_facts_are_absent_and_a_profile_requiring_each_is_refused_by_name() {
     assert!(facts.proves(&Fact::IpcSignalsContained));
     for fact in &S2_FACTS {
         assert!(
-            !facts.proves(fact),
-            "{fact:?} is proved: {S2_STORY} flips this assertion"
+            facts.proves(fact),
+            "{fact:?} is not proved: {S2_STORY} makes the Seatbelt build probe prove it at open"
         );
     }
     let by_field = [
@@ -262,26 +171,18 @@ fn s2_facts_are_absent_and_a_profile_requiring_each_is_refused_by_name() {
         };
         for profile in [profile, by_name] {
             let (sink, records) = recording();
-            let error = adapter
+            let admitted = adapter
                 .admit(&ConfinementProfile {
                     audit: Some(sink),
                     ..profile
                 })
-                .expect_err("refused until S2");
-            match &error {
-                ConfinementError::FactUnserved { fact, .. } => assert_eq!(
-                    fact, &expected,
-                    "refused naming another fact; {S2_STORY} flips this assertion"
-                ),
-                other => panic!(
-                    "expected confinement.fact-unserved naming {expected:?} until {S2_STORY}: \
-                     {other}"
-                ),
-            }
-            assert_eq!(error.code(), "confinement.fact-unserved");
-            assert_eq!(error.status(), 501);
+                .unwrap_or_else(|error| {
+                    panic!("{expected:?} is refused after {S2_STORY}: {error}")
+                });
+            assert!(!admitted.declared_insecure());
             let record = serde_json::to_value(&records.lock()[0]).expect("record");
-            assert_eq!(record["fact"], json!(fact_name(&expected)), "{record}");
+            assert_eq!(record["event"], "profile_admitted", "{record}");
+            assert_eq!(record["facts"], json!([fact_name(&expected)]), "{record}");
         }
     }
 }
@@ -553,7 +454,12 @@ async fn a_read_only_root_overlapping_the_workspace_is_refused_before_anything_r
             .expect_err("an overlapping root");
         assert_eq!(error.code(), READ_ONLY_ROOT_INVALID, "{host_path}: {error}");
         assert!(!workspace.path().join("marker").exists());
-        assert_eq!(events(&records), ["profile_admitted"], "{host_path}");
+        // The refused start writes its own record (ADR 0109 decision 2).
+        assert_eq!(
+            events(&records),
+            ["profile_admitted", "profile_refused"],
+            "{host_path}"
+        );
     }
 }
 

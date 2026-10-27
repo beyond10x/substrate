@@ -24,12 +24,39 @@
 //! run can raise its own `pids.max` or leave its cgroup. That is why the run stays declared
 //! insecure; a run that must not lift its bounds needs `linux`.
 //!
+//! The same holds for a run that reaches the user manager. A start around `local` whose
+//! environment names `DBUS_SESSION_BUS_ADDRESS`, `DBUS_STARTER_ADDRESS` or `XDG_RUNTIME_DIR`, the
+//! variables a client finds the user manager through, is refused `exec.environment-refused`. A run
+//! can still reach the manager another way (the socket's path is no secret) and have it move a
+//! descendant out of the run's cgroup, where `cgroup.kill` does not reach it. The timeout, the CPU
+//! budget, `KILL` and the leader's own exit therefore also kill the leader's process group, which
+//! ends a descendant that stayed in it; one that left both the cgroup and the group outlives the
+//! run, and `wait` reports the run `Unknown` once ten seconds past the leader's exit passed with
+//! that descendant still holding the run's output or the cgroup still populated. `whole_tree_kill` around `local` is a claim about a
+//! tree that does not ask the user manager to move it.
+//!
+//! The leader dies with the thread that started it (`PR_SET_PDEATHSIG`), as `linux`'s
+//! `--die-with-parent` does; the timeout and the CPU budget are enforced by this process, so a
+//! descendant that outlives a dead embedder is unbounded in time, though still in its bounded
+//! cgroup, until the next `open` of `systemd` by any process of the same user. Every `open` kills
+//! (`cgroup.kill`) and stops each `substrate-confinement-*` scope that is active, was not made by
+//! this process and holds no embedder (its root and its `embedder` leaf hold no process), and adds
+//! the count to [`reclaimed_scopes`].
+//!
+//! Opening `systemd` moves this process out of the cgroup it was started in, which includes an
+//! operator's delegated cgroup root: a `linux` adapter opened afterwards with that root does not
+//! prove `limits` and refuses a profile that needs them `confinement.family-unserved`. An embedder
+//! that opened `systemd` and needs a bounded confined run uses `systemd` with `inner: linux`. The
+//! scope carries the nearest `pids.max` and `memory.max` bound of the cgroup the process left, as
+//! its `TasksMax` and `MemoryMax`, so the move takes the process out of no bound it was under.
+//!
 //! The open is refused `confinement.adapter-unserved`, before anything moves, when no user manager
-//! is reachable: `DBUS_SESSION_BUS_ADDRESS` unset or empty, no `systemctl` or `busctl`, or
-//! `systemctl --user` not answering. It is refused the same when the scope the manager made does
-//! not carry `cpu`, `memory` and `pids` or `cgroup.kill`, or when `linux` did not prove `limits`
-//! and `whole_tree_kill` in it: a `systemd` adapter that cannot bound a run is not opened
-//! (invariant 3).
+//! is reachable: `DBUS_SESSION_BUS_ADDRESS` unset, empty or not one `unix:path=` address (an
+//! address of another form can name a program to run), no `systemctl` or `busctl`, or
+//! `systemctl --user` not answering; and when the enclosing bounds cannot be read. It is refused
+//! the same when the scope the manager made does not carry `cpu`, `memory` and `pids`,
+//! `cgroup.kill` or the enclosing bounds, or when `linux` did not prove `limits` and
+//! `whole_tree_kill` in it: a `systemd` adapter that cannot bound a run is not opened (invariant 3).
 
 use std::sync::Arc;
 
@@ -82,6 +109,24 @@ impl SystemdRequest {
     }
 }
 
+/// The variables through which a client finds the user manager; a start around `local` that names
+/// one is refused `exec.environment-refused`.
+pub const USER_MANAGER_ENV: [&str; 3] =
+    [SESSION_BUS_ENV, "DBUS_STARTER_ADDRESS", "XDG_RUNTIME_DIR"];
+
+/// How many leftover `substrate-confinement-*` scopes the opens of this process have killed and
+/// stopped, summed.
+pub fn reclaimed_scopes() -> usize {
+    #[cfg(target_os = "linux")]
+    {
+        imp::reclaimed()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        0
+    }
+}
+
 #[cfg(not(target_os = "linux"))]
 pub(crate) fn open(
     _request: SystemdRequest,
@@ -107,7 +152,7 @@ mod imp {
     use std::path::{Path, PathBuf};
     use std::process::Stdio;
     use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
     use async_trait::async_trait;
@@ -123,7 +168,7 @@ mod imp {
     };
     use super::{
         InnerRequest, SESSION_BUS_ENV, SYSTEMD_MAX_TRACKED_RUNS, SYSTEMD_OUTPUT_LIMIT_BYTES,
-        SystemdRequest,
+        SystemdRequest, USER_MANAGER_ENV,
     };
     use crate::DriverError;
 
@@ -152,6 +197,16 @@ mod imp {
     static SCOPE: Mutex<Option<PathBuf>> = Mutex::new(None);
     /// Whether an open `systemd` around `linux` holds the scope as its driver's root.
     static LINUX_HELD: AtomicBool = AtomicBool::new(false);
+    /// Every scope unit this process made: never another embedder's leftover, even once this
+    /// process has left it.
+    static OWN_UNITS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    /// Leftover scopes this process's opens killed and stopped.
+    static RECLAIMED: AtomicUsize = AtomicUsize::new(0);
+    const UNIT_PREFIX: &str = "substrate-confinement-";
+
+    pub(super) fn reclaimed() -> usize {
+        RECLAIMED.load(Ordering::Relaxed)
+    }
 
     fn unserved(detail: impl Into<String>) -> ConfinementError {
         ConfinementError::AdapterUnserved {
@@ -167,10 +222,106 @@ mod imp {
             .find(|path| path.is_file())
     }
 
+    /// Whether `bus` is exactly one `unix:path=` address: the only form that names a socket and
+    /// never a program to run (`unixexec:`) or a remote peer.
+    fn is_unix_path_address(bus: &std::ffi::OsStr) -> bool {
+        bus.to_str()
+            .and_then(|bus| bus.strip_prefix("unix:path="))
+            .is_some_and(|rest| !rest.is_empty() && !rest.contains(';'))
+    }
+
+    /// The nearest bound in `file` (`pids.max`, `memory.max`) on `cgroup` or an ancestor of it
+    /// beneath `root`: `None` when every level that carries the file says `max`. An error when no
+    /// level carries it, or one cannot be read.
+    fn enclosing_bound(root: &Path, cgroup: &Path, file: &str) -> Result<Option<u64>, String> {
+        let mut carried = false;
+        for level in cgroup
+            .ancestors()
+            .take_while(|level| level.starts_with(root) && *level != root)
+        {
+            let value = match std::fs::read_to_string(level.join(file)) {
+                Ok(value) => value,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(format!("{}: {error}", level.join(file).display())),
+            };
+            carried = true;
+            let value = value.trim();
+            if value != "max" {
+                return value
+                    .parse()
+                    .map(Some)
+                    .map_err(|_| format!("{}: {value:?}", level.join(file).display()));
+            }
+        }
+        if carried {
+            Ok(None)
+        } else {
+            Err(format!(
+                "no cgroup enclosing {} carries {file}",
+                cgroup.display()
+            ))
+        }
+    }
+
+    /// The bounds the scope must carry: those of the cgroup this process is in now.
+    struct Enclosing {
+        tasks: Option<u64>,
+        memory: Option<u64>,
+    }
+
+    impl Enclosing {
+        fn read() -> Result<Self, ConfinementError> {
+            let current = own_cgroup().ok_or_else(|| {
+                unserved("this process's cgroup cannot be read, nor the bounds it is under")
+            })?;
+            let bound = |file: &str| {
+                enclosing_bound(Path::new(CGROUP_FS), &current, file).map_err(|detail| {
+                    unserved(format!(
+                        "the bounds this process is under cannot be read: {detail}"
+                    ))
+                })
+            };
+            Ok(Self {
+                tasks: bound("pids.max")?,
+                memory: bound("memory.max")?,
+            })
+        }
+
+        /// The value systemd takes for the property: `u64::MAX` is no bound.
+        fn property(bound: Option<u64>) -> String {
+            bound.unwrap_or(u64::MAX).to_string()
+        }
+
+        /// Refuses a scope whose cgroup does not carry these bounds.
+        fn check(&self, scope: &Path, unit: &str) -> Result<(), ConfinementError> {
+            for (file, bound) in [("pids.max", self.tasks), ("memory.max", self.memory)] {
+                let carried = std::fs::read_to_string(scope.join(file)).unwrap_or_default();
+                let wanted = bound.map_or_else(|| "max".to_owned(), |bound| bound.to_string());
+                if carried.trim() != wanted {
+                    return Err(unserved(format!(
+                        "{unit} carries {file} {:?}, not the enclosing {wanted}",
+                        carried.trim()
+                    )));
+                }
+            }
+            Ok(())
+        }
+    }
+
+    /// Whether `cgroup` holds no process of its own; a cgroup that is not there holds none, and
+    /// one that cannot be read is taken to hold one.
+    fn holds_no_process(cgroup: &Path) -> bool {
+        match std::fs::read_to_string(cgroup.join("cgroup.procs")) {
+            Ok(procs) => procs.trim().is_empty(),
+            Err(error) => error.kind() == std::io::ErrorKind::NotFound,
+        }
+    }
+
     /// The user manager, reached.
     struct Manager {
         bus: OsString,
         busctl: PathBuf,
+        systemctl: PathBuf,
     }
 
     impl Manager {
@@ -180,14 +331,98 @@ mod imp {
                     "{SESSION_BUS_ENV} is unset: no user systemd manager is reachable"
                 ))
             })?;
+            if !is_unix_path_address(&bus) {
+                return Err(unserved(format!(
+                    "{SESSION_BUS_ENV} is not one unix:path= address"
+                )));
+            }
             let systemctl = tool("systemctl").ok_or_else(|| unserved("no systemctl"))?;
             let busctl = tool("busctl").ok_or_else(|| unserved("no busctl"))?;
-            let manager = Self { bus, busctl };
+            let manager = Self {
+                bus,
+                busctl,
+                systemctl,
+            };
             manager.call(
-                &systemctl,
+                &manager.systemctl,
                 &["--user", "show", "--property=Version", "--value"],
             )?;
             Ok(manager)
+        }
+
+        /// Kills and stops every active `substrate-confinement-*` scope this process did not make
+        /// whose root and `embedder` leaf hold no process: what an embedder that died left. A
+        /// scope still being entered holds its embedder in its root and is left alone.
+        fn reclaim(&self) -> Result<usize, ConfinementError> {
+            let listed = self.call(
+                &self.systemctl,
+                &[
+                    "--user",
+                    "list-units",
+                    "--all",
+                    "--plain",
+                    "--no-legend",
+                    "--type=scope",
+                    "substrate-confinement-*",
+                ],
+            )?;
+            let own = OWN_UNITS.lock().clone();
+            let mut reclaimed = 0;
+            for unit in listed
+                .lines()
+                .filter_map(|line| line.split_whitespace().next())
+            {
+                let named = unit
+                    .strip_prefix(UNIT_PREFIX)
+                    .and_then(|rest| rest.strip_suffix(".scope"))
+                    .is_some_and(|id| {
+                        !id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric())
+                    });
+                if !named || own.iter().any(|mine| mine == unit) {
+                    continue;
+                }
+                let Ok(shown) = self.call(
+                    &self.systemctl,
+                    &[
+                        "--user",
+                        "show",
+                        "--property=ActiveState",
+                        "--property=ControlGroup",
+                        unit,
+                    ],
+                ) else {
+                    continue;
+                };
+                let property = |name: &str| {
+                    shown
+                        .lines()
+                        .find_map(|line| line.strip_prefix(name)?.strip_prefix('='))
+                        .unwrap_or_default()
+                };
+                let control_group = property("ControlGroup");
+                if property("ActiveState") != "active" || !control_group.starts_with('/') {
+                    continue;
+                }
+                let scope = Path::new(CGROUP_FS).join(control_group.trim_start_matches('/'));
+                if !holds_no_process(&scope) || !holds_no_process(&scope.join(EMBEDDER)) {
+                    continue;
+                }
+                if kill_tree(&scope).is_err() {
+                    continue;
+                }
+                // Emptied, the scope is usually stopped and collected by the manager before this
+                // call, which then has no unit to stop.
+                let _ = self.call(&self.systemctl, &["--user", "stop", unit]);
+                reclaimed += 1;
+            }
+            if reclaimed > 0 {
+                RECLAIMED.fetch_add(reclaimed, Ordering::Relaxed);
+                tracing::warn!(
+                    reclaimed,
+                    "systemd confinement: killed and stopped leftover scopes of embedders that died"
+                );
+            }
+            Ok(reclaimed)
         }
 
         /// Runs `program` with only the session bus in its environment.
@@ -219,6 +454,10 @@ mod imp {
                 ulid::Ulid::generate().to_string().to_ascii_lowercase()
             );
             let pid = std::process::id().to_string();
+            let enclosing = Enclosing::read()?;
+            let tasks = Enclosing::property(enclosing.tasks);
+            let memory = Enclosing::property(enclosing.memory);
+            OWN_UNITS.lock().push(unit.clone());
             self.call(
                 &self.busctl,
                 &[
@@ -231,7 +470,7 @@ mod imp {
                     "ssa(sv)a(sa(sv))",
                     &unit,
                     "fail",
-                    "4",
+                    "5",
                     "PIDs",
                     "au",
                     "1",
@@ -239,10 +478,14 @@ mod imp {
                     "Delegate",
                     "b",
                     "true",
-                    // The scope bounds nothing itself: each run's own cgroup carries its bounds.
+                    // The bounds this process was under when it moved; each run's own cgroup
+                    // carries the run's bounds beneath them.
                     "TasksMax",
                     "t",
-                    "18446744073709551615",
+                    &tasks,
+                    "MemoryMax",
+                    "t",
+                    &memory,
                     "CollectMode",
                     "s",
                     "inactive-or-failed",
@@ -277,6 +520,7 @@ mod imp {
             if !scope.join("cgroup.kill").is_file() {
                 return Err(unserved(format!("{unit} has no cgroup.kill")));
             }
+            enclosing.check(&scope, &unit)?;
             let embedder = scope.join(EMBEDDER);
             match std::fs::create_dir(&embedder) {
                 Ok(()) => {}
@@ -318,6 +562,7 @@ mod imp {
         request: SystemdRequest,
     ) -> Result<Arc<dyn ConfinementAdapter>, ConfinementError> {
         let manager = Manager::reach(request.session_bus)?;
+        manager.reclaim()?;
         match request.inner {
             InnerRequest::Local(local) => open_local(&manager, local),
             InnerRequest::Linux(linux) => open_linux(&manager, *linux),
@@ -454,10 +699,15 @@ mod imp {
             admitted: &AdmittedProfile,
             command: &Command,
         ) -> Result<RunId, ConfinementError> {
-            let inner = self.inner_admission(admitted, true)?;
-            let run = self.inner.start(&inner, command).await?;
-            admitted.audit_start(&run, &command.argv[0]);
-            Ok(run)
+            // Every refusal, from the contract's recheck on, writes its audit record.
+            let started: Result<RunId, ConfinementError> = async {
+                let inner = self.inner_admission(admitted, true)?;
+                let run = self.inner.start(&inner, command).await?;
+                admitted.audit_start(&run, &command.argv[0]);
+                Ok(run)
+            }
+            .await;
+            admitted.audit_refusal(&self.facts, started)
         }
 
         async fn observe(&self, run: &RunId) -> Result<RunObservation, ConfinementError> {
@@ -516,14 +766,11 @@ mod imp {
 
     struct LocalRun {
         id: RunId,
-        pid: i32,
+        leader: Leader,
         reason: Option<String>,
         cgroup: PathBuf,
         phase: watch::Receiver<Phase>,
         captured: Arc<Mutex<Captured>>,
-        /// Set, under this lock, after the leader exited and before it is reaped: while it is
-        /// false the leader's pid still names this run's process group.
-        leader_exited: Arc<Mutex<bool>>,
     }
 
     struct SystemdLocal {
@@ -577,24 +824,94 @@ mod imp {
             .ok()
     }
 
-    /// Kills what is left in `cgroup` until it is empty, then removes it. False when the tree did
-    /// not leave within [`TREE_DRAIN`].
-    async fn drain_tree(cgroup: &Path) -> bool {
-        let started = Instant::now();
-        loop {
-            let procs = match std::fs::read_to_string(cgroup.join("cgroup.procs")) {
-                Ok(procs) => procs,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return true,
-                Err(_) => String::from("unreadable"),
+    /// Whether a process is left anywhere beneath `cgroup`, its own cgroups included, from
+    /// `cgroup.events`: `None` when the cgroup is gone; one that cannot be read is populated.
+    fn populated(cgroup: &Path) -> Option<bool> {
+        match std::fs::read_to_string(cgroup.join("cgroup.events")) {
+            Ok(events) => Some(!events.lines().any(|line| line.trim() == "populated 0")),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(_) => Some(true),
+        }
+    }
+
+    /// Removes `cgroup` and every cgroup a run made beneath it, deepest first.
+    fn remove_subtree(cgroup: &Path) -> std::io::Result<()> {
+        let mut pending = vec![(cgroup.to_path_buf(), false)];
+        while let Some((directory, visited)) = pending.pop() {
+            if visited {
+                match std::fs::remove_dir(&directory) {
+                    Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+                        return Err(error);
+                    }
+                    _ => continue,
+                }
+            }
+            let entries = match std::fs::read_dir(&directory) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
             };
-            if procs.trim().is_empty() && std::fs::remove_dir(cgroup).is_ok() {
-                return true;
+            pending.push((directory, true));
+            for entry in entries {
+                let entry = entry?;
+                if entry.file_type()?.is_dir() {
+                    pending.push((entry.path(), false));
+                }
             }
-            if started.elapsed() > TREE_DRAIN {
-                return procs.trim().is_empty();
+        }
+        Ok(())
+    }
+
+    /// Kills what is left beneath `cgroup` until `cgroup.events` says `populated 0`, then removes
+    /// it and every cgroup beneath it. False when a process was still left at `deadline`.
+    async fn drain_tree(cgroup: &Path, deadline: tokio::time::Instant) -> bool {
+        loop {
+            match populated(cgroup) {
+                None => return true,
+                Some(false) => {
+                    if remove_subtree(cgroup).is_ok() || tokio::time::Instant::now() >= deadline {
+                        return true;
+                    }
+                }
+                Some(true) => {
+                    if tokio::time::Instant::now() >= deadline {
+                        return false;
+                    }
+                    let _ = kill_tree(cgroup);
+                }
             }
-            let _ = kill_tree(cgroup);
             tokio::time::sleep(POLL).await;
+        }
+    }
+
+    /// A run's leader, which is also its process group: what a descendant the user manager moved
+    /// out of the run's cgroup may still be in.
+    #[derive(Clone)]
+    struct Leader {
+        pid: i32,
+        /// Set, under this lock, after the leader exited and before it is reaped: while it is
+        /// false the leader's pid still names this run's process group.
+        exited: Arc<Mutex<bool>>,
+    }
+
+    impl Leader {
+        /// `KILL` to the leader and its process group, unless it has exited; held across `kill`,
+        /// so the run's task cannot reap the leader meanwhile and the pid cannot name another
+        /// process.
+        fn kill(&self) {
+            let exited = self.exited.lock();
+            if !*exited {
+                kill_group(self.pid);
+            }
+        }
+    }
+
+    /// `KILL` to `pid` and its process group. Only for a leader that is not reaped yet.
+    fn kill_group(pid: i32) {
+        // SAFETY: `kill` signals processes; no memory is involved.
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+            libc::kill(pid, libc::SIGKILL);
         }
     }
 
@@ -643,6 +960,10 @@ mod imp {
                 )
             })?;
         let procs_fd = procs.as_raw_fd();
+        let parent = libc::pid_t::try_from(std::process::id()).map_err(|_| {
+            DriverError::failed("exec.spawn-failed", "systemd spawn: this process's pid")
+        })?;
+        let death_signal = libc::c_ulong::try_from(libc::SIGKILL).unwrap_or(9);
         let mut child = tokio::process::Command::new(&command.argv[0]);
         child
             .args(&command.argv[1..])
@@ -653,18 +974,25 @@ mod imp {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0);
-        // SAFETY: the hook only calls `write(2)`, which is async-signal-safe, on a descriptor the
-        // parent keeps open until `spawn` returns. Writing `0` to `cgroup.procs` moves the writer:
-        // the run is in its bounded cgroup before it executes, so nothing it forks starts outside
-        // it, and a run that cannot join is never executed.
+        // SAFETY: the hook only calls `write(2)`, `prctl(2)` and `getppid(2)`, which are
+        // async-signal-safe, the first on a descriptor the parent keeps open until `spawn`
+        // returns. Writing `0` to `cgroup.procs` moves the writer: the run is in its bounded
+        // cgroup before it executes, so nothing it forks starts outside it, and a run that cannot
+        // join is never executed. `PR_SET_PDEATHSIG` kills the leader when the thread that started
+        // it ends, so a run does not outlive its embedder's timeout and budget; it survives
+        // `execve`, and a parent already gone by then is refused rather than missed.
         unsafe {
             child.pre_exec(move || {
-                let written = libc::write(procs_fd, b"0".as_ptr().cast(), 1);
-                if written == 1 {
-                    Ok(())
-                } else {
-                    Err(std::io::Error::last_os_error())
+                if libc::write(procs_fd, b"0".as_ptr().cast(), 1) != 1 {
+                    return Err(std::io::Error::last_os_error());
                 }
+                if libc::prctl(libc::PR_SET_PDEATHSIG, death_signal, 0, 0, 0) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::getppid() != parent {
+                    return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
+                }
+                Ok(())
             });
         }
         let spawned = child.spawn();
@@ -776,20 +1104,56 @@ mod imp {
             let Some(workdir) = &admitted.profile().workdir else {
                 return Ok(workspace.clone());
             };
-            let directory = workspace.join(super::super::relative_workdir(workdir)?);
-            if !directory.is_dir() {
-                return Err(DriverError::refused(
+            let relative = super::super::relative_workdir(workdir)?;
+            let missing = || {
+                ConfinementError::from(DriverError::refused(
                     substrate_wire::EXEC_WORKDIR_MISSING,
                     "The working directory is not a directory beneath the workspace.",
                     "workdir",
-                )
-                .into());
+                ))
+            };
+            // Every component a directory itself, never a symbolic link, as `linux` and `local`
+            // require (design 26).
+            let mut directory = workspace.clone();
+            for component in relative.components() {
+                directory.push(component);
+                let entry = std::fs::symlink_metadata(&directory).map_err(|_| missing())?;
+                if !entry.file_type().is_dir() {
+                    return Err(missing());
+                }
             }
             Ok(directory)
         }
 
-        /// Ends the tree at the run's timeout or once its cumulative CPU passes its budget.
-        fn watch(cgroup: PathBuf, bounds: ProcessBounds, mut phase: watch::Receiver<Phase>) {
+        /// The environment's shape, and no variable through which the run finds the user
+        /// manager: a run that asks it for a scope of its own leaves its bounds.
+        fn check_environment(command: &Command) -> Result<(), ConfinementError> {
+            crate::environment::check(&command.env)?;
+            if let Some(name) = USER_MANAGER_ENV
+                .iter()
+                .find(|name| command.env.contains_key(**name))
+            {
+                return Err(DriverError::refused(
+                    "exec.environment-refused",
+                    format!(
+                        "{name} reaches the user manager, which can move a process out of the \
+                         run's bounds."
+                    ),
+                    "env",
+                )
+                .into());
+            }
+            Ok(())
+        }
+
+        /// Ends the tree, its cgroup and its leader's process group, at the run's timeout or once
+        /// its cumulative CPU passes its budget.
+        fn watch(
+            cgroup: PathBuf,
+            leader: Leader,
+            bounds: ProcessBounds,
+            mut phase: watch::Receiver<Phase>,
+        ) {
             let deadline = Instant::now() + Duration::from_millis(bounds.timeout_ms);
             let budget = bounds.cpu_millis.saturating_mul(1_000);
             tokio::spawn(async move {
@@ -806,6 +1170,7 @@ mod imp {
                         || cpu_usage_micros(&cgroup).is_some_and(|used| used >= budget)
                     {
                         let _ = kill_tree(&cgroup);
+                        leader.kill();
                         return;
                     }
                 }
@@ -832,6 +1197,7 @@ mod imp {
         ) -> Result<RenderedCommand, ConfinementError> {
             admitted.check_on(&self.facts, false)?;
             super::super::check_command(command)?;
+            Self::check_environment(command)?;
             Ok(RenderedCommand {
                 program: PathBuf::from(&command.argv[0]),
                 args: command.argv[1..].to_vec(),
@@ -843,8 +1209,81 @@ mod imp {
             admitted: &AdmittedProfile,
             command: &Command,
         ) -> Result<RunId, ConfinementError> {
+            // Every refusal, from the contract's recheck on, writes its audit record.
+            let started = self.start_run(admitted, command);
+            admitted.audit_refusal(&self.facts, started)
+        }
+
+        async fn observe(&self, run: &RunId) -> Result<RunObservation, ConfinementError> {
+            let run = self.run(run)?;
+            Ok(Self::observation(&run))
+        }
+
+        async fn output(&self, run: &RunId) -> Result<RunOutput, ConfinementError> {
+            let run = self.run(run)?;
+            let captured = run.captured.lock();
+            Ok(RunOutput {
+                stdout: captured.stdout.clone(),
+                stderr: captured.stderr.clone(),
+                stdout_truncated: captured.stdout_truncated,
+                stderr_truncated: captured.stderr_truncated,
+            })
+        }
+
+        async fn wait(&self, run: &RunId) -> Result<RunObservation, ConfinementError> {
+            let run = self.run(run)?;
+            let mut phase = run.phase.clone();
+            // The sender lives until the tree has left its cgroup or the drain's deadline passed,
+            // and it always sends first.
+            let _ = phase
+                .wait_for(|phase| !matches!(phase, Phase::Running))
+                .await;
+            Ok(Self::observation(&run))
+        }
+
+        /// `KILL` ends the whole tree through `cgroup.kill`, and the leader's process group;
+        /// another signal reaches the run's process group, as under `local`.
+        async fn signal(&self, run: &RunId, signal: Signal) -> Result<(), ConfinementError> {
+            let run = self.run(run)?;
+            if signal == Signal::Kill {
+                let killed = kill_tree(&run.cgroup);
+                run.leader.kill();
+                return killed.map_err(|error| {
+                    DriverError::failed("exec.signal-failed", format!("systemd kill: {error}"))
+                        .into()
+                });
+            }
+            // Held across `kill`: the run's task cannot reap the leader meanwhile, so the group id
+            // cannot have been reused by another process.
+            let exited = run.leader.exited.lock();
+            if *exited {
+                return Ok(());
+            }
+            // SAFETY: `kill` with a negative pid signals one process group; no memory is involved.
+            if unsafe { libc::kill(-run.leader.pid, signal.number()) } != 0 {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::ESRCH) {
+                    return Err(DriverError::failed(
+                        "exec.signal-failed",
+                        format!("systemd signal: {error}"),
+                    )
+                    .into());
+                }
+            }
+            Ok(())
+        }
+    }
+
+    impl SystemdLocal {
+        /// Starts a run; called from `start`, inside the runtime its tasks are spawned on.
+        fn start_run(
+            &self,
+            admitted: &AdmittedProfile,
+            command: &Command,
+        ) -> Result<RunId, ConfinementError> {
             admitted.check_on(&self.facts, true)?;
             super::super::check_command(command)?;
+            Self::check_environment(command)?;
             let directory = Self::directory(admitted)?;
             let (bounds, output_limit) = bounds(admitted.profile())?;
             self.reserve()?;
@@ -872,19 +1311,34 @@ mod imp {
             let stderr = child.stderr.take().map(|stream| {
                 tokio::spawn(drain(stream, Arc::clone(&captured), false, output_limit))
             });
-            let leader_exited = Arc::new(Mutex::new(false));
-            let exited = Arc::clone(&leader_exited);
+            let leader = Leader {
+                pid,
+                exited: Arc::new(Mutex::new(false)),
+            };
+            let exited = Arc::clone(&leader.exited);
             let tree = cgroup.clone();
             tokio::spawn(async move {
                 let _ = tokio::task::spawn_blocking(move || await_exit_unreaped(pid)).await;
                 *exited.lock() = true;
-                // Nothing of the tree outlives its leader.
+                let deadline = tokio::time::Instant::now() + TREE_DRAIN;
+                // Nothing of the tree outlives its leader: neither its cgroup nor, while the
+                // unreaped leader still holds the group's id, its process group.
                 let _ = kill_tree(&tree);
+                kill_group(pid);
                 let ended = child.wait().await;
-                for reader in [stdout, stderr].into_iter().flatten() {
-                    let _ = reader.await;
+                // A descendant outside both still holding the output is not waited past the
+                // deadline: the run is then unknown.
+                let mut closed = true;
+                for mut reader in [stdout, stderr].into_iter().flatten() {
+                    if tokio::time::timeout_at(deadline, &mut reader)
+                        .await
+                        .is_err()
+                    {
+                        reader.abort();
+                        closed = false;
+                    }
                 }
-                let drained = drain_tree(&tree).await;
+                let drained = drain_tree(&tree, deadline).await && closed;
                 let _ = phase.send(match ended {
                     Ok(status) if drained => Phase::Ended(RunExit {
                         code: status.code(),
@@ -893,74 +1347,17 @@ mod imp {
                     _ => Phase::Unknown,
                 });
             });
-            Self::watch(cgroup.clone(), bounds, observed.clone());
+            Self::watch(cgroup.clone(), leader.clone(), bounds, observed.clone());
             self.runs.lock().push(Arc::new(LocalRun {
                 id: id.clone(),
-                pid,
+                leader,
                 reason: admitted.insecure_reason().map(str::to_owned),
                 cgroup,
                 phase: observed,
                 captured,
-                leader_exited,
             }));
             admitted.audit_start(&id, &command.argv[0]);
             Ok(id)
-        }
-
-        async fn observe(&self, run: &RunId) -> Result<RunObservation, ConfinementError> {
-            let run = self.run(run)?;
-            Ok(Self::observation(&run))
-        }
-
-        async fn output(&self, run: &RunId) -> Result<RunOutput, ConfinementError> {
-            let run = self.run(run)?;
-            let captured = run.captured.lock();
-            Ok(RunOutput {
-                stdout: captured.stdout.clone(),
-                stderr: captured.stderr.clone(),
-                stdout_truncated: captured.stdout_truncated,
-                stderr_truncated: captured.stderr_truncated,
-            })
-        }
-
-        async fn wait(&self, run: &RunId) -> Result<RunObservation, ConfinementError> {
-            let run = self.run(run)?;
-            let mut phase = run.phase.clone();
-            // The sender lives until the tree has left its cgroup, and it always sends first.
-            let _ = phase
-                .wait_for(|phase| !matches!(phase, Phase::Running))
-                .await;
-            Ok(Self::observation(&run))
-        }
-
-        /// `KILL` ends the whole tree through `cgroup.kill`; another signal reaches the run's
-        /// process group, as under `local`.
-        async fn signal(&self, run: &RunId, signal: Signal) -> Result<(), ConfinementError> {
-            let run = self.run(run)?;
-            if signal == Signal::Kill {
-                return kill_tree(&run.cgroup).map_err(|error| {
-                    DriverError::failed("exec.signal-failed", format!("systemd kill: {error}"))
-                        .into()
-                });
-            }
-            // Held across `kill`: the run's task cannot reap the leader meanwhile, so the group id
-            // cannot have been reused by another process.
-            let exited = run.leader_exited.lock();
-            if *exited {
-                return Ok(());
-            }
-            // SAFETY: `kill` with a negative pid signals one process group; no memory is involved.
-            if unsafe { libc::kill(-run.pid, signal.number()) } != 0 {
-                let error = std::io::Error::last_os_error();
-                if error.raw_os_error() != Some(libc::ESRCH) {
-                    return Err(DriverError::failed(
-                        "exec.signal-failed",
-                        format!("systemd signal: {error}"),
-                    )
-                    .into());
-                }
-            }
-            Ok(())
         }
     }
 
@@ -1056,6 +1453,61 @@ mod imp {
                 let error = Manager::reach(bus).err().expect("unserved");
                 assert_eq!(error.code(), "confinement.adapter-unserved", "{error}");
             }
+        }
+
+        /// Every address form but one `unix:path=` is refused by `reach` before it runs a tool.
+        #[test]
+        fn a_session_bus_other_than_one_unix_path_is_unserved() {
+            assert!(is_unix_path_address(std::ffi::OsStr::new(
+                "unix:path=/run/user/1000/bus"
+            )));
+            assert!(is_unix_path_address(std::ffi::OsStr::new(
+                "unix:path=/run/user/1000/bus,guid=0123"
+            )));
+            for bus in [
+                "unixexec:path=/usr/bin/touch,argv1=/x",
+                "unix:path=/run/user/1000/bus;unixexec:path=/usr/bin/touch",
+                "unix:abstract=/tmp/dbus-x",
+                "unix:path=",
+                "tcp:host=localhost,port=1",
+                "launchd:env=X",
+                "autolaunch:",
+                "/run/user/1000/bus",
+            ] {
+                assert!(!is_unix_path_address(std::ffi::OsStr::new(bus)), "{bus}");
+                let error = Manager::reach(Some(bus.into())).err().expect("unserved");
+                assert_eq!(
+                    error.code(),
+                    "confinement.adapter-unserved",
+                    "{bus}: {error}"
+                );
+            }
+        }
+
+        /// The nearest bound up the ancestry, `max` all the way is none, and a tree that carries
+        /// the file nowhere cannot be read.
+        #[test]
+        fn the_enclosing_bound_is_the_nearest_one_up_the_cgroup_ancestry() {
+            let root = tempfile::tempdir().expect("root");
+            let slice = root.path().join("user.slice");
+            let unit = slice.join("bounded.scope");
+            let leaf = unit.join("leaf");
+            std::fs::create_dir_all(&leaf).expect("tree");
+            std::fs::write(slice.join("pids.max"), "169092\n").expect("slice");
+            std::fs::write(unit.join("pids.max"), "4242\n").expect("unit");
+            std::fs::write(leaf.join("pids.max"), "max\n").expect("leaf");
+            std::fs::write(slice.join("memory.max"), "max\n").expect("slice");
+            assert_eq!(
+                enclosing_bound(root.path(), &leaf, "pids.max"),
+                Ok(Some(4242))
+            );
+            assert_eq!(enclosing_bound(root.path(), &leaf, "memory.max"), Ok(None));
+            assert!(enclosing_bound(root.path(), &leaf, "io.max").is_err());
+            std::fs::write(unit.join("pids.max"), "lots\n").expect("unit");
+            assert!(enclosing_bound(root.path(), &leaf, "pids.max").is_err());
+            // Nothing at or above the root is read.
+            std::fs::write(root.path().join("io.max"), "1\n").expect("root");
+            assert!(enclosing_bound(root.path(), &leaf, "io.max").is_err());
         }
     }
 }
