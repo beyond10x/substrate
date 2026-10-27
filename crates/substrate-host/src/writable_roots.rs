@@ -376,7 +376,10 @@ pub(crate) fn mechanism_is_provable(bubblewrap: &Path) -> bool {
     unsafe {
         command.pre_exec(move || crate::process::inherit(&descriptors));
     }
-    let status = command.status();
+    let status = command
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status();
     drop(pinned);
     drop(parent_fd);
     let entries = |path: &Path| {
