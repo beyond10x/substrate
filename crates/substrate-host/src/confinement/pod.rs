@@ -3,17 +3,20 @@
 //!
 //! It renders an admitted profile into one Pod in the namespace the operator's cluster
 //! configuration names, beside a default-deny `NetworkPolicy`, creates both through the cluster API,
-//! polls the Pod's phase, reads its log once it ends and deletes both objects before `wait`
-//! returns. It serves `process_run`, `process_watch`, `output_read`, `wait`, `workspace` (an
-//! `emptyDir` at `/workspace`), `limits` and `audit`, and proves `image_digest_pinned`. It serves no
-//! `filesystem_view` (a Pod reaches no host path) and neither network family: a `NetworkPolicy`'s
-//! enforcement depends on the cluster's network plugin, which the API does not let a client prove.
+//! polls the Pod's phase, reads its log once it ends and deletes the Pod, then the policy, before
+//! `wait` reports the run ended. A Pod whose removal the API does not confirm keeps its policy,
+//! and the run reads `Unknown`. It serves `process_run`, `process_watch`, `output_read`, `wait`,
+//! `workspace` (an `emptyDir` at `/workspace`), `limits` and `audit`, and proves
+//! `image_digest_pinned`. It serves no `filesystem_view` (a Pod reaches no host path) and neither
+//! network family: a `NetworkPolicy`'s enforcement depends on the cluster's network plugin, which
+//! the API does not let a client prove.
 //!
 //! The adapter speaks to the API server itself over HTTP/1.1 and TLS with the workspace's own
 //! `hyper` and `rustls`; it admits no Kubernetes client crate and runs no `kubectl`.
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
@@ -57,6 +60,12 @@ pub const RUN_LABEL: &str = "b10x-substrate/run";
 pub const CONTAINER: &str = "run";
 /// Where the run's `emptyDir` workspace is mounted.
 pub const WORKSPACE_MOUNT: &str = "/workspace";
+/// The workspace's `sizeLimit` and the container's `ephemeral-storage` limit when the operator
+/// states none.
+pub const POD_DEFAULT_EPHEMERAL_STORAGE_BYTES: u64 = 1 << 30;
+/// The Pod open asks for a log of, to learn whether the credential may read `pods/log`: no run is
+/// ever named this, so an authorized read answers 404.
+pub const LOG_ACCESS_PROBE: &str = "substrate-log-access-probe";
 
 /// A `processes` bound the cluster does not hold: no `pod_pids_limit`, or one above the bound.
 pub const POD_PROCESSES_UNSERVED: &str = "confinement.pod-processes-unserved";
@@ -75,18 +84,26 @@ const DEFAULT_BOUNDS: ProcessBounds = ProcessBounds {
 const MAX_CLUSTER_FILE_BYTES: u64 = 1_048_576;
 const MAX_API_BODY_BYTES: usize = 4 * 1_048_576;
 const MAX_ARGV_BYTES: usize = 262_144;
-const MAX_ENV_ENTRIES: usize = 64;
 const API_TIMEOUT: Duration = Duration::from_secs(30);
 const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(500);
 /// How long past its wall bound a Pod may stay unended before the adapter deletes it.
 const DEADLINE_GRACE: Duration = Duration::from_mins(1);
-/// How long the API may stay unreachable before a run is reported `Unknown`.
+/// How long the API may stay unreachable, or a Pod's removal unconfirmed, before a run is reported
+/// `Unknown`.
 const UNREACHABLE_LIMIT: Duration = Duration::from_mins(2);
+/// How long after a deletion the adapter waits for the kubelet to confirm the container stopped
+/// before it reports the run `Unknown`.
+const STOP_CONFIRM: Duration = Duration::from_mins(1);
 /// Polls of a Pod in a terminal phase whose container has no terminated state yet.
 const TERMINAL_POLLS: u32 = 10;
 const REMOVE_ATTEMPTS: u32 = 60;
+/// Reads of a log before the adapter reports it unreadable.
+const LOG_ATTEMPTS: u32 = 5;
 const TERM_GRACE_SECONDS: u64 = 5;
+/// The shortest grace the API leaves to the kubelet: 0 is a force deletion, which removes the
+/// object without the kubelet confirming the container stopped.
+const KILL_GRACE_SECONDS: u64 = 1;
 
 /// What opening `pod` takes.
 #[derive(Debug, Clone)]
@@ -103,21 +120,12 @@ pub struct PodSettings {
     pub namespace: String,
     /// The numeric uid and gid the container runs as.
     pub run_as_user: u32,
-    /// The kubelet's `podPidsLimit` on every node, as the operator states it.
+    /// The kubelet's `podPidsLimit` on every node, as the operator states it. Without it no
+    /// profile is admitted: every run has a processes bound, the default one included.
     pub pod_pids_limit: Option<u32>,
-}
-
-/// How a run's Pod ended, beside its observation.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PodTermination {
-    /// The container's terminated reason (`Completed`, `Error`, `OOMKilled`), or the Pod's
-    /// `DeadlineExceeded`.
-    pub reason: Option<String>,
-    /// Containers of the run that ended `OOMKilled`: 0 or 1.
-    pub memory_oom_kills: u64,
-    /// Whether the Pod and its `NetworkPolicy` were both seen gone before the run was reported
-    /// ended.
-    pub objects_removed: bool,
+    /// The workspace `emptyDir`'s `sizeLimit` and the container's `ephemeral-storage` request and
+    /// limit, in bytes.
+    pub ephemeral_storage_bytes: u64,
 }
 
 /// `pod`'s declared set (`spec/confinement/confinement.yaml`, above `OpenAdapter`).
@@ -142,13 +150,14 @@ pub(crate) fn open(request: PodRequest) -> Result<Arc<dyn ConfinementAdapter>, C
     Ok(open_pod(request)?)
 }
 
-/// Opens `pod` and returns the adapter itself, for [`PodAdapter::termination`] and
-/// [`PodAdapter::settings`]. `confinement::open` answers the same.
+/// Opens `pod` and returns the adapter itself, for [`PodAdapter::settings`].
+/// `confinement::open` answers the same.
 ///
 /// # Errors
 ///
 /// `confinement.adapter-unserved` when there is no cluster configuration, it is unusable
-/// (design 28 names each refused member), or the cluster does not answer the probe.
+/// (design 28 names each refused member), the cluster does not answer the probe, or the credential
+/// may not read `pods/log`.
 pub fn open_pod(request: PodRequest) -> Result<Arc<PodAdapter>, ConfinementError> {
     let unserved = |detail: String| ConfinementError::AdapterUnserved {
         adapter: AdapterName::Pod,
@@ -257,6 +266,7 @@ fn settings(context: &Value, namespace: String) -> Result<PodSettings, String> {
         namespace,
         run_as_user: POD_DEFAULT_RUN_AS_USER,
         pod_pids_limit: None,
+        ephemeral_storage_bytes: POD_DEFAULT_EPHEMERAL_STORAGE_BYTES,
     };
     let Some(extension) = context["extensions"].as_array().and_then(|extensions| {
         extensions
@@ -279,6 +289,12 @@ fn settings(context: &Value, namespace: String) -> Result<PodSettings, String> {
         match member.as_str() {
             "run_as_user" => settings.run_as_user = positive(value, member)?,
             "pod_pids_limit" => settings.pod_pids_limit = Some(positive(value, member)?),
+            "ephemeral_storage_bytes" => {
+                settings.ephemeral_storage_bytes = value
+                    .as_u64()
+                    .filter(|bytes| (1_048_576..=1_099_511_627_776).contains(bytes))
+                    .ok_or_else(|| format!("{member} must be an integer from 1 MiB to 1 TiB"))?;
+            }
             other => {
                 return Err(format!(
                     "the {POD_SETTINGS_EXTENSION} extension has {other:?}"
@@ -457,17 +473,17 @@ impl Api {
     }
 
     /// Creates `object` in `collection`.
-    async fn create(&self, collection: &str, object: &Value) -> Result<(), ConfinementError> {
+    async fn create(&self, collection: &str, object: &Value) -> Result<(), String> {
         match self
             .call(Method::POST, collection, Some(object), MAX_API_BODY_BYTES)
             .await
         {
             Ok((200..=202, _)) => Ok(()),
-            Ok((status, body)) => Err(api_failed(&format!(
+            Ok((status, body)) => Err(format!(
                 "create answered {status}: {}",
                 status_message(&body)
-            ))),
-            Err(error) => Err(api_failed(&error)),
+            )),
+            Err(error) => Err(error),
         }
     }
 
@@ -506,10 +522,12 @@ impl Api {
         }
     }
 
-    /// Deletes the object at `path` and polls until the API no longer has it.
-    async fn remove(&self, path: &str) -> bool {
+    /// Deletes the object at `path` with `grace_seconds` and polls until the API no longer has it.
+    /// A Pod is deleted with a grace of at least one second, never forced, so its disappearance is
+    /// the kubelet's confirmation that its container stopped.
+    async fn remove(&self, path: &str, grace_seconds: u64) -> bool {
         for _ in 0..REMOVE_ATTEMPTS {
-            if matches!(self.delete(path, 0).await, Ok(true))
+            if matches!(self.delete(path, grace_seconds).await, Ok(true))
                 || matches!(self.get(path).await, Ok(None))
             {
                 return true;
@@ -519,17 +537,15 @@ impl Api {
         false
     }
 
-    /// The container's log, at most `limit` bytes plus one; empty while it cannot be read.
-    async fn log(&self, name: &str, limit: usize) -> Result<Vec<u8>, String> {
+    /// The API's answer to a read of the container's log, at most `limit` bytes plus one.
+    async fn log(&self, name: &str, limit: usize) -> Result<(u16, Bytes), String> {
         let path = format!(
             "{}/{name}/log?container={CONTAINER}&limitBytes={}",
             self.pods(),
             limit + 1
         );
-        match self.call(Method::GET, &path, None, limit + 1).await? {
-            (200, body) => Ok(body.to_vec()),
-            _ => Ok(Vec::new()),
-        }
+        self.call(Method::GET, &path, None, limit.max(MAX_API_BODY_BYTES) + 1)
+            .await
     }
 }
 
@@ -590,8 +606,10 @@ fn api_failed(detail: &str) -> ConfinementError {
     DriverError::failed(POD_API_FAILED, format!("pod: the cluster API: {detail}")).into()
 }
 
-/// Open's one request: a list of at most one Pod in the namespace, on a thread of its own so
-/// `open` stays synchronous inside or outside a runtime.
+/// Open's two requests, on a thread of its own so `open` stays synchronous inside or outside a
+/// runtime: a list of at most one Pod in the namespace, then a read of the log of a Pod no run is
+/// named, which the API answers 404 only to a credential that may read `pods/log` and 403 to one
+/// that may not. Without that access every run's output would be unreadable.
 fn probe(api: &Arc<Api>) -> Result<(), String> {
     let api = Arc::clone(api);
     std::thread::scope(|scope| {
@@ -602,20 +620,47 @@ fn probe(api: &Arc<Api>) -> Result<(), String> {
                     .build()
                     .map_err(|error| format!("the probe has no runtime: {error}"))?;
                 runtime.block_on(async {
-                    let path = format!("{}?limit=1", api.pods());
-                    match tokio::time::timeout(
-                        OPEN_TIMEOUT,
-                        api.call(Method::GET, &path, None, MAX_API_BODY_BYTES),
-                    )
-                    .await
-                    {
-                        Ok(Ok((200, _))) => Ok(()),
-                        Ok(Ok((status, body))) => Err(format!(
-                            "the cluster answered the probe {status}: {}",
+                    let api: &Api = &api;
+                    let ask = |path: String| async move {
+                        match tokio::time::timeout(
+                            OPEN_TIMEOUT,
+                            api.call(Method::GET, &path, None, MAX_API_BODY_BYTES),
+                        )
+                        .await
+                        {
+                            Ok(Ok(answer)) => Ok(answer),
+                            Ok(Err(error)) => Err(format!("the cluster did not answer: {error}")),
+                            Err(_) => {
+                                Err("the cluster did not answer within 10 seconds".to_owned())
+                            }
+                        }
+                    };
+                    match ask(format!("{}?limit=1", api.pods())).await? {
+                        (200, _) => {}
+                        (status, body) => {
+                            return Err(format!(
+                                "the cluster answered the probe {status}: {}",
+                                status_message(&body)
+                            ));
+                        }
+                    }
+                    let log = format!(
+                        "{}/{LOG_ACCESS_PROBE}/log?container={CONTAINER}&limitBytes=1",
+                        api.pods()
+                    );
+                    match ask(log).await? {
+                        // Authorized: no such Pod, or (should one exist) its log or its refusal
+                        // to name a container it does not have.
+                        (200 | 400 | 404, _) => Ok(()),
+                        (status @ (401 | 403), body) => Err(format!(
+                            "the credential may not read pods/log in the namespace, so no run's \
+                             output could be read ({status}: {})",
                             status_message(&body)
                         )),
-                        Ok(Err(error)) => Err(format!("the cluster did not answer: {error}")),
-                        Err(_) => Err("the cluster did not answer within 10 seconds".to_owned()),
+                        (status, body) => Err(format!(
+                            "the cluster answered the pods/log probe {status}: {}",
+                            status_message(&body)
+                        )),
                     }
                 })
             })
@@ -669,11 +714,15 @@ fn resolve(
             "the CPU bound is under one millicore over the wall bound",
         ));
     }
-    if let Some(stated) = profile.process_bounds
-        && settings
-            .pod_pids_limit
-            .is_none_or(|limit| limit > stated.processes)
-    {
+    // Every run has a processes bound, the default one included, and the Pod API holds none of
+    // its own: without the operator's `pod_pids_limit` no profile is admitted. A profile that
+    // states no bound runs under the cluster's.
+    let held = match (settings.pod_pids_limit, profile.process_bounds) {
+        (None, _) => false,
+        (Some(limit), Some(stated)) => limit <= stated.processes,
+        (Some(_), None) => true,
+    };
+    if !held {
         return Err(DriverError::unserved(
             POD_PROCESSES_UNSERVED,
             "pod: the cluster holds no per-Pod process bound at or below this one",
@@ -735,21 +784,6 @@ pub fn check_profile(
     resolve(settings, profile).map(|_| ())
 }
 
-fn is_secretish(name: &str) -> bool {
-    let lower = name.to_ascii_lowercase();
-    [
-        "authorization",
-        "bearer",
-        "credential",
-        "password",
-        "proxy",
-        "secret",
-        "token",
-    ]
-    .iter()
-    .any(|fragment| lower.contains(fragment))
-}
-
 fn check_pod_command(command: &Command) -> Result<(), ConfinementError> {
     super::check_command(command)?;
     if command.argv.iter().map(String::len).sum::<usize>() > MAX_ARGV_BYTES
@@ -762,26 +796,11 @@ fn check_pod_command(command: &Command) -> Result<(), ConfinementError> {
         )
         .into());
     }
-    let refused = command.env.len() > MAX_ENV_ENTRIES
-        || command.env.iter().any(|(name, value)| {
-            name.len() > 128
-                || !name.bytes().enumerate().all(|(index, byte)| {
-                    byte.is_ascii_uppercase()
-                        || (index > 0 && (byte.is_ascii_digit() || byte == b'_'))
-                })
-                || name.is_empty()
-                || name == LOCAL_POLICY_ENV
-                || is_secretish(name)
-                || value.len() > 4096
-                || value.contains('\0')
-        });
-    if refused {
-        return Err(DriverError::refused(
-            "exec.environment-refused",
-            "Exec environment is outside the closed non-secret shape.",
-            "env",
-        )
-        .into());
+    // The portable shape every adapter holds a run's environment to, and the one variable only
+    // the adapter sets.
+    crate::environment::check(&command.env)?;
+    if command.env.contains_key(LOCAL_POLICY_ENV) {
+        return Err(crate::environment::refused().into());
     }
     Ok(())
 }
@@ -809,6 +828,12 @@ fn security_context(settings: &PodSettings, container: bool) -> Value {
         members.insert("capabilities".into(), json!({"drop": ["ALL"]}));
     }
     context
+}
+
+/// `text` as the kubelet passes it on: it expands `$(NAME)` and turns `$$` into `$` in a
+/// container's `command`, `args` and `env` values, so every `$` is written `$$`.
+fn literal(text: &str) -> String {
+    text.replace('$', "$$")
 }
 
 /// The `NetworkPolicy` and the Pod one run creates, in that order.
@@ -844,13 +869,16 @@ fn render_objects(
     let mut env: Vec<Value> = command
         .env
         .iter()
-        .map(|(name, value)| json!({"name": name, "value": value}))
+        .map(|(name, value)| json!({"name": name, "value": literal(value)}))
         .collect();
     // ADR 0109 F3 A: inside `pod` the host refuses `local`.
     env.push(json!({"name": LOCAL_POLICY_ENV, "value": "refuse"}));
+    let args: Vec<String> = command.argv[1..].iter().map(|arg| literal(arg)).collect();
+    let storage = settings.ephemeral_storage_bytes.to_string();
     let resources = json!({
         "cpu": format!("{}m", resolved.millicores),
         "memory": resolved.memory_bytes.to_string(),
+        "ephemeral-storage": storage,
     });
     let policy = json!({
         "apiVersion": "networking.k8s.io/v1",
@@ -875,13 +903,13 @@ fn render_objects(
             "restartPolicy": "Never",
             "terminationGracePeriodSeconds": TERM_GRACE_SECONDS,
             "securityContext": security_context(settings, false),
-            "volumes": [{"name": "workspace", "emptyDir": {}}],
+            "volumes": [{"name": "workspace", "emptyDir": {"sizeLimit": storage}}],
             "containers": [{
                 "name": CONTAINER,
                 "image": image,
                 "imagePullPolicy": "IfNotPresent",
-                "command": [command.argv[0]],
-                "args": command.argv[1..],
+                "command": [literal(&command.argv[0])],
+                "args": args,
                 "workingDir": working,
                 "env": env,
                 "resources": {"requests": resources, "limits": resources},
@@ -920,7 +948,8 @@ pub fn render_manifests(
 #[derive(Debug, Clone, Copy)]
 enum Phase {
     Running,
-    Ended(RunExit),
+    /// The exit, and the run's OOM kills when the API showed the container's terminated state.
+    Ended(RunExit, Option<u64>),
     Unknown,
 }
 
@@ -928,8 +957,17 @@ enum Phase {
 struct Captured {
     stdout: Vec<u8>,
     truncated: bool,
-    /// Read once the container ended or before the adapter deleted it.
+    /// Final: read once the container ended or before the adapter deleted it, or never readable.
     complete: bool,
+    /// Why the log could not be read; `output_read` reports it instead of an empty output.
+    error: Option<String>,
+}
+
+/// A deletion of the run's Pod the adapter asked for: the signal the run ends with, and when.
+#[derive(Debug, Clone, Copy)]
+struct Stop {
+    signal: Signal,
+    at: Instant,
 }
 
 struct PodRun {
@@ -937,8 +975,9 @@ struct PodRun {
     phase: watch::Receiver<Phase>,
     output_limit: usize,
     captured: Mutex<Captured>,
-    termination: Mutex<Option<PodTermination>>,
-    signalled: Mutex<Option<Signal>>,
+    /// Whether the API has shown the container running or terminated.
+    started: AtomicBool,
+    stop: Mutex<Option<Stop>>,
 }
 
 /// The `pod` adapter, opened against one cluster and one namespace.
@@ -955,15 +994,6 @@ impl PodAdapter {
         &self.settings
     }
 
-    /// How `run` ended; `None` while it runs.
-    ///
-    /// # Errors
-    ///
-    /// `resource.not-found` for a run this adapter does not track.
-    pub fn termination(&self, run: &RunId) -> Result<Option<PodTermination>, ConfinementError> {
-        Ok(self.run(run)?.termination.lock().clone())
-    }
-
     fn run(&self, id: &RunId) -> Result<Arc<PodRun>, ConfinementError> {
         self.runs
             .lock()
@@ -974,10 +1004,10 @@ impl PodAdapter {
     }
 
     fn observation(run: &PodRun) -> RunObservation {
-        let (state, exit) = match *run.phase.borrow() {
-            Phase::Running => (RunState::Running, None),
-            Phase::Ended(exit) => (RunState::Ended, Some(exit)),
-            Phase::Unknown => (RunState::Unknown, None),
+        let (state, exit, memory_oom_kills) = match *run.phase.borrow() {
+            Phase::Running => (RunState::Running, None, None),
+            Phase::Ended(exit, kills) => (RunState::Ended, Some(exit), kills),
+            Phase::Unknown => (RunState::Unknown, None, None),
         };
         RunObservation {
             run: run.id.clone(),
@@ -986,6 +1016,7 @@ impl PodAdapter {
             declared_insecure: None,
             state,
             exit,
+            memory_oom_kills,
         }
     }
 
@@ -1008,165 +1039,9 @@ impl PodAdapter {
         }
         Ok(())
     }
-}
 
-/// Reads the container's log once into `run`, unless it was read already.
-async fn capture(api: &Api, run: &PodRun) {
-    if run.captured.lock().complete {
-        return;
-    }
-    let Ok(mut log) = api.log(run.id.as_str(), run.output_limit).await else {
-        return;
-    };
-    let truncated = log.len() > run.output_limit;
-    log.truncate(run.output_limit);
-    let mut captured = run.captured.lock();
-    if !captured.complete {
-        *captured = Captured {
-            stdout: log,
-            truncated,
-            complete: true,
-        };
-    }
-}
-
-/// How a Pod in a terminal phase ended, once its container says so (or `force`).
-fn ended(pod: &Value, force: bool) -> Option<(RunExit, Option<String>, u64)> {
-    let status = &pod["status"];
-    if !matches!(status["phase"].as_str(), Some("Succeeded" | "Failed")) {
-        return None;
-    }
-    let terminated = status["containerStatuses"]
-        .as_array()
-        .and_then(|containers| containers.iter().find(|c| c["name"] == CONTAINER))
-        .map(|container| &container["state"]["terminated"])
-        .filter(|terminated| terminated.is_object());
-    let pod_reason = status["reason"].as_str().map(str::to_owned);
-    let Some(terminated) = terminated else {
-        return force.then_some((
-            RunExit {
-                code: None,
-                signal: None,
-            },
-            pod_reason,
-            0,
-        ));
-    };
-    let reason = terminated["reason"].as_str().map(str::to_owned);
-    let kills = u64::from(reason.as_deref() == Some("OOMKilled"));
-    let exit = RunExit {
-        code: terminated["exitCode"]
-            .as_i64()
-            .and_then(|code| i32::try_from(code).ok()),
-        signal: terminated["signal"]
-            .as_i64()
-            .filter(|signal| *signal != 0)
-            .and_then(|signal| i32::try_from(signal).ok()),
-    };
-    let reason = if pod_reason.as_deref() == Some("DeadlineExceeded") {
-        pod_reason
-    } else {
-        reason
-    };
-    Some((exit, reason, kills))
-}
-
-/// Follows one run until its Pod ends, then removes the Pod and the policy and reports the end.
-async fn monitor(api: Arc<Api>, run: Arc<PodRun>, phase: watch::Sender<Phase>, give_up: Instant) {
-    let name = run.id.as_str().to_owned();
-    let pod_path = format!("{}/{name}", api.pods());
-    let mut unreachable_since: Option<Instant> = None;
-    let mut terminal_polls = 0_u32;
-    let (outcome, reason, kills) = loop {
-        tokio::time::sleep(POLL).await;
-        let signalled = *run.signalled.lock();
-        match api.get(&pod_path).await {
-            Ok(Some(pod)) => {
-                unreachable_since = None;
-                if let Some((exit, reason, kills)) = ended(&pod, terminal_polls >= TERMINAL_POLLS) {
-                    capture(&api, &run).await;
-                    let exit = signalled.map_or(exit, |signal| RunExit {
-                        code: None,
-                        signal: Some(signal.number()),
-                    });
-                    break (Phase::Ended(exit), reason, kills);
-                }
-                if pod["status"]["phase"] == "Succeeded" || pod["status"]["phase"] == "Failed" {
-                    terminal_polls += 1;
-                }
-                if Instant::now() >= give_up {
-                    capture(&api, &run).await;
-                    let _ = api.delete(&pod_path, 0).await;
-                    let exit = RunExit {
-                        code: None,
-                        signal: Some(Signal::Kill.number()),
-                    };
-                    break (Phase::Ended(exit), Some("DeadlineExceeded".to_owned()), 0);
-                }
-            }
-            // Gone: deleted by a signal, or by someone else, which the adapter cannot account for.
-            Ok(None) => {
-                break match signalled {
-                    Some(signal) => (
-                        Phase::Ended(RunExit {
-                            code: None,
-                            signal: Some(signal.number()),
-                        }),
-                        None,
-                        0,
-                    ),
-                    None => (Phase::Unknown, None, 0),
-                };
-            }
-            Err(_) => {
-                if unreachable_since.get_or_insert_with(Instant::now).elapsed() >= UNREACHABLE_LIMIT
-                {
-                    break (Phase::Unknown, None, 0);
-                }
-            }
-        }
-    };
-    let pod_removed = api.remove(&pod_path).await;
-    let policy_removed = api.remove(&format!("{}/{name}", api.policies())).await;
-    *run.termination.lock() = Some(PodTermination {
-        reason,
-        memory_oom_kills: kills,
-        objects_removed: pod_removed && policy_removed,
-    });
-    run.captured.lock().complete = true;
-    let _ = phase.send(outcome);
-}
-
-#[async_trait]
-impl ConfinementAdapter for PodAdapter {
-    fn facts(&self) -> &AdapterFacts {
-        &self.facts
-    }
-
-    fn check(&self, profile: &ConfinementProfile) -> Result<(), ConfinementError> {
-        check_profile(&self.settings, profile)
-    }
-
-    /// The program and arguments the container runs, after every refusal `start` would make.
-    fn render(
-        &self,
-        admitted: &AdmittedProfile,
-        command: &Command,
-    ) -> Result<RenderedCommand, ConfinementError> {
-        admitted.check_on(&self.facts, false)?;
-        render_objects(
-            &self.settings,
-            admitted.profile(),
-            command,
-            "substrate-run-render",
-        )?;
-        Ok(RenderedCommand {
-            program: PathBuf::from(&command.argv[0]),
-            args: command.argv[1..].to_vec(),
-        })
-    }
-
-    async fn start(
+    /// Every refusal and failure of a start, before the run exists.
+    async fn start_run(
         &self,
         admitted: &AdmittedProfile,
         command: &Command,
@@ -1179,13 +1054,25 @@ impl ConfinementAdapter for PodAdapter {
         let (policy, pod, resolved) =
             render_objects(&self.settings, admitted.profile(), command, &name)?;
         self.reserve()?;
+        let policy_path = format!("{}/{name}", self.api.policies());
         // The policy first, so the Pod is never without it.
-        self.api.create(&self.api.policies(), &policy).await?;
+        if let Err(error) = self.api.create(&self.api.policies(), &policy).await {
+            // No Pod exists yet; a policy stored before its answer was lost is removed.
+            self.api.remove(&policy_path, 0).await;
+            return Err(api_failed(&error));
+        }
         if let Err(error) = self.api.create(&self.api.pods(), &pod).await {
-            self.api
-                .remove(&format!("{}/{name}", self.api.policies()))
-                .await;
-            return Err(error);
+            // An answer lost after the API stored the Pod looks like a refusal: delete the Pod by
+            // name, and only once it is confirmed gone its policy.
+            let pod_path = format!("{}/{name}", self.api.pods());
+            if !self.api.remove(&pod_path, KILL_GRACE_SECONDS).await {
+                return Err(api_failed(&format!(
+                    "{error}; the Pod {name} may have been stored and its removal was not \
+                     confirmed, so its NetworkPolicy stays"
+                )));
+            }
+            self.api.remove(&policy_path, 0).await;
+            return Err(api_failed(&error));
         }
         let id = RunId::new(name);
         let (sender, phase) = watch::channel(Phase::Running);
@@ -1194,8 +1081,8 @@ impl ConfinementAdapter for PodAdapter {
             phase,
             output_limit: resolved.output_limit,
             captured: Mutex::new(Captured::default()),
-            termination: Mutex::new(None),
-            signalled: Mutex::new(None),
+            started: AtomicBool::new(false),
+            stop: Mutex::new(None),
         });
         let wall = Duration::from_secs(resolved.deadline_seconds);
         tokio::spawn(monitor(
@@ -1208,33 +1095,303 @@ impl ConfinementAdapter for PodAdapter {
         admitted.audit_start(&id, &command.argv[0]);
         Ok(id)
     }
+}
+
+/// Reads the container's log, retried. A log that cannot be read is an error, never an empty
+/// output; only a container the API has not shown started has printed nothing yet.
+async fn read_log(api: &Api, run: &PodRun) -> Result<(Vec<u8>, bool), String> {
+    let mut failure = String::new();
+    for attempt in 0..LOG_ATTEMPTS {
+        if attempt > 0 {
+            tokio::time::sleep(POLL).await;
+        }
+        match api.log(run.id.as_str(), run.output_limit).await {
+            Ok((200, body)) => {
+                let mut log = body.to_vec();
+                let truncated = log.len() > run.output_limit;
+                log.truncate(run.output_limit);
+                return Ok((log, truncated));
+            }
+            // The kubelet keeps no log yet: the Pod has no node or its container waits to start.
+            Ok((400, _)) if !run.started.load(Ordering::SeqCst) => {
+                return Ok((Vec::new(), false));
+            }
+            Ok((status, body)) => {
+                failure = format!("the log read answered {status}: {}", status_message(&body));
+            }
+            Err(error) => failure = error,
+        }
+    }
+    Err(failure)
+}
+
+fn log_unread(detail: &str) -> ConfinementError {
+    api_failed(&format!("the run's log cannot be read: {detail}"))
+}
+
+/// Reads the container's log once into `run`, unless it was read already; a failed read is kept
+/// as the reason no output can be reported.
+async fn capture(api: &Api, run: &PodRun) {
+    if run.captured.lock().complete {
+        return;
+    }
+    let read = read_log(api, run).await;
+    let mut captured = run.captured.lock();
+    if captured.complete {
+        return;
+    }
+    match read {
+        Ok((stdout, truncated)) => {
+            *captured = Captured {
+                stdout,
+                truncated,
+                complete: true,
+                error: None,
+            };
+        }
+        Err(error) => captured.error = Some(error),
+    }
+}
+
+/// Makes the output final before the run is reported over: what was read, or why nothing was.
+fn seal(run: &PodRun) {
+    let mut captured = run.captured.lock();
+    if !captured.complete {
+        captured.complete = true;
+        captured
+            .error
+            .get_or_insert_with(|| "the log was not read before the run was lost".to_owned());
+    }
+}
+
+/// Asks the API to delete the run's Pod with `grace_seconds`, at least one: the kubelet stops the
+/// container and only then does the Pod go. The stop is recorded first, so a Pod seen gone
+/// afterwards is read as this deletion's.
+async fn request_stop(
+    api: &Api,
+    run: &PodRun,
+    signal: Signal,
+    grace_seconds: u64,
+) -> Result<(), String> {
+    let first = {
+        let mut stop = run.stop.lock();
+        let first = stop.is_none();
+        stop.get_or_insert(Stop {
+            signal,
+            at: Instant::now(),
+        });
+        first
+    };
+    let path = format!("{}/{}", api.pods(), run.id.as_str());
+    match api.delete(&path, grace_seconds).await {
+        Ok(_) => Ok(()),
+        Err(error) => {
+            if first {
+                *run.stop.lock() = None;
+            }
+            Err(error)
+        }
+    }
+}
+
+fn container(pod: &Value) -> &Value {
+    pod["status"]["containerStatuses"]
+        .as_array()
+        .and_then(|containers| containers.iter().find(|c| c["name"] == CONTAINER))
+        .map_or(&Value::Null, |container| &container["state"])
+}
+
+fn terminal(pod: &Value) -> bool {
+    matches!(
+        pod["status"]["phase"].as_str(),
+        Some("Succeeded" | "Failed")
+    )
+}
+
+/// How the run's container ended, once the API shows it terminated: the exit and its OOM kills.
+/// With `force`, a Pod in a terminal phase that never reports its container ends without either.
+fn ended(pod: &Value, force: bool) -> Option<(RunExit, Option<u64>)> {
+    let terminated = &container(pod)["terminated"];
+    if !terminated.is_object() {
+        return (force && terminal(pod)).then_some((
+            RunExit {
+                code: None,
+                signal: None,
+            },
+            None,
+        ));
+    }
+    let kills = u64::from(terminated["reason"] == "OOMKilled");
+    let exit = RunExit {
+        code: terminated["exitCode"]
+            .as_i64()
+            .and_then(|code| i32::try_from(code).ok()),
+        signal: terminated["signal"]
+            .as_i64()
+            .filter(|signal| *signal != 0)
+            .and_then(|signal| i32::try_from(signal).ok()),
+    };
+    Some((exit, Some(kills)))
+}
+
+/// Follows one run until the API shows its container ended, or the run is lost, then removes the
+/// Pod and, once the Pod is confirmed gone, its policy.
+async fn monitor(api: Arc<Api>, run: Arc<PodRun>, phase: watch::Sender<Phase>, give_up: Instant) {
+    let name = run.id.as_str().to_owned();
+    let pod_path = format!("{}/{name}", api.pods());
+    let policy_path = format!("{}/{name}", api.policies());
+    let mut answered = Instant::now();
+    let mut terminal_polls = 0_u32;
+    let outcome = loop {
+        tokio::time::sleep(POLL).await;
+        let answer = api.get(&pod_path).await;
+        // Read after the answer: a stop recorded before its deletion is seen with the deletion.
+        let stop = *run.stop.lock();
+        let stopped = |exit: RunExit| {
+            stop.map_or(exit, |stop| RunExit {
+                code: None,
+                signal: Some(stop.signal.number()),
+            })
+        };
+        match answer {
+            Ok(Some(pod)) => {
+                answered = Instant::now();
+                let state = container(&pod);
+                if state["running"].is_object() || state["terminated"].is_object() {
+                    run.started.store(true, Ordering::SeqCst);
+                }
+                if let Some((exit, kills)) = ended(&pod, terminal_polls >= TERMINAL_POLLS) {
+                    capture(&api, &run).await;
+                    break Phase::Ended(stopped(exit), kills);
+                }
+                if terminal(&pod) {
+                    terminal_polls += 1;
+                }
+                match stop {
+                    // The kubelet has not confirmed the container stopped: it may still run.
+                    Some(stop) if stop.at.elapsed() >= STOP_CONFIRM => break Phase::Unknown,
+                    None if Instant::now() >= give_up => {
+                        capture(&api, &run).await;
+                        // A failed deletion is asked for again at the next poll.
+                        let _ = request_stop(&api, &run, Signal::Kill, KILL_GRACE_SECONDS).await;
+                    }
+                    _ => {}
+                }
+            }
+            // Gone after the adapter's own graceful deletion: the kubelet confirmed the container
+            // stopped. Gone otherwise: deleted by someone else, which the adapter cannot account for.
+            Ok(None) => {
+                break match stop {
+                    Some(_) => Phase::Ended(
+                        stopped(RunExit {
+                            code: None,
+                            signal: None,
+                        }),
+                        None,
+                    ),
+                    None => Phase::Unknown,
+                };
+            }
+            Err(_) => {
+                if answered.elapsed() >= UNREACHABLE_LIMIT {
+                    break Phase::Unknown;
+                }
+            }
+        }
+    };
+    if matches!(outcome, Phase::Unknown) {
+        seal(&run);
+        phase.send_replace(Phase::Unknown);
+    }
+    // The Pod first, never forced, and its policy only once the Pod is confirmed gone; a removal
+    // not confirmed within the limit reports the run `Unknown` while the adapter keeps trying.
+    let deadline = tokio::time::Instant::from_std(Instant::now() + UNREACHABLE_LIMIT);
+    let removed = tokio::time::timeout_at(deadline, api.remove(&pod_path, KILL_GRACE_SECONDS))
+        .await
+        .unwrap_or(false);
+    if removed {
+        let policy_removed = tokio::time::timeout_at(deadline, api.remove(&policy_path, 0))
+            .await
+            .unwrap_or(false);
+        seal(&run);
+        phase.send_replace(outcome);
+        if !policy_removed {
+            api.remove(&policy_path, 0).await;
+        }
+        return;
+    }
+    seal(&run);
+    phase.send_replace(Phase::Unknown);
+    if api.remove(&pod_path, KILL_GRACE_SECONDS).await {
+        api.remove(&policy_path, 0).await;
+    }
+}
+
+#[async_trait]
+impl ConfinementAdapter for PodAdapter {
+    fn facts(&self) -> &AdapterFacts {
+        &self.facts
+    }
+
+    fn check(&self, profile: &ConfinementProfile) -> Result<(), ConfinementError> {
+        check_profile(&self.settings, profile)
+    }
+
+    /// The program and arguments the container runs, after every refusal `start` would make. A
+    /// refused render is audited as a refused start is.
+    fn render(
+        &self,
+        admitted: &AdmittedProfile,
+        command: &Command,
+    ) -> Result<RenderedCommand, ConfinementError> {
+        let rendered = admitted.check_on(&self.facts, false).and_then(|()| {
+            render_objects(
+                &self.settings,
+                admitted.profile(),
+                command,
+                "substrate-run-render",
+            )
+        });
+        admitted.audit_refusal(
+            &self.facts,
+            rendered.map(|_| RenderedCommand {
+                program: PathBuf::from(&command.argv[0]),
+                args: command.argv[1..].to_vec(),
+            }),
+        )
+    }
+
+    /// Every refusal, from the contract's recheck to the cluster API's, writes its audit record.
+    async fn start(
+        &self,
+        admitted: &AdmittedProfile,
+        command: &Command,
+    ) -> Result<RunId, ConfinementError> {
+        let started = self.start_run(admitted, command).await;
+        admitted.audit_refusal(&self.facts, started)
+    }
 
     async fn observe(&self, run: &RunId) -> Result<RunObservation, ConfinementError> {
         Ok(Self::observation(&*self.run(run)?))
     }
 
     /// The container's one log stream as `stdout`: the kubelet interleaves stdout and stderr, and
-    /// the API returns them as one (design 28).
+    /// the API returns them as one (design 28). A log the API does not return is
+    /// `confinement.pod-api-failed`, never an empty output.
     async fn output(&self, run: &RunId) -> Result<RunOutput, ConfinementError> {
         let run = self.run(run)?;
         let stored = {
             let captured = run.captured.lock();
-            captured
-                .complete
-                .then(|| (captured.stdout.clone(), captured.truncated))
+            captured.complete.then(|| match &captured.error {
+                Some(error) => Err(error.clone()),
+                None => Ok((captured.stdout.clone(), captured.truncated)),
+            })
         };
-        let (stdout, truncated) = if let Some(stored) = stored {
-            stored
-        } else {
-            let mut log = self
-                .api
-                .log(run.id.as_str(), run.output_limit)
-                .await
-                .map_err(|error| api_failed(&error))?;
-            let truncated = log.len() > run.output_limit;
-            log.truncate(run.output_limit);
-            (log, truncated)
+        let read = match stored {
+            Some(read) => read,
+            None => read_log(&self.api, &run).await,
         };
+        let (stdout, truncated) = read.map_err(|error| log_unread(&error))?;
         Ok(RunOutput {
             stdout,
             stderr: Vec::new(),
@@ -1253,12 +1410,13 @@ impl ConfinementAdapter for PodAdapter {
         Ok(Self::observation(&run))
     }
 
-    /// `Kill` deletes the Pod at once and `Term` with a 5 second grace; the API delivers no other
-    /// signal.
+    /// `Kill` deletes the Pod with a grace of 1 second and `Term` with 5, so the kubelet sends
+    /// `SIGTERM`, then `SIGKILL`; the API delivers no other signal. The run reads `Ended` with that
+    /// signal once the kubelet confirms the container stopped, and `Unknown` if it does not.
     async fn signal(&self, run: &RunId, signal: Signal) -> Result<(), ConfinementError> {
         let run = self.run(run)?;
         let grace = match signal {
-            Signal::Kill => 0,
+            Signal::Kill => KILL_GRACE_SECONDS,
             Signal::Term => TERM_GRACE_SECONDS,
             Signal::Int => {
                 return Err(DriverError::unserved(
@@ -1272,12 +1430,9 @@ impl ConfinementAdapter for PodAdapter {
         if !matches!(*run.phase.borrow(), Phase::Running) {
             return Ok(());
         }
-        run.signalled.lock().get_or_insert(signal);
         capture(&self.api, &run).await;
-        self.api
-            .delete(&format!("{}/{}", self.api.pods(), run.id.as_str()), grace)
+        request_stop(&self.api, &run, signal, grace)
             .await
-            .map_err(|error| api_failed(&error))?;
-        Ok(())
+            .map_err(|error| api_failed(&error))
     }
 }

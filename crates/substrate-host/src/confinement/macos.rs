@@ -233,6 +233,7 @@ impl MacosAdapter {
             declared_insecure: None,
             state,
             exit,
+            memory_oom_kills: None,
         }
     }
 

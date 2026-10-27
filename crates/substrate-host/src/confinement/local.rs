@@ -192,6 +192,7 @@ impl LocalAdapter {
             declared_insecure: run.reason.clone(),
             state,
             exit,
+            memory_oom_kills: None,
         }
     }
 

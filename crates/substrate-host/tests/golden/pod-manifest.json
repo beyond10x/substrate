@@ -42,7 +42,7 @@
           {
             "args": [
               "-c",
-              "echo hi > out"
+              "echo hi $$PWD > out"
             ],
             "command": [
               "/bin/sh"
@@ -63,10 +63,12 @@
             "resources": {
               "limits": {
                 "cpu": "500m",
+                "ephemeral-storage": "1073741824",
                 "memory": "67108864"
               },
               "requests": {
                 "cpu": "500m",
+                "ephemeral-storage": "1073741824",
                 "memory": "67108864"
               }
             },
@@ -113,7 +115,9 @@
         "terminationGracePeriodSeconds": 5,
         "volumes": [
           {
-            "emptyDir": {},
+            "emptyDir": {
+              "sizeLimit": "1073741824"
+            },
             "name": "workspace"
           }
         ]
