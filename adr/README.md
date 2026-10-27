@@ -49,3 +49,4 @@ with YAML frontmatter containing `date` and `status`. Draft design questions rem
 | [0041](0041-a-session-attachment-lives-one-hour-and-is-never-re-attached.md) | A session attachment lives one hour and is never re-attached | accepted |
 | [0042](0042-an-upgraded-connection-hands-its-transport-slot-to-its-stream.md) | An upgraded connection hands its transport slot to its stream | accepted |
 | [0043](0043-a-listing-names-the-entries-it-omits-in-a-response-header.md) | A listing names the entries it omits in a response header | accepted |
+| [0044](0044-confinement-is-a-contract-family-served-by-declared-adapters.md) | Confinement is a contract family served by declared adapters | accepted |

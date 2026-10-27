@@ -1,0 +1,50 @@
+# `systemd { inner: local }` (`story:systemd-scope-bounds-provider`): a transient scope gives the
+# unconfined run limits and whole-tree kill; the run stays declared insecure and needs a reason.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: systemd-local-admits-limits-on-delegated
+summary: "lane delegated: systemd around local, with a reason, admits limits and whole-tree kill, reported declared_insecure: true with the reason."
+
+arrange:
+  - instance: run
+    entity: substrate.confinement.Profile
+
+timeline:
+  - at: 2026-10-27T09:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: systemd
+      inner: local
+      served_families: [process_run, process_watch, output_read, wait, workspace, limits, audit]
+      facts: [declared_insecure, paths_are_host_paths, whole_tree_kill, local_permitted, host_network]
+    outcome: opened
+  - at: 2026-10-27T09:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: systemd
+      inner: local
+      required_families: [process_run, limits]
+      required_facts: [whole_tree_kill]
+      local_reason: the operator bounds this run on the developer's own machine
+    outcome: admitted-insecure
+    events:
+      - event: substrate.confinement.ProfileAdmitted
+        payload:
+          adapter: systemd
+          inner: local
+          families: [process_run, limits]
+          facts: [whole_tree_kill]
+          declared_insecure: true
+          local_reason: the operator bounds this run on the developer's own machine
+    capture: {instance: run, event: substrate.confinement.ProfileAdmitted, field: profile}
+
+assert:
+  - view: substrate.confinement.Profiles
+    contains:
+      profile: {$instance: run}
+      adapter: systemd
+      inner: local
+      declared_insecure: true
+      local_reason: the operator bounds this run on the developer's own machine

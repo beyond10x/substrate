@@ -1,0 +1,552 @@
+domain: substrate.confinement
+summary: >-
+  The confinement contract family (atlas ADR 0109, ADR 0044): an adapter proves at open which
+  contract families it serves and which facts hold, and a profile that needs a family or a fact the
+  adapter lacks is refused by that name, never degraded.
+
+types:
+  # ADR 0109 decision 8, in that order. An adapter declares the families it serves; a client that
+  # needs one the adapter does not serve is refused with that family's name.
+  - name: substrate.confinement.ContractFamily
+    kind: enum
+    variants:
+      - process_run
+      - process_watch
+      - output_read
+      - wait
+      - workspace
+      - filesystem_view
+      - network_egress
+      - network_ingress
+      - limits
+      - audit
+  # ADR 0109 decision 3. `systemd` is the bounds provider around one other adapter, named by
+  # InnerAdapter (`story:systemd-scope-bounds-provider`).
+  - name: substrate.confinement.AdapterName
+    kind: enum
+    variants: [local, linux, macos, systemd, oci, pod]
+  - name: substrate.confinement.InnerAdapter
+    kind: enum
+    variants: [local, linux]
+  # The facts an adapter proves at open and a profile may require (ADR 0109 decision 2). Each
+  # adapter's set is stated by the open step of every scenario that opens it; README.md lists the
+  # sets and the source each member is read from.
+  # - declared_insecure: the run is unconfined and every observation says so (decision 4).
+  # - paths_are_host_paths: a path the program sees is the host path (no remapped mount).
+  # - whole_tree_kill: a kill reaches every process of the tree.
+  # - local_permitted: the host's policy fact; absent, `local` is refused (F3 A).
+  # - ipc_socket_allowlist: socket(2) families are an allowlist (ADR 0039).
+  # - ipc_signals_contained: no signal reaches a process outside the tree.
+  # - sealed_paths: paths inside a writable workspace that stay unwritable.
+  # - exec_subpaths: exec admitted by declared subpath, not only by literal program.
+  # - private_tmpdir: a per-run TMPDIR, invisible to another run and gone after wait.
+  # - host_network: the run uses the host's network directly.
+  # - image_digest_pinned: the image runs by digest only.
+  - name: substrate.confinement.Fact
+    kind: enum
+    variants:
+      - declared_insecure
+      - paths_are_host_paths
+      - whole_tree_kill
+      - local_permitted
+      - ipc_socket_allowlist
+      - ipc_signals_contained
+      - sealed_paths
+      - exec_subpaths
+      - private_tmpdir
+      - host_network
+      - image_digest_pinned
+  # The two profile fields ADR 0109 F1 B reserves: setting either is refused until a later story
+  # fills it. Spelled with `-` because ESS reads a bare `ingress_routes` in a payload as the input
+  # of that name.
+  - name: substrate.confinement.ReservedField
+    kind: enum
+    variants: [ingress-routes, rate-bounds]
+  # An OCI image reference as the client writes it: `name:tag` or `name@sha256:<hex>`.
+  - name: substrate.confinement.ImageReference
+    kind: newtype
+    of: String
+  # substrate-host mints one per admitted profile. It is not a wire identifier.
+  - name: substrate.confinement.ProfileId
+    kind: newtype
+    of: Uuid
+
+entities:
+  # The adapter as opened on this host: one row per adapter name, written by OpenAdapter, which is
+  # `confinement::open` of the S0 contract (`story:confinement-contract-on-linux-and-local`). No row
+  # means the adapter did not open here.
+  - name: substrate.confinement.Adapter
+    naming:
+      summary: An adapter opened on this host, with the contract families it serves and the facts it proved at open.
+    identity: {name: adapter, type: substrate.confinement.AdapterName}
+    fields:
+      # The adapter `systemd` wraps; absent for every other adapter.
+      - {name: inner, type: "Optional<substrate.confinement.InnerAdapter>"}
+      - {name: served_families, type: "List<substrate.confinement.ContractFamily>"}
+      - {name: facts, type: "List<substrate.confinement.Fact>"}
+    lifecycle:
+      initial: Open
+      states: [Open]
+      terminal: [Open]
+
+  # A profile admitted on an adapter: what it required, and whether the run is declared insecure.
+  - name: substrate.confinement.Profile
+    naming:
+      summary: A confinement profile admitted on one opened adapter.
+    identity: {name: profile, type: substrate.confinement.ProfileId}
+    fields:
+      - {name: adapter, type: substrate.confinement.AdapterName}
+      - {name: inner, type: "Optional<substrate.confinement.InnerAdapter>"}
+      - {name: families, type: "List<substrate.confinement.ContractFamily>"}
+      - {name: facts, type: "List<substrate.confinement.Fact>"}
+      - {name: declared_insecure, type: Boolean}
+      - {name: local_reason, type: "Optional<String>"}
+    # A profile is admitted against the adapter row that is open; the row outlives the profile.
+    relations:
+      - {name: opened_on, kind: references, target: substrate.confinement.Adapter, cardinality: one, via: adapter}
+    lifecycle:
+      initial: Admitted
+      states: [Admitted]
+      terminal: [Admitted]
+
+views:
+  - name: substrate.confinement.Adapters
+    source: substrate.confinement.Adapter
+    consistency: read_your_writes
+    fields:
+      - {name: adapter, type: substrate.confinement.AdapterName}
+      - {name: state, type: substrate.confinement.Adapter.State}
+      - {name: inner, type: "Optional<substrate.confinement.InnerAdapter>"}
+      - {name: served_families, type: "List<substrate.confinement.ContractFamily>"}
+      - {name: facts, type: "List<substrate.confinement.Fact>"}
+  - name: substrate.confinement.Profiles
+    source: substrate.confinement.Profile
+    consistency: read_your_writes
+    fields:
+      - {name: profile, type: substrate.confinement.ProfileId}
+      - {name: state, type: substrate.confinement.Profile.State}
+      - {name: adapter, type: substrate.confinement.AdapterName}
+      - {name: inner, type: "Optional<substrate.confinement.InnerAdapter>"}
+      - {name: families, type: "List<substrate.confinement.ContractFamily>"}
+      - {name: facts, type: "List<substrate.confinement.Fact>"}
+      - {name: declared_insecure, type: Boolean}
+      - {name: local_reason, type: "Optional<String>"}
+
+actors:
+  # A substrate-host embedder (loom-sdk, takt, the daemon). The API is in process; no subject is
+  # derived here.
+  - name: substrate.confinement.Embedder
+    may:
+      - substrate.confinement.OpenAdapter
+      - substrate.confinement.AdmitProfile
+
+errors:
+  # Each error is one named refusal; the code and the status are the contract's.
+  - name: substrate.confinement.AdapterUnserved
+    summary: "`confinement.adapter-unserved`, 501. The adapter cannot open on this host or platform."
+    fields:
+      - {name: adapter, type: substrate.confinement.AdapterName}
+  - name: substrate.confinement.FamilyUnserved
+    summary: "`confinement.family-unserved`, 501. The adapter does not serve a contract family the profile needs; the error names the family."
+    fields:
+      - {name: adapter, type: substrate.confinement.AdapterName}
+      - {name: family, type: substrate.confinement.ContractFamily}
+  - name: substrate.confinement.FactUnserved
+    summary: "`confinement.fact-unserved`, 501. The adapter did not prove a fact the profile requires; the error names the fact (ADR 0109 decision 2)."
+    fields:
+      - {name: adapter, type: substrate.confinement.AdapterName}
+      - {name: fact, type: substrate.confinement.Fact}
+  - name: substrate.confinement.LocalRefused
+    summary: "`confinement.local-refused`, 403. The host's policy fact forbids `local` (ADR 0109 F3 A)."
+    fields:
+      - {name: adapter, type: substrate.confinement.AdapterName}
+  - name: substrate.confinement.LocalReasonMissing
+    summary: "`confinement.local-reason-missing`, 422. `local` is requested without a reason (ADR 0109 decision 4)."
+    fields:
+      - {name: adapter, type: substrate.confinement.AdapterName}
+  - name: substrate.confinement.ImageUnpinned
+    summary: "`confinement.image-unpinned`, 422. An `oci` or `pod` image is not named by digest."
+    fields:
+      - {name: adapter, type: substrate.confinement.AdapterName}
+  - name: substrate.confinement.ReservedFieldUnserved
+    summary: "`confinement.reserved-field-unserved`, 501. An ingress route or a rate bound was set; both are reserved (ADR 0109 F1 B)."
+    fields:
+      - {name: field, type: substrate.confinement.ReservedField}
+
+commands:
+  # `confinement::open` (S0 contract). The adapter probes at open; the input states the families
+  # and facts the probe proved, so a scenario's open step is that adapter's declared set, and a
+  # runner holding a real adapter compares its facts with it. The declared sets the scenarios open:
+  # - local: process_run, process_watch, output_read, wait, workspace, audit; declared_insecure,
+  #   paths_are_host_paths, local_permitted (absent where the host forbids `local`, F3 A),
+  #   host_network (decision 4: direct networking). No whole-tree kill (the systemd story).
+  # - linux: process_run, process_watch, output_read, wait, workspace, filesystem_view, limits,
+  #   audit, and network_egress where the operator declared an egress aperture
+  #   (`crates/substrate-host/src/probe.rs`); whole_tree_kill (cgroup kill), ipc_socket_allowlist
+  #   (ADR 0039's seccomp socket filter), ipc_signals_contained (its own pid namespace). The S0
+  #   story: paths_are_host_paths, sealed_paths and host_network are not proved.
+  #   UNMAPPED: exec_subpaths and private_tmpdir. The bwrap argv mounts a fresh `/tmp`
+  #   (`crates/substrate-host/src/process.rs`), but no story declares either fact for `linux`;
+  #   both are left out until one does.
+  # - macos, final state after `story:macos-seatbelt-policy-runs-cargo-test`: process_run,
+  #   process_watch, output_read, wait, workspace, filesystem_view, audit; paths_are_host_paths,
+  #   ipc_signals_contained (the profile's `signal (target same-sandbox)` rule,
+  #   `crates/substrate-host/src/seatbelt.rs`), sealed_paths, exec_subpaths, private_tmpdir.
+  #   No limits, egress or whole-tree kill (ADR 0037).
+  # - systemd around local: local's families plus limits; local's facts plus whole_tree_kill.
+  # - systemd around linux: linux's set.
+  # - oci: process_run, process_watch, output_read, wait, workspace, filesystem_view, limits,
+  #   audit; image_digest_pinned (`story:oci-adapter`).
+  #   UNMAPPED: the oci story names a "rootless or not" fact with no Fact variant, and states no
+  #   whole_tree_kill, IPC, private_tmpdir or paths_are_host_paths fact; none is declared.
+  # - pod: process_run, process_watch, output_read, wait, workspace, limits, audit;
+  #   image_digest_pinned (its posture runs "an image by digest", `story:pod-adapter`).
+  #   UNMAPPED: whole_tree_kill; no story declares it for `pod`.
+  # UNMAPPED: no family states the audit record's own snapshot fact (decision 2); `audit` is
+  # declared served by every adapter, as each story lists it.
+  - name: substrate.confinement.OpenAdapter
+    input:
+      - {name: adapter, type: substrate.confinement.AdapterName}
+      - {name: inner, type: "Optional<substrate.confinement.InnerAdapter>"}
+      - {name: served_families, type: "List<substrate.confinement.ContractFamily>"}
+      - {name: facts, type: "List<substrate.confinement.Fact>"}
+    outcomes:
+      # What makes an adapter absent is the host, not the request: `macos` off macOS, `linux` off
+      # Linux, `systemd` with no reachable user manager, `oci` with no runtime program, `pod` with
+      # no cluster configuration. `local` always opens.
+      - name: unserved
+        external: the adapter cannot open on this host or platform
+        error: substrate.confinement.AdapterUnserved
+        payload:
+          substrate.confinement.AdapterUnserved: {adapter: input.adapter}
+      - name: opened
+        creates: substrate.confinement.Adapter
+        instance: adapter
+        sets:
+          inner: input.inner
+          served_families: input.served_families
+          facts: input.facts
+        emits: [substrate.confinement.AdapterOpened]
+        payload:
+          substrate.confinement.AdapterOpened:
+            adapter: input.adapter
+            inner: input.inner
+            served_families: input.served_families
+            facts: input.facts
+
+  # Admission of a profile on an opened adapter. The request-only refusals answer first, then a
+  # missing adapter, then what the opened adapter row decides (a missing reason, an unpinned
+  # image, the host's policy), then its families and facts, in declaration order. Whether a run is
+  # `local` is read from the opened row: `local`, or `systemd` opened around `local`.
+  # UNMAPPED: no source names a refusal for `systemd` requested without `inner`, for `inner` named
+  # beside another adapter, or for an `inner` that differs from the one the open `systemd`
+  # wraps. The model decides by the opened row and records the requested `inner` as sent. Open
+  # question for the owner of the S0 contract.
+  # UNMAPPED: ADR 0109 decision 2 and this story make every refusal an audit record
+  # (`ProfileRefused`, carrying the adapter and the family or fact named). ESS refuses an event on
+  # an outcome that reports an error (`refusal_mutated_state`), so the refusal's audit record is
+  # not in this model; each error carries the adapter and the name it refuses, and the adapter's
+  # own tests hold the audit record.
+  - name: substrate.confinement.AdmitProfile
+    input:
+      - {name: adapter, type: substrate.confinement.AdapterName}
+      - {name: inner, type: "Optional<substrate.confinement.InnerAdapter>"}
+      - {name: required_families, type: "List<substrate.confinement.ContractFamily>"}
+      - {name: required_facts, type: "List<substrate.confinement.Fact>"}
+      # Required when the run is `local`, bare or inside `systemd` (decision 4; the systemd story:
+      # wrapping `local` is still reported declared insecure).
+      - {name: local_reason, type: "Optional<String>"}
+      # For `oci` and `pod`.
+      # UNMAPPED: no source says what an image beside `local`, `linux`, `macos` or `systemd`
+      # means; the model ignores it there.
+      - {name: image, type: "Optional<substrate.confinement.ImageReference>"}
+      # Reserved by ADR 0109 F1 B; their shape is a later story's.
+      # UNMAPPED: the shape of an ingress route and of a rate bound. Any value is refused here.
+      - {name: ingress_routes, type: "Optional<Json>"}
+      - {name: rate_bounds, type: "Optional<Json>"}
+    outcomes:
+      - name: ingress-routes-reserved
+        when: {ingress_routes: {defined: true}}
+        error: substrate.confinement.ReservedFieldUnserved
+        payload:
+          substrate.confinement.ReservedFieldUnserved: {field: ingress-routes}
+      - name: rate-bounds-reserved
+        when: {rate_bounds: {defined: true}}
+        error: substrate.confinement.ReservedFieldUnserved
+        payload:
+          substrate.confinement.ReservedFieldUnserved: {field: rate-bounds}
+      - name: adapter-unserved
+        when_related: {via: input.adapter, exists: false}
+        error: substrate.confinement.AdapterUnserved
+        payload:
+          substrate.confinement.AdapterUnserved: {adapter: input.adapter}
+      # Decision 4: a run is `local` exactly when its opened adapter proves `declared_insecure`:
+      # `local`, or `systemd` opened around `local` (the systemd story: still declared insecure).
+      - name: local-reason-missing
+        when: {any: ["not defined(local_reason)", local_reason == ""]}
+        when_related:
+          via: input.adapter
+          predicate: {exists: {in: facts, as: held, that: held == declared_insecure}}
+        error: substrate.confinement.LocalReasonMissing
+        payload:
+          substrate.confinement.LocalReasonMissing: {adapter: input.adapter}
+      # The oci story: "the adapter runs only a digest". An adapter that proves
+      # `image_digest_pinned` (`oci`, `pod`) refuses a reference that names no `sha256` digest.
+      # UNMAPPED: an `oci` or `pod` profile with no image at all. The model refuses it as unpinned
+      # (no digest is named; invariant 3, fail closed); no source says so. Open question.
+      - name: image-unpinned
+        when: {any: ["not defined(image)", {not: {image: {contains: "@sha256:"}}}]}
+        when_related:
+          via: input.adapter
+          predicate: {exists: {in: facts, as: held, that: held == image_digest_pinned}}
+        error: substrate.confinement.ImageUnpinned
+        payload:
+          substrate.confinement.ImageUnpinned: {adapter: input.adapter}
+      # F3 A: the host's policy fact. The opened `local`, or `systemd` around it, carries
+      # `local_permitted` exactly when the host permits `local`.
+      - name: local-refused
+        when_related:
+          via: input.adapter
+          predicate:
+            all:
+              - {exists: {in: facts, as: held, that: held == declared_insecure}}
+              - {not: {exists: {in: facts, as: held, that: held == local_permitted}}}
+        error: substrate.confinement.LocalRefused
+        payload:
+          substrate.confinement.LocalRefused: {adapter: input.adapter}
+      # One branch per family, in ADR 0109 decision 8's order, so the refusal names the first
+      # family the profile needs and the adapter does not serve.
+      - name: family-unserved-process-run
+        when: {exists: {in: required_families, as: needed, that: needed == process_run}}
+        when_related:
+          via: input.adapter
+          predicate: {not: {exists: {in: served_families, as: served, that: served == process_run}}}
+        error: substrate.confinement.FamilyUnserved
+        payload:
+          substrate.confinement.FamilyUnserved: {adapter: input.adapter, family: process_run}
+      - name: family-unserved-process-watch
+        when: {exists: {in: required_families, as: needed, that: needed == process_watch}}
+        when_related:
+          via: input.adapter
+          predicate: {not: {exists: {in: served_families, as: served, that: served == process_watch}}}
+        error: substrate.confinement.FamilyUnserved
+        payload:
+          substrate.confinement.FamilyUnserved: {adapter: input.adapter, family: process_watch}
+      - name: family-unserved-output-read
+        when: {exists: {in: required_families, as: needed, that: needed == output_read}}
+        when_related:
+          via: input.adapter
+          predicate: {not: {exists: {in: served_families, as: served, that: served == output_read}}}
+        error: substrate.confinement.FamilyUnserved
+        payload:
+          substrate.confinement.FamilyUnserved: {adapter: input.adapter, family: output_read}
+      - name: family-unserved-wait
+        when: {exists: {in: required_families, as: needed, that: needed == wait}}
+        when_related:
+          via: input.adapter
+          predicate: {not: {exists: {in: served_families, as: served, that: served == wait}}}
+        error: substrate.confinement.FamilyUnserved
+        payload:
+          substrate.confinement.FamilyUnserved: {adapter: input.adapter, family: wait}
+      - name: family-unserved-workspace
+        when: {exists: {in: required_families, as: needed, that: needed == workspace}}
+        when_related:
+          via: input.adapter
+          predicate: {not: {exists: {in: served_families, as: served, that: served == workspace}}}
+        error: substrate.confinement.FamilyUnserved
+        payload:
+          substrate.confinement.FamilyUnserved: {adapter: input.adapter, family: workspace}
+      - name: family-unserved-filesystem-view
+        when: {exists: {in: required_families, as: needed, that: needed == filesystem_view}}
+        when_related:
+          via: input.adapter
+          predicate: {not: {exists: {in: served_families, as: served, that: served == filesystem_view}}}
+        error: substrate.confinement.FamilyUnserved
+        payload:
+          substrate.confinement.FamilyUnserved: {adapter: input.adapter, family: filesystem_view}
+      - name: family-unserved-network-egress
+        when: {exists: {in: required_families, as: needed, that: needed == network_egress}}
+        when_related:
+          via: input.adapter
+          predicate: {not: {exists: {in: served_families, as: served, that: served == network_egress}}}
+        error: substrate.confinement.FamilyUnserved
+        payload:
+          substrate.confinement.FamilyUnserved: {adapter: input.adapter, family: network_egress}
+      - name: family-unserved-network-ingress
+        when: {exists: {in: required_families, as: needed, that: needed == network_ingress}}
+        when_related:
+          via: input.adapter
+          predicate: {not: {exists: {in: served_families, as: served, that: served == network_ingress}}}
+        error: substrate.confinement.FamilyUnserved
+        payload:
+          substrate.confinement.FamilyUnserved: {adapter: input.adapter, family: network_ingress}
+      - name: family-unserved-limits
+        when: {exists: {in: required_families, as: needed, that: needed == limits}}
+        when_related:
+          via: input.adapter
+          predicate: {not: {exists: {in: served_families, as: served, that: served == limits}}}
+        error: substrate.confinement.FamilyUnserved
+        payload:
+          substrate.confinement.FamilyUnserved: {adapter: input.adapter, family: limits}
+      - name: family-unserved-audit
+        when: {exists: {in: required_families, as: needed, that: needed == audit}}
+        when_related:
+          via: input.adapter
+          predicate: {not: {exists: {in: served_families, as: served, that: served == audit}}}
+        error: substrate.confinement.FamilyUnserved
+        payload:
+          substrate.confinement.FamilyUnserved: {adapter: input.adapter, family: audit}
+      # One branch per fact, in the Fact order, so the refusal names the first fact the profile
+      # requires and the adapter did not prove.
+      - name: fact-unserved-declared-insecure
+        when: {exists: {in: required_facts, as: needed, that: needed == declared_insecure}}
+        when_related:
+          via: input.adapter
+          predicate: {not: {exists: {in: facts, as: held, that: held == declared_insecure}}}
+        error: substrate.confinement.FactUnserved
+        payload:
+          substrate.confinement.FactUnserved: {adapter: input.adapter, fact: declared_insecure}
+      - name: fact-unserved-paths-are-host-paths
+        when: {exists: {in: required_facts, as: needed, that: needed == paths_are_host_paths}}
+        when_related:
+          via: input.adapter
+          predicate: {not: {exists: {in: facts, as: held, that: held == paths_are_host_paths}}}
+        error: substrate.confinement.FactUnserved
+        payload:
+          substrate.confinement.FactUnserved: {adapter: input.adapter, fact: paths_are_host_paths}
+      - name: fact-unserved-whole-tree-kill
+        when: {exists: {in: required_facts, as: needed, that: needed == whole_tree_kill}}
+        when_related:
+          via: input.adapter
+          predicate: {not: {exists: {in: facts, as: held, that: held == whole_tree_kill}}}
+        error: substrate.confinement.FactUnserved
+        payload:
+          substrate.confinement.FactUnserved: {adapter: input.adapter, fact: whole_tree_kill}
+      - name: fact-unserved-local-permitted
+        when: {exists: {in: required_facts, as: needed, that: needed == local_permitted}}
+        when_related:
+          via: input.adapter
+          predicate: {not: {exists: {in: facts, as: held, that: held == local_permitted}}}
+        error: substrate.confinement.FactUnserved
+        payload:
+          substrate.confinement.FactUnserved: {adapter: input.adapter, fact: local_permitted}
+      - name: fact-unserved-ipc-socket-allowlist
+        when: {exists: {in: required_facts, as: needed, that: needed == ipc_socket_allowlist}}
+        when_related:
+          via: input.adapter
+          predicate: {not: {exists: {in: facts, as: held, that: held == ipc_socket_allowlist}}}
+        error: substrate.confinement.FactUnserved
+        payload:
+          substrate.confinement.FactUnserved: {adapter: input.adapter, fact: ipc_socket_allowlist}
+      - name: fact-unserved-ipc-signals-contained
+        when: {exists: {in: required_facts, as: needed, that: needed == ipc_signals_contained}}
+        when_related:
+          via: input.adapter
+          predicate: {not: {exists: {in: facts, as: held, that: held == ipc_signals_contained}}}
+        error: substrate.confinement.FactUnserved
+        payload:
+          substrate.confinement.FactUnserved: {adapter: input.adapter, fact: ipc_signals_contained}
+      - name: fact-unserved-sealed-paths
+        when: {exists: {in: required_facts, as: needed, that: needed == sealed_paths}}
+        when_related:
+          via: input.adapter
+          predicate: {not: {exists: {in: facts, as: held, that: held == sealed_paths}}}
+        error: substrate.confinement.FactUnserved
+        payload:
+          substrate.confinement.FactUnserved: {adapter: input.adapter, fact: sealed_paths}
+      - name: fact-unserved-exec-subpaths
+        when: {exists: {in: required_facts, as: needed, that: needed == exec_subpaths}}
+        when_related:
+          via: input.adapter
+          predicate: {not: {exists: {in: facts, as: held, that: held == exec_subpaths}}}
+        error: substrate.confinement.FactUnserved
+        payload:
+          substrate.confinement.FactUnserved: {adapter: input.adapter, fact: exec_subpaths}
+      - name: fact-unserved-private-tmpdir
+        when: {exists: {in: required_facts, as: needed, that: needed == private_tmpdir}}
+        when_related:
+          via: input.adapter
+          predicate: {not: {exists: {in: facts, as: held, that: held == private_tmpdir}}}
+        error: substrate.confinement.FactUnserved
+        payload:
+          substrate.confinement.FactUnserved: {adapter: input.adapter, fact: private_tmpdir}
+      - name: fact-unserved-host-network
+        when: {exists: {in: required_facts, as: needed, that: needed == host_network}}
+        when_related:
+          via: input.adapter
+          predicate: {not: {exists: {in: facts, as: held, that: held == host_network}}}
+        error: substrate.confinement.FactUnserved
+        payload:
+          substrate.confinement.FactUnserved: {adapter: input.adapter, fact: host_network}
+      - name: fact-unserved-image-digest-pinned
+        when: {exists: {in: required_facts, as: needed, that: needed == image_digest_pinned}}
+        when_related:
+          via: input.adapter
+          predicate: {not: {exists: {in: facts, as: held, that: held == image_digest_pinned}}}
+        error: substrate.confinement.FactUnserved
+        payload:
+          substrate.confinement.FactUnserved: {adapter: input.adapter, fact: image_digest_pinned}
+      # Decision 4: `local` is a configuration, not an absence. It runs only with a reason, and the
+      # admission records it as declared insecure.
+      - name: admitted-insecure
+        when_related:
+          via: input.adapter
+          predicate: {exists: {in: facts, as: held, that: held == declared_insecure}}
+        creates: substrate.confinement.Profile
+        instance: profile
+        sets:
+          adapter: input.adapter
+          inner: input.inner
+          families: input.required_families
+          facts: input.required_facts
+          declared_insecure: true
+          local_reason: input.local_reason
+        emits: [substrate.confinement.ProfileAdmitted]
+        payload:
+          substrate.confinement.ProfileAdmitted:
+            profile: {generated: true}
+            adapter: input.adapter
+            inner: input.inner
+            families: input.required_families
+            facts: input.required_facts
+            declared_insecure: true
+            local_reason: input.local_reason
+      # A reason sent with a confined adapter is recorded as sent; it declares nothing.
+      - name: admitted
+        creates: substrate.confinement.Profile
+        instance: profile
+        sets:
+          adapter: input.adapter
+          inner: input.inner
+          families: input.required_families
+          facts: input.required_facts
+          declared_insecure: false
+          local_reason: input.local_reason
+        emits: [substrate.confinement.ProfileAdmitted]
+        payload:
+          substrate.confinement.ProfileAdmitted:
+            profile: {generated: true}
+            adapter: input.adapter
+            inner: input.inner
+            families: input.required_families
+            facts: input.required_facts
+            declared_insecure: false
+            local_reason: input.local_reason
+
+events:
+  - name: substrate.confinement.AdapterOpened
+    fields:
+      - {name: adapter, type: substrate.confinement.AdapterName}
+      - {name: inner, type: "Optional<substrate.confinement.InnerAdapter>"}
+      - {name: served_families, type: "List<substrate.confinement.ContractFamily>"}
+      - {name: facts, type: "List<substrate.confinement.Fact>"}
+  # The audit record of an admission (ADR 0109 decision 2).
+  - name: substrate.confinement.ProfileAdmitted
+    fields:
+      - {name: profile, type: substrate.confinement.ProfileId}
+      - {name: adapter, type: substrate.confinement.AdapterName}
+      - {name: inner, type: "Optional<substrate.confinement.InnerAdapter>"}
+      - {name: families, type: "List<substrate.confinement.ContractFamily>"}
+      - {name: facts, type: "List<substrate.confinement.Fact>"}
+      - {name: declared_insecure, type: Boolean}
+      - {name: local_reason, type: "Optional<String>"}

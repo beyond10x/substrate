@@ -172,3 +172,28 @@ What it does not establish:
   S11), the environment digest (S1) and the cursor's order are generated values (points 4, 8, 9
   and 16). The supervisor names which deadline it enforced.
 - **No S8 or S9.** `StartContainer` and `AdoptProcess` are drafted and deferred to their wave.
+
+## Confinement contract projection
+
+`confinement/confinement.yaml` (domain `substrate.confinement`, ADR 0044) specifies the
+confinement contract of atlas ADR 0109 before any adapter code. What the green check establishes:
+
+- The model validates under ESS 0.70.0 with no warning, and `confinement-suite.json` is its exact
+  synthesized suite (22 scenarios, 10 refusals) plus the 36 authored scenarios under
+  `confinement/scenarios/`. Each refused obligation has an authored scenario
+  ([`confinement/README.md`](confinement/README.md) names them).
+- All 58 scenarios pass against ESS's `interpreted` reference. That checks the model, not an
+  adapter.
+- `ContractFamily`, `AdapterName` and `Fact` are generated into
+  `crates/substrate-host/src/generated/confinement.rs`; `cargo xtask check-ess` fails on drift.
+
+What it does not establish:
+
+- **No adapter conformance.** Nothing runs these scenarios against `local`, `linux`, `macos`,
+  `systemd`, `oci` or `pod` yet. Each adapter's story adds the test file that runs the scenarios of
+  its lane (the name's `-on-<lane>` suffix) against the adapter.
+- **No probe.** Each scenario's open step states the adapter's declared set. Whether a host
+  actually proves those facts is the adapter's runtime claim.
+- **No refusal audit record.** ESS admits no event on an outcome that reports an error, so the
+  refusal's `ProfileRefused` record is the adapters' to test.
+- **No wire.** The contract is substrate-host's API. No route, wire field or bundle changes.

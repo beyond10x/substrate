@@ -1,0 +1,33 @@
+# `story:confinement-contract-on-linux-and-local`: a profile under `local` that names a filesystem
+# view is refused `confinement.family-unserved`; `local` claims no confinement.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: local-filesystem-view-unserved-on-portable
+summary: "lane portable: local with a reason, asked for a filesystem view, is refused confinement.family-unserved naming filesystem_view."
+
+timeline:
+  - at: 2026-10-27T09:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: local
+      served_families: [process_run, process_watch, output_read, wait, workspace, audit]
+      facts: [declared_insecure, paths_are_host_paths, local_permitted, host_network]
+    outcome: opened
+  - at: 2026-10-27T09:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: local
+      required_families: [process_run, filesystem_view]
+      required_facts: []
+      local_reason: the operator runs this task on the developer's own machine
+    outcome: family-unserved-filesystem-view
+    error:
+      name: substrate.confinement.FamilyUnserved
+      fields: {adapter: local, family: filesystem_view}
+    no_events: [substrate.confinement.ProfileAdmitted]
+
+assert:
+  - view: substrate.confinement.Profiles
+    counts: {at_most: 0}

@@ -7,6 +7,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- The confinement contract is specified as the ESS domain `substrate.confinement` (ADR 0044): ten contract families, six adapters with their declared facts and named refusals, 36 authored scenarios tagged by lane, checked against the interpreted reference by `cargo xtask check-ess`.
+
 ### Changed
 
 - The specification and CI use ESS 0.70.0 (was 0.69.2); the suites, wire types and CLI package regenerate unchanged apart from the generator header.
