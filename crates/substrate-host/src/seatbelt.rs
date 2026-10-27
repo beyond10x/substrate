@@ -69,9 +69,10 @@ pub const XCODE_SELECT_LINK: &str = "/private/var/db/xcode_select_link";
 /// The Command Line Tools root, the developer directory when no Xcode is selected.
 pub const COMMAND_LINE_TOOLS: &str = "/Library/Developer/CommandLineTools";
 
-/// Fixed system directories a policy with an exec subpath may read: the LibreSSL configuration
-/// and trust store. Cargo links the system libcurl, whose LibreSSL reads `openssl.cnf` when it
-/// starts and exits if the read is refused. They hold no user data and no credential.
+/// Fixed system directories a policy with an exec subpath may read: the system TLS library's
+/// configuration and trust store. Cargo links the system `libcurl`, whose `LibreSSL` reads
+/// `openssl.cnf` when it starts and exits if the read is refused. They hold no user data and no
+/// credential.
 pub const BUILD_READ_SUBPATHS: [&str; 1] = ["/private/etc/ssl"];
 
 /// System directories an exec subpath may name without a declared root.
