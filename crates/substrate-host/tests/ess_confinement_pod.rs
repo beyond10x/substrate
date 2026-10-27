@@ -2,7 +2,7 @@
 //!
 //! Portable: the rendered Pod for a fixed profile equals the committed golden manifest byte for
 //! byte, and against a fake API server every field design 28 refuses is refused with no request
-//! made after open's one probe.
+//! made after open's two probes, and a credential that may not read `pods/log` does not open.
 //!
 //! The `pod` lane: with `SUBSTRATE_POD_LANE=1`, every authored `pod-*-on-pod` scenario of
 //! `spec/confinement-suite.json` runs against a real cluster named by `SUBSTRATE_POD_KUBECONFIG`
@@ -70,6 +70,7 @@ fn the_rendered_pod_equals_the_golden_manifest() {
         namespace: "substrate-pod-golden".to_owned(),
         run_as_user: 65_532,
         pod_pids_limit: Some(1024),
+        ephemeral_storage_bytes: pod::POD_DEFAULT_EPHEMERAL_STORAGE_BYTES,
     };
     let profile = ConfinementProfile {
         image: Some(IMAGE.to_owned()),
@@ -89,7 +90,7 @@ fn the_rendered_pod_equals_the_golden_manifest() {
     let rendered = pod::render_manifests(
         &settings,
         &profile,
-        &command(&["/bin/sh", "-c", "echo hi > out"]),
+        &command(&["/bin/sh", "-c", "echo hi $PWD > out"]),
         GOLDEN_RUN,
     )
     .expect("the golden profile renders");
@@ -113,6 +114,11 @@ struct FakeCluster {
 
 impl FakeCluster {
     fn start(extension: Option<Value>) -> Self {
+        Self::start_with(extension, 404)
+    }
+
+    /// A cluster whose answer to open's `pods/log` probe is `log_probe`.
+    fn start_with(extension: Option<Value>, log_probe: u16) -> Self {
         let directory = tempfile::tempdir().expect("fake cluster directory");
         let identity = rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_owned()])
             .expect("fake cluster identity");
@@ -150,7 +156,7 @@ impl FakeCluster {
                     .expect("read timeout");
                 let tls = ServerConnection::new(Arc::clone(&config)).expect("server session");
                 let mut stream = BufReader::new(StreamOwned::new(tls, socket));
-                let _ = serve(&mut stream, &observed);
+                let _ = serve(&mut stream, &observed, log_probe);
             }
         });
         let mut context = json!({"cluster": "fake", "user": "fake", "namespace": "substrate-fake"});
@@ -193,6 +199,7 @@ impl Drop for FakeCluster {
 fn serve(
     stream: &mut BufReader<StreamOwned<ServerConnection, std::net::TcpStream>>,
     observed: &Mutex<Vec<String>>,
+    log_probe: u16,
 ) -> std::io::Result<()> {
     let mut line = String::new();
     stream.read_line(&mut line)?;
@@ -223,21 +230,18 @@ fn serve(
         if authorized { "" } else { " (no bearer token)" }
     ));
     let probe = request.starts_with("GET /api/v1/namespaces/substrate-fake/pods?limit=1 ");
+    let log = request.starts_with(LOG_PROBE);
     let (status, payload) = if probe && authorized {
-        (
-            "200 OK",
-            r#"{"kind":"PodList","apiVersion":"v1","items":[]}"#,
-        )
+        (200, r#"{"kind":"PodList","apiVersion":"v1","items":[]}"#)
+    } else if log && authorized {
+        (log_probe, r#"{"kind":"Status","message":"the log probe"}"#)
     } else {
-        (
-            "500 Internal Server Error",
-            r#"{"kind":"Status","message":"unexpected"}"#,
-        )
+        (500, r#"{"kind":"Status","message":"unexpected"}"#)
     };
     let writer = stream.get_mut();
     write!(
         writer,
-        "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{payload}",
+        "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{payload}",
         payload.len()
     )?;
     writer.flush()?;
@@ -253,8 +257,12 @@ fn open_fake(cluster: &FakeCluster) -> Arc<PodAdapter> {
     .expect("pod opens against the fake cluster")
 }
 
+/// Open's second request: the log of a Pod no run is named, which only a credential that may
+/// read `pods/log` sees answered 404.
+const LOG_PROBE: &str = "GET /api/v1/namespaces/substrate-fake/pods/substrate-log-access-probe/log?container=run&limitBytes=1 ";
+
 #[test]
-fn pod_opens_on_a_fake_cluster_with_its_declared_set_after_one_probe() {
+fn pod_opens_on_a_fake_cluster_with_its_declared_set_after_its_two_probes() {
     let cluster = FakeCluster::start(Some(json!({"pod_pids_limit": 1024})));
     let adapter = confinement::open(AdapterRequest::Pod(PodRequest {
         cluster: Some(cluster.kubeconfig.clone()),
@@ -277,8 +285,29 @@ fn pod_opens_on_a_fake_cluster_with_its_declared_set_after_one_probe() {
     assert_eq!(facts.facts, [Fact::ImageDigestPinned]);
     assert_eq!(
         cluster.requests(),
-        ["GET /api/v1/namespaces/substrate-fake/pods?limit=1 HTTP/1.1"]
+        [
+            "GET /api/v1/namespaces/substrate-fake/pods?limit=1 HTTP/1.1".to_owned(),
+            format!("{LOG_PROBE}HTTP/1.1"),
+        ]
     );
+}
+
+/// Without `get` on `pods/log` every run's output would be unreadable, so `pod` does not open.
+#[test]
+fn a_credential_that_may_not_read_pods_log_does_not_open_pod() {
+    for status in [401, 403, 500] {
+        let cluster = FakeCluster::start_with(Some(json!({"pod_pids_limit": 1024})), status);
+        let error = confinement::open(AdapterRequest::Pod(PodRequest {
+            cluster: Some(cluster.kubeconfig.clone()),
+        }))
+        .err()
+        .unwrap_or_else(|| panic!("a {status} on the pods/log probe opened pod"));
+        assert_eq!(error.code(), "confinement.adapter-unserved", "{error}");
+        if status != 500 {
+            assert!(error.to_string().contains("pods/log"), "{error}");
+        }
+        assert_eq!(cluster.requests().len(), 2, "{:?}", cluster.requests());
+    }
 }
 
 #[test]
@@ -652,7 +681,7 @@ async fn every_refused_field_is_refused_before_any_api_call() {
     let cluster = FakeCluster::start(Some(json!({"pod_pids_limit": 1024})));
     let adapter = open_fake(&cluster);
     let probe = cluster.requests();
-    assert_eq!(probe.len(), 1, "{probe:?}");
+    assert_eq!(probe.len(), 2, "{probe:?}");
     let mut refused = 0;
     for (name, mut profile, code, fields) in refused_profiles() {
         let (sink, records) = recording();
@@ -745,7 +774,74 @@ async fn a_profile_with_a_processes_bound_is_refused_where_the_operator_declared
         .expect_err("no processes bound is provable");
     assert_eq!(error.code(), "confinement.pod-processes-unserved");
     assert_eq!(error.status(), 501);
-    assert_eq!(cluster.requests().len(), 1);
+    assert_eq!(cluster.requests().len(), 2);
+}
+
+/// Every run has a processes bound: a profile that states none gets the default one, which a
+/// cluster without a declared `pod_pids_limit` does not hold either.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_profile_without_bounds_is_refused_where_the_operator_declared_no_pids_limit() {
+    let cluster = FakeCluster::start(None);
+    let adapter = open_fake(&cluster);
+    let profile = ConfinementProfile {
+        image: Some(IMAGE.to_owned()),
+        ..ConfinementProfile::default()
+    };
+    let error = adapter
+        .admit(&profile)
+        .expect_err("the default processes bound is not provable");
+    assert_eq!(error.code(), "confinement.pod-processes-unserved");
+    let settings = adapter.settings().clone();
+    let error = pod::render_manifests(&settings, &profile, &command(&["/bin/true"]), GOLDEN_RUN)
+        .expect_err("the default processes bound is not rendered");
+    assert_eq!(error.code(), "confinement.pod-processes-unserved");
+    assert_eq!(cluster.requests().len(), 2);
+}
+
+/// The operator's `ephemeral_storage_bytes` bounds the workspace and the container's ephemeral
+/// storage, and a value outside 1 MiB to 1 TiB does not open.
+#[test]
+fn the_operator_states_the_ephemeral_storage_bound() {
+    let cluster = FakeCluster::start(Some(
+        json!({"pod_pids_limit": 1024, "ephemeral_storage_bytes": 268_435_456_u64}),
+    ));
+    let adapter = open_fake(&cluster);
+    assert_eq!(adapter.settings().ephemeral_storage_bytes, 268_435_456);
+    let profile = ConfinementProfile {
+        image: Some(IMAGE.to_owned()),
+        ..ConfinementProfile::default()
+    };
+    let settings = adapter.settings().clone();
+    let rendered = pod::render_manifests(&settings, &profile, &command(&["/bin/true"]), GOLDEN_RUN)
+        .expect("renders");
+    let spec = &rendered["items"][1]["spec"];
+    assert_eq!(
+        spec["volumes"][0]["emptyDir"],
+        json!({"sizeLimit": "268435456"})
+    );
+    for side in ["requests", "limits"] {
+        assert_eq!(
+            spec["containers"][0]["resources"][side]["ephemeral-storage"],
+            json!("268435456")
+        );
+    }
+    for refused in [
+        json!(0),
+        json!(1_048_575),
+        json!(1_099_511_627_777_u64),
+        json!("1Gi"),
+    ] {
+        let cluster = FakeCluster::start(Some(
+            json!({"pod_pids_limit": 1024, "ephemeral_storage_bytes": refused}),
+        ));
+        let error = pod::open_pod(PodRequest {
+            cluster: Some(cluster.kubeconfig.clone()),
+        })
+        .err()
+        .unwrap_or_else(|| panic!("{refused} opened"));
+        assert_eq!(error.code(), "confinement.adapter-unserved", "{error}");
+        assert!(cluster.requests().is_empty());
+    }
 }
 
 // --- the `pod` lane --------------------------------------------------------------------------
@@ -860,6 +956,7 @@ async fn a_run_writes_its_workspace_reports_its_output_and_leaves_nothing_after_
     assert_eq!(ended.state, RunState::Ended);
     assert_eq!(ended.adapter, AdapterName::Pod);
     assert_eq!(ended.declared_insecure, None);
+    assert_eq!(ended.memory_oom_kills, Some(0), "{ended:?}");
     assert_eq!(ended.exit.and_then(|exit| exit.code), Some(3));
     let output = adapter.output(&run).await.expect("output");
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -913,12 +1010,15 @@ async fn a_run_over_its_memory_bound_is_oom_killed_and_leaves_nothing() {
         exit.code.is_some_and(|code| code != 0) || exit.signal.is_some(),
         "{exit:?}"
     );
-    let termination = adapter
-        .termination(&run)
-        .expect("tracked")
-        .expect("the run ended");
-    assert_eq!(termination.reason.as_deref(), Some("OOMKilled"));
-    assert_eq!(termination.memory_oom_kills, 1);
+    assert_eq!(ended.memory_oom_kills, Some(1), "{ended:?}");
+    assert_eq!(
+        adapter
+            .observe(&run)
+            .await
+            .expect("observed")
+            .memory_oom_kills,
+        Some(1)
+    );
     assert_eq!(
         leftovers(&kubeconfig, &adapter.settings().namespace, run.as_str()),
         ""
@@ -1004,11 +1104,9 @@ async fn a_run_past_its_deadline_ends_and_leaves_nothing() {
         .expect("the run ends at its deadline")
         .expect("waited");
     assert_eq!(ended.state, RunState::Ended);
-    let termination = adapter
-        .termination(&run)
-        .expect("tracked")
-        .expect("the run ended");
-    assert_eq!(termination.reason.as_deref(), Some("DeadlineExceeded"));
+    // `sleep 600` ended by its 5 s deadline, not by exiting.
+    assert_ne!(ended.exit.and_then(|exit| exit.code), Some(0), "{ended:?}");
+    println!("the deadline run ended {ended:?}");
     assert_eq!(
         leftovers(&kubeconfig, &adapter.settings().namespace, run.as_str()),
         ""

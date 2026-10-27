@@ -339,6 +339,7 @@ mod imp {
                     code: exit.code.map(i32::from),
                     signal: exit.signal.map(Signal::number),
                 }),
+                memory_oom_kills: None,
             }
         }
     }
