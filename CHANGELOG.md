@@ -11,6 +11,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 - The confinement contract is specified as the ESS domain `substrate.confinement` (ADR 0044): ten contract families, six adapters with their declared facts and named refusals, 49 authored scenarios named by adapter and lane, checked against the interpreted reference by `cargo xtask check-ess`.
 - `substrate_host::confinement` implements that contract in Rust (ADR 0044): `ConfinementProfile`, the `ConfinementAdapter` trait, the `linux` adapter over the host driver, the declared-insecure `local` adapter, the six-adapter registry and refusing `macos`, `systemd`, `oci` and `pod` stubs, with the authored scenarios executed by `tests/ess_confinement_local.rs` (portable) and `tests/ess_confinement_linux.rs` (delegated).
+- The `systemd` confinement adapter (ADR 0109 decision 3) asks the user's systemd manager for one transient `Delegate=yes` scope holding the embedding process: around `local` each run gets its own bounded cgroup (pids, memory with no swap, timeout, cumulative CPU, `cgroup.kill`) and stays declared insecure; around `linux` the scope is the host driver's delegated cgroup root. Without a reachable user manager it is refused `confinement.adapter-unserved`; `tests/ess_confinement_systemd.rs` runs every `systemd` scenario of the suite and real runs under `scripts/delegated-lane.sh`.
 
 ### Changed
 

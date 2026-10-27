@@ -1,7 +1,7 @@
 //! The confinement contract's portable lane (`story:confinement-contract-on-linux-and-local`).
 //!
 //! Executes every authored `-on-portable` scenario of `spec/confinement-suite.json` against the
-//! real `local` adapter and the S0 stubs of `macos`, `systemd`, `oci` and `pod`, through
+//! real `local` adapter, `systemd` with no user manager and the S0 stubs of `macos`, `oci` and `pod`, through
 //! `confinement::open`. The count is read from the suite and must equal what ran. Beside the
 //! suite: `linux` without a delegated cgroup refuses `limits` by name, each stub refuses to open,
 //! `render` under `linux` produces the bubblewrap argv, and a `local` run reports itself declared
@@ -43,11 +43,13 @@ fn open_portable(
     let request = match step.adapter.as_str() {
         "local" => AdapterRequest::Local(local()),
         "macos" => AdapterRequest::Macos(MacosRequest::default()),
+        // The setup the scenario names: `DBUS_SESSION_BUS_ADDRESS` unset, so no user manager.
         "systemd" => AdapterRequest::Systemd(SystemdRequest {
             inner: match step.inner.as_deref() {
                 Some("local") => InnerRequest::Local(local()),
                 other => panic!("no portable systemd scenario wraps {other:?}"),
             },
+            session_bus: None,
         }),
         // The setup the scenario names: a runtime program path that does not exist.
         "oci" => AdapterRequest::Oci(OciRequest {
@@ -128,7 +130,7 @@ fn macos_does_not_open_off_macos() {
 }
 
 #[test]
-fn systemd_is_unserved_in_this_tree() {
+fn systemd_without_a_user_manager_is_unserved() {
     for inner in [
         InnerRequest::Local(LocalRequest::default()),
         InnerRequest::Linux(Box::new(confinement::linux::LinuxRequest::new(
@@ -137,9 +139,12 @@ fn systemd_is_unserved_in_this_tree() {
             ),
         ))),
     ] {
-        let error = confinement::open(AdapterRequest::Systemd(SystemdRequest { inner }))
-            .err()
-            .expect("systemd is absent");
+        let error = confinement::open(AdapterRequest::Systemd(SystemdRequest {
+            inner,
+            session_bus: None,
+        }))
+        .err()
+        .expect("systemd is absent without a session bus");
         assert!(
             matches!(
                 &error,
