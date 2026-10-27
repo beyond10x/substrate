@@ -628,6 +628,132 @@ fn a_sigkilled_runs_group_is_removed_by_the_next_run_and_a_live_ones_is_not() {
     println!("confine delegated reaps a killed group: executed");
 }
 
+/// A `confine-<pid>-<start time>` group beneath the root whose owner is gone, still holding a
+/// process: the state the commit that added the reaper names, a SIGKILL that lands before the
+/// command starts and leaves bubblewrap and the command running, reparented, in the group.
+///
+/// The owner is a `sleep` this case started and ended; the process held is a second `sleep` this
+/// case started, moved into the group, and ends on drop.
+struct DeadOwnersGroup {
+    group: PathBuf,
+    holder: std::process::Child,
+}
+
+impl DeadOwnersGroup {
+    fn new(root: &Path) -> Self {
+        let mut owner = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("the owner");
+        let pid = owner.id();
+        let owner_stat =
+            std::fs::read_to_string(format!("/proc/{pid}/stat")).expect("the owner's stat");
+        let start: u64 = owner_stat
+            .rsplit_once(')')
+            .and_then(|(_, rest)| rest.split_whitespace().nth(19))
+            .and_then(|field| field.parse().ok())
+            .expect("the owner's start time");
+        owner.kill().expect("end the owner");
+        owner.wait().expect("reap the owner");
+        let group = root.join(format!("confine-{pid}-{start}"));
+        std::fs::create_dir(&group).expect("the dead owner's group");
+        let holder = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("the held process");
+        std::fs::write(group.join("cgroup.procs"), holder.id().to_string())
+            .expect("move the held process into the group");
+        Self { group, holder }
+    }
+}
+
+impl Drop for DeadOwnersGroup {
+    fn drop(&mut self) {
+        let _ = self.holder.kill();
+        let _ = self.holder.wait();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::fs::remove_dir(&self.group).is_err()
+            && self.group.exists()
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+    }
+}
+
+/// The reaper's safety fact, at step 4: a group whose owner is gone but which still holds a
+/// process is not removed, and the process in it is not ended. Only `rmdir` runs, and the kernel
+/// refuses it on a populated group.
+#[test]
+fn a_dead_owners_group_that_still_holds_a_process_is_kept_and_its_process_runs_on() {
+    let _lock = DELEGATED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(root) = delegated("keeps a populated dead group") else {
+        return;
+    };
+    let host = host();
+    let ws = dir(&host);
+    let mut dead = DeadOwnersGroup::new(&root);
+    let output = cli()
+        .env(ROOT_ENV, &root)
+        .args([
+            "confine", "run", "--dir", &ws, "--", "/bin/sh", "-c", "true",
+        ])
+        .output()
+        .expect("the CLI runs");
+    assert_eq!(output.status.code(), Some(0), "{}", text(&output.stderr));
+    assert!(
+        dead.group.is_dir(),
+        "the run removed {}, which held a process",
+        dead.group.display()
+    );
+    assert!(
+        dead.holder.try_wait().expect("try_wait").is_none(),
+        "the run ended the process held in {}",
+        dead.group.display()
+    );
+    assert_eq!(procs(&dead.group), [dead.holder.id().to_string()]);
+    println!("confine delegated keeps a populated dead group: executed");
+}
+
+/// A dead owner's group the reaper cannot remove is reported, not skipped in silence. The process
+/// held there outlives the timeout and whole-tree kill its owner would have enforced, and without
+/// a record nothing tells the operator it is there: every later run skips it the same way.
+#[test]
+fn a_dead_owners_group_left_holding_a_process_is_named_on_stderr() {
+    let _lock = DELEGATED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let Some(root) = delegated("names a populated dead group") else {
+        return;
+    };
+    let host = host();
+    let ws = dir(&host);
+    let dead = DeadOwnersGroup::new(&root);
+    let name = dead
+        .group
+        .file_name()
+        .expect("a name")
+        .to_string_lossy()
+        .into_owned();
+    let output = cli()
+        .env(ROOT_ENV, &root)
+        .args([
+            "confine", "run", "--dir", &ws, "--", "/bin/sh", "-c", "true",
+        ])
+        .output()
+        .expect("the CLI runs");
+    let stderr = text(&output.stderr);
+    assert!(
+        stderr.contains(&name),
+        "the run left {name}, which holds a process its owner no longer bounds, and said \
+         nothing (exit {:?}); stderr: {stderr:?}",
+        output.status.code()
+    );
+    println!("confine delegated names a populated dead group: executed");
+}
+
 // --- --image: only oci runs an image -------------------------------------------------------
 
 /// Pinned or tagged, an image under linux or local is the fact those adapters do not prove,
