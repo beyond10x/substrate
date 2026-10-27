@@ -348,9 +348,9 @@ async fn limits_egress_and_whole_tree_kill_are_refused_by_name_and_nothing_runs(
     );
 }
 
-fn bash(script: &str, args: &[&str]) -> Command {
+fn bash(script: &str, extra: &[&str]) -> Command {
     let mut argv = vec![BASH.to_owned(), "-c".into(), script.into(), "bash".into()];
-    argv.extend(args.iter().map(|arg| (*arg).to_owned()));
+    argv.extend(extra.iter().map(|arg| (*arg).to_owned()));
     Command {
         argv,
         env: BTreeMap::new(),

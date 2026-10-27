@@ -46,6 +46,7 @@ jobs:
     env:
       CARGO_TERM_COLOR: always
       RUST_BACKTRACE: 1
+      SUBSTRATE_OCI_LANE: "1"
 
     steps:
       - name: Check out source

@@ -19,6 +19,21 @@ Do not assume Docker socket access is a security boundary: a Docker-backed deplo
 root-equivalent to its host unless separately isolated by its environment. Kubernetes authority is
 bounded only by the handed-over credentials and namespace enforcement.
 
+The `oci` confinement adapter (ADR 0044 decision 8, `crates/substrate-host/src/confinement/oci.rs`)
+holds that authority: whoever may call the operator's container runtime may start a privileged
+container. The adapter therefore takes no runtime flag from a profile. A profile reaches the
+runtime only through a fixed argument list, each value one argument: the run's own uid and gid,
+`--network none`, `--cap-drop ALL`, `no-new-privileges`, a read-only root with a private `/tmp`,
+the runtime's default seccomp profile (an `open` whose `info` reports none is
+`confinement.adapter-unserved`), the profile's bounds, and the image after `--`, by sha256 digest,
+with a name that cannot be read as a flag. Host paths are bound only as the workspace, read-only
+roots and files, and writable roots the operator declared, each checked on the host to be what it
+claims and reached without a symlink, and refused `confinement.path-unrepresentable` when it holds
+a `:`. The runtime resolves a bind's path itself, after that check, so a path swapped between the
+check and the bind is bound as swapped: the `linux` adapter binds a pinned descriptor and does not
+have this gap. A container whose embedder dies runs on until it ends, unbounded by the adapter's
+timeout, and keeps the run's label for an operator to find.
+
 ## 2. Host filesystem
 
 - Workspace roots are created and owned by substrate under an explicit configured root.
