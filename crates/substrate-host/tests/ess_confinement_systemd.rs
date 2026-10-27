@@ -23,16 +23,17 @@ mod support;
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use substrate_host::HostConfig;
 use substrate_host::confinement::{
-    self, AdapterName, AdapterRequest, Command, ConfinementAdapter, ConfinementError,
-    ConfinementProfile, ContractFamily, Fact, InnerAdapter, ProcessBounds, RunState,
+    self, AdapterName, AdapterRequest, AuditRecord, AuditSink, Command, ConfinementAdapter,
+    ConfinementError, ConfinementProfile, ContractFamily, Fact, InnerAdapter, ProcessBounds,
+    RunState,
     linux::LinuxRequest,
     local::LocalRequest,
-    systemd::{InnerRequest, SystemdRequest},
+    systemd::{self, InnerRequest, SystemdRequest},
 };
 use substrate_wire::Signal;
 
@@ -468,4 +469,207 @@ async fn systemd_around_linux_gives_linux_the_scope_as_its_delegated_root() {
     let reopened = open(linux_inner(host.path())).expect("the scope is free again once dropped");
     drop(reopened);
     println!("ESS confinement systemd linux run: executed");
+}
+
+/// Whether `pid` is a live process, not a zombie.
+fn alive(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+        stat.rsplit_once(") ")
+            .is_some_and(|(_, rest)| !rest.starts_with('Z'))
+    })
+}
+
+/// Around `local`, a start or render whose environment names a variable through which a client
+/// finds the user manager is refused `exec.environment-refused`, audited, before anything runs:
+/// the manager would move a process of the run out of its bounds (security F1, adversary F3).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_systemd_local_run_naming_the_user_manager_is_refused_before_it_runs() {
+    let _held = OPENING.lock().await;
+    if let Err(reason) = user_manager() {
+        println!("ESS confinement systemd user-manager environment: ABSENT ({reason})");
+        return;
+    }
+    let adapter = open(local_inner()).expect("systemd around local opens");
+    let workspace = tempfile::tempdir().expect("workspace");
+    let records = Arc::new(Mutex::new(Vec::<AuditRecord>::new()));
+    let sink = Arc::clone(&records);
+    let admitted = adapter
+        .admit(&ConfinementProfile {
+            inner: Some(InnerAdapter::Local),
+            local_reason: Some(REASON.into()),
+            workspace: Some(workspace.path().to_path_buf()),
+            audit: Some(AuditSink::new(move |record: &AuditRecord| {
+                sink.lock().expect("records").push(record.clone());
+            })),
+            ..ConfinementProfile::default()
+        })
+        .expect("admitted");
+    let marker = workspace.path().join("ran");
+    for name in systemd::USER_MANAGER_ENV {
+        let mut command = shell(&format!("touch {}", marker.display()));
+        command
+            .env
+            .insert(name.to_owned(), "unix:path=/nonexistent".to_owned());
+        let rendered = adapter
+            .render(&admitted, &command)
+            .expect_err("render refused");
+        assert_eq!(
+            rendered.code(),
+            "exec.environment-refused",
+            "{name}: {rendered}"
+        );
+        let started = adapter
+            .start(&admitted, &command)
+            .await
+            .expect_err("start refused");
+        assert_eq!(
+            started.code(),
+            "exec.environment-refused",
+            "{name}: {started}"
+        );
+    }
+    assert!(!marker.exists(), "a refused run ran");
+    let refused = records
+        .lock()
+        .expect("records")
+        .iter()
+        .filter(|record| {
+            matches!(
+                record,
+                AuditRecord::ProfileRefused {
+                    code: "exec.environment-refused",
+                    ..
+                }
+            )
+        })
+        .count();
+    assert_eq!(refused, systemd::USER_MANAGER_ENV.len());
+    println!("ESS confinement systemd user-manager environment: executed");
+}
+
+const EMBEDDER_CHILD: &str = "ESS_SYSTEMD_EMBEDDER_CHILD";
+
+/// An embedder that dies leaves nothing of a run past the next open (adversary F4): the run's
+/// leader dies with it (`PR_SET_PDEATHSIG`), and a descendant that left the leader's process group
+/// is killed, and its scope stopped and counted, by the next process that opens `systemd`.
+#[test]
+#[allow(clippy::too_many_lines)] // The embedder's half, then each thing its death left.
+fn a_dead_embedders_run_is_ended_and_its_scope_reclaimed_by_the_next_open() {
+    const NAME: &str = "a_dead_embedders_run_is_ended_and_its_scope_reclaimed_by_the_next_open";
+    if std::env::var_os(EMBEDDER_CHILD).is_some() {
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            let adapter = open(local_inner()).expect("systemd around local opens");
+            let workspace = tempfile::tempdir().expect("workspace");
+            let admitted = adapter
+                .admit(&ConfinementProfile {
+                    inner: Some(InnerAdapter::Local),
+                    local_reason: Some(REASON.into()),
+                    workspace: Some(workspace.path().to_path_buf()),
+                    process_bounds: Some(ProcessBounds {
+                        timeout_ms: 500,
+                        processes: 8,
+                        memory_bytes: 64 << 20,
+                        cpu_millis: 30_000,
+                    }),
+                    ..ConfinementProfile::default()
+                })
+                .expect("admitted");
+            let run = adapter
+                .start(
+                    &admitted,
+                    &shell(
+                        "cat /proc/self/cgroup; echo leader=$$; \
+                         setsid sleep 600 </dev/null >/dev/null 2>&1 & echo orphan=$!; \
+                         exec sleep 600",
+                    ),
+                )
+                .await
+                .expect("started");
+            let started = Instant::now();
+            loop {
+                let stdout = adapter.output(&run).await.expect("output").stdout;
+                let stdout = String::from_utf8_lossy(&stdout).into_owned();
+                if stdout.contains("orphan=") {
+                    print!("{stdout}");
+                    break;
+                }
+                assert!(started.elapsed() < Duration::from_secs(10), "{stdout}");
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        });
+        // The embedder ends, as a crashed daemon does, before the run's 500 ms timeout.
+        std::process::exit(0);
+    }
+    let _held = OPENING.blocking_lock();
+    if let Err(reason) = user_manager() {
+        println!("ESS confinement systemd dead embedder: ABSENT ({reason})");
+        return;
+    }
+    let output = std::process::Command::new(std::env::current_exe().expect("this test binary"))
+        .args(["--exact", NAME, "--nocapture", "--test-threads=1"])
+        .env(EMBEDDER_CHILD, "1")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("the embedder");
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(output.status.success(), "the embedder failed: {stdout}");
+    let value = |key: &str| {
+        stdout
+            .lines()
+            // libtest prints a case's first line after its own `test ... `.
+            .find_map(|line| {
+                line.split_once(key)
+                    .map(|(_, value)| value.trim().to_owned())
+            })
+            .unwrap_or_else(|| panic!("the embedder printed no {key}: {stdout}"))
+    };
+    let cgroup = PathBuf::from("/sys/fs/cgroup").join(value("0::").trim_start_matches('/'));
+    let scope = cgroup.parent().expect("scope").to_path_buf();
+    let leader: u32 = value("leader=").parse().expect("leader pid");
+    let orphan: u32 = value("orphan=").parse().expect("orphan pid");
+    let ended = |pid: u32| {
+        let started = Instant::now();
+        while alive(pid) && started.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        !alive(pid)
+    };
+    let leader_ended = ended(leader);
+    let orphan_left = alive(orphan);
+    let before = systemd::reclaimed_scopes();
+    let adapter = open(local_inner());
+    let reclaimed = systemd::reclaimed_scopes() - before;
+    let orphan_ended = ended(orphan);
+    // Clean up whatever the adapter left, before asserting.
+    let _ = std::fs::write(scope.join("cgroup.kill"), "1");
+    let adapter = adapter.expect("systemd around local opens");
+    drop(adapter);
+    assert!(leader_ended, "the leader {leader} outlived its embedder");
+    assert!(
+        orphan_left,
+        "precondition: the descendant {orphan} outside the leader's group outlived the embedder"
+    );
+    assert!(
+        orphan_ended,
+        "the next open left {orphan} alive in {}",
+        cgroup.display()
+    );
+    assert!(reclaimed >= 1, "the next open reclaimed {reclaimed} scopes");
+    let stopped = {
+        let started = Instant::now();
+        while scope.exists() && started.elapsed() < Duration::from_secs(5) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        !scope.exists()
+    };
+    assert!(
+        stopped,
+        "the leftover scope {} is still there",
+        scope.display()
+    );
+    println!("ESS confinement systemd dead embedder: executed ({reclaimed} scopes reclaimed)");
 }
