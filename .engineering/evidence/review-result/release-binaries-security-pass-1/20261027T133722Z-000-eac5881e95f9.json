@@ -1,0 +1,15 @@
+{
+  "at": "2026-10-27T13:37:22Z",
+  "actor": "human:timo",
+  "artifact": "review-result:release-binaries-security-pass-1",
+  "kind": "review-result",
+  "revision": 2,
+  "change": {
+    "change": "redaction",
+    "literal_sha256": "414a6c537dea95a531aec855a8972ce32c5bb9fa01aa39cc95421f08442bb049",
+    "literal_chars": 63,
+    "replacement": "<scratch>/",
+    "count": 1,
+    "reason": "a workstation path, published by mistake"
+  }
+}

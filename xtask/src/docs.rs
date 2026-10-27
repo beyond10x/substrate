@@ -156,18 +156,23 @@ fn markdown(page: &str, source: &str) -> Result<Rendered> {
         .strip_prefix("---\n")
         .and_then(|s| s.split_once("\n---\n").map(|(_, body)| body))
         .context("missing document frontmatter")?;
+    // One page shares one set of heading IDs: Docusaurus renames a repeated one `<id>-1`, which
+    // moves a published anchor, so a repeat is refused.
+    let mut ids = BTreeSet::new();
+    if page != RELEASES {
+        return render(page, body, &mut ids);
+    }
+    let (authored, generated) = body
+        .split_once(RELEASES_MARKER)
+        .with_context(|| format!("{RELEASES_FILE} has no generated-section marker"))?;
+    let rendered = render(page, authored, &mut ids)?;
     // The generated release section is the changelog's text, not the site's to shorten (UXF-007),
-    // so only the authored part above the marker is parsed and measured.
-    let body = if page == RELEASES {
-        body.split_once(RELEASES_MARKER)
-            .with_context(|| format!("{RELEASES_FILE} has no generated-section marker"))?
-            .0
-    } else {
-        body
-    };
-    render(page, body)
+    // so it is not measured. It is published on this page all the same, so the same guards hold
+    // for it: no raw HTML, no image, no undeclared link and no repeated heading ID.
+    render(page, generated, &mut ids)?;
+    Ok(rendered)
 }
-fn render(page: &str, source: &str) -> Result<Rendered> {
+fn render(page: &str, source: &str, ids: &mut BTreeSet<String>) -> Result<Rendered> {
     let mut rendered = Rendered::default();
     // Open text blocks, innermost last, each with its word count so far.
     let mut open: Vec<usize> = Vec::new();
@@ -184,6 +189,10 @@ fn render(page: &str, source: &str) -> Result<Rendered> {
             Event::Start(Tag::Heading { .. }) => heading = Some(String::new()),
             Event::End(TagEnd::Heading(_)) => {
                 current = slug(&heading.take().unwrap_or_default());
+                ensure!(
+                    ids.insert(current.clone()),
+                    "duplicate heading {current} in {page}"
+                );
             }
             Event::Start(Tag::Link { dest_url, .. }) => {
                 link(page, &dest_url)?;
@@ -535,9 +544,16 @@ fn built_route(relative: &str) -> Option<String> {
         .strip_suffix(".html")
         .map(|page| format!("{BASE}{page}/"))
 }
-/// Every page of the built site at `site`, keyed by its route.
-pub(crate) fn built_pages(site: &Path) -> Result<BTreeMap<String, String>> {
-    fn walk(site: &Path, dir: &Path, out: &mut BTreeMap<String, String>) -> Result<()> {
+/// The built site at `site`: every page keyed by its route, the route of every copy that only
+/// sends the reader on, and every file, relative to `site`.
+#[derive(Debug, Default)]
+pub(crate) struct BuiltSite {
+    pub pages: BTreeMap<String, String>,
+    pub copies: BTreeSet<String>,
+    pub files: Vec<String>,
+}
+pub(crate) fn built_site(site: &Path) -> Result<BuiltSite> {
+    fn walk(site: &Path, dir: &Path, out: &mut BuiltSite) -> Result<()> {
         let mut entries: Vec<_> = fs::read_dir(dir)
             .with_context(|| format!("reading {}", dir.display()))?
             .collect::<std::result::Result<_, _>>()?;
@@ -553,32 +569,91 @@ pub(crate) fn built_pages(site: &Path) -> Result<BTreeMap<String, String>> {
                 .to_str()
                 .context("non-UTF-8 path in the built site")?
                 .replace('\\', "/");
+            out.files.push(relative.clone());
             let Some(route) = built_route(&relative) else {
                 continue;
             };
             let html = fs::read_to_string(&path)?;
             if is_redirect(&html) {
+                out.copies.insert(route);
                 continue;
             }
             ensure!(
-                out.insert(route.clone(), html).is_none(),
+                out.pages.insert(route.clone(), html).is_none(),
                 "two built files answer {route}"
             );
         }
         Ok(())
     }
-    let mut pages = BTreeMap::new();
-    walk(site, site, &mut pages)?;
-    ensure!(pages.contains_key(BASE), "the built site has no start page");
-    Ok(pages)
+    let mut built = BuiltSite::default();
+    walk(site, site, &mut built)?;
+    ensure!(
+        built.pages.contains_key(BASE),
+        "the built site has no start page"
+    );
+    Ok(built)
 }
-/// The published route and anchor inventory: every page with its sorted element IDs, stamped
+/// Every page of the built site at `site`, keyed by its route.
+pub(crate) fn built_pages(site: &Path) -> Result<BTreeMap<String, String>> {
+    Ok(built_site(site)?.pages)
+}
+/// The routes the site publishes: the start page and `PAGES`.
+fn declared_routes() -> BTreeSet<String> {
+    std::iter::once(BASE.to_owned())
+        .chain(PAGES.iter().map(|(page, _, _)| route(page)))
+        .collect()
+}
+/// Extensions a static host serves as an HTML page. Docusaurus writes `.html`; a file with one of
+/// these is a page nothing here checks.
+const OTHER_PAGE_EXTENSIONS: [&str; 3] = ["htm", "xhtml", "shtml"];
+/// The built site holds the declared routes and nothing else: a page Docusaurus copied from
+/// `website/static/`, or a copy that sends the reader to one, is an undeclared page that no check
+/// reads and the inventory would publish.
+fn only_declared_routes(built: &BuiltSite) -> Vec<String> {
+    let declared = declared_routes();
+    let mut failures = Vec::new();
+    for route in built.pages.keys().chain(&built.copies) {
+        if !declared.contains(route) {
+            failures.push(format!("{route}: built, but not a declared public page"));
+        }
+    }
+    for file in &built.files {
+        let other = Path::new(file).extension().is_some_and(|extension| {
+            OTHER_PAGE_EXTENSIONS
+                .iter()
+                .any(|other| extension.eq_ignore_ascii_case(other))
+        });
+        if other {
+            failures.push(format!("{file}: built, but not a declared public page"));
+        }
+    }
+    failures
+}
+/// Whether `id` is one React or Docusaurus generates for its own use: a `useId` value, which
+/// changes with the component tree (`_R_…_` in React 19.1, `«r…»` in 19.0, `:r…:` before), or a
+/// framework element. None of them is an anchor a link may name.
+fn generated_id(id: &str) -> bool {
+    const FRAMEWORK: [&str; 1] = ["theme-svg-external-link"];
+    id.contains("_R_")
+        || id.contains('«')
+        || id.contains(":r")
+        || id.starts_with("__docusaurus")
+        || FRAMEWORK.contains(&id)
+}
+/// The IDs of `html` the route inventory publishes: every element ID but the generated ones.
+fn published_anchors(html: &str) -> BTreeSet<String> {
+    attribute_values(html, "id")
+        .into_iter()
+        .filter(|id| !generated_id(id))
+        .collect()
+}
+/// The published route and anchor inventory: every page with its sorted published IDs, stamped
 /// with the same commit as the site provenance. The organization Website reads it to redirect
 /// the former `/docs/substrate/` pages and to check links into this site.
 fn inventory(pages: &BTreeMap<String, String>, commit: &str) -> Result<Vec<u8>> {
     let routes: Vec<_> = pages
         .iter()
-        .map(|(path, page)| json!({"path": path, "anchors": attribute_values(page, "id")}))
+        .map(|(path, page)| json!({"path": path, "anchors": published_anchors(page)}))
         .collect();
     Ok(serde_json::to_vec_pretty(&json!({
         "schema": "b10x-project-routes/v1",
@@ -635,16 +710,74 @@ fn page_list_is_closed_on_narrow_screens(route: &str, html: &str) -> Vec<String>
     }
     failures
 }
-/// UXF-004: every table sits in the docs-system frame that becomes a focusable named region
-/// when the table is wider than the column.
+/// `text` with the character references the build writes replaced by their characters.
+fn decode(text: &str) -> String {
+    text.replace("&quot;", "\"")
+        .replace("&#x27;", "'")
+        .replace("&#39;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+}
+/// The text of the last heading in `html`, without its markup and its direct-link mark.
+fn last_heading(html: &str) -> Option<String> {
+    let start = (1..=6)
+        .filter_map(|level| {
+            let open = format!("<h{level}");
+            html.match_indices(open.as_str())
+                .filter(|(at, _)| matches!(html.as_bytes().get(at + open.len()), Some(b' ' | b'>')))
+                .map(|(at, _)| (at, level))
+                .last()
+        })
+        .max()?;
+    let (at, level) = start;
+    let inner = &html[at..];
+    let inner = &inner[inner.find('>')? + 1..];
+    let inner = &inner[..inner.find(&format!("</h{level}>")).unwrap_or(inner.len())];
+    let mut text = String::new();
+    let mut in_tag = false;
+    for c in inner.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            '\u{200b}' => (),
+            c if !in_tag => text.push(c),
+            _ => (),
+        }
+    }
+    Some(decode(text.trim()))
+}
+/// UXF-004: every table scrolls inside the site's frame (`website/src/theme/MDXComponents`),
+/// which the server-rendered page already makes a keyboard-focusable region named by the heading
+/// above the table, as `<heading> table`, or `Table` with no heading above it.
 fn tables_scroll_in_a_frame(route: &str, html: &str) -> Vec<String> {
     let mut failures = Vec::new();
     for (at, _) in html.match_indices("<table") {
         let before = html[..at].trim_end();
-        if !(before.ends_with("<div class=b10x-table-wrap>")
-            || before.ends_with("<div class=\"b10x-table-wrap\">"))
-        {
+        let tag = before
+            .rfind('<')
+            .map(|start| &before[start..])
+            .filter(|tag| tag.starts_with("<div ") && tag.ends_with('>'))
+            .unwrap_or_default();
+        let value = |name: &str| attribute_list(tag, name).into_iter().next();
+        let framed = value("class")
+            .is_some_and(|class| class.split_whitespace().any(|c| c == "b10x-table-wrap"));
+        if !framed {
             failures.push(format!("{route}: a table outside the scrolling frame"));
+            continue;
+        }
+        let expected = match last_heading(&html[..at]) {
+            Some(heading) if !heading.is_empty() => format!("{heading} table"),
+            _ => "Table".to_owned(),
+        };
+        let label = value("aria-label").map(|label| decode(&label));
+        if value("role").as_deref() != Some("region")
+            || value("tabindex").as_deref() != Some("0")
+            || label.as_deref() != Some(expected.as_str())
+        {
+            failures.push(format!(
+                "{route}: the frame of a table is not a focusable region named {expected:?} ({tag})"
+            ));
         }
     }
     failures
@@ -679,19 +812,106 @@ fn start_page_links_resolve(pages: &BTreeMap<String, String>) -> Vec<String> {
     }
     failures
 }
-/// The built-site checks: every declared page is built, the start page's links resolve, and
-/// every docs page holds UXF-001, UXF-002 and UXF-004.
-fn check_built(pages: &BTreeMap<String, String>) -> Vec<String> {
-    let mut failures = start_page_links_resolve(pages);
+/// The published anchors every docs page keeps: `#main` (`src/theme/DocItem/Layout`) and the
+/// ID of each H1 (`src/theme/Heading`), which links and redirects into this site already use.
+fn keeps_page_anchors(route: &str, html: &str) -> Vec<String> {
+    let mut failures = Vec::new();
+    if !attribute_values(html, "id").contains("main") {
+        failures.push(format!("{route}: no #main"));
+    }
+    let h1: Vec<&str> = html
+        .match_indices("<h1")
+        .filter(|(at, _)| matches!(html.as_bytes().get(at + 3), Some(b' ' | b'>')))
+        .map(|(at, _)| html[at..].split_inclusive('>').next().unwrap_or_default())
+        .collect();
+    if h1.is_empty() {
+        failures.push(format!("{route}: no H1"));
+    }
+    for tag in h1 {
+        if attribute_list(tag, "id").is_empty() {
+            failures.push(format!("{route}: an H1 without an ID ({tag})"));
+        }
+    }
+    failures
+}
+/// The built-site checks: the built routes are the declared ones, the start page's links
+/// resolve, and every docs page keeps its anchors and holds UXF-001, UXF-002 and UXF-004.
+fn check_built(built: &BuiltSite) -> Vec<String> {
+    let pages = &built.pages;
+    let mut failures = only_declared_routes(built);
+    failures.extend(start_page_links_resolve(pages));
     for (page, _, _) in PAGES {
         let route = route(page);
         let Some(html) = pages.get(&route) else {
             failures.push(format!("{route}: not built"));
             continue;
         };
+        failures.extend(keeps_page_anchors(&route, html));
         failures.extend(marks_current_page(&route, html));
         failures.extend(page_list_is_closed_on_narrow_screens(&route, html));
         failures.extend(tables_scroll_in_a_frame(&route, html));
+    }
+    failures
+}
+/// Where a home directory starts on the hosts that build this site.
+const HOME_PREFIXES: [&str; 2] = ["/home/", "/Users/"];
+/// Every built file that names a home directory or `checkout`: a path of the machine that built
+/// the site, which the site would publish (Docusaurus writes its whole configuration, absolute
+/// static directories included, into the client bundle).
+fn absolute_paths(site: &Path, checkout: &Path) -> Result<Vec<String>> {
+    let checkout = checkout.to_string_lossy().into_owned();
+    let mut failures = Vec::new();
+    for file in built_site(site)?.files {
+        let bytes = fs::read(site.join(&file))?;
+        let contains = |needle: &[u8]| {
+            !needle.is_empty() && bytes.windows(needle.len()).any(|window| window == needle)
+        };
+        let home = HOME_PREFIXES.iter().find(|prefix| {
+            bytes.windows(prefix.len() + 1).any(|window| {
+                window.starts_with(prefix.as_bytes())
+                    && window[prefix.len()].is_ascii_alphanumeric()
+            })
+        });
+        if contains(checkout.as_bytes()) {
+            failures.push(format!("{file}: names the checkout {checkout}"));
+        } else if let Some(prefix) = home {
+            failures.push(format!("{file}: names a home directory under {prefix}"));
+        }
+    }
+    Ok(failures)
+}
+/// The pages whose diagrams are `mermaid` fences.
+#[cfg(test)]
+const MERMAID_PAGES: [&str; 2] = ["concepts/model", "concepts/operations"];
+/// The diagrams render in the browser through `@docusaurus/theme-mermaid`: each page in `pages`
+/// holds a fenced `mermaid` block, and `config` (`website/docusaurus.config.ts`) turns Mermaid on
+/// and loads the theme. Without either, a diagram is published as its source text. A test holds
+/// the committed files to it; `check-docs` reads no Docusaurus configuration.
+#[cfg(test)]
+fn mermaid_failures(pages: &[(&str, &str)], config: &str) -> Vec<String> {
+    let mut failures = Vec::new();
+    for (page, source) in pages {
+        let fenced = Parser::new(source).any(|event| {
+            matches!(
+                event,
+                Event::Start(Tag::CodeBlock(pulldown_cmark::CodeBlockKind::Fenced(language)))
+                    if &*language == "mermaid"
+            )
+        });
+        if !fenced {
+            failures.push(format!(
+                "website/docs/{page}.md: no fenced `mermaid` diagram"
+            ));
+        }
+    }
+    let lines: Vec<&str> = config.lines().map(str::trim).collect();
+    if !(lines.contains(&"mermaid: true,")
+        && lines.contains(&"themes: ['@docusaurus/theme-mermaid'],"))
+    {
+        failures.push(
+            "website/docusaurus.config.ts: Mermaid is not on with `mermaid: true` and `themes: ['@docusaurus/theme-mermaid']`"
+                .into(),
+        );
     }
     failures
 }
@@ -711,9 +931,11 @@ fn valid_commit(commit: &str) -> Result<()> {
 pub fn provenance(args: &ProvenanceArgs) -> Result<ExitCode> {
     valid_commit(&args.commit)?;
     let root = crate::repo::root()?;
-    let pages = built_pages(&args.site)?;
-    let mut failures = check_built(&pages);
-    failures.extend(crate::site_ux::check_site(&root, &pages)?);
+    let built = built_site(&args.site)?;
+    let pages = &built.pages;
+    let mut failures = check_built(&built);
+    failures.extend(absolute_paths(&args.site, &root)?);
+    failures.extend(crate::site_ux::check_site(&root, pages)?);
     if !failures.is_empty() {
         for failure in &failures {
             eprintln!("{failure}");
@@ -733,7 +955,7 @@ pub fn provenance(args: &ProvenanceArgs) -> Result<ExitCode> {
     )?;
     fs::write(
         args.site.join(".well-known/b10x-routes.json"),
-        inventory(&pages, &args.commit)?,
+        inventory(pages, &args.commit)?,
     )?;
     fs::write(args.site.join(".nojekyll"), "")?;
     println!(
@@ -787,6 +1009,83 @@ mod tests {
     #[test]
     fn public_markdown_refuses_executable_html() {
         assert!(markdown("index", "---\ntitle: Test\n---\n<script>alert(1)</script>").is_err());
+    }
+    /// The generated changelog section of the Release notes page is held to every guard an
+    /// authored page is, and one page never repeats a heading ID, across both parts.
+    #[test]
+    fn the_generated_release_section_and_repeated_headings_are_guarded() {
+        let page = |generated: &str| {
+            format!(
+                "---\ntitle: R\n---\n# Release notes\n\n## Newest\n\n{RELEASES_MARKER}\n\n{generated}"
+            )
+        };
+        markdown(
+            RELEASES,
+            &page("## 1.0.0 (2026-01-01)\n\n- [a](https://x.invalid/a)\n"),
+        )
+        .unwrap();
+        for refused in [
+            "- <img src=x onerror=alert(1)>\n",
+            "<div>block</div>\n",
+            "- ![pixel](https://x.invalid/p.png)\n",
+            "- [up](../AGENTS.md)\n",
+            "## Newest\n",
+        ] {
+            assert!(markdown(RELEASES, &page(refused)).is_err(), "{refused}");
+        }
+        let generated = "## 1.0.0 (2026-01-01)\n\n".to_owned() + &"word ".repeat(500);
+        assert_eq!(
+            markdown(RELEASES, &page(&generated)).unwrap().blocks,
+            Vec::<usize>::new(),
+            "the generated section is not measured"
+        );
+        assert!(markdown("status", "---\ntitle: S\n---\n# S\n\n## A b\n\n## A  B\n").is_err());
+        markdown("status", "---\ntitle: S\n---\n# S\n\n## A\n\n## B\n").unwrap();
+    }
+    /// The built site is the declared routes and nothing else, whatever form the extra page takes.
+    #[test]
+    fn a_built_route_outside_the_declared_set_is_refused_in_every_form() {
+        let site = |pages: &[&str], copies: &[&str], files: &[&str]| BuiltSite {
+            pages: pages
+                .iter()
+                .map(|r| ((*r).to_owned(), String::new()))
+                .collect(),
+            copies: copies.iter().map(|r| (*r).to_owned()).collect(),
+            files: files.iter().map(|f| (*f).to_owned()).collect(),
+        };
+        let declared: Vec<String> = declared_routes().into_iter().collect();
+        let declared: Vec<&str> = declared.iter().map(String::as_str).collect();
+        assert_eq!(declared.len(), PAGES.len() + 1);
+        let files = ["index.html", "assets/js/main.js", "img/mark.svg"];
+        assert!(only_declared_routes(&site(&declared, &declared, &files)).is_empty());
+        let extra = [declared.clone(), vec!["/substrate/internal/plan/"]].concat();
+        assert_eq!(only_declared_routes(&site(&extra, &[], &files)).len(), 1);
+        assert_eq!(
+            only_declared_routes(&site(&declared, &["/substrate/internal/plan/"], &files)).len(),
+            1
+        );
+        assert_eq!(
+            only_declared_routes(&site(&declared, &[], &["internal/plan.htm"])).len(),
+            1
+        );
+    }
+    /// Every docs page keeps `#main` and an H1 with its ID.
+    #[test]
+    fn a_docs_page_keeps_main_and_its_h1_id() {
+        let route = "/substrate/docs/";
+        let page = "<div id=main><h1 id=t>T</h1><h2 id=a>A</h2></div>";
+        assert!(keeps_page_anchors(route, page).is_empty());
+        assert!(
+            keeps_page_anchors(route, "<div id=main><h1 class=x id=\"t\">T</h1></div>").is_empty()
+        );
+        for broken in [
+            page.replace("<div id=main>", "<div>"),
+            page.replace("<h1 id=t>", "<h1>"),
+            page.replace("<h1 id=t>", "<h1 class=title>"),
+            page.replace("<h1 id=t>T</h1>", ""),
+        ] {
+            assert_eq!(keeps_page_anchors(route, &broken).len(), 1, "{broken}");
+        }
     }
     #[test]
     fn the_committed_site_inputs_hold() {
@@ -939,18 +1238,137 @@ mod tests {
         let config = read_public(&root, "website/docusaurus.config.ts").unwrap();
         assert!(config.contains("customCss: './src/css/custom.css'"));
     }
-    /// UXF-004: a table that scrolls sideways is a frame the docs-system makes a focusable named
-    /// region when it overflows.
+    /// UXF-004: every table scrolls inside a focusable region named by the heading above it, in
+    /// the server-rendered HTML, before any script runs.
     #[test]
     fn every_table_scrolls_inside_a_focusable_named_region() {
         let route = "/substrate/docs/concepts/adapters/";
-        let framed = built(
-            route,
-            "<div class=b10x-table-wrap><table><tr><td>x</td></tr></table></div>",
+        let heading = "<h3 class=anchor id=families-by-adapter>Families by adapter<a href=#families-by-adapter class=hash-link aria-label=\"Direct link to Families by adapter\">\u{200b}</a></h3>";
+        let table = "<table><tr><td>x</td></tr></table></div>";
+        let framed = |wrap: &str| built(route, &format!("{heading}{wrap}{table}"));
+        let labelled = "<div class=b10x-table-wrap role=region tabindex=0 aria-label=\"Families by adapter table\">";
+        assert!(
+            tables_scroll_in_a_frame(route, &framed(labelled)).is_empty(),
+            "{:?}",
+            tables_scroll_in_a_frame(route, &framed(labelled))
         );
-        assert!(tables_scroll_in_a_frame(route, &framed).is_empty());
-        let bare = built(route, "<table><tr><td>x</td></tr></table>");
-        assert_eq!(tables_scroll_in_a_frame(route, &bare).len(), 1);
+        let quoted = "<div class=\"b10x-table-wrap\" role=\"region\" tabindex=\"0\" aria-label=\"Families by adapter table\" aria-describedby=\"x\">";
+        assert!(tables_scroll_in_a_frame(route, &framed(quoted)).is_empty());
+        let entities = built(
+            route,
+            &format!(
+                "<h2 id=a>Read <code>a</code> &amp; write</h2><div class=b10x-table-wrap role=region tabindex=0 aria-label=\"Read a &amp; write table\">{table}"
+            ),
+        );
+        assert!(tables_scroll_in_a_frame(route, &entities).is_empty());
+        let unheaded = built(
+            route,
+            &format!("<div class=b10x-table-wrap role=region tabindex=0 aria-label=Table>{table}"),
+        );
+        assert!(tables_scroll_in_a_frame(route, &unheaded).is_empty());
+        for wrong in [
+            // The docs-system frame before hydration: no region, no tab stop, no name.
+            "<div class=b10x-table-wrap>",
+            "<div class=b10x-table-wrap tabindex=0 aria-label=\"Families by adapter table\">",
+            "<div class=b10x-table-wrap role=region aria-label=\"Families by adapter table\">",
+            "<div class=b10x-table-wrap role=region tabindex=0>",
+            "<div class=b10x-table-wrap role=region tabindex=0 aria-label=Table>",
+            "<div class=b10x-table-wrap role=region tabindex=0 aria-label=\"Commands table\">",
+            "<div class=other role=region tabindex=0 aria-label=\"Families by adapter table\">",
+            "",
+        ] {
+            assert_eq!(
+                tables_scroll_in_a_frame(route, &framed(wrong)).len(),
+                1,
+                "{wrong}"
+            );
+        }
+    }
+    /// The route inventory publishes the authored heading IDs and the page anchors, and none of the
+    /// IDs React or Docusaurus generate for their own use, which change from build to build.
+    #[test]
+    fn the_inventory_publishes_authored_anchors_and_no_framework_ids() {
+        let html = "<div id=__docusaurus><a id=__docusaurus_skipToContent_fallback></a><svg><symbol id=theme-svg-external-link></symbol></svg><div id=main><h1 id=run-one-confined-command>R</h1><h2 id=pod>P</h2><h2 id=install>I</h2><p id=b10x-table-_R_5q7dalbah_-instructions></p><p id=b10x-table-«r1»-instructions></p><p id=b10x-table-:r2:-instructions></p><p id=\":r3:\"></p></div></div>";
+        assert_eq!(
+            published_anchors(html).into_iter().collect::<Vec<_>>(),
+            ["install", "main", "pod", "run-one-confined-command"]
+        );
+    }
+    /// A built file that names the builder's home or checkout directory publishes it.
+    #[test]
+    fn a_built_file_carrying_a_home_or_checkout_path_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let site = dir.path().join("build");
+        fs::create_dir_all(site.join("assets/js")).unwrap();
+        fs::write(site.join("index.html"), "<main id=main></main>").unwrap();
+        fs::write(
+            site.join("assets/js/main.js"),
+            "staticDirectories:[\"static\",\"node_modules/x/static\"]",
+        )
+        .unwrap();
+        let checkout = Path::new("/srv/build/checkout");
+        assert!(absolute_paths(&site, checkout).unwrap().is_empty());
+        for leaked in [
+            format!(
+                "staticDirectories:[\"{}someone/x/website/node_modules/x/static\"]",
+                HOME_PREFIXES[0]
+            ),
+            format!(
+                "staticDirectories:[\"{}someone/x/static\"]",
+                HOME_PREFIXES[1]
+            ),
+            "staticDirectories:[\"/srv/build/checkout/website/static\"]".to_owned(),
+        ] {
+            fs::write(site.join("assets/js/main.js"), &leaked).unwrap();
+            assert_eq!(
+                absolute_paths(&site, checkout).unwrap().len(),
+                1,
+                "{leaked}"
+            );
+        }
+    }
+    /// The quickstart's setup link leads to the daemon walkthrough its code sample needs: the
+    /// private socket is started there, not in Getting started.
+    #[test]
+    fn the_start_page_sends_its_setup_link_to_the_daemon_walkthrough() {
+        let root = crate::repo::root().unwrap();
+        let html = read_public(&root, START_PAGE).unwrap();
+        assert!(html.contains(
+            "<a href=\"/substrate/docs/guides/run-a-command#start-with-an-observable-machine\">Complete setup and workspace round trip →</a>"
+        ));
+    }
+    /// The two diagrams stay `mermaid` fences and the site keeps the Mermaid theme that renders them.
+    #[test]
+    fn the_diagrams_stay_mermaid_fences_and_the_theme_stays_on() {
+        fn sources<'a>(pages: &'a [(&'a str, String)]) -> Vec<(&'a str, &'a str)> {
+            pages.iter().map(|(p, s)| (*p, s.as_str())).collect()
+        }
+        let root = crate::repo::root().unwrap();
+        let config = read_public(&root, "website/docusaurus.config.ts").unwrap();
+        let pages: Vec<(&str, String)> = MERMAID_PAGES
+            .iter()
+            .map(|page| {
+                (
+                    *page,
+                    read_public(&root, &format!("website/docs/{page}.md")).unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(MERMAID_PAGES, ["concepts/model", "concepts/operations"]);
+        assert!(
+            mermaid_failures(&sources(&pages), &config).is_empty(),
+            "{:?}",
+            mermaid_failures(&sources(&pages), &config)
+        );
+        let mut text = pages.clone();
+        text[0].1 = text[0].1.replace("```mermaid", "```text");
+        assert_eq!(mermaid_failures(&sources(&text), &config).len(), 1);
+        for off in [
+            config.replace("themes: ['@docusaurus/theme-mermaid'],", ""),
+            config.replace("mermaid: true,", "mermaid: false,"),
+        ] {
+            assert_eq!(mermaid_failures(&sources(&pages), &off).len(), 1);
+        }
     }
     #[test]
     fn the_releases_page_ends_with_the_newest_released_changelog_section() {
@@ -977,6 +1395,7 @@ mod tests {
         let rendered = render(
             "index",
             "## Two words\n\none two three\n\n- four five\n\n| A | B |\n|---|---|\n| `x` | y z |\n",
+            &mut BTreeSet::new(),
         )
         .unwrap();
         assert_eq!(rendered.blocks, [3, 2, 1, 1, 1, 2]);

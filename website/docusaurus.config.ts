@@ -1,6 +1,11 @@
 import type {Config} from '@docusaurus/types';
 import type * as Preset from '@docusaurus/preset-classic';
+import path from 'node:path';
+import {fileURLToPath} from 'node:url';
 import {withProductSite} from '@beyond10x/docs-system/product-site';
+import rehypeTableLabels from './src/rehype/table-labels';
+
+const siteDir = path.dirname(fileURLToPath(import.meta.url));
 
 const config: Config = {
   title: 'Substrate',
@@ -45,6 +50,7 @@ const config: Config = {
           sidebarPath: './sidebars.ts',
           routeBasePath: 'docs',
           editUrl: 'https://github.com/beyond10x/substrate/tree/main/website/',
+          rehypePlugins: [rehypeTableLabels],
         },
         blog: false,
         pages: false,
@@ -84,4 +90,14 @@ const config: Config = {
   } satisfies Preset.ThemeConfig,
 };
 
-export default withProductSite(config, {mark: 'Sb'});
+const site = withProductSite(config, {mark: 'Sb'});
+
+// Docusaurus writes the whole configuration into the client bundle, and the Docs System names its
+// font and share-card directories by absolute path. Docusaurus resolves a static directory against
+// the site directory, so the relative form serves the same files and publishes no builder path.
+export default {
+  ...site,
+  staticDirectories: site.staticDirectories?.map((directory) =>
+    directory && path.isAbsolute(directory) ? path.relative(siteDir, directory) : directory,
+  ),
+} satisfies Config;
