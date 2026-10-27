@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-27T07:42:53Z",
+  "actor": "human:timo",
+  "artifact": "story:confinement-consumer-surface",
+  "kind": "story",
+  "revision": 8,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "gate.yml Full gate and Pod lane on main at 65e1fca7: success; consumer_surface and confinement_public_items passed; scripts/delegated-lane.sh at 65e1fca7: exit 0, linux 9 of 9 scenarios, systemd 5 of 5, consumer surface 5 of 5 needs, 0 failed",
+    "reference": "https://github.com/beyond10x/substrate/actions/runs/40467347057"
+  }
+}
