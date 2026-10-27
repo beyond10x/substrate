@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:confinement-contract-on-linux-and-local
 kind: story
-status: active
+status: implemented
 title: 'S0: the confinement contract over the Linux driver, plus local'
 owner: substrate
 tags:
@@ -43,10 +43,11 @@ scope:
   path: crates/substrate-host/tests/support
 - confidence: inferred
   path: scripts/delegated-lane.sh
-revision: 7
+revision: 8
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-27T01:13:03Z", actor: "human:timo", revision: 6, decided_on: {"recorded":{"review_outcome":2}}}
 - {from: "proposed", to: "active", at: "2026-10-27T01:13:03Z", actor: "human:timo", revision: 7, decided_on: {"recorded":{"review_outcome":2}}}
+- {from: "active", to: "implemented", at: "2026-10-27T07:47:38Z", actor: "human:timo", revision: 8, decided_on: {"recorded":{"test_result":1,"review_outcome":5}}}
 ---
 # S0: the confinement contract over the Linux driver, plus `local`
 
