@@ -2,17 +2,18 @@
 format: aep.planning-md/3
 id: story:confine-run-reaps-killed-groups
 kind: story
-status: active
+status: implemented
 title: A SIGKILL'd confine run leaves no confine group behind
 tags:
 - adr-0109
 relations:
 - decomposes: epic:confinement-contract-family
 - depends_on: story:sandbox-repository-parity
-revision: 3
+revision: 4
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-27T07:24:38Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-10-27T07:24:38Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-10-27T13:17:25Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Outcome
 
