@@ -1,0 +1,41 @@
+# ADR 0044 decision 3 and atlas ADR 0109 decision 4: `local` is always reported declared insecure.
+# An open of `local` whose proved set lacks `declared_insecure` is refused by that fact's name, so no
+# `local` row exists on which a profile could be admitted without a reason or reported confined.
+# This replaces the adversary probe that opened such a row and expected a missing reason: that open
+# is now refused, so the probe's first step cannot be taken.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: local-open-without-declared-insecure-refused-on-portable
+summary: "lane portable: opening local without the declared_insecure fact is refused confinement.fact-unserved naming declared_insecure, and a profile on local is then refused confinement.adapter-unserved."
+
+timeline:
+  - at: 2026-10-27T09:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: local
+      served_families: [process_run, process_watch, output_read, wait, workspace, audit]
+      facts: [paths_are_host_paths, local_permitted, host_network]
+    outcome: local-not-declared-insecure
+    error:
+      name: substrate.confinement.FactUnserved
+      fields: {adapter: local, fact: declared_insecure}
+    no_events: [substrate.confinement.AdapterOpened]
+  - at: 2026-10-27T09:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: local
+      required_families: [process_run]
+      required_facts: []
+    outcome: adapter-not-open
+    error:
+      name: substrate.confinement.AdapterUnserved
+      fields: {adapter: local}
+    no_events: [substrate.confinement.ProfileAdmitted]
+
+assert:
+  - view: substrate.confinement.Adapters
+    counts: {at_most: 0}
+  - view: substrate.confinement.Profiles
+    counts: {at_most: 0}

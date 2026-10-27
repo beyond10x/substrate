@@ -9,7 +9,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
-- The confinement contract is specified as the ESS domain `substrate.confinement` (ADR 0044): ten contract families, six adapters with their declared facts and named refusals, 36 authored scenarios tagged by lane, checked against the interpreted reference by `cargo xtask check-ess`.
+- The confinement contract is specified as the ESS domain `substrate.confinement` (ADR 0044): ten contract families, six adapters with their declared facts and named refusals, 49 authored scenarios named by adapter and lane, checked against the interpreted reference by `cargo xtask check-ess`.
 
 ### Changed
 

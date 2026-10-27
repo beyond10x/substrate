@@ -179,11 +179,15 @@ What it does not establish:
 confinement contract of atlas ADR 0109 before any adapter code. What the green check establishes:
 
 - The model validates under ESS 0.70.0 with no warning, and `confinement-suite.json` is its exact
-  synthesized suite (22 scenarios, 10 refusals) plus the 36 authored scenarios under
-  `confinement/scenarios/`. Each refused obligation has an authored scenario
-  ([`confinement/README.md`](confinement/README.md) names them).
-- All 58 scenarios pass against ESS's `interpreted` reference. That checks the model, not an
+  synthesized suite (5 scenarios, 30 refusals) plus the 49 authored scenarios under
+  `confinement/scenarios/`. Each of the 35 outcomes has at least one scenario, and each refused
+  obligation an authored one ([`confinement/README.md`](confinement/README.md) says why synthesis
+  refuses them).
+- All 54 scenarios pass against ESS's `interpreted` reference. That checks the model, not an
   adapter.
+- `OpenAdapter` refuses a `local` (or `systemd` around `local`) set without `declared_insecure` and
+  an `oci` or `pod` set without `image_digest_pinned`, so no admission can report `local`
+  confined or skip `oci`'s digest check.
 - `ContractFamily`, `AdapterName` and `Fact` are generated into
   `crates/substrate-host/src/generated/confinement.rs`; `cargo xtask check-ess` fails on drift.
 
@@ -191,9 +195,17 @@ What it does not establish:
 
 - **No adapter conformance.** Nothing runs these scenarios against `local`, `linux`, `macos`,
   `systemd`, `oci` or `pod` yet. Each adapter's story adds the test file that runs the scenarios of
-  its lane (the name's `-on-<lane>` suffix) against the adapter.
+  its lane against the adapter: its own `<adapter>-*` scenarios ending `-on-<lane>`, and the
+  `absent-*` scenarios in the lane where an adapter is absent.
+- **Synthesized scenarios reach no adapter.** ESS names them by command and outcome and cannot
+  rename them, so they name no adapter or lane and no adapter lane selects them; they check the
+  model against the interpreted reference only. The same holds for the authored `model-*`
+  scenario. Adapter lanes run the authored scenarios.
+- **No full digest check.** ESS 0.70.0 has no pattern predicate, so the model checks that an image
+  names `@sha256:`, ends with a lowercase hex character and is at least 73 characters long. That
+  exactly 64 lowercase hex characters follow `@sha256:` is the `oci` and `pod` adapters' check.
 - **No probe.** Each scenario's open step states the adapter's declared set. Whether a host
   actually proves those facts is the adapter's runtime claim.
 - **No refusal audit record.** ESS admits no event on an outcome that reports an error, so the
-  refusal's `ProfileRefused` record is the adapters' to test.
+  refusal's `ProfileRefused` record is an adapter-test obligation: S0's tests assert it.
 - **No wire.** The contract is substrate-host's API. No route, wire field or bundle changes.

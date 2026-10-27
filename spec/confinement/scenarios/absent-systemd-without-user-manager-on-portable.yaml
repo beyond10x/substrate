@@ -3,7 +3,7 @@
 # `systemd { inner: local }` is refused the same.
 type: ess-scenario/5
 domain: substrate.confinement
-scenario: systemd-local-adapter-unserved-without-user-manager-on-portable
+scenario: absent-systemd-without-user-manager-on-portable
 summary: "lane portable: with DBUS_SESSION_BUS_ADDRESS unset, opening systemd around local is refused confinement.adapter-unserved, and a profile on it is refused the same."
 
 timeline:
@@ -29,7 +29,7 @@ timeline:
       required_families: [process_run, limits]
       required_facts: []
       local_reason: the operator bounds this run on the developer's own machine
-    outcome: adapter-unserved
+    outcome: adapter-not-open
     error:
       name: substrate.confinement.AdapterUnserved
       fields: {adapter: systemd}
