@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-27T07:42:53Z",
+  "actor": "human:timo",
+  "artifact": "story:ess-pin-0-70-0",
+  "kind": "story",
+  "revision": 6,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "gate.yml Full gate and Pod lane on main at 65e1fca7: success; cargo xtask check-ess green",
+    "reference": "https://github.com/beyond10x/substrate/actions/runs/40467347057"
+  }
+}

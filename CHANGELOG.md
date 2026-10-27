@@ -7,8 +7,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- The `macos` adapter resolves the selected developer tools' macOS SDK, `clang` and `ar` with `xcrun` outside the sandbox at open, with a cleared environment and `/` as its working directory, and a start gets `SDKROOT`, `CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER`, `CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER`, `CC` and `AR` for each of them its exec subpaths reach, unless its environment names it, so a confined `cargo build` or `cargo test`, and a build script that compiles C, links without reaching the `/usr/bin/cc` shim, which runs `/bin/sh` and `xcodebuild`. A start over the developer tools is refused `exec.sandbox-developer-tools-unresolved` before anything runs, naming why, when the open could not resolve them, when the selected developer tools changed since the open, when the SDK the open resolved is gone, or when its exec subpaths hold the selected developer directory but not a value it needs; nothing is resolved again at start. The Seatbelt policy gains no rule. `tests/seatbelt_adversary.rs` runs the fixture's `cargo test` with no `RUSTC`, `SDKROOT` or linker set by the caller.
+
 ### Changed
 
+- The gate workflow's `pod-lane` job runs `scripts/pod-lane.sh`: the `ess_confinement_pod` and `adversary_pod` suites against the `kind` cluster, each required by its own `test result:` line with at least one case passed, none failed, ignored or filtered out, and no case reporting itself absent; the script takes no arguments. `security_review_pod` reads no lane variable and stays in the workspace gate. The job adds a second ServiceAccount bound to the Pod and NetworkPolicy Role without `pods/log` for the no-log case, and names the kind node for the kubelet-stop case, which now waits for the adapter to remove the run's Pod and NetworkPolicy once the kubelet answers again.
 - `tests/confinement_public_items.rs` now freezes every type the `confinement` module's public items reach, to a fixed point, beside the module's own items. From the host crate that adds `SecretSlot`, `EgressAperture`, `GitSourceBinding`, `DriverError` and `DriverErrorClass`. From `substrate-wire` it adds `CapabilitySnapshot`, `CapabilityFacts`, `HostDriverKind`, `EgressApertureFact` and the fact types `CapabilityFacts` holds (`StorageQuotaFacts`, `ScratchQuotaFacts`, `ReadOnlyRootFacts`, `ReadOnlyFileFacts`, `ResourceUsageFacts`, `MetricsStreamFacts`, `StreamBoundsFacts`, `AttachmentBoundsFacts`, `ExecutionCapsuleFacts`, `NamespaceFacts`, `CgroupLimitFacts`). The list also covers:
   - an `impl` of a module type in any file of the host crate;
   - the associated types and constants of trait impls on held types;
@@ -23,6 +28,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - An egress aperture's listening socket is shut down when its install is undone or the aperture is dropped. Before, only the installing process's descriptor was closed, so a child another thread forked meanwhile could keep the socket accepting connections from inside the run.
 
 ## [0.12.0] — 2026-10-27
+
+Published by [release run 40469131133](https://github.com/beyond10x/substrate/actions/runs/40469131133)
+from tagged commit `65e1fca7185dfb0a5a116b70b9046b1de5722d68`. All three artifacts were
+keyless-signed and verified against `release.yml@refs/tags/0.12.0` by the release workflow, and each
+digest resolved anonymously:
+
+- Image: `ghcr.io/beyond10x/b10x-substrate-daemon:0.12.0` at `sha256:eca4a8b5118bd012ed9c96d6ffa392d0983ed5375356504c6df56220e4f50802`.
+- Contract bundle: `ghcr.io/beyond10x/b10x-substrate-wire:0.23.0` at `sha256:c2a50222da154028011a794cc93724043943581ba4ee44051c38dd084b759ff5`, unchanged since 0.11.0 and signed again by this release.
+- Disposable MCP image: `ghcr.io/beyond10x/b10x-substrate-mcp:0.12.0` at `sha256:2d365d7041feaff960fab55bcb1405a44c7b790db7936a3f3bdf1b0e78683403`, development-only.
 
 ### Added
 

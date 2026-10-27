@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:macos-seatbelt-policy-runs-cargo-test
 kind: story
-status: active
+status: implemented
 title: 'S2: a Seatbelt policy that runs cargo test'
 owner: substrate
 tags:
@@ -25,10 +25,11 @@ scope:
   path: crates/substrate-host/tests/fixtures
 - confidence: inferred
   path: crates/substrate-host/tests/seatbelt_adversary.rs
-revision: 7
+revision: 8
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-27T01:13:04Z", actor: "human:timo", revision: 6, decided_on: {"recorded":{"review_outcome":5}}}
 - {from: "proposed", to: "active", at: "2026-10-27T01:13:04Z", actor: "human:timo", revision: 7, decided_on: {"recorded":{"review_outcome":5}}}
+- {from: "active", to: "implemented", at: "2026-10-27T07:47:39Z", actor: "human:timo", revision: 8, decided_on: {"recorded":{"test_result":2,"review_outcome":7}}}
 ---
 # S2: a Seatbelt policy that runs `cargo test`
 

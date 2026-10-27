@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:sandbox-repository-parity
 kind: story
-status: active
+status: implemented
 title: The sandbox repository's settings are covered by Substrate
 owner: substrate
 tags:
@@ -29,10 +29,11 @@ scope:
   path: spec/client/client.yaml
 - confidence: inferred
   path: spec/generated/cli
-revision: 7
+revision: 8
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-27T01:13:04Z", actor: "human:timo", revision: 6, decided_on: {"recorded":{"review_outcome":4}}}
 - {from: "proposed", to: "active", at: "2026-10-27T01:13:04Z", actor: "human:timo", revision: 7, decided_on: {"recorded":{"review_outcome":4}}}
+- {from: "active", to: "implemented", at: "2026-10-27T07:47:38Z", actor: "human:timo", revision: 8, decided_on: {"recorded":{"test_result":1,"review_outcome":6}}}
 ---
 # The sandbox repository's settings are covered by Substrate
 

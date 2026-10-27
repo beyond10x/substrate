@@ -522,7 +522,11 @@ async fn adversary_lane_echo_prints_its_argv_unchanged() {
         .await
         .expect("the run ends")
         .expect("waited");
-    assert_eq!(ended.exit.and_then(|exit| exit.code), Some(0));
+    assert_eq!(
+        ended.exit.and_then(|exit| exit.code),
+        Some(0),
+        "wait reported {ended:?}"
+    );
     let output = adapter.output(&run).await.expect("output");
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
@@ -559,12 +563,83 @@ fn node(node: &str, args: &[&str]) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
+/// How long the restarted kubelet may take to report its node `Ready` and untainted.
+const NODE_RETURN_LIMIT: Duration = Duration::from_mins(2);
+
+/// The kind node's kubelet, stopped; dropping it starts the kubelet again and waits for the node,
+/// so a case that fails while the kubelet is away does not hand the next case a stopped node.
+struct KubeletStopped(Option<String>);
+
+impl KubeletStopped {
+    fn stop(kind_node: &str) -> Self {
+        node(kind_node, &["systemctl", "stop", "kubelet"]);
+        Self(Some(kind_node.to_owned()))
+    }
+
+    /// Starts the kubelet and requires the node back: `Ready` and carrying none of the node
+    /// lifecycle taints (`node.kubernetes.io/unreachable`, `not-ready`) its absence added. Nothing
+    /// orders the run's objects going before the node lifecycle controller lifts those taints, so
+    /// the next case's start is ordered after this, not after the cleanup wait below.
+    fn restore(mut self) {
+        let kind_node = self.0.take().expect("stopped once");
+        let state = Self::start_and_wait(&kind_node);
+        assert!(
+            state.is_ok(),
+            "the node did not return within {NODE_RETURN_LIMIT:?}: {state:?}"
+        );
+    }
+
+    fn start_and_wait(kind_node: &str) -> Result<(), String> {
+        node(kind_node, &["systemctl", "start", "kubelet"]);
+        let deadline = std::time::Instant::now() + NODE_RETURN_LIMIT;
+        loop {
+            // The lane's ServiceAccount may not read Nodes; the kind node's own admin.conf may.
+            let output = std::process::Command::new("docker")
+                .args(["exec", kind_node, "kubectl", "--kubeconfig"])
+                .args(["/etc/kubernetes/admin.conf", "get", "nodes", "--output"])
+                .arg(
+                    "jsonpath={range .items[*]}{.status.conditions[?(@.type==\"Ready\")].status} \
+                     {.spec.taints[*].key}{\"\\n\"}{end}",
+                )
+                .output()
+                .expect("docker runs");
+            let state = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+            let back = output.status.success()
+                && !state.is_empty()
+                && state
+                    .lines()
+                    .all(|line| line.starts_with("True") && !line.contains("node.kubernetes.io/"));
+            if back {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(format!(
+                    "{state} {}",
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ));
+            }
+            std::thread::sleep(Duration::from_secs(1));
+        }
+    }
+}
+
+impl Drop for KubeletStopped {
+    fn drop(&mut self) {
+        if let Some(kind_node) = self.0.take()
+            && let Err(state) = Self::start_and_wait(&kind_node)
+        {
+            println!("adversary pod lane: the node did not return: {state}");
+        }
+    }
+}
+
 /// `wait` "Returns once the run has ended" (`ConfinementAdapter::wait`). `signal: Kill` deletes the
 /// Pod with a grace period of 0, which the API server treats as a force deletion: the object goes
 /// at once, without the kubelet confirming the container stopped. On a node whose kubelet is not
 /// answering (stopped here; partitioned in production), `wait` then reports the run ended by
 /// SIGKILL while its container still runs. `SUBSTRATE_POD_KIND_NODE` names the kind node
-/// container; the kubelet is started again before the assertion.
+/// container; the kubelet is started again, and the node observed `Ready` and untainted, before
+/// the assertion, so the case after this one starts on a node that schedules and runs its Pod.
 #[tokio::test(flavor = "multi_thread")]
 async fn adversary_lane_a_kill_reported_ended_left_no_running_container() {
     let Some(kubeconfig) = lane("SUBSTRATE_POD_KUBECONFIG") else {
@@ -575,7 +650,7 @@ async fn adversary_lane_a_kill_reported_ended_left_no_running_container() {
         return;
     };
     let adapter = pod::open_pod(PodRequest {
-        cluster: Some(kubeconfig),
+        cluster: Some(kubeconfig.clone()),
     })
     .expect("opens");
     let admitted = adapter.admit(&admitted_profile()).expect("admitted");
@@ -605,14 +680,14 @@ async fn adversary_lane_a_kill_reported_ended_left_no_running_container() {
         )
     };
     assert!(!running().is_empty(), "the container runs before the kill");
-    node(&kind_node, &["systemctl", "stop", "kubelet"]);
+    let stopped = KubeletStopped::stop(&kind_node);
     adapter
         .signal(&run, substrate_wire::Signal::Kill)
         .await
         .expect("killed");
     let ended = tokio::time::timeout(Duration::from_mins(3), adapter.wait(&run)).await;
     let still_running = running();
-    node(&kind_node, &["systemctl", "start", "kubelet"]);
+    tokio::task::block_in_place(|| stopped.restore());
     let ended = ended.expect("wait returned").expect("waited");
     println!("wait reported {ended:?}");
     assert!(
@@ -621,6 +696,40 @@ async fn adversary_lane_a_kill_reported_ended_left_no_running_container() {
         ended.state,
         ended.exit
     );
+    // story:pod-lane-runs-adversary-and-security: a run read `Unknown` is removed by the adapter
+    // once the kubelet answers again ("the adapter keeps trying", pod.rs). Wait for that here, in
+    // the process that holds the adapter, so the CI pod lane's no-leftover check sees the result
+    // instead of a NetworkPolicy left only because the test ended first.
+    let deadline = std::time::Instant::now() + Duration::from_mins(3);
+    loop {
+        let left = leftovers(&kubeconfig, &adapter.settings().namespace, run.as_str());
+        if left.is_empty() {
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the adapter left {left} after the kubelet returned"
+        );
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
+}
+
+/// The run's objects still in the cluster, read with `kubectl` rather than the adapter.
+fn leftovers(kubeconfig: &std::path::Path, namespace: &str, run: &str) -> String {
+    let output = std::process::Command::new("kubectl")
+        .arg("--kubeconfig")
+        .arg(kubeconfig)
+        .args(["--namespace", namespace, "get", "pods,networkpolicies"])
+        .arg(format!("--selector=b10x-substrate/run={run}"))
+        .args(["--output", "name"])
+        .output()
+        .expect("kubectl runs");
+    assert!(
+        output.status.success(),
+        "kubectl: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("utf-8")
 }
 
 /// `UNREACHABLE_LIMIT` (pod.rs): "How long the API may stay unreachable before a run is reported

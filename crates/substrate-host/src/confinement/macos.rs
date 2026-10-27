@@ -29,6 +29,20 @@
 //!   `exec.sandbox-exec-subpath-undeclared`. A policy with an exec subpath may read
 //!   [`seatbelt::XCODE_SELECT_LINK`], [`seatbelt::XCODE_LICENSE_PREFERENCES`] and
 //!   [`seatbelt::BUILD_READ_SUBPATHS`].
+//!
+//!   Inside the policy the `/usr/bin/cc` and `xcrun` shims cannot find the compiler or the SDK:
+//!   they ask `xcodebuild` through `/bin/sh`, which no exec subpath allows. So `open` asks
+//!   `xcrun`, unconfined and with a cleared environment, for the selected developer tools' macOS
+//!   SDK, `clang` and `ar`, and a start gets `SDKROOT`, `CARGO_TARGET_<TRIPLE>_LINKER` for both
+//!   Apple triples, `CC` and `AR` for each of them that lies beneath one of its exec subpaths,
+//!   unless the command's environment names it
+//!   (`story:confined-cargo-build-links-without-the-xcrun-shim`). The linker variable outranks a
+//!   linker a cargo configuration file names; a caller that wants another one sets the variable.
+//!   A start whose exec subpaths reach the developer tools is refused
+//!   `exec.sandbox-developer-tools-unresolved`, naming why, and nothing runs, when the open could
+//!   not resolve them, when another developer root is selected than at open, when the SDK the open
+//!   resolved is gone, or when its exec subpaths hold the selected developer directory but not a
+//!   value it needs. Nothing is resolved again at a start. The policy itself gains no rule.
 //! - `private_tmpdir`: each start creates a directory beside the host's temporary directory,
 //!   writable by that run alone, sets `TMPDIR` to it, and removes it before `wait` returns, after
 //!   making every directory the run left in it owner-accessible again. A directory that still
@@ -39,6 +53,7 @@
 //! a deny-default profile, it answers `confinement.adapter-unserved`. Nothing falls back to an
 //! unconfined run.
 
+use std::collections::BTreeMap;
 use std::os::unix::process::ExitStatusExt as _;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -105,9 +120,265 @@ pub(crate) fn open(
         adapter: AdapterName::Macos,
         detail: format!("the Seatbelt probe failed: {error}"),
     })?;
-    Ok(Arc::new(MacosAdapter::with_facts(proved(
-        seatbelt::probe_build(),
-    ))))
+    Ok(Arc::new(MacosAdapter {
+        developer: DeveloperTools::resolve(),
+        ..MacosAdapter::with_facts(proved(seatbelt::probe_build()))
+    }))
+}
+
+/// The Apple targets the developer tools' `clang` links for. Cargo reads the linker of the
+/// toolchain's host or `--target` triple, which need not be the architecture this adapter was
+/// built for (an `x86_64` toolchain on Apple silicon, a daemon under Rosetta), so each is named.
+const APPLE_DARWIN_TRIPLES: [&str; 2] = ["aarch64-apple-darwin", "x86_64-apple-darwin"];
+
+/// The environment `/usr/bin/xcrun` runs in at open: nothing of the embedding process's, so no
+/// `DEVELOPER_DIR` or `TOOLCHAINS` there chooses which developer tools answer, as the Seatbelt
+/// probes clear theirs.
+const XCRUN_PATH: &str = "/usr/bin:/bin";
+
+/// The selected developer tools as a build links with them, resolved outside the sandbox at open
+/// (`story:confined-cargo-build-links-without-the-xcrun-shim`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum DeveloperTools {
+    /// The host had no developer tools at open.
+    Absent,
+    /// The macOS SDK as `xcrun` named it, and the resolved toolchain `clang` and `ar`, each
+    /// resolving beneath `root`, the developer root [`seatbelt::developer_root`] named at open.
+    Resolved {
+        root: PathBuf,
+        sdk: PathBuf,
+        clang: PathBuf,
+        ar: PathBuf,
+    },
+    /// The host had developer tools at `root`, and `detail` says why the SDK, `clang` or `ar` was
+    /// not resolved.
+    Unresolved { root: PathBuf, detail: String },
+}
+
+impl DeveloperTools {
+    /// Asks `/usr/bin/xcrun`, unconfined, with a cleared environment and `/` as its working
+    /// directory, for the SDK, `clang` and `ar` of the selected developer tools. `xcrun` runs only
+    /// when [`seatbelt::developer_root`] finds developer tools, so a host without them is never
+    /// offered their installation.
+    fn resolve() -> Self {
+        let Some(root) = seatbelt::developer_root() else {
+            return Self::Absent;
+        };
+        resolve_developer_tools(root, |args| {
+            let output = std::process::Command::new("/usr/bin/xcrun")
+                .args(["--sdk", "macosx"])
+                .args(args)
+                .env_clear()
+                .env("PATH", XCRUN_PATH)
+                .current_dir("/")
+                .stdin(Stdio::null())
+                .output()
+                .map_err(|error| error.to_string())?;
+            if !output.status.success() {
+                return Err(format!(
+                    "{}: {}",
+                    output.status,
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ));
+            }
+            String::from_utf8(output.stdout).map_err(|_| "the answer is not UTF-8".to_owned())
+        })
+    }
+
+    /// The developer root the open saw, if it saw one.
+    #[cfg(test)]
+    fn root(&self) -> Option<&Path> {
+        match self {
+            Self::Absent => None,
+            Self::Resolved { root, .. } | Self::Unresolved { root, .. } => Some(root),
+        }
+    }
+
+    /// [`Self::environment_at`] with the selection unchanged since the open.
+    #[cfg(test)]
+    fn environment(
+        &self,
+        exec_subpaths: &[PathBuf],
+        caller: &BTreeMap<String, String>,
+    ) -> Result<Vec<(String, PathBuf)>, ConfinementError> {
+        self.environment_at(self.root(), exec_subpaths, caller)
+    }
+
+    /// What a start adds to its environment so a build links and compiles C with the developer
+    /// tools and nothing asks `xcrun`: `SDKROOT`, `CARGO_TARGET_<TRIPLE>_LINKER` for each of
+    /// [`APPLE_DARWIN_TRIPLES`], `CC` and `AR`. A start gets each value whose path lies beneath one
+    /// of its exec subpaths, unless its environment names it. `selected` is the developer root
+    /// [`seatbelt::developer_root`] names now; nothing is resolved again.
+    ///
+    /// A start whose exec subpaths hold the selected developer directory, or any value, is refused
+    /// `exec.sandbox-developer-tools-unresolved`, naming why, when the open did not resolve the
+    /// tools, when the selection changed since the open, when the SDK the open resolved is gone,
+    /// or when its exec subpaths hold the selected developer directory but a value it needs lies
+    /// outside them.
+    fn environment_at(
+        &self,
+        selected: Option<&Path>,
+        exec_subpaths: &[PathBuf],
+        caller: &BTreeMap<String, String>,
+    ) -> Result<Vec<(String, PathBuf)>, ConfinementError> {
+        let beneath = |path: &Path| {
+            exec_subpaths
+                .iter()
+                .any(|subpath| path.starts_with(subpath))
+        };
+        let holds = |root: &Path| beneath(&selected_directory(root));
+        let refused = |why: String| -> ConfinementError {
+            DriverError::unserved(seatbelt::DEVELOPER_TOOLS_UNRESOLVED, why, "exec_subpaths").into()
+        };
+        let (root, sdk, clang, ar) = match self {
+            Self::Absent => {
+                return match selected {
+                    Some(now) if holds(now) => Err(refused(format!(
+                        "the exec subpaths hold the developer tools at {}, selected after the \
+                         open, which found none",
+                        now.display()
+                    ))),
+                    _ => Ok(Vec::new()),
+                };
+            }
+            Self::Unresolved { root, detail } => {
+                return if holds(root) || selected.is_some_and(holds) {
+                    Err(refused(format!(
+                        "the exec subpaths hold the developer tools at {}, whose SDK, clang and \
+                         ar were not resolved at open: {detail}",
+                        root.display()
+                    )))
+                } else {
+                    Ok(Vec::new())
+                };
+            }
+            Self::Resolved {
+                root,
+                sdk,
+                clang,
+                ar,
+            } => (root, sdk, clang, ar),
+        };
+        let sdk_now = std::fs::canonicalize(sdk)
+            .ok()
+            .filter(|path| path.is_dir() && path.starts_with(root));
+        let involved = holds(root)
+            || selected.is_some_and(holds)
+            || beneath(clang)
+            || beneath(ar)
+            || sdk_now.as_deref().is_some_and(beneath);
+        if !involved {
+            return Ok(Vec::new());
+        }
+        if selected != Some(root.as_path()) {
+            return Err(refused(format!(
+                "the developer tools selected now, {}, are not the ones the open resolved, {}",
+                selected.map_or_else(|| "none".to_owned(), |now| now.display().to_string()),
+                root.display()
+            )));
+        }
+        let Some(sdk_now) = sdk_now else {
+            return Err(refused(format!(
+                "the SDK the open resolved, {}, is no longer a directory beneath {}",
+                sdk.display(),
+                root.display()
+            )));
+        };
+        // Each value: its name, the resolved path the policy must reach, and the value itself.
+        let mut values = vec![("SDKROOT".to_owned(), sdk_now, sdk.clone())];
+        for triple in APPLE_DARWIN_TRIPLES {
+            values.push((linker_variable(triple), clang.clone(), clang.clone()));
+        }
+        values.push(("CC".to_owned(), clang.clone(), clang.clone()));
+        values.push(("AR".to_owned(), ar.clone(), ar.clone()));
+        values.retain(|(name, _, _)| !caller.contains_key(name));
+        if holds(root)
+            && let Some((name, reached, _)) =
+                values.iter().find(|(_, reached, _)| !beneath(reached))
+        {
+            return Err(refused(format!(
+                "the exec subpaths hold the selected developer directory {} but not {name}, {}",
+                selected_directory(root).display(),
+                reached.display()
+            )));
+        }
+        Ok(values
+            .into_iter()
+            .filter(|(_, reached, _)| beneath(reached))
+            .map(|(name, _, value)| (name, value))
+            .collect())
+    }
+}
+
+/// The developer directory `xcode-select` selects for the developer root `root`: an Xcode
+/// bundle's `Contents/Developer`, else the root itself (the Command Line Tools). The inverse of
+/// [`seatbelt::developer_root`].
+fn selected_directory(root: &Path) -> PathBuf {
+    if root.extension().is_some_and(|extension| extension == "app") {
+        root.join("Contents/Developer")
+    } else {
+        root.to_path_buf()
+    }
+}
+
+/// The developer tools at `root` as `xcrun` names them: `xcrun` answers `--sdk macosx <args>` for
+/// `--show-sdk-path`, `--find clang` and `--find ar`. Each answer must be an absolute path that
+/// resolves beneath `root`. The SDK is kept as `xcrun` named it, so an SDK update that moves the
+/// unversioned link keeps it valid; `clang` and `ar` are kept resolved.
+fn resolve_developer_tools(
+    root: PathBuf,
+    xcrun: impl Fn(&[&str]) -> Result<String, String>,
+) -> DeveloperTools {
+    let find = |args: &[&str]| -> Result<(PathBuf, PathBuf), String> {
+        let asked = format!("xcrun --sdk macosx {}", args.join(" "));
+        let answer = xcrun(args).map_err(|error| format!("{asked}: {error}"))?;
+        let answer = answer.trim();
+        if answer.is_empty() {
+            return Err(format!("{asked} named no path"));
+        }
+        if !Path::new(answer).is_absolute() {
+            return Err(format!("{asked} named {answer}, not an absolute path"));
+        }
+        let path = std::fs::canonicalize(answer)
+            .map_err(|error| format!("{asked} named {answer}: {error}"))?;
+        if !path.starts_with(&root) {
+            return Err(format!(
+                "{asked} named {}, outside the developer tools {}",
+                path.display(),
+                root.display()
+            ));
+        }
+        Ok((PathBuf::from(answer), path))
+    };
+    let resolved = find(&["--show-sdk-path"]).and_then(|(sdk, _)| {
+        let (_, clang) = find(&["--find", "clang"])?;
+        let (_, ar) = find(&["--find", "ar"])?;
+        Ok((sdk, clang, ar))
+    });
+    match resolved {
+        Ok((sdk, clang, ar)) => DeveloperTools::Resolved {
+            root,
+            sdk,
+            clang,
+            ar,
+        },
+        Err(detail) => DeveloperTools::Unresolved { root, detail },
+    }
+}
+
+/// The Apple target triple of the architecture this adapter was built for.
+#[cfg(test)]
+fn apple_host_triple() -> String {
+    format!("{}-apple-darwin", std::env::consts::ARCH)
+}
+
+/// The variable cargo reads `triple`'s linker from: `CARGO_TARGET_<TRIPLE>_LINKER`, the triple
+/// upper-cased with `-` and `.` as `_`.
+fn linker_variable(triple: &str) -> String {
+    format!(
+        "CARGO_TARGET_{}_LINKER",
+        triple.to_ascii_uppercase().replace(['-', '.'], "_")
+    )
 }
 
 /// `macos`'s declared set: what it proves when every build probe holds.
@@ -198,6 +469,7 @@ fn await_exit_unreaped(pid: i32) {
 
 pub struct MacosAdapter {
     facts: AdapterFacts,
+    developer: DeveloperTools,
     runs: Mutex<Vec<Arc<MacosRun>>>,
     sequence: Mutex<u64>,
 }
@@ -211,6 +483,7 @@ impl MacosAdapter {
     fn with_facts(facts: AdapterFacts) -> Self {
         Self {
             facts,
+            developer: DeveloperTools::Absent,
             runs: Mutex::new(Vec::new()),
             sequence: Mutex::new(0),
         }
@@ -271,14 +544,25 @@ impl MacosAdapter {
         canonical(workspace, "workspace")
     }
 
-    /// The Seatbelt policy one start of `program` runs under: the workspace, the declared roots,
-    /// the private `TMPDIR` when the start created one, the sealed paths and the exec subpaths,
-    /// each after the refusals a start applies to it.
+    /// The policy of [`Self::policy_and_exec_subpaths`] alone.
+    #[cfg(test)]
     fn policy(
         admitted: &AdmittedProfile,
         program: &Path,
         private_tmpdir: Option<&Path>,
     ) -> Result<SeatbeltPolicy, ConfinementError> {
+        Self::policy_and_exec_subpaths(admitted, program, private_tmpdir).map(|(policy, _)| policy)
+    }
+
+    /// The Seatbelt policy one start of `program` runs under: the workspace, the declared roots,
+    /// the private `TMPDIR` when the start created one, the sealed paths and the exec subpaths,
+    /// each after the refusals a start applies to it; and those exec subpaths as the policy names
+    /// them.
+    fn policy_and_exec_subpaths(
+        admitted: &AdmittedProfile,
+        program: &Path,
+        private_tmpdir: Option<&Path>,
+    ) -> Result<(SeatbeltPolicy, Vec<PathBuf>), ConfinementError> {
         let workspace = Self::workspace(admitted)?;
         let profile = admitted.profile();
         let mut policy = SeatbeltPolicy::new(&workspace).executable(program);
@@ -294,16 +578,21 @@ impl MacosAdapter {
         for path in &profile.sealed_paths {
             policy = policy.sealed(sealed_path(&workspace, path)?);
         }
+        let mut subpaths = Vec::with_capacity(profile.exec_subpaths.len());
         for subpath in &profile.exec_subpaths {
-            policy = policy.exec_subpath(exec_subpath(&workspace, &declared, subpath)?);
+            let subpath = exec_subpath(&workspace, &declared, subpath)?;
+            subpaths.push(subpath.clone());
+            policy = policy.exec_subpath(subpath);
         }
-        Ok(policy)
+        Ok((policy, subpaths))
     }
 
     /// The confined command one start would spawn: the Seatbelt launcher, its profile, the
     /// program and its arguments, in the workspace or the workdir beneath it, with `TMPDIR` set to
-    /// the private directory when there is one. Nothing is spawned.
+    /// the private directory when there is one, and the developer tools' values the exec subpaths
+    /// reach ([`DeveloperTools::environment_at`]). Nothing is spawned.
     fn command(
+        developer: &DeveloperTools,
         admitted: &AdmittedProfile,
         command: &Command,
         private_tmpdir: Option<&Path>,
@@ -324,7 +613,13 @@ impl MacosAdapter {
             )
             .into());
         }
-        let policy = Self::policy(admitted, program, private_tmpdir)?;
+        let (policy, exec_subpaths) =
+            Self::policy_and_exec_subpaths(admitted, program, private_tmpdir)?;
+        let developer = developer.environment_at(
+            seatbelt::developer_root().as_deref(),
+            &exec_subpaths,
+            &command.env,
+        )?;
         let workspace = super::workspace_of(admitted)?;
         let canonical_workspace = Self::workspace(admitted)?;
         let profile = admitted.profile();
@@ -358,6 +653,8 @@ impl MacosAdapter {
         };
         let mut confined = policy.command(program, &command.argv[1..])?;
         confined.envs(&command.env);
+        // Names the caller did not set, so nothing the caller named is replaced.
+        confined.envs(developer);
         if let Some(private) = private_tmpdir {
             // The profile requires it, so it wins over a `TMPDIR` the command names.
             confined.env("TMPDIR", private);
@@ -599,6 +896,7 @@ impl MacosAdapter {
             None
         };
         let confined = Self::command(
+            &self.developer,
             admitted,
             command,
             private.as_ref().map(|(_, path)| path.as_path()),
@@ -767,7 +1065,7 @@ impl ConfinementAdapter for MacosAdapter {
             )
             .into());
         }
-        let confined = Self::command(admitted, command, None)?;
+        let confined = Self::command(&self.developer, admitted, command, None)?;
         Ok(RenderedCommand {
             program: PathBuf::from(confined.get_program()),
             args: confined
@@ -1274,6 +1572,371 @@ mod tests {
         assert_eq!(driver_code(&error), super::super::RENDER_UNSERVED);
     }
 
+    // story:confined-cargo-build-links-without-the-xcrun-shim: cargo reads the host target's
+    // linker from `CARGO_TARGET_<TRIPLE>_LINKER`, the triple upper-cased with `-` as `_`.
+    #[test]
+    fn the_linker_variable_names_the_host_target() {
+        assert_eq!(
+            linker_variable("aarch64-apple-darwin"),
+            "CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER"
+        );
+        assert_eq!(
+            linker_variable("x86_64-apple-darwin"),
+            "CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER"
+        );
+        assert_eq!(
+            apple_host_triple(),
+            format!("{}-apple-darwin", std::env::consts::ARCH)
+        );
+    }
+
+    /// A developer root holding an SDK directory and `clang` and `ar` files where `xcrun` names
+    /// them, and a directory beside the root holding its own `clang` and `ar`.
+    struct DeveloperTree {
+        _root: tempfile::TempDir,
+        developer: PathBuf,
+        sdk: PathBuf,
+        clang: PathBuf,
+        ar: PathBuf,
+        beside: PathBuf,
+    }
+
+    fn developer_tree() -> DeveloperTree {
+        let root = tempfile::tempdir().expect("root");
+        let base = std::fs::canonicalize(root.path()).expect("canonical");
+        let developer = base.join("Xcode.app");
+        let sdk = developer.join("Contents/Developer/SDKs/MacOSX.sdk");
+        let bin = developer.join("Contents/Developer/Toolchains/Default.xctoolchain/usr/bin");
+        let beside = base.join("beside");
+        for directory in [&sdk, &bin, &beside] {
+            std::fs::create_dir_all(directory).expect("directory");
+        }
+        for tool in ["clang", "ar"] {
+            std::fs::write(bin.join(tool), b"").expect(tool);
+            std::fs::write(beside.join(tool), b"").expect(tool);
+        }
+        DeveloperTree {
+            _root: root,
+            developer,
+            sdk,
+            clang: bin.join("clang"),
+            ar: bin.join("ar"),
+            beside,
+        }
+    }
+
+    /// What `xcrun --sdk macosx <args>` answers: `sdk` for the SDK path, `clang` for the linker,
+    /// and for `ar` the `ar` beside the `clang` it names.
+    fn answering(
+        sdk: Result<String, String>,
+        clang: Result<String, String>,
+    ) -> impl Fn(&[&str]) -> Result<String, String> {
+        move |args: &[&str]| match args {
+            ["--show-sdk-path"] => sdk.clone(),
+            ["--find", "clang"] => clang.clone(),
+            ["--find", "ar"] => clang
+                .clone()
+                .map(|clang| clang.replace("/clang\n", "/ar\n")),
+            other => panic!("unexpected xcrun arguments {other:?}"),
+        }
+    }
+
+    /// `xcrun` naming `path`, as it prints it.
+    fn line(path: &Path) -> String {
+        format!("{}\n", path.display())
+    }
+
+    // story:confined-cargo-build-links-without-the-xcrun-shim: the SDK and `clang` are resolved
+    // outside the sandbox, and only a pair the developer root holds is used, because a build
+    // policy reaches the developer tools through that root and nothing else.
+    #[test]
+    fn the_developer_tools_resolve_only_beneath_their_root() {
+        let tree = developer_tree();
+        let resolved = resolve_developer_tools(
+            tree.developer.clone(),
+            answering(Ok(line(&tree.sdk)), Ok(line(&tree.clang))),
+        );
+        assert_eq!(
+            resolved,
+            DeveloperTools::Resolved {
+                root: tree.developer.clone(),
+                sdk: tree.sdk.clone(),
+                clang: tree.clang.clone(),
+                ar: tree.ar.clone(),
+            }
+        );
+        for (sdk, clang, named) in [
+            (
+                Ok("relative/MacOSX.sdk\n".to_owned()),
+                Ok(line(&tree.clang)),
+                "not an absolute path",
+            ),
+            (Ok(line(&tree.beside)), Ok(line(&tree.clang)), "beside"),
+            (
+                Ok(line(&tree.sdk)),
+                Ok(line(&tree.beside.join("clang"))),
+                "beside",
+            ),
+            (Err("exit 72".to_owned()), Ok(line(&tree.clang)), "exit 72"),
+            (Ok(line(&tree.sdk)), Err("exit 72".to_owned()), "exit 72"),
+            (
+                Ok(line(&tree.sdk.join("absent"))),
+                Ok(line(&tree.clang)),
+                "absent",
+            ),
+            (
+                Ok("\n".to_owned()),
+                Ok(line(&tree.clang)),
+                "--show-sdk-path",
+            ),
+        ] {
+            match resolve_developer_tools(tree.developer.clone(), answering(sdk, clang)) {
+                DeveloperTools::Unresolved { root, detail } => {
+                    assert_eq!(root, tree.developer);
+                    assert!(detail.contains(named), "{named}: {detail}");
+                }
+                other => panic!("{named}: expected unresolved tools, got {other:?}"),
+            }
+        }
+    }
+
+    fn resolved(tree: &DeveloperTree) -> DeveloperTools {
+        DeveloperTools::Resolved {
+            root: tree.developer.clone(),
+            sdk: tree.sdk.clone(),
+            clang: tree.clang.clone(),
+            ar: tree.ar.clone(),
+        }
+    }
+
+    /// Every value a start over the whole tree gets, in the order the adapter names them.
+    fn every_value(tree: &DeveloperTree) -> Vec<(String, PathBuf)> {
+        vec![
+            ("SDKROOT".to_owned(), tree.sdk.clone()),
+            (
+                "CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER".to_owned(),
+                tree.clang.clone(),
+            ),
+            (
+                "CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER".to_owned(),
+                tree.clang.clone(),
+            ),
+            ("CC".to_owned(), tree.clang.clone()),
+            ("AR".to_owned(), tree.ar.clone()),
+        ]
+    }
+
+    // story:confined-cargo-build-links-without-the-xcrun-shim: an exec subpath that holds the
+    // developer root gets `SDKROOT`, the linker for both Apple triples, `CC` and `AR`, so cargo
+    // and a build script never reach the `/usr/bin/cc` shim; each value is given only to a policy
+    // that reaches it (adversary A2), so one over the toolchain alone gets the toolchain's
+    // values, and a policy that reaches none of the developer tools gets nothing.
+    #[test]
+    fn a_build_policy_over_the_developer_tools_gets_sdkroot_and_the_linker() {
+        let tree = developer_tree();
+        let tools = resolved(&tree);
+        let parent = tree.developer.parent().expect("parent").to_path_buf();
+        for subpaths in [
+            vec![tree.developer.clone()],
+            vec![tree.developer.join("Contents/Developer")],
+            vec![PathBuf::from("/usr/bin"), parent],
+        ] {
+            assert_eq!(
+                tools
+                    .environment(&subpaths, &BTreeMap::new())
+                    .expect("environment"),
+                every_value(&tree),
+                "{subpaths:?}"
+            );
+        }
+        let toolchain = vec![tree.developer.join("Contents/Developer/Toolchains")];
+        assert_eq!(
+            tools
+                .environment(&toolchain, &BTreeMap::new())
+                .expect("environment"),
+            every_value(&tree)[1..].to_vec(),
+        );
+        for subpaths in [
+            vec![],
+            vec![PathBuf::from("/usr/bin")],
+            vec![tree.beside.clone()],
+        ] {
+            assert_eq!(
+                tools
+                    .environment(&subpaths, &BTreeMap::new())
+                    .expect("environment"),
+                Vec::new(),
+                "{subpaths:?}"
+            );
+        }
+        assert_eq!(
+            DeveloperTools::Absent
+                .environment(std::slice::from_ref(&tree.developer), &BTreeMap::new())
+                .expect("environment"),
+            Vec::new()
+        );
+    }
+
+    // story:confined-cargo-build-links-without-the-xcrun-shim, adversary A2: a start whose exec
+    // subpaths hold the selected developer directory but not a value it needs is refused by name,
+    // naming the value; a value the caller set is not needed.
+    #[test]
+    fn a_value_outside_a_policy_over_the_selected_directory_is_refused_by_name() {
+        let tree = developer_tree();
+        let tools = DeveloperTools::Resolved {
+            root: tree.developer.clone(),
+            sdk: tree.sdk.clone(),
+            clang: tree.clang.clone(),
+            ar: tree.beside.join("ar"),
+        };
+        let subpaths = [tree.developer.clone()];
+        let error = tools
+            .environment(&subpaths, &BTreeMap::new())
+            .expect_err("AR outside the policy");
+        assert_eq!(driver_code(&error), seatbelt::DEVELOPER_TOOLS_UNRESOLVED);
+        assert!(error.to_string().contains("not AR"), "{error}");
+        let caller = BTreeMap::from([("AR".to_owned(), "/caller/ar".to_owned())]);
+        assert_eq!(
+            tools.environment(&subpaths, &caller).expect("environment"),
+            every_value(&tree)[..4].to_vec()
+        );
+    }
+
+    // story:confined-cargo-build-links-without-the-xcrun-shim, security F2: developer tools
+    // selected after the open were never resolved, so a start whose exec subpaths reach them, or
+    // the ones the open resolved, is refused by name; a start that reaches neither is not.
+    #[test]
+    fn a_selection_changed_since_the_open_refuses_a_start_over_the_developer_tools() {
+        let tree = developer_tree();
+        let tools = resolved(&tree);
+        let other = tree.beside.join("Other.app");
+        std::fs::create_dir_all(other.join("Contents/Developer")).expect("other Xcode");
+        for (selected, subpaths, why) in [
+            (Some(other.as_path()), vec![other.clone()], "selected now"),
+            (
+                Some(other.as_path()),
+                vec![tree.developer.clone()],
+                "selected now",
+            ),
+            (None, vec![tree.developer.clone()], "selected now, none"),
+        ] {
+            let error = tools
+                .environment_at(selected, &subpaths, &BTreeMap::new())
+                .expect_err(why);
+            assert_eq!(driver_code(&error), seatbelt::DEVELOPER_TOOLS_UNRESOLVED);
+            assert!(error.to_string().contains(why), "{why}: {error}");
+        }
+        assert_eq!(
+            tools
+                .environment_at(
+                    Some(other.as_path()),
+                    &[PathBuf::from("/usr/bin")],
+                    &BTreeMap::new()
+                )
+                .expect("a start that reaches no developer tools"),
+            Vec::new()
+        );
+        let error = DeveloperTools::Absent
+            .environment_at(
+                Some(other.as_path()),
+                std::slice::from_ref(&other),
+                &BTreeMap::new(),
+            )
+            .expect_err("selected after an open that found none");
+        assert!(error.to_string().contains("found none"), "{error}");
+    }
+
+    // story:confined-cargo-build-links-without-the-xcrun-shim, security F2: an SDK the open
+    // resolved that is gone refuses a start over the developer tools by name.
+    #[test]
+    fn a_vanished_sdk_refuses_a_start_over_the_developer_tools() {
+        let tree = developer_tree();
+        let tools = resolved(&tree);
+        std::fs::remove_dir(&tree.sdk).expect("SDK removed");
+        let error = tools
+            .environment(std::slice::from_ref(&tree.developer), &BTreeMap::new())
+            .expect_err("a vanished SDK");
+        assert_eq!(driver_code(&error), seatbelt::DEVELOPER_TOOLS_UNRESOLVED);
+        assert!(
+            error.to_string().contains("no longer a directory"),
+            "{error}"
+        );
+    }
+
+    // story:confined-cargo-build-links-without-the-xcrun-shim: a value the caller names is never
+    // replaced.
+    #[test]
+    fn what_the_caller_set_is_kept() {
+        let tree = developer_tree();
+        let tools = resolved(&tree);
+        let subpaths = [tree.developer.clone()];
+        let every = every_value(&tree);
+        for (index, (name, _)) in every.iter().enumerate() {
+            let caller = BTreeMap::from([(name.clone(), "/caller/value".to_owned())]);
+            let mut expected = every.clone();
+            expected.remove(index);
+            assert_eq!(
+                tools.environment(&subpaths, &caller).expect("environment"),
+                expected,
+                "{name}"
+            );
+        }
+    }
+
+    // story:confined-cargo-build-links-without-the-xcrun-shim: developer tools the adapter could
+    // not resolve at open refuse, by name and audited, a start whose policy would run them, and
+    // nothing runs; a policy that does not hold them is not affected.
+    #[tokio::test]
+    async fn unresolved_developer_tools_refuse_a_build_policy_over_them_before_anything_runs() {
+        let tree = developer_tree();
+        let developer = tree.developer.to_str().expect("UTF-8").to_owned();
+        let adapter = MacosAdapter {
+            developer: DeveloperTools::Unresolved {
+                root: tree.developer.clone(),
+                detail: "xcrun --sdk macosx --find clang: exit 72".to_owned(),
+            },
+            ..adapter()
+        };
+        let unaffected = DeveloperTools::Unresolved {
+            root: tree.developer.clone(),
+            detail: String::new(),
+        };
+        assert_eq!(
+            unaffected
+                .environment(std::slice::from_ref(&tree.beside), &BTreeMap::new())
+                .expect("a policy without the developer tools"),
+            Vec::new()
+        );
+        let workspace = tempfile::tempdir().expect("workspace");
+        let (sink, records) = recording();
+        let admitted = adapter
+            .admit(&ConfinementProfile {
+                workspace: Some(workspace.path().to_path_buf()),
+                read_only_roots: vec![root(&developer, &developer)],
+                exec_subpaths: vec![developer.clone()],
+                audit: Some(sink),
+                ..ConfinementProfile::default()
+            })
+            .expect("admitted");
+        let error = adapter
+            .start(
+                &admitted,
+                &Command {
+                    argv: vec!["/bin/sh".into(), "-c".into(), "printf ran > marker".into()],
+                    env: BTreeMap::new(),
+                },
+            )
+            .await
+            .expect_err("unresolved developer tools");
+        assert_eq!(driver_code(&error), seatbelt::DEVELOPER_TOOLS_UNRESOLVED);
+        assert!(error.to_string().contains("exit 72"), "{error}");
+        assert!(!workspace.path().join("marker").exists());
+        let records = records.lock();
+        let last = serde_json::to_value(records.last().expect("a record")).expect("record");
+        assert_eq!(last["event"], "profile_refused", "{last}");
+        assert_eq!(last["code"], seatbelt::DEVELOPER_TOOLS_UNRESOLVED, "{last}");
+    }
+
     #[cfg(not(target_os = "macos"))]
     #[test]
     fn off_macos_the_adapter_does_not_open() {
@@ -1541,6 +2204,95 @@ mod tests {
                 .count(),
             0,
             "something ran in the workspace"
+        );
+    }
+
+    // Adversary, story:confined-cargo-build-links-without-the-xcrun-shim, A2: the selected
+    // developer directory (`xcode-select -p`, `…/Xcode.app/Contents/Developer`) is an admitted exec
+    // subpath and holds both the SDK and `clang` the adapter resolved, so its policy can run them;
+    // without `SDKROOT` and the linker its build reaches the `/usr/bin/cc` shim and fails.
+    #[test]
+    fn adversary_a_policy_over_the_selected_developer_directory_gets_sdkroot_and_the_linker() {
+        let tree = developer_tree();
+        let tools = resolved(&tree);
+        let selected = tree.developer.join("Contents/Developer");
+        assert!(tree.sdk.starts_with(&selected) && tree.clang.starts_with(&selected));
+        // story:confined-cargo-build-links-without-the-xcrun-shim: containment, not equality,
+        // because A1 adds `CC` and `AR` and A3 the other triple's linker to the same environment.
+        let environment = tools
+            .environment(std::slice::from_ref(&selected), &BTreeMap::new())
+            .expect("environment");
+        for expected in [
+            ("SDKROOT".to_owned(), tree.sdk.clone()),
+            (linker_variable(&apple_host_triple()), tree.clang.clone()),
+        ] {
+            assert!(
+                environment.contains(&expected),
+                "{expected:?} is not set: {environment:?}"
+            );
+        }
+    }
+
+    // Adversary, A3: cargo reads the linker of the toolchain's host or `--target` triple, which is
+    // not the architecture the daemon was built for when the toolchain is the other Apple triple
+    // (an x86_64 rustup toolchain on Apple silicon, a daemon under Rosetta, a `--target` build).
+    // The resolved `clang` links both, so a start over the developer tools names it for both.
+    #[test]
+    fn adversary_the_linker_is_named_for_each_apple_darwin_triple() {
+        let tree = developer_tree();
+        let environment = resolved(&tree)
+            .environment(std::slice::from_ref(&tree.developer), &BTreeMap::new())
+            .expect("environment");
+        for triple in ["aarch64-apple-darwin", "x86_64-apple-darwin"] {
+            let name = linker_variable(triple);
+            assert!(
+                environment
+                    .iter()
+                    .any(|(set, value)| *set == name && *value == tree.clang),
+                "{name} is not set: {environment:?}"
+            );
+        }
+    }
+
+    // Adversary, A4: `xcrun --show-sdk-path` names the unversioned `MacOSX.sdk` link, and the
+    // adapter keeps its canonical, versioned target from open for the daemon's lifetime. An SDK
+    // update while the daemon runs replaces the versioned directory and moves the link, and every
+    // later start gets an `SDKROOT` that no longer exists; rustc ignores it, asks `xcrun`, and the
+    // build fails inside the sandbox with no named refusal.
+    #[test]
+    fn adversary_the_sdkroot_a_start_gets_survives_an_sdk_update() {
+        let tree = developer_tree();
+        let sdks = tree
+            .developer
+            .join("Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs");
+        let old = sdks.join("MacOSX15.0.sdk");
+        std::fs::create_dir_all(&old).expect("versioned SDK");
+        let link = sdks.join("MacOSX.sdk");
+        std::os::unix::fs::symlink("MacOSX15.0.sdk", &link).expect("SDK link");
+        let tools = resolve_developer_tools(
+            tree.developer.clone(),
+            answering(Ok(line(&link)), Ok(line(&tree.clang))),
+        );
+        assert!(
+            matches!(tools, DeveloperTools::Resolved { .. }),
+            "{tools:?}"
+        );
+        // The update: the versioned SDK is replaced and the link names its successor.
+        std::fs::remove_dir(&old).expect("old SDK removed");
+        std::fs::create_dir(sdks.join("MacOSX15.2.sdk")).expect("new SDK");
+        std::fs::remove_file(&link).expect("link removed");
+        std::os::unix::fs::symlink("MacOSX15.2.sdk", &link).expect("link moved");
+        let environment = tools
+            .environment(std::slice::from_ref(&tree.developer), &BTreeMap::new())
+            .expect("environment");
+        let (_, sdkroot) = environment
+            .iter()
+            .find(|(name, _)| name == "SDKROOT")
+            .expect("SDKROOT is set");
+        assert!(
+            sdkroot.is_dir(),
+            "SDKROOT {} no longer exists after the update",
+            sdkroot.display()
         );
     }
 }

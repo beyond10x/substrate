@@ -98,13 +98,13 @@ require_executed() {
   log="$(cargo test -p "${package}" --locked --test "${binary}" \
     -- --nocapture --test-threads=1 2>&1)" || { printf '%s\n' "${log}" >&2; exit 1; }
   printf '%s\n' "${log}"
-  if printf '%s\n' "${log}" | grep -q 'ABSENT'; then
+  if grep -q 'ABSENT' <<<"${log}"; then
     echo "delegated-lane: ${binary} reported a case absent" >&2
     exit 1
   fi
   local line
   for line in "$@"; do
-    if ! printf '%s\n' "${log}" | grep -qF "${line}"; then
+    if ! grep -qF "${line}" <<<"${log}"; then
       echo "delegated-lane: ${binary} did not print '${line}'" >&2
       exit 1
     fi
