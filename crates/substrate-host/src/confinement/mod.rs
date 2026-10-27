@@ -27,8 +27,10 @@
 //! decision 7).
 //!
 //! The registry names all six adapters ([`ADAPTERS`]). Each lives in its own file with its own
-//! request type, so an adapter story replaces one file: `macos`, `systemd`, `oci` and `pod` are
-//! stubs here whose `open` answers `confinement.adapter-unserved`.
+//! request type. Each opens only where its mechanism is present and otherwise answers
+//! `confinement.adapter-unserved`: `macos` on macOS with Seatbelt, `systemd` on Linux through the
+//! user's systemd manager around `local` or `linux`, `oci` with a Docker or podman runtime that
+//! answers, and `pod` with an operator's cluster configuration whose cluster answers.
 
 pub mod facts;
 pub mod linux;

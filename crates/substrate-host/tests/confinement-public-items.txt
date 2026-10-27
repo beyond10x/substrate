@@ -15,6 +15,7 @@ confinement/facts.rs: struct AdapterFacts > pub adapter: AdapterName,
 confinement/facts.rs: struct AdapterFacts > #[serde(skip_serializing_if = "Option::is_none")] pub inner: Option<InnerAdapter>,
 confinement/facts.rs: struct AdapterFacts > pub served_families: Vec<ContractFamily>,
 confinement/facts.rs: struct AdapterFacts > pub facts: Vec<Fact>,
+confinement/facts.rs: struct AdapterFacts > (private fields)
 confinement/facts.rs: impl AdapterFacts > pub fn new(adapter: AdapterName, inner: Option<InnerAdapter>, served: &[(ContractFamily, bool)], proved: &[(Fact, bool)]) -> Self
 confinement/facts.rs: impl AdapterFacts > pub fn serves(&self, family: &ContractFamily) -> bool
 confinement/facts.rs: impl AdapterFacts > pub fn proves(&self, fact: &Fact) -> bool
@@ -27,6 +28,7 @@ confinement/linux.rs: #[cfg(target_os = "linux")] pub use imp::proof;
 confinement/linux.rs: mod imp > pub const DEFAULT_BOUNDS: ProcessBounds = ProcessBounds {timeout_ms: 600_000, processes: 256, memory_bytes: 1 << 30, cpu_millis: 600_000};
 confinement/linux.rs: mod imp > pub fn proof(machine: &CapabilitySnapshot) -> AdapterFacts
 confinement/linux.rs: mod imp > pub struct LinuxAdapter
+confinement/linux.rs: mod imp > struct LinuxAdapter > (private fields)
 confinement/linux.rs: mod imp > #[async_trait] impl ConfinementAdapter for LinuxAdapter
 confinement/local.rs: pub const LOCAL_POLICY_ENV: &str = "SUBSTRATE_CONFINEMENT_LOCAL";
 confinement/local.rs: pub const LOCAL_OUTPUT_LIMIT_BYTES: usize = 1_048_576;
@@ -39,6 +41,7 @@ confinement/local.rs: #[derive(Debug, Clone, Copy, Default)] pub struct LocalReq
 confinement/local.rs: struct LocalRequest > pub policy: LocalPolicy,
 confinement/local.rs: pub fn proof(permitted: bool) -> AdapterFacts
 confinement/local.rs: pub struct LocalAdapter
+confinement/local.rs: struct LocalAdapter > (private fields)
 confinement/local.rs: #[async_trait] impl ConfinementAdapter for LocalAdapter
 confinement/macos.rs: pub const MACOS_OUTPUT_LIMIT_BYTES: usize = 1_048_576;
 confinement/macos.rs: pub const MACOS_MAX_TRACKED_RUNS: usize = 128;
@@ -48,6 +51,7 @@ confinement/macos.rs: pub const S2_FACTS: [Fact; 3] = [Fact::SealedPaths, Fact::
 confinement/macos.rs: #[derive(Debug, Clone, Default)] #[non_exhaustive] pub struct MacosRequest {}
 confinement/macos.rs: pub fn proof() -> AdapterFacts
 confinement/macos.rs: pub struct MacosAdapter
+confinement/macos.rs: struct MacosAdapter > (private fields)
 confinement/macos.rs: #[async_trait] impl ConfinementAdapter for MacosAdapter
 confinement/mod.rs: pub mod facts;
 confinement/mod.rs: pub mod linux;
@@ -106,6 +110,7 @@ confinement/mod.rs: impl fmt::Debug for AuditSink
 confinement/mod.rs: #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize)] #[serde(transparent)] pub struct ProfileId(String);
 confinement/mod.rs: impl ProfileId > pub fn as_str(&self) -> &str
 confinement/mod.rs: #[derive(Debug, Clone)] pub struct AdmittedProfile
+confinement/mod.rs: struct AdmittedProfile > (private fields)
 confinement/mod.rs: impl AdmittedProfile > pub fn id(&self) -> &ProfileId
 confinement/mod.rs: impl AdmittedProfile > pub fn adapter(&self) -> &AdapterName
 confinement/mod.rs: impl AdmittedProfile > pub fn inner(&self) -> Option<InnerAdapter>
@@ -180,6 +185,7 @@ confinement/oci.rs: pub fn probe(request: &OciRequest) -> Result<RuntimeProbe, C
 confinement/oci.rs: pub fn proof(runtime: &RuntimeProbe) -> AdapterFacts
 confinement/oci.rs: pub fn open_adapter(request: OciRequest) -> Result<Arc<OciAdapter>, ConfinementError>
 confinement/oci.rs: pub struct OciAdapter
+confinement/oci.rs: struct OciAdapter > (private fields)
 confinement/oci.rs: impl OciAdapter > pub fn orphans_removed(&self) -> usize
 confinement/oci.rs: #[async_trait] impl ConfinementAdapter for OciAdapter
 confinement/pod.rs: pub const POD_SETTINGS_EXTENSION: &str = "b10x-substrate/pod";
@@ -208,6 +214,7 @@ confinement/pod.rs: pub fn open_pod(request: PodRequest) -> Result<Arc<PodAdapte
 confinement/pod.rs: pub fn check_profile(settings: &PodSettings, profile: &ConfinementProfile) -> Result<(), ConfinementError>
 confinement/pod.rs: pub fn render_manifests(settings: &PodSettings, profile: &ConfinementProfile, command: &Command, run: &str) -> Result<Value, ConfinementError>
 confinement/pod.rs: pub struct PodAdapter
+confinement/pod.rs: struct PodAdapter > (private fields)
 confinement/pod.rs: impl PodAdapter > pub fn settings(&self) -> &PodSettings
 confinement/pod.rs: #[async_trait] impl ConfinementAdapter for PodAdapter
 confinement/profile.rs: #[derive(Debug, Clone, Default)] pub struct ConfinementProfile
@@ -296,3 +303,49 @@ generated/confinement.rs: enum Fact > #[serde(rename = "paths_are_host_paths")] 
 generated/confinement.rs: enum Fact > #[serde(rename = "private_tmpdir")] PrivateTmpdir,
 generated/confinement.rs: enum Fact > #[serde(rename = "sealed_paths")] SealedPaths,
 generated/confinement.rs: enum Fact > #[serde(rename = "whole_tree_kill")] WholeTreeKill,
+lib.rs: #[derive(Debug, Clone, PartialEq, Eq)] pub struct DeclaredWritableRoot
+lib.rs: struct DeclaredWritableRoot > pub name: String,
+lib.rs: struct DeclaredWritableRoot > pub path: PathBuf,
+lib.rs: #[derive(Debug, Clone)] pub struct HostConfig
+lib.rs: struct HostConfig > pub workspace_root: PathBuf,
+lib.rs: struct HostConfig > pub capsule_root: PathBuf,
+lib.rs: struct HostConfig > pub cgroup_root: Option<PathBuf>,
+lib.rs: struct HostConfig > pub bubblewrap: PathBuf,
+lib.rs: struct HostConfig > pub config_generation: u64,
+lib.rs: struct HostConfig > pub max_file_bytes: u64,
+lib.rs: struct HostConfig > pub read_limit_bytes: u64,
+lib.rs: struct HostConfig > pub list_limit_items: u32,
+lib.rs: struct HostConfig > pub output_limit_bytes: u64,
+lib.rs: struct HostConfig > pub max_concurrent_execs: usize,
+lib.rs: struct HostConfig > pub max_tracked_execs: usize,
+lib.rs: struct HostConfig > pub event_retention: u64,
+lib.rs: struct HostConfig > pub max_current_workspaces: u64,
+lib.rs: struct HostConfig > pub max_current_execs: u64,
+lib.rs: struct HostConfig > pub snapshot_provenance_events: u64,
+lib.rs: struct HostConfig > pub secret_slots: Vec<SecretSlot>,
+lib.rs: struct HostConfig > pub egress_apertures: Vec<EgressAperture>,
+lib.rs: struct HostConfig > pub aperture_root: PathBuf,
+lib.rs: struct HostConfig > pub ca_bundle: Option<PathBuf>,
+lib.rs: struct HostConfig > pub project_quota_ids: Option<(u32, u32)>,
+lib.rs: struct HostConfig > pub git_sources: Vec<GitSourceBinding>,
+lib.rs: struct HostConfig > pub exec_cpu_cores: u32,
+lib.rs: struct HostConfig > pub host_processes: bool,
+lib.rs: struct HostConfig > pub writable_roots: Vec<DeclaredWritableRoot>,
+lib.rs: impl HostConfig > pub fn minimum(workspace_root: impl Into<PathBuf>) -> Self
+substrate-wire/src/lib.rs: #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)] #[serde(deny_unknown_fields)] pub struct WritableHostRoot
+substrate-wire/src/lib.rs: struct WritableHostRoot > pub host: String,
+substrate-wire/src/lib.rs: struct WritableHostRoot > pub mount: String,
+substrate-wire/src/lib.rs: #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)] #[serde(rename_all = "UPPERCASE")] pub enum Signal
+substrate-wire/src/lib.rs: enum Signal > Int,
+substrate-wire/src/lib.rs: enum Signal > Term,
+substrate-wire/src/lib.rs: enum Signal > Kill,
+substrate-wire/src/lib.rs: impl Signal > pub const fn number(self) -> i32
+substrate-wire/src/lib.rs: #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)] #[serde(deny_unknown_fields)] pub struct ReadOnlyRoot
+substrate-wire/src/lib.rs: struct ReadOnlyRoot > pub host_path: String,
+substrate-wire/src/lib.rs: struct ReadOnlyRoot > pub mount: String,
+substrate-wire/src/lib.rs: #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)] #[serde(deny_unknown_fields)] pub struct ReadOnlyFile
+substrate-wire/src/lib.rs: struct ReadOnlyFile > pub host_path: String,
+substrate-wire/src/lib.rs: struct ReadOnlyFile > pub mount: String,
+substrate-wire/src/lib.rs: #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)] #[serde(deny_unknown_fields)] pub struct SecretSlotRequest
+substrate-wire/src/lib.rs: struct SecretSlotRequest > pub slot: String,
+substrate-wire/src/lib.rs: struct SecretSlotRequest > pub fd: u32,

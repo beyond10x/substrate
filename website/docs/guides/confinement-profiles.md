@@ -76,8 +76,11 @@ Each profile field needs the family or the fact beside it.
 | `image` | on an adapter that proves `image_digest_pinned`, `name@sha256:` and 64 lowercase hex digits |
 
 `ingress_routes` and `rate_bounds` are reserved: any value is
-`confinement.reserved-field-unserved`. `profile.required_families()` and
-`profile.required_facts()` list what a profile needs, in the orders above.
+`confinement.reserved-field-unserved`. `profile.required_facts()` lists the facts a profile
+requires, in the order above. `profile.required_families()` lists the families its `families` and
+its fields imply, in the order above, except two that depend on more than the profile's fields:
+`audit` for an `audit` sink, and `network_egress` for `network: Isolated` on an adapter that proves
+`host_network`. Admission requires both, so add them yourself (see `needed` below).
 
 A workspace is the directory the run starts in and may write, so a build that writes `target/`
 inside it needs no more than `workspace`. A directory outside it is a declared root:
@@ -90,10 +93,27 @@ Pick the adapter whose facts cover the profile, and prefer one that does not pro
 `declared_insecure`:
 
 ```rust
-use substrate_host::confinement::{self, AdapterFacts, ConfinementProfile};
+use substrate_host::confinement::{
+    self, AdapterFacts, ConfinementProfile, ContractFamily, FAMILY_ORDER, Fact, Network,
+};
+
+/// The families admission requires of this adapter, in the contract's order.
+fn needed(profile: &ConfinementProfile, facts: &AdapterFacts) -> Vec<ContractFamily> {
+    let implied = profile.required_families();
+    FAMILY_ORDER
+        .into_iter()
+        .filter(|family| {
+            implied.contains(family)
+                || (*family == ContractFamily::Audit && profile.audit.is_some())
+                || (*family == ContractFamily::NetworkEgress
+                    && profile.network == Some(Network::Isolated)
+                    && facts.proves(&Fact::HostNetwork))
+        })
+        .collect()
+}
 
 fn covers(profile: &ConfinementProfile, facts: &AdapterFacts) -> bool {
-    profile.required_families().iter().all(|family| facts.serves(family))
+    needed(profile, facts).iter().all(|family| facts.serves(family))
         && profile.required_facts().iter().all(|fact| facts.proves(fact))
 }
 
@@ -109,9 +129,12 @@ let chosen = offered
 
 `covers` is a preselection; admission is the answer. An adapter can refuse what its families do
 not show: `linux` refuses a `workdir` its host has not proved with `exec.workdir-unserved`, and a
-writable root the operator did not declare with `exec.writable-roots-host-unserved`. When no
-adapter covers a profile, admitting it anywhere answers the first family missing, so the refusal
-can be predicted from the facts before the call.
+writable root the operator did not declare with `exec.writable-roots-host-unserved`. When an
+adapter does not cover a profile, admitting it there is refused in the order of the refusals table
+below. Past its first five rows, that is `confinement.family-unserved` naming the first family of
+`needed` the adapter does not serve, or, when it serves them all,
+`confinement.fact-unserved` naming the first fact of `required_facts()` it did not prove. Either
+can be read from the facts before the call.
 
 ## Admit, start and observe
 
@@ -138,11 +161,15 @@ Admission refuses in this order and names the first refusal it meets:
 | 3 | `confinement.local-reason-missing` | 422 | a declared-insecure adapter and no reason |
 | 4 | `confinement.image-unpinned` | 422 | a digest-pinning adapter and an image not named by digest |
 | 5 | `confinement.local-refused` | 403 | a declared-insecure adapter the host's policy forbids |
-| 6 | `confinement.family-unserved` | 501 | the first needed family not served |
+| 6 | `confinement.family-unserved` | 501 | the first family of `needed` not served |
 | 7 | `confinement.fact-unserved` | 501 | the first required fact not proved |
 
 `error.code()` and `error.status()` return the code and status. A refusal from the host itself,
 met while starting, keeps its own code, such as `exec.workdir-missing`.
+
+A start or a render whose profile names no `workspace` is `confinement.workspace-required` (422)
+on every adapter that runs the program in a host directory. `pod` runs it in its own `emptyDir` at
+`/workspace` instead.
 
 The host's operator can forbid `local` by setting `SUBSTRATE_CONFINEMENT_LOCAL` to any value other
 than `permit`; an embedder can only tighten that, with `LocalPolicy::Refuse`.

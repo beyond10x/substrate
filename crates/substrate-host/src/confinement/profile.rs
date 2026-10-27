@@ -116,6 +116,9 @@ impl ConfinementProfile {
     /// The audit sink is not among them: it is where records go, and the record lists `audit`
     /// only when the client named it. Admission still refuses a sink on an adapter that does not
     /// serve `audit`.
+    ///
+    /// Nor is `network_egress` for an isolated network: admission requires it only of an adapter
+    /// that proves `host_network`, which the profile alone cannot know.
     pub fn required_families(&self) -> Vec<ContractFamily> {
         let implied = |family: &ContractFamily| match family {
             ContractFamily::Workspace => self.workspace.is_some() || self.workdir.is_some(),
