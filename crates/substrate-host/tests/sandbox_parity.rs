@@ -22,6 +22,10 @@
 //! `filesystem_view`, which needs the delegated cgroup v2 root `SUBSTRATE_VECTORS_CGROUP_ROOT`
 //! names; without it that case is **absent, never reported as passed** (invariant 3), and the
 //! portable case asserts every other row.
+//!
+//! Linux only: the `linux` adapter opens nowhere else and the `oci` render reads `/proc/self`
+//! (macos-15 run 40460300228: `linux opens: AdapterUnserved`, `/proc/self: NotFound`).
+#![cfg(target_os = "linux")]
 
 use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
 use std::path::{Path, PathBuf};
