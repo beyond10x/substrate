@@ -694,6 +694,504 @@ fn a_calendar_impossible_instant_is_refused_by_both_steps() {
     }
 }
 
+const BINARY_ARCHIVES: [&str; 2] = [
+    "substrate-daemon-${VERSION}-${BINARY_TARGET}.tar.gz",
+    "b10x-substrate-${VERSION}-${BINARY_TARGET}.tar.gz",
+];
+const GLIBC_STEP: &str = "Refuse release binaries a glibc 2.35 host cannot load";
+
+#[test]
+fn release_binaries_come_from_the_pinned_builder_stage() {
+    // One pinned builder compiles every shipped binary once, the CLI included, and a scratch
+    // stage exports exactly the two archived binaries; the workflow selects that stage.
+    let build = DOCKERFILE
+        .split_once("cargo build --locked --release")
+        .expect("the builder's one release build")
+        .1
+        .split_once("install -D")
+        .expect("the build's package list ends before the first install")
+        .0;
+    assert!(build.contains("-p b10x-substrate-cli --bin b10x-substrate"));
+    assert!(
+        DOCKERFILE.contains("install -D /src/target/release/b10x-substrate /out/b10x-substrate")
+    );
+    let stage = DOCKERFILE
+        .split_once("FROM scratch AS release-binaries\n")
+        .expect("a scratch stage holding only the release binaries")
+        .1
+        .split("\nFROM ")
+        .next()
+        .expect("release-binaries stage body");
+    assert!(stage.contains("COPY --from=builder /out/substrate-daemon /substrate-daemon"));
+    assert!(stage.contains("COPY --from=builder /out/b10x-substrate /b10x-substrate"));
+    assert!(
+        DOCKERFILE.trim_end().ends_with("FROM daemon AS release"),
+        "`docker build .` must still select the daemon image"
+    );
+
+    position("BINARY_TARGET: x86_64-unknown-linux-gnu");
+    position("GLIBC_CEILING: \"2.35\"");
+    let export = position("--target release-binaries");
+    position("--output \"type=local,dest=${BINARY_DIST}/bin\"");
+    let image_under_test = position(&format!("- name: {DAEMON_IMAGE_STEP}\n"));
+    let identity = position(
+        "cmp \"${BINARY_DIST}/bin/substrate-daemon\" target/image-under-test/substrate-daemon",
+    );
+    let ceiling = position(&format!("- name: {GLIBC_STEP}\n"));
+    let floor_smoke = position("\"${GLIBC_FLOOR_IMAGE}\"");
+    let package = position("Package the release binaries");
+    let daemon_push = position("docker push \"${IMAGE}:${VERSION}\"");
+    let mcp_push = position("docker push \"${MCP_IMAGE}:${VERSION}\"");
+    // The daemon that is checked and archived is the image's, and every binary refusal happens
+    // before any image tag is mutated.
+    assert!(export < image_under_test && image_under_test < identity);
+    assert!(identity < ceiling && ceiling < floor_smoke && floor_smoke < package);
+    assert!(package < daemon_push && package < mcp_push);
+    assert!(
+        !step_block(DAEMON_IMAGE_STEP).contains("docker push"),
+        "the daemon image step must not push before the archived daemon is proven"
+    );
+    // The oldest supported glibc is an exact image, not a moving tag.
+    position("GLIBC_FLOOR_IMAGE: ubuntu:22.04@sha256:");
+}
+
+const DAEMON_IMAGE_STEP: &str = "Build and smoke-test the daemon image";
+const PROVE_STEP: &str = "Prove the archived daemon is the image's daemon";
+const SOURCE_STEP: &str = "Find out whether the tagged source builds release binaries";
+const PUBLISH_STEP: &str = "Publish the GitHub release";
+const BINARY_STEPS: [&str; 7] = [
+    "Export the release binaries from the pinned builder stage",
+    PROVE_STEP,
+    GLIBC_STEP,
+    "Smoke-test the release binaries on the oldest supported glibc",
+    "Package the release binaries",
+    "Sign the release-binary checksums keylessly",
+    "Verify the release-binary checksum signature with the workflow identity",
+];
+
+/// Runs the named release-job step offline in `root`, with `tools` (if any) first on `PATH`.
+fn run_release_step(
+    step: &str,
+    root: &Path,
+    env: &[(&str, &str)],
+    tools: Option<&Path>,
+) -> (bool, String, String) {
+    let output_file = root.join("github-output");
+    fs::write(&output_file, "").expect("GITHUB_OUTPUT");
+    let mut command = std::process::Command::new("bash");
+    command
+        .current_dir(root)
+        .env("GITHUB_OUTPUT", &output_file)
+        .args(["-e", "-o", "pipefail", "-c", &step_script(step)]);
+    if let Some(tools) = tools {
+        command.env(
+            "PATH",
+            format!(
+                "{}:{}",
+                tools.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        );
+    }
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let output = command.output().expect("bash runs");
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).into_owned()
+            + &String::from_utf8_lossy(&output.stderr),
+        fs::read_to_string(&output_file).expect("GITHUB_OUTPUT readable"),
+    )
+}
+
+/// A dist directory holding a freshly built daemon and an image-under-test daemon.
+fn prove_fixture(fresh: &str, image: &str) -> tempfile::TempDir {
+    let directory = tempfile::tempdir().expect("temporary checkout");
+    let root = directory.path();
+    fs::create_dir_all(root.join("dist/bin")).expect("bin");
+    fs::create_dir_all(root.join("target/image-under-test")).expect("image under test");
+    fs::write(root.join("dist/bin/substrate-daemon"), fresh).expect("fresh daemon");
+    fs::write(root.join("target/image-under-test/substrate-daemon"), image).expect("image daemon");
+    directory
+}
+
+fn prove(directory: &tempfile::TempDir, exists: &str) -> (bool, String) {
+    let (success, output, _) = run_release_step(
+        PROVE_STEP,
+        directory.path(),
+        &[
+            ("EXISTS", exists),
+            ("BINARY_DIST", "dist"),
+            ("IMAGE", "ghcr.io/example/daemon"),
+            ("VERSION", TAG),
+        ],
+        None,
+    );
+    (success, output)
+}
+
+#[test]
+fn an_initial_release_refuses_an_archived_daemon_that_is_not_the_images() {
+    let same = prove_fixture("daemon bytes", "daemon bytes");
+    let (success, output) = prove(&same, "false");
+    assert!(success, "{output}");
+    let differs = prove_fixture("fresh bytes", "image bytes");
+    let (success, output) = prove(&differs, "false");
+    assert!(
+        !success,
+        "accepted a daemon that is not the image's: {output}"
+    );
+    assert!(
+        output.contains("refused: the archived substrate-daemon"),
+        "{output}"
+    );
+    // Anything but an explicit answer about the image tag is refused, not read as `false`.
+    for exists in ["", "yes"] {
+        let (success, output) = prove(&same, exists);
+        assert!(!success, "accepted EXISTS={exists:?}: {output}");
+    }
+}
+
+#[test]
+fn a_recovery_run_archives_the_reused_images_daemon() {
+    let recovery = prove_fixture("this run's fresh build", "the reused image's daemon");
+    let (success, output) = prove(&recovery, "true");
+    assert!(success, "{output}");
+    assert_eq!(
+        fs::read_to_string(recovery.path().join("dist/bin/substrate-daemon")).expect("archived"),
+        "the reused image's daemon",
+        "a recovery run must archive the daemon of the image it reuses"
+    );
+}
+
+fn binary_source(dockerfile: Option<&str>, event: &str) -> (bool, String, String) {
+    let directory = tempfile::tempdir().expect("temporary checkout");
+    if let Some(dockerfile) = dockerfile {
+        fs::write(directory.path().join("Dockerfile"), dockerfile).expect("Dockerfile");
+    }
+    run_release_step(
+        SOURCE_STEP,
+        directory.path(),
+        &[("EVENT_NAME", event)],
+        None,
+    )
+}
+
+#[test]
+fn only_a_recovered_tag_that_predates_the_binaries_stage_publishes_without_binaries() {
+    let old = "FROM rust:1 AS builder\nFROM builder AS daemon\nFROM daemon AS release\n";
+    let (success, output, outputs) = binary_source(Some(old), "workflow_dispatch");
+    assert!(success, "{output}");
+    assert_eq!(outputs.trim(), "present=false");
+    assert!(output.contains("no release binaries"), "{output}");
+    // A tag push runs this workflow from the tag itself, so the stage is always there; its
+    // absence there is a broken source, not an older one.
+    let (success, output, outputs) = binary_source(Some(old), "push");
+    assert!(!success, "{output}");
+    assert!(output.contains("refused:"), "{output}");
+    assert!(!outputs.contains("present="), "{outputs}");
+    let (success, output, _) = binary_source(None, "workflow_dispatch");
+    assert!(
+        !success,
+        "a missing Dockerfile must not read as an older one: {output}"
+    );
+    let (success, output, outputs) = binary_source(Some(DOCKERFILE), "push");
+    assert!(success, "{output}");
+    assert_eq!(outputs.trim(), "present=true");
+    let (success, output, outputs) = binary_source(Some(DOCKERFILE), "workflow_dispatch");
+    assert!(success, "{output}");
+    assert_eq!(outputs.trim(), "present=true");
+
+    // Every binary step is skipped, and only skipped, on that one answer.
+    position(&format!(
+        "- name: {SOURCE_STEP}\n        id: binary-source\n"
+    ));
+    for step in BINARY_STEPS {
+        assert!(
+            step_block(step).contains("if: steps.binary-source.outputs.present == 'true'\n"),
+            "step {step:?} is not conditional on the tagged source building binaries"
+        );
+    }
+    assert!(position(&format!("- name: {SOURCE_STEP}\n")) < position(BINARY_STEPS[0]));
+}
+
+/// Runs the publication step with a fake `gh` and returns its success, output and the argument
+/// lines `gh` received.
+fn publish(binaries: &str, assets_present: bool) -> (bool, String, String) {
+    let directory = tempfile::tempdir().expect("temporary checkout");
+    let root = directory.path();
+    let tools = root.join("tools");
+    fs::create_dir_all(&tools).expect("tools");
+    let gh = tools.join("gh");
+    fs::write(&gh, "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$GH_LOG\"\n").expect("fake gh");
+    let mut permissions = fs::metadata(&gh).expect("metadata").permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+    fs::set_permissions(&gh, permissions).expect("executable fake gh");
+    fs::create_dir_all(root.join("dist/assets")).expect("assets");
+    if assets_present {
+        for asset in [
+            format!("substrate-daemon-{TAG}-x86_64-unknown-linux-gnu.tar.gz"),
+            format!("b10x-substrate-{TAG}-x86_64-unknown-linux-gnu.tar.gz"),
+            "SHA256SUMS".to_owned(),
+            "SHA256SUMS.sigstore.json".to_owned(),
+        ] {
+            fs::write(root.join("dist/assets").join(asset), "asset").expect("asset");
+        }
+    }
+    let log = root.join("gh.log");
+    let log_text = log.display().to_string();
+    let (success, output, _) = run_release_step(
+        PUBLISH_STEP,
+        root,
+        &[
+            ("BINARIES", binaries),
+            ("VERSION", TAG),
+            ("GITHUB_REPOSITORY", "example/substrate"),
+            ("BINARY_DIST", "dist"),
+            ("BINARY_TARGET", "x86_64-unknown-linux-gnu"),
+            ("GH_LOG", &log_text),
+        ],
+        Some(&tools),
+    );
+    (
+        success,
+        output,
+        fs::read_to_string(&log).unwrap_or_default(),
+    )
+}
+
+#[test]
+fn the_release_attaches_all_four_binary_assets_or_none() {
+    let (success, output, calls) = publish("true", true);
+    assert!(success, "{output}");
+    let create = calls
+        .lines()
+        .find(|line| line.starts_with("release create "))
+        .expect("gh release create ran");
+    for asset in [
+        format!("dist/assets/substrate-daemon-{TAG}-x86_64-unknown-linux-gnu.tar.gz"),
+        format!("dist/assets/b10x-substrate-{TAG}-x86_64-unknown-linux-gnu.tar.gz"),
+        "dist/assets/SHA256SUMS ".to_owned(),
+        "dist/assets/SHA256SUMS.sigstore.json".to_owned(),
+    ] {
+        assert!(
+            format!("{create} ").contains(&asset),
+            "missing {asset}: {create}"
+        );
+    }
+    assert!(create.contains("--draft"), "{create}");
+
+    // A missing asset is refused before anything is created.
+    let (success, output, calls) = publish("true", false);
+    assert!(!success, "{output}");
+    assert!(output.contains("refused:"), "{output}");
+    assert!(calls.is_empty(), "gh ran: {calls}");
+
+    // The one source without the stage publishes the release with no asset at all.
+    let (success, output, calls) = publish("false", false);
+    assert!(success, "{output}");
+    let create = calls
+        .lines()
+        .find(|line| line.starts_with("release create "))
+        .expect("gh release create ran");
+    assert!(!create.contains("dist/assets"), "{create}");
+
+    // An unset or unexpected answer is refused rather than read as either.
+    for binaries in ["", "maybe"] {
+        let (success, output, calls) = publish(binaries, true);
+        assert!(!success, "accepted BINARIES={binaries:?}: {output}");
+        assert!(calls.is_empty(), "gh ran: {calls}");
+    }
+
+    // Notes and summaries say when a release carries no binaries.
+    position("BINARIES: ${{ steps.binary-source.outputs.present }}");
+    position("This release carries no binaries:");
+    position("not published: the tagged source has no release-binaries stage");
+}
+
+#[test]
+fn readme_names_both_release_signing_identities() {
+    let readme = fs::read_to_string(repository_root().join("README.md")).expect("README");
+    for identity in [
+        "https://github.com/beyond10x/substrate/.github/workflows/release.yml@refs/tags/<version>",
+        "https://github.com/beyond10x/substrate/.github/workflows/release.yml@refs/heads/main",
+    ] {
+        assert!(
+            readme.contains(identity),
+            "README.md does not name {identity}"
+        );
+    }
+    // The release notes print the identity of the run, whichever event started it.
+    assert!(occurrences(".github/workflows/release.yml@${GITHUB_REF}") >= 4);
+}
+
+#[test]
+fn release_binaries_are_archived_summed_signed_and_verified_before_announcement() {
+    for archive in BINARY_ARCHIVES {
+        assert!(
+            occurrences(archive) >= 2,
+            "{archive} must be both packaged and attached"
+        );
+    }
+    let sums = position("sha256sum -- \"${archives[@]}\" > SHA256SUMS");
+    let sign = position(
+        "cosign sign-blob --yes \\\n            --bundle \"${BINARY_DIST}/assets/SHA256SUMS.sigstore.json\"",
+    );
+    let verify = position("cosign verify-blob \\");
+    let announce = position("gh release create \"${VERSION}\"");
+    assert!(sums < sign && sign < verify && verify < announce);
+    // The verification reads the bundle the release attaches, for this workflow at this ref.
+    let verify_step =
+        &step_script("Verify the release-binary checksum signature with the workflow identity");
+    assert!(verify_step.contains("cosign verify-blob \\"));
+    assert!(verify_step.contains("--bundle \"${BINARY_DIST}/assets/SHA256SUMS.sigstore.json\""));
+    assert!(verify_step.contains("--certificate-identity \"${identity}\""));
+    assert!(verify_step.contains(".github/workflows/release.yml@${GITHUB_REF}"));
+    assert!(verify_step.contains("sha256sum --check --strict SHA256SUMS"));
+
+    // All four files go onto the release the workflow creates, while it is still a draft.
+    let create = step_block(PUBLISH_STEP);
+    for asset in BINARY_ARCHIVES
+        .iter()
+        .copied()
+        .chain(["SHA256SUMS\"", "SHA256SUMS.sigstore.json\""])
+    {
+        assert!(
+            create.contains(&format!("\"${{BINARY_DIST}}/assets/{asset}")),
+            "gh release create does not attach {asset}"
+        );
+    }
+    position("## Release binaries");
+    position("cosign verify-blob \\\\");
+    position("| binaries signature step | ${{ steps.binaries-verify.outcome }} |");
+}
+
+/// Runs a release-job step offline with `objdump` and `readelf` replaced by fakes that report
+/// `glibc` symbol versions and `needed` libraries for every binary.
+fn run_glibc_step(glibc: &[&str], needed: &[&str]) -> (bool, String) {
+    let directory = tempfile::tempdir().expect("temporary dist");
+    let root = directory.path();
+    let bin = root.join("dist/bin");
+    fs::create_dir_all(&bin).expect("bin");
+    for binary in ["substrate-daemon", "b10x-substrate"] {
+        fs::write(bin.join(binary), "not an ELF; the fakes answer").expect("binary");
+    }
+    let tools = root.join("tools");
+    fs::create_dir_all(&tools).expect("tools");
+    let mut objdump = String::from("#!/bin/sh\n");
+    for version in glibc {
+        writeln!(
+            objdump,
+            "echo '0000000000000000      DF *UND*  0000000000000000 ({version}) symbol'"
+        )
+        .expect("writing to a String cannot fail");
+    }
+    let mut readelf = String::from("#!/bin/sh\n");
+    for library in needed {
+        writeln!(
+            readelf,
+            "echo ' 0x0000000000000001 (NEEDED)             Shared library: [{library}]'"
+        )
+        .expect("writing to a String cannot fail");
+    }
+    for (name, script) in [("objdump", objdump), ("readelf", readelf)] {
+        let path = tools.join(name);
+        fs::write(&path, script).expect("fake tool");
+        let mut permissions = fs::metadata(&path).expect("metadata").permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+        fs::set_permissions(&path, permissions).expect("executable fake tool");
+    }
+    let path = format!(
+        "{}:{}",
+        tools.display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
+    let output = std::process::Command::new("bash")
+        .current_dir(root)
+        .env("PATH", path)
+        .env("BINARY_DIST", "dist")
+        .env("GLIBC_CEILING", "2.35")
+        .args(["-e", "-o", "pipefail", "-c", &step_script(GLIBC_STEP)])
+        .output()
+        .expect("bash runs");
+    (
+        output.status.success(),
+        String::from_utf8_lossy(&output.stdout).into_owned()
+            + &String::from_utf8_lossy(&output.stderr),
+    )
+}
+
+const SHIPPED_LIBRARIES: [&str; 7] = [
+    "libssl.so.3",
+    "libcrypto.so.3",
+    "libz.so.1",
+    "libgcc_s.so.1",
+    "libm.so.6",
+    "libc.so.6",
+    "ld-linux-x86-64.so.2",
+];
+
+#[test]
+fn release_binaries_within_the_glibc_ceiling_and_documented_libraries_are_accepted() {
+    // 0.12.0's daemon, measured: GLIBC_2.34 at most, and exactly these seven libraries.
+    let (success, output) = run_glibc_step(
+        &["GLIBC_2.2.5", "GLIBC_2.4", "GLIBC_2.34", "GLIBC_2.33"],
+        &SHIPPED_LIBRARIES,
+    );
+    assert!(success, "{output}");
+    assert!(output.contains("needs GLIBC_2.34"), "{output}");
+    let (success, output) = run_glibc_step(&["GLIBC_2.35"], &["libc.so.6"]);
+    assert!(success, "{output}");
+}
+
+#[test]
+fn a_release_binary_needing_a_newer_glibc_is_refused() {
+    // Version order, not string order: 2.36 is newer than 2.35, and 2.4 is older.
+    for newest in ["GLIBC_2.36", "GLIBC_2.39", "GLIBC_3.0"] {
+        let (success, output) =
+            run_glibc_step(&["GLIBC_2.4", newest, "GLIBC_2.34"], &SHIPPED_LIBRARIES);
+        assert!(!success, "accepted {newest}: {output}");
+        assert!(
+            output.contains(&format!("refused: substrate-daemon needs {newest}")),
+            "{output}"
+        );
+    }
+    let (success, output) = run_glibc_step(&[], &SHIPPED_LIBRARIES);
+    assert!(!success, "{output}");
+    assert!(output.contains("names no GLIBC symbol version"), "{output}");
+}
+
+#[test]
+fn a_release_binary_needing_an_undocumented_library_is_refused() {
+    let mut needed = SHIPPED_LIBRARIES.to_vec();
+    needed.push("libcurl.so.4");
+    let (success, output) = run_glibc_step(&["GLIBC_2.34"], &needed);
+    assert!(!success, "{output}");
+    assert!(
+        output.contains("refused: substrate-daemon needs libcurl.so.4"),
+        "{output}"
+    );
+}
+
+#[test]
+fn readme_records_what_the_release_binaries_need_at_run_time() {
+    let readme = fs::read_to_string(repository_root().join("README.md")).expect("README");
+    for needle in [
+        "substrate-daemon-<version>-x86_64-unknown-linux-gnu.tar.gz",
+        "b10x-substrate-<version>-x86_64-unknown-linux-gnu.tar.gz",
+        "SHA256SUMS.sigstore.json",
+        "libssl3",
+        "zlib1g",
+        "glibc 2.35",
+    ] {
+        assert!(
+            readme.contains(needle),
+            "README.md does not state {needle:?}"
+        );
+    }
+}
+
 #[test]
 fn development_status_is_verified_and_never_described_as_stable() {
     position("dev.b10x.contract.status");
@@ -726,6 +1224,244 @@ fn every_third_party_action_is_pinned_to_a_commit() {
         assert!(
             revision.bytes().all(|byte| byte.is_ascii_hexdigit()),
             "action is not commit-pinned: {line}"
+        );
+    }
+}
+
+/// The whole text of the named release-job step, from its `- name:` line to the next step.
+fn step_block(name: &str) -> &'static str {
+    let rest = &WORKFLOW[position(&format!("- name: {name}\n"))..];
+    let end = rest[1..]
+        .find("\n      - name: ")
+        .map_or(rest.len(), |end| end + 2);
+    &rest[..end]
+}
+
+#[test]
+fn the_archived_daemon_is_compared_with_the_image_before_the_daemon_tag_is_pushed() {
+    // A refusal after `docker push` leaves a write-once daemon tag behind, and the only way on is
+    // a recovery dispatch, whose branch of the comparison step skips `cmp`. So the byte-identity
+    // refusal holds only if it runs before the tag moves, like every other binary refusal.
+    let compare = position(
+        "cmp \"${BINARY_DIST}/bin/substrate-daemon\" target/image-under-test/substrate-daemon",
+    );
+    let daemon_push = position("docker push \"${IMAGE}:${VERSION}\"");
+    assert!(
+        compare < daemon_push,
+        "the archived daemon is compared with the image's at byte {compare}, after the daemon tag \
+         is pushed at byte {daemon_push}"
+    );
+}
+
+#[test]
+fn the_checksum_signature_is_verified_against_one_exact_identity_and_issuer() {
+    let verify =
+        step_script("Verify the release-binary checksum signature with the workflow identity");
+    assert!(!verify.contains("regexp"), "{verify}");
+    assert!(
+        verify.contains("--certificate-oidc-issuer 'https://token.actions.githubusercontent.com'"),
+        "{verify}"
+    );
+    assert!(
+        verify.contains(
+            "identity=\"${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}\""
+        ),
+        "{verify}"
+    );
+    // The command an operator is told to run is exact as well.
+    let notes = &WORKFLOW[position("## Release binaries")..position("## Confinement lane")];
+    assert!(!notes.contains("regexp"), "{notes}");
+    assert!(notes.contains("--certificate-identity ${BINARIES_IDENTITY}"));
+    assert!(
+        notes.contains("--certificate-oidc-issuer https://token.actions.githubusercontent.com")
+    );
+    let readme = fs::read_to_string(repository_root().join("README.md")).expect("README");
+    let section = readme
+        .split_once("### Release binaries")
+        .expect("README release-binaries section")
+        .1
+        .split("\n### ")
+        .next()
+        .expect("section body");
+    assert!(!section.contains("regexp"), "{section}");
+}
+
+#[test]
+fn release_binary_steps_receive_no_token_or_secret() {
+    for step in [
+        "Export the release binaries from the pinned builder stage",
+        GLIBC_STEP,
+        "Smoke-test the release binaries on the oldest supported glibc",
+        "Package the release binaries",
+        "Prove the archived daemon is the image's daemon",
+        "Sign the release-binary checksums keylessly",
+        "Verify the release-binary checksum signature with the workflow identity",
+    ] {
+        let block = step_block(step);
+        for forbidden in ["secrets.", "TOKEN", "--secret", "--build-arg"] {
+            assert!(
+                !block.contains(forbidden),
+                "step {step:?} carries {forbidden:?}:\n{block}"
+            );
+        }
+    }
+}
+
+#[test]
+fn only_the_release_job_holds_packages_and_id_token_write() {
+    let release_job = position("\n  release:\n");
+    for grant in ["packages: write", "id-token: write", "contents: write"] {
+        let lines: Vec<usize> = WORKFLOW
+            .match_indices(grant)
+            .map(|(at, _)| at)
+            .filter(|&at| {
+                let line_start = WORKFLOW[..at].rfind('\n').map_or(0, |n| n + 1);
+                WORKFLOW[line_start..at].trim().is_empty()
+            })
+            .collect();
+        assert_eq!(lines.len(), 1, "{grant} is granted {} times", lines.len());
+        assert!(
+            lines[0] > release_job,
+            "{grant} is granted outside the release job"
+        );
+    }
+    let top = &WORKFLOW[position("\npermissions:\n") + 1..];
+    let top = &top[..top
+        .find("\n\n")
+        .expect("workflow-level permissions block ends")];
+    assert_eq!(top, "permissions:\n  contents: read");
+}
+
+/// Runs the packaging step offline in a tagged throwaway repository and returns the bytes of
+/// every file it wrote to the assets directory, by name.
+fn package_release_binaries(source: &TaggedSource) -> Vec<(String, Vec<u8>)> {
+    let root = source.directory.path();
+    let _ = fs::remove_dir_all(root.join("dist"));
+    let bin = root.join("dist/bin");
+    fs::create_dir_all(&bin).expect("bin");
+    for binary in ["substrate-daemon", "b10x-substrate"] {
+        fs::write(bin.join(binary), format!("{binary} bytes")).expect("binary");
+    }
+    let output_file = root.join("github-output");
+    fs::write(&output_file, "").expect("GITHUB_OUTPUT");
+    let output = std::process::Command::new("bash")
+        .current_dir(root)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("SOURCE_SHA", &source.sha)
+        .env("VERSION", TAG)
+        .env("BINARY_TARGET", "x86_64-unknown-linux-gnu")
+        .env("BINARY_DIST", "dist")
+        .env("GITHUB_OUTPUT", &output_file)
+        .args([
+            "-e",
+            "-o",
+            "pipefail",
+            "-c",
+            &step_script("Package the release binaries"),
+        ])
+        .output()
+        .expect("bash runs");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let mut assets: Vec<(String, Vec<u8>)> = fs::read_dir(root.join("dist/assets"))
+        .expect("assets")
+        .map(|entry| {
+            let entry = entry.expect("asset entry");
+            (
+                entry.file_name().to_string_lossy().into_owned(),
+                fs::read(entry.path()).expect("asset bytes"),
+            )
+        })
+        .collect();
+    assets.sort();
+    assets
+}
+
+#[test]
+fn release_archives_are_deterministic_named_as_documented_and_summed_exactly() {
+    let source = TaggedSource::with_files(
+        &[
+            ("LICENSE", "licence text\n"),
+            ("THIRD_PARTY_LICENSES.html", "<p>notices</p>\n"),
+            ("README.md", "# readme\n"),
+        ],
+        "release",
+    );
+    let first = package_release_binaries(&source);
+    // Input modification times and the wall clock must not reach the archive bytes.
+    for file in ["LICENSE", "THIRD_PARTY_LICENSES.html", "README.md"] {
+        let status = std::process::Command::new("touch")
+            .args(["-d", "2001-02-03T04:05:06Z"])
+            .arg(source.directory.path().join(file))
+            .status()
+            .expect("touch runs");
+        assert!(status.success());
+    }
+    std::thread::sleep(std::time::Duration::from_millis(1100));
+    let second = package_release_binaries(&source);
+    assert_eq!(first, second, "packaging the same inputs twice differs");
+
+    let daemon = format!("substrate-daemon-{TAG}-x86_64-unknown-linux-gnu.tar.gz");
+    let cli = format!("b10x-substrate-{TAG}-x86_64-unknown-linux-gnu.tar.gz");
+    let names: Vec<&str> = first.iter().map(|(name, _)| name.as_str()).collect();
+    let mut expected = vec!["SHA256SUMS", cli.as_str(), daemon.as_str()];
+    expected.sort_unstable();
+    assert_eq!(names, expected);
+
+    let sums = String::from_utf8(
+        first
+            .iter()
+            .find(|(name, _)| name == "SHA256SUMS")
+            .expect("SHA256SUMS")
+            .1
+            .clone(),
+    )
+    .expect("utf-8 sums");
+    let mut summed: Vec<&str> = sums
+        .lines()
+        .map(|line| line.split_once("  ").expect("sha256sum line").1)
+        .collect();
+    summed.sort_unstable();
+    let mut archives = vec![daemon.as_str(), cli.as_str()];
+    archives.sort_unstable();
+    assert_eq!(
+        summed, archives,
+        "SHA256SUMS covers exactly the two archives"
+    );
+
+    let assets = source.directory.path().join("dist/assets");
+    for (archive, binary) in [(&daemon, "substrate-daemon"), (&cli, "b10x-substrate")] {
+        let stem = archive.trim_end_matches(".tar.gz");
+        let listing = std::process::Command::new("tar")
+            .args(["--numeric-owner", "-tvzf"])
+            .arg(assets.join(archive))
+            .output()
+            .expect("tar runs");
+        assert!(listing.status.success());
+        let listing = String::from_utf8(listing.stdout).expect("utf-8 listing");
+        let mut entries: Vec<&str> = listing
+            .lines()
+            .map(|line| {
+                assert!(line.contains(" 0/0 "), "entry not owned by 0/0: {line}");
+                line.rsplit(' ').next().expect("entry name")
+            })
+            .collect();
+        entries.sort_unstable();
+        let mut want = vec![
+            format!("{stem}/"),
+            format!("{stem}/{binary}"),
+            format!("{stem}/LICENSE"),
+            format!("{stem}/README.md"),
+            format!("{stem}/THIRD_PARTY_LICENSES.html"),
+        ];
+        want.sort_unstable();
+        assert_eq!(
+            entries, want,
+            "{archive} holds exactly the documented files"
         );
     }
 }

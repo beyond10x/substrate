@@ -52,8 +52,10 @@ enum Command {
     CheckDocs,
     /// Validate ESS and reject drift in the committed conformance suite.
     CheckEss,
-    /// Build the standalone project site and exact-commit provenance.
-    BuildDocs(docs::BuildArgs),
+    /// Check the built documentation site and bind it to its source commit.
+    DocsProvenance(docs::ProvenanceArgs),
+    /// Regenerate the release notes page from the newest released CHANGELOG.md section.
+    DocsReleases,
     /// Write the public site's measured UX values as its new ratchet baseline.
     DocsBaseline(site_ux::BaselineArgs),
     /// Verify final daemon image files and non-root startup capability masks on local Linux Docker.
@@ -131,7 +133,8 @@ fn dispatch() -> Result<ExitCode> {
     let report = match cli.command {
         Command::CheckEss => ess::check(&repo::root()?)?,
         Command::CheckDocs => docs::check(&repo::root()?)?,
-        Command::BuildDocs(args) => return docs::build(&args),
+        Command::DocsProvenance(args) => return docs::provenance(&args),
+        Command::DocsReleases => return docs::write_release_notes(),
         Command::DocsBaseline(args) => return site_ux::write_baseline(&args),
         Command::ImageStartup(args) => return image_startup::run(&args),
         Command::Advisories => advisories::check(&repo::root()?)?,

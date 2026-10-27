@@ -2,17 +2,18 @@
 format: aep.planning-md/3
 id: story:pod-lane-runs-adversary-and-security
 kind: story
-status: active
+status: implemented
 title: The CI pod lane runs the pod adversary and security cases
 tags:
 - adr-0109
 relations:
 - decomposes: epic:confinement-contract-family
 - depends_on: story:pod-adapter
-revision: 3
+revision: 4
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-27T07:24:38Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-10-27T07:24:38Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-10-27T13:17:26Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":2}}}
 ---
 ## Outcome
 

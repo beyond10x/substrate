@@ -13,12 +13,14 @@ RUN --mount=type=cache,id=b10x-cargo-registry,target=/usr/local/cargo/registry,s
     cargo build --locked --release \
       -p b10x-substrate-daemon --bin substrate-daemon --bin substrate-container-exec --bin substrate-container-profiles \
       -p b10x-substrate-mcp --bin substrate-mcp \
+      -p b10x-substrate-cli --bin b10x-substrate \
       -p b10x-substrate-sdk --example container-pty-check && \
     install -D /src/target/release/substrate-daemon /out/substrate-daemon && \
     install -D /src/target/release/substrate-container-exec /out/substrate-container-exec && \
     install -D /src/target/release/substrate-container-profiles /out/substrate-container-profiles && \
     install -D /src/target/release/examples/container-pty-check /out/container-pty-check && \
     install -D /src/target/release/substrate-mcp /out/substrate-mcp && \
+    install -D /src/target/release/b10x-substrate /out/b10x-substrate && \
     install -D /usr/lib/x86_64-linux-gnu/libz.so.1 /out/lib/libz.so.1 && \
     install -d -m 0700 /out/state
 
@@ -86,6 +88,10 @@ FROM execution-prerequisites AS container-checker
 COPY --from=builder /out/container-pty-check /usr/local/bin/container-pty-check
 USER 65532:65532
 ENTRYPOINT ["/usr/local/bin/container-pty-check"]
+
+FROM scratch AS release-binaries
+COPY --from=builder /out/substrate-daemon /substrate-daemon
+COPY --from=builder /out/b10x-substrate /b10x-substrate
 
 # Preserve `docker build .` as the daemon image while release automation selects both named
 # runtime targets explicitly. The alias adds no bytes to the daemon image.

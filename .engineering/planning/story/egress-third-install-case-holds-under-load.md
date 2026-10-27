@@ -2,14 +2,15 @@
 format: aep.planning-md/3
 id: story:egress-third-install-case-holds-under-load
 kind: story
-status: active
+status: implemented
 title: The egress third-install case holds under host load
 relations:
 - decomposes: epic:confinement-contract-family
-revision: 3
+revision: 4
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-27T07:24:39Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-10-27T07:24:39Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-10-27T13:17:25Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":1}}}
 ---
 ## Outcome
 

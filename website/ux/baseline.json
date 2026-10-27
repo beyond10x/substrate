@@ -1,5 +1,5 @@
 {
-  "about": "Lower-is-better ratchets of the public site, written by `cargo xtask docs-baseline` and held by `cargo xtask check-docs`. task:<id> counts the link clicks from the landing page to the task's page; page:<page> counts the words of the page's largest and median text block.",
+  "about": "Lower-is-better ratchets of the public site, written by `cargo xtask docs-baseline`. task:<id> counts the link clicks from the start page to the task's page on the built site, held by `cargo xtask docs-provenance`; page:<page> counts the words of the page's largest and median text block, held by `cargo xtask check-docs`.",
   "scenarios": {
     "page:concepts/adapters": {
       "reading_load.max": {
@@ -54,11 +54,11 @@
     "page:getting-started": {
       "reading_load.max": {
         "tolerance": 0,
-        "value": 52.0
+        "value": 38.0
       },
       "reading_load.median": {
         "tolerance": 0,
-        "value": 13.0
+        "value": 12.5
       }
     },
     "page:guides/cli": {
@@ -108,7 +108,7 @@
       },
       "reading_load.median": {
         "tolerance": 0,
-        "value": 19.0
+        "value": 14.0
       }
     },
     "page:guides/rust-sdk": {
@@ -164,11 +164,11 @@
     "page:releases": {
       "reading_load.max": {
         "tolerance": 0,
-        "value": 40.0
+        "value": 38.0
       },
       "reading_load.median": {
         "tolerance": 0,
-        "value": 40.0
+        "value": 38.0
       }
     },
     "page:security": {

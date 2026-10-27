@@ -1,141 +1,108 @@
 ---
 title: Getting started
-description: Build and run a personal Substrate daemon over an owner-permissioned Unix socket.
+description: Install the b10x-substrate command line, run one command under confinement and see a named refusal.
 ---
 
-# Start with an observable machine
+# Run one command under confinement
 
-The safest first run uses the personal deployment over a Unix socket. It lets you inspect machine
-facts and exercise workspace operations without implying that this host can safely execute a
-process.
+This page takes a Linux host from nothing to one confined command, with no daemon. The
+`b10x-substrate` command line opens a [confinement adapter](./concepts/adapters.md) in its own
+process and runs the command inside it.
 
 ## Prerequisites
 
-- Linux
-- Rust 1.97 or newer
-- `curl`
-- `jq` for readable JSON output
+- Linux on x86_64.
+- For the `oci` adapter: Docker.
+- For the `linux` adapter: bubblewrap and a systemd user session on cgroup v2.
 
-Bubblewrap, `/usr/bin/socat`, and a delegated cgroup v2 subtree are additional requirements for
-process execution. The probe uses `socat` to prove that a sandbox cannot reach the host's Unix
-socket namespace. They are not needed merely to start the daemon and inspect its facts.
+## Install the command line
 
-## Build the workspace
-
-From a Substrate checkout:
+From release 0.14.0, each release carries the command line and `SHA256SUMS`:
 
 ```bash
-cargo build --workspace --locked
+version=0.14.0
+asset="b10x-substrate-$version-x86_64-unknown-linux-gnu.tar.gz"
+base="https://github.com/beyond10x/substrate/releases/download/$version"
+curl -fLO "$base/$asset" -fLO "$base/SHA256SUMS"
+sha256sum --check --ignore-missing SHA256SUMS
+tar -xzf "$asset"
 ```
 
-## Run the daemon
+Put the `b10x-substrate` binary from the archive on your `PATH`.
 
-Create a private runtime directory and start the daemon with your numeric user ID explicitly
-allowed:
+For an earlier release, build it from its tag with Rust 1.97 or newer:
 
 ```bash
-install -d -m 700 ./run
-target/debug/substrate-daemon \
-  --socket ./run/substrate.sock \
-  --state ./run/state.db \
-  --workspaces ./run/workspaces \
-  --deployment personal \
-  --event-retention 10000 \
-  --allow-uid "$(id -u)"
+cargo install --git https://github.com/beyond10x/substrate --tag 0.13.0 b10x-substrate-cli --locked
 ```
 
-The daemon derives the subject from kernel peer credentials on each Unix-socket connection. There
-is no request header or JSON field that can choose a subject.
+## Preview a run
 
-## Inspect verified facts
-
-In another terminal:
+With Docker, pull an image and name it by digest:
 
 ```bash
-curl --silent --show-error --fail-with-body --max-time 30 \
-  --unix-socket ./run/substrate.sock \
-  http://localhost/v1/machine | jq
+docker pull alpine:3.22
+image=$(docker inspect --format '{{index .RepoDigests 0}}' alpine:3.22)
+mkdir job
+b10x-substrate confine run --backend oci --image "$image" --dir job --dry-run -- /bin/echo hello
 ```
 
-Read the capability document literally. If execution confinement is unavailable, its facts remain
-absent. A later exec request is refused with a named `exec.sandbox-unavailable` outcome; Substrate
-does not fall back to an ordinary host process.
+The adapter never pulls an image itself.
 
-## What to look for
+`--dry-run` admits the run as a real run would, prints the command the adapter would start and
+runs nothing. Here that is a `docker create` with no network, no capabilities, a read-only root
+and `job` at `/workspace`.
 
-The response describes the deployment, contract identity, driver generation, verified capabilities,
-and operational limits. These are observations about this running daemon, not promises inferred from
-its configuration.
+## Run a confined command
 
-## Try a workspace without process execution
-
-This first round trip creates workspace W1, writes the input used by the command guide, reads it
-back, and destroys the workspace. It needs guarded workspace I/O; it does not request an exec or a
-hard disk quota. Run this as a Bash script from the checkout, with the daemon still running.
-
-The helper fails on transport, HTTP and response-envelope errors. A fresh run gets fresh operation
-IDs; keep the printed run ID and request bodies if a connection fails, so you can reconcile the
-same operations instead of repeating effects.
+Drop `--dry-run`. The command writes to `job`, mounted at `/workspace`:
 
 ```bash
-set -euo pipefail
-SOCKET=./run/substrate.sock
-BASE=http://localhost
-RUN_ID=$(cat /proc/sys/kernel/random/uuid)
-printf 'run: %s\n' "$RUN_ID"
-
-api() {
-  local response
-  response=$(curl --silent --show-error --fail-with-body --max-time 30 \
-    --unix-socket "$SOCKET" "$@") || { printf '%s\n' "$response" >&2; return 1; }
-  jq -e 'if .error == null and .result != null then . else error("API failure") end' \
-    <<<"$response"
-}
-
-CREATE_BODY=$(jq -nc --arg op "$RUN_ID-create" \
-  '{op: $op, input: {source: "empty", labels: {purpose: "handbook"}}}')
-CREATE=$(api --header 'content-type: application/json' \
-  --data "$CREATE_BODY" "$BASE/v1/workspaces")
-WS=$(jq -er '.result.id | select(type == "string" and length > 0)' <<<"$CREATE")
-printf 'workspace: %s\n' "$WS"
-
-CONTENT=$(printf '%s' 'substrate runs ordinary binaries' | base64 -w0)
-WRITE_BODY=$(jq -nc --arg op "$RUN_ID-write" --arg data "$CONTENT" \
-  '{op: $op, input: {content: {encoding: "base64", data: $data}}}')
-api --request PUT --header 'content-type: application/json' \
-  --data "$WRITE_BODY" "$BASE/v1/workspaces/$WS/files/input.txt"
-
-api "$BASE/v1/workspaces/$WS/files/input.txt?mode=file&offset=0&limit_bytes=4096" |
-  jq -er '.result.content.data | select(type == "string")' | base64 -d
-printf '\n'
-
-DESTROY_BODY=$(jq -nc --arg op "$RUN_ID-destroy" '{op: $op, input: {}}')
-api --request DELETE --header 'content-type: application/json' \
-  --data "$DESTROY_BODY" "$BASE/v1/workspaces/$WS"
+b10x-substrate confine run --backend oci --image "$image" --dir job \
+  -- /bin/sh -c 'echo hello > /workspace/out.txt'
+cat job/out.txt
 ```
 
-If a mutation loses its response, inspect `GET /v1/ops/{operation_id}` before making another
-attempt. If the script stops after workspace creation, its printed workspace ID remains available
-for inspection and cleanup. See [retry identity](./concepts/operations.md#retry-identity).
+### Without Docker
 
-## Serving process execution
+The `linux` adapter runs the command under bubblewrap, in a private cgroup beneath a delegated
+cgroup v2 root. Ask your systemd user manager for a delegated scope with a shell in it:
 
-A Linux host that serves exec needs all of the following:
+```bash
+systemd-run --user -p Delegate=yes --scope bash
+```
 
-1. bubblewrap available at the configured path;
-2. user, mount, PID, IPC, UTS, and network namespaces;
-3. a delegated cgroup v2 subtree with `cpu`, `memory`, and `pids` controllers;
-4. a process-free delegation root;
-5. `/usr/bin/socat` for the host-IPC confinement probe;
-6. the delegation passed with `--cgroup-root`.
+In that shell, move the shell out of the scope's root, which must hold no process. Then enable
+the controllers and name the root:
 
-An exec's CPU bandwidth follows its declared CPU time over its timeout, capped at
-`--exec-cpu-cores N` whole cores (default 1). The daemon refuses to start with 0 or with more cores
-than it may run on.
+```bash
+root="/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)"
+mkdir "$root/shell"
+echo $$ > "$root/shell/cgroup.procs"
+echo "+cpu +memory +pids" > "$root/cgroup.subtree_control"
+export SUBSTRATE_CONFINE_CGROUP_ROOT="$root"
+b10x-substrate confine run --dir job -- /bin/sh -c 'echo hello > /workspace/out.txt'
+```
 
-The daemon probes the backend before advertising execution. Missing enforcement produces a refusal,
-not weaker isolation.
+## See a named refusal
 
-Continue with [run a bounded command](./guides/run-a-command.md) for a complete terminal journey.
-Read [confinement and refusal](./concepts/confinement.md) before admitting process work, or
-[deployment postures](./guides/deployment.md) before making the daemon reachable beyond its owner.
+Ask for something the adapter cannot prove, such as the host network:
+
+```bash
+b10x-substrate confine run --backend oci --image "$image" --dir job --net -- /bin/true
+```
+
+```text
+b10x-substrate: confinement.fact-unserved: host_network
+```
+
+It exits 2 and runs nothing. Substrate refuses by name; it never runs with weaker isolation. An
+image named by tag is refused the same way, as `confinement.image-unpinned`.
+
+## Next steps
+
+- [Command line](./guides/cli.md#run-under-a-confinement-adapter-without-a-daemon): every
+  `confine run` flag, and the fixed bounds.
+- [Confinement adapters](./concepts/adapters.md): what each adapter enforces and declares.
+- [Run a bounded command](./guides/run-a-command.md#start-with-an-observable-machine): run the
+  daemon and drive it through its API.

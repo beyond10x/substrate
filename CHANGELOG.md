@@ -29,8 +29,29 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `HeadAndTail` with `confinement.output-retention-unserved` (501), because the log API bounds a
   read only from its start. No bound changes, and a run that does not set it reports the same bytes
   as before.
+- The GitHub release carries prebuilt x86_64 Linux binaries: `substrate-daemon-<version>-x86_64-unknown-linux-gnu.tar.gz` and `b10x-substrate-<version>-x86_64-unknown-linux-gnu.tar.gz`, each with `LICENSE`, `THIRD_PARTY_LICENSES.html` and `README.md`, plus `SHA256SUMS` over both and `SHA256SUMS.sigstore.json`, a keyless `cosign sign-blob` bundle by the release workflow's identity, verified with `cosign verify-blob` before the release is created. The binaries come from the Dockerfile's pinned `builder` stage (new target `release-binaries`, which now also builds the CLI). Before any image tag moves, the workflow refuses a binary that needs a glibc newer than 2.35 or a shared library other than OpenSSL 3, zlib, `libgcc_s` and glibc's own, that does not start in a digest-pinned Ubuntu 22.04 image, or an archived daemon that is not byte for byte the daemon of the image being published; a recovery run that reuses a published image archives that image's daemon. A recovery dispatch of a tag whose source predates the `release-binaries` stage publishes the release without binaries and says so in its notes and summary; a tag push without the stage is refused. README.md § *Release binaries* states the runtime needs, the verification commands and both signing identities (`@refs/tags/<version>` for a tag push, `@refs/heads/main` for a recovery dispatch).
+
+### Changed
+
+- The public site is built with Docusaurus on the shared Docs System, with the same pages, paths, grouping and heading IDs, and the start page unchanged. The Mermaid diagrams on the operations and system model pages render as diagrams, code blocks are highlighted, and the adapter matrices show `TRUE`, `UNKNOWN` (proved by the open-time probe on this host) and `FALSE` chips.
+- `cargo xtask docs-provenance --site website/build --commit <full-sha>` replaces `cargo xtask build-docs`: it checks the built site, holds the click ratchet on it, and writes `.well-known/b10x-site.json`, `.well-known/b10x-routes.json` and `.nojekyll`. `cargo xtask check-docs` keeps the Markdown checks and the reading-load ratchet without Node, and checks the pages against `website/sidebars.ts` and the start page's links. `cargo xtask docs-baseline` takes `--site` to measure clicks.
+- The *Release notes* page is generated from the newest released `CHANGELOG.md` section by `cargo xtask docs-releases`, and `check-docs` fails when the two differ.
+- *Getting started* now installs the command line and runs one command under the `oci` or `linux` adapter without a daemon, then shows a named refusal. The daemon walkthrough moves, with its heading IDs, to *Run a bounded command*.
 
 ## [0.13.0] — 2026-10-27
+
+Published by [release run 40507411588](https://github.com/beyond10x/substrate/actions/runs/40507411588),
+the protected-`main` recovery dispatch for tag `0.13.0`, from tagged commit
+`c2b95f2882ec1e425459b23ed9e48dae121ae6d3`. The tag-push
+[run 40504625490](https://github.com/beyond10x/substrate/actions/runs/40504625490) pushed the
+daemon image and failed at keyless signing before anything was announced; the recovery run checked
+that image's source-revision label and shipped binary again and reused it. All three artifacts were
+keyless-signed and verified against `release.yml@refs/heads/main` by the release workflow, and each
+digest resolved anonymously:
+
+- Image: `ghcr.io/beyond10x/b10x-substrate-daemon:0.13.0` at `sha256:81a5d4d5d47520483dd6020549d63bb82ec3b636885c4f6aadab02b5a6040f22`.
+- Contract bundle: `ghcr.io/beyond10x/b10x-substrate-wire:0.23.0` at `sha256:c2a50222da154028011a794cc93724043943581ba4ee44051c38dd084b759ff5`, unchanged since 0.11.0 and signed again by this release.
+- Disposable MCP image: `ghcr.io/beyond10x/b10x-substrate-mcp:0.13.0` at `sha256:ae0d64f50b7bae805b5bb4d3ceb24abd8bb4cbe32cbd4b9aeb216840c127f5ec`, development-only.
 
 ### Added
 
