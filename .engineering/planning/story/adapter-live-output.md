@@ -6,42 +6,37 @@ status: draft
 title: A confinement adapter delivers a child's output while it runs
 relations:
 - decomposes: epic:confinement-contract-family
-- depends_on: story:adapter-io-spec
-revision: 2
+- depends_on: story:adapter-live-spec
+- depends_on: story:adapter-stdin-pipe
+revision: 3
 ---
-# A confinement adapter delivers a child's output while it runs
-
-## Consumer ask
-
-A consumer launching children through the confinement adapters needs output as it is produced.
-Today the adapters return output only after the run ends.
+# A confinement adapter delivers a run's output while it runs
 
 ## Design
 
-[Design 32](../../../docs/design/32-adapter-stdin-and-live-output.md) D3 to D10, D14:
-`OutputDelivery::Live { queued_chunks }` (at most 16), `read_output(run, timeout)` returning
-`Chunk { stream, offset, bytes }`, `Bounded` or `Stalled`, the loss events synthesized from the
-drain's flags after the queue, `output_stalled(run)`, the `output_live` fact, the 1 s stall
-deadline that kills the run, and the post-run record that begins with the delivered head.
+A consumer needs a child's output while it runs; today it is read after the run ends.
+[Design 32](../../../docs/design/32-adapter-stdin-and-live-output.md) § 3, § 5, § 11 story 4, D3
+to D6, D12 (the `Live` refusal), D16: `OutputDelivery::Live { queued_chunks }`, `OutputEvent`,
+`read_output` under a per-run reader lock, `output_stalled`, the live queue in the shared drain and
+in `drain_capped`'s adapter path, and `output_live` on `local`, `linux`, `systemd` around both,
+`macos` and `oci`.
 
 ## Depends on
 
-`story:adapter-io-spec`, which makes every spec change of the design first. This story edits no
-scenario and not the suite (ADR 0044 decision 6).
+`story:adapter-live-spec` (lands with it as one unit) and `story:adapter-stdin-pipe` (it extends
+that story's `check_streams`, `run_with_stdin`, linux `Pipes` channel and `systemd` forwarding).
+Edits no scenario and no pinned scenario count.
 
 ## Acceptance
 
-- An adapter that declares `output_live` delivers each stream in order with contiguous offsets, and
-  any loss is a named event after every chunk; nothing is dropped silently.
-- A reader that stops reading past the stall deadline gets `Stalled`, the run is killed, and
-  `output_stalled` is true for it.
-- The record begins with the delivered bytes, equals them unless the run stalled, and carries no
-  truncation marker under `Live`.
-- `Live` with `Tail` or `HeadAndTail` retention is refused
-  `confinement.live-output-retention-invalid` (422) before anything runs.
-- An adapter without the fact refuses `Live` `confinement.fact-unserved` naming `output_live`;
-  `pod` is one of them until a design states merged-stream delivery.
-- Served on `local`, `linux`, `systemd` around both, `macos` and `oci`; the lanes the spec story
-  turned red are green on the integration branch once this story and `story:adapter-stdin-pipe`
-  have landed.
-- Each new case runs once; a stall case costs one 1 s deadline; no new CI job.
+- On a natural end each stream's chunks are in order with contiguous offsets, the record equals
+  them with no marker, and crossing the bound is `Bounded` from the delivered offset and the final
+  `*_truncated`, then `None` (T4, T6).
+- An unread run stalls after 1 s, ends, and reads `Stalled` after its queued chunks;
+  `output_stalled` is true (T5, T11). On any other imposed end delivery stops, no event follows,
+  and the chunks are a prefix of the record (T19).
+- `check_streams` refuses `queued_chunks` 0 and 17 and `Live` with `Tail` (T1b);
+  `run_with_stdin` refuses `Live` `confinement.live-output-unread` before start (T7b).
+- `pod` refuses `Live` naming `output_live` (T17); `systemd` around `linux` forwards `read_output`
+  and `output_stalled` (T13).
+- Every lane is green on the unit's head; macos cases move `macos.yml`'s pinned pass count.
