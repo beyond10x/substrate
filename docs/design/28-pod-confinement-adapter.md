@@ -50,6 +50,19 @@ may read `pods/log` and 403 to one that may not, and without that access no run'
 read, so a 401 or 403 does not open either, nor does any answer but 200, 400 or 404. The
 credentials never appear in an error, a record or a log line.
 
+Open last sweeps the namespace (`approval-record:pod-orphan-policy-sweep-d124`). It lists the
+NetworkPolicies labelled `app.kubernetes.io/managed-by: b10x-substrate` and deletes one only when
+its name is the run its `b10x-substrate/run` label names, the Pod of that name does not exist, in
+any phase, and the API server's clock (its `Date`) puts the policy's `creationTimestamp` at least
+90 seconds back: twice the 30-second API timeout plus 30 seconds. `start` creates the policy, waits
+up to 30 seconds for that answer, then creates the Pod and waits up to 30 seconds more, and the API
+server stamps a `creationTimestamp` in whole seconds before admission and storage, possibly on
+another member than the one whose `Date` the sweep reads; a younger policy may fence a run another
+adapter is still starting. A policy without that label, or whose name is not its run label, is never
+touched. The list is read in pages of 100 with `continue`, each page bounded at 4 MiB, at most 64
+pages; every page is read before anything is deleted. A list longer than that, or a sweep the API
+refuses or does not answer, does not open (`confinement.adapter-unserved`).
+
 `pod_pids_limit` is the operator's statement of the kubelet's `podPidsLimit` on every node that may
 run the Pod. The Pod API has no per-Pod process bound and a namespaced client cannot read the
 kubelet's, so this is the one bound the adapter takes on the operator's word. Every run has a
@@ -95,6 +108,10 @@ The adapter creates two namespaced objects per run and no cluster-scoped resourc
 NetworkPolicy of the same name selecting it by the label `b10x-substrate/run`, with
 `policyTypes: [Ingress, Egress]` and no rule. Both carry
 `app.kubernetes.io/managed-by: b10x-substrate`. The policy is created first and deleted last. The
+Pod carries one `ownerReference`, to that policy by the `uid` its create answered, with
+`controller: false` and no `blockOwnerDeletion`, so the garbage collector removes a Pod whose
+policy is gone and the Role needs nothing more; `render` shows the Pod without it, because the uid
+exists only once the policy is created. The
 minimal Role is `create`, `get`, `list`, `delete` on `pods` and `networkpolicies`, and `get` on
 `pods/log`; the CI lane runs with exactly that Role and the namespace labelled
 `pod-security.kubernetes.io/enforce: restricted`.
@@ -144,14 +161,25 @@ With them:
 answer lost after the API may have stored the Pod (a dropped connection, a 504, the client's
 timeout), deletes the Pod by name and confirms it is gone before it deletes the policy; when the
 Pod's removal is not confirmed the policy stays and the start fails
-`confinement.pod-api-failed` naming the Pod. One task per run polls the Pod. When the API shows
+`confinement.pod-api-failed` naming the Pod. A policy create answered without a `uid` removes the
+policy and fails the start the same way. Once the Pod is stored, `start` reads the policy back: a
+404, any other failed read, or a policy with another `uid` removes the Pod the same way and fails
+the start `confinement.pod-api-failed`, so a run whose policy another adapter's sweep removed in
+between never starts; a removal after the read-back leaves the Pod to the garbage collector through
+its `ownerReference`. One task per run polls the Pod. When the API shows
 the container terminated, the task reads the container's log, at most the output bound plus one
 byte, then deletes the Pod and, once the Pod is confirmed gone, the policy, before `wait` reports
 the run ended. A Pod is never force-deleted: every deletion leaves the kubelet a grace of at least
 1 second, so a Pod gone after the adapter's own deletion is the kubelet's confirmation that its
 container stopped. A Pod's removal not confirmed within 2 minutes keeps its policy and reports the
 run `Unknown` while the task keeps trying; so does an API that has not answered for 2 minutes,
-whatever the removal is doing, and a Pod someone else deleted.
+whatever the removal is doing, and a Pod someone else deleted. After `Unknown` the task deletes and
+reads the Pod again, the pause between tries doubling from 500 ms to 30 seconds, until the API
+confirms the Pod gone, then removes the policy the same way; the run still reads `Unknown`. The
+task lives as long as the process that holds the adapter; the next open's sweep removes what it
+leaves. The adapter tracks at most 128 runs and makes room by forgetting runs that are over, oldest
+first; a run whose Pod's removal the API has not confirmed is not over for that count, so at 128 a
+start is refused `exec.tracking-capacity` and the removal tasks never outnumber the cap.
 
 `wait` and `observe` carry `memory_oom_kills` once the API has shown the container's terminated
 state: 1 for a container that ended `OOMKilled`, 0 otherwise, absent when it was not shown.
@@ -173,4 +201,5 @@ Pod in every case.
 Restart reconciliation, durable-before-API dispatch, watch gaps, quotas, server-side apply and
 finalizers belong to the namespace driver (`story:kubernetes-namespace-driver-entry-gate`). An
 embedding process that dies mid-run leaves the run's two objects, labelled for an operator to find;
-`activeDeadlineSeconds` still ends the container.
+`activeDeadlineSeconds` still ends the container. Once the Pod is gone, the next open's sweep
+removes the policy; reconciling the run itself stays with the namespace driver.

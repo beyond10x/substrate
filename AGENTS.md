@@ -251,7 +251,7 @@ already ahead of `0.4.0` — `ExecStartInput::read_only_roots` (the `ExecStartIn
 `crates/substrate-wire/src/lib.rs`) has no `0.4.0` schema — and no bound sits *on* a type as a
 derive attribute. The bounds the schemas state are free constants: the wire crate's own
 `pub const MAX_…`/`MIN_…` items (`grep -c '^pub const \(MAX\|MIN\)_' crates/substrate-wire/src/lib.rs`
-= 48), which a schema binds with the `{"$wire": "CONSTANT"}` marker, plus the daemon- and
+= 50), which a schema binds with the `{"$wire": "CONSTANT"}` marker, plus the daemon- and
 host-local literals their enforcement sites hold — `PIPE_MAX_FRAME_BYTES`,
 `PIPE_MAX_INPUT_BYTES` and `PIPE_MAX_QUEUED_FRAMES` in `crates/substrate-daemon/src/app.rs`, and
 `PIPE_FRAME_BYTES` and `PIPE_QUEUED_FRAMES` in `crates/substrate-host/src/process.rs`.
@@ -543,17 +543,19 @@ offline against throwaway tagged repositories by `xtask/tests/release_workflow.r
 `packages: write` and `id-token: write` exist on the release job and nowhere else; that job holds
 `contents: write` only to create the GitHub release. Everything it does uses the run's own
 `GITHUB_TOKEN`; **the release needs no repository secret at all** (§ *Bot identity*). The GitHub
-release records all artifact digests and the exact `cosign verify` and `cosign verify-blob` commands. **`0.7.7` is the published
-release**: daemon `ghcr.io/beyond10x/b10x-substrate-daemon:0.7.7` at
-`sha256:5e20467bd03ad7e619ffcf8664dcc6d3323c62fb62eb1f0e25f001333092a409`, disposable MCP
-`ghcr.io/beyond10x/b10x-substrate-mcp:0.7.7` at
-`sha256:e40c16ae56fa06353e508e5245b8d78b336ecd1cebf3fde20b8dddaf18b42b7c`, and development bundle
-`ghcr.io/beyond10x/b10x-substrate-wire:0.16.0` at
-`sha256:4c4e57a1b2427cb004a05cb475c1193e979777c5c79d9a9505ba5facbe10daf7`. All three were
-keyless-signed, `cosign verify`-ed with the exact tagged workflow identity
-(`release.yml@refs/tags/0.7.7`), and anonymously read back before the GitHub release was announced.
+release records all artifact digests and the exact `cosign verify` and `cosign verify-blob` commands. **`0.14.0` is the published
+release** (2026-10-27, tagged commit `0b9d50c`): daemon
+`ghcr.io/beyond10x/b10x-substrate-daemon:0.14.0` at
+`sha256:a22fc8a1707ac750eb86115422e26ecfb2fde64fb3df588e9fced32ef2a52182`, disposable MCP
+`ghcr.io/beyond10x/b10x-substrate-mcp:0.14.0` at
+`sha256:c6844980db262412db962228bb263421e285d57226e7c8a3a28fbbb85d589d42`, and development bundle
+`ghcr.io/beyond10x/b10x-substrate-wire:0.23.0` at
+`sha256:c2a50222da154028011a794cc93724043943581ba4ee44051c38dd084b759ff5`, plus the two binary
+archives under a signed `SHA256SUMS`. All were keyless-signed and verified with the exact tagged
+workflow identity (`release.yml@refs/tags/0.14.0`), and the three images were anonymously read back
+before the GitHub release was announced.
 Do not maintain a second digest list here: the digests of every release are the GitHub release's own
-([0.7.7](https://github.com/beyond10x/substrate/releases/tag/0.7.7)) and
+([0.14.0](https://github.com/beyond10x/substrate/releases/tag/0.14.0)) and
 [CHANGELOG.md](CHANGELOG.md)'s.
 
 **Ruleset `main-requires-the-full-gate` (id 23425552, no bypass actors) requires that check on `main` (`gh api repos/beyond10x/substrate/rules/branches/main` → `required_status_checks` beside `creation`, `update`, `deletion`, `non_fast_forward` and the two email patterns); the legacy `GET …/branches/main/protection` still answers 404 `Branch not protected`, because rulesets are not branch protection.** The gate is also enforced at release time: `release.yml` reads
