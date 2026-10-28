@@ -1181,14 +1181,16 @@ impl HostDriver {
 
     /// [`Driver::start_exec`] for the `linux` confinement adapter (design 29): keeping the bytes
     /// of each recorded stream `retention` chooses within the same bound (§ 6), and refusing a
-    /// writable subtree that holds a registered submodule (§ 2). `pub(crate)`, so no session and
-    /// no daemon route can ask for either.
+    /// writable subtree that holds a registered submodule (§ 2). With `stdin`, the run's standard
+    /// input is a pipe [`Self::write_pipe_session`] writes and the output is still recorded
+    /// (design 32 § 5). `pub(crate)`, so no session and no daemon route can ask for any of them.
     pub(crate) async fn start_exec_for_adapter(
         &self,
         id: &str,
         workspace_root_name: &str,
         input: &ExecStartInput,
         retention: OutputRetention,
+        stdin: bool,
     ) -> DispatchOutcome<ExecObservation> {
         let workspace = match self.workspace_path(workspace_root_name) {
             Ok(value) => value,
@@ -1197,6 +1199,7 @@ impl HostDriver {
         let adapter = process::AdapterStart {
             retention,
             refuse_registered_submodules: true,
+            stdin,
         };
         self.processes
             .start_for_adapter(id, &workspace, input, adapter)

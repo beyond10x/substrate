@@ -21,7 +21,7 @@ use parking_lot::Mutex;
 use substrate_host::confinement::{
     self, AdapterName, AdapterRequest, AuditRecord, AuditSink, Command, ConfinementAdapter,
     ConfinementError, ConfinementProfile, ContractFamily, Fact, InnerAdapter, Network,
-    ProcessBounds, RunState,
+    ProcessBounds, RunState, StdinMode,
     local::{LocalPolicy, LocalRequest},
     macos::MacosRequest,
     oci::OciRequest,
@@ -70,7 +70,7 @@ fn open_portable(
 
 /// The authored `-on-portable` scenarios `spec/confinement-suite.json` holds. Pinned, so a
 /// scenario lost or renamed out of the lane fails here instead of shrinking what runs.
-const PORTABLE_DECLARED: usize = 18;
+const PORTABLE_DECLARED: usize = 19;
 
 /// The portable scenarios this host cannot execute, by name: an `absent-<adapter>-*` scenario on
 /// the platform where that adapter is present.
@@ -82,9 +82,9 @@ const NOT_EXECUTABLE_HERE: &[&str] = &[];
 
 /// What this host executes of the portable lane.
 #[cfg(target_os = "macos")]
-const PORTABLE_EXECUTED: usize = 17;
-#[cfg(not(target_os = "macos"))]
 const PORTABLE_EXECUTED: usize = 18;
+#[cfg(not(target_os = "macos"))]
+const PORTABLE_EXECUTED: usize = 19;
 
 #[test]
 fn ess_confinement_portable_lane_executes_every_authored_portable_scenario() {
@@ -785,4 +785,384 @@ async fn local_tail_keeps_the_last_bytes_of_a_long_stream() {
 #[tokio::test(flavor = "multi_thread")]
 async fn local_head_and_tail_keeps_both_ends_of_a_long_stream() {
     local_retains(confinement::Retention::HeadAndTail).await;
+}
+
+// ---- design 32: a piped standard input on `local` ----
+
+/// A `local` profile in `workspace` with a piped standard input of `limit_bytes`.
+fn piped(workspace: &std::path::Path, limit_bytes: u64) -> ConfinementProfile {
+    ConfinementProfile {
+        local_reason: Some(REASON.into()),
+        workspace: Some(workspace.to_path_buf()),
+        stdin: StdinMode::Piped { limit_bytes },
+        ..ConfinementProfile::default()
+    }
+}
+
+fn started_runs(records: &Mutex<Vec<AuditRecord>>) -> usize {
+    records
+        .lock()
+        .iter()
+        .filter(|record| serde_json::to_value(record).expect("record")["event"] == "run_started")
+        .count()
+}
+
+/// Whether a process `pid` is still there, reaped or not.
+fn process_exists(pid: &str) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", pid])
+        .stderr(std::process::Stdio::null())
+        .status()
+        .expect("kill runs")
+        .success()
+}
+
+/// Waits up to `limit` for `path` to hold a line, and returns it.
+async fn read_when_written(path: &std::path::Path, limit: std::time::Duration) -> String {
+    let deadline = tokio::time::Instant::now() + limit;
+    loop {
+        if let Ok(text) = std::fs::read_to_string(path)
+            && text.ends_with('\n')
+        {
+            return text.trim().to_owned();
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "{} was not written",
+            path.display()
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+// T2.
+#[tokio::test(flavor = "multi_thread")]
+async fn local_stdin_echoes_three_writes_and_close_ends_the_run() {
+    let workspace = tempfile::tempdir().expect("workspace");
+    support::stdin_echoes_and_ends_on_close(
+        &local(),
+        &piped(workspace.path(), 1_024),
+        &[b"one\n", b"two\n", b"three\n"],
+    )
+    .await;
+}
+
+// T3.
+#[tokio::test(flavor = "multi_thread")]
+async fn local_stdin_refuses_past_its_limit_an_oversized_write_and_a_null_run() {
+    let adapter = local();
+    let workspace = tempfile::tempdir().expect("workspace");
+    let admitted = adapter
+        .admit(&piped(workspace.path(), 4))
+        .expect("admitted");
+    let run = adapter
+        .start(&admitted, &support::sh("exec cat"))
+        .await
+        .expect("cat starts");
+    adapter.write_stdin(&run, b"abc").await.expect("3 of 4");
+    support::assert_refused(
+        &adapter.write_stdin(&run, b"de").await.expect_err("5 of 4"),
+        substrate_wire::SESSION_INPUT_LIMIT,
+        429,
+    );
+    support::assert_refused(
+        &adapter
+            .write_stdin(&run, &vec![0; confinement::STDIN_CHUNK_BYTES + 1])
+            .await
+            .expect_err("over a chunk"),
+        substrate_wire::SESSION_FRAME_LIMIT,
+        429,
+    );
+    adapter.close_stdin(&run).await.expect("closed");
+    adapter.wait(&run).await.expect("cat ends");
+    let output = adapter.output(&run).await.expect("output");
+    assert_eq!(output.stdout, b"abc");
+    let null = adapter
+        .admit(&ConfinementProfile {
+            local_reason: Some(REASON.into()),
+            workspace: Some(workspace.path().to_path_buf()),
+            ..ConfinementProfile::default()
+        })
+        .expect("admitted");
+    let run = adapter
+        .start(&null, &support::sh("exec cat"))
+        .await
+        .expect("cat starts");
+    support::assert_refused(
+        &adapter.write_stdin(&run, b"x").await.expect_err("no pipe"),
+        substrate_wire::SESSION_NOT_PIPE,
+        422,
+    );
+    support::assert_refused(
+        &adapter.close_stdin(&run).await.expect_err("no pipe"),
+        substrate_wire::SESSION_NOT_PIPE,
+        422,
+    );
+    let ended = adapter
+        .wait(&run)
+        .await
+        .expect("cat reads /dev/null and ends");
+    assert_eq!(ended.exit.as_ref().and_then(|exit| exit.code), Some(0));
+}
+
+// T7a.
+#[tokio::test(flavor = "multi_thread")]
+async fn run_with_stdin_on_local_writes_closes_waits_and_kills_when_dropped() {
+    let adapter = local();
+    let workspace = tempfile::tempdir().expect("workspace");
+    let input: Vec<u8> = (0..200_000_u32)
+        .map(|i| u8::try_from(i % 251).expect("below 251"))
+        .collect();
+    let admitted = adapter
+        .admit(&piped(workspace.path(), confinement::MAX_STDIN_BYTES))
+        .expect("admitted");
+    let (ended, output, accepted) =
+        confinement::run_with_stdin(&adapter, &admitted, &support::sh("exec cat"), &input)
+            .await
+            .expect("cat ran");
+    assert_eq!(ended.exit.as_ref().and_then(|exit| exit.code), Some(0));
+    assert_eq!(accepted, input.len() as u64);
+    assert_eq!(output.stdout, input);
+
+    let large = vec![b'y'; 1 << 20];
+    let (ended, _, accepted) =
+        confinement::run_with_stdin(&adapter, &admitted, &support::sh("exit 0"), &large)
+            .await
+            .expect("a child that reads nothing is no error");
+    assert_eq!(ended.exit.as_ref().and_then(|exit| exit.code), Some(0));
+    assert!(accepted <= large.len() as u64, "{accepted}");
+
+    let (sink, records) = recording();
+    let null = adapter
+        .admit(&ConfinementProfile {
+            local_reason: Some(REASON.into()),
+            workspace: Some(workspace.path().to_path_buf()),
+            audit: Some(sink.clone()),
+            ..ConfinementProfile::default()
+        })
+        .expect("admitted");
+    support::assert_refused(
+        &confinement::run_with_stdin(&adapter, &null, &support::sh("exec cat"), b"x")
+            .await
+            .expect_err("not a pipe"),
+        substrate_wire::SESSION_NOT_PIPE,
+        422,
+    );
+    let small = adapter
+        .admit(&ConfinementProfile {
+            audit: Some(sink),
+            ..piped(workspace.path(), 4)
+        })
+        .expect("admitted");
+    support::assert_refused(
+        &confinement::run_with_stdin(&adapter, &small, &support::sh("exec cat"), b"abcde")
+            .await
+            .expect_err("over the limit"),
+        substrate_wire::SESSION_INPUT_LIMIT,
+        429,
+    );
+    assert_eq!(started_runs(&records), 0, "neither refusal started a run");
+
+    let gate = support::Gate::new(workspace.path());
+    let pid_file = workspace.path().join("pid");
+    let script = format!("echo $$ > '{}'; {}", pid_file.display(), gate.line());
+    let helper = tokio::spawn({
+        let adapter = Arc::clone(&adapter);
+        async move {
+            let _ = confinement::run_with_stdin(&adapter, &admitted, &support::sh(&script), &large)
+                .await;
+        }
+    });
+    let pid = read_when_written(&pid_file, std::time::Duration::from_secs(10)).await;
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    helper.abort();
+    let _ = helper.await;
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+    while process_exists(&pid) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the dropped helper's run {pid} is still there after 3 s"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+}
+
+/// Kills a process by pid when dropped: a descendant a case left outside its run.
+struct KillOnDrop(String);
+
+impl Drop for KillOnDrop {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("kill")
+            .args(["-KILL", &self.0])
+            .status();
+    }
+}
+
+/// A gated child that then counts what it reads: T8's and T9's run.
+async fn counting_behind(
+    adapter: &Arc<dyn ConfinementAdapter>,
+    workspace: &std::path::Path,
+    gate: &support::Gate,
+) -> confinement::RunId {
+    let admitted = adapter
+        .admit(&piped(workspace, confinement::MAX_STDIN_BYTES))
+        .expect("admitted");
+    adapter
+        .start(&admitted, &support::sh(&format!("{}; wc -c", gate.line())))
+        .await
+        .expect("started")
+}
+
+// T8.
+#[tokio::test(flavor = "multi_thread")]
+async fn local_a_cancelled_write_closes_stdin_and_the_child_reads_a_prefix_then_eof() {
+    let adapter = local();
+    let workspace = tempfile::tempdir().expect("workspace");
+    let gate = support::Gate::new(workspace.path());
+    let run = counting_behind(&adapter, workspace.path(), &gate).await;
+    let (completed, pending) = support::fill(&adapter, &run).await;
+    pending.abort();
+    assert!(pending.await.is_err(), "the pending write was cancelled");
+    support::assert_refused(
+        &adapter
+            .write_stdin(&run, b"x")
+            .await
+            .expect_err("after a cancellation"),
+        substrate_wire::SESSION_INPUT_CLOSED,
+        422,
+    );
+    adapter.close_stdin(&run).await.expect("close is Ok");
+    gate.open();
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(10), adapter.wait(&run))
+        .await
+        .expect("the child read end of file")
+        .expect("waited");
+    assert_eq!(ended.exit.as_ref().and_then(|exit| exit.code), Some(0));
+    let output = adapter.output(&run).await.expect("output");
+    let read: u64 = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .expect("wc's count");
+    assert!(
+        (completed..=completed + 65_536).contains(&read),
+        "the child read {read} bytes; the completed writes held {completed}"
+    );
+}
+
+// T9.
+#[tokio::test(flavor = "multi_thread")]
+async fn local_close_waits_for_a_pending_write_until_it_is_cancelled() {
+    let adapter = local();
+    let workspace = tempfile::tempdir().expect("workspace");
+    let gate = support::Gate::new(workspace.path());
+    let run = counting_behind(&adapter, workspace.path(), &gate).await;
+    let (_, pending) = support::fill(&adapter, &run).await;
+    let mut closing = tokio::spawn({
+        let adapter = Arc::clone(&adapter);
+        let run = run.clone();
+        async move { adapter.close_stdin(&run).await }
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), &mut closing)
+            .await
+            .is_err(),
+        "close returned while a write was pending"
+    );
+    pending.abort();
+    let _ = pending.await;
+    tokio::time::timeout(std::time::Duration::from_secs(3), closing)
+        .await
+        .expect("close returned once the write was cancelled")
+        .expect("joined")
+        .expect("close is Ok");
+    gate.open();
+    adapter.wait(&run).await.expect("waited");
+}
+
+// T10 (a).
+#[tokio::test(flavor = "multi_thread")]
+async fn local_after_the_run_ended_a_write_is_input_closed_and_close_is_ok() {
+    let adapter = local();
+    let workspace = tempfile::tempdir().expect("workspace");
+    let admitted = adapter
+        .admit(&piped(workspace.path(), 1_024))
+        .expect("admitted");
+    let run = adapter
+        .start(&admitted, &support::sh("exit 0"))
+        .await
+        .expect("started");
+    adapter.wait(&run).await.expect("waited");
+    support::assert_refused(
+        &adapter
+            .write_stdin(&run, b"x")
+            .await
+            .expect_err("after the end"),
+        substrate_wire::SESSION_INPUT_CLOSED,
+        422,
+    );
+    adapter.close_stdin(&run).await.expect("close is Ok");
+}
+
+// T10 (b).
+#[tokio::test(flavor = "multi_thread")]
+async fn local_a_write_pending_when_the_child_exits_fails() {
+    let adapter = local();
+    let workspace = tempfile::tempdir().expect("workspace");
+    let gate = support::Gate::new(workspace.path());
+    let admitted = adapter
+        .admit(&piped(workspace.path(), confinement::MAX_STDIN_BYTES))
+        .expect("admitted");
+    let run = adapter
+        .start(&admitted, &support::sh(&gate.line()))
+        .await
+        .expect("started");
+    let (_, pending) = support::fill(&adapter, &run).await;
+    gate.open();
+    let written = tokio::time::timeout(std::time::Duration::from_secs(5), pending)
+        .await
+        .expect("the pending write returned")
+        .expect("joined");
+    support::assert_refused(
+        &written.expect_err("the child exited"),
+        substrate_wire::SESSION_WRITE_FAILED,
+        500,
+    );
+    adapter.wait(&run).await.expect("waited");
+}
+
+// T10 (c): a descendant that left the process group holds only descriptor 0; the run's end, not
+// the pipe, fails the pending write.
+#[tokio::test(flavor = "multi_thread")]
+async fn local_the_runs_end_fails_a_write_a_descendant_outside_the_group_still_blocks() {
+    let adapter = local();
+    let workspace = tempfile::tempdir().expect("workspace");
+    let gate = support::Gate::new(workspace.path());
+    let pid_file = workspace.path().join("descendant");
+    let admitted = adapter
+        .admit(&piped(workspace.path(), confinement::MAX_STDIN_BYTES))
+        .expect("admitted");
+    let script = format!(
+        "exec 3<&0; perl -MPOSIX -e 'setsid; exec @ARGV' sleep 30 <&3 >/dev/null 2>&1 3<&- & \
+         echo $! > '{}'; {}",
+        pid_file.display(),
+        gate.line()
+    );
+    let run = adapter
+        .start(&admitted, &support::sh(&script))
+        .await
+        .expect("started");
+    let _descendant =
+        KillOnDrop(read_when_written(&pid_file, std::time::Duration::from_secs(10)).await);
+    let (_, pending) = support::fill(&adapter, &run).await;
+    gate.open();
+    adapter.wait(&run).await.expect("waited");
+    let written = tokio::time::timeout(std::time::Duration::from_secs(1), pending)
+        .await
+        .expect("the pending write returned within 1 s of wait")
+        .expect("joined");
+    support::assert_refused(
+        &written.expect_err("the run ended"),
+        substrate_wire::SESSION_WRITE_FAILED,
+        500,
+    );
 }

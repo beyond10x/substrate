@@ -220,6 +220,9 @@ pub(crate) struct AdapterStart {
     /// Refuse a writable subtree that holds a submodule the workspace registers, as `.git`
     /// itself is refused: `confinement.writable-subtree-git` (§ 2).
     pub(crate) refuse_registered_submodules: bool,
+    /// Pipe the run's standard input for the adapter's writer (design 32 § 5): three pipes, no
+    /// live output sender, so the output is recorded as for any exec and never stalls.
+    pub(crate) stdin: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1126,7 +1129,7 @@ impl ProcessRuntime {
                 Ok(descriptors) => ChildChannel::Terminal(descriptors),
                 Err(error) => return contain_cgroup(&cgroup, error),
             },
-            None if pipe_settings.is_some() => ChildChannel::Pipes,
+            None if pipe_settings.is_some() || adapter.stdin => ChildChannel::Pipes,
             None => ChildChannel::Quiet,
         };
         let (mut command, seccomp) = match self.command(
@@ -1396,6 +1399,28 @@ impl ProcessRuntime {
                     terminal: terminal.clone(),
                 }),
             )
+        } else if adapter.stdin {
+            let Some(stdin) = child.stdin.take() else {
+                let error = DriverError::failed(
+                    substrate_wire::SESSION_STDIN_MISSING,
+                    "The adapter's piped process did not expose stdin.",
+                );
+                return contain_spawned(child, cgroup, error).await;
+            };
+            // No live output: the receiver's sender is dropped here, so nothing is ever queued,
+            // and the output is recorded through `drain_capped` without a sender.
+            let (_, receiver) = mpsc::channel(1);
+            (
+                None,
+                Some(PipeState {
+                    stdin: tokio::sync::Mutex::new(Some(stdin)),
+                    output: tokio::sync::Mutex::new(receiver),
+                    input_bytes: AtomicU64::new(0),
+                    input_limit: crate::confinement::MAX_STDIN_BYTES,
+                    frame_limit: PIPE_FRAME_BYTES,
+                    terminal: None,
+                }),
+            )
         } else {
             (None, None)
         };
@@ -1639,6 +1664,23 @@ impl ProcessRuntime {
             wait_terminal(&execution, Duration::from_secs(5)).await?;
         }
         Ok(frame)
+    }
+
+    /// Returns once exec `id` is in a terminal state, or at once when it is not tracked: the
+    /// moment the `linux` adapter takes as its run's end for standard input (design 32 § 2).
+    pub(crate) async fn wait_ended(&self, id: &str) {
+        let Ok(execution) = self.execution(id) else {
+            return;
+        };
+        loop {
+            let notified = execution.notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if is_terminal(execution.observation.lock().resource.state) {
+                return;
+            }
+            notified.await;
+        }
     }
 
     fn execution(&self, id: &str) -> Result<Arc<Execution>, DriverError> {

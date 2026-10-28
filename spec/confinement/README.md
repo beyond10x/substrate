@@ -5,7 +5,10 @@ This ESS projection is the confinement contract of atlas ADR 0109 and
 contract families a run may need, the adapters that serve them, the facts each adapter proves when
 it opens, and the refusal that answers anything an adapter does not serve. It is written before any
 adapter code. Each adapter story adds a test file that runs its lane's scenarios against the
-adapter. No adapter story edits the committed suite.
+adapter. No adapter story edits the committed suite. A story that adds a fact and proves it on
+the adapters ([design 32](../../docs/design/32-adapter-stdin-and-live-output.md) § 6) meets this by
+role: a spec author writes the suite change as the story's first commit, and the adapter
+implementor edits nothing under `spec/confinement/`, the generated suite or the pinned counts.
 
 `cargo xtask check-ess` validates it, regenerates `../confinement-suite.json` and compares bytes,
 runs that suite against ESS's `interpreted` reference, and regenerates `ContractFamily`,
@@ -95,8 +98,9 @@ and ends with `-on-<lane>`, and its summary begins with `lane <lane>:`. The rule
 follows:
 
 - **An adapter's own lane selects the `<adapter>-*` scenarios that end `-on-<lane>`**: `local-*`
-  on `portable`, `linux-*` and `systemd-*` on `delegated`, `macos-s1-*` (S1's adapter) and
-  `macos-s2-*` (the admissions S2 makes pass) on `macos`, `oci-*` on `oci`, `pod-*` on `pod`.
+  on `portable`, `linux-*` and `systemd-*` on `delegated`, `macos-s1-*` (S1's adapter),
+  `macos-s2-*` (the admissions S2 makes pass) and `macos-io-*` (design 32's standard input and
+  live output) on `macos`, `oci-*` on `oci`, `pod-*` on `pod`.
 - **`absent-<adapter>-*` scenarios run in the lane where that adapter is absent**:
   `absent-macos-*`, `absent-systemd-*`, `absent-oci-*` and `absent-pod-*` on `portable`,
   `absent-linux-*` on `macos`. No adapter's own selection matches them, so S1's `macos-s1-*`
@@ -109,26 +113,26 @@ follows:
 
 | lane | scenarios |
 |---|---|
-| `portable` | 18: eleven `local-*` (admission, a missing reason, host policy, a filesystem view, four facts, both reserved fields, the open without `declared_insecure`), three `*-open-without-*` for `systemd` around `local`, `oci` and `pod`, and four `absent-*` (`macos`, `systemd`, `oci`, `pod`) with their setup in the summary |
-| `delegated` | 14: nine `linux-*`, five `systemd-*` (two around `local`, three around `linux`, one of them requested on a scope opened around `local`) |
-| `macos` | 8: `absent-linux-*`, four `macos-s1-*`, three `macos-s2-*` |
-| `oci` | 5: admission by digest, egress refused, three images refused `image-unpinned` (a tag, `@sha256:` with no digest, a short digest) |
-| `pod` | 3: admission by digest, a filesystem view refused, `@sha256:latest` refused `image-unpinned` |
-| `interpreted` | 1: `model-*`, the six families every declared adapter serves, each refused by name |
+| `portable` | 19: twelve `local-*` (admission, a missing reason, host policy, a filesystem view, four facts, both reserved fields, the open without `declared_insecure`, `stdin_pipe` admitted), three `*-open-without-*` for `systemd` around `local`, `oci` and `pod`, and four `absent-*` (`macos`, `systemd`, `oci`, `pod`) with their setup in the summary |
+| `delegated` | 17: ten `linux-*`, seven `systemd-*` (three around `local`, four around `linux`, one of them requested on a scope opened around `local`); `stdin_pipe` admitted on `linux` and on `systemd` around each |
+| `macos` | 9: `absent-linux-*`, four `macos-s1-*`, three `macos-s2-*`, one `macos-io-*` (`stdin_pipe` admitted) |
+| `oci` | 6: admission by digest, `stdin_pipe` admitted on the lane's pinned runtime, egress refused, three images refused `image-unpinned` (a tag, `@sha256:` with no digest, a short digest) |
+| `pod` | 4: admission by digest, a filesystem view refused, `stdin_pipe` refused `fact-unserved`, `@sha256:latest` refused `image-unpinned` |
+| `interpreted` | 2: `model-*`, the six families every declared adapter serves, each refused by name, and `stdin_pipe` refused by name on a row that holds `linux`'s other facts |
 
 **Synthesized scenarios check the model against the interpreted reference only.** ESS names them
 by command and outcome (`substrate.confinement.OpenAdapter/outcome/opened`) and cannot rename
 them, so they carry no adapter and no lane, and no adapter lane selects them. Adapter lanes run the
 authored scenarios above.
 
-Synthesis writes 5 scenarios, all on `OpenAdapter`, and refuses 30 obligations, every one on
+Synthesis writes 5 scenarios, all on `OpenAdapter`, and refuses 31 obligations, every one on
 `AdmitProfile`. The open refusals that keep a `local` row declared insecure and an `oci` or `pod`
 row digest-pinned are guards on the adapter identity, and with them ESS 0.75.0 synthesis arranges
 no adapter row for an admission (`ESS-SYNTH-003`, "no candidate of the 15 tried satisfies
 `substrate.confinement.Adapter` stored related row selecting this branch", and `ESS-SYNTH-001` for
 the reserved fields and `adapter-not-open`). The model
-keeps the refusals and the authored scenarios carry admission: each of the 35 outcomes of the two
-commands has at least one scenario among the 49 authored. All 54 scenarios pass against ESS
+keeps the refusals and the authored scenarios carry admission: each of the 36 outcomes of the two
+commands has at least one scenario among the 57 authored. All 62 scenarios pass against ESS
 0.75.0's `interpreted` target.
 
 ## Open questions (`UNMAPPED:` in `confinement.yaml`)

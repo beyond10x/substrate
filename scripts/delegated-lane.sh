@@ -129,11 +129,19 @@ require_executed ess_confinement_linux \
   'ESS confinement linux output while running: executed' \
   'ESS confinement linux retention head: executed' \
   'ESS confinement linux retention tail: executed' \
-  'ESS confinement linux retention per stream: executed'
+  'ESS confinement linux retention per stream: executed' \
+  'ESS confinement linux stdin echo: executed' \
+  'ESS confinement linux stdin cancel: executed' \
+  'ESS confinement linux stdin close waits: executed' \
+  'ESS confinement linux stdin after the end: executed' \
+  'ESS confinement linux stdin pending at the end: executed' \
+  'ESS confinement linux stdin recorded output: executed'
 require_executed ess_confinement_systemd \
   'ESS confinement systemd local scoped write: executed' \
   'ESS confinement systemd linux scoped write: executed' \
-  'ESS confinement systemd local retention tail: executed'
+  'ESS confinement systemd local retention tail: executed' \
+  'ESS confinement systemd local stdin: executed' \
+  'ESS confinement systemd linux stdin: executed'
 
 # `b10x-substrate confine run` opens the linux adapter on a private group beneath the delegated
 # root; its delegated cases are absent, exit 0, without it, so each is required by its line.

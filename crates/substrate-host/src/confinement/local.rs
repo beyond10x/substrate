@@ -2,9 +2,10 @@
 //!
 //! It serves `process_run`, `process_watch`, `output_read`, `wait`, `workspace` (a host directory)
 //! and `audit`, and nothing that would claim confinement. It proves `declared_insecure`,
-//! `paths_are_host_paths` and `host_network`, and `local_permitted` unless the host's policy
-//! forbids it (F3 A). It is opened only by name, a profile on it needs a reason, and every
-//! observation carries that reason. Nothing falls back to it.
+//! `paths_are_host_paths`, `host_network` and `stdin_pipe` (a pipe, not confinement: design 32),
+//! and `local_permitted` unless the host's policy forbids it (F3 A). It is opened only by name, a
+//! profile on it needs a reason, and every observation carries that reason. Nothing falls back to
+//! it.
 //!
 //! Declared insecure is not unchecked: a start holds the environment to the host driver's closed,
 //! non-secret shape (`exec.environment-refused`), refuses a working directory reached through a
@@ -29,6 +30,7 @@ use parking_lot::Mutex;
 use substrate_wire::Signal;
 use tokio::sync::watch;
 
+use super::stdin::{self, StdinWriter};
 use super::{
     AdapterFacts, AdapterName, AdmittedProfile, Command, ConfinementAdapter, ConfinementError,
     ConfinementProfile, ContractFamily, Fact, RenderedCommand, RunExit, RunId, RunObservation,
@@ -110,6 +112,7 @@ pub fn proof(permitted: bool) -> AdapterFacts {
             (Fact::PathsAreHostPaths, true),
             (Fact::LocalPermitted, permitted),
             (Fact::HostNetwork, true),
+            (Fact::StdinPipe, true),
         ],
     )
 }
@@ -131,6 +134,8 @@ struct LocalRun {
     /// before the leader is reaped: while it is false the leader is at least a zombie, so its pid
     /// still names this run's process group.
     reaped: Arc<Mutex<bool>>,
+    /// The run's standard input, when its profile piped it (design 32).
+    stdin: Option<Arc<StdinWriter>>,
 }
 
 /// Blocks until `pid` has exited, without reaping it.
@@ -256,7 +261,7 @@ impl LocalAdapter {
             .env_clear()
             .envs(&command.env)
             .current_dir(&directory)
-            .stdin(Stdio::null())
+            .stdin(stdin::stdio(admitted.profile().stdin))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             // Its own process group, so a signal reaches what it started and stayed in the group.
@@ -269,6 +274,8 @@ impl LocalAdapter {
             .id()
             .and_then(|pid| i32::try_from(pid).ok())
             .ok_or_else(|| DriverError::failed("exec.spawn-failed", "local spawn: no pid"))?;
+        let writer = stdin::child_writer(admitted.profile().stdin, child.stdin.take());
+        let ending = writer.clone();
         let id = {
             let mut sequence = self.sequence.lock();
             *sequence += 1;
@@ -305,6 +312,11 @@ impl LocalAdapter {
             while group_remains(pid) && tokio::time::Instant::now() < settle {
                 tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             }
+            // The run's end, for its standard input too: a write pending now fails, and a
+            // descendant outside the group still holding descriptor 0 no longer holds the writer.
+            if let Some(writer) = ending {
+                writer.end().await;
+            }
             let _ = phase.send(match ended {
                 Ok(status) => Phase::Ended(RunExit {
                     code: status.code(),
@@ -320,6 +332,7 @@ impl LocalAdapter {
             phase: observed,
             captured,
             reaped,
+            stdin: writer,
         }));
         admitted.audit_start(&id, &command.argv[0]);
         Ok(id)
@@ -335,6 +348,7 @@ impl ConfinementAdapter for LocalAdapter {
     /// A read-only or scoped workspace, which an unconfined process cannot be kept to, and a
     /// secret slot, which needs a sealed descriptor `local` cannot provide.
     fn check(&self, profile: &ConfinementProfile) -> Result<(), ConfinementError> {
+        stdin::check_streams(profile)?;
         super::refuse_workspace_access("local", profile)?;
         if !profile.secret_slots.is_empty() {
             return Err(DriverError::unserved(
@@ -414,6 +428,17 @@ impl ConfinementAdapter for LocalAdapter {
                 .into());
             }
         }
+        Ok(())
+    }
+
+    async fn write_stdin(&self, run: &RunId, bytes: &[u8]) -> Result<(), ConfinementError> {
+        let run = self.run(run)?;
+        stdin::piped(run.stdin.as_ref())?.write(bytes).await
+    }
+
+    async fn close_stdin(&self, run: &RunId) -> Result<(), ConfinementError> {
+        let run = self.run(run)?;
+        stdin::piped(run.stdin.as_ref())?.close().await;
         Ok(())
     }
 }

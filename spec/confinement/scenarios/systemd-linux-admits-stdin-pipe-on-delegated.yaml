@@ -1,0 +1,48 @@
+# Design 32 (`story:adapter-stdin-pipe`): `systemd` around `linux` delegates to `linux` and forwards
+# `write_stdin` and `close_stdin` to it; the declared set is `linux`'s.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: systemd-linux-admits-stdin-pipe-on-delegated
+summary: "lane delegated: systemd around linux admits a profile requiring stdin_pipe, reported declared_insecure: false."
+
+arrange:
+  - instance: run
+    entity: substrate.confinement.Profile
+
+timeline:
+  - at: 2026-10-28T09:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: systemd
+      inner: linux
+      served_families: [process_run, process_watch, output_read, wait, workspace, filesystem_view, limits, audit]
+      facts: [whole_tree_kill, ipc_socket_allowlist, ipc_signals_contained, stdin_pipe]
+    outcome: opened
+  - at: 2026-10-28T09:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: systemd
+      inner: linux
+      required_families: [process_run]
+      required_facts: [stdin_pipe]
+    outcome: admitted
+    events:
+      - event: substrate.confinement.ProfileAdmitted
+        payload:
+          adapter: systemd
+          inner: linux
+          families: [process_run]
+          facts: [stdin_pipe]
+          declared_insecure: false
+    capture: {instance: run, event: substrate.confinement.ProfileAdmitted, field: profile}
+
+assert:
+  - view: substrate.confinement.Profiles
+    contains:
+      profile: {$instance: run}
+      adapter: systemd
+      inner: linux
+      facts: [stdin_pipe]
+      declared_insecure: false

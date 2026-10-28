@@ -1170,6 +1170,45 @@ fn open_removes_a_container_whose_embedder_is_gone() {
     println!("ESS confinement oci orphans: executed");
 }
 
+// T15 of design 32: on the lane's pinned runtime `cat` in the container reads three writes, the
+// bytes `0x10 0x11` (Docker's detach sequence) among them, and the end of file after
+// `close_stdin`: every byte crossed the runtime client.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_oci_run_reads_every_byte_of_its_piped_stdin_and_the_end_of_file() {
+    const NAME: &str = "ESS confinement oci stdin";
+    let runtime = match lane() {
+        Ok(runtime) => runtime,
+        Err(reason) => {
+            println!("{NAME}: ABSENT ({reason})");
+            return;
+        }
+    };
+    let (_ws, workspace) = canonical_tempdir();
+    let adapter = open_lane(&runtime, Vec::new());
+    support::stdin_echoes_through(
+        &adapter,
+        &ConfinementProfile {
+            image: Some(image()),
+            workspace: Some(workspace),
+            process_bounds: Some(ProcessBounds {
+                timeout_ms: 60_000,
+                processes: 8,
+                memory_bytes: 64 << 20,
+                cpu_millis: 30_000,
+            }),
+            stdin: confinement::StdinMode::Piped { limit_bytes: 1_024 },
+            ..ConfinementProfile::default()
+        },
+        &Command {
+            argv: vec!["/bin/cat".into()],
+            env: BTreeMap::new(),
+        },
+        &[b"one\n", b"\x10\x11 two\n", b"three\x10\x11\n"],
+    )
+    .await;
+    println!("{NAME}: executed");
+}
+
 // B10: an `oci` run keeps the last bytes under `Tail`.
 #[tokio::test(flavor = "multi_thread")]
 async fn an_oci_run_under_tail_keeps_the_last_bytes() {

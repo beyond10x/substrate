@@ -2,12 +2,14 @@
 format: aep.planning-md/3
 id: approval-record:adapter-io-waves
 kind: approval-record
-status: draft
+status: active
 title: Run the adapter standard-input and live-output waves and release after each (D166)
 relations:
 - decides: story:adapter-stdin-pipe
 - decides: story:adapter-live-output
-revision: 2
+revision: 3
+transitions:
+- {from: "draft", to: "active", at: "2026-10-28T20:25:25Z", actor: "human:timo", revision: 2}
 ---
 # Decision: run the adapter standard-input and live-output waves, and release after each
 

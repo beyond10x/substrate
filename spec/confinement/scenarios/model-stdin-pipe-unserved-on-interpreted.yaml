@@ -1,0 +1,35 @@
+# Model only (design 32, `story:adapter-stdin-pipe`). Every declared adapter set but `pod`'s holds
+# `stdin_pipe`, and `pod` refuses it in its own lane. This scenario opens an adapter row that holds
+# `linux`'s other facts without `stdin_pipe` and checks that a profile requiring it is refused by
+# that name, and that the refusal names no other fact the row holds. It runs only against the
+# interpreted reference: no adapter lane selects a `model-*` scenario.
+type: ess-scenario/5
+domain: substrate.confinement
+scenario: model-stdin-pipe-unserved-on-interpreted
+summary: "lane interpreted: an adapter row without stdin_pipe refuses a profile requiring it confinement.fact-unserved naming stdin_pipe."
+
+timeline:
+  - at: 2026-10-28T09:00:00Z
+    command: substrate.confinement.OpenAdapter
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: linux
+      served_families: [process_run, process_watch, output_read, wait, workspace, filesystem_view, limits, audit]
+      facts: [whole_tree_kill, ipc_socket_allowlist, ipc_signals_contained]
+    outcome: opened
+  - at: 2026-10-28T09:00:01Z
+    command: substrate.confinement.AdmitProfile
+    actor: substrate.confinement.Embedder
+    input:
+      adapter: linux
+      required_families: [process_run]
+      required_facts: [whole_tree_kill, stdin_pipe]
+    outcome: fact-unserved-stdin-pipe
+    error:
+      name: substrate.confinement.FactUnserved
+      fields: {adapter: linux, fact: stdin_pipe}
+    no_events: [substrate.confinement.ProfileAdmitted]
+
+assert:
+  - view: substrate.confinement.Profiles
+    counts: {at_most: 0}

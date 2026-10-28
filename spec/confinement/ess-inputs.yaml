@@ -51,3 +51,11 @@ scenarios:
   - scenarios/oci-image-digestless-unpinned-on-oci.yaml
   - scenarios/pod-image-non-hex-digest-unpinned-on-pod.yaml
   - scenarios/systemd-linux-requested-on-local-scope-unserved-on-delegated.yaml
+  - scenarios/local-admits-stdin-pipe-on-portable.yaml
+  - scenarios/linux-admits-stdin-pipe-on-delegated.yaml
+  - scenarios/systemd-local-admits-stdin-pipe-on-delegated.yaml
+  - scenarios/systemd-linux-admits-stdin-pipe-on-delegated.yaml
+  - scenarios/model-stdin-pipe-unserved-on-interpreted.yaml
+  - scenarios/macos-io-admits-stdin-pipe-on-macos.yaml
+  - scenarios/oci-admits-stdin-pipe-on-oci.yaml
+  - scenarios/pod-stdin-pipe-unserved-on-pod.yaml

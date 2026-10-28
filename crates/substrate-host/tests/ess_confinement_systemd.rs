@@ -789,3 +789,58 @@ async fn a_systemd_local_run_under_tail_keeps_the_last_bytes() {
     assert!(output.stdout_truncated);
     println!("{NAME}: executed");
 }
+
+// T13 of design 32, around `local`: the scope's run reads a piped standard input through the
+// adapter's own writer.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_systemd_local_run_reads_its_piped_stdin() {
+    const NAME: &str = "ESS confinement systemd local stdin";
+    let _held = OPENING.lock().await;
+    if let Err(reason) = user_manager() {
+        println!("{NAME}: ABSENT ({reason})");
+        return;
+    }
+    let adapter = open(local_inner()).expect("systemd around local opens");
+    let workspace = tempfile::tempdir().expect("workspace");
+    support::stdin_echoes_and_ends_on_close(
+        &adapter,
+        &ConfinementProfile {
+            inner: Some(InnerAdapter::Local),
+            local_reason: Some(REASON.into()),
+            workspace: Some(workspace.path().to_path_buf()),
+            stdin: confinement::StdinMode::Piped { limit_bytes: 1_024 },
+            ..ConfinementProfile::default()
+        },
+        &[b"one\n", b"two\n", b"three\n"],
+    )
+    .await;
+    println!("{NAME}: executed");
+}
+
+// T13 of design 32, around `linux`: `systemd` forwards the writes to the inner adapter's writer.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_systemd_linux_run_reads_its_piped_stdin() {
+    const NAME: &str = "ESS confinement systemd linux stdin";
+    let _held = OPENING.lock().await;
+    if let Err(reason) = user_manager().and_then(|()| bubblewrap()) {
+        println!("{NAME}: ABSENT ({reason})");
+        return;
+    }
+    let host = tempfile::tempdir().expect("host root");
+    let adapter = open(linux_inner(host.path())).expect("systemd around linux opens");
+    let workspace = host.path().join("workspaces").join("ws_scoped");
+    std::fs::create_dir_all(&workspace).expect("workspace");
+    support::stdin_echoes_and_ends_on_close(
+        &adapter,
+        &ConfinementProfile {
+            inner: Some(InnerAdapter::Linux),
+            workspace: Some(workspace),
+            stdin: confinement::StdinMode::Piped { limit_bytes: 1_024 },
+            ..ConfinementProfile::default()
+        },
+        &[b"one\n", b"two\n", b"three\n"],
+    )
+    .await;
+    drop(adapter);
+    println!("{NAME}: executed");
+}
