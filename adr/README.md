@@ -50,5 +50,4 @@ with YAML frontmatter containing `date` and `status`. Draft design questions rem
 | [0042](0042-an-upgraded-connection-hands-its-transport-slot-to-its-stream.md) | An upgraded connection hands its transport slot to its stream | accepted |
 | [0043](0043-a-listing-names-the-entries-it-omits-in-a-response-header.md) | A listing names the entries it omits in a response header | accepted |
 | [0044](0044-confinement-is-a-contract-family-served-by-declared-adapters.md) | Confinement is a contract family served by declared adapters | accepted |
-| [0045](0045-operational-health-and-metrics-use-a-separate-listener.md) | Operational health and metrics use a separate listener outside the wire contract | proposed |
-| [0046](0046-kubernetes-serves-one-node-bound-daemon-per-stable-pod-address.md) | Kubernetes serves one node-bound daemon per stable pod address | proposed |
+| [0045](0045-operational-health-and-metrics-use-a-separate-listener.md) | Operational health and metrics use a separate listener outside the wire contract | accepted |

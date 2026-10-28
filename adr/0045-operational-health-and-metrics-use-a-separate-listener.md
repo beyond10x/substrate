@@ -1,14 +1,13 @@
 ---
-status: proposed
-date: 2026-10-27
+status: accepted
+date: 2026-10-28
 ---
 
 # ADR 0045: operational health and metrics use a separate listener outside the wire contract
 
-Decides `story:operational-health-and-telemetry`. **Proposed, not accepted.** Six questions in
-§ *Decisions for the operator* need the operator's answer before acceptance and before any code
-(invariant 8). § *Decision* is written with the recommended option of each. Where the operator
-chooses differently, that sentence is rewritten at acceptance.
+Decides `story:operational-health-and-telemetry`. **Accepted** by the operator on 2026-10-28
+with the recommended option of each question in § *Decisions for the operator*: D1 to D6 are all
+A, so § *Decision* stands as written.
 
 ## Context
 
@@ -70,7 +69,7 @@ chooses differently, that sentence is rewritten at acceptance.
    ADR 0024's "no production plaintext fallback" as applying to control traffic. The operational
    listener is not a fallback for it: it carries no control route, reads no credential and answers
    with no identifier. Exposure is bounded by the bind address and, in Kubernetes, by NetworkPolicy
-   (ADR 0046).
+   (the Kubernetes serving profile, proposed as ADR 0046).
 4. **Paths** (D3 A): `/livez`, `/readyz`, `/metrics`.
 5. **Liveness reports the process loop only.** `/livez` answers `200 ok` when its handler runs and
    neither maintenance task has *finished*. Both are infinite loops, so a finished task has panicked
@@ -205,7 +204,7 @@ outage must not empty every pod at once.
   stays within the pinned maximum. The second asserts that every registry route answers `404` on
   the operational listener and that no response there depends on an `Authorization` header.
 - Readiness transitions are tested against an unreadable store and a stopped maintenance task, each
-  scenario run once. The Kubernetes probe behaviour is exercised by ADR 0046's chart lane.
+  scenario run once. The Kubernetes probe behaviour is left to the Kubernetes serving profile (proposed ADR 0046).
 - The metric names and label sets are pinned by a test against this catalogue. Renaming a metric,
   or changing a label set, changes that test and the deployment guide together and is recorded in
   `CHANGELOG.md`.
