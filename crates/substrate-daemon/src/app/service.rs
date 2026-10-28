@@ -452,16 +452,29 @@ impl App {
             // a start or renewal can issue and commit a lease from a later reading in between,
             // and `clock` would then read as a regression that expires it
             // (`story:pty-session-refuses-first-attach-under-load`).
-            let Ok(Some((claimed, claimed_at))) = self
+            let claim = self
                 .store_io(|| {
                     self.store
                         .claim_expired_lease_reading(&candidate, || self.lease_clock().ok())
                 })
-                .await
-            else {
-                continue;
-            };
-            self.cleanup_expired(claimed, claimed_at.wall).await;
+                .await;
+            match claim {
+                Ok(Some((claimed, claimed_at))) => {
+                    self.cleanup_expired(claimed, claimed_at.wall).await;
+                }
+                Ok(None) => {}
+                // Invariant 3: a due lease the store cannot claim is a named cleanup failure,
+                // retried with the same backoff as any other, never a silent skip.
+                Err(error) => {
+                    let code = error.to_string();
+                    let _ = self
+                        .store_io(|| {
+                            self.store
+                                .record_lease_cleanup_failure(&candidate, clock.wall, &code)
+                        })
+                        .await;
+                }
+            }
         }
     }
 
@@ -741,9 +754,14 @@ impl App {
     async fn cleanup_expired(&self, expired: ExpiredLease, observed_at: DateTime<Utc>) {
         let result = match &expired.resource {
             LeaseResource::Exec { .. } => {
-                if let Ok(Some(stored)) = self
+                let read = self
                     .store_io(|| self.store.exec(&expired.scope, &expired.id))
-                    .await
+                    .await;
+                // Invariant 3: an exec that could not be read is not recorded expired unsignalled;
+                // the round fails by name and the lease is retried.
+                if let Err(error) = &read {
+                    Err(error.to_string())
+                } else if let Ok(Some(stored)) = read
                     && matches!(
                         stored.resource.state,
                         ExecState::Accepted | ExecState::Running | ExecState::Unknown

@@ -389,7 +389,17 @@ impl Harness {
     }
 
     async fn start(&self, operation: &str, own: &str, checkout: &str) -> (StatusCode, Value) {
-        let body = json!({
+        self.start_leased(operation, own, checkout, None).await
+    }
+
+    async fn start_leased(
+        &self,
+        operation: &str,
+        own: &str,
+        checkout: &str,
+        lease_ttl_ms: Option<u64>,
+    ) -> (StatusCode, Value) {
+        let mut body = json!({
             "workspace": own,
             "argv": ["/fixture/keep-running"],
             "env": { "allow": [], "set": {} },
@@ -409,6 +419,9 @@ impl Harness {
             "wait": true,
             "writable_roots": [{ "workspace": checkout, "mount": "/srv/checkout" }]
         });
+        if let Some(ttl) = lease_ttl_ms {
+            body["lease_ttl_ms"] = json!(ttl);
+        }
         self.call(Method::POST, "/v1/execs", mutation(operation, body))
             .await
     }
@@ -433,6 +446,19 @@ impl Harness {
             )
             .expect("rewrite the recorded exec state");
         assert_eq!(changed, 1, "exactly the named exec is rewritten");
+    }
+
+    /// The recorded state of one lease, read through a raw connection so that a resource whose
+    /// own record cannot be decoded can still be asked about.
+    fn lease_state(&self, kind: &str, resource: &str) -> String {
+        rusqlite::Connection::open(self.directory.path().join("state.db"))
+            .expect("read connection")
+            .query_row(
+                "SELECT state FROM leases WHERE resource_kind = ?1 AND resource_id = ?2",
+                rusqlite::params![kind, resource],
+                |row| row.get(0),
+            )
+            .expect("lease row")
     }
 
     /// The event transitions recorded for one resource, in order.
@@ -594,6 +620,107 @@ async fn lease_expiry_ends_no_workspace_whose_holding_execs_it_cannot_read() {
     let retried = harness.transitions(&scope, &checkout);
     assert!(
         retried.iter().any(|t| t == "workspace.lease-expired"),
+        "the retry records the expiry: {retried:?}"
+    );
+}
+
+/// The exec half of the same rule. Claiming an expired exec lease reads the exec's record, so an
+/// exec whose record cannot be decoded fails the claim. That round must not record the exec
+/// `expired` without signalling it, and must not pass over it silently either: every attempted
+/// round records `exec.cleanup-failed`. Once the record reads again, a later round signals the
+/// exec and records the expiry.
+#[tokio::test(flavor = "multi_thread")]
+async fn exec_lease_expiry_does_not_expire_an_exec_it_cannot_read() {
+    let harness = Harness::open();
+    let own = harness
+        .workspace("01JWRSECEXECERR00000001", false, None)
+        .await;
+    let checkout = harness
+        .workspace("01JWRSECEXECERR00000002", true, None)
+        .await;
+    let (status, started) = harness
+        .start_leased("01JWRSECEXECERR00000003", &own, &checkout, Some(1_000))
+        .await;
+    assert!(status.is_success(), "{status} {started}");
+    assert_eq!(started["result"]["state"], "running", "{started}");
+    let exec_id = started["result"]["id"]
+        .as_str()
+        .expect("exec id")
+        .to_owned();
+    let scope = Scope {
+        deployment: "dep_wrsecurity".to_owned(),
+        subject: SUBJECT.to_owned(),
+    };
+
+    harness.record_exec_state(&exec_id, "unreadable");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    // Two attempted rounds, each past the previous failure's 250 ms and 500 ms backoff.
+    for round in 1..=2 {
+        tokio::time::sleep(Duration::from_millis(600)).await;
+        harness.app.sweep_expired().await;
+
+        let signalled = harness
+            .driver
+            .signalled
+            .lock()
+            .expect("fixture lock")
+            .clone();
+        let failed = harness.transitions(&scope, &exec_id);
+        assert_ne!(
+            harness.lease_state("exec", &exec_id),
+            "expired",
+            "round {round}: the exec's lease was recorded expired although its record could not \
+             be read (signalled: {signalled:?}, transitions: {failed:?})"
+        );
+        assert!(signalled.is_empty(), "signalled: {signalled:?}");
+        assert_eq!(
+            failed
+                .iter()
+                .filter(|t| *t == "exec.cleanup-failed")
+                .count(),
+            round,
+            "every attempted round names its failure: {failed:?}"
+        );
+        assert!(
+            !failed.iter().any(|t| t == "exec.lease-expired"),
+            "no expiry is recorded for a failed round: {failed:?}"
+        );
+    }
+
+    harness.record_exec_state(&exec_id, "running");
+    for _ in 0..20 {
+        if harness.lease_state("exec", &exec_id) == "expired" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        harness.app.sweep_expired().await;
+    }
+
+    let signalled = harness
+        .driver
+        .signalled
+        .lock()
+        .expect("fixture lock")
+        .clone();
+    assert_eq!(
+        signalled,
+        vec![exec_id.clone()],
+        "the retry signals the exec"
+    );
+    assert_eq!(harness.lease_state("exec", &exec_id), "expired");
+    assert_eq!(
+        harness
+            .store
+            .exec(&scope, &exec_id)
+            .expect("exec lookup")
+            .expect("exec record")
+            .resource
+            .state,
+        ExecState::Expired
+    );
+    let retried = harness.transitions(&scope, &exec_id);
+    assert!(
+        retried.iter().any(|t| t == "exec.lease-expired"),
         "the retry records the expiry: {retried:?}"
     );
 }
