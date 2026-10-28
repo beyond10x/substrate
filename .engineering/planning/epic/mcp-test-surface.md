@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: epic:mcp-test-surface
 kind: epic
-status: proposed
+status: implemented
 title: MCP test surface for arbitrary harnesses
 summary: A disposable daemon and protocol-neutral MCP adapter make Substrate easy to exercise from Codex and other MCP-capable harnesses.
 owner: substrate
@@ -12,9 +12,11 @@ tags:
 - testing
 relations:
 - depends_on: epic:resource-bounded-execution
-revision: 3
+revision: 5
 transitions:
 - {from: "draft", to: "proposed", at: "2026-08-31T22:50:11Z", actor: "human:timo", revision: 2, imported: true}
+- {from: "proposed", to: "active", at: "2026-10-28T13:33:39Z", actor: "human:timo", revision: 4}
+- {from: "active", to: "implemented", at: "2026-10-28T13:33:40Z", actor: "human:timo", revision: 5}
 ---
 # Epic: MCP test surface
 
