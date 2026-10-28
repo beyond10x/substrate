@@ -186,9 +186,7 @@ fn owned_pod_list(cluster: &Cluster, accept: &str) -> (u16, String) {
 }
 
 fn answer(cluster: &Cluster, method: &str, path: &str, accept: &str) -> (u16, String) {
-    let pod = format!("/api/v1/namespaces/{NAMESPACE}/pods/{RUN}");
     let policies = format!("/apis/networking.k8s.io/v1/namespaces/{NAMESPACE}/networkpolicies");
-    let policy = format!("{policies}/{RUN}");
     let gone = (404, r#"{"kind":"Status","code":404}"#.to_owned());
     let (pod_path, query) = path.split_once('?').unwrap_or((path, ""));
     let pods = format!("/api/v1/namespaces/{NAMESPACE}/pods");
@@ -250,6 +248,14 @@ fn answer(cluster: &Cluster, method: &str, path: &str, accept: &str) -> (u16, St
     if method == "DELETE" && deferred(&format!("{policies}/")).is_some() {
         return (200, "{}".to_owned());
     }
+    answer_run(cluster, method, path)
+}
+
+fn answer_run(cluster: &Cluster, method: &str, path: &str) -> (u16, String) {
+    let pod = format!("/api/v1/namespaces/{NAMESPACE}/pods/{RUN}");
+    let policy = format!("/apis/networking.k8s.io/v1/namespaces/{NAMESPACE}/networkpolicies/{RUN}");
+    let gone = (404, r#"{"kind":"Status","code":404}"#.to_owned());
+    let pod_path = path.split_once('?').map_or(path, |(pod_path, _)| pod_path);
     match method {
         "GET" if pod_path == format!("{pod}/log") => (200, "hello\n".to_owned()),
         "GET" if path == pod && cluster.pod_gone.load(Ordering::SeqCst) => gone,
