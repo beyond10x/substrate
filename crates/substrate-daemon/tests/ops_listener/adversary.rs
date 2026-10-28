@@ -324,19 +324,16 @@ async fn adversary_the_ninth_connection_is_closed_and_the_header_deadline_frees_
         .expect("spawn development daemon");
     ops_when_ready(&mut child, ops).await;
 
-    let mut idle = Vec::new();
-    for _ in 0..8 {
-        idle.push(TcpStream::connect(ops).await.expect("idle connection"));
-    }
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let mut ninth = TcpStream::connect(ops).await.expect("ninth connection");
-    let _ = ninth
-        .write_all(b"GET /livez HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
-        .await;
-    let mut bytes = Vec::new();
-    let _ = tokio::time::timeout(Duration::from_millis(1_500), ninth.read_to_end(&mut bytes))
-        .await
-        .expect("the ninth connection is closed at once, not held");
+    // One source: four of the eight are admitted, the source's bound, and four are closed.
+    let (idle, bytes, closed) = ops_beyond_held(
+        ops,
+        &[[127, 0, 0, 1]; 8],
+        4,
+        [127, 0, 0, 1],
+        Duration::from_millis(200),
+    )
+    .await;
+    assert!(closed, "the ninth connection is closed at once, not held");
     assert!(
         bytes.is_empty(),
         "the ninth connection was answered: {}",
@@ -355,7 +352,7 @@ async fn adversary_the_ninth_connection_is_closed_and_the_header_deadline_frees_
         );
     }
     assert!(started.elapsed() < Duration::from_secs(4));
-    let live = ops_get(ops, "/livez", "").await;
+    let live = ops_get_after_release(ops, "/livez").await;
     assert_eq!(
         (live.status, live.body.as_slice()),
         (200, b"ok\n".as_slice())

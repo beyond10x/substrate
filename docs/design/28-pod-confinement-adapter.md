@@ -59,9 +59,25 @@ up to 30 seconds for that answer, then creates the Pod and waits up to 30 second
 server stamps a `creationTimestamp` in whole seconds before admission and storage, possibly on
 another member than the one whose `Date` the sweep reads; a younger policy may fence a run another
 adapter is still starting. A policy without that label, or whose name is not its run label, is never
-touched. The list is read in pages of 100 with `continue`, each page bounded at 4 MiB, at most 64
-pages; every page is read before anything is deleted. A list longer than that, or a sweep the API
+touched. The list asks for each policy's metadata alone (`Accept:
+application/json;as=PartialObjectMetadataList;g=meta.k8s.io;v=v1`) and is read in pages of 100 with
+`continue`, each page bounded at 4 MiB, at most 64 pages; every page is read before anything is
+deleted. A list longer than that, or a sweep the API
 refuses or does not answer, does not open (`confinement.adapter-unserved`).
+
+The sweep reads the Pod of every owned policy, the young ones included, and keeps a policy younger
+than 90 seconds or whose Pod exists. The opened adapter checks what it kept again, every 2 seconds,
+on a thread of its own: each round lists the metadata alone of the namespace's Pods labelled
+`app.kubernetes.io/managed-by: b10x-substrate`, as the open sweep lists policies, in pages of 100
+bounded at 4 MiB, at most 64. A whole Pod of a run the adapter admits holds up to 256 KiB of argv
+and 256 KiB of environment, so a page of whole Pods of ten such runs would pass the bound and fail
+every round; a Pod's metadata holds neither. A kept policy
+whose Pod the list lacks is deleted after one more read of its Pod finds it gone, when the API has
+shown that Pod before (its start stored the Pod and creates it no more) or the policy is 90 seconds
+old by that list's `Date`. A young policy whose Pod was never seen therefore stays until it is 90
+seconds old, as at open. A round that fails is tried again at the next. The thread ends once
+nothing is kept, or once the adapter and every task of its runs are gone; a thread that cannot
+start does not open.
 
 `pod_pids_limit` is the operator's statement of the kubelet's `podPidsLimit` on every node that may
 run the Pod. The Pod API has no per-Pod process bound and a namespaced client cannot read the
@@ -173,11 +189,11 @@ the run ended. A Pod is never force-deleted: every deletion leaves the kubelet a
 1 second, so a Pod gone after the adapter's own deletion is the kubelet's confirmation that its
 container stopped. A Pod's removal not confirmed within 2 minutes keeps its policy and reports the
 run `Unknown` while the task keeps trying; so does an API that has not answered for 2 minutes,
-whatever the removal is doing, and a Pod someone else deleted. After `Unknown` the task deletes and
-reads the Pod again, the pause between tries doubling from 500 ms to 30 seconds, until the API
-confirms the Pod gone, then removes the policy the same way; the run still reads `Unknown`. The
-task lives as long as the process that holds the adapter; the next open's sweep removes what it
-leaves. The adapter tracks at most 128 runs and makes room by forgetting runs that are over, oldest
+whatever the removal is doing, and a Pod someone else deleted. After `Unknown` the task deletes the
+Pod again, the pause between deletions doubling from 500 ms to 30 seconds, and reads it every 2
+seconds in between, until the API confirms the Pod gone, then removes the policy the same way; the
+run still reads `Unknown`. The task lives as long as the process that holds the adapter; the next
+open's sweep, and the adapter it opens, remove what it leaves. The adapter tracks at most 128 runs and makes room by forgetting runs that are over, oldest
 first; a run whose Pod's removal the API has not confirmed is not over for that count, so at 128 a
 start is refused `exec.tracking-capacity` and the removal tasks never outnumber the cap.
 
@@ -202,4 +218,5 @@ Restart reconciliation, durable-before-API dispatch, watch gaps, quotas, server-
 finalizers belong to the namespace driver (`story:kubernetes-namespace-driver-entry-gate`). An
 embedding process that dies mid-run leaves the run's two objects, labelled for an operator to find;
 `activeDeadlineSeconds` still ends the container. Once the Pod is gone, the next open's sweep
-removes the policy; reconciling the run itself stays with the namespace driver.
+removes the policy, or the adapter that open returned does once the Pod goes; reconciling the run
+itself stays with the namespace driver.
