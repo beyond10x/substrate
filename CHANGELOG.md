@@ -84,6 +84,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ### Fixed
 
 - A raw-pipe or pty session whose child exited after the driver answered the start and before the daemon recorded it no longer reads `ready` with attachment `available` over the dead child. The start keeps the recorded exit: the session reads `exited` with attachment `consumed`, its exec reads `exited`, and the start's result is that session.
+- The lease sweeper no longer expires a lease issued while it runs: a just-started raw-pipe or pty session or exec is no longer killed, and a just-leased workspace no longer frozen. The lease sweeper judged each lease by a clock it had read before its store calls; a start that issued its lease from a later reading in between looked like a clock regression, which expires conservatively, so the sweeper killed the child and a freshly started session refused its first attach with `session.not-attachable` (state `expired`, attachment `consumed`, lease `expired`). The claim now reads the clock inside its own transaction. Seen once in 1,500 sequential pty start-and-attach rounds on a loaded host.
 
 ### Fixed
 

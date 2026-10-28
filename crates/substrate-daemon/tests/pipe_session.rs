@@ -53,6 +53,9 @@ mod attach_refusal_names_condition;
 #[path = "pipe_session/adversary_pass1.rs"]
 mod adversary_pass1;
 
+#[path = "pipe_session/sweep_clock_predates_start.rs"]
+mod sweep_clock_predates_start;
+
 struct FixturePipe {
     observation: ExecObservation,
     sender: Option<mpsc::Sender<PipeFrame>>,

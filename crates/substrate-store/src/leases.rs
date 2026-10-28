@@ -375,14 +375,42 @@ impl Store {
         Ok(candidates)
     }
 
-    #[allow(clippy::too_many_lines)]
+    /// Claims `candidate` when its lease is due by `clock`.
+    ///
+    /// `clock` must have been read after every write this claim can observe; a sweeper reads its
+    /// clock inside the claim with [`Store::claim_expired_lease_reading`] instead.
     pub fn claim_expired_lease(
         &self,
         candidate: &ExpiredLease,
         clock: &LeaseClock,
     ) -> Result<Option<ExpiredLease>, StoreError> {
+        Ok(self
+            .claim_expired_lease_reading(candidate, || Some(clock.clone()))?
+            .map(|(claimed, _)| claimed))
+    }
+
+    /// Claims `candidate` when its lease is due by a clock `read_clock` reads inside this claim's
+    /// transaction, and returns that reading with the claim. No reading leaves it unclaimed.
+    ///
+    /// A clock read before the transaction can predate a lease another request issued and
+    /// committed in between. `lease_due` reads a boot-relative time below a lease's issue as a
+    /// monotonic regression and expires it, so that stale reading killed a session its start had
+    /// just answered as ready (`story:pty-session-refuses-first-attach-under-load`). Every lease
+    /// write holds this store's connection, and every issuing request reads its clock before it
+    /// writes, so a reading taken here is no earlier than the issue of any lease the claim sees.
+    #[allow(clippy::too_many_lines)]
+    pub fn claim_expired_lease_reading(
+        &self,
+        candidate: &ExpiredLease,
+        read_clock: impl FnOnce() -> Option<LeaseClock>,
+    ) -> Result<Option<(ExpiredLease, LeaseClock)>, StoreError> {
         let mut connection = self.connection.lock();
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(reading) = read_clock() else {
+            transaction.commit()?;
+            return Ok(None);
+        };
+        let clock = &reading;
         let kind = match candidate.resource {
             LeaseResource::Workspace { .. } => "workspace",
             LeaseResource::Exec { .. } => "exec",
@@ -511,7 +539,7 @@ impl Store {
         if let Some(event) = event {
             self.report_committed(&[commit_effect(&candidate.scope, &event)]);
         }
-        Ok(Some(candidate.clone()))
+        Ok(Some((candidate.clone(), reading)))
     }
 
     pub fn claim_expired_leases(
