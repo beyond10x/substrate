@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-27T18:28:42Z",
+  "actor": "human:timo",
+  "artifact": "story:release-binaries",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "release.yml run 40558015370 for tag 0.14.0: success; four release assets attached, glibc ceiling, ubuntu 22.04 start, daemon cmp and SHA256SUMS sign/verify steps all ran; xtask/tests/release_workflow.rs holds them offline",
+    "reference": "https://github.com/beyond10x/substrate/actions/runs/40558015370"
+  }
+}
