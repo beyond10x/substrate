@@ -2,14 +2,28 @@
 format: aep.planning-md/3
 id: story:pod-unknown-cleanup-outlives-adapter
 kind: story
-status: draft
+status: active
 title: A pod run read Unknown leaves no NetworkPolicy behind
 tags:
 - adr-0109
 relations:
 - decomposes: epic:confinement-contract-family
 - depends_on: story:pod-adapter
-revision: 2
+scope:
+- confidence: inferred
+  path: .github/workflows/gate.yml
+- confidence: cited
+  path: crates/substrate-host/src/confinement/pod.rs
+- confidence: cited
+  path: crates/substrate-host/tests/adversary_pod.rs
+- confidence: cited
+  path: docs/design/28-pod-confinement-adapter.md
+- confidence: inferred
+  path: scripts/pod-lane.sh
+revision: 6
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-28T07:37:19Z", actor: "human:timo", revision: 3}
+- {from: "proposed", to: "active", at: "2026-10-28T07:37:19Z", actor: "human:timo", revision: 4, executor: "agent:substrate-adr-0109"}
 ---
 # A run read Unknown leaves no NetworkPolicy behind
 

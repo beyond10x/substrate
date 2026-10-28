@@ -2,7 +2,8 @@
 //!
 //! Portable: the rendered Pod for a fixed profile equals the committed golden manifest byte for
 //! byte, and against a fake API server every field design 28 refuses is refused with no request
-//! made after open's two probes, and a credential that may not read `pods/log` does not open.
+//! made after open's two probes and its sweep, and a credential that may not read `pods/log` does
+//! not open.
 //!
 //! The `pod` lane: with `SUBSTRATE_POD_LANE=1`, every authored `pod-*-on-pod` scenario of
 //! `spec/confinement-suite.json` runs against a real cluster named by `SUBSTRATE_POD_KUBECONFIG`
@@ -231,10 +232,16 @@ fn serve(
     ));
     let probe = request.starts_with("GET /api/v1/namespaces/substrate-fake/pods?limit=1 ");
     let log = request.starts_with(LOG_PROBE);
+    let sweep = request.starts_with(SWEEP);
     let (status, payload) = if probe && authorized {
         (200, r#"{"kind":"PodList","apiVersion":"v1","items":[]}"#)
     } else if log && authorized {
         (log_probe, r#"{"kind":"Status","message":"the log probe"}"#)
+    } else if sweep && authorized {
+        (
+            200,
+            r#"{"kind":"NetworkPolicyList","apiVersion":"networking.k8s.io/v1","items":[]}"#,
+        )
     } else {
         (500, r#"{"kind":"Status","message":"unexpected"}"#)
     };
@@ -261,8 +268,15 @@ fn open_fake(cluster: &FakeCluster) -> Arc<PodAdapter> {
 /// read `pods/log` sees answered 404.
 const LOG_PROBE: &str = "GET /api/v1/namespaces/substrate-fake/pods/substrate-log-access-probe/log?container=run&limitBytes=1 ";
 
+/// Open's last request: the first page of the list its sweep of orphaned `NetworkPolicy` objects
+/// reads (design 28).
+const SWEEP: &str = "GET /apis/networking.k8s.io/v1/namespaces/substrate-fake/networkpolicies?labelSelector=app.kubernetes.io%2Fmanaged-by%3Db10x-substrate&limit=100 ";
+
+/// Open's requests: the two probes and the sweep's list.
+const OPEN_REQUESTS: usize = 3;
+
 #[test]
-fn pod_opens_on_a_fake_cluster_with_its_declared_set_after_its_two_probes() {
+fn pod_opens_on_a_fake_cluster_with_its_declared_set_after_its_two_probes_and_its_sweep() {
     let cluster = FakeCluster::start(Some(json!({"pod_pids_limit": 1024})));
     let adapter = confinement::open(AdapterRequest::Pod(PodRequest {
         cluster: Some(cluster.kubeconfig.clone()),
@@ -288,6 +302,7 @@ fn pod_opens_on_a_fake_cluster_with_its_declared_set_after_its_two_probes() {
         [
             "GET /api/v1/namespaces/substrate-fake/pods?limit=1 HTTP/1.1".to_owned(),
             format!("{LOG_PROBE}HTTP/1.1"),
+            format!("{SWEEP}HTTP/1.1"),
         ]
     );
 }
@@ -681,7 +696,7 @@ async fn every_refused_field_is_refused_before_any_api_call() {
     let cluster = FakeCluster::start(Some(json!({"pod_pids_limit": 1024})));
     let adapter = open_fake(&cluster);
     let probe = cluster.requests();
-    assert_eq!(probe.len(), 2, "{probe:?}");
+    assert_eq!(probe.len(), OPEN_REQUESTS, "{probe:?}");
     let mut refused = 0;
     for (name, mut profile, code, fields) in refused_profiles() {
         let (sink, records) = recording();
@@ -774,7 +789,7 @@ async fn a_profile_with_a_processes_bound_is_refused_where_the_operator_declared
         .expect_err("no processes bound is provable");
     assert_eq!(error.code(), "confinement.pod-processes-unserved");
     assert_eq!(error.status(), 501);
-    assert_eq!(cluster.requests().len(), 2);
+    assert_eq!(cluster.requests().len(), OPEN_REQUESTS);
 }
 
 /// Every run has a processes bound: a profile that states none gets the default one, which a
@@ -795,7 +810,7 @@ async fn a_profile_without_bounds_is_refused_where_the_operator_declared_no_pids
     let error = pod::render_manifests(&settings, &profile, &command(&["/bin/true"]), GOLDEN_RUN)
         .expect_err("the default processes bound is not rendered");
     assert_eq!(error.code(), "confinement.pod-processes-unserved");
-    assert_eq!(cluster.requests().len(), 2);
+    assert_eq!(cluster.requests().len(), OPEN_REQUESTS);
 }
 
 /// The operator's `ephemeral_storage_bytes` bounds the workspace and the container's ephemeral

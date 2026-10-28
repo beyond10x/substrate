@@ -2,9 +2,13 @@
 format: aep.planning-md/3
 id: story:release-binaries
 kind: story
-status: draft
+status: implemented
 title: Each release attaches prebuilt daemon and CLI binaries
-revision: 1
+revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-28T07:37:19Z", actor: "human:timo", revision: 2, decided_on: {"recorded":{"review_outcome":1}}}
+- {from: "proposed", to: "active", at: "2026-10-28T07:37:19Z", actor: "human:timo", revision: 3, decided_on: {"recorded":{"review_outcome":1}}, executor: "agent:substrate-adr-0109"}
+- {from: "active", to: "implemented", at: "2026-10-28T07:37:20Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":1,"review_outcome":1}}}
 ---
 ## Outcome
 
