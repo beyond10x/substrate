@@ -1,6 +1,7 @@
 # Design 33: the host execution profile name is a deployment parameter
 
-Status: proposed, 2026-10-28. Owned by `story:host-profile-name-is-a-deployment-parameter`
+Status: accepted for implementation, 2026-10-28, under the coordinating session's D167 (no ADR
+needed, no enforced rule changed). Owned by `story:host-profile-name-is-a-deployment-parameter`
 (`epic:kubernetes-deployment-and-driver`), which carries out decision A of
 `decision-blocker:chart-lane-host-profile`. It refines the AppArmor part of
 [design 25](25-container-private-host-execution.md) and the chart of
