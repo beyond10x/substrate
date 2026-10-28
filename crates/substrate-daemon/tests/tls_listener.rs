@@ -88,12 +88,9 @@ fn atomic_replace(path: &Path, bytes: &[u8], mode: u32) {
     std::fs::rename(temporary, path).expect("replace identity file");
 }
 
-fn unused_address() -> SocketAddr {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("ephemeral listener");
-    let address = listener.local_addr().expect("ephemeral address");
-    drop(listener);
-    address
-}
+#[path = "support/ports.rs"]
+mod ports;
+use ports::unused_address;
 
 fn daemon_command(
     root: &Path,
@@ -1428,18 +1425,31 @@ struct OpsAnswer {
 
 /// One request on the operational listener, which serves one request per connection.
 async fn ops_exchange(address: SocketAddr, request: &[u8]) -> OpsAnswer {
-    let mut stream = TcpStream::connect(address)
+    let stream = TcpStream::connect(address)
         .await
         .expect("operational listener connection");
-    stream
-        .write_all(request)
+    ops_exchange_on(stream, request).await
+}
+
+async fn ops_exchange_on(stream: TcpStream, request: &[u8]) -> OpsAnswer {
+    let bytes = ops_bytes_on(stream, request)
         .await
-        .expect("operational request");
+        .expect("operational answer");
+    ops_answer(&bytes)
+}
+
+/// Sends `request` on `stream` and reads until the listener closes it: the bytes answered, empty
+/// when it was closed unanswered, and an error when it was reset.
+async fn ops_bytes_on(mut stream: TcpStream, request: &[u8]) -> std::io::Result<Vec<u8>> {
+    stream.write_all(request).await?;
     let mut bytes = Vec::new();
     tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut bytes))
         .await
-        .expect("operational answer timeout")
-        .expect("operational answer");
+        .expect("operational answer timeout")?;
+    Ok(bytes)
+}
+
+fn ops_answer(bytes: &[u8]) -> OpsAnswer {
     let split = bytes
         .windows(4)
         .position(|window| window == b"\r\n\r\n")
@@ -1462,15 +1472,118 @@ async fn ops_exchange(address: SocketAddr, request: &[u8]) -> OpsAnswer {
     }
 }
 
-async fn ops_get(address: SocketAddr, path: &str, extra: &str) -> OpsAnswer {
-    let request =
-        format!("GET {path} HTTP/1.1\r\nHost: operations.test\r\n{extra}Connection: close\r\n\r\n");
-    ops_exchange(address, request.as_bytes()).await
+fn ops_get_request(path: &str, extra: &str) -> String {
+    format!("GET {path} HTTP/1.1\r\nHost: operations.test\r\n{extra}Connection: close\r\n\r\n")
 }
 
+async fn ops_get(address: SocketAddr, path: &str, extra: &str) -> OpsAnswer {
+    ops_exchange(address, ops_get_request(path, extra).as_bytes()).await
+}
+
+/// `GET path` once the connections a test just saw closed have given their slots back.
+///
+/// The listener closes a connection and then ends the task that holds its slot, so for a moment
+/// after the client reads end-of-file the slot is still taken, and a connection opened in that
+/// moment is closed unanswered. Such a refusal is retried for at most a second; without the
+/// release the slots would stay taken for the connection lifetime of ten seconds.
+async fn ops_get_after_release(address: SocketAddr, path: &str) -> OpsAnswer {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(1);
+    loop {
+        let stream = TcpStream::connect(address)
+            .await
+            .expect("operational listener connection");
+        let refusal = match ops_bytes_on(stream, ops_get_request(path, "").as_bytes()).await {
+            Ok(bytes) if !bytes.is_empty() => return ops_answer(&bytes),
+            Ok(_) => "closed unanswered".to_owned(),
+            Err(error) => error.to_string(),
+        };
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the closed connections' slots were not released within a second: {refusal}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// Holds one idle connection from each of `held`'s sources, then asks `/livez` on one more from
+/// `next` after `settle`: the held connections, the bytes that one was answered (empty when it
+/// was closed unanswered) and whether it was closed within 1.5 s.
+///
+/// The answer counts only once exactly `admitted` of the held connections hold a slot: a slot
+/// stays taken for a moment after its client saw the connection end (`ops_get_after_release`), so
+/// a held connection opened then may be refused and leave a slot free for the next. The listener
+/// accepts in order and closes a refused connection at its accept, so once the next connection is
+/// answered or closed every held one has been admitted or closed, and a closed one reads
+/// end-of-file at once while an admitted one reads nothing until the two-second header deadline.
+/// Five attempts, else the case fails.
+async fn ops_beyond_held(
+    address: SocketAddr,
+    held: &[[u8; 4]],
+    admitted: usize,
+    next: [u8; 4],
+    settle: Duration,
+) -> (Vec<TcpStream>, Vec<u8>, bool) {
+    let mut open_counts = Vec::new();
+    for _ in 0..5 {
+        let mut streams = Vec::new();
+        for source in held {
+            streams.push(ops_connect_from(*source, address).await);
+        }
+        tokio::time::sleep(settle).await;
+        let mut beyond = ops_connect_from(next, address).await;
+        let _ = beyond
+            .write_all(b"GET /livez HTTP/1.1\r\nHost: operations.test\r\nConnection: close\r\n\r\n")
+            .await;
+        let mut bytes = Vec::new();
+        if tokio::time::timeout(Duration::from_millis(1_500), beyond.read_to_end(&mut bytes))
+            .await
+            .is_err()
+        {
+            // Still open: nothing says the held ones were accepted, so no count is taken.
+            return (streams, bytes, false);
+        }
+        let mut open = 0;
+        for stream in &mut streams {
+            let mut byte = [0_u8; 1];
+            if tokio::time::timeout(Duration::from_millis(20), stream.read(&mut byte))
+                .await
+                .is_err()
+            {
+                open += 1;
+            }
+        }
+        if open == admitted {
+            return (streams, bytes, true);
+        }
+        open_counts.push(open);
+        drop(streams);
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    panic!("never held {admitted} admitted connections; held open per attempt: {open_counts:?}");
+}
+
+/// A connection to `address` from the loopback source address `source`.
+async fn ops_connect_from(source: [u8; 4], address: SocketAddr) -> TcpStream {
+    let socket = tokio::net::TcpSocket::new_v4().expect("socket");
+    socket
+        .bind(SocketAddr::from((source, 0)))
+        .expect("bind loopback source");
+    socket.connect(address).await.expect("connect from source")
+}
+
+/// Asks `/readyz` until it is `200`, one connection per attempt. A refused connect means the
+/// listener is not bound yet. A reset or an unanswered close is retried: the daemon binds this
+/// listener before its control listener, so a daemon that then fails to start closes it with the
+/// probe still queued, and the next attempt's exit check names the daemon's own error instead of
+/// the reset. Any other failure fails the test, and so does a reset that lasts to the deadline.
+///
+/// A connection the client opens and closes unused holds one of the source's four slots until the
+/// listener's task for it runs, after the client has moved on. So no attempt opens a connection
+/// it does not send a request on: a test that fills the slots next must find them free.
 async fn ops_when_ready(child: &mut Child, address: SocketAddr) -> OpsAnswer {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
+        let last;
         if let Some(status) = child.try_wait().expect("inspect daemon") {
             let mut stderr = String::new();
             if let Some(mut pipe) = child.stderr.take() {
@@ -1480,15 +1593,31 @@ async fn ops_when_ready(child: &mut Child, address: SocketAddr) -> OpsAnswer {
             }
             panic!("daemon exited before operational readiness: {status}: {stderr}");
         }
-        if TcpStream::connect(address).await.is_ok() {
-            let answer = ops_get(address, "/readyz", "").await;
-            if answer.status == 200 {
-                return answer;
+        match TcpStream::connect(address).await {
+            Ok(stream) => {
+                match ops_bytes_on(stream, ops_get_request("/readyz", "").as_bytes()).await {
+                    Ok(bytes) if !bytes.is_empty() => {
+                        let answer = ops_answer(&bytes);
+                        if answer.status == 200 {
+                            return answer;
+                        }
+                        last = format!("status {}", answer.status);
+                    }
+                    Ok(_) => last = "closed unanswered".to_owned(),
+                    Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {
+                        last = error.to_string();
+                    }
+                    Err(error) => panic!("operational readiness answer: {error}"),
+                }
             }
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionRefused => {
+                last = error.to_string();
+            }
+            Err(error) => panic!("operational listener connection: {error}"),
         }
         assert!(
             tokio::time::Instant::now() < deadline,
-            "operational readiness timed out"
+            "operational readiness timed out; last attempt: {last}"
         );
         tokio::time::sleep(Duration::from_millis(50)).await;
     }

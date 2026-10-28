@@ -1,0 +1,9 @@
+Each ordinal is its own daemon with its own operation ledger. Address one pod by name; never the
+Service name {{ include "substrate.name" . }}.{{ .Release.Namespace }}.svc.{{ .Values.clusterDomain }}, which resolves to every ready pod.
+
+Certificate names for the secret {{ .Values.tls.secretName }} (one certificate, these names only):
+{{ include "substrate.certificateNames" . }}
+
+The same list is in the ConfigMap {{ include "substrate.name" . }}-certificate-names, key dns-names.
+A certificate rotation reaches a pod when it restarts: roll the StatefulSet after replacing the secret.
+Uninstalling keeps every ledger-{{ include "substrate.name" . }}-<ordinal> PersistentVolumeClaim.

@@ -1,0 +1,17 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "substrate.name" . | quote }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "substrate.labels" . | nindent 4 }}
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: false
+  selector:
+    {{- include "substrate.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: control
+      port: 8443
+      targetPort: control
+      protocol: TCP

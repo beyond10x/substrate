@@ -1,0 +1,10 @@
+apiVersion: v2
+name: b10x-substrate
+description: One node-bound Substrate host daemon per stable pod address
+type: application
+version: 0.0.0
+appVersion: "0.0.0"
+kubeVersion: ">=1.32.0-0"
+home: https://beyond10x.github.io/substrate/
+sources:
+  - https://github.com/beyond10x/substrate

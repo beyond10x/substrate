@@ -1,0 +1,98 @@
+{{- if .Values.nodeProfiles.enabled }}
+{{- $name := printf "%s-node-profiles" (include "substrate.name" .) -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name | quote }}
+  namespace: {{ .Values.nodeProfiles.namespace | quote }}
+  labels:
+    {{- include "substrate.labels" . | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ $name | quote }}
+  namespace: {{ .Values.nodeProfiles.namespace | quote }}
+  labels:
+    {{- include "substrate.labels" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: b10x-substrate
+      app.kubernetes.io/instance: {{ .Release.Name | quote }}
+      app.kubernetes.io/component: node-profiles
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: b10x-substrate
+        app.kubernetes.io/instance: {{ .Release.Name | quote }}
+        app.kubernetes.io/component: node-profiles
+    spec:
+      serviceAccountName: {{ $name | quote }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      hostNetwork: false
+      hostPID: false
+      hostIPC: false
+      nodeSelector:
+        {{ .Values.nodePool.label.key | quote }}: {{ .Values.nodePool.label.value | quote }}
+      tolerations:
+        - key: {{ .Values.nodePool.taint.key | quote }}
+          operator: Equal
+          value: {{ .Values.nodePool.taint.value | quote }}
+          effect: {{ .Values.nodePool.taint.effect | quote }}
+      containers:
+        - name: install
+          image: {{ include "substrate.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy | quote }}
+          command:
+            - /usr/local/bin/substrate-container-profiles
+            - --hold
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            runAsNonRoot: false
+            privileged: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - MAC_ADMIN
+            seccompProfile:
+              type: RuntimeDefault
+            appArmorProfile:
+              type: Unconfined
+          readinessProbe:
+            exec:
+              command:
+                - /usr/local/bin/substrate-container-profiles
+                - --check
+            periodSeconds: 10
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+          volumeMounts:
+            - name: securityfs
+              mountPath: /sys/kernel/security
+            - name: seccomp
+              mountPath: /node-profiles
+      volumes:
+        - name: securityfs
+          hostPath:
+            path: /sys/kernel/security
+            type: Directory
+        - name: seccomp
+          hostPath:
+            path: {{ printf "%s/seccomp/b10x-substrate" .Values.nodeProfiles.kubeletRoot | quote }}
+            type: DirectoryOrCreate
+{{- end }}

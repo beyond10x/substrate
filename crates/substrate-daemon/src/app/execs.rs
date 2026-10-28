@@ -660,13 +660,14 @@ pub(super) async fn exec_lease_renew(
     }
     match app
         .store_io(|| {
-            app.store.renew_exec_lease(
+            app.store.renew_exec_lease_reading(
                 &scope,
                 &operation,
                 &app.authority.now().to_rfc3339(),
                 200,
                 &exec_id,
                 &lease,
+                || app.lease_clock().ok(),
             )
         })
         .await
