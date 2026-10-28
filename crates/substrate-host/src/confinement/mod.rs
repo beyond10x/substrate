@@ -56,9 +56,14 @@ pub use crate::confinement_types::{AdapterName, ContractFamily, Fact};
 // declared roots, `ConfinementProfile` holds the wire's root, file and slot types, and
 // `ConfinementAdapter::signal` takes a `Signal`.
 pub use crate::{DeclaredWritableRoot, HostConfig};
+// Which bytes of each output stream a run keeps (design 29 § 5).
+pub use crate::output_retention::{KeptOutput, OutputRetention, Retention};
 pub use facts::{AdapterFacts, FACT_ORDER, FAMILY_ORDER, InnerAdapter, ReservedField};
 pub use profile::{ConfinementProfile, IoBounds, Ipc, Network, ProcessBounds, image_is_pinned};
 pub use substrate_wire::{ReadOnlyFile, ReadOnlyRoot, SecretSlotRequest, Signal, WritableHostRoot};
+// What a run may write inside its workspace: the wire's own type, so one validator answers it
+// (design 29 § 1).
+pub use substrate_wire::WorkspaceAccess;
 
 use crate::{DriverError, DriverErrorClass};
 
@@ -73,6 +78,12 @@ pub const RESERVED_FIELD_UNSERVED: &str = "confinement.reserved-field-unserved";
 pub const WORKSPACE_REQUIRED: &str = "confinement.workspace-required";
 /// A `render` the adapter cannot reproduce faithfully without acquiring run-time material.
 pub const RENDER_UNSERVED: &str = "confinement.render-unserved";
+/// A writable workspace subtree that is `.git` or lies beneath one, compared ASCII
+/// case-insensitively (design 29 § 1): 422, class `Refused`.
+pub const WRITABLE_SUBTREE_GIT: &str = "confinement.writable-subtree-git";
+/// A tail retention on an adapter that bounds a read of its output only from the start (design
+/// 29 § 6): 501, class `Unserved`.
+pub const OUTPUT_RETENTION_UNSERVED: &str = "confinement.output-retention-unserved";
 
 /// The registry: every adapter ADR 0109 decision 3 names, in that order.
 pub const ADAPTERS: [AdapterName; 6] = [
@@ -671,6 +682,11 @@ pub struct RunOutput {
     pub stderr: Vec<u8>,
     pub stdout_truncated: bool,
     pub stderr_truncated: bool,
+    /// Which bytes of the stream `stdout` holds: the head is `stdout[..head_bytes]`, the tail
+    /// directly after it, and the omitted bytes sat between the two (design 29 § 5).
+    pub stdout_kept: KeptOutput,
+    /// Which bytes of the stream `stderr` holds, as `stdout_kept`.
+    pub stderr_kept: KeptOutput,
 }
 
 /// One confinement mechanism behind the contract.
@@ -761,6 +777,55 @@ pub(crate) fn workspace_of(admitted: &AdmittedProfile) -> Result<&PathBuf, Confi
     })
 }
 
+/// Steps 1 and 2 of design 29 § 1, the same on every adapter: the wire's own shape rule for a
+/// workspace access (`exec.workspace-access-invalid`, 422), then no writable subtree that is
+/// `.git` or lies beneath one ([`WRITABLE_SUBTREE_GIT`], 422).
+pub(crate) fn check_workspace_access(profile: &ConfinementProfile) -> Result<(), ConfinementError> {
+    substrate_wire::validate_workspace_access(&profile.workspace_access).map_err(|error| {
+        DriverError::refused(
+            substrate_wire::EXEC_WORKSPACE_ACCESS_INVALID,
+            format!("The requested workspace access is invalid: {error}"),
+            "workspace_access",
+        )
+    })?;
+    let beneath_git = |subtree: &&String| {
+        subtree
+            .split('/')
+            .any(|component| component.eq_ignore_ascii_case(".git"))
+    };
+    if let Some(subtree) = profile
+        .workspace_access
+        .writable_subtrees()
+        .and_then(|subtrees| subtrees.iter().find(beneath_git))
+    {
+        return Err(DriverError::refused(
+            WRITABLE_SUBTREE_GIT,
+            format!("The writable subtree {subtree} is a .git directory or lies beneath one."),
+            "workspace_access.writable_subtrees",
+        )
+        .into());
+    }
+    Ok(())
+}
+
+/// Steps 1 and 2, then step 3 for an adapter that serves no workspace access but `ReadWrite`:
+/// `exec.workspace-scoped-write-unserved` (501).
+pub(crate) fn refuse_workspace_access(
+    adapter: &str,
+    profile: &ConfinementProfile,
+) -> Result<(), ConfinementError> {
+    check_workspace_access(profile)?;
+    if profile.workspace_access.is_read_write() {
+        return Ok(());
+    }
+    Err(DriverError::unserved(
+        substrate_wire::EXEC_WORKSPACE_SCOPED_WRITE_UNSERVED,
+        format!("The {adapter} adapter does not serve a read-only or scoped workspace."),
+        "workspace_access",
+    )
+    .into())
+}
+
 /// Validates a workdir relative to the workspace: relative, normal components only.
 pub(crate) fn relative_workdir(workdir: &str) -> Result<PathBuf, ConfinementError> {
     let path = std::path::Path::new(workdir);
@@ -777,4 +842,102 @@ pub(crate) fn relative_workdir(workdir: &str) -> Result<PathBuf, ConfinementErro
         .into());
     }
     Ok(path.to_path_buf())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const REASON: &str = "the test admits a profile on purpose";
+
+    fn scoped(subtrees: &[&str]) -> WorkspaceAccess {
+        WorkspaceAccess::Scoped {
+            writable_subtrees: subtrees
+                .iter()
+                .map(|subtree| (*subtree).to_owned())
+                .collect(),
+        }
+    }
+
+    /// Admits `access` on `local` and returns the refusal with the audit records it wrote.
+    fn refusal(access: &WorkspaceAccess) -> (ConfinementError, Vec<serde_json::Value>) {
+        let adapter =
+            open(AdapterRequest::Local(local::LocalRequest::default())).expect("local opens");
+        let records = Arc::new(parking_lot::Mutex::new(Vec::new()));
+        let sink_records = Arc::clone(&records);
+        let profile = ConfinementProfile {
+            local_reason: Some(REASON.into()),
+            workspace_access: access.clone(),
+            audit: Some(AuditSink::new(move |record: &AuditRecord| {
+                sink_records
+                    .lock()
+                    .push(serde_json::to_value(record).expect("record"));
+            })),
+            ..ConfinementProfile::default()
+        };
+        let error = adapter
+            .admit(&profile)
+            .expect_err(&format!("{access:?} is refused at admission"));
+        let records = records.lock().clone();
+        (error, records)
+    }
+
+    // A3: a subtree that is `.git` or lies beneath one, in any ASCII case, is refused by name.
+    #[test]
+    fn a_writable_subtree_at_or_beneath_git_is_refused_at_admission() {
+        for subtrees in [
+            &[".git"][..],
+            &["a/.git/b"],
+            &[".GIT"],
+            &["out", "src/.Git"],
+        ] {
+            let (error, records) = refusal(&scoped(subtrees));
+            assert_eq!(error.code(), WRITABLE_SUBTREE_GIT, "{subtrees:?}: {error}");
+            assert_eq!(error.status(), 422, "{subtrees:?}");
+            let ConfinementError::Driver(driver) = &error else {
+                panic!("{subtrees:?}: {error}");
+            };
+            assert!(
+                driver.message.contains(subtrees[subtrees.len() - 1]),
+                "the refusal names the subtree: {}",
+                driver.message
+            );
+            assert_eq!(records.len(), 1, "{records:?}");
+            assert_eq!(records[0]["event"], "profile_refused");
+            assert_eq!(records[0]["code"], WRITABLE_SUBTREE_GIT);
+            assert_eq!(records[0]["adapter"], "local");
+        }
+    }
+
+    // A4: the wire's shape rule comes first, the same on every adapter.
+    #[test]
+    fn an_unsorted_overlapping_or_dotdot_list_is_refused_at_admission() {
+        for subtrees in [
+            &["src", "out"][..],
+            &["out", "out/a"],
+            &["../out"],
+            &["out/../src"],
+            &[],
+        ] {
+            let (error, records) = refusal(&scoped(subtrees));
+            assert_eq!(
+                error.code(),
+                substrate_wire::EXEC_WORKSPACE_ACCESS_INVALID,
+                "{subtrees:?}: {error}"
+            );
+            assert_eq!(error.status(), 422, "{subtrees:?}");
+            assert_eq!(records.len(), 1, "{records:?}");
+            assert_eq!(
+                records[0]["code"],
+                substrate_wire::EXEC_WORKSPACE_ACCESS_INVALID
+            );
+        }
+    }
+
+    // The shape rule is checked before `.git`: an unsorted list naming `.git` is invalid first.
+    #[test]
+    fn the_shape_rule_is_checked_before_the_git_rule() {
+        let (error, _) = refusal(&scoped(&["src", ".git"]));
+        assert_eq!(error.code(), substrate_wire::EXEC_WORKSPACE_ACCESS_INVALID);
+    }
 }

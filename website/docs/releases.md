@@ -12,41 +12,52 @@ fails when the two differ. Earlier releases are in the
 
 <!-- Generated from CHANGELOG.md by `cargo xtask docs-releases`. Edit CHANGELOG.md, not the text below. -->
 
-## 0.13.0 (2026-10-27)
+## 0.14.0 (2026-10-27)
 
-Published by [release run 40507411588](https://github.com/beyond10x/substrate/actions/runs/40507411588),
-the protected-`main` recovery dispatch for tag `0.13.0`, from tagged commit
-`c2b95f2882ec1e425459b23ed9e48dae121ae6d3`. The tag-push
-[run 40504625490](https://github.com/beyond10x/substrate/actions/runs/40504625490) pushed the
-daemon image and failed at keyless signing before anything was announced; the recovery run checked
-that image's source-revision label and shipped binary again and reused it. All three artifacts were
-keyless-signed and verified against `release.yml@refs/heads/main` by the release workflow, and each
-digest resolved anonymously:
+Published by [release run 40558015370](https://github.com/beyond10x/substrate/actions/runs/40558015370)
+for tag `0.14.0` at commit `0b9d50c6105cacc7f959eb41d5e65f252084a282`. All three images and the
+binaries' `SHA256SUMS` were keyless-signed and verified against `release.yml@refs/tags/0.14.0` by
+the release workflow, and each digest resolved anonymously:
 
-- Image: `ghcr.io/beyond10x/b10x-substrate-daemon:0.13.0` at `sha256:81a5d4d5d47520483dd6020549d63bb82ec3b636885c4f6aadab02b5a6040f22`.
+- Image: `ghcr.io/beyond10x/b10x-substrate-daemon:0.14.0` at `sha256:a22fc8a1707ac750eb86115422e26ecfb2fde64fb3df588e9fced32ef2a52182`.
 - Contract bundle: `ghcr.io/beyond10x/b10x-substrate-wire:0.23.0` at `sha256:c2a50222da154028011a794cc93724043943581ba4ee44051c38dd084b759ff5`, unchanged since 0.11.0 and signed again by this release.
-- Disposable MCP image: `ghcr.io/beyond10x/b10x-substrate-mcp:0.13.0` at `sha256:ae0d64f50b7bae805b5bb4d3ceb24abd8bb4cbe32cbd4b9aeb216840c127f5ec`, development-only.
+- Disposable MCP image: `ghcr.io/beyond10x/b10x-substrate-mcp:0.14.0` at `sha256:c6844980db262412db962228bb263421e285d57226e7c8a3a28fbbb85d589d42`, development-only.
+- Binaries: `substrate-daemon-0.14.0-x86_64-unknown-linux-gnu.tar.gz` and `b10x-substrate-0.14.0-x86_64-unknown-linux-gnu.tar.gz`, listed in `SHA256SUMS` (`sha256:521435c3007898ade2a021e13f799dd5789fddc44f81cfce051d186b6c67f480`) and signed in `SHA256SUMS.sigstore.json`.
 
-### Added in 0.13.0
+### Added in 0.14.0
 
-- The public site explains each confinement adapter (what it enforces, declares, refuses by name and needs, and when to choose it). It also gains an overview of the contracts with the ten families and eleven facts, release notes rendered from the newest released `CHANGELOG.md` section, and `confine run`; the status page moves to 0.12.0. The page list is grouped, marks the current page, and collapses on narrow screens; tables scroll inside focusable regions.
-- `cargo xtask check-docs` holds the site's adapter matrices, family, fact and lane tables and CLI Commands table to the specification. It also holds the site to lower-is-better UX ratchets in `website/ux/baseline.json` (clicks per reader task, words per text block), which `cargo xtask docs-baseline` rewrites, and checks the `website/ux/findings/` records.
-- The `macos` adapter resolves the selected developer tools' macOS SDK, `clang` and `ar` with `xcrun` outside the sandbox at open, with a cleared environment and `/` as its working directory, and a start gets `SDKROOT`, `CARGO_TARGET_AARCH64_APPLE_DARWIN_LINKER`, `CARGO_TARGET_X86_64_APPLE_DARWIN_LINKER`, `CC` and `AR` for each of them its exec subpaths reach, unless its environment names it, so a confined `cargo build` or `cargo test`, and a build script that compiles C, links without reaching the `/usr/bin/cc` shim, which runs `/bin/sh` and `xcodebuild`. A start over the developer tools is refused `exec.sandbox-developer-tools-unresolved` before anything runs, naming why, when the open could not resolve them, when the selected developer tools changed since the open, when the SDK the open resolved is gone, or when its exec subpaths hold the selected developer directory but not a value it needs; nothing is resolved again at start. The Seatbelt policy gains no rule. `tests/seatbelt_adversary.rs` runs the fixture's `cargo test` with no `RUSTC`, `SDKROOT` or linker set by the caller.
+- The confinement profile gains `workspace_access`, the wire's `WorkspaceAccess`, re-exported from
+  `substrate_host::confinement`, default `ReadWrite` as before. `linux`, and `systemd` around it,
+  serve `ReadOnly` and `Scoped` on a host whose probe proved `exec.workspace-scoped-write`: the
+  workspace is bound read-only, and each named subtree is bound writable over it by descriptor, so a
+  write elsewhere in the workspace fails inside the run and `Scoped` protects the workspace root's
+  `.git` from writes in the run. A subtree that is `.git` or lies beneath one is refused
+  `confinement.writable-subtree-git` (422), and so, at start, is a subtree that is or holds a
+  submodule the workspace's `.gitmodules` registers, because the run could replace the submodule's
+  `gitdir:` file and a host `git status` in the root would run Git in it; a malformed list is
+  `exec.workspace-access-invalid` (422). Its limits: a nested `.git` inside a writable subtree stays
+  writable when no `.gitmodules` registers it; `Scoped` does not protect host Git run inside a
+  writable subtree from a repository the run creates there, as `ReadWrite` does not; and a hard link
+  made on the host before the run stays writable through a subtree, while the run cannot create one
+  itself (`EXDEV`). Every other adapter refuses a non-default access
+  `exec.workspace-scoped-write-unserved` (501), and so does `linux` on a host without the fact.
+  `sealed_paths` stays refused on `linux` (`confinement.fact-unserved`). The surface change is
+  additive: a profile built with `..ConfinementProfile::default()` compiles unchanged, and only a
+  struct literal that names every field must name the new one.
+- The confinement profile gains `output_retention`, which sets `Head` (the default, unchanged),
+  `Tail` or `HeadAndTail` for stdout and stderr separately, within the same byte bound per stream.
+  `HeadAndTail` keeps the first half of the bound and the last half. `RunOutput` gains `stdout_kept`
+  and `stderr_kept` (`KeptOutput`): the retention applied, the head and tail byte counts, and the
+  bytes the stream produced when the adapter read it to its end. `local`, `linux`, `macos`,
+  `systemd` and `oci` serve all three modes from one shared buffer. `pod` refuses `Tail` and
+  `HeadAndTail` with `confinement.output-retention-unserved` (501), because the log API bounds a
+  read only from its start. No bound changes, and a run that does not set it reports the same bytes
+  as before.
+- The GitHub release carries prebuilt x86_64 Linux binaries: `substrate-daemon-<version>-x86_64-unknown-linux-gnu.tar.gz` and `b10x-substrate-<version>-x86_64-unknown-linux-gnu.tar.gz`, each with `LICENSE`, `THIRD_PARTY_LICENSES.html` and `README.md`, plus `SHA256SUMS` over both and `SHA256SUMS.sigstore.json`, a keyless `cosign sign-blob` bundle by the release workflow's identity, verified with `cosign verify-blob` before the release is created. The binaries come from the Dockerfile's pinned `builder` stage (new target `release-binaries`, which now also builds the CLI). Before any image tag moves, the workflow refuses a binary that needs a glibc newer than 2.35 or a shared library other than OpenSSL 3, zlib, `libgcc_s` and glibc's own, that does not start in a digest-pinned Ubuntu 22.04 image, or an archived daemon that is not byte for byte the daemon of the image being published; a recovery run that reuses a published image archives that image's daemon. A recovery dispatch of a tag whose source predates the `release-binaries` stage publishes the release without binaries and says so in its notes and summary; a tag push without the stage is refused. README.md § *Release binaries* states the runtime needs, the verification commands and both signing identities (`@refs/tags/<version>` for a tag push, `@refs/heads/main` for a recovery dispatch).
 
-### Changed in 0.13.0
+### Changed in 0.14.0
 
-- The gate workflow's `pod-lane` job runs `scripts/pod-lane.sh`: the `ess_confinement_pod` and `adversary_pod` suites against the `kind` cluster, each required by its own `test result:` line with at least one case passed, none failed, ignored or filtered out, and no case reporting itself absent; the script takes no arguments. `security_review_pod` reads no lane variable and stays in the workspace gate. The job adds a second ServiceAccount bound to the Pod and NetworkPolicy Role without `pods/log` for the no-log case, and names the kind node for the kubelet-stop case, which now waits for the adapter to remove the run's Pod and NetworkPolicy once the kubelet answers again.
-- `tests/confinement_public_items.rs` now freezes every type the `confinement` module's public items reach, to a fixed point, beside the module's own items. From the host crate that adds `SecretSlot`, `EgressAperture`, `GitSourceBinding`, `DriverError` and `DriverErrorClass`. From `substrate-wire` it adds `CapabilitySnapshot`, `CapabilityFacts`, `HostDriverKind`, `EgressApertureFact` and the fact types `CapabilityFacts` holds (`StorageQuotaFacts`, `ScratchQuotaFacts`, `ReadOnlyRootFacts`, `ReadOnlyFileFacts`, `ResourceUsageFacts`, `MetricsStreamFacts`, `StreamBoundsFacts`, `AttachmentBoundsFacts`, `ExecutionCapsuleFacts`, `NamespaceFacts`, `CgroupLimitFacts`). The list also covers:
-  - an `impl` of a module type in any file of the host crate;
-  - the associated types and constants of trait impls on held types;
-  - a wire type that shares a name with a module type;
-  - a type reached through a renaming `pub use … as …`.
-
-  `tests/confinement-public-items.txt` lists them. Adding, removing or reshaping any of them changes the list.
-- `b10x-substrate confine run` names its private group `confine-<pid>-<start time>` (the start time is field 22 of `/proc/<pid>/stat`). Before opening, it removes each such group whose owner has exited (including an owner still unreaped), deepest first, if the group holds no process. It never touches a running owner's group and never kills. Each group it leaves holding a process, or cannot remove, is named on one stderr line, and so is an unreadable root. Under `--output json`, these go instead into the verb's one document, as `left_groups` (`path` and `reason`) in `result` or in `error.data`. The exit status does not change.
-- The public site's command-line guide describes how `confine run` removes a killed run's group and `left_groups`; the profiles guide describes the `macos` developer-tool resolution and its refusal.
-
-### Fixed in 0.13.0
-
-- An egress aperture's listening socket is shut down when an aperture list fails to install, before its forwarders are killed. Before, only the installing process's descriptor was closed, so a child another thread forked meanwhile could keep the socket accepting connections from inside the run. A list that installs completely closes the installing process's copy without a shutdown, so the forwarder holds the last one and a forwarder that dies mid-run leaves its aperture refusing connections. A descriptor received and then refused inside the install is shut down as well.
-- `scripts/delegated-lane.sh` and `scripts/pod-lane.sh` read each suite's log through a here-string. Piped into `grep -q` under `pipefail`, a log longer than a pipe buffer after a match read as no match, so an `ABSENT` line could pass the lane.
+- The public site is built with Docusaurus on the shared Docs System, with the same pages, paths, grouping and heading IDs, and the start page unchanged. The Mermaid diagrams on the operations and system model pages render as diagrams, code blocks are highlighted, and the adapter matrices show `TRUE`, `UNKNOWN` (proved by the open-time probe on this host) and `FALSE` chips.
+- `cargo xtask docs-provenance --site website/build --commit <full-sha>` replaces `cargo xtask build-docs`: it checks the built site, holds the click ratchet on it, and writes `.well-known/b10x-site.json`, `.well-known/b10x-routes.json` and `.nojekyll`. `cargo xtask check-docs` keeps the Markdown checks and the reading-load ratchet without Node, and checks the pages against `website/sidebars.ts` and the start page's links. `cargo xtask docs-baseline` takes `--site` to measure clicks.
+- The *Release notes* page is generated from the newest released `CHANGELOG.md` section by `cargo xtask docs-releases`, and `check-docs` fails when the two differ.
+- *Getting started* now installs the command line and runs one command under the `oci` or `linux` adapter without a daemon, then shows a named refusal. The daemon walkthrough moves, with its heading IDs, to *Run a bounded command*.

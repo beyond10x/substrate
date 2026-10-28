@@ -26,6 +26,7 @@ use tokio::process::{Child, ChildStdin, Command};
 use tokio::sync::{Notify, mpsc};
 
 pub use crate::observation::{ExecObservation, PipeFrame, PipeStream};
+use crate::output_retention::{KeptOutput, OutputRetention, Retention, RetentionBuffer};
 use crate::{DispatchOutcome, DriverError, HostConfig};
 
 const TRUNCATION_MARKER: &[u8] = b"\n[substrate: output truncated]\n";
@@ -208,6 +209,17 @@ struct PipeState {
     /// Input goes here instead of to `stdin`, because a terminal has one descriptor and the line
     /// discipline on it is what turns a client's bytes into what the child reads.
     terminal: Option<Arc<crate::pty::PtyMaster>>,
+}
+
+/// What only the `linux` confinement adapter asks of a start beyond its wire request (design 29).
+/// No daemon route and no session sets anything here, so neither changes what the wire answers.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct AdapterStart {
+    /// Which bytes of each recorded stream are kept within the bound (§ 6).
+    pub(crate) retention: OutputRetention,
+    /// Refuse a writable subtree that holds a submodule the workspace registers, as `.git`
+    /// itself is refused: `confinement.writable-subtree-git` (§ 2).
+    pub(crate) refuse_registered_submodules: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -792,7 +804,22 @@ impl ProcessRuntime {
         workspace: &Path,
         input: &ExecStartInput,
     ) -> DispatchOutcome<ExecObservation> {
-        self.start_inner(id, workspace, &[], input, None).await
+        self.start_inner(id, workspace, &[], input, None, AdapterStart::default())
+            .await
+    }
+
+    /// [`Self::start`] with what only the `linux` confinement adapter asks beyond the wire
+    /// request (design 29): another retention than the head, and the registered-submodule rule.
+    /// No wire request can name either.
+    pub(crate) async fn start_for_adapter(
+        &self,
+        id: &str,
+        workspace: &Path,
+        input: &ExecStartInput,
+        adapter: AdapterStart,
+    ) -> DispatchOutcome<ExecObservation> {
+        self.start_inner(id, workspace, &[], input, None, adapter)
+            .await
     }
 
     /// [`Self::start`], also binding each writable Git root the daemon admitted (ADR 0038 kind 2).
@@ -803,8 +830,15 @@ impl ProcessRuntime {
         git_roots: &[crate::GitRootBinding],
         input: &ExecStartInput,
     ) -> DispatchOutcome<ExecObservation> {
-        self.start_inner(id, workspace, git_roots, input, None)
-            .await
+        self.start_inner(
+            id,
+            workspace,
+            git_roots,
+            input,
+            None,
+            AdapterStart::default(),
+        )
+        .await
     }
 
     /// Starts a confined process with bounded live stdin/stdout/stderr pipes.
@@ -905,8 +939,16 @@ impl ProcessRuntime {
                 SessionMode::Pty => input.window,
             },
         };
-        self.start_inner(id, workspace, git_roots, &input.exec, Some(settings))
-            .await
+        // A session keeps the head of what it forwarded live (design 29 § 6).
+        self.start_inner(
+            id,
+            workspace,
+            git_roots,
+            &input.exec,
+            Some(settings),
+            AdapterStart::default(),
+        )
+        .await
     }
 
     #[allow(clippy::too_many_lines)] // Admission, spawn barrier, and durable observation stay adjacent.
@@ -917,12 +959,21 @@ impl ProcessRuntime {
         git_roots: &[crate::GitRootBinding],
         input: &ExecStartInput,
         pipe_settings: Option<PipeSettings>,
+        adapter: AdapterStart,
     ) -> DispatchOutcome<ExecObservation> {
+        let retention = adapter.retention;
         let (pinned, read_only_roots, writable_roots) =
             match self.admit(id, workspace, git_roots, input) {
                 Ok(admitted) => admitted,
                 Err(error) => return DispatchOutcome::NotDispatched(error),
             };
+        // In the directory the run binds, after every subtree was shown to exist (design 29 § 2).
+        if adapter.refuse_registered_submodules
+            && let Err(error) =
+                crate::submodules::refuse_registered_submodules(&pinned, &input.workspace_access)
+        {
+            return DispatchOutcome::NotDispatched(error);
+        }
         let workspace_access =
             match Self::prepare_workspace_access(&pinned, &input.workspace_access) {
                 Ok(value) => value,
@@ -1314,6 +1365,9 @@ impl ProcessRuntime {
             stderr: Vec::new(),
             stdout_truncated: false,
             stderr_truncated: false,
+            // Nothing kept yet, and the total unknown until each stream is read to its end.
+            stdout_kept: Some(RetentionBuffer::new(retention.stdout, 0).kept()),
+            stderr_kept: Some(RetentionBuffer::new(retention.stderr, 0).kept()),
             output_complete: false,
             cgroup: Some(cgroup.name().to_owned()),
             leader_pid: Some(leader_pid),
@@ -1365,6 +1419,7 @@ impl ProcessRuntime {
             timeout,
             cpu_budget_micros,
             output_limit,
+            retention,
             pipe_sender,
             pipe_settings.map_or(PIPE_FRAME_BYTES, |settings| settings.frame_limit),
             capsule,
@@ -2423,8 +2478,10 @@ impl ProcessRuntime {
     ///
     /// Every check admission makes on the request alone runs here too, in admission's order:
     /// workspace access, the capability snapshot, the sandbox profile, the working directory, and
-    /// [`Self::admit_command_shape`] (argv, limits, environment). The workspace, read-only roots
-    /// and read-only files are pinned and refused exactly as a start pins and refuses them, and
+    /// [`Self::admit_command_shape`] (argv, limits, environment). The workspace, its writable
+    /// subtrees (absent, not a directory, a symlink, or holding a registered submodule),
+    /// read-only roots and read-only files are pinned and refused exactly as a start pins and
+    /// refuses them, and
     /// the descriptors are closed when this returns, so a number in the argv names nothing
     /// afterwards. What a render does not ask is what only a start acquires: the host's
     /// confinement facts and backend identity. What a start acquires only to run — secret slots, a
@@ -2484,6 +2541,11 @@ impl ProcessRuntime {
             .as_deref()
             .ok_or_else(DriverError::not_found)?;
         let pinned = crate::fs::pin_workspace_directory_beneath(root, workspace)?;
+        // The start's own subtree admission and, as the `linux` adapter's start applies it (that
+        // adapter is this function's only caller), the registered-submodule rule, so a render
+        // names the refusal a start names (design 29 §§ 1-2).
+        Self::admit_writable_subtrees(&pinned, &input.workspace_access)?;
+        crate::submodules::refuse_registered_submodules(&pinned, &input.workspace_access)?;
         let access = Self::prepare_workspace_access(&pinned, &input.workspace_access)?;
         drop(pinned);
         let slots = crate::secrets::SecretSlotSet::acquire(&[], &[])?;
@@ -2846,6 +2908,7 @@ async fn run_child(
     timeout: Duration,
     cpu_budget_micros: u64,
     output_limit: usize,
+    retention: OutputRetention,
     pipe_sender: Option<mpsc::Sender<PipeFrame>>,
     frame_limit: usize,
     capsule: Option<PreparedCapsule>,
@@ -2869,6 +2932,7 @@ async fn run_child(
             drain_capped(
                 Some(crate::pty::PtyOutput(master)),
                 output_limit,
+                Retention::Head,
                 pipe_sender,
                 PipeStream::Stdout,
                 frame_limit,
@@ -2878,7 +2942,13 @@ async fn run_child(
             )
             .await
         });
-        (merged, tokio::spawn(async { (Vec::new(), false) }))
+        let mut empty = RetentionBuffer::new(Retention::Head, output_limit);
+        empty.finish();
+        let empty = empty.kept();
+        (
+            merged,
+            tokio::spawn(async move { (Vec::new(), false, empty) }),
+        )
     } else {
         let unrecorded = execution
             .observation
@@ -2900,6 +2970,7 @@ async fn run_child(
                 drain_capped(
                     stdout,
                     output_limit,
+                    retention.stdout,
                     stdout_sender,
                     PipeStream::Stdout,
                     frame_limit,
@@ -2913,6 +2984,7 @@ async fn run_child(
                 drain_capped(
                     stderr,
                     output_limit,
+                    retention.stderr,
                     pipe_sender,
                     PipeStream::Stderr,
                     frame_limit,
@@ -2941,8 +3013,16 @@ async fn run_child(
         &output_bound,
     )
     .await;
-    let (stdout, stdout_truncated) = stdout_task.await.unwrap_or_else(|_| (Vec::new(), true));
-    let (stderr, stderr_truncated) = stderr_task.await.unwrap_or_else(|_| (Vec::new(), true));
+    // A drain that did not finish read nothing to its end: its total is unknown.
+    let lost = |retention| {
+        let mut lost = RetentionBuffer::new(retention, 0);
+        lost.fail();
+        (Vec::new(), true, lost.kept())
+    };
+    let (stdout, stdout_truncated, stdout_kept) =
+        stdout_task.await.unwrap_or_else(|_| lost(retention.stdout));
+    let (stderr, stderr_truncated, stderr_kept) =
+        stderr_task.await.unwrap_or_else(|_| lost(retention.stderr));
     let measured = execution.observation.lock().resource.usage.is_some();
     let terminal_usage = measured.then(|| {
         let mut usage = cgroup.resource_usage(true, started_at)?;
@@ -2991,6 +3071,8 @@ async fn run_child(
     observation.stderr = stderr;
     observation.stdout_truncated = stdout_truncated;
     observation.stderr_truncated = stderr_truncated;
+    observation.stdout_kept = Some(stdout_kept);
+    observation.stderr_kept = Some(stderr_kept);
     observation.output_complete = true;
     observation.resource.observed_at = Utc::now();
     if let Some(usage) = terminal_usage {
@@ -3533,35 +3615,51 @@ fn contain_cgroup(cgroup: &Cgroup, error: DriverError) -> DispatchOutcome<ExecOb
 /// `[substrate: output truncated]` into a merged terminal transcript would both speak a statement
 /// the published frame vocabulary has no branch for and destroy the last
 /// `TRUNCATION_MARKER.len()` bytes the child actually wrote inside the bound.
+///
+/// `retention` chooses which bytes inside the bound are stored (design 29 § 6). It applies only
+/// to recorded output with no live sender: a session's stored bytes are what it forwarded, so a
+/// drain with a sender keeps the head whatever it is asked.
 #[allow(clippy::too_many_arguments)] // Reader, durable bound, live channel and refusal facts are one drain contract.
 async fn drain_capped<R>(
     reader: Option<R>,
     limit: usize,
+    retention: Retention,
     sender: Option<mpsc::Sender<PipeFrame>>,
     stream: PipeStream,
     frame_limit: usize,
     execution: Option<Arc<Execution>>,
     bound_reached: Option<Arc<AtomicBool>>,
     mark_truncation: bool,
-) -> (Vec<u8>, bool)
+) -> (Vec<u8>, bool, KeptOutput)
 where
     R: AsyncRead + Unpin,
 {
+    let retention = if sender.is_some() {
+        Retention::Head
+    } else {
+        retention
+    };
     let Some(mut reader) = reader else {
-        return (Vec::new(), false);
+        let mut empty = RetentionBuffer::new(retention, limit);
+        empty.finish();
+        return (Vec::new(), false, empty.kept());
     };
     let unrecorded = execution
         .as_ref()
         .is_some_and(|e| e.observation.lock().resource.unrecorded_output.is_some());
-    let mut stored = Vec::with_capacity(if unrecorded { 0 } else { limit.min(65_536) });
+    let mut kept = RetentionBuffer::new(retention, if unrecorded { 0 } else { limit });
     let mut accounted = 0usize;
     let mut buffer = [0_u8; 8192];
     let mut truncated = false;
     loop {
         let count = match reader.read(&mut buffer).await {
-            Ok(0) => break,
+            Ok(0) => {
+                kept.finish();
+                break;
+            }
             Ok(count) => count,
             Err(_) => {
+                kept.fail();
                 truncated = true;
                 break;
             }
@@ -3569,9 +3667,7 @@ where
         let remaining = limit.saturating_sub(accounted);
         let retained = remaining.min(count);
         accounted = accounted.saturating_add(retained);
-        if !unrecorded {
-            stored.extend_from_slice(&buffer[..retained]);
-        }
+        kept.push(&buffer[..count]);
         if let Some(e) = execution.as_ref()
             && let Some(stats) = e.observation.lock().resource.unrecorded_output.as_mut()
         {
@@ -3603,17 +3699,21 @@ where
             }
         }
     }
-    if truncated && !unrecorded {
+    let (mut stored, mut record) = kept.snapshot();
+    // The marker is written only under `Head`: under the other modes it would overwrite kept
+    // bytes, and the record already says what is missing.
+    if truncated && !unrecorded && retention == Retention::Head {
         if !mark_truncation {
             stored.truncate(limit);
         } else if limit >= TRUNCATION_MARKER.len() {
             stored.truncate(limit - TRUNCATION_MARKER.len());
+            record.head_bytes = stored.len() as u64;
             stored.extend_from_slice(TRUNCATION_MARKER);
         } else {
             stored.truncate(limit);
         }
     }
-    (stored, truncated)
+    (stored, truncated, record)
 }
 
 /// Reserve a finite queue slot before copying payload. Occupancy includes reserved slots.
@@ -4314,6 +4414,7 @@ mod tests {
         recording_backend, wait_terminal_with_hook,
     };
     use super::{RawFd, bubblewrap_descriptor, inherited_clear_of_slots, pipe};
+    use crate::output_retention::Retention;
     use crate::{DispatchOutcome, HostConfig};
 
     /// A fake exec cgroup carrying every counter `resource_usage` reads, with `controllers` as its
@@ -4483,6 +4584,8 @@ mod tests {
             stderr: Vec::new(),
             stdout_truncated: false,
             stderr_truncated: false,
+            stdout_kept: None,
+            stderr_kept: None,
             output_complete: false,
             cgroup: None,
             leader_pid: None,
@@ -5533,6 +5636,7 @@ mod tests {
             let drain = tokio::spawn(drain_capped(
                 Some(reader),
                 8,
+                Retention::Head,
                 Some(sender),
                 stream,
                 4,
@@ -5542,7 +5646,7 @@ mod tests {
             ));
             writer.write_all(b"canary-112").await.unwrap();
             drop(writer);
-            let (captured, truncated) = drain.await.unwrap();
+            let (captured, truncated, _) = drain.await.unwrap();
             let mut delivered = Vec::new();
             while let Some(frame) = receiver.recv().await {
                 delivered.extend(frame.bytes);
@@ -5583,6 +5687,7 @@ mod tests {
         let drain = tokio::spawn(drain_capped(
             Some(reader),
             4,
+            Retention::Head,
             Some(sender),
             PipeStream::Stdout,
             64,
@@ -5596,7 +5701,7 @@ mod tests {
         assert_eq!(frame.stream, PipeStream::Stdout);
         assert_eq!(frame.bytes, b"abcd");
         assert!(receiver.recv().await.is_none());
-        let (captured, truncated) = drain.await.unwrap();
+        let (captured, truncated, _) = drain.await.unwrap();
         assert_eq!(captured, b"abcd");
         assert!(truncated);
     }
@@ -5614,6 +5719,7 @@ mod tests {
             let stdout = tokio::spawn(drain_capped(
                 Some(&b"aa"[..]),
                 64,
+                Retention::Head,
                 Some(sender.clone()),
                 PipeStream::Stdout,
                 1,
@@ -5627,6 +5733,7 @@ mod tests {
             let stderr = tokio::spawn(drain_capped(
                 Some(&b"b"[..]),
                 64,
+                Retention::Head,
                 Some(sender),
                 PipeStream::Stderr,
                 1,
@@ -5640,7 +5747,7 @@ mod tests {
                 "sibling must be waiting on the same full queue"
             );
             tokio::time::advance(Duration::from_millis(901)).await;
-            let (captured, truncated) = stdout.await.unwrap();
+            let (captured, truncated, _) = stdout.await.unwrap();
             assert!(!truncated);
             assert_eq!(
                 captured,
@@ -5655,7 +5762,7 @@ mod tests {
             // An attached consumer can free capacity before the supervisor's next tick closes
             // the queue. A producer already waiting must not resume after its sibling failed.
             assert_eq!(receiver.recv().await.unwrap().bytes, b"a");
-            let (captured, truncated) = stderr.await.unwrap();
+            let (captured, truncated, _) = stderr.await.unwrap();
             assert!(!truncated);
             assert_eq!(
                 captured,
@@ -5702,6 +5809,7 @@ mod tests {
             let drain = tokio::spawn(drain_capped(
                 Some(reader),
                 payload.len(),
+                Retention::Head,
                 Some(sender),
                 PipeStream::Stdout,
                 super::PIPE_FRAME_BYTES,
@@ -5733,7 +5841,7 @@ mod tests {
             })
             .await
             .expect("consumer drains every frame");
-            let (captured, truncated) = drain.await.unwrap();
+            let (captured, truncated, _) = drain.await.unwrap();
             assert_eq!(delivered, payload);
             assert!(!truncated);
             assert!(!execution.cancellation_requested.load(Ordering::Acquire));
@@ -5775,6 +5883,7 @@ mod tests {
         let drain = tokio::spawn(drain_capped(
             Some(reader),
             64,
+            Retention::Head,
             Some(sender),
             PipeStream::Stdout,
             1,
@@ -5797,7 +5906,7 @@ mod tests {
             "queue must tolerate transient occupancy"
         );
         assert!(!execution.pipe_backpressure.load(Ordering::Acquire));
-        let (captured, truncated) = tokio::time::timeout(Duration::from_secs(2), drain)
+        let (captured, truncated, _) = tokio::time::timeout(Duration::from_secs(2), drain)
             .await
             .expect("stall deadline releases drain without a consumer")
             .unwrap();
@@ -5856,6 +5965,7 @@ mod tests {
             let drain = tokio::spawn(drain_capped(
                 Some(reader),
                 64,
+                Retention::Head,
                 Some(sender),
                 PipeStream::Stdout,
                 1,
@@ -5871,7 +5981,7 @@ mod tests {
             assert!(!drain.is_finished());
             // Signal and timeout cleanup use this exact production receiver-close operation.
             close_live_output(&execution).await;
-            let (captured, truncated) = tokio::time::timeout(Duration::from_millis(100), drain)
+            let (captured, truncated, _) = tokio::time::timeout(Duration::from_millis(100), drain)
                 .await
                 .expect("receiver close wakes pending reservation")
                 .unwrap();

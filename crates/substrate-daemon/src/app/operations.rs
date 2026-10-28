@@ -1357,6 +1357,8 @@ pub(super) fn observation_from_stored(stored: StoredExec) -> ExecObservation {
         stderr: stored.stderr,
         stdout_truncated: stored.stdout_truncated,
         stderr_truncated: stored.stderr_truncated,
+        stdout_kept: None,
+        stderr_kept: None,
         output_complete: stored.output_complete,
         cgroup: stored.cgroup,
         leader_pid: stored.leader_pid,

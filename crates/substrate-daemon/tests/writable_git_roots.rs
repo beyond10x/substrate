@@ -131,6 +131,8 @@ impl GitRootFixtureDriver {
             stderr: Vec::new(),
             stdout_truncated: false,
             stderr_truncated: false,
+            stdout_kept: None,
+            stderr_kept: None,
             output_complete: complete,
             cgroup: None,
             leader_pid: None,

@@ -66,6 +66,8 @@ Each profile field needs the family or the fact beside it.
 |---|---|
 | `families`, `facts` | themselves, beyond what the fields imply |
 | `workspace`, `workdir` | `workspace` |
+| `workspace_access` other than `ReadWrite` | `workspace` |
+| `output_retention` other than `Head` on both streams | `output_read` |
 | `writable_roots`, `read_only_roots`, `read_only_files` | `filesystem_view` |
 | `sealed_paths` | the fact `sealed_paths` |
 | `exec_subpaths` | the fact `exec_subpaths` |
@@ -89,6 +91,14 @@ A workspace is the directory the run starts in and may write, so a build that wr
 inside it needs no more than `workspace`. A directory outside it is a declared root:
 `read_only_roots` for a toolchain, `writable_roots` for an install root the operator declared by
 name.
+
+`workspace_access: Scoped` names the subtrees a run may write; the rest of the workspace is
+read-only. `linux` and `systemd` around it serve it. The run cannot write the root's `.git`, and a
+subtree that is `.git`, lies beneath it or holds a submodule the root's `.gitmodules` registers is
+refused (`confinement.writable-subtree-git`). Limits: an unregistered nested `.git` stays writable,
+and host Git run inside a subtree reads a repository the run created there, so run it in the root.
+A hard link made on the host before the run stays writable through a subtree; the run cannot
+create one (`EXDEV`).
 
 ## Choose an adapter by its facts
 

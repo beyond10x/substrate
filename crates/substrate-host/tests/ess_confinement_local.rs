@@ -604,3 +604,185 @@ async fn a_profile_admitted_on_one_adapter_does_not_start_on_another() {
         .expect_err("refused");
     assert_eq!(code(&error), "confinement.adapter-unserved");
 }
+
+// A7: an unconfined process cannot be kept from a path, so `local` refuses a narrower workspace
+// by the host's own name, audited, before anything is spawned.
+#[test]
+fn local_refuses_a_narrower_workspace_scoped_write_unserved() {
+    let adapter = local();
+    for access in [
+        confinement::WorkspaceAccess::ReadOnly,
+        confinement::WorkspaceAccess::Scoped {
+            writable_subtrees: vec!["out".to_owned()],
+        },
+    ] {
+        let (sink, records) = recording();
+        let error = adapter
+            .admit(&ConfinementProfile {
+                local_reason: Some(REASON.into()),
+                workspace_access: access.clone(),
+                audit: Some(sink),
+                ..ConfinementProfile::default()
+            })
+            .expect_err("refused");
+        assert_eq!(
+            code(&error),
+            substrate_wire::EXEC_WORKSPACE_SCOPED_WRITE_UNSERVED,
+            "{access:?}: {error}"
+        );
+        assert_eq!(error.status(), 501);
+        let records = records.lock();
+        assert_eq!(records.len(), 1, "{records:?}");
+        let record = serde_json::to_value(&records[0]).expect("record");
+        assert_eq!(record["event"], "profile_refused");
+        assert_eq!(
+            record["code"],
+            substrate_wire::EXEC_WORKSPACE_SCOPED_WRITE_UNSERVED
+        );
+    }
+}
+
+/// The last number `seq` prints in the retention cases: about 2 MiB, twice `local`'s bound.
+const SEQ_LAST: u32 = 300_000;
+
+/// Runs `seq 1 SEQ_LAST` under `local` with `retention` on stdout and checks what it kept.
+async fn local_retains(retention: confinement::Retention) {
+    let adapter = local();
+    let workspace = tempfile::tempdir().expect("workspace");
+    let admitted = adapter
+        .admit(&ConfinementProfile {
+            local_reason: Some(REASON.into()),
+            workspace: Some(workspace.path().to_path_buf()),
+            output_retention: confinement::OutputRetention {
+                stdout: retention,
+                stderr: confinement::Retention::Head,
+            },
+            ..ConfinementProfile::default()
+        })
+        .expect("admitted");
+    let run = adapter
+        .start(
+            &admitted,
+            &Command {
+                argv: vec!["/usr/bin/seq".into(), "1".into(), SEQ_LAST.to_string()],
+                env: BTreeMap::new(),
+            },
+        )
+        .await
+        .expect("started");
+    let ended = adapter.wait(&run).await.expect("waited");
+    assert_eq!(ended.exit.as_ref().and_then(|exit| exit.code), Some(0));
+    let output = adapter.output(&run).await.expect("output");
+    let stream = support::seq_bytes(SEQ_LAST);
+    assert!(stream.len() > confinement::local::LOCAL_OUTPUT_LIMIT_BYTES);
+    support::assert_retained(
+        &format!("local {retention:?}"),
+        &stream,
+        &output.stdout,
+        &output.stdout_kept,
+        retention,
+        confinement::local::LOCAL_OUTPUT_LIMIT_BYTES,
+        None,
+    );
+    assert!(output.stdout_truncated, "bytes were dropped");
+    let first = b"1\n2\n3\n";
+    let last = format!("{SEQ_LAST}\n");
+    let holds_first = output.stdout.starts_with(first);
+    let holds_last = output.stdout.ends_with(last.as_bytes());
+    match retention {
+        confinement::Retention::Head => assert!(holds_first && !holds_last),
+        confinement::Retention::Tail => assert!(!holds_first && holds_last),
+        confinement::Retention::HeadAndTail => assert!(holds_first && holds_last),
+    }
+    assert!(output.stderr.is_empty() && !output.stderr_truncated);
+    assert_eq!(output.stderr_kept.observed_bytes, Some(0));
+}
+
+// Design 29 § 6: an adapter that reads its own pipes answers `output()` while the run is running
+// with what it kept so far. The run prints, says so through a file, then waits for the go-ahead,
+// so every read happens while it is alive and after its bytes were written. The bytes can still be
+// in the pipe when the file appears, so the case reads until the drain has them, before the
+// go-ahead; one read raced the drain on main 981eb1f1 and saw nothing.
+#[tokio::test(flavor = "multi_thread")]
+async fn local_output_while_running_is_what_was_kept_so_far() {
+    let adapter = local();
+    let workspace = tempfile::tempdir().expect("workspace");
+    let admitted = adapter
+        .admit(&ConfinementProfile {
+            local_reason: Some(REASON.into()),
+            workspace: Some(workspace.path().to_path_buf()),
+            output_retention: confinement::OutputRetention {
+                stdout: confinement::Retention::Tail,
+                stderr: confinement::Retention::Head,
+            },
+            ..ConfinementProfile::default()
+        })
+        .expect("admitted");
+    let run = adapter
+        .start(
+            &admitted,
+            &Command {
+                argv: vec![
+                    "/bin/sh".into(),
+                    "-c".into(),
+                    "printf abc; : > \"$WS/printed\"; i=0; \
+                     while [ ! -e \"$WS/go\" ] && [ $i -lt 200 ]; do sleep 0.05; i=$((i+1)); done"
+                        .into(),
+                ],
+                env: BTreeMap::from([
+                    ("PATH".to_owned(), "/usr/bin:/bin".to_owned()),
+                    (
+                        "WS".to_owned(),
+                        workspace.path().to_str().expect("utf-8").to_owned(),
+                    ),
+                ]),
+            },
+        )
+        .await
+        .expect("started");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while !workspace.path().join("printed").exists() {
+        assert!(std::time::Instant::now() < deadline, "never printed");
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    let during = loop {
+        let during = adapter.output(&run).await.expect("output while running");
+        if !during.stdout.is_empty() || std::time::Instant::now() >= deadline {
+            break during;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
+    std::fs::write(workspace.path().join("go"), "").expect("go");
+    let ended = adapter.wait(&run).await.expect("waited");
+    assert_eq!(ended.exit.as_ref().and_then(|exit| exit.code), Some(0));
+    let after = adapter.output(&run).await.expect("output");
+    assert_eq!(
+        during.stdout, b"abc",
+        "while running: {:?}",
+        during.stdout_kept
+    );
+    assert_eq!(
+        during.stdout_kept.observed_bytes, None,
+        "the total is not known yet"
+    );
+    assert_eq!(after.stdout, b"abc");
+    assert_eq!(after.stdout_kept.observed_bytes, Some(3));
+}
+
+// B2
+#[tokio::test(flavor = "multi_thread")]
+async fn local_head_keeps_the_first_bytes_of_a_long_stream() {
+    local_retains(confinement::Retention::Head).await;
+}
+
+// B3
+#[tokio::test(flavor = "multi_thread")]
+async fn local_tail_keeps_the_last_bytes_of_a_long_stream() {
+    local_retains(confinement::Retention::Tail).await;
+}
+
+// B4
+#[tokio::test(flavor = "multi_thread")]
+async fn local_head_and_tail_keeps_both_ends_of_a_long_stream() {
+    local_retains(confinement::Retention::HeadAndTail).await;
+}

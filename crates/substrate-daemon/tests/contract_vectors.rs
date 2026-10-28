@@ -195,6 +195,8 @@ impl VectorDriver {
             stderr: Vec::new(),
             stdout_truncated: false,
             stderr_truncated: false,
+            stdout_kept: None,
+            stderr_kept: None,
             output_complete: true,
             cgroup: Some("substrate/vector".to_owned()),
             leader_pid: None,

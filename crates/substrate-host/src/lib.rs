@@ -24,6 +24,9 @@ mod fs;
 mod git;
 pub mod host_process;
 mod observation;
+// Which bytes of a bounded output stream a run keeps (design 29). Published through `confinement`,
+// which re-exports its public types.
+mod output_retention;
 #[cfg(target_os = "linux")]
 mod probe;
 #[cfg(target_os = "linux")]
@@ -41,6 +44,8 @@ pub mod seatbelt;
 mod seccomp;
 #[cfg(target_os = "linux")]
 mod secrets;
+#[cfg(target_os = "linux")]
+mod submodules;
 #[cfg(not(target_os = "linux"))]
 mod unsupported;
 #[cfg(target_os = "linux")]
@@ -70,6 +75,7 @@ use zeroize::Zeroizing;
 
 pub use aperture::EgressAperture;
 pub use observation::{ExecObservation, PipeFrame, PipeStream};
+use output_retention::OutputRetention;
 // The host-process port and the vocabulary its signatures force, at the crate root as `Driver`'s
 // is: a client names these, and never `host_process::HostProcessSupervisor`.
 pub use host_process::{
@@ -1159,6 +1165,30 @@ impl HostDriver {
             ));
         }
         Ok(self.config.workspace_root.join(root_name))
+    }
+
+    /// [`Driver::start_exec`] for the `linux` confinement adapter (design 29): keeping the bytes
+    /// of each recorded stream `retention` chooses within the same bound (§ 6), and refusing a
+    /// writable subtree that holds a registered submodule (§ 2). `pub(crate)`, so no session and
+    /// no daemon route can ask for either.
+    pub(crate) async fn start_exec_for_adapter(
+        &self,
+        id: &str,
+        workspace_root_name: &str,
+        input: &ExecStartInput,
+        retention: OutputRetention,
+    ) -> DispatchOutcome<ExecObservation> {
+        let workspace = match self.workspace_path(workspace_root_name) {
+            Ok(value) => value,
+            Err(error) => return DispatchOutcome::NotDispatched(error),
+        };
+        let adapter = process::AdapterStart {
+            retention,
+            refuse_registered_submodules: true,
+        };
+        self.processes
+            .start_for_adapter(id, &workspace, input, adapter)
+            .await
     }
 
     pub fn root(&self) -> &Path {

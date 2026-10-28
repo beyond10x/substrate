@@ -625,3 +625,152 @@ pub fn run(
     }
     (executed, audited, open_checks)
 }
+
+/// What `seq 1 <last>` writes: every number from 1 to `last` on its own line.
+pub fn seq_bytes(last: u32) -> Vec<u8> {
+    (1..=last)
+        .flat_map(|number| format!("{number}\n").into_bytes())
+        .collect()
+}
+
+/// Asserts that `held`, the bytes `RunOutput` holds for one stream, are the part of `stream` its
+/// `kept` record names under `retention` and the stream's `bound` (design 29 §§ 5 and 6).
+///
+/// The head is `held[..head_bytes]`, the tail directly after it, and anything after the tail is
+/// `marker`, the `linux` truncation marker, which only `Head` over the bound carries. The record's
+/// counts are compared with the bytes the run wrote, never with themselves.
+pub fn assert_retained(
+    name: &str,
+    stream: &[u8],
+    held: &[u8],
+    kept: &confinement::KeptOutput,
+    retention: confinement::Retention,
+    bound: usize,
+    marker: Option<&[u8]>,
+) {
+    use confinement::Retention;
+    assert_eq!(kept.retention, retention, "{name}: the record's mode");
+    assert_eq!(
+        kept.observed_bytes,
+        Some(stream.len() as u64),
+        "{name}: every byte the run wrote is counted"
+    );
+    let head_len = usize::try_from(kept.head_bytes).expect("head");
+    let tail_len = usize::try_from(kept.tail_bytes).expect("tail");
+    assert!(
+        head_len + tail_len <= bound,
+        "{name}: {head_len} + {tail_len} exceeds {bound}"
+    );
+    assert!(
+        held.len() <= bound,
+        "{name}: {} held exceeds {bound}",
+        held.len()
+    );
+    if stream.len() <= bound {
+        assert_eq!(
+            head_len + tail_len,
+            stream.len(),
+            "{name}: nothing is omitted"
+        );
+        assert_eq!(held, stream, "{name}: the whole stream is held in order");
+        return;
+    }
+    let (head_cap, tail_cap) = match retention {
+        Retention::Head => (bound - marker.map_or(0, <[u8]>::len), 0),
+        Retention::Tail => (0, bound),
+        Retention::HeadAndTail => (bound / 2, bound - bound / 2),
+    };
+    assert_eq!(
+        (head_len, tail_len),
+        (head_cap, tail_cap),
+        "{name}: the split"
+    );
+    assert_eq!(&held[..head_len], &stream[..head_len], "{name}: the head");
+    assert_eq!(
+        &held[head_len..head_len + tail_len],
+        &stream[stream.len() - tail_len..],
+        "{name}: the tail"
+    );
+    let rest = &held[head_len + tail_len..];
+    match (retention, marker) {
+        (Retention::Head, Some(marker)) => assert_eq!(rest, marker, "{name}: the marker"),
+        _ => assert!(
+            rest.is_empty(),
+            "{name}: {} bytes after the tail",
+            rest.len()
+        ),
+    }
+}
+
+/// Design 29 A1: a run under `Scoped(["out"])` writes one file in the subtree and tries one beside
+/// it and one at the top of the workspace. Each attempt prints whether it was written.
+pub const SCOPED_WRITE_SCRIPT: &str = "w() { if (printf %s \"$2\" > \"$1\") 2>/dev/null; \
+     then echo \"$1 written\"; else echo \"$1 refused\"; fi; }; \
+     w /workspace/out/f ok; w /workspace/src/f x; w /workspace/f y";
+
+/// The workspace A1 runs in: `out` and `src`, both empty.
+pub fn scoped_write_workspace(workspace: &std::path::Path) {
+    std::fs::create_dir_all(workspace.join("out")).expect("out");
+    std::fs::create_dir_all(workspace.join("src")).expect("src");
+}
+
+/// The profile field A1 names.
+pub fn scoped_out() -> confinement::WorkspaceAccess {
+    confinement::WorkspaceAccess::Scoped {
+        writable_subtrees: vec!["out".to_owned()],
+    }
+}
+
+/// A1's assertions: the run says only `out/f` was written, and the host agrees.
+pub fn assert_scoped_write(name: &str, workspace: &std::path::Path, stdout: &[u8]) {
+    assert_eq!(
+        String::from_utf8_lossy(stdout),
+        "/workspace/out/f written\n/workspace/src/f refused\n/workspace/f refused\n",
+        "{name}: what the run could write"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("out/f")).expect("out/f"),
+        "ok",
+        "{name}: the write in the subtree landed"
+    );
+    for refused in ["src/f", "f"] {
+        assert!(
+            !workspace.join(refused).exists(),
+            "{name}: {refused} exists on the host"
+        );
+    }
+}
+
+/// Every entry beneath `root`, by relative path: a file's bytes, a directory as `None`, and a
+/// symlink as its target, read without following it.
+pub fn tree(root: &std::path::Path) -> BTreeMap<std::path::PathBuf, Option<Vec<u8>>> {
+    fn walk(
+        root: &std::path::Path,
+        directory: &std::path::Path,
+        entries: &mut BTreeMap<std::path::PathBuf, Option<Vec<u8>>>,
+    ) {
+        let mut names: Vec<_> = std::fs::read_dir(directory)
+            .expect("read_dir")
+            .map(|entry| entry.expect("entry").path())
+            .collect();
+        names.sort();
+        for path in names {
+            let relative = path.strip_prefix(root).expect("beneath").to_path_buf();
+            let kind = std::fs::symlink_metadata(&path)
+                .expect("metadata")
+                .file_type();
+            if kind.is_dir() {
+                entries.insert(relative, None);
+                walk(root, &path, entries);
+            } else if kind.is_symlink() {
+                let target = std::fs::read_link(&path).expect("link");
+                entries.insert(relative, Some(target.into_os_string().into_encoded_bytes()));
+            } else {
+                entries.insert(relative, Some(std::fs::read(&path).expect("file")));
+            }
+        }
+    }
+    let mut entries = BTreeMap::new();
+    walk(root, root, &mut entries);
+    entries
+}

@@ -208,6 +208,8 @@ impl Driver for AdoptFixtureDriver {
             stderr: output.stderr,
             stdout_truncated: false,
             stderr_truncated: false,
+            stdout_kept: None,
+            stderr_kept: None,
             output_complete: true,
             cgroup: None,
             leader_pid: None,
