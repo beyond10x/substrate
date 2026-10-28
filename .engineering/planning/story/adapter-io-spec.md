@@ -2,11 +2,13 @@
 format: aep.planning-md/3
 id: story:adapter-io-spec
 kind: story
-status: draft
+status: archived
 title: The confinement specification states adapter standard input
 relations:
 - decomposes: epic:confinement-contract-family
-revision: 3
+revision: 5
+transitions:
+- {from: "draft", to: "archived", at: "2026-10-28T19:24:53Z", actor: "human:timo", revision: 5, decided_on: {"recorded":{"review_outcome":2}}}
 ---
 # The confinement contract states standard input
 
@@ -37,3 +39,7 @@ None.
   and the obligation counts `check-ess` reports.
 - It lands with `story:adapter-stdin-pipe` as one unit, merged only with every lane green on the
   unit's head. `pod-stdin-pipe-unserved-on-pod` passes from this story's commit on.
+
+Folded by review pass 3 H3 of design 32: a spec story whose acceptance needs its adapter story
+cannot merge alone under one story per unit, so this spec change moved into its adapter story as
+that story's first commit, and this story is archived.

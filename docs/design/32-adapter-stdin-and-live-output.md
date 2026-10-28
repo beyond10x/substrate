@@ -1,7 +1,7 @@
 # Design 32: standard input and live output on the confinement adapters
 
-Status: proposed, 2026-10-28, revised after review passes 1 and 2 the same day (§ 13). § 11 names
-the stories. It changes no wire byte and no contract bundle: the adapters are substrate-host's
+Status: proposed, 2026-10-28, revised after review passes 1, 2 and 3 the same day (§ 13). § 11
+names the stories. It changes no wire byte and no contract bundle: the adapters are substrate-host's
 confinement API
 ([ADR 0044](../../adr/0044-confinement-is-a-contract-family-served-by-declared-adapters.md)
 decisions 7 and 8). No code before acceptance (invariant 8).
@@ -21,8 +21,8 @@ contract, reusing the session machinery and its decided bounds rather than inven
 
 ## 1. Evidence: what the tree does at `dc75cbd5`
 
-The rows from "the host keeps a raw pipe's `ChildStdin`" on were added in review pass 2 and read on
-this design's branch.
+The rows from "the host keeps a raw pipe's `ChildStdin`" on were added in review passes 2 and 3 and
+read on this design's branch; the `read_pipe` row was corrected in pass 3.
 
 | what | where |
 |---|---|
@@ -40,7 +40,10 @@ this design's branch.
 | `oci`'s open reads the runtime's flavor and version (`RuntimeProbe`) | `oci.rs` `parse_info` |
 | public and not `#[non_exhaustive]`: `ConfinementProfile` (public fields, `Default`), `ConfinementError`, `RunObservation`, and the generated `Fact` (serde `Serialize` and `Deserialize`); `FACT_ORDER: [Fact; 11]` and `FAMILY_ORDER: [ContractFamily; 10]` are public fixed-length arrays | `confinement/mod.rs`, `confinement/profile.rs`, `confinement/facts.rs`, `crates/substrate-host/src/generated/confinement.rs`, `crates/substrate-host/tests/confinement-public-items.txt` |
 | the host keeps a raw pipe's `ChildStdin` in `PipeState` for as long as it tracks the exec; nothing drops it when the run ends | `process.rs` `start_inner` (the `PipeState` it builds) |
-| `read_pipe` holds the output receiver's lock around one `recv` only | `process.rs` `read_pipe` |
+| `read_pipe` holds the output receiver's lock for its whole `timeout(recv)`, and `signal` takes the same lock to close the receiver before it signals, so a long read on a silent child holds `signal` until the read times out. A `read_pipe` that receives `None` then waits up to 5 s for the run's terminal observation | `process.rs` `read_pipe`, `signal` |
+| the `linux` adapter sends every signal with `grace_ms: 0`. The host closes the live receiver, signals the cgroup and, for `Int` or `Term`, kills it unless the run already ended: every signal is an imposed end | `linux.rs` `signal`; `process.rs` `signal` |
+| `local`'s `signal` sends `Int`, `Term` or `Kill` to the run's process group and nothing else; a child may trap `Int` and `Term` and keep running | `local.rs` `signal` |
+| `linux`'s per-stream output bound is the smaller of the run's `io_bounds.output_bytes` and the host's configured `output_limit_bytes` | `process.rs` `start_inner` (`output_limit`) |
 | a signal, a timeout, the CPU budget, an aperture ceiling or the output bound of an unrecorded or pty run closes the live receiver before reconciliation. `forward_frame` then returns `false` for every later chunk while `drain_capped` keeps filling the record; `pipe_backpressure` stays `false` and nothing else records that delivery stopped | `process.rs` `signal` (the receiver closed before signalling), the run loop's ends and `close_live_output`, `forward_frame` |
 | there is no per-stream bound flag: `run_child` gives both drains of a recorded run one shared `AtomicBool` | `process.rs` `run_child` (`stdout_bound`, `stderr_bound`) |
 | `RunObservation` states an end as `exit.code` or `exit.signal`; it does not say which bound ended a run | `confinement/mod.rs` `RunObservation`, `RunExit`; `linux.rs` `observation` |
@@ -157,7 +160,7 @@ pub async fn run_with_stdin(
   (422). An unknown run is the adapters' existing not-found.
 - **`run_with_stdin`** refuses before it starts anything, writing no start record: a profile
   admitted with `Null`, `session.not-pipe` (422); an `input` longer than `limit_bytes`,
-  `session.input-limit` (429); and, once `output_live` exists (§ 11, story 4), a profile admitted
+  `session.input-limit` (429); and, once `output_live` exists (§ 11, `story:adapter-live-output`), a profile admitted
   with `OutputDelivery::Live`, `confinement.live-output-unread` (422), because it reads no events,
   so a `Live` run would stall once its queue filled and be killed after the 1 s deadline. Once
   started, it holds a guard over a clone of the adapter `Arc` and the run id. If the helper's
@@ -244,7 +247,8 @@ wire's `OutputStream` is a different type and is not reused.
 - **Bounded.** `queued_chunks` is 1 to `MAX_QUEUED_CHUNKS` (16, the host's `PIPE_QUEUED_FRAMES`);
   outside it, `session.limit-unserved` (429) at admission. A chunk holds 1 to 64 KiB, and its
   boundaries carry no meaning. Each stream delivers at most its existing output bound (1 MiB, or
-  `io_bounds.output_bytes` where `limits` is served). No bound changes.
+  `io_bounds.output_bytes` where `limits` is served; under `linux` the smaller of that and the
+  host's configured `output_limit_bytes`, § 1). No bound changes.
 - **Chunk sizes in this tree.** A chunk is one read of the adapter's drain: at most 8 KiB under
   `linux` and `systemd` around `linux` (`drain_capped`'s read buffer), at most 16 KiB under
   `local`, `systemd` around `local`, `macos` and `oci` (`output_retention::drain`'s). The contract
@@ -261,12 +265,18 @@ wire's `OutputStream` is a different type and is not reused.
   design applies the same deadline and the same kill to an embedder reading in its own process: the
   rule and its bounds are ADR 0031's, and the reader it now covers is new (§ 10, D4 and Q5).
 - **Delivery stops when the run is ended for it.** A run ends naturally when its process exits on
-  its own (an exit code, or a signal the adapter did not send). Every other end is imposed: the
-  embedder's `signal`, a timeout, the CPU budget, an aperture ceiling, an output bound that ends
-  the run, or the stall. On an imposed end the adapter stops delivery at once: under `linux` the
-  host closes the live receiver before it reconciles (§ 1), and the shared drain does the same by
-  closing its queue before the adapter signals. Chunks queued before that stay readable, in order.
-  The drain keeps reading the pipes and keeps filling the record within its bound, so the record,
+  its own (an exit code, or a signal the adapter did not send). An end is imposed when the adapter
+  or the host ends the run and closes the live queue first: `signal(Kill)`, a timeout, the CPU
+  budget, an aperture ceiling, an output bound that ends the run, or the stall. Under `linux` and
+  `systemd` around `linux` every signal is imposed: the adapter sends it with `grace_ms: 0`, and
+  the host closes the live receiver, signals and kills the cgroup unless the run already ended
+  (§ 1), so `Int` and `Term` are end-equivalent there. Under `local`, `systemd` around `local`,
+  `macos` and `oci`, `Int` and `Term` close nothing: the child may trap them, and delivery
+  continues until the run ends or stalls, so a run that ends after one is a natural end for
+  delivery. Of the embedder's signals there, only `Kill` closes the shared drain's queue, before
+  the adapter signals. On an imposed end the adapter stops delivery at once: under `linux` the
+  host closes the live receiver before it reconciles (§ 1), and the shared drain closes its queue
+  as just stated. Chunks queued before that stay readable, in order. The drain keeps reading the pipes and keeps filling the record within its bound, so the record,
   not the delivered chunks, is the complete account of what the run wrote: the chunks are a prefix
   of each stream's record. No event is synthesized for an imposed end other than the stall:
   `read_output` returns the queued chunks, then `Stalled` if the end was the stall, then `None`.
@@ -277,18 +287,28 @@ wire's `OutputStream` is a different type and is not reused.
   and a stall happens exactly when it is full, so a queued `Stalled` would have no slot.
   `read_output` therefore returns the queued chunks in order and counts each stream's delivered
   `offset` itself. Once the queue is exhausted (every drain ended and every chunk was read) the run
-  has ended, and it returns, in this order and each at most once: `Bounded { Stdout }` if the
-  adapter's delivered stdout offset equals the stdout output bound and the run's final `output()`
-  has `stdout_truncated`; `Bounded { Stderr }` likewise with `stderr_truncated`; `Stalled` if the
-  stall flag is set; then `None` from then on. The bound is read from the delivered offset and the
-  final record, not from a drain flag, because the host has no per-stream bound flag (§ 1). The
-  stall flag is the execution's `pipe_backpressure` under `linux`, read through a new `pub(crate)`
+  has ended, and it returns, in this order and each at most once: `Bounded { Stdout }` if the run's
+  final `output()` has `stdout_truncated` and the adapter's delivered stdout offset equals the
+  length of that record's stdout; `Bounded { Stderr }` likewise with `stderr_truncated`; `Stalled`
+  if the stall flag is set; then `None` from then on. The bound is read from the delivered offset
+  and the final record, not from a drain flag, because the host has no per-stream bound flag, and
+  not from a configured value, because under `linux` the bound is the smaller of two (§ 1): a
+  truncated record holds exactly the bound, and an offset equal to its length means every kept
+  byte was delivered. Where an imposed end left kept bytes undelivered, the offset falls short of
+  the record and no `Bounded` is returned. The stall flag is the execution's `pipe_backpressure` under `linux`, read through a new `pub(crate)`
   `HostDriver` accessor by exec id, and a flag in the adapter's run state under the shared drain.
 - **One reader at a time.** The adapter holds a per-run reader lock (`tokio::sync::Mutex`) across
-  one host read and the offset update that follows it, and across the synthesized events. The
-  host's own lock covers only the `recv` (§ 1), so without it two concurrent `read_output` calls
-  could return chunks with swapped offsets or the same synthesized event twice. Concurrent calls
-  are served one after the other, each with the next event.
+  one `read_output` call: its host reads, the offset update that follows a chunk, and the
+  synthesized events. The host's own lock covers only one `read_pipe` (§ 1), so without it two
+  concurrent `read_output` calls could return chunks with swapped offsets or the same synthesized
+  event twice. Concurrent calls are served one after the other, each with the next event. No
+  `signal` takes the reader lock.
+- **Under `linux`, reads in slices.** The host's `signal` takes the receiver lock `read_pipe`
+  holds for its whole timeout (§ 1), so one long host read would hold a `signal(Kill)` on a silent
+  child until it timed out. The `linux` adapter therefore calls `read_pipe` with a timeout of at
+  most 100 ms and loops until an event arrives or the caller's deadline passes, so a `signal`
+  waits at most one slice for the lock. An elapsed slice is not an answer; only the caller's
+  elapsed deadline is `session.read-timeout`. The host changes nothing (T20).
 - **Ordering and loss.** Within one stream: in order, contiguous (`offset` + `bytes.len()` is the
   next chunk's `offset`), no duplicate, no gap. Between stdout and stderr: no order is promised.
   A pipe pair has none to observe. On a natural end every byte within the bound is delivered, and
@@ -315,7 +335,9 @@ wire's `OutputStream` is a different type and is not reused.
   this tree, beside the records' existing bound.
 - **Timeouts.** A zero timeout is `session.timeout-invalid` (422), and an elapsed one
   `session.read-timeout` (500), as `read_pipe`. `read_output` on a `Recorded` run is
-  `session.not-pipe` (422).
+  `session.not-pipe` (422). Under `linux` the read that finds the queue ended can return up to
+  5 s after the caller's deadline, because `read_pipe` waits up to 5 s after `None` for the run's
+  terminal observation (§ 1); no case bounds a run's end by the time `read_output` returns.
 - **`wait` and `output` are unchanged.** `wait` returns when the run ended, whether or not its
   events were read. An embedder that did not read the events learns of a stall from
   `output_stalled`, which also tells a stall kill apart from a `signal(Kill)` the embedder sent.
@@ -361,7 +383,7 @@ revision and the crate is 0.x, so none is hidden behind a version a consumer did
    pattern break. Marking it `#[non_exhaustive]` now would break every literal outside the crate,
    so it is not done here.
 
-If the two pairs of § 11 land in different releases, each release carries its half of each break.
+If the two stories of § 11 land in different releases, each release carries its half of each break.
 Not breaks: the four trait methods carry default bodies, so an implementor outside the crate
 compiles unchanged. `StdinMode` and `OutputDelivery` are `#[non_exhaustive]` from the start, as
 `OutputEvent` is, so a later mode or event is additive. `run_with_stdin` is new, so its `Arc`
@@ -372,12 +394,12 @@ parameter breaks nothing. `ConfinementError`, `RunObservation`, `RunOutput`, `Co
 
 | adapter | `stdin_pipe` | `output_live` | mechanism |
 |---|---|---|---|
-| `local` | proved | proved | `Stdio::piped()` for stdin, held by the shared `StdinWriter`; `output_retention::drain` gains an optional live queue that it fills after the record, with the stall flag in the run state; the stall and `signal` close the queue, then kill the process group |
+| `local` | proved | proved | `Stdio::piped()` for stdin, held by the shared `StdinWriter`; `output_retention::drain` gains an optional live queue that it fills after the record, with the stall flag in the run state; the stall and `signal(Kill)` close the queue, then kill the process group. `Int` and `Term` are sent to the group and close nothing, so a child that traps them keeps delivering (§ 3) |
 | `systemd` around `local` | proved | proved | its own spawn, the same code as `local`; the stall kills the run's cgroup |
-| `linux` | proved with the floor | proved with the floor | the host driver's session path. `AdapterStart` gains `stdin: bool` and `live: Option<queue>` (`pub(crate)`). `ChildChannel::Pipes` without a live sender is new: stdin piped, output recorded through `drain_capped` with no sender, so `Piped` + `Recorded` never stalls. With a live sender the adapter's drain passes `mark_truncation = false`. `write_pipe`, `close_pipe_input` and `read_pipe` serve the adapter by exec id behind the `StdinWriter` and the reader lock, and a `pub(crate)` accessor reads `pipe_backpressure`; there is no bound flag to read (§ 3). The adapter calls `close_pipe_input` when it observes the run's end (§ 2). Sessions keep their path unchanged |
+| `linux` | proved with the floor | proved with the floor | the host driver's session path. `AdapterStart` gains `stdin: bool` and `live: Option<queue>` (`pub(crate)`). `ChildChannel::Pipes` without a live sender is new: stdin piped, output recorded through `drain_capped` with no sender, so `Piped` + `Recorded` never stalls. With a live sender the adapter's drain passes `mark_truncation = false`. `write_pipe`, `close_pipe_input` and `read_pipe` serve the adapter by exec id behind the `StdinWriter` and the reader lock, `read_pipe` in slices of at most 100 ms (§ 3), and a `pub(crate)` accessor reads `pipe_backpressure`; there is no bound flag to read (§ 3). The adapter calls `close_pipe_input` when it observes the run's end (§ 2). Sessions keep their path unchanged |
 | `systemd` around `linux` | as `linux` | as `linux` | delegates to `linux`. Its wrapper forwards all four new methods, `write_stdin`, `close_stdin`, `read_output` and `output_stalled`, to the inner adapter, as it forwards `start` to `signal` today; a method left unforwarded would answer the trait's default while the fact is declared (T13) |
 | `macos` | proved once the macos lane case passes | the same | the same `Captured` path as `local`. Seatbelt rules govern opens by path, and the run inherits descriptors 0 to 2. The macos lane proves that a confined `cat` reads and writes them before the fact is declared (ADR 0023's rule: nothing published unproved) |
-| `oci` | proved only for pinned runtime and version pairs | proved | `create --interactive` and `start --attach --interactive` with the runtime client's stdin piped; output is already the attached client's two pipes. A write returns once the client's pipe took the bytes (§ 2). The runtime's detach sequence (`ctrl-p ctrl-q`) must not eat input bytes: the adapter disables it where the runtime has an option for it. `open` declares `stdin_pipe` only when the probe's flavor and version are a pair in `OCI_STDIN_PINNED`, a list that holds only pairs on which the oci lane wrote the bytes `0x10 0x11` through the container and read back every byte and the end of file (T15). On any other pair the fact is absent and `Piped` is refused `confinement.fact-unserved` naming `stdin_pipe` (invariant 3; atlas ADR 0109 decision 2). A probe at open, writing those bytes through a throwaway container, is a later option and not this design |
+| `oci` | proved only for pinned runtime and version pairs | proved | `create --interactive` and `start --attach --interactive` with the runtime client's stdin piped; output is already the attached client's two pipes. A write returns once the client's pipe took the bytes (§ 2). `Int` and `Term` go to the container and close no live queue (§ 3). The runtime's detach sequence (`ctrl-p ctrl-q`) must not eat input bytes: the adapter disables it where the runtime has an option for it. `open` declares `stdin_pipe` only when the probe's flavor and version are a pair in `OCI_STDIN_PINNED`, a list that holds only pairs on which the oci lane wrote the bytes `0x10 0x11` through the container and read back every byte and the end of file (T15). On any other pair the fact is absent and `Piped` is refused `confinement.fact-unserved` naming `stdin_pipe` (invariant 3; atlas ADR 0109 decision 2). A probe at open, writing those bytes through a throwaway container, is a later option and not this design |
 | `pod` | **not served** | **not served** | stdin needs `stdin: true` and `stdinOnce: true` in the Pod and the `pods/attach` subresource on the Role: new authority (attach to any Pod in the namespace) and a new streaming client. Live output is deferred: the log endpoint merges stdout and stderr into one stream, so a chunk could name no true `PipeStream`, and labelling the merged stream `Stdout` would misstate it. It waits for a design that states merged-stream delivery (an event or fact that says the streams are one), written when a consumer needs it. Both refused `confinement.fact-unserved` |
 
 § 11 orders the work: standard input on every adapter above first, then live output. Within each,
@@ -385,10 +407,11 @@ the `local`, `linux` and `systemd` parts are what the consumer runs on.
 
 ## 6. The ESS confinement domain and suite
 
-The spec changes are split per fact, one spec story each, and each lands together with the adapter
-story that proves its fact (§ 11).
+The spec changes are split per fact, and each is made by the story that also proves its fact on
+the adapters (§ 11): `story:adapter-stdin-pipe` for `stdin_pipe`, then
+`story:adapter-live-output` for `output_live`.
 
-Changes in `spec/confinement/confinement.yaml`, the stdin spec story first, then the live spec
+Changes in `spec/confinement/confinement.yaml`, the stdin story first, then the live-output
 story:
 
 - `Fact` gains `stdin_pipe`, then `output_live`, with a comment line each, after
@@ -405,7 +428,7 @@ by the Rust cases of § 9. Design 29 § 10 records that gap, and this design doe
 New authored scenarios, named by the lane rule of `spec/confinement/README.md`. The macos ones use
 a new `macos-io-` stage beside `macos-s1-` and `macos-s2-`:
 
-| stdin spec story | live spec story | lane |
+| `story:adapter-stdin-pipe` | `story:adapter-live-output` | lane |
 |---|---|---|
 | `local-admits-stdin-pipe-on-portable` | `local-admits-output-live-on-portable` | portable |
 | `linux-admits-stdin-pipe-on-delegated` | `linux-admits-output-live-on-delegated` | delegated |
@@ -416,35 +439,51 @@ a new `macos-io-` stage beside `macos-s1-` and `macos-s2-`:
 | `oci-admits-stdin-pipe-on-oci` | `oci-admits-output-live-on-oci` | oci |
 | `pod-stdin-pipe-unserved-on-pod` | `pod-output-live-unserved-on-pod` | pod |
 
-**Each spec story edits the suite and every count pinned on it, and no adapter story does.** Every
-lane compares the adapter's real facts with the scenario's open step exactly
+**Each story edits the suite and every count pinned on it in its first commit, then the
+adapters.** Every lane compares the adapter's real facts with the scenario's open step exactly
 (`crates/substrate-host/tests/support/mod.rs`), so adding a fact to an adapter also edits the open
 step of every authored scenario that states that adapter's declared set (at `dc75cbd5`, 11 files
-name `local`, 11 `linux` and 7 `systemd`, besides every `macos` and `oci` one). Each spec story
-makes, for its fact: the fact, the outcome, every open-step edit, its eight scenarios, the
+name `local`, 11 `linux` and 7 `systemd`, besides every `macos` and `oci` one). Each story's spec
+commit makes, for its fact: the fact, the outcome, every open-step edit, its eight scenarios, the
 regenerated `spec/confinement-suite.json` and `Fact` (`cargo xtask check-ess`), the edits that keep
 the regenerated `Fact` compiling (`FACT_ORDER` and any exhaustive `match` on `Fact`; no adapter
 proof changes), the `Fact` and `FACT_ORDER` lines of `tests/confinement-public-items.txt`, the
 fact tables `cargo xtask check-docs` holds, the README's lane table and counts, and the pinned
-counts below. The obligation and synthesis counts in the README are what `cargo xtask check-ess`
-reports after regeneration; the spec story records them.
+counts below. `check-docs` also holds the total in the sentence "The specification holds N
+authored scenarios" and the lanes table under
+`website/docs/reference/contracts.md#scenarios-and-lanes` (`xtask/src/site_drift.rs` `lanes`),
+which move to 57 and then 65 by the table below. The confinement paragraph of `spec/coverage.md`
+states the authored, synthesized, refusal and outcome counts in prose that no check holds; the
+spec commit updates it by hand (authored 49 → 57 → 65, outcomes 35 → 36 → 37, the rest as
+`check-ess` reports). The obligation and synthesis counts in the README are what
+`cargo xtask check-ess` reports after regeneration; the spec commit records them.
 
-| lane | today | after the stdin spec story | after the live spec story | pinned by |
+**ADR 0044 decision 6.** Its rule, "no adapter story edits the suite", binds the story that adds
+an adapter: each such story "adds a test file that runs its lane against the adapter", and the
+rule keeps a new adapter from rewriting the contract it is held to. Neither story here adds an
+adapter or a lane test file (§ 9 adds no test binary). Each changes the contract itself (a fact,
+an outcome, its scenarios) and then serves that change on adapters that already exist, so it is
+a contract story that also edits adapters, not an adapter story in decision 6's sense, and its
+suite edit is the contract change the decision places in `spec/confinement/`. The suite edit is
+the story's first commit, so no adapter commit edits the suite.
+
+| lane | today | after `story:adapter-stdin-pipe` | after `story:adapter-live-output` | pinned by |
 |---|---|---|---|---|
 | portable | 18 | 19 | 20 | `PORTABLE_DECLARED`; `PORTABLE_EXECUTED` 17/18 → 18/19 → 19/20 (on macOS / elsewhere), `ess_confinement_local.rs` |
 | delegated | 14 | 17 | 20 | `LINUX_DELEGATED` 9 → 10 → 11, `ess_confinement_linux.rs`; the systemd runner pins no count and requires each inner to run (5 → 7 → 9) |
-| macos | 8 | 9 | 10 | `MACOS_DECLARED`, and a new `MACOS_IO` 1 → 2 beside `MACOS_S1` and `MACOS_S2`; the stdin spec story adds it and admits `macos-io-*` in the stage assertion, `ess_confinement_macos.rs` |
+| macos | 8 | 9 | 10 | `MACOS_DECLARED`, and a new `MACOS_IO` 1 → 2 beside `MACOS_S1` and `MACOS_S2`; `story:adapter-stdin-pipe` adds it and admits `macos-io-*` in the stage assertion, `ess_confinement_macos.rs` |
 | oci | 5 | 6 | 7 | `lane_size` (no constant); the README |
 | pod | 3 | 4 | 5 | `lane_size` (no constant); the README |
 | interpreted | 1 | 2 | 3 | the README |
 
-**Each spec story and its adapter story land as one unit**, so every lane is green after each pair.
-A spec story's commit alone turns the portable, delegated, macos and oci lanes red by construction:
-its open steps state a fact no adapter proves yet. That red stays on the unit's branch. The unit
+**Each story is one unit**, so every lane is green after each story. Its spec commit alone turns
+the portable, delegated, macos and oci lanes red by construction: its open steps state a fact no
+adapter proves yet. That red stays on the story's branch, between its own commits. The story
 merges into its target only when every lane is green on its head (portable and macos in CI;
 delegated and oci as recorded local runs; pod in CI where its lane runs, otherwise recorded), so
-neither an integration branch nor `main` carries a red lane between pairs. The `pod` open step does
-not change, and the `pod` refusal scenario of each pair passes from its spec commit on.
+neither an integration branch nor `main` carries a red lane between stories. That is the wave
+protocol's unit: one story, merged when green. The `pod` open step does not change, and the `pod`
+refusal scenario of each story passes from its spec commit on.
 
 ## 7. The wire
 
@@ -486,7 +525,7 @@ Each case runs its scenario once and finishes in seconds. Linux cases lower
 retention cases already do. Each case goes into its adapter's existing lane test file, and no test
 binary is added. Each delegated case prints `<name>: executed` for `require_executed` in
 `scripts/delegated-lane.sh`. A case added to `ess_confinement_macos.rs` moves the `15 passed` that
-`.github/workflows/macos.yml` pins, in the adapter story that adds it.
+`.github/workflows/macos.yml` pins, in the story that adds it.
 
 Two drivers are shared by the cases below:
 
@@ -506,24 +545,27 @@ Two drivers are shared by the cases below:
 | T3 | `local`: a write past `limit_bytes` is `session.input-limit`, a 64 KiB + 1 write `session.frame-limit`, a write on a `Null` run `session.not-pipe` | portable | the same |
 | T4 | `local`, `Live`, natural end: a program writing to both streams and exiting yields contiguous offsets per stream, each chunk equal to the record at its offset, the record equal to the delivered bytes, then `None` | portable | the same |
 | T5 | `local`, `Live`, `queued_chunks: 1`, a child writing without end and never read: the run ends no sooner than 1 s and within 3 s of its start (the 1 s deadline, the 1 s group settle, 1 s slack); the queued chunk is readable, then `Stalled`, then `None`; `output_stalled` is true; the record begins with the delivered chunk | portable | the same |
-| T6 | `local`, `Live`, natural end past the bound: `Bounded { Stdout }` after the last chunk, then `None`; `stdout_truncated`; the delivered stdout offset equals the bound; the record equals the delivered bytes, with no marker | portable | the same |
+| T6 | `local`, `Live`, natural end past the bound: `Bounded { Stdout }` after the last chunk, then `None`; `stdout_truncated`; the delivered stdout offset equals the record's stdout length, which is the bound; the record equals the delivered bytes, with no marker | portable | the same |
 | T7a | `run_with_stdin`: `cat` returns the input on stdout; a child that exits without reading returns accepted bytes ≤ input and no error; a `Null` profile is `session.not-pipe` and an input longer than `limit_bytes` `session.input-limit`, each with no start record; a gated child that never reads writes its pid to a file, the helper, given 1 MiB of input, is dropped 200 ms after the pid file appears, and that process is gone within 3 s | portable | the same |
 | T7b | `run_with_stdin` with a `Live` profile is `confinement.live-output-unread`, with no start record | portable | the same |
-| T8 | `local`, cancel: a gated child that then runs `wc -c`; the fill; the pending write is cancelled. The next write is `session.input-closed` and `close_stdin` is `Ok`. The test opens the gate: the child reports at least the bytes of the completed writes and at most 65 536 more, and exits 0, so it read end of file | portable | the same |
+| T8 | `local`, cancel: a gated child that then runs `wc -c`; the fill; the pending write is cancelled. The next write is `session.input-closed` and `close_stdin` is `Ok`. The test opens the gate: the child reports at least the bytes of the completed writes and at most 65 536 more, and exits 0, so it read end of file. The test trims the count before parsing it, because BSD `wc` on macOS pads it with spaces | portable | the same |
 | T9 | `local`, close during a pending write: with T8's pending write, a concurrent `close_stdin` has not returned after 200 ms; once the write is cancelled it returns `Ok` | portable | the same |
 | T10 | `local`, the run's end: (a) `true`; after `wait` returned, a write is `session.input-closed` and `close_stdin` is `Ok`. (b) a gated child that never reads; the fill; the test opens the gate, the child exits, and the pending write returns `session.write-failed`. (c) as (b), but the child first starts a descendant that leaves the process group and holds only descriptor 0: `exec 3<&0; perl -MPOSIX -e 'setsid; exec @ARGV' sleep 30 <&3 >/dev/null 2>&1 3<&- & echo $! > "$pid"` (descriptor 3 because a non-interactive shell gives a background command `/dev/null`; output redirected so the `local` run can end; `perl` because macOS has no `setsid` utility). After the gate opens, `wait` returns and the pending write returns `session.write-failed` within 1 s of it; the test then kills the descendant by its pid | portable | the same |
 | T11 | `local`, `Live`, `queued_chunks: 2`, both streams writing and never read: one `Stalled`, after the last chunk of either stream; each stream's chunks contiguous | portable | the same |
-| T12 | `linux`: T2, T4, T5, T6, T8, T9, T10 (a) and (b), T11, T19, and `Piped` + `Recorded` with 64 KiB of unread output not stalling | delegated | `ess_confinement_linux.rs` |
+| T12 | `linux`: T2, T4, T5, T6, T8, T9, T10 (a) and (b), T11, T19, and `Piped` + `Recorded` with 64 KiB of unread output not stalling. T6 lowers `io_bounds.output_bytes` below the host's configured bound, so the bound is the smaller of the two | delegated | `ess_confinement_linux.rs` |
 | T13 | `systemd` around `local` and around `linux`: T2, T4 and T5 once each around each inner (T5 around `linux` reads `output_stalled` through the wrapper), so every forwarded method answers | delegated | `ess_confinement_systemd.rs` |
 | T14 | `macos`: T2 and T4 | macos | `ess_confinement_macos.rs` |
 | T15 | `oci`, on the lane's pinned runtime: `cat` in the container, three writes with the bytes `0x10 0x11` among them, then `close_stdin`; the run exits 0 and its stdout equals the bytes written, so every byte and the end of file crossed the runtime client; and T4 | oci | `ess_confinement_oci.rs` |
 | T16 | `oci`: a probe naming a runtime version outside `OCI_STDIN_PINNED` proves no `stdin_pipe`, and `Piped` is `confinement.fact-unserved` naming `stdin_pipe` | portable | `oci.rs` unit test |
 | T17 | `pod` refuses `Piped` naming `stdin_pipe` and `Live` naming `output_live`, `confinement.fact-unserved`, through `check_profile` | portable | `pod.rs` unit test |
 | T18 | the daemon's `PIPE_MAX_INPUT_BYTES` equals `confinement::MAX_STDIN_BYTES` | portable | `crates/substrate-daemon/src/app.rs` unit test |
-| T19 | `local`, `Live`, imposed end: a child writing without end, read twice, then `signal(Kill)`: the remaining queued chunks, then `None`, no `Stalled`; `output_stalled` is false; the delivered chunks are a prefix of the record | portable | `ess_confinement_local.rs` |
+| T19 | `local`, `Live`, `queued_chunks: 16`, imposed end: a gated child writes `one\n`, waits for the gate, writes `two\n` and `three\n`, creates a marker file and sleeps without end. The test reads a chunk, opens the gate, waits for the marker, and sends `signal(Kill)`: the remaining queued chunks, then `None`, no `Stalled`; `output_stalled` is false; the delivered chunks are a prefix of the record. The child writes a fixed 14 bytes, at most 14 chunks, so a pause in the test of any length cannot stall it | portable | `ess_confinement_local.rs` |
+| T20 | `linux`, `Live`, a child that writes nothing and sleeps 60 s: one task calls `read_output` with a 30 s timeout; once it is pending, another task's `signal(Kill)` returns within 3 s, and the read then returns `None` | delegated | `ess_confinement_linux.rs` |
+| T21 | `local`, `Live`, a child that traps `TERM`: `trap 'printf after; exit 3' TERM; printf before; touch "$ready"; while :; do sleep 0.05; done`. After the marker, `signal(Term)`; `read_output` returns chunks holding `before` and then `after`, then `None`, no `Stalled`; the run's exit code is 3; the record equals the delivered bytes | portable | `ess_confinement_local.rs` |
 
-T4 and T6 assert that the record equals the delivered bytes only on a natural end; T5, T11 and
-T19 assert the prefix. The scenarios of § 6 run in the lanes that already exist, so no CI job is
+T4, T6 and T21 assert that the record equals the delivered bytes, only on a natural end; T5, T11
+and T19 assert the prefix. T5 measures the run's end from `wait`, never from `read_output`, which
+under `linux` may return up to 5 s after `None` was due (§ 3, *Timeouts*). The scenarios of § 6 run in the lanes that already exist, so no CI job is
 added. A stall case costs one stall deadline (1 s) plus the kill; T5, T11 and their `linux` and
 `systemd` repeats are the only ones. The default profile changes no existing case.
 
@@ -531,11 +573,12 @@ added. A stall case costs one stall deadline (1 s) plus the kill; T5, T11 and th
 `OutputEvent`, `PipeStream` re-exported, the two profile fields, the four trait methods,
 `run_with_stdin`, the two `Fact` variants, `FACT_ORDER`'s new length, `MAX_STDIN_BYTES`,
 `STDIN_CHUNK_BYTES`, `MAX_QUEUED_CHUNKS`, `LIVE_OUTPUT_RETENTION_INVALID` and `LIVE_OUTPUT_UNREAD`.
-The `Fact` and `FACT_ORDER` lines move with each spec story, the others with each adapter story.
-As documentation, the table in `profile.rs` changes, along with the field table in
+The `Fact` and `FACT_ORDER` lines move with each story's spec commit, the others with its adapter
+commits. As documentation, the table in `profile.rs` changes, along with the field table in
 `website/docs/guides/confinement-profiles.md`. The fact tables in
-`website/docs/concepts/adapters.md` and `website/docs/reference/contracts.md` move with the spec,
-as `cargo xtask check-docs` requires.
+`website/docs/concepts/adapters.md` and `website/docs/reference/contracts.md`, and the scenario
+total and lanes table of `contracts.md#scenarios-and-lanes`, move with the spec, as
+`cargo xtask check-docs` requires (§ 6).
 
 ## 10. Decisions
 
@@ -543,20 +586,20 @@ as `cargo xtask check-docs` requires.
 |---|---|---|---|
 | D1 | stdin surface | profile `StdinMode::Piped { limit_bytes }`, `write_stdin` and `close_stdin`, and the helper `run_with_stdin` | the whole buffer in `Command` (breaks `Command`, no long-lived child); the raw `ChildStdin` (not every adapter holds it) |
 | D2 | stdin bounds and pending writes | total 1 to 16 MiB, write 1 to 64 KiB, no adapter buffer, ended by EOF; one shared `StdinWriter`; a cancelled write poisons and closes stdin, under `linux` through `Handle::try_current` with the next call as the fallback; `close_stdin` waits for a pending write | unbounded; a bytes-per-second rate bound (memory does not grow with rate); a write deadline inside the adapter (cancellation already bounds it); `tokio::spawn` in `Drop` (panics without a runtime) |
-| D3 | live output surface | `OutputDelivery::Live { queued_chunks }`, `read_output(run, timeout)` returning `Chunk`, `Bounded` or `Stalled` under a per-run reader lock; `Bounded` from the delivered offset and the final `*_truncated`, `Stalled` from the stall flag, both after the queue; `output_stalled(run) -> bool` | polling `output()`; an unbounded channel; a lossy live view; loss events in the queue (no slot when it is full); per-stream drain bound flags (the host has none) |
+| D3 | live output surface | `OutputDelivery::Live { queued_chunks }`, `read_output(run, timeout)` returning `Chunk`, `Bounded` or `Stalled` under a per-run reader lock; `Bounded` from `*_truncated` and a delivered offset equal to the final record's length, `Stalled` from the stall flag, both after the queue; `output_stalled(run) -> bool`; under `linux`, host reads in slices of at most 100 ms to the caller's deadline | polling `output()`; an unbounded channel; a lossy live view; loss events in the queue (no slot when it is full); per-stream drain bound flags (the host has none); comparing with a configured bound (under `linux` it is the smaller of two); one host read for the whole timeout (holds `signal`); a lock-free close in the host (a host change for what the adapter can do) |
 | D4 | backpressure | terminal after the 1 s stall deadline, ADR 0031 unchanged, extended from daemon sessions to in-process embedders | blocking the child; dropping chunks; a configurable deadline |
 | D5 | live output and the record | the record begins with the delivered head and equals it on a natural end; no marker under `Live`; `Live` with a non-`Head` retention refused (422) | a record with its own retention beside the live stream |
 | D6 | ordering and loss | per stream in order, contiguous offsets; at a natural end every byte within the bound is delivered and the bound is named; no order between streams; the contract counts chunks, not bytes | a total order across stdout and stderr (not observable from two pipes); coalescing to 64 KiB chunks (holds back written lines) |
 | D7 | capability statement | two facts, `stdin_pipe` and `output_live`, appended to `Fact` | two new families (changes atlas ADR 0109 decision 8); host-local refusals with no fact (no selection by facts) |
 | D8 | refusal names | session codes of `substrate_wire` for per-call refusals; two new codes, `confinement.live-output-retention-invalid` and `confinement.live-output-unread`, on the existing `Driver` variant | a parallel `confinement.*` vocabulary for the same refusals; a new `ConfinementError` variant (a further break) |
-| D9 | delivery | a spec story per fact; each spec story with its adapter story as one unit, merged only with every lane green on its head; stdin first, live output after it; `local`, `linux`, `systemd`, `macos`, `oci` | one spec story for both facts (no adapter unit could show a green lane, review pass 2 G5); one wave for all of it; adapter stories that edit the suite (ADR 0044 decision 6) |
+| D9 | delivery | one story per fact, each holding the fact's spec change as its first commit and the adapters after it, merged only with every lane green on its head; stdin first, live output after it; `local`, `linux`, `systemd`, `macos`, `oci`. ADR 0044 decision 6 binds stories that add an adapter, and these add none (§ 6) | one spec story for both facts (no adapter unit could show a green lane, review pass 2 G5); a spec story and an adapter story per fact (the spec story's acceptance needs the adapter story, so it cannot merge alone under one story per unit, review pass 3 H3); one wave for all of it |
 | D10 | `pod` | neither capability: stdin needs new Role authority, and live output waits for a merged-stream statement | `pods/attach` now; live output labelled `Stdout` |
 | D11 | wire | no change, no bundle | a successor bundle for adapter stdin (the session family already serves it on the wire) |
 | D12 | `run_with_stdin` | refuses `Null`, an input over `limit_bytes` and (with `output_live`) `Live` before start; a dropped helper kills its run | draining and discarding the events inside the helper (hides the stream the profile asked for); leaving a cancelled helper's run running |
 | D13 | `oci` `stdin_pipe` | declared only for runtime and version pairs the oci lane pinned; refused by fact name otherwise | a static declaration for every runtime (a detach sequence could eat bytes on an unlisted one); a probe at open (a later option) |
 | D14 | public API | three stated breaks (`Fact`, `FACT_ORDER`, `ConfinementProfile`), new enums `#[non_exhaustive]` | marking `ConfinementProfile` `#[non_exhaustive]` now (breaks every outside literal) |
 | D15 | stdin at the run's end | from the adapter's observed end, a write is `session.input-closed` and close `Ok`; a write pending at that moment is `session.write-failed`; the adapter closes its pipe then | leaving the host's stdin open until the exec is forgotten (a late write would succeed into a dead run's pipe) |
-| D16 | live delivery on an imposed end | delivery stops; queued chunks stay readable; the record is the complete account; the stall alone is a named event | an event per imposed end (needs a cause `RunObservation` does not carry today); forwarding until the drain ends (the host closes the receiver first) |
+| D16 | live delivery on an imposed end | delivery stops; queued chunks stay readable; the record is the complete account; the stall alone is a named event. Of the embedder's signals only `Kill` is imposed on `local`, `systemd` around `local`, `macos` and `oci`; `Int` and `Term` keep delivering until the run ends or stalls. Under `linux` every signal is end-equivalent (`grace_ms: 0`) | an event per imposed end (needs a cause `RunObservation` does not carry today); forwarding until the drain ends (the host closes the receiver first); closing the queue on every signal (a child that traps `Int` or `Term` would lose live output silently, review pass 3 H2) |
 
 Open questions for the operator, each with a recommended default:
 
@@ -573,35 +616,38 @@ Open questions for the operator, each with a recommended default:
 
 ## 11. Stories
 
-Four stories in two pairs, in this order. Each pair is one unit on its target branch: the spec
-story's commit, then the adapter story's, merged only when every lane is green on the unit's head
-(§ 6). The second pair starts from the first pair's merged head. No single wave is needed for all
-four.
+Two stories, in this order. Each is one unit on its target branch: its spec commit first, then
+its adapter commits, merged only when every lane is green on its head (§ 6). The second starts
+from the first's merged head. No single wave is needed for both. Review pass 3 (H3) folded the
+former spec stories `story:adapter-io-spec` and `story:adapter-live-spec` into these two; they
+are archived.
 
-1. `story:adapter-io-spec`, narrowed to standard input: § 6's stdin half. The fact `stdin_pipe`,
-   the outcome `fact-unserved-stdin-pipe`, the declared sets, every open-step edit, the eight
-   stdin scenarios, the regenerated suite and `Fact`, the `FACT_ORDER` length, the public-items
-   and fact-table lines, the README counts and the pinned lane counts (the `MACOS_IO` pin and the
-   macos stage assertion included). No adapter code, no adapter proof.
-2. `story:adapter-stdin-pipe`, `depends_on` story 1: `StdinMode`, the `StdinWriter`, `write_stdin`,
+1. `story:adapter-stdin-pipe`. Spec commit: § 6's stdin half, that is the fact `stdin_pipe`, the
+   outcome `fact-unserved-stdin-pipe`, the declared sets, every open-step edit, the eight stdin
+   scenarios, the regenerated suite and `Fact`, the `FACT_ORDER` length, the public-items and
+   fact-table lines, the scenario total and lanes table of `contracts.md`, the `spec/coverage.md`
+   counts, the README counts and the pinned lane counts (the `MACOS_IO` pin and the macos stage
+   assertion included). Adapter commits: `StdinMode`, the `StdinWriter`, `write_stdin`,
    `close_stdin`, the run's-end rule, `run_with_stdin` without its `Live` refusal, `check_streams`
    with the `limit_bytes` check, `stdin_pipe` on every adapter of § 5 that proves it,
    `OCI_STDIN_PINNED`, `systemd` around `linux` forwarding `write_stdin` and `close_stdin`, and the
    `linux` `Pipes` channel without a live sender (T1a, T2, T3, T7a, T8 to T10, T16, T18, and the
-   stdin rows of T12 to T15 and T17). Edits no scenario and no pinned scenario count.
-3. `story:adapter-live-spec`, `depends_on` story 2: § 6's live half, as story 1 for `output_live`.
-4. `story:adapter-live-output`, `depends_on` stories 2 and 3: `OutputDelivery`, `OutputEvent`, the
-   live queue in the shared drain and in `drain_capped`'s adapter path, the `linux` `Pipes` channel
-   with a live sender, `read_output` and its reader lock, `output_stalled`, the stall accessor,
-   `systemd` around `linux` forwarding both, `check_streams`'s `queued_chunks` and retention
-   checks, `run_with_stdin`'s `confinement.live-output-unread` refusal and `output_live` (T1b, T4
-   to T6, T7b, T11, T19, and the live rows of T12 to T15 and T17). Edits no scenario and no pinned
-   scenario count.
+   stdin rows of T12 to T15 and T17).
+2. `story:adapter-live-output`, `depends_on` story 1. Spec commit: § 6's live half, as story 1's
+   for `output_live`. Adapter commits: `OutputDelivery`, `OutputEvent`, the live queue in the
+   shared drain (closed by `Kill`, not by `Int` or `Term`) and in `drain_capped`'s adapter path,
+   the `linux` `Pipes` channel with a live sender, `read_output` with its reader lock and, under
+   `linux`, its 100 ms slices, `output_stalled`, the stall accessor, `systemd` around `linux`
+   forwarding both, `check_streams`'s `queued_chunks` and retention checks, `run_with_stdin`'s
+   `confinement.live-output-unread` refusal and `output_live` (T1b, T4 to T6, T7b, T11, T19 to
+   T21, and the live rows of T12 to T15 and T17).
 
-Story 4 builds on story 2's `check_streams`, `run_with_stdin`, linux `Pipes` channel and `systemd`
-forwarding, and both edit `confinement/mod.rs`, `local.rs`, `systemd.rs`, `linux.rs`, `macos.rs`,
-`oci.rs` and `process.rs`, hence its edge on story 2. The consumer's move from `HostDriver` sessions
-to the adapter is its own change after its pin moves, and none of it is done here.
+Story 2 builds on story 1's `check_streams`, `run_with_stdin`, linux `Pipes` channel and `systemd`
+forwarding, its spec commit states `output_live` beside the `stdin_pipe` story 1's spec commit
+added, and both edit `confinement/mod.rs`, `local.rs`, `systemd.rs`, `linux.rs`, `macos.rs`,
+`oci.rs`, `process.rs` and the confinement spec and suite, hence its edge on story 1. The
+consumer's move from `HostDriver` sessions to the adapter is its own change after its pin moves,
+and none of it is done here.
 
 ## 12. Out of scope
 
@@ -620,7 +666,8 @@ to the adapter is its own change after its pin moves, and none of it is done her
 Pass 1 reviewed the first draft and returned needs-revision with eight blocking findings and five
 notes (F1 to F13). Pass 2 reviewed the revision, held F4 to F7 and F9 to F13, reopened F1, F2, F3,
 F8 and F12, and returned needs-revision with five blocking findings and four notes (G1 to G9).
-Where each is answered:
+Pass 3 reviewed the revision at `dc106e35`, held G1 to G9 and the pinned lane counts, and returned
+needs-revision with three blocking findings and three notes (H1 to H6). Where each is answered:
 
 | finding | answer |
 |---|---|
@@ -641,8 +688,14 @@ Where each is answered:
 | G2 no per-stream bound flags | § 1 row on `run_child`; § 3 *Loss events*: `Bounded` from the delivered offset and the final `*_truncated`; § 5 `linux` row; D3; T6 |
 | G3 `tokio::spawn` in `Drop`; concurrent `read_output` | § 2 *Cancellation closes* (`Handle::try_current`, fallback stated); § 3 *One reader at a time*; D2, D3 |
 | G4 write after the run's end undefined; T10 races | § 1 row on the host's stdin; § 2 *The run's end* (`session.input-closed` from the observed end); D15; T10 (a) to (c) driven by `wait` and the gate |
-| G5 one spec story keeps every adapter unit red | § 1 row on lane pins; § 6 per-fact spec stories, the pinned-count table, units green per pair; D9; § 11 |
-| G6 story 2 reads story 3's types; no edge | § 2 `run_with_stdin` (the `Live` refusal arrives with `output_live`); § 4 `check_streams` split; § 11 story 4 `depends_on` story 2, `confinement.live-output-unread` and T7b in story 4; T1a and T1b |
+| G5 one spec story keeps every adapter unit red | § 1 row on lane pins; § 6 per-fact spec changes, the pinned-count table, each unit green on its head; D9; § 11. The units became single stories in pass 3 (H3) |
+| G6 the stdin story read the live story's types; no edge | § 2 `run_with_stdin` (the `Live` refusal arrives with `output_live`); § 4 `check_streams` split; § 11 `story:adapter-live-output` `depends_on` `story:adapter-stdin-pipe`, with `confinement.live-output-unread` and T7b in it; T1a and T1b |
 | G7 T8 and T9 never cancel; T10's descendant keeps `local` running | § 9 *the fill* and *the gate*; T8, T9; T10 (c) redirects the descendant's output and takes descriptor 0 explicitly |
 | G8 `run_with_stdin` can leave a started run running | § 2 `run_with_stdin` (refusals before start; a dropped helper kills its run); signature takes the adapter `Arc`; D12; T7a |
 | G9 `oci` pipe meaning; T15 EOF; `systemd` forwarding; ADR 0016 cited as current | § 2 *No buffering*; § 5 `oci` and `systemd` around `linux` rows; T13, T15; ADR 0031 cited throughout as ADR 0016's successor |
+| H1 a long `read_output` on a silent `linux` child holds `signal(Kill)` behind the host's receiver lock | § 1 `read_pipe` row corrected; § 3 *Under `linux`, reads in slices* (at most 100 ms, looped to the caller's deadline, no host change); § 5 `linux` row; D3; T20 |
+| H2 closing the queue on any signal loses a trapping child's output | § 1 rows on `linux` and `local` signals; § 3 *Delivery stops when the run is ended for it* (only `Kill` closes the queue on `local`, `systemd` around `local`, `macos` and `oci`; `linux` end-equivalent); § 5 `local` and `oci` rows; D16; T21 |
+| H3 a spec story cannot merge alone under one story per unit | § 6 (each story's spec commit, then its adapters; how ADR 0044 decision 6 is met); D9; § 11 two stories, `story:adapter-live-output` `depends_on` `story:adapter-stdin-pipe`; the spec stories archived |
+| H4 `check-docs` also holds the contracts page's scenario counts; `spec/coverage.md` states them | § 6 (total 49 → 57 → 65, the lanes table, the coverage paragraph by hand); § 9; § 11 |
+| H5 the `linux` bound is the smaller of two | § 1 row on `output_limit`; § 3 *Bounded* and *Loss events* (`Bounded` when the delivered offset equals the final record's length); D3; T6, T12 |
+| H6 T19 can stall; BSD `wc` pads; `read_pipe` adds up to 5 s after `None` | T19 writes a fixed 14 bytes; T8 trims the count; § 3 *Timeouts*; § 9 note on T5 |

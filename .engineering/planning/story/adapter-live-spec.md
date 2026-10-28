@@ -2,12 +2,13 @@
 format: aep.planning-md/3
 id: story:adapter-live-spec
 kind: story
-status: draft
+status: archived
 title: The confinement specification states adapter live output
 relations:
 - decomposes: epic:confinement-contract-family
-- depends_on: story:adapter-stdin-pipe
-revision: 1
+revision: 3
+transitions:
+- {from: "draft", to: "archived", at: "2026-10-28T19:24:54Z", actor: "human:timo", revision: 3}
 ---
 # The confinement contract states live output
 
@@ -37,3 +38,7 @@ decision 6 keeps adapter stories out of the suite. No adapter code and no adapte
   reports.
 - It lands with `story:adapter-live-output` as one unit, merged only with every lane green on the
   unit's head. `pod-output-live-unserved-on-pod` passes from this story's commit on.
+
+Folded by review pass 3 H3 of design 32: a spec story whose acceptance needs its adapter story
+cannot merge alone under one story per unit, so this spec change moved into its adapter story as
+that story's first commit, and this story is archived.

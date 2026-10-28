@@ -1,0 +1,14 @@
+{
+  "at": "2026-10-28T19:24:54Z",
+  "actor": "human:timo",
+  "artifact": "story:adapter-stdin-pipe",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "review_outcome",
+    "source": "review-result:adapter-io-design-pass-3",
+    "review": "review-result:adapter-io-design-pass-3",
+    "outcome": "fixed"
+  }
+}
