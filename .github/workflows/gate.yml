@@ -233,7 +233,7 @@ jobs:
           kubectl create namespace "$ns"
           kubectl label namespace "$ns" pod-security.kubernetes.io/enforce=restricted
           kubectl -n "$ns" create serviceaccount substrate-pod
-          kubectl -n "$ns" create role substrate-pod --verb=create,get,list,delete --resource=pods,networkpolicies.networking.k8s.io
+          kubectl -n "$ns" create role substrate-pod --verb=create,get,list,watch,delete --resource=pods,networkpolicies.networking.k8s.io
           kubectl -n "$ns" create role substrate-pod-log --verb=get --resource=pods/log
           kubectl -n "$ns" create rolebinding substrate-pod --role=substrate-pod --serviceaccount="$ns:substrate-pod"
           kubectl -n "$ns" create rolebinding substrate-pod-log --role=substrate-pod-log --serviceaccount="$ns:substrate-pod"
