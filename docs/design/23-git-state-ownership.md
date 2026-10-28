@@ -1,5 +1,7 @@
 # Design 23: Git inactivity without configured sources
 
+**Status:** implemented in 0.7.7 · **Date:** 2026-09-07
+
 ## Scope
 
 A host with an empty `HostConfig.git_sources` list serves no Git source. Its Git-specific
