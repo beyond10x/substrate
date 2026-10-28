@@ -19,6 +19,7 @@ on:
       - xtask/src/chart_adversary.rs
       - xtask/src/chart_cluster.rs
       - xtask/src/chart_yaml.rs
+      - xtask/src/lane_record.rs
       - .github/workflows/chart-lane.yml
       - .github/workflows/release.yml
   workflow_dispatch:

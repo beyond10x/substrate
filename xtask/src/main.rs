@@ -18,6 +18,7 @@ mod docs;
 mod ess;
 mod image_startup;
 mod json;
+mod lane_record;
 mod licenses;
 mod links;
 mod mcp;

@@ -111,6 +111,14 @@ on:
           empty uses the annotated tag's own Quota-lane trailer
         required: false
         type: string
+      chart_evidence:
+        description: >-
+          Recorded execution-enabled chart-lane run for the tagged commit, as
+          "<source-sha> <scenario-count> <RFC 3339 UTC>" from
+          `cargo xtask chart-lane cluster --node-profiles`; empty uses the annotated tag's own
+          Chart-lane trailer
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -161,6 +169,7 @@ jobs:
       chart-lane-absent: ${{ steps.chart-lane.outputs.absent }}
       confinement-evidence: ${{ steps.confinement.outputs.evidence }}
       quota-evidence: ${{ steps.quota.outputs.evidence }}
+      chart-evidence: ${{ steps.chart-record.outputs.evidence }}
 
     steps:
       - name: Check out source
@@ -595,6 +604,114 @@ jobs:
           echo "quota lane recorded for ${SOURCE_SHA} from ${carrier}: ${evidence}"
           echo "evidence=${evidence}" >> "$GITHUB_OUTPUT"
 
+      - name: Require a recorded chart-lane run for this commit
+        id: chart-record
+        env:
+          TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
+          INPUT_EVIDENCE: ${{ github.event_name == 'workflow_dispatch' && inputs.chart_evidence || '' }}
+          SOURCE_SHA: ${{ steps.tag.outputs.source-sha }}
+        run: |
+          set -euo pipefail
+          if ! git cat-file -e "${SOURCE_SHA}:deploy/helm/substrate/Chart.yaml" 2>/dev/null; then
+            echo "the tagged source ${SOURCE_SHA} has no deploy/helm/substrate chart; no chart lane record applies"
+            exit 0
+          fi
+          evidence="${INPUT_EVIDENCE:-}"
+          carrier="the chart_evidence workflow input"
+          if [ -z "${evidence//[[:space:]]/}" ]; then
+            evidence=$(git tag -l --format='%(contents)' "${TAG}" \
+              | sed -n 's/^Chart-lane:[[:space:]]*//p')
+            carrier="the annotated tag's Chart-lane trailer"
+            records=$(printf '%s' "$evidence" | grep -c '' || true)
+            if [ "${records:-0}" -gt 1 ]; then
+              echo "refused: ${TAG} carries ${records} Chart-lane lines; a release records exactly one." >&2
+              exit 1
+            fi
+          fi
+
+          if [ -z "${evidence//[[:space:]]/}" ]; then
+            echo "refused: no recorded chart lane run for ${SOURCE_SHA}." >&2
+            echo "The execution-enabled chart scenarios need Localhost seccomp and AppArmor profiles on the" >&2
+            echo "nodes, which no hosted runner has, so they are a release condition (ADR 0046, K9 C)." >&2
+            echo "Build the daemon image from ${SOURCE_SHA} with --build-arg SOURCE_SHA=${SOURCE_SHA}, run" >&2
+            echo "'cargo xtask chart-lane cluster --node-profiles' at that commit with a clean checkout, then" >&2
+            echo "record the line it prints either as" >&2
+            echo "  Chart-lane: ${SOURCE_SHA} <scenario-count> <RFC 3339 UTC>" >&2
+            echo "in the annotated tag's message, or as the chart_evidence input of a" >&2
+            echo "protected-main recovery dispatch. AGENTS.md, section \"Releases\"." >&2
+            exit 1
+          fi
+
+          case "$evidence" in
+            *$'\n'* | *$'\r'*)
+              echo "refused: ${carrier} spans more than one line; a record is one line of three fields." >&2
+              exit 1
+              ;;
+          esac
+          read -r -a fields <<<"${evidence}"
+          if [ "${#fields[@]}" -ne 3 ]; then
+            echo "refused: ${carrier} has ${#fields[@]} fields; a record is '<sha> <scenario-count> <RFC 3339 UTC>'." >&2
+            exit 1
+          fi
+          claimed_sha=${fields[0]}
+          claimed_cases=${fields[1]}
+          claimed_at=${fields[2]}
+          evidence="${claimed_sha} ${claimed_cases} ${claimed_at}"
+
+          if [ "$claimed_sha" != "$SOURCE_SHA" ]; then
+            echo "refused: ${carrier} records commit '${claimed_sha}', not ${SOURCE_SHA}." >&2
+            echo "A lane run against other bytes is not evidence about the tagged source." >&2
+            exit 1
+          fi
+
+          if ! printf '%s' "$claimed_cases" | grep -Eq '^[0-9]+$'; then
+            echo "refused: ${carrier} records '${claimed_cases}' where a chart-lane scenario count belongs." >&2
+            exit 1
+          fi
+
+          chart_source="xtask/src/chart_cluster.rs"
+          if ! source_text=$(git show "${SOURCE_SHA}:${chart_source}"); then
+            echo "refused: ${chart_source} is absent at ${SOURCE_SHA}." >&2
+            exit 1
+          fi
+          declared_cases=$(printf '%s\n' "$source_text" | awk '
+            /^pub const SCENARIOS: \[&str; [0-9]+\] = \[$/ {
+              if (seen) bad = 1
+              seen = 1
+              inside = 1
+              declared = $0
+              sub(/^pub const SCENARIOS: \[&str; /, "", declared)
+              sub(/\].*$/, "", declared)
+              next
+            }
+            inside && $0 == "];" { inside = 0; next }
+            inside && /^    "[^"]+",$/ { cases++; next }
+            inside { bad = 1 }
+            END {
+              if (!seen || inside || bad || cases + 0 == 0 || cases + 0 != declared + 0) print 0
+              else print cases + 0
+            }
+          ')
+          if [ "${declared_cases:-0}" -eq 0 ]; then
+            echo "refused: ${chart_source} at ${SOURCE_SHA} declares no SCENARIOS array of one quoted scenario per line." >&2
+            echo "Fix this check with the lane; a record of zero scenarios proves nothing." >&2
+            exit 1
+          fi
+          if [ "$claimed_cases" != "$declared_cases" ]; then
+            echo "refused: ${carrier} records ${claimed_cases} chart-lane scenarios; ${SOURCE_SHA} declares ${declared_cases}." >&2
+            exit 1
+          fi
+
+          if ! printf '%s' "$claimed_at" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$' \
+            || [ "$(date -u -d "$claimed_at" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)" != "$claimed_at" ]; then
+            echo "refused: ${carrier} records '${claimed_at}' where an RFC 3339 UTC instant belongs." >&2
+            echo "Use the form 2026-09-15T08:30:00Z." >&2
+            exit 1
+          fi
+
+          echo "chart lane recorded for ${SOURCE_SHA} from ${carrier}: ${evidence}"
+          echo "evidence=${evidence}" >> "$GITHUB_OUTPUT"
+
       - name: Preflight summary
         env:
           VERSION: ${{ steps.tag.outputs.version }}
@@ -604,6 +721,7 @@ jobs:
           CHART_LANE_ABSENT: ${{ steps.chart-lane.outputs.absent }}
           CONFINEMENT_EVIDENCE: ${{ steps.confinement.outputs.evidence }}
           QUOTA_EVIDENCE: ${{ steps.quota.outputs.evidence }}
+          CHART_EVIDENCE: ${{ steps.chart-record.outputs.evidence }}
         run: |
           {
             echo "### Release preflight"
@@ -617,6 +735,7 @@ jobs:
             echo "| chart lane absent, not passed | ${CHART_LANE_ABSENT:-no chart in the tagged source} |"
             echo "| confinement lane | \`${CONFINEMENT_EVIDENCE}\` |"
             echo "| quota lane | \`${QUOTA_EVIDENCE}\` |"
+            echo "| chart lane record | \`${CHART_EVIDENCE:-no chart in the tagged source}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
 
   release:
@@ -644,6 +763,7 @@ jobs:
       CHART_LANE_ABSENT: ${{ needs.preflight.outputs.chart-lane-absent }}
       CONFINEMENT_EVIDENCE: ${{ needs.preflight.outputs.confinement-evidence }}
       QUOTA_EVIDENCE: ${{ needs.preflight.outputs.quota-evidence }}
+      CHART_EVIDENCE: ${{ needs.preflight.outputs.chart-evidence }}
 
     steps:
       - name: Check out the tagged source
@@ -1653,6 +1773,27 @@ jobs:
           the recorded line above, and that line must name this exact commit and the real-quota
           case count this source declares.
 
+          NOTES
+          if [ "$CHART" = present ]; then
+          cat >> release-notes.md <<NOTES
+          ## Chart lane
+
+          | | |
+          | --- | --- |
+          | local record | \`${CHART_EVIDENCE}\` |
+          | command | \`cargo xtask chart-lane cluster --node-profiles\` |
+          | where | a workstation kind cluster whose nodes load the Localhost seccomp and AppArmor profiles, not this runner |
+
+          The fields are the commit, the number of chart-lane scenarios and when the run finished.
+          The hosted chart lane (see *Kubernetes chart* above) cannot start the execution-enabled
+          pod, so it reports those scenarios absent. The local run installs the node profiles,
+          starts that pod, runs a confined exec through it and passes every scenario the source
+          declares; this workflow refuses to publish a chart without the recorded line above, and
+          that line must name this exact commit and that scenario count.
+
+          NOTES
+          fi
+          cat >> release-notes.md <<NOTES
           ## Verify the signatures
 
           All three image and bundle artifacts are signed keylessly through Sigstore, and so are
@@ -1814,6 +1955,7 @@ jobs:
             echo "| chart lane absent, not passed | ${CHART_LANE_ABSENT:-<none>} |"
             echo "| confinement lane | \`${CONFINEMENT_EVIDENCE:-<none recorded>}\` |"
             echo "| quota lane | \`${QUOTA_EVIDENCE:-<none recorded>}\` |"
+            echo "| chart lane record | \`${CHART_EVIDENCE:-<none recorded>}\` |"
             echo "| daemon signature step | ${{ steps.verify.outcome }} |"
             echo "| bundle signature step | ${{ steps.bundle-verify.outcome }} |"
             echo "| MCP signature step | ${{ steps.mcp-verify.outcome }} |"

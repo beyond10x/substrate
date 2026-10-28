@@ -596,8 +596,8 @@ type LaneStep = (
     fn(&str) -> TaggedSource,
 );
 
-/// Both lane steps, each with a source it accepts and the trailer name it reads.
-fn lane_steps() -> [LaneStep; 2] {
+/// Every lane-record step, each with a source it accepts and the trailer name it reads.
+fn lane_steps() -> [LaneStep; 3] {
     [
         (
             CONFINEMENT_STEP,
@@ -608,7 +608,198 @@ fn lane_steps() -> [LaneStep; 2] {
         (QUOTA_STEP, "Quota-lane", "7", |message| {
             TaggedSource::new(&quota_source(7), message)
         }),
+        (CHART_RECORD_STEP, "Chart-lane", "10", |message| {
+            chart_record_source(&chart_scenarios(10), message)
+        }),
     ]
+}
+
+const CHART_RECORD_STEP: &str = "Require a recorded chart-lane run for this commit";
+const CHART_LANE_SOURCE: &str = "xtask/src/chart_cluster.rs";
+const CHART_YAML: &str = "deploy/helm/substrate/Chart.yaml";
+
+/// A chart-lane source declaring `count` scenarios in the one literal array the step counts.
+fn chart_scenarios(count: usize) -> String {
+    chart_scenarios_declaring(count, count)
+}
+
+fn chart_scenarios_declaring(length: usize, entries: usize) -> String {
+    let mut source = String::from("const RELEASE: &str = \"lane\";\n\n");
+    writeln!(source, "pub const SCENARIOS: [&str; {length}] = [").expect("String");
+    for entry in 0..entries {
+        writeln!(source, "    \"scenario {entry}\",").expect("String");
+    }
+    source.push_str("];\n\nconst OTHER: [&str; 1] = [\n    \"not a scenario\",\n];\n");
+    source
+}
+
+/// A tagged source carrying the chart and `scenarios` as the chart lane's source.
+fn chart_record_source(scenarios: &str, message: &str) -> TaggedSource {
+    TaggedSource::with_files(
+        &[
+            (CHART_LANE_SOURCE, scenarios),
+            (CHART_YAML, "apiVersion: v2\nname: b10x-substrate\n"),
+        ],
+        message,
+    )
+}
+
+fn chart_refused(source: &TaggedSource, input: &str, reason: &str) {
+    refused_by(CHART_RECORD_STEP, source, input, reason);
+}
+
+#[test]
+fn a_release_refuses_without_a_recorded_chart_lane_run() {
+    let require = position(CHART_RECORD_STEP);
+    let announce = position("gh release create \"${VERSION}\"");
+    assert!(require < announce);
+    assert!(position("Require a green chart-lane run for this commit") < require);
+    position("chart_evidence:");
+    position("Chart-lane:");
+    position("refused: no recorded chart lane run for");
+    position("## Chart lane");
+    position("cargo xtask chart-lane cluster --node-profiles");
+    assert!(WORKFLOW.contains("chart-evidence: ${{ steps.chart-record.outputs.evidence }}"));
+    assert!(WORKFLOW.contains("CHART_EVIDENCE: ${{ steps.chart-record.outputs.evidence }}"));
+    assert!(WORKFLOW.contains("CHART_EVIDENCE: ${{ needs.preflight.outputs.chart-evidence }}"));
+    assert_eq!(occurrences("| chart lane record |"), 2);
+    assert_eq!(occurrences("| local record |"), 1);
+}
+
+#[test]
+fn the_chart_lane_record_naming_the_tagged_commit_and_its_scenario_count_is_accepted() {
+    let source = chart_record_source(
+        &chart_scenarios(10),
+        &format!("release\n\nChart-lane: {{sha}} 10 {AT}\n"),
+    );
+    let (success, stderr, output) = source.run_step(CHART_RECORD_STEP, "");
+    assert!(success, "{stderr}");
+    assert_eq!(output.trim(), format!("evidence={} 10 {AT}", source.sha));
+
+    let untrailed = chart_record_source(&chart_scenarios(10), "release\n");
+    let (success, stderr, output) =
+        untrailed.run_step(CHART_RECORD_STEP, &format!("{} 10 {AT}", untrailed.sha));
+    assert!(success, "{stderr}");
+    assert!(output.contains("evidence="), "{output}");
+}
+
+#[test]
+fn the_chart_lane_record_is_refused_when_absent_or_only_another_lanes_record() {
+    let absent = chart_record_source(&chart_scenarios(10), "release\n");
+    chart_refused(&absent, "", "refused: no recorded chart lane run for");
+    let others = chart_record_source(
+        &chart_scenarios(10),
+        &format!("release\n\nQuota-lane: {{sha}} 7 {AT}\nConfinement-lane: {{sha}} 167 {AT}\n"),
+    );
+    chart_refused(&others, "", "refused: no recorded chart lane run for");
+}
+
+#[test]
+fn the_chart_lane_record_for_another_commit_is_refused() {
+    let source = chart_record_source(
+        &chart_scenarios(10),
+        &format!("release\n\nChart-lane: 0123456789abcdef0123456789abcdef01234567 10 {AT}\n"),
+    );
+    chart_refused(
+        &source,
+        "",
+        "records commit '0123456789abcdef0123456789abcdef01234567'",
+    );
+}
+
+#[test]
+fn the_chart_lane_record_with_another_scenario_count_is_refused() {
+    let fewer = chart_record_source(
+        &chart_scenarios(10),
+        &format!("release\n\nChart-lane: {{sha}} 6 {AT}\n"),
+    );
+    chart_refused(&fewer, "", "records 6 chart-lane scenarios;");
+    let word = chart_record_source(
+        &chart_scenarios(10),
+        &format!("release\n\nChart-lane: {{sha}} ten {AT}\n"),
+    );
+    chart_refused(
+        &word,
+        "",
+        "records 'ten' where a chart-lane scenario count belongs",
+    );
+    let none_declared = chart_record_source(
+        "const RELEASE: &str = \"lane\";\n",
+        &format!("release\n\nChart-lane: {{sha}} 0 {AT}\n"),
+    );
+    chart_refused(&none_declared, "", "declares no SCENARIOS array");
+    let disagreeing = chart_record_source(
+        &chart_scenarios_declaring(11, 10),
+        &format!("release\n\nChart-lane: {{sha}} 10 {AT}\n"),
+    );
+    chart_refused(&disagreeing, "", "declares no SCENARIOS array");
+    let two_per_line = chart_record_source(
+        &chart_scenarios(10).replace("    \"scenario 9\",\n", "    \"scenario 9\", \"x\",\n"),
+        &format!("release\n\nChart-lane: {{sha}} 10 {AT}\n"),
+    );
+    chart_refused(&two_per_line, "", "declares no SCENARIOS array");
+}
+
+#[test]
+fn the_chart_lane_record_with_a_timestamp_that_is_not_rfc_3339_utc_is_refused() {
+    for instant in ["2026-10-23", "2026-10-23T10:00:00+02:00", "yesterday"] {
+        let source = chart_record_source(
+            &chart_scenarios(10),
+            &format!("release\n\nChart-lane: {{sha}} 10 {instant}\n"),
+        );
+        chart_refused(&source, "", "where an RFC 3339 UTC instant belongs");
+    }
+}
+
+#[test]
+fn a_tagged_source_without_the_chart_needs_no_chart_lane_record() {
+    let source = TaggedSource::with_files(&[("README.md", "no chart\n")], "release\n");
+    let (success, stderr, output) = source.run_step(CHART_RECORD_STEP, "");
+    assert!(success, "{stderr}");
+    assert!(!output.contains("evidence="), "{output}");
+    let forged = TaggedSource::with_files(
+        &[("README.md", "no chart\n")],
+        &format!("release\n\nChart-lane: {{sha}} 10 {AT}\n"),
+    );
+    let (success, stderr, output) = forged.run_step(CHART_RECORD_STEP, "");
+    assert!(success, "{stderr}");
+    assert!(!output.contains("evidence="), "{output}");
+}
+
+#[test]
+fn the_chart_record_step_counts_the_repositorys_own_scenarios() {
+    // The step counts the entries of one literal array in the *tagged* source; assert that count
+    // against the file it parses, so a reformatting cannot make every release refuse with a
+    // message about the check rather than about the release.
+    let real =
+        fs::read_to_string(repository_root().join(CHART_LANE_SOURCE)).expect("chart lane source");
+    let start = real
+        .lines()
+        .position(|line| line.starts_with("pub const SCENARIOS: [&str; "))
+        .expect("the SCENARIOS array");
+    let declared = real
+        .lines()
+        .skip(start + 1)
+        .take_while(|line| *line != "];")
+        .filter(|line| line.starts_with("    \"") && line.ends_with("\","))
+        .count();
+    // At least the four execution-enabled scenarios the hosted lane reports absent.
+    assert!(
+        declared >= 4,
+        "{CHART_LANE_SOURCE} declares {declared} scenarios"
+    );
+    let source = chart_record_source(
+        &real,
+        &format!("release\n\nChart-lane: {{sha}} {declared} {AT}\n"),
+    );
+    let (success, stderr, output) = source.run_step(CHART_RECORD_STEP, "");
+    assert!(success, "{stderr}");
+    assert!(output.contains(&format!(" {declared} ")), "{output}");
+    let off_by_one = chart_record_source(
+        &real,
+        &format!("release\n\nChart-lane: {{sha}} {} {AT}\n", declared - 1),
+    );
+    chart_refused(&off_by_one, "", "chart-lane scenarios;");
 }
 
 #[test]

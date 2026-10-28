@@ -16,6 +16,27 @@
 //! 5. the execution-enabled pod is admitted by server dry run in a `privileged` namespace and
 //!    refused in a `baseline` one, and the execution-off install itself runs under `restricted`;
 //! 6. `helm uninstall` leaves exactly the ledger claims.
+//!
+//! The hosted lane reports the four execution-enabled scenarios absent, by name. With
+//! `--node-profiles` the verb is ADR 0046's K9 C: a workstation lane on one kind worker, because
+//! every kind node shares the host kernel's `AppArmor` profiles, built from the committed
+//! `fixtures/chart-lab/Dockerfile` (the hosted node image plus the distribution's pinned
+//! `apparmor_parser`) and given the host's securityfs. It refuses, naming the prerequisite and
+//! every scenario that therefore did not run, an image whose revision label is not `HEAD`, a recipe
+//! not built on `--node-image`, and a worker without `AppArmor`, without the parser, already
+//! holding `substrate-host-exec-v1` in the shared kernel, or without a cgroup v2 hierarchy carrying
+//! `cpu`, `memory` and `pids`. It installs the chart with one pod, `execution.enabled` and
+//! `nodeProfiles.enabled` in `privileged` namespaces and runs the four:
+//!
+//! 1. the bootstrap dropped to uid 65532 with no capability, and a confined exec runs through it;
+//! 2. the daemon runs under seccomp with the Localhost profile the node holds byte for byte;
+//! 3. the daemon and its init run under the enforced `substrate-host-exec-v1` `AppArmor` profile;
+//! 4. the 0400 key is owned by 65532 and the daemon, holding no capability, serves TLS with it.
+//!
+//! It then uninstalls the release and removes the profile its own run loaded through the node,
+//! which holds the source, so the next run starts from the same kernel. It prints
+//! `Chart-lane: <sha> <count> <instant>` only when every declared scenario passed, the profile was
+//! removed, `HEAD` did not move and the checkout was clean before and after the run.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -39,16 +60,34 @@ use serde_json::{Value, json};
 
 use crate::chart::{self, CHART};
 use crate::chart_yaml;
+use crate::lane_record::{git_text, record_line};
 
 const RELEASE: &str = "lane";
 const NAMESPACE: &str = "substrate-lane";
 const PRIVILEGED_NAMESPACE: &str = "substrate-lane-privileged";
+const NODE_PROFILES_NAMESPACE: &str = "substrate-lane-node-profiles";
 const BASELINE_NAMESPACE: &str = "substrate-lane-baseline";
 const POOL_KEY: &str = "b10x.dev/substrate-pool";
 const POOL_VALUE: &str = "lane";
 const REPLICAS: usize = 2;
+/// Local mode's workers and daemon pods. Every kind node shares the host kernel and its `AppArmor`
+/// profiles, so a second node's installer would find the first one's profile loaded without its
+/// own source and refuse it.
+const LOCAL_REPLICAS: usize = 1;
+/// The checked-in recipe local mode builds its kind node image from, at the recorded commit.
+const LAB_RECIPE: &str = "fixtures/chart-lab/Dockerfile";
+/// The local, never pushed, tag of that image; one per checkout.
+const LAB_REPOSITORY: &str = "b10x-substrate-chart-lab";
 const AUDIENCE: &str = "urn:b10x:substrate";
 const SELECTOR: &str = "app.kubernetes.io/instance=lane,app.kubernetes.io/component=daemon";
+const REVISION_LABEL: &str = "org.opencontainers.image.revision";
+const TRAILER: &str = "Chart-lane";
+/// This file, relative to the workspace root: the release step counts its `SCENARIOS`.
+const SOURCE: &str = "xtask/src/chart_cluster.rs";
+const APPARMOR_PROFILE: &str = "substrate-host-exec-v1";
+const SECCOMP_PROFILE: &str = "b10x-substrate/host-exec-v1-amd64.json";
+const SECCOMP_SOURCE: &str = "deploy/seccomp/host-exec-v1-amd64.json";
+const DAEMON_UID: &str = "65532";
 
 #[derive(Debug, ClapArgs)]
 pub struct Args {
@@ -73,9 +112,15 @@ pub struct Args {
     /// The kind cluster's name; the verb refuses one that already exists.
     #[arg(long, default_value = "substrate-chart-lane")]
     cluster: String,
+    /// K9 C, the workstation lane: one worker built from `fixtures/chart-lab/Dockerfile` with the
+    /// host's securityfs, the node profiles installed, the execution-enabled scenarios run for real
+    /// and a `Chart-lane:` record printed.
+    #[arg(long)]
+    node_profiles: bool,
 }
 
 /// What one scenario came to.
+#[derive(Debug)]
 enum Outcome {
     Passed(String),
     Absent(String),
@@ -103,8 +148,237 @@ pub const EXECUTION_ABSENT: [(&str, &str); 4] = [
     ),
 ];
 
-/// Every scenario the lane names: six it runs, and the execution-enabled ones it reports absent.
-const SCENARIOS: usize = 6 + EXECUTION_ABSENT.len();
+/// The scenarios the hosted mode runs, in order, on two workers.
+const HOSTED: [&str; 6] = [
+    "placement",
+    "certificate names",
+    "restart survival",
+    "egress",
+    "pod security",
+    "uninstall",
+];
+
+/// The scenarios `--node-profiles` runs and a `Chart-lane:` record counts, one per line: exactly
+/// the execution-enabled ones the hosted mode reports absent. `release.yml` counts its entries in
+/// the tagged source by the rule of [`declared_scenarios`], so keep it one quoted name per line.
+pub const SCENARIOS: [&str; 4] = [
+    "execution bootstrap",
+    "Localhost seccomp profile",
+    "Localhost AppArmor profile",
+    "TLS key after the uid drop",
+];
+
+/// The number of entries of the one `pub const SCENARIOS: [&str; N] = [` array in `source`, each
+/// on its own line as `    "name",`, closed by `];` — the count `release.yml` reads from the
+/// tagged source. `None` for a missing, repeated, empty or malformed array, or one whose declared
+/// length is not its entry count.
+pub fn declared_scenarios(source: &str) -> Option<usize> {
+    let mut lines = source.lines();
+    let mut found = None;
+    while let Some(line) = lines.next() {
+        let Some(rest) = line.strip_prefix("pub const SCENARIOS: [&str; ") else {
+            continue;
+        };
+        if found.is_some() {
+            return None;
+        }
+        let declared: usize = rest.strip_suffix("] = [")?.parse().ok()?;
+        let mut count = 0;
+        let mut closed = false;
+        for entry in lines.by_ref() {
+            if entry == "];" {
+                closed = true;
+                break;
+            }
+            let name = entry.strip_prefix("    \"")?.strip_suffix("\",")?;
+            if name.is_empty() || name.contains('"') {
+                return None;
+            }
+            count += 1;
+        }
+        if !closed || count == 0 || count != declared {
+            return None;
+        }
+        found = Some(count);
+    }
+    found
+}
+
+/// The declared count, when a local run produced exactly one passed outcome per declared scenario
+/// and no failure; otherwise why the run is no record.
+fn local_verdict(outcomes: &[(String, Outcome)], failures: &[String]) -> Result<usize, String> {
+    if !failures.is_empty() {
+        return Err(format!(
+            "{} scenario(s) failed: {}",
+            failures.len(),
+            failures.join("; ")
+        ));
+    }
+    let mut seen = BTreeSet::new();
+    for (name, outcome) in outcomes {
+        if !SCENARIOS.contains(&name.as_str()) {
+            return Err(format!("{name} is not a declared scenario"));
+        }
+        if !seen.insert(name.as_str()) {
+            return Err(format!("{name} ran twice"));
+        }
+        if let Outcome::Absent(reason) = outcome {
+            return Err(format!("{name} is absent, not passed: {reason}"));
+        }
+    }
+    let missing: Vec<&str> = SCENARIOS
+        .iter()
+        .copied()
+        .filter(|name| !seen.contains(name))
+        .collect();
+    if missing.is_empty() {
+        Ok(SCENARIOS.len())
+    } else {
+        Err(format!(
+            "these declared scenarios did not run: {}",
+            missing.join("; ")
+        ))
+    }
+}
+
+/// What a finished local run prints.
+#[derive(Debug, PartialEq, Eq)]
+enum Decision {
+    /// Every scenario passed at an unmoved, clean `HEAD`: print the record.
+    Record(usize),
+    /// Every scenario passed, but the run is no record for any commit.
+    NoRecord(String),
+    /// A scenario failed, was absent or did not run.
+    Failed(String),
+}
+
+fn decision(
+    verdict: Result<usize, String>,
+    sha: &str,
+    head_after: &str,
+    clean_before: bool,
+    clean_after: bool,
+) -> Decision {
+    match verdict {
+        Err(reason) => Decision::Failed(reason),
+        Ok(_) if head_after != sha => Decision::NoRecord(format!(
+            "HEAD moved from {sha} to {head_after} during the run"
+        )),
+        Ok(count) if clean_before && clean_after => Decision::Record(count),
+        Ok(_) => Decision::NoRecord(format!(
+            "the checkout was not clean {} the run",
+            if clean_before { "after" } else { "before" }
+        )),
+    }
+}
+
+/// The refusal for a missing prerequisite: what is missing, and every scenario that did not run.
+fn refusal(prerequisite: &str) -> String {
+    format!(
+        "chart lane cluster: refusing, no record: {prerequisite}. None of the {} declared scenarios \
+         ran: {}",
+        SCENARIOS.len(),
+        SCENARIOS.join("; ")
+    )
+}
+
+/// The image must name the commit the record will name.
+fn revision_verdict(label: &str, sha: &str) -> Result<(), String> {
+    if label == sha {
+        Ok(())
+    } else {
+        Err(format!(
+            "the image's {REVISION_LABEL} label is {label:?}, not HEAD {sha}; build it from this \
+             commit with --build-arg SOURCE_SHA={sha}"
+        ))
+    }
+}
+
+fn evidence_line(sha: &str, count: usize, at: SystemTime) -> String {
+    record_line(TRAILER, sha, count, at)
+}
+
+/// The image the chart lab's recipe builds on: its one `FROM` reference.
+fn lab_base(recipe: &str) -> Option<&str> {
+    let mut bases = recipe
+        .lines()
+        .filter_map(|line| line.strip_prefix("FROM "))
+        .map(str::trim);
+    let base = bases.next()?;
+    bases.next().is_none().then_some(base)
+}
+
+/// The chart lab must build on the node image the hosted lane runs, by the same digest.
+fn lab_base_verdict(recipe: &str, node_image: &str) -> Result<(), String> {
+    match lab_base(recipe) {
+        Some(base) if base == node_image => Ok(()),
+        base => Err(format!(
+            "{LAB_RECIPE} builds on {}, not the --node-image {node_image}",
+            base.unwrap_or("no single FROM image")
+        )),
+    }
+}
+
+/// The chart lab's local tag, keyed by the checkout's canonical path as `quota-fixture` keys its.
+fn lab_image(root: &Path) -> String {
+    use sha2::Digest as _;
+    use std::os::unix::ffi::OsStrExt as _;
+    let digest = sha2::Sha256::digest(root.as_os_str().as_bytes());
+    format!("{LAB_REPOSITORY}:{}", hex::encode(&digest[..8]))
+}
+
+/// What removes the lane's own profile from the kernel, run on the node: the parser reading the
+/// exact source the installer wrote under the chart's default `nodeProfiles.kubeletRoot`.
+fn removal_argv() -> [String; 3] {
+    [
+        "/sbin/apparmor_parser".to_owned(),
+        "--remove".to_owned(),
+        format!("/var/lib/kubelet/seccomp/b10x-substrate/{APPARMOR_PROFILE}.apparmor"),
+    ]
+}
+
+/// The profile is loaded before the lane loaded it: the installer would refuse it on a fresh node,
+/// and the lane removes only what its own run loaded.
+fn loaded_refusal(worker: &str) -> String {
+    format!(
+        "{APPARMOR_PROFILE} is already loaded in the host kernel kind node {worker} shares, and the \
+         node-profile installer refuses a loaded profile whose source its fresh node does not hold; \
+         this run did not load it, so it does not remove it. As root, after checking nothing on \
+         this host still runs under it: sudo sh -c 'printf %s {APPARMOR_PROFILE} > \
+         /sys/kernel/security/apparmor/.remove'"
+    )
+}
+
+/// One control plane and the pool workers: two hosted, one local, where the worker sees the host's
+/// securityfs, without which no `AppArmor` profile can be loaded or applied on it.
+fn kind_config(node_profiles: bool) -> String {
+    let (worker, count) = if node_profiles {
+        (
+            "  - role: worker\n    extraMounts:\n      - hostPath: /sys/kernel/security\n        containerPath: /sys/kernel/security\n",
+            LOCAL_REPLICAS,
+        )
+    } else {
+        ("  - role: worker\n", REPLICAS)
+    };
+    format!(
+        "kind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4\nnodes:\n  - role: control-plane\n{}",
+        worker.repeat(count)
+    )
+}
+
+/// The lane's values with execution and the node-profile `DaemonSet` enabled, the installer in a
+/// `privileged` namespace of its own (the chart refuses the release's namespace), and one daemon
+/// pod for the one worker.
+fn execution_values(values: &Value) -> Value {
+    chart::merged(
+        values,
+        &json!({
+            "replicas": LOCAL_REPLICAS,
+            "execution": {"enabled": true},
+            "nodeProfiles": {"enabled": true, "namespace": NODE_PROFILES_NAMESPACE}
+        }),
+    )
+}
 
 /// The absent scenarios of one run, by name: those a run could not prove, then every
 /// execution-enabled scenario.
@@ -194,7 +468,7 @@ struct Cluster<'a> {
 
 impl Drop for Cluster<'_> {
     fn drop(&mut self) {
-        let _ = Command::new(&self.args.kind)
+        let deleted = Command::new(&self.args.kind)
             .args([
                 "delete",
                 "cluster",
@@ -205,6 +479,16 @@ impl Drop for Cluster<'_> {
             .arg(&self.kubeconfig)
             .stdin(Stdio::null())
             .status();
+        if !deleted
+            .as_ref()
+            .is_ok_and(std::process::ExitStatus::success)
+        {
+            eprintln!(
+                "chart lane cluster: deleting kind cluster {} failed ({deleted:?}); the next run \
+                 refuses until `kind delete cluster --name {}` succeeds",
+                self.args.cluster, self.args.cluster
+            );
+        }
     }
 }
 
@@ -224,13 +508,76 @@ pub fn run(args: &Args) -> Result<ExitCode> {
         args.cluster
     );
 
+    // Local mode reads `HEAD` and the checkout state once, here; a record names this commit, and
+    // the image must carry it.
+    let start = if args.node_profiles {
+        let sha = git_text(&root, &["rev-parse", "HEAD"])?;
+        let clean = git_text(&root, &["status", "--porcelain"])?.is_empty();
+        let label = output(Command::new(&args.docker).args([
+            "image",
+            "inspect",
+            "--format",
+            &format!("{{{{ index .Config.Labels \"{REVISION_LABEL}\" }}}}"),
+            &args.image,
+        ]))?;
+        if let Err(reason) = revision_verdict(label.trim(), &sha) {
+            eprintln!("{}", refusal(&reason));
+            return Ok(ExitCode::FAILURE);
+        }
+        // The release step counts the committed array, so this binary must declare the same one.
+        let committed = git_text(&root, &["show", &format!("{sha}:{SOURCE}")])
+            .map(|source| declared_scenarios(&source))
+            .unwrap_or_default();
+        if committed != Some(SCENARIOS.len()) {
+            let committed = committed.map_or_else(
+                || "no well-formed SCENARIOS array".to_owned(),
+                |count| format!("{count} scenarios"),
+            );
+            eprintln!(
+                "{}",
+                refusal(&format!(
+                    "{SOURCE} at {sha} declares {committed} and this binary {}; build the lane \
+                     from the commit it records",
+                    SCENARIOS.len()
+                ))
+            );
+            return Ok(ExitCode::FAILURE);
+        }
+        // The node image is built from the committed recipe, on the hosted lane's node image.
+        let recipe = git_text(&root, &["show", &format!("{sha}:{LAB_RECIPE}")])
+            .map_err(|error| format!("{LAB_RECIPE} is not committed at {sha}: {error:#}"))
+            .and_then(|recipe| lab_base_verdict(&recipe, &args.node_image).map(|()| recipe));
+        let recipe = match recipe {
+            Ok(recipe) => recipe,
+            Err(reason) => {
+                eprintln!("{}", refusal(&reason));
+                return Ok(ExitCode::FAILURE);
+            }
+        };
+        Some((sha, clean, recipe))
+    } else {
+        None
+    };
+
     let work = tempfile::tempdir()?;
+    let node_image = match &start {
+        Some((_, _, recipe)) => match build_lab(args, &root, recipe, work.path()) {
+            Ok(image) => image,
+            Err(error) => {
+                eprintln!(
+                    "{}",
+                    refusal(&format!(
+                        "building the chart-lab node image failed: {error:#}"
+                    ))
+                );
+                return Ok(ExitCode::FAILURE);
+            }
+        },
+        None => args.node_image.clone(),
+    };
     let kubeconfig = work.path().join("kubeconfig");
     let config = work.path().join("kind.yaml");
-    fs::write(
-        &config,
-        "kind: Cluster\napiVersion: kind.x-k8s.io/v1alpha4\nnodes:\n  - role: control-plane\n  - role: worker\n  - role: worker\n",
-    )?;
+    fs::write(&config, kind_config(args.node_profiles))?;
     let cluster = Cluster {
         args,
         kubeconfig: kubeconfig.clone(),
@@ -243,7 +590,7 @@ pub fn run(args: &Args) -> Result<ExitCode> {
                 "--name",
                 &args.cluster,
                 "--image",
-                &args.node_image,
+                &node_image,
             ])
             .arg("--config")
             .arg(&config)
@@ -273,11 +620,27 @@ pub fn run(args: &Args) -> Result<ExitCode> {
         "name",
     ])?;
     let workers: Vec<&str> = workers.lines().collect();
+    let wanted = if args.node_profiles {
+        LOCAL_REPLICAS
+    } else {
+        REPLICAS
+    };
     ensure!(
-        workers.len() == REPLICAS,
-        "kind created {} workers, not {REPLICAS}",
+        workers.len() == wanted,
+        "kind created {} workers, not {wanted}",
         workers.len()
     );
+    let names: Vec<&str> = workers
+        .iter()
+        .map(|worker| worker.strip_prefix("node/").unwrap_or(worker))
+        .collect();
+    if args.node_profiles
+        && let Err(missing) = node_prerequisites(&lane, &names)
+    {
+        drop(cluster);
+        eprintln!("{}", refusal(&missing));
+        return Ok(ExitCode::FAILURE);
+    }
     for worker in &workers {
         lane.kubectl(&["label", worker, &format!("{POOL_KEY}={POOL_VALUE}")])?;
         // `kubectl taint` takes the type and the name as two arguments, not `node/<name>`.
@@ -298,11 +661,20 @@ pub fn run(args: &Args) -> Result<ExitCode> {
     let allowed = Listener::counting(gateway)?;
     let denied = Listener::counting(gateway)?;
 
-    for (namespace, level) in [
-        (NAMESPACE, "restricted"),
-        (PRIVILEGED_NAMESPACE, "privileged"),
-        (BASELINE_NAMESPACE, "baseline"),
-    ] {
+    // The chart refuses a node-profile installer in the release's own namespace.
+    let namespaces: &[(&str, &str)] = if args.node_profiles {
+        &[
+            (PRIVILEGED_NAMESPACE, "privileged"),
+            (NODE_PROFILES_NAMESPACE, "privileged"),
+        ]
+    } else {
+        &[
+            (NAMESPACE, "restricted"),
+            (PRIVILEGED_NAMESPACE, "privileged"),
+            (BASELINE_NAMESPACE, "baseline"),
+        ]
+    };
+    for (namespace, level) in namespaces {
         lane.kubectl(&["create", "namespace", namespace])?;
         lane.kubectl(&[
             "label",
@@ -311,32 +683,57 @@ pub fn run(args: &Args) -> Result<ExitCode> {
             &format!("pod-security.kubernetes.io/enforce={level}"),
         ])?;
     }
-    let certificate = lane.work.join("tls.crt");
-    let key = lane.work.join("tls.key");
-    let identity_ca = lane.work.join("identity-ca.crt");
-    fs::write(&certificate, &material.daemon_pem)?;
-    fs::write(&key, &material.daemon_key_pem)?;
-    fs::write(&identity_ca, &material.identity_pem)?;
-    lane.kubectl(&[
-        "create",
-        "secret",
-        "tls",
-        "substrate-tls",
-        "-n",
-        NAMESPACE,
-        &format!("--cert={}", certificate.display()),
-        &format!("--key={}", key.display()),
-    ])?;
-    lane.kubectl(&[
-        "create",
-        "configmap",
-        "identity-ca",
-        "-n",
-        NAMESPACE,
-        &format!("--from-file=ca.crt={}", identity_ca.display()),
-    ])?;
-
     let values = cluster_values(repository, tag, gateway, &identity, &allowed, &denied);
+
+    if let Some((sha, clean_before, _)) = start {
+        let mut outcomes = Vec::new();
+        let mut failures = Vec::new();
+        let mut record = |name: &str, result: Result<Outcome>| match result {
+            Ok(outcome) => outcomes.push((name.to_owned(), outcome)),
+            Err(error) => failures.push(format!("{name}: {error:#}")),
+        };
+        match execution(&lane, &chart_dir, &material, &values) {
+            Ok(results) => {
+                for (name, result) in results {
+                    record(name, result);
+                }
+            }
+            Err(error) => {
+                record(SCENARIOS[0], Err(error.context("did not run")));
+                for name in &SCENARIOS[1..] {
+                    record(
+                        name,
+                        Err(anyhow!("did not run: see {} for why", SCENARIOS[0])),
+                    );
+                }
+            }
+        }
+        // The prerequisites refused a profile loaded before the run, so a loaded one is this
+        // run's own: remove it while its node, which holds the source, still exists.
+        for worker in &names {
+            if let Err(error) = remove_own_profile(&lane, worker) {
+                failures.push(format!(
+                    "removing this run's {APPARMOR_PROFILE} through {worker}: {error:#}; it stays \
+                     loaded in the host kernel, and the next run refuses until root clears it: \
+                     sudo sh -c 'printf %s {APPARMOR_PROFILE} > \
+                     /sys/kernel/security/apparmor/.remove'"
+                ));
+            }
+        }
+        identity.stop();
+        allowed.stop();
+        denied.stop();
+        drop(cluster);
+        return Ok(report_local(
+            &root,
+            &outcomes,
+            &failures,
+            &sha,
+            clean_before,
+        ));
+    }
+
+    fixtures(&lane, NAMESPACE, &material)?;
     let values_file = lane.work.join("values.json");
     fs::write(&values_file, serde_json::to_vec_pretty(&values)?)?;
     let values_path = values_file.display().to_string();
@@ -404,7 +801,8 @@ pub fn run(args: &Args) -> Result<ExitCode> {
     }
     if failures.is_empty() {
         println!(
-            "chart lane cluster: {passed} of {SCENARIOS} scenarios passed, {} absent: {}",
+            "chart lane cluster: {passed} of {} scenarios passed, {} absent: {}",
+            HOSTED.len() + EXECUTION_ABSENT.len(),
             absent.len(),
             absent_list(&absent)
         );
@@ -416,6 +814,730 @@ pub fn run(args: &Args) -> Result<ExitCode> {
         }
         Ok(ExitCode::FAILURE)
     }
+}
+
+/// The local mode's report: every outcome and failure, then the record or why there is none.
+fn report_local(
+    root: &Path,
+    outcomes: &[(String, Outcome)],
+    failures: &[String],
+    sha: &str,
+    clean_before: bool,
+) -> ExitCode {
+    for (name, outcome) in outcomes {
+        match outcome {
+            Outcome::Passed(detail) => println!("chart lane cluster: {name}: passed: {detail}"),
+            Outcome::Absent(reason) => {
+                println!("chart lane cluster: {name}: absent, not passed: {reason}");
+            }
+        }
+    }
+    for failure in failures {
+        eprintln!("chart lane cluster: failed: {failure}");
+    }
+    // Read again after a run that takes minutes: a moved `HEAD` or an edited checkout means the
+    // record would name a commit nobody is looking at any more. A git failure is no record.
+    let after = git_text(root, &["rev-parse", "HEAD"])
+        .and_then(|head| Ok((head, git_text(root, &["status", "--porcelain"])?.is_empty())));
+    let (head_after, clean_after) = match after {
+        Ok(after) => after,
+        Err(error) => {
+            eprintln!(
+                "chart lane cluster: no record: reading the checkout again failed: {error:#}"
+            );
+            return ExitCode::FAILURE;
+        }
+    };
+    match decision(
+        local_verdict(outcomes, failures),
+        sha,
+        &head_after,
+        clean_before,
+        clean_after,
+    ) {
+        Decision::Record(count) => {
+            println!(
+                "chart lane cluster: all {count} scenarios passed at {sha}; record this line in the annotated tag:"
+            );
+            println!("{}", evidence_line(sha, count, SystemTime::now()));
+            ExitCode::SUCCESS
+        }
+        Decision::NoRecord(reason) => {
+            println!(
+                "chart lane cluster: all {} scenarios passed at {sha}, but {reason}; this run is \
+                 not a release record for any commit",
+                SCENARIOS.len()
+            );
+            ExitCode::SUCCESS
+        }
+        Decision::Failed(reason) => {
+            eprintln!("chart lane cluster: no record: {reason}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Whether the kernel's `apparmor/profiles` listing holds `profile` by its exact top-level name,
+/// in any mode.
+fn profile_loaded(listing: &str, profile: &str) -> bool {
+    listing.lines().any(|line| {
+        line.strip_prefix(profile)
+            .is_some_and(|rest| rest.starts_with(" ("))
+    })
+}
+
+/// Builds the chart lab's node image from the committed `recipe`, alone in a fresh build context
+/// under the lane's work directory, and tags it for this checkout. Never pushed.
+fn build_lab(args: &Args, root: &Path, recipe: &str, work: &Path) -> Result<String> {
+    let image = lab_image(&fs::canonicalize(root)?);
+    let context = work.join("chart-lab");
+    fs::create_dir(&context)?;
+    fs::write(context.join("Dockerfile"), recipe)?;
+    let status = Command::new(&args.docker)
+        .args(["build", "--tag", &image])
+        .arg(&context)
+        .stdin(Stdio::null())
+        .status()
+        .context("docker build")?;
+    ensure!(
+        status.success(),
+        "building {image} from {LAB_RECIPE} failed: {status}"
+    );
+    Ok(image)
+}
+
+/// Removes the `AppArmor` profile this run loaded, through the node holding its source, after
+/// nothing on the cluster can load it again: the release is uninstalled and no pod of it remains,
+/// so the holding installer cannot restart and reload it. A profile already gone is no error.
+fn remove_own_profile(lane: &Lane<'_>, worker: &str) -> Result<()> {
+    // An install that never created a release has nothing to uninstall; the pod check decides.
+    let _ = lane.helm(&[
+        "uninstall",
+        RELEASE,
+        "-n",
+        PRIVILEGED_NAMESPACE,
+        "--wait",
+        "--timeout",
+        "3m",
+    ]);
+    let selector = format!("app.kubernetes.io/instance={RELEASE}");
+    let deadline = Instant::now() + Duration::from_mins(3);
+    for namespace in [PRIVILEGED_NAMESPACE, NODE_PROFILES_NAMESPACE] {
+        loop {
+            let pods = lane.kubectl(&[
+                "get", "pods", "-n", namespace, "-l", &selector, "-o", "name",
+            ])?;
+            if pods.trim().is_empty() {
+                break;
+            }
+            ensure!(
+                Instant::now() < deadline,
+                "pods of the release remain in {namespace}: {}",
+                pods.trim()
+            );
+            thread::sleep(Duration::from_secs(2));
+        }
+    }
+    let listing = |lane: &Lane<'_>| {
+        on_node(
+            lane,
+            worker,
+            &["cat", "/sys/kernel/security/apparmor/profiles"],
+        )
+    };
+    if !profile_loaded(&listing(lane)?, APPARMOR_PROFILE) {
+        return Ok(());
+    }
+    let argv = removal_argv();
+    on_node(lane, worker, &argv.each_ref().map(String::as_str))?;
+    ensure!(
+        !profile_loaded(&listing(lane)?, APPARMOR_PROFILE),
+        "{APPARMOR_PROFILE} is still loaded after {}",
+        argv.join(" ")
+    );
+    println!("chart lane cluster: removed this run's {APPARMOR_PROFILE} from the host kernel");
+    Ok(())
+}
+
+/// `docker exec <node> <argv>` on one of the lane's own kind nodes.
+fn on_node(lane: &Lane<'_>, node: &str, argv: &[&str]) -> Result<String> {
+    output(
+        Command::new(&lane.args.docker)
+            .args(["exec", node])
+            .args(argv),
+    )
+}
+
+/// What the node profiles need on each worker, checked before anything is installed: `AppArmor`
+/// enabled with its securityfs visible, so the profile can be loaded and applied; the node's own
+/// `apparmor_parser`, without which containerd applies no Localhost profile; the lane's profile not
+/// yet loaded in the kernel the nodes share, which the installer refuses; and a cgroup v2
+/// hierarchy carrying `cpu`, `memory` and `pids`, so the bootstrap can delegate. The first missing
+/// prerequisite, named.
+fn node_prerequisites(lane: &Lane<'_>, workers: &[&str]) -> std::result::Result<(), String> {
+    for worker in workers {
+        let enabled = on_node(
+            lane,
+            worker,
+            &["cat", "/sys/module/apparmor/parameters/enabled"],
+        );
+        if !enabled.as_deref().is_ok_and(|value| value.trim() == "Y") {
+            return Err(format!(
+                "AppArmor is not enabled in kind node {worker} ({enabled:?}), so the Localhost \
+                 AppArmor profile cannot be applied"
+            ));
+        }
+        if on_node(
+            lane,
+            worker,
+            &["test", "-f", "/sys/kernel/security/apparmor/profiles"],
+        )
+        .is_err()
+        {
+            return Err(format!(
+                "the AppArmor securityfs is not visible in kind node {worker}, so the node profiles \
+                 cannot be loaded"
+            ));
+        }
+        // containerd reports AppArmor unsupported, and refuses every Localhost profile with
+        // `apparmor is not supported`, on a node without the parser.
+        if on_node(lane, worker, &["test", "-x", "/sbin/apparmor_parser"]).is_err() {
+            return Err(format!(
+                "kind node {worker} has no /sbin/apparmor_parser, so its containerd reports \
+                 AppArmor unsupported and refuses the Localhost AppArmor profile"
+            ));
+        }
+        // Every kind node shares the host kernel; the installer refuses a loaded profile whose
+        // exact source its own node does not hold.
+        let loaded = on_node(
+            lane,
+            worker,
+            &["cat", "/sys/kernel/security/apparmor/profiles"],
+        )
+        .map_err(|error| {
+            format!("the AppArmor profile listing is not readable in kind node {worker}: {error:#}")
+        })?;
+        if profile_loaded(&loaded, APPARMOR_PROFILE) {
+            return Err(loaded_refusal(worker));
+        }
+        let filesystem = on_node(lane, worker, &["stat", "-fc", "%T", "/sys/fs/cgroup"]);
+        let controllers = on_node(lane, worker, &["cat", "/sys/fs/cgroup/cgroup.controllers"]);
+        let delegated = filesystem
+            .as_deref()
+            .is_ok_and(|value| value.trim() == "cgroup2fs")
+            && controllers.as_deref().is_ok_and(|value| {
+                ["cpu", "memory", "pids"]
+                    .iter()
+                    .all(|wanted| value.split_whitespace().any(|have| have == *wanted))
+            });
+        if !delegated {
+            return Err(format!(
+                "kind node {worker} has no cgroup v2 hierarchy delegating cpu, memory and pids \
+                 ({filesystem:?}, {controllers:?}), so the execution bootstrap cannot delegate"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// The daemon's TLS secret and the Identity trust roots in `namespace`.
+fn fixtures(lane: &Lane<'_>, namespace: &str, material: &Material) -> Result<()> {
+    let certificate = lane.work.join(format!("{namespace}-tls.crt"));
+    let key = lane.work.join(format!("{namespace}-tls.key"));
+    let identity_ca = lane.work.join(format!("{namespace}-identity-ca.crt"));
+    fs::write(&certificate, &material.daemon_pem)?;
+    fs::write(&key, &material.daemon_key_pem)?;
+    fs::write(&identity_ca, &material.identity_pem)?;
+    lane.kubectl(&[
+        "create",
+        "secret",
+        "tls",
+        "substrate-tls",
+        "-n",
+        namespace,
+        &format!("--cert={}", certificate.display()),
+        &format!("--key={}", key.display()),
+    ])?;
+    lane.kubectl(&[
+        "create",
+        "configmap",
+        "identity-ca",
+        "-n",
+        namespace,
+        &format!("--from-file=ca.crt={}", identity_ca.display()),
+    ])?;
+    Ok(())
+}
+
+type Results = Vec<(&'static str, Result<Outcome>)>;
+
+/// K9 C: the chart again, with execution and the node profiles, the daemons in the `privileged`
+/// namespace and the installer in a `privileged` namespace of its own;
+/// the four execution-enabled scenarios against its pods. `Err` when the install never became
+/// ready, with what the node-profile `DaemonSet` and the namespace's events say.
+fn execution(
+    lane: &Lane<'_>,
+    chart_dir: &Path,
+    material: &Material,
+    values: &Value,
+) -> Result<Results> {
+    let material = material.for_namespace(
+        chart_dir,
+        &lane.args.helm,
+        PRIVILEGED_NAMESPACE,
+        LOCAL_REPLICAS,
+    )?;
+    fixtures(lane, PRIVILEGED_NAMESPACE, &material)?;
+    let values = execution_values(values);
+    let values_file = lane.work.join("execution-values.json");
+    fs::write(&values_file, serde_json::to_vec_pretty(&values)?)?;
+    let installed = lane.helm(&[
+        "install",
+        RELEASE,
+        &chart_dir.display().to_string(),
+        "-n",
+        PRIVILEGED_NAMESPACE,
+        "--values",
+        &values_file.display().to_string(),
+        "--wait",
+        "--timeout",
+        "8m",
+    ]);
+    if let Err(error) = installed {
+        return Err(error.context(installation_diagnosis(lane)));
+    }
+    let client = material.client()?;
+    let pods = (0..LOCAL_REPLICAS)
+        .map(|ordinal| DaemonProcess::observe(lane, ordinal))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(vec![
+        (
+            "execution bootstrap",
+            execution_bootstrap(lane, &client, &material, &pods),
+        ),
+        ("Localhost seccomp profile", localhost_seccomp(lane, &pods)),
+        (
+            "Localhost AppArmor profile",
+            localhost_apparmor(lane, &pods),
+        ),
+        (
+            "TLS key after the uid drop",
+            key_after_drop(lane, &client, &material, &pods),
+        ),
+    ])
+}
+
+/// Why the execution-enabled install did not become ready, as far as the cluster says.
+fn installation_diagnosis(lane: &Lane<'_>) -> String {
+    let ask = |args: &[&str]| {
+        lane.kubectl(args)
+            .unwrap_or_else(|error| format!("<{error:#}>"))
+    };
+    let profiles = ask(&[
+        "get",
+        "daemonset",
+        "-n",
+        NODE_PROFILES_NAMESPACE,
+        "-l",
+        "app.kubernetes.io/component=node-profiles",
+        "-o",
+        "jsonpath={range .items[*]}{.metadata.name} ready {.status.numberReady} of {.status.desiredNumberScheduled}{end}",
+    ]);
+    let logs = ask(&[
+        "logs",
+        "-n",
+        NODE_PROFILES_NAMESPACE,
+        "-l",
+        "app.kubernetes.io/component=node-profiles",
+        "--tail",
+        "20",
+    ]);
+    let daemon_logs = ask(&[
+        "logs",
+        "-n",
+        PRIVILEGED_NAMESPACE,
+        "-l",
+        SELECTOR,
+        "-c",
+        "daemon",
+        "--tail",
+        "20",
+    ]);
+    let events = ask(&[
+        "get",
+        "events",
+        "-n",
+        PRIVILEGED_NAMESPACE,
+        "--field-selector",
+        "type=Warning",
+        "-o",
+        "jsonpath={range .items[*]}{.involvedObject.name}: {.reason}: {.message}{\"\\n\"}{end}",
+    ]);
+    format!(
+        "the execution-enabled install never became ready. Node profiles: {profiles}. Node-profile \
+         logs: {logs}. Daemon logs: {daemon_logs}. Warning events: {events}"
+    )
+}
+
+/// One execution-enabled daemon pod, observed from its kind node: the container's init (PID 1,
+/// which the bootstrap became) and its one child, the daemon.
+struct DaemonProcess {
+    ordinal: usize,
+    node: String,
+    container: Value,
+    runtime: Value,
+    init: String,
+    init_status: String,
+    daemon: String,
+    daemon_status: String,
+    daemon_argv: Vec<String>,
+}
+
+impl DaemonProcess {
+    fn observe(lane: &Lane<'_>, ordinal: usize) -> Result<Self> {
+        let pod: Value = serde_json::from_str(&lane.kubectl(&[
+            "get",
+            "pod",
+            "-n",
+            PRIVILEGED_NAMESPACE,
+            &format!("{RELEASE}-{ordinal}"),
+            "-o",
+            "json",
+        ])?)?;
+        let node = pod["spec"]["nodeName"]
+            .as_str()
+            .ok_or_else(|| anyhow!("{RELEASE}-{ordinal} is on no node"))?
+            .to_owned();
+        let container = pod["spec"]["containers"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|container| container["name"] == "daemon")
+            .cloned()
+            .ok_or_else(|| anyhow!("{RELEASE}-{ordinal} has no daemon container"))?;
+        let id = pod["status"]["containerStatuses"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|status| status["name"] == "daemon")
+            .and_then(|status| status["containerID"].as_str())
+            .and_then(|id| id.strip_prefix("containerd://"))
+            .ok_or_else(|| anyhow!("{RELEASE}-{ordinal} reports no containerd daemon container"))?
+            .to_owned();
+        let inspected: Value =
+            serde_json::from_str(&on_node(lane, &node, &["crictl", "inspect", &id])?)?;
+        let init = inspected["info"]["pid"]
+            .as_u64()
+            .ok_or_else(|| anyhow!("crictl reports no pid for {id}"))?
+            .to_string();
+        let children = on_node(
+            lane,
+            &node,
+            &["cat", &format!("/proc/{init}/task/{init}/children")],
+        )?;
+        let children: Vec<&str> = children.split_whitespace().collect();
+        let [daemon] = children[..] else {
+            bail!("the init of {RELEASE}-{ordinal} has children {children:?}, not one daemon");
+        };
+        let daemon = daemon.to_owned();
+        let read = |path: String| on_node(lane, &node, &["cat", &path]);
+        let init_status = read(format!("/proc/{init}/status"))?;
+        let daemon_status = read(format!("/proc/{daemon}/status"))?;
+        let daemon_argv = read(format!("/proc/{daemon}/cmdline"))?
+            .split('\0')
+            .filter(|argument| !argument.is_empty())
+            .map(str::to_owned)
+            .collect();
+        Ok(Self {
+            ordinal,
+            runtime: inspected["info"]["runtimeSpec"].clone(),
+            node,
+            container,
+            init,
+            init_status,
+            daemon,
+            daemon_status,
+            daemon_argv,
+        })
+    }
+
+    fn name(&self) -> String {
+        format!("{RELEASE}-{}", self.ordinal)
+    }
+
+    /// The `AppArmor` label of `pid`, from the node.
+    fn label(&self, lane: &Lane<'_>, pid: &str) -> Result<String> {
+        on_node(
+            lane,
+            &self.node,
+            &["cat", &format!("/proc/{pid}/attr/apparmor/current")],
+        )
+        .or_else(|_| {
+            on_node(
+                lane,
+                &self.node,
+                &["cat", &format!("/proc/{pid}/attr/current")],
+            )
+        })
+        .map(|label| label.trim_end_matches(['\0', '\n']).to_owned())
+    }
+}
+
+/// The value of one `/proc/<pid>/status` field.
+fn status_field<'a>(status: &'a str, field: &str) -> Option<&'a str> {
+    status.lines().find_map(|line| {
+        line.strip_prefix(field)
+            .and_then(|rest| rest.strip_prefix(':'))
+            .map(str::trim)
+    })
+}
+
+/// Every uid and gid is 65532 and no capability is effective, permitted or in the bounding set.
+fn dropped(status: &str) -> std::result::Result<(), String> {
+    for field in ["Uid", "Gid"] {
+        let ids: Vec<&str> = status_field(status, field)
+            .unwrap_or_default()
+            .split_whitespace()
+            .collect();
+        if ids.len() != 4 || ids.iter().any(|id| *id != DAEMON_UID) {
+            return Err(format!("{field} is {ids:?}"));
+        }
+    }
+    for field in ["CapEff", "CapPrm", "CapBnd", "CapInh", "CapAmb"] {
+        let value = status_field(status, field).unwrap_or_default();
+        if u64::from_str_radix(value, 16) != Ok(0) {
+            return Err(format!("{field} is {value:?}"));
+        }
+    }
+    Ok(())
+}
+
+fn execution_bootstrap(
+    lane: &Lane<'_>,
+    client: &Arc<ClientConfig>,
+    material: &Material,
+    pods: &[DaemonProcess],
+) -> Result<Outcome> {
+    for pod in pods {
+        dropped(&pod.init_status)
+            .map_err(|reason| anyhow!("{} init {}: {reason}", pod.name(), pod.init))?;
+        dropped(&pod.daemon_status)
+            .map_err(|reason| anyhow!("{} daemon {}: {reason}", pod.name(), pod.daemon))?;
+        ensure!(
+            status_field(&pod.daemon_status, "NoNewPrivs") == Some("1"),
+            "{} daemon runs without no_new_privs",
+            pod.name()
+        );
+        let argv = &pod.daemon_argv;
+        ensure!(
+            argv.first().map(String::as_str) == Some("/usr/local/bin/substrate-daemon")
+                && argv
+                    .windows(2)
+                    .any(|pair| pair[0] == "--cgroup-root" && pair[1] == "/sys/fs/cgroup"),
+            "{} runs {argv:?}, not the daemon on the delegated cgroup root",
+            pod.name()
+        );
+    }
+
+    let forward = Forward::open_in(lane, PRIVILEGED_NAMESPACE, 0)?;
+    let pod = Target::pod(&forward, client, material, 0);
+    let (status, machine) = call(&pod, "GET", "/v1/machine", None)?;
+    ensure!(status == 200, "machine answered {status}: {machine}");
+    let snapshot = machine["result"]["snapshot"]
+        .as_str()
+        .ok_or_else(|| anyhow!("the machine names no capability snapshot: {machine}"))?
+        .to_owned();
+    let create = json!({"op": ulid::Ulid::generate().to_string(), "input": {"source": "empty", "labels": {"lane": "execution"}}});
+    let (status, created) = call(&pod, "POST", "/v1/workspaces", Some(&create))?;
+    ensure!(
+        status == 201,
+        "workspace create answered {status}: {created}"
+    );
+    let workspace = created["result"]["id"]
+        .as_str()
+        .unwrap_or_default()
+        .to_owned();
+    let exec = json!({"op": ulid::Ulid::generate().to_string(), "input": {
+        "workspace": workspace,
+        "argv": ["/usr/bin/printf", "hello"],
+        "env": {"allow": [], "set": {}},
+        "sandbox": {"capability_snapshot": snapshot, "network": "none", "profile": "workspace", "require": true},
+        "limits": {"timeout_ms": 20_000, "output_bytes": 65_536, "processes": 16, "memory_bytes": 67_108_864, "cpu_millis": 1_000},
+        "wait": true
+    }});
+    let (status, executed) = call(&pod, "POST", "/v1/execs", Some(&exec))?;
+    ensure!(
+        status == 200
+            && executed["result"]["state"] == "exited"
+            && executed["result"]["exit"] == json!({"code": 0, "signal": null})
+            && executed["result"]["applied"]["network"] == "none",
+        "the confined exec answered {status}: {executed}"
+    );
+    let id = executed["result"]["id"].as_str().unwrap_or_default();
+    let (status, stdout) = call(
+        &pod,
+        "GET",
+        &format!("/v1/execs/{id}/output?stream=stdout&offset=0&limit_bytes=65536"),
+        None,
+    )?;
+    ensure!(
+        status == 200 && stdout["result"]["content"]["data"] == "aGVsbG8=",
+        "the confined exec's stdout is not hello: {status} {stdout}"
+    );
+    Ok(Outcome::Passed(format!(
+        "init and daemon of {} run as uid {DAEMON_UID} with no capability and no_new_privs on the \
+         delegated cgroup root; {id} ran /usr/bin/printf confined in {workspace} and printed hello",
+        pods.iter()
+            .map(DaemonProcess::name)
+            .collect::<Vec<_>>()
+            .join(" and ")
+    )))
+}
+
+/// The syscall names of a seccomp document, profile or OCI runtime spec alike.
+fn syscall_names(seccomp: &Value) -> BTreeSet<String> {
+    seccomp["syscalls"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|rule| rule["names"].as_array().into_iter().flatten())
+        .filter_map(|name| name.as_str().map(str::to_owned))
+        .collect()
+}
+
+fn localhost_seccomp(lane: &Lane<'_>, pods: &[DaemonProcess]) -> Result<Outcome> {
+    let source = fs::read_to_string(crate::repo::root()?.join(SECCOMP_SOURCE))?;
+    let profile: Value = serde_json::from_str(&source)?;
+    let names = syscall_names(&profile);
+    ensure!(!names.is_empty(), "{SECCOMP_SOURCE} names no syscall");
+    for pod in pods {
+        let declared = &pod.container["securityContext"]["seccompProfile"];
+        ensure!(
+            *declared == json!({"type": "Localhost", "localhostProfile": SECCOMP_PROFILE}),
+            "{} declares seccomp {declared}",
+            pod.name()
+        );
+        let installed = on_node(
+            lane,
+            &pod.node,
+            &[
+                "cat",
+                &format!("/var/lib/kubelet/seccomp/{SECCOMP_PROFILE}"),
+            ],
+        )?;
+        ensure!(
+            installed == source,
+            "the profile on {} is not {SECCOMP_SOURCE} byte for byte",
+            pod.node
+        );
+        let applied = &pod.runtime["linux"]["seccomp"];
+        ensure!(
+            applied["defaultAction"] == profile["defaultAction"] && syscall_names(applied) == names,
+            "{} runs seccomp with default {} over {} syscall names, not the profile's {} over {}",
+            pod.name(),
+            applied["defaultAction"],
+            syscall_names(applied).len(),
+            profile["defaultAction"],
+            names.len()
+        );
+        for (role, status) in [("init", &pod.init_status), ("daemon", &pod.daemon_status)] {
+            ensure!(
+                status_field(status, "Seccomp") == Some("2"),
+                "{} {role} is not in seccomp filter mode",
+                pod.name()
+            );
+        }
+    }
+    Ok(Outcome::Passed(format!(
+        "init and daemon of each pod are in seccomp filter mode under {SECCOMP_PROFILE}, which its \
+         node holds byte for byte: default {} over {} syscall names",
+        profile["defaultAction"],
+        names.len()
+    )))
+}
+
+fn localhost_apparmor(lane: &Lane<'_>, pods: &[DaemonProcess]) -> Result<Outcome> {
+    let ready = lane.kubectl(&[
+        "get",
+        "daemonset",
+        "-n",
+        NODE_PROFILES_NAMESPACE,
+        "-l",
+        "app.kubernetes.io/component=node-profiles",
+        "-o",
+        "jsonpath={.items[0].status.numberReady}",
+    ])?;
+    ensure!(
+        ready.trim() == pods.len().to_string(),
+        "{ready} node-profile pods are ready, not {}",
+        pods.len()
+    );
+    let enforced = format!("{APPARMOR_PROFILE} (enforce)");
+    for pod in pods {
+        let declared = &pod.container["securityContext"]["appArmorProfile"];
+        ensure!(
+            *declared == json!({"type": "Localhost", "localhostProfile": APPARMOR_PROFILE}),
+            "{} declares AppArmor {declared}",
+            pod.name()
+        );
+        ensure!(
+            pod.runtime["process"]["apparmorProfile"] == APPARMOR_PROFILE,
+            "{} runs under AppArmor {}",
+            pod.name(),
+            pod.runtime["process"]["apparmorProfile"]
+        );
+        for (role, pid) in [("init", &pod.init), ("daemon", &pod.daemon)] {
+            let label = pod.label(lane, pid)?;
+            ensure!(
+                label == enforced,
+                "{} {role} is labelled {label:?}, not {enforced:?}",
+                pod.name()
+            );
+        }
+    }
+    Ok(Outcome::Passed(format!(
+        "the node profiles are ready on {} worker(s); init and daemon of each pod are labelled \
+         {enforced}",
+        pods.len()
+    )))
+}
+
+fn key_after_drop(
+    lane: &Lane<'_>,
+    client: &Arc<ClientConfig>,
+    material: &Material,
+    pods: &[DaemonProcess],
+) -> Result<Outcome> {
+    for pod in pods {
+        dropped(&pod.daemon_status).map_err(|reason| anyhow!("{} daemon: {reason}", pod.name()))?;
+        let key = on_node(
+            lane,
+            &pod.node,
+            &[
+                "stat",
+                "-c",
+                "%a %u %g %F",
+                &format!("/proc/{}/root/run/substrate/tls/tls.key", pod.daemon),
+            ],
+        )?;
+        ensure!(
+            key.trim() == format!("400 {DAEMON_UID} {DAEMON_UID} regular file"),
+            "{}'s key is {key:?}",
+            pod.name()
+        );
+        let forward = Forward::open_in(lane, PRIVILEGED_NAMESPACE, pod.ordinal)?;
+        let target = Target::pod(&forward, client, material, pod.ordinal);
+        let (status, machine) = call(&target, "GET", "/v1/machine", None)?;
+        ensure!(
+            status == 200,
+            "{} answered {status} over TLS: {machine}",
+            pod.name()
+        );
+    }
+    Ok(Outcome::Passed(format!(
+        "each key is 0400 and owned by {DAEMON_UID}; each daemon, uid {DAEMON_UID} with no \
+         capability, served TLS verified under its own pod name"
+    )))
 }
 
 fn kind_gateway(args: &Args) -> Result<Ipv4Addr> {
@@ -449,8 +1571,16 @@ struct Material {
 }
 
 impl Material {
-    fn new(gateway: Ipv4Addr, chart_dir: &Path, helm: &Path) -> Result<Self> {
-        let rendered = chart::render(helm, chart_dir, RELEASE, NAMESPACE, &chart::base_values())?
+    /// The per-pod host names the chart's `certificate-names` `ConfigMap` computes in `namespace`
+    /// for `replicas` pods.
+    fn pod_names(
+        chart_dir: &Path,
+        helm: &Path,
+        namespace: &str,
+        replicas: usize,
+    ) -> Result<Vec<String>> {
+        let values = chart::merged(&chart::base_values(), &json!({"replicas": replicas}));
+        let rendered = chart::render(helm, chart_dir, RELEASE, namespace, &values)?
             .map_err(|stderr| anyhow!("helm template: {stderr}"))?;
         let names = chart_yaml::documents(&rendered)?
             .into_iter()
@@ -461,7 +1591,37 @@ impl Material {
             .and_then(|document| document["data"]["dns-names"].as_str().map(str::to_owned))
             .ok_or_else(|| anyhow!("the chart rendered no certificate-names ConfigMap"))?;
         let pod_names: Vec<String> = names.lines().map(str::to_owned).collect();
-        ensure!(pod_names.len() == REPLICAS, "the chart names {pod_names:?}");
+        ensure!(pod_names.len() == replicas, "the chart names {pod_names:?}");
+        Ok(pod_names)
+    }
+
+    /// The same Identity stub and credential, with a daemon certificate naming exactly the
+    /// `replicas` pods of the release in `namespace`.
+    fn for_namespace(
+        &self,
+        chart_dir: &Path,
+        helm: &Path,
+        namespace: &str,
+        replicas: usize,
+    ) -> Result<Self> {
+        let pod_names = Self::pod_names(chart_dir, helm, namespace, replicas)?;
+        let daemon_key = KeyPair::generate()?;
+        let daemon = CertificateParams::new(pod_names.clone())?.self_signed(&daemon_key)?;
+        Ok(Self {
+            daemon_pem: daemon.pem(),
+            daemon_key_pem: daemon_key.serialize_pem(),
+            daemon_der: daemon.der().clone(),
+            identity_pem: self.identity_pem.clone(),
+            identity_der: self.identity_der.clone(),
+            identity_key: self.identity_key.clone(),
+            pod_names,
+            service_name: format!("{RELEASE}.{namespace}.svc.cluster.local"),
+            credential: self.credential.clone(),
+        })
+    }
+
+    fn new(gateway: Ipv4Addr, chart_dir: &Path, helm: &Path) -> Result<Self> {
+        let pod_names = Self::pod_names(chart_dir, helm, NAMESPACE, REPLICAS)?;
         let daemon_key = KeyPair::generate()?;
         let daemon = CertificateParams::new(pod_names.clone())?.self_signed(&daemon_key)?;
         let identity_key = KeyPair::generate()?;
@@ -643,7 +1803,7 @@ fn resolve(
             "exp": now + 300,
             "jti": ulid::Ulid::generate().to_string(),
             "act": {"sub": "chart-lane-actor"},
-            "scope": "observe workspaces",
+            "scope": "exec observe workspaces",
             "principal_kind": "human",
             "tenant_id": "chart-lane-tenant",
             "email": null,
@@ -705,13 +1865,17 @@ struct Forward(Child, u16);
 
 impl Forward {
     fn open(lane: &Lane<'_>, ordinal: usize) -> Result<Self> {
+        Self::open_in(lane, NAMESPACE, ordinal)
+    }
+
+    fn open_in(lane: &Lane<'_>, namespace: &str, ordinal: usize) -> Result<Self> {
         let port = TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
         let child = lane
             .tool(&lane.args.kubectl)
             .args([
                 "port-forward",
                 "-n",
-                NAMESPACE,
+                namespace,
                 &format!("pod/{RELEASE}-{ordinal}"),
                 &format!("{port}:8443"),
             ])
@@ -1248,7 +2412,296 @@ mod tests {
             absent_list(&absent_scenarios(&[])),
             "execution bootstrap; Localhost seccomp profile; Localhost AppArmor profile; TLS key after the uid drop"
         );
-        assert_eq!(SCENARIOS, 10);
+        assert_eq!(SCENARIOS.len(), 4);
+    }
+
+    #[test]
+    fn the_declared_scenarios_are_one_literal_array_naming_every_scenario_once() {
+        let source = include_str!("chart_cluster.rs");
+        assert_eq!(declared_scenarios(source), Some(SCENARIOS.len()));
+        let names: BTreeSet<&str> = SCENARIOS.iter().copied().collect();
+        assert_eq!(names.len(), SCENARIOS.len(), "a scenario is declared twice");
+        // A local record covers exactly the execution scenarios the hosted lane reports absent;
+        // the six hosted ones are the hosted lane's, on two workers.
+        let execution: Vec<&str> = EXECUTION_ABSENT.iter().map(|(name, _)| *name).collect();
+        assert_eq!(SCENARIOS.as_slice(), execution.as_slice());
+        for name in HOSTED {
+            assert!(!names.contains(name), "{name} is a hosted scenario");
+        }
+        let array = |entries: &str, length: usize| {
+            format!("const X: u8 = 0;\npub const SCENARIOS: [&str; {length}] = [\n{entries}];\n")
+        };
+        assert_eq!(
+            declared_scenarios(&array("    \"a\",\n    \"b c\",\n", 2)),
+            Some(2)
+        );
+        for malformed in [
+            array("    \"a\", \"b\",\n", 2),
+            array("    \"a\",\n", 2),
+            array("    \"a\",\n    // b\n", 1),
+            "pub const SCENARIOS: [&str; 0] = [];\n".to_owned(),
+            String::new(),
+        ] {
+            assert_eq!(declared_scenarios(&malformed), None, "{malformed}");
+        }
+    }
+
+    fn every(passed: bool) -> Vec<(String, Outcome)> {
+        SCENARIOS
+            .iter()
+            .map(|name| {
+                let outcome = if passed {
+                    Outcome::Passed("ok".into())
+                } else {
+                    Outcome::Absent("not proven".into())
+                };
+                ((*name).to_owned(), outcome)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn only_a_local_run_that_passed_every_declared_scenario_is_a_record() {
+        assert_eq!(local_verdict(&every(true), &[]), Ok(SCENARIOS.len()));
+        let error = local_verdict(&every(true), &["egress: refused".to_owned()]).unwrap_err();
+        assert!(error.contains("egress: refused"), "{error}");
+        let error = local_verdict(&every(false), &[]).unwrap_err();
+        assert!(error.contains("absent"), "{error}");
+        let mut missing = every(true);
+        missing.retain(|(name, _)| name != "Localhost AppArmor profile");
+        let error = local_verdict(&missing, &[]).unwrap_err();
+        assert!(error.contains("Localhost AppArmor profile"), "{error}");
+        let mut doubled = every(true);
+        doubled.push((
+            "execution bootstrap".to_owned(),
+            Outcome::Passed("again".into()),
+        ));
+        assert!(local_verdict(&doubled, &[]).is_err());
+        for undeclared in ["undeclared", "placement"] {
+            let mut unknown = every(true);
+            unknown.push((undeclared.to_owned(), Outcome::Passed("ok".into())));
+            assert!(local_verdict(&unknown, &[]).is_err(), "{undeclared}");
+        }
+    }
+
+    #[test]
+    fn a_record_needs_an_unmoved_head_and_a_checkout_clean_before_and_after() {
+        let sha = "a".repeat(40);
+        let moved = "b".repeat(40);
+        assert_eq!(
+            decision(Ok(10), &sha, &sha, true, true),
+            Decision::Record(10)
+        );
+        assert!(matches!(
+            decision(Ok(10), &sha, &moved, true, true),
+            Decision::NoRecord(reason) if reason.contains("HEAD moved")
+        ));
+        for (before, after) in [(false, true), (true, false), (false, false)] {
+            assert!(matches!(
+                decision(Ok(10), &sha, &sha, before, after),
+                Decision::NoRecord(reason) if reason.contains("not clean")
+            ));
+        }
+        assert!(matches!(
+            decision(Err("egress failed".into()), &sha, &sha, true, true),
+            Decision::Failed(reason) if reason.contains("egress failed")
+        ));
+    }
+
+    #[test]
+    fn a_missing_prerequisite_is_refused_by_name_with_every_scenario_that_did_not_run() {
+        let message = refusal("AppArmor securityfs is not mounted in substrate-chart-lane-worker");
+        assert!(
+            message.contains("AppArmor securityfs is not mounted"),
+            "{message}"
+        );
+        for name in SCENARIOS {
+            assert!(message.contains(name), "{name} is not named: {message}");
+        }
+        assert!(!message.contains("Chart-lane:"), "{message}");
+    }
+
+    #[test]
+    fn the_image_must_carry_the_checkouts_own_revision() {
+        let sha = "c".repeat(40);
+        assert_eq!(revision_verdict(&sha, &sha), Ok(()));
+        for label in ["", "unknown", "<no value>", &"d".repeat(40), &sha[..12]] {
+            let error = revision_verdict(label, &sha).unwrap_err();
+            assert!(error.contains(REVISION_LABEL), "{error}");
+            assert!(error.contains(&sha), "{error}");
+        }
+    }
+
+    #[test]
+    fn the_record_is_the_form_the_release_workflow_accepts() {
+        let at = UNIX_EPOCH + Duration::from_hours(497_986);
+        assert_eq!(
+            evidence_line("abc", 10, at),
+            "Chart-lane: abc 10 2026-10-23T10:00:00Z"
+        );
+    }
+
+    #[test]
+    fn a_profile_already_in_the_shared_kernel_is_found_by_its_exact_name() {
+        let listing = "docker-default (enforce)\nsubstrate-host-exec-v1 (enforce)\n";
+        assert!(profile_loaded(listing, APPARMOR_PROFILE));
+        assert!(profile_loaded(
+            "substrate-host-exec-v1 (complain)\n",
+            APPARMOR_PROFILE
+        ));
+        assert!(!profile_loaded(
+            "docker-default (enforce)\n",
+            APPARMOR_PROFILE
+        ));
+        assert!(!profile_loaded(
+            "substrate-host-exec-v10 (enforce)\nx//substrate-host-exec-v1 (enforce)\n",
+            APPARMOR_PROFILE
+        ));
+        assert!(!profile_loaded("", APPARMOR_PROFILE));
+    }
+
+    #[test]
+    fn local_mode_runs_one_worker_and_loads_the_hosts_securityfs_into_it_only() {
+        let hosted = kind_config(false);
+        assert!(!hosted.contains("extraMounts"), "{hosted}");
+        assert_eq!(hosted.matches("role: worker").count(), REPLICAS, "{hosted}");
+        // Every kind node shares the host kernel, so a second node's installer would find the
+        // first one's profile loaded without its source and refuse.
+        let local = kind_config(true);
+        assert_eq!(LOCAL_REPLICAS, 1);
+        assert_eq!(
+            local.matches("role: worker").count(),
+            LOCAL_REPLICAS,
+            "{local}"
+        );
+        assert_eq!(
+            local.matches("extraMounts").count(),
+            LOCAL_REPLICAS,
+            "{local}"
+        );
+        assert_eq!(
+            local.matches("hostPath: /sys/kernel/security").count(),
+            LOCAL_REPLICAS,
+            "{local}"
+        );
+        let control_plane = local
+            .split("  - role: ")
+            .find(|node| node.starts_with("control-plane"))
+            .expect("a control plane");
+        assert!(!control_plane.contains("extraMounts"), "{local}");
+    }
+
+    #[test]
+    fn local_values_enable_execution_and_the_node_profiles_in_the_privileged_namespace() {
+        let values = execution_values(&json!({"execution": {"enabled": false}}));
+        assert_eq!(values["execution"]["enabled"], true);
+        assert_eq!(values["nodeProfiles"]["enabled"], true);
+        // The chart refuses a node-profile installer in the release's own namespace.
+        assert_eq!(values["nodeProfiles"]["namespace"], NODE_PROFILES_NAMESPACE);
+        assert_ne!(NODE_PROFILES_NAMESPACE, PRIVILEGED_NAMESPACE);
+        // One worker holds one pod: the chart's anti-affinity places no second.
+        assert_eq!(values["replicas"], LOCAL_REPLICAS);
+    }
+
+    fn repository_file(path: &str) -> String {
+        fs::read_to_string(crate::repo::root().expect("root").join(path)).expect(path)
+    }
+
+    #[test]
+    fn the_chart_lab_builds_on_the_hosted_lanes_exact_node_image() {
+        let recipe = repository_file(LAB_RECIPE);
+        let workflow = repository_file(".github/workflows/chart-lane.yml");
+        let hosted = workflow
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("KIND_NODE_IMAGE: "))
+            .expect("chart-lane.yml pins KIND_NODE_IMAGE");
+        assert!(hosted.contains("@sha256:"), "{hosted}");
+        assert_eq!(lab_base(&recipe), Some(hosted));
+        assert_eq!(lab_base_verdict(&recipe, hosted), Ok(()));
+        let other = "kindest/node:v1.36.0@sha256:0000";
+        let error = lab_base_verdict(&recipe, other).unwrap_err();
+        assert!(error.contains(other) && error.contains(hosted), "{error}");
+        assert!(lab_base_verdict("RUN true\n", hosted).is_err());
+    }
+
+    #[test]
+    fn the_chart_lab_pins_the_parser_from_the_nodes_own_distribution_and_never_starts_it() {
+        let recipe = repository_file(LAB_RECIPE);
+        // The node's own Debian snapshot, the exact parser version, and the boot unit masked so
+        // the node never loads its distribution's profiles into the kernel it shares.
+        assert!(
+            recipe.contains("http://snapshot.debian.org/archive/debian/20260803T000000Z"),
+            "{recipe}"
+        );
+        assert!(recipe.contains("apparmor=4.1.0-1"), "{recipe}");
+        assert!(recipe.contains("--no-install-recommends"), "{recipe}");
+        assert!(
+            recipe.contains("systemctl mask apparmor.service"),
+            "{recipe}"
+        );
+        assert!(recipe.contains("test -x /sbin/apparmor_parser"), "{recipe}");
+        assert!(
+            recipe
+                .lines()
+                .filter(|line| line.trim_start().starts_with('#'))
+                .all(|line| line.starts_with("# syntax=")),
+            "{recipe}"
+        );
+    }
+
+    #[test]
+    fn every_checkout_owns_its_chart_lab_tag() {
+        let one = lab_image(Path::new("/a/substrate"));
+        let other = lab_image(Path::new("/b/substrate"));
+        assert!(one.starts_with(&format!("{LAB_REPOSITORY}:")), "{one}");
+        assert_ne!(one, other);
+        assert_eq!(one, lab_image(Path::new("/a/substrate")));
+    }
+
+    #[test]
+    fn the_lane_removes_its_own_profile_through_the_source_the_installer_wrote() {
+        let values = repository_file("deploy/helm/substrate/values.yaml");
+        let kubelet_root = values
+            .lines()
+            .find_map(|line| line.trim().strip_prefix("kubeletRoot: "))
+            .expect("kubeletRoot");
+        let template = repository_file("deploy/helm/substrate/templates/node-profiles.yaml");
+        assert!(
+            template
+                .contains("printf \"%s/seccomp/b10x-substrate\" .Values.nodeProfiles.kubeletRoot"),
+            "the installer's host directory moved"
+        );
+        let installer = repository_file("crates/substrate-daemon/src/container_profiles.rs");
+        let file = installer
+            .lines()
+            .find_map(|line| {
+                line.strip_prefix("const APPARMOR: &str = \"")?
+                    .strip_suffix("\";")
+            })
+            .expect("the installer's AppArmor file name");
+        assert_eq!(
+            removal_argv(),
+            [
+                "/sbin/apparmor_parser".to_owned(),
+                "--remove".to_owned(),
+                format!("{kubelet_root}/seccomp/b10x-substrate/{file}"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_profile_the_lane_did_not_load_is_refused_with_the_root_command_that_clears_it() {
+        let message = refusal(&loaded_refusal("substrate-chart-lane-worker"));
+        assert!(message.contains(APPARMOR_PROFILE), "{message}");
+        assert!(
+            message.contains(
+                "sudo sh -c 'printf %s substrate-host-exec-v1 > /sys/kernel/security/apparmor/.remove'"
+            ),
+            "{message}"
+        );
+        for name in SCENARIOS {
+            assert!(message.contains(name), "{name}: {message}");
+        }
     }
 
     #[test]
