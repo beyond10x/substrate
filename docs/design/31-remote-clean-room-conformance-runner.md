@@ -1,9 +1,9 @@
 # Design 31: a clean-room runner certifies a remote endpoint
 
-Status: proposed, 2026-10-28. Owned by `story:remote-clean-room-conformance`
-(`epic:remote-serving`). It changes no wire byte and cuts no successor bundle (§ 8). No code before
-acceptance (invariant 8). § 11 lists the questions left to the operator, each with a recommended
-answer.
+Status: accepted for implementation, 2026-10-28. Owned by `story:remote-clean-room-conformance`
+(`epic:remote-serving`). It changes no wire byte and cuts no successor bundle (§ 8). § 11 records
+the three questions that were left to the operator and the answers taken
+(`approval-record:design-31-accepted`).
 
 The story asks for a Rust runner that certifies a deployed endpoint from outside its process,
 container and checkout, using only the public contract and a scoped test authority. This note
@@ -463,3 +463,12 @@ check-docs`), and `AGENTS.md`, `STATUS.md` and `CHANGELOG.md`. No new third-part
 - **Q3. Should the runner binary ship as a release artifact?** Recommended: not yet. Build it from
   source at a revision with `-p` (ADR 0030, § 2), and decide release names separately, because they
   become a public interface (AGENTS.md § *Releases*).
+
+Answered 2026-10-28 by the coordinating session's D172 under the operator's grant, each as
+recommended (`approval-record:design-31-accepted`):
+
+| question | answer |
+|---|---|
+| Q1 | C: keyless `cosign sign-blob`; a private deployment signs key-based without the transparency log |
+| Q2 | yes: an `incomplete` run exits 4 and keeps its report |
+| Q3 | not yet: the runner is built from source; release artifacts are a later story |

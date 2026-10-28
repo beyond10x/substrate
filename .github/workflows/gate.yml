@@ -1,8 +1,3 @@
-# Runs the full component gate — `bash scripts/gate.sh`, the bar for `main` per AGENTS.md § "The
-# gate" — on every push to main and every pull request. The gate is invoked bare, so the job's
-# status is the gate's own exit status; it is never piped into `tail`, which would report `tail`'s
-# status instead (AGENTS.md § "The gate").
-#
 # Lanes. The suite has a portable lane and a delegated lane. `scripts/gate.sh` runs the clean-room
 # runner `crates/substrate-daemon/tests/runtime_vectors.rs` inside `cargo test --workspace`, with
 # no `SUBSTRATE_VECTORS_CGROUP_ROOT`, so it takes its portable branch and asserts the named
@@ -37,8 +32,8 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  gate:
-    name: Full gate
+  gate-tests:
+    name: "Gate: tests and Clippy"
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -50,20 +45,11 @@ jobs:
 
     steps:
       - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          # `cargo xtask check-secrets` verifies every reachable commit and refuses a shallow
-          # history whose Gitleaks count cannot agree with Git's. The full history is therefore
-          # security input, not checkout convenience.
           fetch-depth: 0
           persist-credentials: false
 
-      # The runner ships its own rustup, so no third-party Rust action is used. `rust-toolchain.toml`
-      # is the source of the version when it is present — `cargo xtask check-toolchain` keeps it equal
-      # to `rust-version` in Cargo.toml and the Dockerfile builder tag, and a bump there must reach
-      # CI without editing this file. The literal below is the fallback for a tree without that file,
-      # so this step is correct both before and after story:pinned-rust-toolchain lands. rustfmt and
-      # clippy are requested explicitly because the gate runs both.
       - name: Install the pinned Rust toolchain
         run: |
           channel=1.97
@@ -84,13 +70,8 @@ jobs:
           cargo fmt --version
           cargo clippy --version
 
-      # The former broad cache uploaded the entire workspace target tree. Run 33497345920 restored
-      # 4.0 GiB for 68 seconds and saved it for another 59 seconds, even though Cargo then rebuilt
-      # every changed workspace crate. This Rust-aware cache retains Cargo home and dependency
-      # artifacts while pruning workspace outputs that are invalidated by the next source change.
-      # Its signed v2.9.2 tag peels to this exact commit.
       - name: Cache Cargo dependencies
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
         with:
           prefix-key: substrate-gate-v1
           shared-key: full-gate
@@ -121,29 +102,10 @@ jobs:
             echo "oci lane:       RUNS   — SUBSTRATE_OCI_LANE=1, and no usable Docker answers here, so the oci cases fail rather than report ABSENT"
           fi
 
-      - name: Install the pinned licence inventory tool
-        run: |
-          if ! cargo-about --version 2>/dev/null | grep -qx 'cargo-about 0.9.1'; then
-            cargo install cargo-about --version 0.9.1 --locked --features cli
-          fi
-          cargo-about --version
-
-      - name: Install the specification's pinned ESS release
-        env:
-          ESS_VERSION: 0.74.0
-          ESS_SHA256: 072d033d74d3cc1649aa9a5ef82a4e07637c3078a2f2ee3dc14ad2e6a80da863
-        run: |
-          archive="ess-$ESS_VERSION-x86_64-unknown-linux-gnu.tar.gz"
-          curl --fail --location --retry 3 "https://github.com/beyond10x/ess/releases/download/$ESS_VERSION/$archive" --output "$RUNNER_TEMP/$archive"
-          echo "$ESS_SHA256  $RUNNER_TEMP/$archive" | sha256sum --check --strict
-          mkdir -p "$RUNNER_TEMP/ess-bin"
-          tar -xzf "$RUNNER_TEMP/$archive" --strip-components=1 -C "$RUNNER_TEMP/ess-bin"
-          echo "$RUNNER_TEMP/ess-bin" >> "$GITHUB_PATH"
-
       # Bare invocation: the job fails with the gate's own exit status. Do not add a pipeline here.
-      - name: Run the full gate
+      - name: Run the gate's tests phase
         id: gate
-        run: bash scripts/gate.sh
+        run: bash scripts/gate.sh tests
 
       # The gate stops at its first failing step, so the portable lane's outcome is the gate step's
       # outcome and nothing stronger is claimed. The delegated line is unconditional: it did not run.
@@ -162,6 +124,82 @@ jobs:
             echo "The delegated lane needs a runner inside a delegated cgroup subtree carrying \`cpu\`, \`memory\` and \`pids\`; see README.md, section \"Serving exec\"."
           } >> "$GITHUB_STEP_SUMMARY"
           echo "portable lane: ${{ steps.gate.outcome }} (the gate step). oci lane: ${{ steps.gate.outcome }} (the gate step). delegated lane: absent — not executed, not passed."
+
+  gate-static:
+    name: "Gate: static checks"
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: 1
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install the pinned Rust toolchain
+        run: |
+          channel=$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml | head -1)
+          test -n "$channel"
+          rustup toolchain install "$channel" --profile minimal --component rustfmt
+          rustup default "$channel"
+          cargo --version
+          cargo fmt --version
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+        with:
+          prefix-key: substrate-gate-v1
+          shared-key: full-gate-static
+          cache-workspace-crates: "false"
+          cache-all-crates: "false"
+          cache-on-failure: "false"
+
+      - name: Install the pinned licence inventory tool
+        run: |
+          if ! cargo-about --version 2>/dev/null | grep -qx 'cargo-about 0.9.1'; then
+            cargo install cargo-about --version 0.9.1 --locked --features cli
+          fi
+          cargo-about --version
+
+      - name: Install the specification's pinned ESS release
+        env:
+          ESS_VERSION: 0.75.0
+          ESS_SHA256: cb4634a6004cfa407de2dbecdfb66b8c3bce462364c69f932b31fa7408b900f4
+        run: |
+          archive="ess-$ESS_VERSION-x86_64-unknown-linux-gnu.tar.gz"
+          curl --fail --location --retry 3 "https://github.com/beyond10x/ess/releases/download/$ESS_VERSION/$archive" --output "$RUNNER_TEMP/$archive"
+          echo "$ESS_SHA256  $RUNNER_TEMP/$archive" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/ess-bin"
+          tar -xzf "$RUNNER_TEMP/$archive" --strip-components=1 -C "$RUNNER_TEMP/ess-bin"
+          echo "$RUNNER_TEMP/ess-bin" >> "$GITHUB_PATH"
+
+      - name: Run the gate's static phase
+        run: bash scripts/gate.sh static
+
+  gate:
+    name: Full gate
+    needs: [gate-tests, gate-static]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Require both gate phases
+        env:
+          TESTS: ${{ needs.gate-tests.result }}
+          STATIC: ${{ needs.gate-static.result }}
+        run: |
+          echo "tests phase: $TESTS"
+          echo "static phase: $STATIC"
+          test "$TESTS" = success
+          test "$STATIC" = success
 
   pod-lane:
     name: Pod lane
@@ -233,7 +271,7 @@ jobs:
           kubectl create namespace "$ns"
           kubectl label namespace "$ns" pod-security.kubernetes.io/enforce=restricted
           kubectl -n "$ns" create serviceaccount substrate-pod
-          kubectl -n "$ns" create role substrate-pod --verb=create,get,list,delete --resource=pods,networkpolicies.networking.k8s.io
+          kubectl -n "$ns" create role substrate-pod --verb=create,get,list,watch,delete --resource=pods,networkpolicies.networking.k8s.io
           kubectl -n "$ns" create role substrate-pod-log --verb=get --resource=pods/log
           kubectl -n "$ns" create rolebinding substrate-pod --role=substrate-pod --serviceaccount="$ns:substrate-pod"
           kubectl -n "$ns" create rolebinding substrate-pod-log --role=substrate-pod-log --serviceaccount="$ns:substrate-pod"

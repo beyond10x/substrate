@@ -212,6 +212,10 @@ confinement/pod.rs: pub const LOG_ACCESS_PROBE: &str = "substrate-log-access-pro
 confinement/pod.rs: pub const POD_PROCESSES_UNSERVED: &str = "confinement.pod-processes-unserved";
 confinement/pod.rs: pub const POD_SIGNAL_UNSERVED: &str = "confinement.pod-signal-unserved";
 confinement/pod.rs: pub const POD_API_FAILED: &str = "confinement.pod-api-failed";
+confinement/pod.rs: #[derive(Debug, Clone, Copy, PartialEq, Eq)] pub struct PodTiming
+confinement/pod.rs: struct PodTiming > pub api_timeout: Duration,
+confinement/pod.rs: struct PodTiming > pub unreachable_limit: Duration,
+confinement/pod.rs: impl Default for PodTiming
 confinement/pod.rs: #[derive(Debug, Clone)] pub struct PodRequest
 confinement/pod.rs: struct PodRequest > pub cluster: Option<PathBuf>,
 confinement/pod.rs: #[derive(Debug, Clone, PartialEq, Eq)] pub struct PodSettings
@@ -221,6 +225,7 @@ confinement/pod.rs: struct PodSettings > pub pod_pids_limit: Option<u32>,
 confinement/pod.rs: struct PodSettings > pub ephemeral_storage_bytes: u64,
 confinement/pod.rs: pub fn proof() -> AdapterFacts
 confinement/pod.rs: pub fn open_pod(request: PodRequest) -> Result<Arc<PodAdapter>, ConfinementError>
+confinement/pod.rs: pub fn open_pod_timed(request: PodRequest, timing: PodTiming) -> Result<Arc<PodAdapter>, ConfinementError>
 confinement/pod.rs: pub fn check_profile(settings: &PodSettings, profile: &ConfinementProfile) -> Result<(), ConfinementError>
 confinement/pod.rs: pub fn render_manifests(settings: &PodSettings, profile: &ConfinementProfile, command: &Command, run: &str) -> Result<Value, ConfinementError>
 confinement/pod.rs: pub struct PodAdapter

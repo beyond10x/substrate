@@ -230,7 +230,7 @@ cluster configuration names. The adapter speaks to the API server itself; it run
   workspace at `/workspace` with a 1 GiB size and ephemeral-storage bound unless the operator
   states another, and `activeDeadlineSeconds` from the wall bound. The argv and environment pass
   literally: every `$` is written `$$`. The Pod is never force-deleted, and its policy is deleted
-  only once the Pod is confirmed gone; otherwise the run reads `Unknown`.
+  only once the Pod is gone and its container shown terminated; otherwise the run reads `Unknown`.
 - **Declares.** `process_run`, `process_watch`, `output_read`, `wait`, `workspace`, `limits` and
   `audit`, and the fact `image_digest_pinned`. It serves no `filesystem_view`, because a Pod
   reaches no host path, and neither network family, because a NetworkPolicy's enforcement depends
@@ -245,6 +245,6 @@ cluster configuration names. The adapter speaks to the API server itself; it run
 - **Needs.** The JSON form of a kubeconfig whose current context names a namespace, a cluster and a
   user. The optional `b10x-substrate/pod` context extension sets `run_as_user`, `pod_pids_limit` and
   `ephemeral_storage_bytes`; without `pod_pids_limit` no profile is admitted. The credential must
-  read `pods/log`. Open is refused `confinement.adapter-unserved` without a configuration, with an
+  read `pods/log` and watch `pods`. Open is refused `confinement.adapter-unserved` without a configuration, with an
   unusable one, when the cluster does not answer, or without log access.
 - **Choose it when** the run belongs on a cluster rather than a host, and needs no host path.

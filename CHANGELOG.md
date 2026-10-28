@@ -115,6 +115,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   unchanged. `local`, `linux`, `macos` and `systemd` around either prove `stdin_pipe`; `oci`
   proves it only on a runtime its lane pinned (Docker 29.7.2), and `pod` refuses `Piped` naming
   the fact.
+- The host execution AppArmor profile name is a deployment parameter (design 33). The chart
+  value `execution.appArmorProfile` (default `substrate-host-exec-v1`) and `--apparmor-profile`
+  on `substrate-container-profiles` and `substrate-container-exec` accept `substrate-host-exec-v1`
+  or `substrate-host-exec-v1-<suffix>`. The installer renders the unchanged policy under that
+  name, renaming its declaration and its two self-peers, installs and loads it from
+  `<name>.apparmor`, and refuses any source that is not those exact bytes. The bootstrap
+  requires `<name> (enforce)`. The schema and the templates refuse any other name. With the
+  value unset, the policy, the installer, the bootstrap check and `helm template` output are
+  byte-identical to before.
 
 ### Security
 
@@ -126,6 +135,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 - The specification and CI use ESS 0.72.0 (was 0.70.0); the suites, wire types and CLI package regenerate unchanged apart from the generator header.
 - The specification and CI use ESS 0.74.0 (was 0.72.0). The host-process suite gains the synthesized `AppendStreamEvent/unknown-process` scenario (92 synthesized, 27 refusals); the other suites, wire types and CLI package regenerate unchanged apart from the generator header.
+- The specification and CI use ESS 0.75.0 (was 0.74.0); the suites, wire types and CLI package regenerate unchanged apart from the generator header.
 - A `session.not-attachable` refusal now names which condition failed (state not `ready`, attachment not `available`, lease not `active`) and states the three observed values, for example "The pty session is not attachable: its state is not ready, its attachment is not available. Observed state exited, attachment consumed, lease active." Code, status, class and `retriable` are unchanged; only the free-text `error.message` differs, and no bundle changes. Under the hosted posture the attachment-authority mint, where a hosted client meets this refusal first, says the same.
 - **Breaking (`substrate-host` public API, design 32):** the confinement `Fact` enum gains `StdinPipe`, so an exhaustive `match` on it breaks and a consumer on an older revision cannot deserialize an `AdapterFacts` or an audit record that names `stdin_pipe`.
 - **Breaking (`substrate-host` public API, design 32):** `FACT_ORDER` changes type from `[Fact; 11]` to `[Fact; 12]`; code that names the array type or relies on its length breaks.
@@ -144,6 +154,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `pod`: a policy open keeps, younger than 90 s or with its run's Pod present, no longer stays until the next open: the adapter checks it again every 2 s on a thread of its own, with one list of its owned Pods' metadata alone per round (a page of whole Pods of ten admitted runs, each up to 256 KiB of argv and 256 KiB of environment, would pass the 4 MiB page bound and fail every round), and deletes it once its Pod is gone and either the API showed that Pod before or the policy is 90 s old. The thread ends when nothing is kept or the adapter and its runs' tasks are gone.
 - `pod`: after `Unknown` the task reads the Pod every 2 s between its backed-off deletions, so a policy follows its Pod within 2 s of the kubelet removing it, not at the next deletion up to 30 s later.
 - `pod`: `start` reads the run's NetworkPolicy back once the Pod is stored, and the Pod carries an `ownerReference` to that policy (`controller: false`), so a Pod whose policy is gone is removed by the garbage collector; a policy not read back removes the Pod and refuses the start `confinement.pod-api-failed`.
+- `pod`: a Pod that reads 404 no longer releases its run's NetworkPolicy by itself. A forced deletion, PodGC's after a node stopped answering or an operator's, removes a Pod while its container may still run. The run's task, the open sweep and the deferred sweep now delete the policy only once the API shows the container terminated: a read showed it, or a watch of the Pod from the last `resourceVersion` read replays it before the deletion, as the kubelet writes it before it removes a Pod. A watch answered 410, one that shows nothing within 5 s, a deletion of a container not shown terminated, or no `resourceVersion` to watch from keeps the policy and reports the run `Unknown`; a `Failed` phase alone does not count, because PodGC sets it before a forced deletion. **Required RBAC change:** the adapter's Role needs `watch` on `pods` (now `create`, `get`, `list`, `watch`, `delete` on `pods` and `networkpolicies`, and `get` on `pods/log`); a deployment that pre-creates the Role must add it, or every run whose Pod goes before its container is read terminated keeps its policy and reads `Unknown`.
 
 ### Fixed
 

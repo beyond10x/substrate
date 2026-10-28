@@ -51,6 +51,88 @@ struct Cluster {
     /// Security review pass 2: while set, the policy list and the owned Pod list answer 200 with
     /// exactly this body.
     list_body: Mutex<Option<String>>,
+    /// While set, a read of `RUN` answers it running on a node, as its kubelet last reported it.
+    running: AtomicBool,
+    /// How a watch of one Pod answers (`story:pod-force-deleted-keeps-its-policy`).
+    watch: Mutex<Watch>,
+}
+
+/// What a watch of one Pod from a `resourceVersion` replays.
+#[derive(Debug, Clone, Copy, Default)]
+enum Watch {
+    /// The kubelet stopped the container and wrote its terminated state, then removed the Pod: the
+    /// last object, and the `DELETED` one, show the container terminated (the kind probe of
+    /// 2026-10-28, after a deletion with a grace of 1 and of 5 seconds).
+    #[default]
+    Terminated,
+    /// `PodGC` force-deleted the Pod of a node that stopped answering: it marked the Pod `Failed`
+    /// with a `DisruptionTarget` condition and removed it, and the container's last state the
+    /// kubelet reported is `running`.
+    ForceDeleted,
+    /// The `resourceVersion` is older than the history the API server keeps: 410.
+    Gone,
+    /// The same, answered as a watch stream's one `ERROR` event, as a watch cache does.
+    Expired,
+    /// The stream opens and carries no event.
+    Silent,
+}
+
+/// The objects a watch of `name` replays, one JSON event per line, or 410, or nothing.
+fn watch_answer(cluster: &Cluster, query: &str) -> (u16, String) {
+    let name = query
+        .split('&')
+        .find_map(|pair| pair.strip_prefix("fieldSelector=metadata.name%3D"))
+        .unwrap_or_default();
+    let pod = |version: &str, phase: &str, state: Value, conditions: Value| {
+        json!({
+            "kind": "Pod",
+            "metadata": {"name": name, "uid": format!("uid-{name}"), "resourceVersion": version},
+            "spec": {"nodeName": "node-a", "restartPolicy": "Never"},
+            "status": {
+                "phase": phase,
+                "conditions": conditions,
+                "containerStatuses": [{"name": CONTAINER, "state": state}],
+            },
+        })
+    };
+    let events = |events: Vec<(&str, Value)>| {
+        let lines: Vec<String> = events
+            .into_iter()
+            .map(|(kind, object)| json!({"type": kind, "object": object}).to_string())
+            .collect();
+        (200, lines.join("\n") + "\n")
+    };
+    match *cluster.watch.lock() {
+        Watch::Terminated => {
+            let stopped = json!({"terminated": {"exitCode": 137, "reason": "Error"}});
+            events(vec![
+                ("MODIFIED", pod("11", "Running", json!({"running": {}}), json!([]))),
+                ("MODIFIED", pod("12", "Failed", stopped.clone(), json!([]))),
+                ("DELETED", pod("13", "Failed", stopped, json!([]))),
+            ])
+        }
+        Watch::ForceDeleted => {
+            let target = json!([{"type": "DisruptionTarget", "status": "True",
+                                 "reason": "DeletionBy`PodGC`"}]);
+            let running = json!({"running": {"startedAt": "2026-10-28T00:00:00Z"}});
+            events(vec![
+                ("MODIFIED", pod("11", "Failed", running.clone(), target.clone())),
+                ("DELETED", pod("12", "Failed", running, target)),
+            ])
+        }
+        Watch::Gone => (
+            410,
+            r#"{"kind":"Status","code":410,"reason":"Expired","message":"too old resource version"}"#
+                .to_owned(),
+        ),
+        Watch::Expired => events(vec![(
+            "ERROR",
+            json!({"kind": "Status", "code": 410, "reason": "Expired",
+                   "message": "too old resource version"}),
+        )]),
+        // `serve` holds the stream open without writing an event.
+        Watch::Silent => (0, String::new()),
+    }
 }
 
 /// The orphan the policy list's page `page` holds: owned, an hour old, its Pod gone.
@@ -121,6 +203,7 @@ fn page(cluster: &Cluster, page: u32, accept: &str) -> String {
         "kind": "NetworkPolicy",
         "metadata": {
             "name": name,
+            "resourceVersion": "1",
             "creationTimestamp": "2020-01-01T00:00:00Z",
             "labels": {MANAGED_BY_LABEL: MANAGED_BY, RUN_LABEL: name},
         },
@@ -147,6 +230,8 @@ fn owned_pod_list(cluster: &Cluster, accept: &str) -> (u16, String) {
         .map(|name| {
             let mut pod = json!({"metadata": {
                 "name": name,
+                "uid": format!("uid-{name}"),
+                "resourceVersion": "10",
                 "labels": {MANAGED_BY_LABEL: MANAGED_BY, RUN_LABEL: name},
             }});
             if cluster.pod_argv_bytes > 0 {
@@ -198,6 +283,9 @@ fn answer(cluster: &Cluster, method: &str, path: &str, accept: &str) -> (u16, St
     }
     if listed && let Some(body) = cluster.list_body.lock().clone() {
         return (200, body);
+    }
+    if method == "GET" && pod_path == pods && query.starts_with("watch=") {
+        return watch_answer(cluster, query);
     }
     // Open's probe: a list of at most one Pod, then the log of a Pod that does not exist.
     if method == "GET" && pod_path == pods && query == "limit=1" {
@@ -259,6 +347,21 @@ fn answer_run(cluster: &Cluster, method: &str, path: &str) -> (u16, String) {
     match method {
         "GET" if pod_path == format!("{pod}/log") => (200, "hello\n".to_owned()),
         "GET" if path == pod && cluster.pod_gone.load(Ordering::SeqCst) => gone,
+        "GET" if path == pod && cluster.running.load(Ordering::SeqCst) => (
+            200,
+            json!({
+                "metadata": {"name": RUN, "uid": format!("uid-{RUN}"), "resourceVersion": "10"},
+                "spec": {"nodeName": "node-a", "restartPolicy": "Never"},
+                "status": {
+                    "phase": "Running",
+                    "containerStatuses": [{
+                        "name": CONTAINER,
+                        "state": {"running": {"startedAt": "2026-10-28T00:00:00Z"}},
+                    }],
+                },
+            })
+            .to_string(),
+        ),
         "GET" if path == pod => (
             200,
             json!({
@@ -329,6 +432,16 @@ fn serve(stream: TcpStream, config: Arc<ServerConfig>, cluster: &Cluster) -> std
     cluster.requests.lock().push(format!("{method} {path}"));
     let (status, payload) = answer(cluster, method, path, &accept);
     let writer = stream.get_mut();
+    if status == 0 {
+        // A watch stream that opens and stays silent: no length, no event, the connection held.
+        write!(
+            writer,
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\nconnection: close\r\n\r\n"
+        )?;
+        writer.flush()?;
+        std::thread::sleep(Duration::from_secs(30));
+        return Ok(());
+    }
     write!(
         writer,
         "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\
@@ -646,6 +759,7 @@ async fn a_list_answer_without_a_kind_or_items_fails_the_round_and_deletes_nothi
         run: GONE.to_owned(),
         created: (chrono::Utc::now() - chrono::Duration::hours(1)).fixed_offset(),
         pod_seen: true,
+        trace: PodTrace::since(Some("1")),
     }];
     let round = resweep(&api, &mut deferred).await;
     assert!(round.is_err(), "a round read a kindless list as empty");
@@ -722,3 +836,6 @@ mod review;
 
 #[path = "pod_cleanup_security_pass2.rs"]
 mod security_pass2;
+
+#[path = "pod_cleanup_force_deleted.rs"]
+mod force_deleted;
