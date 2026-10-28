@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-28T10:09:53Z",
+  "actor": "human:timo",
+  "artifact": "story:ess-pin-0-74-0",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "gate.yml on 2ca59ddb (tree of main's 92e85b63), Full gate with ess 0.74.0 at its pinned digest, success",
+    "reference": "https://github.com/beyond10x/substrate/actions/runs/40667431045"
+  }
+}

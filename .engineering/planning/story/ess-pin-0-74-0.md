@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:ess-pin-0-74-0
 kind: story
-status: active
+status: implemented
 title: The ESS pin moves to 0.74.0, wire bytes unchanged
 scope:
 - confidence: inferred
@@ -19,10 +19,11 @@ scope:
   path: spec
 - confidence: inferred
   path: xtask/src/ess.rs
-revision: 4
+revision: 5
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-28T08:43:36Z", actor: "human:timo", revision: 3}
 - {from: "proposed", to: "active", at: "2026-10-28T08:43:36Z", actor: "human:timo", revision: 4, executor: "agent:substrate-adr-0109"}
+- {from: "active", to: "implemented", at: "2026-10-28T10:13:59Z", actor: "human:timo", revision: 5, decided_on: {"recorded":{"test_result":1}}}
 ---
 # Story: the ESS pin moves to 0.74.0, wire bytes unchanged
 
