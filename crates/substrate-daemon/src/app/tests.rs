@@ -24,6 +24,16 @@ use super::service::{
 };
 use super::{BODY_LIMIT, MAINTENANCE_DRIVER_TIMEOUT, REQUEST_BODY_READ_TIMEOUT};
 
+/// An application over an in-memory store and a minimum host driver, with the directory its
+/// workspaces live in. For the `app` modules' own tests, which are clients of the driver port.
+pub(super) fn host_app(deployment: &str) -> (tempfile::TempDir, Arc<super::App>) {
+    let directory = tempfile::tempdir().expect("temporary directory");
+    let store = Arc::new(Store::open(":memory:").expect("state store"));
+    let driver = HostDriver::open(HostConfig::minimum(directory.path().join("workspaces")))
+        .expect("host driver");
+    (directory, super::App::new(store, driver, deployment))
+}
+
 async fn bound_refusal_response(app: Arc<super::App>, operation: &str) -> Value {
     let request = Request::builder()
         .method("POST")
