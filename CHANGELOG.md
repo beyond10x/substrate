@@ -7,6 +7,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Security
+
+- `pulldown-cmark` is 0.13.5, taking the fix for
+  [RUSTSEC-2026-0414](https://rustsec.org/advisories/RUSTSEC-2026-0414.html); it is used only by
+  `xtask`. `THIRD_PARTY_LICENSES.html` is regenerated for that revision.
+
 ### Changed
 
 - The specification and CI use ESS 0.72.0 (was 0.70.0); the suites, wire types and CLI package regenerate unchanged apart from the generator header.
