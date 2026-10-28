@@ -1,0 +1,325 @@
+{{- $name := include "substrate.name" . -}}
+{{- $execution := .Values.execution.enabled -}}
+{{- $quotas := .Values.execution.projectQuotas.enabled -}}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ $name | quote }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "substrate.labels" . | nindent 4 }}
+spec:
+  serviceName: {{ $name | quote }}
+  replicas: {{ int .Values.replicas }}
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: RollingUpdate
+    rollingUpdate:
+      partition: 0
+      maxUnavailable: 1
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  selector:
+    matchLabels:
+      {{- include "substrate.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "substrate.selectorLabels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ $name | quote }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      hostNetwork: false
+      hostPID: false
+      hostIPC: false
+      terminationGracePeriodSeconds: 30
+      nodeSelector:
+        {{ .Values.nodePool.label.key | quote }}: {{ .Values.nodePool.label.value | quote }}
+      tolerations:
+        - key: {{ .Values.nodePool.taint.key | quote }}
+          operator: Equal
+          value: {{ .Values.nodePool.taint.value | quote }}
+          effect: {{ .Values.nodePool.taint.effect | quote }}
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels:
+                  {{- include "substrate.selectorLabels" . | nindent 18 }}
+      securityContext:
+        fsGroup: 65532
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        - name: tls-material
+          image: {{ include "substrate.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy | quote }}
+          command:
+            - /usr/bin/install
+            - -m
+            - "0400"
+            - -t
+            - /run/substrate/tls
+            - /etc/substrate/tls-source/tls.crt
+            - /etc/substrate/tls-source/tls.key
+          securityContext:
+            runAsUser: 65532
+            runAsGroup: 65532
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            privileged: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 32Mi
+          volumeMounts:
+            - name: tls-source
+              mountPath: /etc/substrate/tls-source
+              readOnly: true
+            - name: tls
+              mountPath: /run/substrate/tls
+        - name: identity-trust-roots
+          image: {{ include "substrate.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy | quote }}
+          command:
+            - /usr/bin/install
+            - -m
+            - "0400"
+            - {{ printf "/etc/substrate/identity-source/%s" .Values.identity.caConfigMap.key | quote }}
+            - /run/substrate/identity/ca.crt
+          securityContext:
+            runAsUser: 65532
+            runAsGroup: 65532
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            privileged: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 32Mi
+          volumeMounts:
+            - name: identity-source
+              mountPath: /etc/substrate/identity-source
+              readOnly: true
+            - name: identity
+              mountPath: /run/substrate/identity
+      containers:
+        - name: daemon
+          image: {{ include "substrate.image" . | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy | quote }}
+          command:
+            {{- if $execution }}
+            - /usr/local/bin/substrate-container-exec
+            {{- else }}
+            - /usr/local/bin/substrate-daemon
+            {{- end }}
+          args:
+            {{- if $execution }}
+            {{- if $quotas }}
+            - --project-quotas
+            {{- end }}
+            - --
+            {{- end }}
+            - --socket
+            - /run/substrate/local.sock
+            - --state
+            - /var/lib/b10x-substrate/state/state.db
+            - --workspaces
+            - /var/lib/b10x-substrate/workspaces
+            - --deployment
+            - $(POD_NAME)
+            - --event-retention
+            - {{ .Values.daemon.eventRetention | quote }}
+            - --exec-cpu-cores
+            - {{ .Values.daemon.execCpuCores | quote }}
+            - --tls-listen
+            - 0.0.0.0:8443
+            - --tls-certificate-chain
+            - /run/substrate/tls/tls.crt
+            - --tls-private-key
+            - /run/substrate/tls/tls.key
+            - --hosted-identity-origin
+            - {{ .Values.identity.origin | quote }}
+            - --hosted-identity-ca-bundle
+            - /run/substrate/identity/ca.crt
+            - --ops-listen
+            - 0.0.0.0:9090
+            {{- range .Values.readiness.requireFacts }}
+            - --ops-require-fact
+            - {{ . | quote }}
+            {{- end }}
+            {{- range .Values.daemon.gitSources }}
+            - --git-source
+            - {{ printf "%s=%s" .name .urlPrefix | quote }}
+            {{- end }}
+            {{- range .Values.daemon.egressApertures }}
+            - --egress-aperture
+            {{- if .maxBytes }}
+            - {{ printf "%s=%s:%d/tcp/max=%s" .name .host (int .port) .maxBytes | quote }}
+            {{- else }}
+            - {{ printf "%s=%s:%d/tcp" .name .host (int .port) | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if .Values.daemon.allowUnrecordedSessions }}
+            - --allow-unrecorded-sessions
+            {{- end }}
+            {{- if $quotas }}
+            - --project-quota-ids
+            - {{ .Values.execution.projectQuotas.ids | quote }}
+            {{- end }}
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: RUST_LOG
+              value: {{ .Values.daemon.logFilter | quote }}
+          ports:
+            - name: control
+              containerPort: 8443
+              protocol: TCP
+            - name: operations
+              containerPort: 9090
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /readyz
+              port: operations
+            periodSeconds: 2
+            timeoutSeconds: 2
+            failureThreshold: 60
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: operations
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 2
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: operations
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          {{- if $execution }}
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            runAsNonRoot: false
+            privileged: false
+            allowPrivilegeEscalation: true
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - CHOWN
+                - SETUID
+                - SETGID
+                - SETPCAP
+                - SYS_ADMIN
+            seccompProfile:
+              type: Localhost
+              localhostProfile: b10x-substrate/host-exec-v1-amd64.json
+            appArmorProfile:
+              type: Localhost
+              localhostProfile: substrate-host-exec-v1
+          {{- else }}
+          securityContext:
+            runAsUser: 65532
+            runAsGroup: 65532
+            runAsNonRoot: true
+            privileged: false
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+          {{- end }}
+          resources:
+            requests:
+              cpu: {{ .Values.resources.requests.cpu | quote }}
+              memory: {{ .Values.resources.requests.memory | quote }}
+            limits:
+              cpu: {{ .Values.resources.limits.cpu | quote }}
+              memory: {{ .Values.resources.limits.memory | quote }}
+          volumeMounts:
+            - name: ledger
+              mountPath: /var/lib/b10x-substrate
+            - name: tls
+              mountPath: /run/substrate/tls
+              readOnly: true
+            - name: identity
+              mountPath: /run/substrate/identity
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tls-source
+          secret:
+            secretName: {{ .Values.tls.secretName | quote }}
+            defaultMode: 0440
+            items:
+              - key: tls.crt
+                path: tls.crt
+              - key: tls.key
+                path: tls.key
+        - name: identity-source
+          configMap:
+            name: {{ .Values.identity.caConfigMap.name | quote }}
+            defaultMode: 0440
+            items:
+              - key: {{ .Values.identity.caConfigMap.key | quote }}
+                path: {{ .Values.identity.caConfigMap.key | quote }}
+        - name: tls
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+        - name: identity
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi
+        - name: tmp
+          emptyDir:
+            sizeLimit: 1Gi
+  volumeClaimTemplates:
+    - metadata:
+        name: ledger
+        labels:
+          {{- include "substrate.selectorLabels" . | nindent 10 }}
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: {{ .Values.persistence.storageClassName | quote }}
+        resources:
+          requests:
+            storage: {{ .Values.persistence.size | quote }}
