@@ -856,10 +856,7 @@ async fn sweep_page(
     let now = date.and_then(|date| chrono::DateTime::parse_from_rfc2822(&date).ok());
     let list: Value = serde_json::from_slice(&body)
         .map_err(|_| "the API answered something other than JSON".to_owned())?;
-    let items = list["items"]
-        .as_array()
-        .ok_or("the policy list holds no items")?;
-    for policy in items {
+    for policy in list_items(&list, "NetworkPolicyList", "policy")? {
         let Some((run, created)) = owned(policy) else {
             continue;
         };
@@ -871,6 +868,23 @@ async fn sweep_page(
         candidates.push((run.to_owned(), created, old));
     }
     Ok(continuation(&list))
+}
+
+/// The items of a sweep's list answer: a `PartialObjectMetadataList`, or the `whole` list kind
+/// (`NetworkPolicyList`, `PodList`) a server that ignored [`METADATA_LIST`] sends. An API server
+/// answers an empty `PartialObjectMetadataList` without an items array, so `null` or absent items
+/// are none. Any other kind, or items that are neither an array nor `null`, is an error, so a body
+/// that is not that list never reads as an empty one and deletes nothing.
+fn list_items<'a>(list: &'a Value, whole: &str, what: &str) -> Result<&'a [Value], String> {
+    let kind = list["kind"].as_str();
+    if kind != Some("PartialObjectMetadataList") && kind != Some(whole) {
+        return Err(format!("the {what} list answered no list kind it reads"));
+    }
+    match &list["items"] {
+        Value::Array(items) => Ok(items),
+        Value::Null => Ok(&[]),
+        _ => Err(format!("the {what} list holds no items")),
+    }
 }
 
 /// A list's `continue` token, or `None` on its last page.
@@ -1029,11 +1043,8 @@ async fn owned_pods(
         }
         let list: Value = serde_json::from_slice(&body)
             .map_err(|_| "the API answered something other than JSON".to_owned())?;
-        let items = list["items"]
-            .as_array()
-            .ok_or("the Pod list holds no items")?;
         names.extend(
-            items
+            list_items(&list, "PodList", "Pod")?
                 .iter()
                 .filter_map(|pod| pod["metadata"]["name"].as_str())
                 .map(str::to_owned),

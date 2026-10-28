@@ -45,6 +45,9 @@ struct Cluster {
     pod_argv_bytes: usize,
     /// Security review: while set, the owned Pod list answers 500.
     pod_list_fails: AtomicBool,
+    /// While set, the policy list and the owned Pod list answer 200 with a body that names no
+    /// list kind and holds no items.
+    kindless_lists: AtomicBool,
 }
 
 /// The orphan the policy list's page `page` holds: owned, an hour old, its Pod gone.
@@ -67,8 +70,19 @@ fn metadata_only(accept: &str) -> bool {
 }
 
 /// A list of `kind` holding `items` and ending at `token`, as the API server answers `accept`: each
-/// item's `metadata` alone in a `PartialObjectMetadataList`, or the objects whole.
+/// item's `metadata` alone in a `PartialObjectMetadataList`, or the objects whole. An empty
+/// `PartialObjectMetadataList` carries `"items": null`, as a real API server's does (CI Pod lane
+/// run 40714688540: every open on kind failed on it).
 fn list(accept: &str, kind: &str, items: Vec<Value>, token: &Value) -> String {
+    if metadata_only(accept) && items.is_empty() {
+        return json!({
+            "kind": "PartialObjectMetadataList",
+            "apiVersion": "meta.k8s.io/v1",
+            "metadata": {"continue": token},
+            "items": null,
+        })
+        .to_string();
+    }
     if metadata_only(accept) {
         let items: Vec<Value> = items
             .into_iter()
@@ -174,6 +188,23 @@ fn answer(cluster: &Cluster, method: &str, path: &str, accept: &str) -> (u16, St
     let policy = format!("{policies}/{RUN}");
     let gone = (404, r#"{"kind":"Status","code":404}"#.to_owned());
     let (pod_path, query) = path.split_once('?').unwrap_or((path, ""));
+    let pods = format!("/api/v1/namespaces/{NAMESPACE}/pods");
+    let listed = method == "GET"
+        && query.starts_with("labelSelector=")
+        && (pod_path == policies || pod_path == pods);
+    if listed && cluster.kindless_lists.load(Ordering::SeqCst) {
+        return (200, r#"{"metadata":{"continue":""}}"#.to_owned());
+    }
+    // Open's probe: a list of at most one Pod, then the log of a Pod that does not exist.
+    if method == "GET" && pod_path == pods && query == "limit=1" {
+        return (200, list(JSON, "Pod", Vec::new(), &json!("")));
+    }
+    if method == "GET" && pod_path == format!("{pods}/{LOG_ACCESS_PROBE}/log") {
+        return gone;
+    }
+    if method == "GET" && pod_path == policies && cluster.pages == 0 {
+        return (200, list(accept, "NetworkPolicy", Vec::new(), &json!("")));
+    }
     if method == "GET" && pod_path == policies && cluster.pages > 0 {
         let number = query
             .split('&')
@@ -193,7 +224,6 @@ fn answer(cluster: &Cluster, method: &str, path: &str, accept: &str) -> (u16, St
     if method == "DELETE" && orphan(&format!("{policies}/")) {
         return (200, "{}".to_owned());
     }
-    let pods = format!("/api/v1/namespaces/{NAMESPACE}/pods");
     if method == "GET" && pod_path == pods && query.starts_with("labelSelector=") {
         return owned_pod_list(cluster, accept);
     }
@@ -301,6 +331,14 @@ fn serve(stream: TcpStream, config: Arc<ServerConfig>, cluster: &Cluster) -> std
 
 /// Starts the fake on loopback and returns the API the adapter would open against it.
 fn start(cluster: &Arc<Cluster>) -> Api {
+    let kubeconfig = fake_kubeconfig(cluster);
+    let (mut api, _) = parse_cluster(kubeconfig.to_string().as_bytes()).expect("the fake parses");
+    api.pacing = PACED;
+    api
+}
+
+/// Starts the fake on loopback and returns the cluster configuration that names it.
+fn fake_kubeconfig(cluster: &Arc<Cluster>) -> Value {
     let identity =
         rcgen::generate_simple_self_signed(vec!["127.0.0.1".to_owned()]).expect("identity");
     let config = Arc::new(
@@ -326,7 +364,7 @@ fn start(cluster: &Arc<Cluster>) -> Api {
             std::thread::spawn(move || serve(stream, config, &cluster));
         }
     });
-    let kubeconfig = json!({
+    json!({
         "apiVersion": "v1",
         "kind": "Config",
         "current-context": "fake",
@@ -340,10 +378,7 @@ fn start(cluster: &Arc<Cluster>) -> Api {
             "extensions": [{"name": POD_SETTINGS_EXTENSION, "extension": {"pod_pids_limit": 1024}}],
         }}],
         "users": [{"name": "fake", "user": {"token": "fake-token"}}],
-    });
-    let (mut api, _) = parse_cluster(kubeconfig.to_string().as_bytes()).expect("the fake parses");
-    api.pacing = PACED;
-    api
+    })
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -550,6 +585,118 @@ async fn the_open_sweep_fails_past_its_page_bound_and_deletes_nothing() {
             .any(|request| request.starts_with("DELETE ")),
         "the sweep deleted before it had read the whole list: {requests:#?}"
     );
+}
+
+/// CI Pod lane run 40714688540: on kind every open failed `confinement.adapter-unserved` with "the
+/// policy list holds no items", because an API server answers an empty `PartialObjectMetadataList`
+/// without an items array. An open against a namespace holding no owned policy and no Pod, whose
+/// lists the fake answers as that server does, succeeds and deletes nothing.
+#[test]
+fn an_open_with_no_policies_and_no_pods_succeeds_on_an_empty_metadata_list() {
+    let cluster = Arc::new(Cluster::default());
+    let directory = tempfile::tempdir().expect("a directory");
+    let path = directory.path().join("cluster.json");
+    std::fs::write(&path, fake_kubeconfig(&cluster).to_string()).expect("the configuration");
+    let opened = open_pod(PodRequest {
+        cluster: Some(path),
+    });
+    let requests = cluster.requests.lock().clone();
+    assert!(
+        opened.is_ok(),
+        "the open failed: {:?}; {requests:#?}",
+        opened.as_ref().err()
+    );
+    assert!(
+        requests
+            .iter()
+            .any(|request| request.starts_with("GET ") && request.contains("/networkpolicies?")),
+        "the open did not list the policies: {requests:#?}"
+    );
+    assert!(
+        !requests
+            .iter()
+            .any(|request| request.starts_with("DELETE ")),
+        "an open with nothing to sweep deleted: {requests:#?}"
+    );
+}
+
+/// Failing closed: a 200 to either list whose body names no list kind and holds no items is no
+/// evidence that nothing is there. The deferred round and the open sweep fail, and nothing is
+/// deleted; the same round against a list answer deletes the policy.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_list_answer_without_a_kind_or_items_fails_the_round_and_deletes_nothing() {
+    const GONE: &str = "substrate-run-deferred-kindless";
+    let cluster = Arc::new(Cluster::default());
+    cluster.kindless_lists.store(true, Ordering::SeqCst);
+    let api = start(&cluster);
+    // Its Pod was seen and is gone: a round that read the Pod list deletes this policy.
+    let mut deferred = vec![Deferred {
+        run: GONE.to_owned(),
+        created: (chrono::Utc::now() - chrono::Duration::hours(1)).fixed_offset(),
+        pod_seen: true,
+    }];
+    let round = resweep(&api, &mut deferred).await;
+    assert!(round.is_err(), "a round read a kindless list as empty");
+    let swept = sweep(&api).await;
+    assert!(
+        swept.is_err(),
+        "the open sweep read a kindless list as empty"
+    );
+    let deletes = |cluster: &Cluster| {
+        cluster
+            .requests
+            .lock()
+            .iter()
+            .filter(|request| request.starts_with("DELETE "))
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        deletes(&cluster),
+        Vec::<String>::new(),
+        "a kindless list answer deleted something"
+    );
+    assert_eq!(deferred.len(), 1, "the kept policy is no longer checked");
+    cluster.kindless_lists.store(false, Ordering::SeqCst);
+    resweep(&api, &mut deferred).await.expect("a round");
+    assert_eq!(
+        deletes(&cluster),
+        vec![format!("DELETE {}/{GONE}", api.policies())],
+        "the control round did not delete the policy whose Pod is gone"
+    );
+}
+
+/// What a sweep reads as a list: either kind it may be answered, with items an array, `null` or
+/// absent. Nothing else reads as one, empty or not.
+#[test]
+fn a_sweep_reads_only_a_list_kind_with_array_null_or_absent_items() {
+    let metadata = "PartialObjectMetadataList";
+    for (body, count) in [
+        (json!({"kind": metadata, "items": null}), 0),
+        (json!({"kind": metadata, "metadata": {}}), 0),
+        (json!({"kind": metadata, "items": [{"metadata": {}}]}), 1),
+        (json!({"kind": "PodList", "items": null}), 0),
+        (json!({"kind": "PodList", "items": [{}, {}]}), 2),
+    ] {
+        assert_eq!(
+            list_items(&body, "PodList", "Pod").map(<[Value]>::len),
+            Ok(count),
+            "{body}"
+        );
+    }
+    for body in [
+        json!({}),
+        json!({"items": []}),
+        json!({"metadata": {"continue": ""}}),
+        json!({"kind": "Status", "items": null}),
+        json!({"kind": "NetworkPolicyList", "items": []}),
+        json!({"kind": metadata, "items": {}}),
+        json!({"kind": metadata, "items": "none"}),
+        json!({"kind": metadata, "items": 0}),
+        json!([]),
+    ] {
+        assert!(list_items(&body, "PodList", "Pod").is_err(), "{body}");
+    }
 }
 
 #[path = "pod_cleanup_adversary.rs"]
