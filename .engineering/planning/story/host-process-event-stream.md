@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:host-process-event-stream
 kind: story
-status: active
+status: implemented
 title: Per-process event stream
 relations:
 - decomposes: epic:host-process-supervision
@@ -56,10 +56,11 @@ scope:
   path: xtask/bundle-source/0.24.0
 - confidence: inferred
   path: xtask/src/bundle.rs
-revision: 9
+revision: 10
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-28T07:37:21Z", actor: "human:timo", revision: 5}
 - {from: "proposed", to: "active", at: "2026-10-28T07:37:21Z", actor: "human:timo", revision: 6, executor: "agent:substrate-adr-0109"}
+- {from: "active", to: "implemented", at: "2026-10-28T14:26:16Z", actor: "human:timo", revision: 10, decided_on: {"recorded":{"test_result":2,"review_outcome":3}}}
 ---
 # Story: per-process event stream
 
