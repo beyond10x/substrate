@@ -1167,7 +1167,10 @@ fn resolve(
 /// `exec.workspace-scoped-write-unserved` for a workspace access other than the whole workspace,
 /// `confinement.output-retention-unserved` for a stream kept by its tail,
 /// `confinement.family-unserved` for a host path or a network policy, `exec.secret-slots-unserved`,
-/// `exec.workdir-invalid`, `exec.limit-unserved` and `confinement.pod-processes-unserved`.
+/// `exec.workdir-invalid`, `exec.limit-unserved` and `confinement.pod-processes-unserved`; first
+/// of all `session.limit-unserved` for a piped stdin bound outside 1 to 16 MiB, then
+/// `confinement.fact-unserved` naming `stdin_pipe` for any piped stdin (design 32: a Pod is
+/// rendered `"stdin": false`, and attaching to it is authority the adapter does not hold).
 pub fn check_profile(
     settings: &PodSettings,
     profile: &ConfinementProfile,
@@ -1176,6 +1179,13 @@ pub fn check_profile(
         adapter: AdapterName::Pod,
         family,
     };
+    super::stdin::check_streams(profile)?;
+    if profile.stdin.is_piped() {
+        return Err(ConfinementError::FactUnserved {
+            adapter: AdapterName::Pod,
+            fact: Fact::StdinPipe,
+        });
+    }
     // Its workspace is an `emptyDir` the adapter creates, so no part of it can be held read-only.
     super::refuse_workspace_access("pod", profile)?;
     // The log API bounds a read only by `limitBytes`, which keeps the first bytes; keeping the
@@ -1977,6 +1987,42 @@ mod tests {
             );
             assert_eq!(error.status(), 501);
         }
+    }
+
+    // T17 of design 32: a Pod has no stdin (`"stdin": false`), so `Piped` is refused naming
+    // `stdin_pipe` by `check_profile` itself, whatever facts it was asked with; an out-of-range
+    // bound is refused first, as on every adapter.
+    #[test]
+    fn a_piped_stdin_is_refused_naming_stdin_pipe() {
+        let error = check_profile(
+            &settings(),
+            &ConfinementProfile {
+                stdin: super::super::StdinMode::Piped { limit_bytes: 1_024 },
+                ..profile()
+            },
+        )
+        .expect_err("refused");
+        match &error {
+            ConfinementError::FactUnserved { adapter, fact } => {
+                assert_eq!(*adapter, AdapterName::Pod);
+                assert_eq!(*fact, Fact::StdinPipe);
+            }
+            other => panic!("expected stdin_pipe unserved, got {other:?}"),
+        }
+        assert_eq!(error.status(), 501);
+        let error = check_profile(
+            &settings(),
+            &ConfinementProfile {
+                stdin: super::super::StdinMode::Piped { limit_bytes: 0 },
+                ..profile()
+            },
+        )
+        .expect_err("refused");
+        assert_eq!(
+            error.code(),
+            substrate_wire::SESSION_LIMIT_UNSERVED,
+            "{error}"
+        );
     }
 
     // B11: the log API keeps only the first bytes, so a tail mode on either stream is refused.
