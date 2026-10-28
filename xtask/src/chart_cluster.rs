@@ -280,9 +280,14 @@ pub fn run(args: &Args) -> Result<ExitCode> {
     );
     for worker in &workers {
         lane.kubectl(&["label", worker, &format!("{POOL_KEY}={POOL_VALUE}")])?;
+        // `kubectl taint` takes the type and the name as two arguments, not `node/<name>`.
+        let name = worker
+            .strip_prefix("node/")
+            .with_context(|| format!("kubectl named a worker {worker:?}, not node/<name>"))?;
         lane.kubectl(&[
             "taint",
-            worker,
+            "nodes",
+            name,
             &format!("{POOL_KEY}={POOL_VALUE}:NoSchedule"),
         ])?;
     }
@@ -548,17 +553,20 @@ impl Listener {
     }
 
     fn identity(gateway: Ipv4Addr, material: &Material) -> Result<Self> {
-        let config = Arc::new(
-            ServerConfig::builder_with_provider(Arc::new(
-                rustls::crypto::aws_lc_rs::default_provider(),
-            ))
-            .with_safe_default_protocol_versions()?
-            .with_no_client_auth()
-            .with_single_cert(
-                vec![material.identity_der.clone()],
-                PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(material.identity_key.clone())),
-            )?,
-        );
+        let builder = ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::aws_lc_rs::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()?
+        .with_no_client_auth();
+        // The refusal is not propagated: nothing that came out of the call holding the key may
+        // reach a printed line. The pair is generated a few lines earlier, so a refusal is a bug.
+        let Ok(config) = builder.with_single_cert(
+            vec![material.identity_der.clone()],
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(material.identity_key.clone())),
+        ) else {
+            bail!("rustls refused the Identity stub's own generated certificate and key");
+        };
+        let config = Arc::new(config);
         let credential = material.credential.clone();
         let origin = Arc::new(std::sync::OnceLock::<String>::new());
         let served_origin = Arc::clone(&origin);
@@ -738,6 +746,9 @@ struct Target<'a> {
     name: &'a str,
     credential: &'a str,
     timeout: Duration,
+    /// The transient Git source authorization a Git workspace create carries; without it the
+    /// daemon refuses `workspace.git-authority-absent` before it dials anything.
+    source_authorization: Option<&'a str>,
 }
 
 impl<'a> Target<'a> {
@@ -753,6 +764,7 @@ impl<'a> Target<'a> {
             name: &material.pod_names[ordinal],
             credential: &material.credential,
             timeout: Duration::from_secs(30),
+            source_authorization: None,
         }
     }
 }
@@ -770,12 +782,16 @@ fn https(
         name,
         credential,
         timeout,
+        source_authorization,
     } = *target;
     let stream = TcpStream::connect(("127.0.0.1", forward.1))?;
     stream.set_read_timeout(Some(timeout))?;
     let server = ServerName::try_from(name.to_owned())?;
     let mut tls = StreamOwned::new(ClientConnection::new(Arc::clone(client), server)?, stream);
     let body = body.map(Value::to_string).unwrap_or_default();
+    let authorization = source_authorization
+        .map(|value| format!("x-b10x-workspace-source-authorization: {value}\r\n"))
+        .unwrap_or_default();
     let content = if body.is_empty() {
         String::new()
     } else {
@@ -785,7 +801,7 @@ fn https(
         )
     };
     let request = format!(
-        "{method} {path} HTTP/1.1\r\nHost: {name}\r\nAuthorization: Bearer {credential}\r\n{content}Connection: close\r\n\r\n{body}"
+        "{method} {path} HTTP/1.1\r\nHost: {name}\r\nAuthorization: Bearer {credential}\r\n{authorization}{content}Connection: close\r\n\r\n{body}"
     );
     let mut response = Vec::new();
     let result = tls
@@ -1017,8 +1033,10 @@ fn egress(
     denied: &Listener,
 ) -> Result<Outcome> {
     let forward = Forward::open(lane, 1)?;
+    // The listeners only count connections and never read a request, so a fixed value suffices.
     let pod = Target {
         timeout: Duration::from_secs(45),
+        source_authorization: Some("chart-lane-source-authorization"),
         ..Target::pod(&forward, client, material, 1)
     };
     let attempt = |source: &str, listener: &Listener| {
