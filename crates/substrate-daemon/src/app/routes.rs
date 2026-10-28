@@ -16,6 +16,7 @@ use super::execs::{
     exec_get, exec_lease_renew, exec_output_get, exec_retire, exec_signal, exec_start,
 };
 use super::metrics::{metrics_get, metrics_stream};
+use super::process_events::process_events;
 use super::processes::{
     process_get, process_lease_renew, process_list, process_logs, process_start, process_stop,
     process_stop_by_owner,
@@ -118,6 +119,7 @@ fn router_for(app: Arc<App>, transport: SessionTransport) -> Router {
             post(process_lease_renew),
         )
         .route("/v1/processes/{process_id}/logs", get(process_logs))
+        .route("/v1/processes/{process_id}/events", get(process_events))
         .route("/v1/events", get(event_list))
         .route("/v1/events/stream", get(event_stream))
         .route(

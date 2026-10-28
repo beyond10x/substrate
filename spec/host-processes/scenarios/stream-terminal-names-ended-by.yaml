@@ -1,0 +1,44 @@
+# S12: the terminal `ended` item names the record's one cause. A caller's stop ends the stream
+# `stopped` then `ended`, both naming `stop` with the signal that ended the tree; the stop the
+# caller requested emits no item of its own, only its completion does.
+type: ess-scenario/1
+domain: substrate.host_processes
+scenario: host-process-stream-terminal-item-names-ended-by
+summary: A caller-stopped record's stream holds started, stopped and one ended item, each end item naming ended_by stop with the signal.
+
+arrange:
+  - instance: dev
+    entity: substrate.host_processes.HostProcess
+
+timeline:
+  - at: 2026-10-16T09:00:00Z
+    command: substrate.host_processes.StartProcess
+    input: {name: dev-server, owner_session_id: s-1, owner_session_name: worker, reason: serve the preview, argv: [vite], cwd: /srv/app, env_passthrough: [], profile: host, lease_ttl_ms: 3600000, keep: false}
+    outcome: started
+    capture: {instance: dev, event: substrate.host_processes.ProcessStarted, field: process}
+  - at: 2026-10-16T09:00:01Z
+    command: substrate.host_processes.ConfirmRunning
+    input: {process: {$instance: dev}}
+    outcome: running
+  - at: 2026-10-16T09:00:02Z
+    command: substrate.host_processes.StopProcess
+    input: {process: {$instance: dev}}
+    outcome: stopping
+  - at: 2026-10-16T09:00:03Z
+    command: substrate.host_processes.RecordExit
+    input: {process: {$instance: dev}, exit_signal: SIGTERM}
+    outcome: stopped
+
+assert:
+  - view: substrate.host_processes.ProcessEvents
+    params: {process: {$instance: dev}, after: -1}
+    counts: {at_least: 3, at_most: 3}
+  - view: substrate.host_processes.ProcessEvents
+    params: {process: {$instance: dev}, after: -1}
+    at: {row: first, fields: {kind: started}}
+  - view: substrate.host_processes.ProcessEvents
+    params: {process: {$instance: dev}, after: -1}
+    at: {row: 1, fields: {kind: stopped, ended_by: stop, exit_signal: SIGTERM}}
+  - view: substrate.host_processes.ProcessEvents
+    params: {process: {$instance: dev}, after: -1}
+    at: {row: last, fields: {kind: ended, ended_by: stop, exit_signal: SIGTERM}}

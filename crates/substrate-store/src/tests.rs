@@ -1942,6 +1942,56 @@ fn event_stream_positions_retention_and_cursors_are_subject_local() {
     );
 }
 
+/// `contracts/substrate-wire/0.24.0/schemas/common.json` publishes `event-cursor` as
+/// `^ev2\.scope_[A-Za-z0-9_-]+\.[1-9][0-9]*\.(?:0|[1-9][0-9]*)$`, at most 512 characters. A
+/// string outside it is `event.cursor-invalid`; one inside it that names another source or
+/// generation, however wide its numbers, is `event.source-mismatch`.
+#[test]
+fn event_cursor_is_read_exactly_by_its_published_pattern() {
+    let store = Store::open(":memory:").expect("open store");
+    let scope = scope("local:1000");
+    let (source, generation, through) = store.stream_position(&scope).expect("position");
+    assert!(source.starts_with("scope_"), "{source}");
+    let read = |cursor: &str| store.events(&scope, Some(cursor), 10).expect("events");
+    assert!(read(&event_cursor(&source, generation, through)).is_ok());
+
+    let at_bound = format!("ev2.scope_{}.1.0", "a".repeat(512 - 14));
+    assert_eq!(at_bound.chars().count(), 512);
+    for foreign in [
+        format!("ev2.scope_other.{generation}.0"),
+        format!("ev2.{source}.{}.0", generation.wrapping_add(1).max(1)),
+        format!("ev2.{source}.18446744073709551616.0"),
+        format!("ev2.{source}.99999999999999999999999999.{through}"),
+        at_bound.clone(),
+    ] {
+        assert_eq!(read(&foreign), Err(EventCursorError::Source), "{foreign}");
+    }
+    for malformed in [
+        format!("ev2.other.{generation}.0"),
+        format!("ev2.scope_.{generation}.0"),
+        format!("ev2.scope a.{generation}.0"),
+        format!("ev2.scope_a b.{generation}.0"),
+        format!("ev2.scope_\u{e9}.{generation}.0"),
+        format!("ev2.Scope_a.{generation}.0"),
+        format!("ev2.scope_a+b.{generation}.0"),
+        format!("ev2.{source}.0.0"),
+        format!("ev2.{source}.0{generation}.0"),
+        format!("ev2.{source}.{generation}.00"),
+        format!("ev2.{source}.{generation}.0.0"),
+        format!("ev2.{source}.{generation}"),
+        format!("ev1.{source}.{generation}.0"),
+        format!("ev2.scope_{}.1.0", "a".repeat(512 - 13)),
+        format!("ev2.{source}.{generation}.18446744073709551616"),
+        String::new(),
+    ] {
+        assert_eq!(
+            read(&malformed),
+            Err(EventCursorError::Invalid),
+            "{malformed}"
+        );
+    }
+}
+
 #[test]
 fn deployment_global_stream_schema_migrates_to_fresh_subject_scopes() {
     let directory = tempdir().expect("tempdir");
