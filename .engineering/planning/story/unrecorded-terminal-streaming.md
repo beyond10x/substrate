@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:unrecorded-terminal-streaming
 kind: story
-status: draft
+status: implemented
 title: Stream interactive terminal output without durable capture
 scope:
 - confidence: cited
@@ -29,7 +29,11 @@ scope:
   path: website/docs
 - confidence: cited
   path: xtask
-revision: 5
+revision: 8
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-28T07:59:01Z", actor: "human:timo", revision: 6, decided_on: {"recorded":{"test_result":3,"approval":1}}}
+- {from: "proposed", to: "active", at: "2026-10-28T07:59:01Z", actor: "human:timo", revision: 7, decided_on: {"recorded":{"test_result":3,"approval":1}}, executor: "agent:substrate-adr-0109"}
+- {from: "active", to: "implemented", at: "2026-10-28T07:59:01Z", actor: "human:timo", revision: 8, decided_on: {"recorded":{"test_result":4,"approval":1}}}
 ---
 ## Context
 

@@ -213,6 +213,9 @@ pub struct App {
     /// Claimed sessions whose containment kill is unproven, retried by `contain_pending`.
     pub(super) containments: PendingContainments,
     pub(super) blocking_store_slots: Arc<Semaphore>,
+    /// The operational telemetry every control listener records into and the operational
+    /// listener reads (ADR 0045). It holds counts only, never a request's content.
+    pub(crate) telemetry: Arc<super::health::Telemetry>,
     #[cfg(test)]
     pub(super) refusal_before_record: ParkingMutex<Option<RefusalBeforeRecordHook>>,
 }
@@ -300,6 +303,7 @@ impl App {
             maintenance_nudge: Notify::new(),
             containments: PendingContainments::default(),
             blocking_store_slots: Arc::new(Semaphore::new(16)),
+            telemetry: Arc::default(),
             #[cfg(test)]
             refusal_before_record: ParkingMutex::new(None),
         })
