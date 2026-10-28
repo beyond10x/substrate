@@ -148,15 +148,6 @@ async fn ops_security_a_unix_socket_path_is_not_an_operational_address() {
     );
 }
 
-/// A connection to `ops` from the loopback source address `source`.
-async fn connect_from(source: [u8; 4], ops: SocketAddr) -> TcpStream {
-    let socket = tokio::net::TcpSocket::new_v4().expect("socket");
-    socket
-        .bind(SocketAddr::from((source, 0)))
-        .expect("bind loopback source");
-    socket.connect(ops).await.expect("connect from source")
-}
-
 /// Asks `/livez` on `stream`: the bytes answered, empty when the connection was closed unanswered.
 /// The read must end within a second: a refused connection is closed at once, not held.
 async fn livez_on(mut stream: TcpStream) -> Vec<u8> {
@@ -182,35 +173,60 @@ async fn ops_security_one_source_holds_at_most_four_connections() {
         .expect("spawn Unix daemon with an operational listener");
     ops_when_ready(&mut child, ops).await;
 
-    let mut held = Vec::new();
-    for _ in 0..4 {
-        held.push(connect_from([127, 0, 0, 1], ops).await);
-    }
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    let fifth = livez_on(connect_from([127, 0, 0, 1], ops).await).await;
+    let (mut first, fifth, closed) = ops_beyond_held(
+        ops,
+        &[[127, 0, 0, 1]; 4],
+        4,
+        [127, 0, 0, 1],
+        Duration::from_millis(100),
+    )
+    .await;
+    assert!(
+        closed,
+        "the connection was held instead of answered or closed"
+    );
     assert!(
         fifth.is_empty(),
         "a fifth connection from one source was answered: {}",
         String::from_utf8_lossy(&fifth)
     );
-    let other = livez_on(connect_from([127, 0, 0, 2], ops).await).await;
+    let other = livez_on(ops_connect_from([127, 0, 0, 2], ops).await).await;
     assert!(
         other.starts_with(b"HTTP/1.1 200 "),
         "another source was not served beside a full one: {}",
         String::from_utf8_lossy(&other)
     );
 
-    for _ in 0..4 {
-        held.push(connect_from([127, 0, 0, 2], ops).await);
+    let (second, ninth, closed) = ops_beyond_held(
+        ops,
+        &[[127, 0, 0, 2]; 4],
+        4,
+        [127, 0, 0, 3],
+        Duration::from_millis(100),
+    )
+    .await;
+    assert!(
+        closed,
+        "the connection was held instead of answered or closed"
+    );
+    if !ninth.is_empty() {
+        // The global bound counts the first source's four too; they must still be held.
+        for stream in &mut first {
+            let mut byte = [0_u8; 1];
+            assert!(
+                tokio::time::timeout(Duration::from_millis(20), stream.read(&mut byte))
+                    .await
+                    .is_err(),
+                "a first-source connection reached the header deadline before the ninth was asked"
+            );
+        }
     }
-    tokio::time::sleep(Duration::from_millis(100)).await;
-    let ninth = livez_on(connect_from([127, 0, 0, 3], ops).await).await;
     assert!(
         ninth.is_empty(),
         "a ninth connection was answered: {}",
         String::from_utf8_lossy(&ninth)
     );
-    drop(held);
+    drop((first, second));
 
     signal(&child, Signal::SIGTERM);
     let output = tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
@@ -233,18 +249,15 @@ async fn ops_security_connection_bounds_hold_on_the_shipped_daemon() {
         .expect("spawn Unix daemon with an operational listener");
     ops_when_ready(&mut child, ops).await;
 
-    let mut held = Vec::new();
-    for _ in 0..8 {
-        held.push(TcpStream::connect(ops).await.expect("held connection"));
-    }
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    let mut ninth = TcpStream::connect(ops).await.expect("ninth connection");
-    ninth
-        .write_all(b"GET /livez HTTP/1.1\r\nHost: operations.test\r\nConnection: close\r\n\r\n")
-        .await
-        .ok();
-    let mut bytes = Vec::new();
-    let _ = tokio::time::timeout(Duration::from_secs(1), ninth.read_to_end(&mut bytes)).await;
+    // One source: four of the eight are admitted, the source's bound, and four are closed.
+    let (mut held, bytes, _) = ops_beyond_held(
+        ops,
+        &[[127, 0, 0, 1]; 8],
+        4,
+        [127, 0, 0, 1],
+        Duration::from_millis(200),
+    )
+    .await;
     assert!(
         bytes.is_empty(),
         "a ninth connection was answered: {}",
@@ -263,7 +276,7 @@ async fn ops_security_connection_bounds_hold_on_the_shipped_daemon() {
         );
     }
     drop(held);
-    assert_eq!(ops_get(ops, "/livez", "").await.status, 200);
+    assert_eq!(ops_get_after_release(ops, "/livez").await.status, 200);
 
     let pipelined = ops_exchange(
         ops,
