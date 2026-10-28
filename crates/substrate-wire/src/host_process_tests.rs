@@ -265,8 +265,8 @@ fn closed_vocabularies_have_the_adr_spelling() {
     );
 }
 
-/// ADR 0036 § Named refusals, every slice of this surface (S1-S7, S11), with its status. S8, S9
-/// and S12 add their codes with their routes; none is reachable here.
+/// ADR 0036 § Named refusals, every slice of this surface (S1-S7, S11, S12), with its status. S8
+/// and S9 add their codes with their routes; none of theirs is reachable here.
 #[test]
 fn process_refusals_are_the_adr_table_for_this_surface() {
     let table: Vec<(&str, u16)> = PROCESS_REFUSALS
@@ -293,6 +293,7 @@ fn process_refusals_are_the_adr_table_for_this_surface() {
             ("process.not-found", 404),
             ("process.timeout-invalid", 422),
             ("process.expires-at-invalid", 422),
+            ("process.events-readers-exceeded", 429),
         ]
     );
     for refusal in PROCESS_REFUSALS {
@@ -314,7 +315,6 @@ fn process_refusals_are_the_adr_table_for_this_surface() {
         "process.adopt-target-absent",
         "process.adopt-target-foreign",
         "process.adopt-unmovable",
-        "process.events-readers-exceeded",
     ] {
         assert_eq!(process_refusal(deferred), None, "{deferred}");
     }

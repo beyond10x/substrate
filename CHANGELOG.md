@@ -9,6 +9,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ### Added
 
+- Host processes publish their lifecycle and stream it (ADR 0036 S12, contract bundle `0.24.0`).
+  Each transition (`process.started`, `process.lease-renewed`, `process.lease-expired`,
+  `process.timed-out`, `process.stopped`, `process.exited`, `process.vanished`) is an event of the
+  existing event log with `resource_kind: process` and the operation that caused it. The new
+  WebSocket `GET /v1/processes/{process_id}/events`, on the same socket and posture as the other
+  process routes, sends one record's events and its log lines in one order, each item with a
+  resumable cursor, a `gap` item for log bytes the bound discarded before the reader reached them,
+  and one `ended` item after the record's end, after which it closes; a stream of an ended record
+  replays what the event log and the log still hold and closes; a stream opened without a cursor
+  is never refused for what retention removed. No line is sent before `process.started` while the
+  record is starting. Lines are read from the log file, never from the program's pipes, so a
+  slow reader never blocks the program, and they never enter the event log; an idle stream reads
+  the store at most once a second. A ninth concurrent stream of one record, a subject's 513th over
+  all its records, live or ended, or a deployment's 513th is `process.events-readers-exceeded`
+  (429, retriable). The cursor names its record; one of another record, or outside the published
+  pattern, is `event.cursor-invalid`, and every cursor the daemon cannot honour is refused before
+  the upgrade with the event log's codes. The Rust SDK gains `Client::process_events` and
+  `ProcessEventStream`.
 - An operational listener for probes and scraping (ADR 0045). It adds no wire route and leaves the
   contract bundle unchanged.
   - **Flags:** `--ops-listen <address:port>` (`SUBSTRATE_OPS_LISTEN`) turns it on; it is off by
@@ -31,7 +49,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
     It never calls Identity and answers `503` once shutdown begins, before any listener closes.
   - **`/metrics`:** a fixed OpenMetrics catalogue. Labels are closed sets only, and a scrape holds
-    at most 578 samples, 471 without the refusal counter. Every histogram has 11 buckets from
+    at most 579 samples, 471 without the refusal counter. Every histogram has 11 buckets from
     5 ms to 10 s. The metrics:
     - `substrate_build_info{version,contract_bundle}`, `substrate_ready{check}`;
     - `substrate_http_requests_total{listener,family,outcome}`,
@@ -74,6 +92,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - `pod`: a policy open keeps, younger than 90 s or with its run's Pod present, no longer stays until the next open: the adapter checks it again every 2 s on a thread of its own, with one list of its owned Pods' metadata alone per round (a page of whole Pods of ten admitted runs, each up to 256 KiB of argv and 256 KiB of environment, would pass the 4 MiB page bound and fail every round), and deletes it once its Pod is gone and either the API showed that Pod before or the policy is 90 s old. The thread ends when nothing is kept or the adapter and its runs' tasks are gone.
 - `pod`: after `Unknown` the task reads the Pod every 2 s between its backed-off deletions, so a policy follows its Pod within 2 s of the kubelet removing it, not at the next deletion up to 30 s later.
 - `pod`: `start` reads the run's NetworkPolicy back once the Pod is stored, and the Pod carries an `ownerReference` to that policy (`controller: false`), so a Pod whose policy is gone is removed by the garbage collector; a policy not read back removes the Pod and refuses the start `confinement.pod-api-failed`.
+
+### Fixed
+
+- The event log reads an `ev2` cursor by its published `event-cursor` pattern: one outside it
+  (a scope without the `scope_` form, generation 0, more than 512 characters) is
+  `event.cursor-invalid` (409), where it was `event.source-mismatch`. A cursor inside the pattern
+  whose number does not fit 64 bits reads as the largest one: another generation is
+  `event.source-mismatch`, a seq or offset beyond the stream `event.cursor-invalid`. A
+  process-event cursor whose seq is 2^63 or more is `event.cursor-invalid`, where it was 500
+  `state.store-failed`, and an empty process-event cursor is `event.cursor-invalid`, where it was
+  422 `request.schema-invalid`.
 
 ## [0.14.0] — 2026-10-27
 

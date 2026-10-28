@@ -44,11 +44,12 @@ pub use substrate_wire::{
     GitChangeStatus, GitChangesQuery, GitSource, GitSourceEnvelope, LinePatchEdit,
     MAX_EVENT_PAGE_ITEMS, MAX_FILE_BYTES, MAX_IO_BYTES, MAX_LIST_ITEMS, MAX_PTY_WINDOW_COLUMNS,
     MAX_PTY_WINDOW_ROWS, MAX_SNAPSHOT_PAGE_ITEMS, MetricsResourceKind, PipeSessionCapabilities,
-    PtyWindow, RESOURCE_USAGE_SAMPLE_INTERVAL_MS, ReadOnlyFile, ReadOnlyRoot, SecretSlotRequest,
+    ProcessStreamEnd, ProcessStreamGap, ProcessStreamItem, ProcessStreamItemKind, PtyWindow,
+    RESOURCE_USAGE_SAMPLE_INTERVAL_MS, ReadOnlyFile, ReadOnlyRoot, SecretSlotRequest,
     SessionAttachmentState, SessionMode, SnapshotMetadata, SnapshotPage, StorageLimit,
     TextMatchPolicy, UnifiedDiff, WorkspaceAccess, WorkspaceTree, WorkspaceTreeEntry,
 };
-pub use transport::{EventStream, MetricsStream, RemoteEndpoint};
+pub use transport::{EventStream, MetricsStream, ProcessEventStream, RemoteEndpoint};
 
 use transport::{Transport, decode_result, encode_path};
 
@@ -358,6 +359,20 @@ impl Client {
             ));
         }
         self.inner.transport.event_stream(cursor, limit).await
+    }
+
+    /// Opens one host process's event stream (ADR 0036 S12), from its start or after `cursor`,
+    /// the cursor of an item an earlier stream delivered. Served only on the personal Unix
+    /// socket to the daemon's own uid; any other caller meets the route's named refusal.
+    pub async fn process_events(
+        &self,
+        process_id: impl AsRef<str>,
+        cursor: Option<&str>,
+    ) -> Result<ProcessEventStream, SdkError> {
+        self.inner
+            .transport
+            .process_events(process_id.as_ref(), cursor)
+            .await
     }
 
     async fn read_machine(&self) -> Result<Machine, SdkError> {
@@ -2270,7 +2285,7 @@ mod tests {
         let socket = temporary.path().join("daemon.sock");
         let listener = UnixListener::bind(&socket).expect("bind fake daemon");
         let vector: Value = serde_json::from_str(include_str!(
-            "../../../contracts/substrate-wire/0.23.0/vectors/http/machine-probe.json"
+            "../../../contracts/substrate-wire/0.24.0/vectors/http/machine-probe.json"
         ))
         .expect("machine vector");
         let machine = serde_json::to_vec(

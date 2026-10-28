@@ -1,4 +1,4 @@
-//! Host processes (ADR 0036 S1-S7, S11), driven through the router.
+//! Host processes (ADR 0036 S1-S7, S11 and S12), driven through the router.
 //!
 //! Each case is named for the conformance scenario of `spec/host-processes/` that the stories
 //! `host-process-start`, `-cgroup-tree`, `-lease`, `-stop-by-owner`, `-listing`, `-logs` and
@@ -46,6 +46,21 @@ const SUBJECT: &str = "local:4242";
 /// A peer of another uid.
 const FOREIGN: &str = "local:4243";
 const SECRET: &str = "s3cr3t-value-that-must-never-be-stored";
+/// The RFC 6455 example handshake key, a constant as in `tests/websocket.rs`: an inline value
+/// after `Sec-WebSocket-Key: ` trips Gitleaks' `generic-api-key` rule.
+const HANDSHAKE_KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
+
+/// ADR 0036 S12: the lifecycle in the event log and the per-process event stream.
+#[path = "processes/events.rs"]
+mod events;
+
+/// Security review pass 1 of `story:host-process-event-stream`.
+#[path = "processes/security_pass1.rs"]
+mod security_pass1;
+
+/// Adversary pass 1 of `story:host-process-event-stream`.
+#[path = "processes/adversary_pass1.rs"]
+mod adversary_pass1;
 
 /// A wall clock the cases move forward; everything else is the system authority's.
 #[derive(Default)]
@@ -948,6 +963,24 @@ impl ProcessLogs for FakeSupervisor {
             profile: HostProfile::Host,
             confinement: Confinement::None,
         })
+    }
+
+    /// An empty log that never grows, so a stream of a faked record waits for its end (S12).
+    fn log_read(
+        &self,
+        _id: &str,
+        from: u64,
+        _max_bytes: u64,
+    ) -> Result<Option<substrate_host::LogRead>, DriverError> {
+        Ok((from == 0).then(|| substrate_host::LogRead {
+            gap: 0,
+            lines: Vec::new(),
+            end: 0,
+        }))
+    }
+
+    fn log_end(&self, _id: &str) -> Result<u64, DriverError> {
+        Ok(0)
     }
 }
 

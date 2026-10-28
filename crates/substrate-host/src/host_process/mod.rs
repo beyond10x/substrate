@@ -29,6 +29,9 @@ mod ports;
 mod security_tests;
 #[cfg(target_os = "linux")]
 #[cfg(test)]
+mod stream_tests;
+#[cfg(target_os = "linux")]
+#[cfg(test)]
 mod tests;
 #[cfg(target_os = "linux")]
 mod tree;
@@ -58,7 +61,7 @@ use crate::process::{Cgroup, read_decimal_counter};
 use crate::{DriverError, DriverErrorClass};
 
 pub use log::{
-    LogLine, LogStream, LogStreamSelection, LogTail, MAX_PROCESS_LOG_BYTES,
+    LogLine, LogRead, LogStream, LogStreamSelection, LogTail, MAX_PROCESS_LOG_BYTES,
     MAX_PROCESS_LOG_LINE_BYTES,
 };
 pub use ports::{ListeningSocket, SocketProtocol};
@@ -1119,6 +1122,46 @@ impl HostProcessSupervisor {
         stored_log_tail(&self.state_dir, id, selection, max_bytes)
     }
 
+    /// Whole records of one process's log from the logical offset `from` (S12): the tracked log
+    /// while this run holds it, else the one an earlier run left in the state directory.
+    ///
+    /// # Errors
+    ///
+    /// `process.not-found` when neither a record nor a log exists, `process.log-failed` when the
+    /// log cannot be read.
+    pub fn log_read(
+        &self,
+        id: &str,
+        from: u64,
+        max_bytes: u64,
+    ) -> Result<Option<LogRead>, DriverError> {
+        validate_id(id)?;
+        match self.tracked_log(id) {
+            Some(log) => log.read_from(from, max_bytes),
+            None => stored_log(&self.state_dir, id)?.read_from(from, max_bytes),
+        }
+    }
+
+    /// The logical offset the next record of one process's log will start at (S12).
+    ///
+    /// # Errors
+    ///
+    /// As [`HostProcessSupervisor::log_read`].
+    pub fn log_end(&self, id: &str) -> Result<u64, DriverError> {
+        validate_id(id)?;
+        match self.tracked_log(id) {
+            Some(log) => Ok(log.end_offset()),
+            None => Ok(stored_log(&self.state_dir, id)?.end_offset()),
+        }
+    }
+
+    fn tracked_log(&self, id: &str) -> Option<Arc<ProcessLog>> {
+        self.entries
+            .lock()
+            .get(id)
+            .map(|entry| Arc::clone(&entry.log))
+    }
+
     /// Forgets an ended record and removes its log (S7: a log is removed with its record).
     ///
     /// # Errors
@@ -1215,6 +1258,44 @@ pub trait ProcessLogs: Send + Sync {
         selection: LogStreamSelection,
         max_bytes: u64,
     ) -> Result<LogTail, DriverError>;
+
+    /// Whole records of one record's log from the logical offset `from`, oldest first, for the
+    /// per-process event stream (ADR 0036 S12; [`HostProcessSupervisor::log_read`]). `Ok(None)`
+    /// when no record starts at `from`.
+    ///
+    /// A driver that cannot read a log forward says so: the default refuses rather than
+    /// answering an empty log.
+    ///
+    /// # Errors
+    ///
+    /// `process.not-found`, `process.id-invalid` or `process.log-failed`.
+    fn log_read(
+        &self,
+        id: &str,
+        from: u64,
+        max_bytes: u64,
+    ) -> Result<Option<LogRead>, DriverError> {
+        let _ = (id, from, max_bytes);
+        Err(forward_read_unserved())
+    }
+
+    /// The logical offset the next record of one record's log will start at (S12).
+    ///
+    /// # Errors
+    ///
+    /// `process.not-found`, `process.id-invalid` or `process.log-failed`; the default refuses,
+    /// as [`ProcessLogs::log_read`]'s does.
+    fn log_end(&self, id: &str) -> Result<u64, DriverError> {
+        let _ = id;
+        Err(forward_read_unserved())
+    }
+}
+
+fn forward_read_unserved() -> DriverError {
+    DriverError::failed(
+        "process.log-failed",
+        "This host-process log reader does not read a log forward.",
+    )
 }
 
 impl ProcessLogs for StoredProcessLogs {
@@ -1227,6 +1308,30 @@ impl ProcessLogs for StoredProcessLogs {
         check_tail(id, max_bytes)?;
         stored_log_tail(&self.state_dir, id, selection, max_bytes)
     }
+
+    fn log_read(
+        &self,
+        id: &str,
+        from: u64,
+        max_bytes: u64,
+    ) -> Result<Option<LogRead>, DriverError> {
+        stored_log(&self.state_dir, id)?.read_from(from, max_bytes)
+    }
+
+    fn log_end(&self, id: &str) -> Result<u64, DriverError> {
+        Ok(stored_log(&self.state_dir, id)?.end_offset())
+    }
+}
+
+/// An existing stored log, opened without following a symlink: `process.not-found` when there
+/// is none, and nothing is created.
+fn stored_log(state_dir: &Path, id: &str) -> Result<ProcessLog, DriverError> {
+    validate_id(id)?;
+    let path = state_dir.join(format!("{id}.log"));
+    if std::fs::symlink_metadata(&path).is_err() {
+        return Err(not_found());
+    }
+    ProcessLog::open_existing(&path)
 }
 
 /// The host-process driver port (ADR 0036; `AGENTS.md` invariant 4): everything the daemon asks
@@ -1300,6 +1405,19 @@ impl ProcessLogs for HostProcessSupervisor {
         max_bytes: u64,
     ) -> Result<LogTail, DriverError> {
         Self::log_tail(self, id, selection, max_bytes)
+    }
+
+    fn log_read(
+        &self,
+        id: &str,
+        from: u64,
+        max_bytes: u64,
+    ) -> Result<Option<LogRead>, DriverError> {
+        Self::log_read(self, id, from, max_bytes)
+    }
+
+    fn log_end(&self, id: &str) -> Result<u64, DriverError> {
+        Self::log_end(self, id)
     }
 }
 

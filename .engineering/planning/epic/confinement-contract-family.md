@@ -2,14 +2,17 @@
 format: aep.planning-md/3
 id: epic:confinement-contract-family
 kind: epic
-status: draft
+status: active
 title: Confinement is one contract family with an adapter per mechanism (atlas ADR 0109)
 summary: One ConfinementProfile and ConfinementAdapter in substrate-host; six adapters each declare the contract families they serve as capability facts; a missing family is refused by name.
 owner: substrate
 tags:
 - adr-0109
 - confinement
-revision: 3
+revision: 5
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-28T13:33:38Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"review_outcome":2}}}
+- {from: "proposed", to: "active", at: "2026-10-28T13:33:39Z", actor: "human:timo", revision: 5, decided_on: {"recorded":{"review_outcome":2}}}
 ---
 # Epic: Confinement is one contract family with an adapter per mechanism
 

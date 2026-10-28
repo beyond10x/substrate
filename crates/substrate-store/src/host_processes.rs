@@ -26,6 +26,7 @@ use crate::operations::{
     existing_reservation, finalize_operation_accounting, insert_accepted_operation,
     insert_refused_operation, operation_identity,
 };
+use crate::process_events::{append_process_event, end_event};
 use crate::{
     NewOperation, OperationCapacity, Reservation, Scope, Store, StoreError, StoredAnswer, to_i64,
     to_u64,
@@ -563,7 +564,20 @@ impl Store {
             params![scope.deployment, scope.subject, id, at.timestamp_millis()],
         )?;
         let record = reload(&transaction, scope, id)?;
+        // S12: `process.started` precedes every line of the record's log.
+        let event = append_process_event(
+            &transaction,
+            self,
+            scope,
+            &record,
+            "process.started",
+            &record.start_operation,
+            at,
+            Some(0),
+        )?;
         transaction.commit()?;
+        drop(connection);
+        self.report_committed(&[commit_effect(scope, &event)]);
         Ok(HostProcessTransition::Applied(Box::new(record)))
     }
 
@@ -610,6 +624,33 @@ impl Store {
         status: u16,
         id: &str,
         ttl_ms: u64,
+        result: impl FnOnce(&HostProcessRecord) -> Result<serde_json::Value, StoreError>,
+    ) -> Result<HostProcessRenewal, StoreError> {
+        self.renew_host_process_lease_at(
+            scope,
+            operation,
+            terminal_at,
+            status,
+            id,
+            ttl_ms,
+            None,
+            result,
+        )
+    }
+
+    /// [`Store::renew_host_process_lease_with`], placing the `process.lease-renewed` event it
+    /// appends at `log_offset` of the record's log (S12): the offset the log had reached when the
+    /// renewal was decided. `None` when the caller could not read it.
+    #[allow(clippy::too_many_arguments)] // One atomic renewal and ledger terminal boundary.
+    pub fn renew_host_process_lease_at(
+        &self,
+        scope: &Scope,
+        operation: &str,
+        terminal_at: DateTime<Utc>,
+        status: u16,
+        id: &str,
+        ttl_ms: u64,
+        log_offset: Option<u64>,
         result: impl FnOnce(&HostProcessRecord) -> Result<serde_json::Value, StoreError>,
     ) -> Result<HostProcessRenewal, StoreError> {
         let mut connection = self.connection.lock();
@@ -659,9 +700,19 @@ impl Store {
             id,
             result,
         )?;
+        let renewed = append_process_event(
+            &transaction,
+            self,
+            scope,
+            &record,
+            "process.lease-renewed",
+            operation,
+            terminal_at,
+            log_offset,
+        )?;
         transaction.commit()?;
         drop(connection);
-        self.report_committed(&[commit_effect(scope, &event)]);
+        self.report_committed(&[commit_effect(scope, &event), commit_effect(scope, &renewed)]);
         Ok(HostProcessRenewal::Renewed(Box::new(record)))
     }
 
@@ -672,6 +723,19 @@ impl Store {
         new: &NewOperation,
         id: &str,
         cause: HostProcessEndedBy,
+    ) -> Result<HostProcessStopReservation, StoreError> {
+        self.reserve_host_process_stop_at(new, id, cause, None)
+    }
+
+    /// [`Store::reserve_host_process_stop`], placing the event a lease expiry or a deadline
+    /// appends (`process.lease-expired`, `process.timed-out`) at `log_offset` of the record's log
+    /// (S12). A caller's stop appends nothing until its end, which appends `process.stopped`.
+    pub fn reserve_host_process_stop_at(
+        &self,
+        new: &NewOperation,
+        id: &str,
+        cause: HostProcessEndedBy,
+        log_offset: Option<u64>,
     ) -> Result<HostProcessStopReservation, StoreError> {
         if new.operation_kind != HOST_PROCESS_STOP_KIND {
             return Err(StoreError::HostProcessInvariant("stop operation kind"));
@@ -733,7 +797,8 @@ impl Store {
                 Err(error) => return Err(error),
             };
         transaction.execute(
-            "UPDATE host_processes SET state = 'stopping', ended_by = ?4, stopping_ms = ?5
+            "UPDATE host_processes
+             SET state = 'stopping', ended_by = ?4, stopping_ms = ?5, stop_operation = ?6
              WHERE deployment = ?1 AND subject = ?2 AND id = ?3
                AND state IN ('starting','running')",
             params![
@@ -741,13 +806,35 @@ impl Store {
                 new.scope.subject,
                 id,
                 cause.as_str(),
-                now.timestamp_millis()
+                now.timestamp_millis(),
+                new.operation,
             ],
         )?;
         let record = reload(&transaction, &new.scope, id)?;
+        let mut effects = vec![commit_effect(&new.scope, &event)];
+        let begun = match cause {
+            HostProcessEndedBy::LeaseExpiry => Some("process.lease-expired"),
+            HostProcessEndedBy::Timeout | HostProcessEndedBy::ExpiresAt => {
+                Some("process.timed-out")
+            }
+            _ => None,
+        };
+        if let Some(transition) = begun {
+            let begun = append_process_event(
+                &transaction,
+                self,
+                &new.scope,
+                &record,
+                transition,
+                &new.operation,
+                now,
+                log_offset,
+            )?;
+            effects.push(commit_effect(&new.scope, &begun));
+        }
         transaction.commit()?;
         drop(connection);
-        self.report_committed(&[commit_effect(&new.scope, &event)]);
+        self.report_committed(&effects);
         Ok(HostProcessStopReservation::Accepted(Box::new(record)))
     }
 
@@ -796,7 +883,21 @@ impl Store {
             ],
         )?;
         let record = reload(&transaction, scope, id)?;
+        // S12: the end follows the whole log, which the supervisor drained before publishing it.
+        let (transition, cause) = end_event(&transaction, scope, &record)?;
+        let event = append_process_event(
+            &transaction,
+            self,
+            scope,
+            &record,
+            transition,
+            &cause,
+            at,
+            None,
+        )?;
         transaction.commit()?;
+        drop(connection);
+        self.report_committed(&[commit_effect(scope, &event)]);
         Ok(HostProcessTransition::Applied(Box::new(record)))
     }
 
@@ -994,6 +1095,12 @@ impl Store {
             transaction.execute(
                 "DELETE FROM host_processes
                  WHERE deployment = ?1 AND subject = ?2 AND id = ?3 AND state = 'ended'",
+                params![deployment, subject, id],
+            )?;
+            // S12: the record's place in its stream goes with it; its events stay in the log.
+            transaction.execute(
+                "DELETE FROM process_events
+                 WHERE deployment = ?1 AND subject = ?2 AND process = ?3",
                 params![deployment, subject, id],
             )?;
             removed.push((
@@ -1681,5 +1788,7 @@ impl RawRecord {
     }
 }
 
+#[cfg(test)]
+mod event_tests;
 #[cfg(test)]
 mod tests;

@@ -151,6 +151,23 @@ impl Transport {
         Ok(EventStream { socket })
     }
 
+    pub async fn process_events(
+        &self,
+        process_id: &str,
+        cursor: Option<&str>,
+    ) -> Result<ProcessEventStream, SdkError> {
+        let mut path = format!("/v1/processes/{}/events", encode_path(process_id));
+        if let Some(cursor) = cursor {
+            path.push_str("?cursor=");
+            path.push_str(&encode_path(cursor));
+        }
+        let socket = self.websocket(&path).await?;
+        Ok(ProcessEventStream {
+            socket,
+            close_code: None,
+        })
+    }
+
     pub async fn metrics_stream(&self, exec_id: &str) -> Result<MetricsStream, SdkError> {
         let query = serde_urlencoded::to_string(substrate_wire::MetricsStreamQuery {
             exec_id: exec_id.to_owned(),
@@ -478,6 +495,51 @@ pub struct EventStream {
 
 pub struct MetricsStream {
     socket: WebSocket,
+}
+
+/// One host process's event stream (ADR 0036 S12): its lifecycle events and log lines in one
+/// order, then one `ended` item, after which the daemon closes the stream.
+pub struct ProcessEventStream {
+    socket: WebSocket,
+    close_code: Option<u16>,
+}
+
+impl ProcessEventStream {
+    /// The next item, or `None` once the daemon closed the stream. [`Self::close_code`] then
+    /// says how: 1000 after the `ended` item, 1011 when the daemon could no longer serve the
+    /// stream, which a new stream resumes from the last item's cursor.
+    pub async fn next_item(
+        &mut self,
+    ) -> Result<Option<substrate_wire::ProcessStreamItem>, SdkError> {
+        while let Some(message) = self.socket.next().await {
+            let message = message.map_err(|error| SdkError::Transport(error.to_string()))?;
+            match message {
+                Message::Text(text) => {
+                    let item = serde_json::from_str(&text)
+                        .map_err(|error| SdkError::Protocol(error.to_string()))?;
+                    return Ok(Some(item));
+                }
+                Message::Close(frame) => {
+                    self.close_code = frame.map(|frame| u16::from(frame.code));
+                    return Ok(None);
+                }
+                Message::Ping(bytes) => {
+                    use futures_util::SinkExt as _;
+                    self.socket
+                        .send(Message::Pong(bytes))
+                        .await
+                        .map_err(|error| SdkError::Transport(error.to_string()))?;
+                }
+                Message::Binary(_) | Message::Pong(_) | Message::Frame(_) => {}
+            }
+        }
+        Ok(None)
+    }
+
+    /// The status the daemon closed the stream with, once it did.
+    pub fn close_code(&self) -> Option<u16> {
+        self.close_code
+    }
 }
 
 impl MetricsStream {

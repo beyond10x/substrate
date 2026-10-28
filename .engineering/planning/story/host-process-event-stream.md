@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:host-process-event-stream
 kind: story
-status: draft
+status: implemented
 title: Per-process event stream
 relations:
 - decomposes: epic:host-process-supervision
@@ -14,6 +14,8 @@ scope:
   path: AGENTS.md
 - confidence: inferred
   path: CHANGELOG.md
+- confidence: inferred
+  path: contracts/substrate-wire/0.24.0
 - confidence: cited
   path: crates/b10x-substrate-sdk/src/lib.rs
 - confidence: cited
@@ -22,6 +24,8 @@ scope:
   path: crates/substrate-daemon/src/app/processes.rs
 - confidence: cited
   path: crates/substrate-daemon/src/app/routes.rs
+- confidence: inferred
+  path: crates/substrate-daemon/src/hosted.rs
 - confidence: inferred
   path: crates/substrate-daemon/tests/processes.rs
 - confidence: inferred
@@ -35,6 +39,8 @@ scope:
 - confidence: inferred
   path: crates/substrate-wire/src/generated/host_process.rs
 - confidence: cited
+  path: crates/substrate-wire/src/host_process_tests.rs
+- confidence: cited
   path: crates/substrate-wire/src/lib.rs
 - confidence: inferred
   path: scripts/gate.sh
@@ -45,10 +51,16 @@ scope:
 - confidence: cited
   path: spec/host-processes-suite.json
 - confidence: cited
-  path: xtask/bundle-source/0.23.0
+  path: spec/host-processes/wire.yaml
+- confidence: inferred
+  path: xtask/bundle-source/0.24.0
 - confidence: inferred
   path: xtask/src/bundle.rs
-revision: 4
+revision: 10
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-28T07:37:21Z", actor: "human:timo", revision: 5}
+- {from: "proposed", to: "active", at: "2026-10-28T07:37:21Z", actor: "human:timo", revision: 6, executor: "agent:substrate-adr-0109"}
+- {from: "active", to: "implemented", at: "2026-10-28T14:26:16Z", actor: "human:timo", revision: 10, decided_on: {"recorded":{"test_result":2,"review_outcome":3}}}
 ---
 # Story: per-process event stream
 
