@@ -51,12 +51,9 @@ fn write_file(path: &Path, bytes: &[u8], mode: u32) {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).expect("file mode");
 }
 
-fn unused_address() -> SocketAddr {
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("ephemeral listener");
-    let address = listener.local_addr().expect("ephemeral address");
-    drop(listener);
-    address
-}
+#[path = "support/ports.rs"]
+mod ports;
+use ports::unused_address;
 
 /// What the scripted Identity does with one resolution request.
 #[derive(Clone, Copy, Debug)]
