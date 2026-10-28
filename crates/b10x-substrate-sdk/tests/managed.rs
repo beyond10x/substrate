@@ -158,6 +158,13 @@ async fn managed_external_daemon_serves_the_typed_workspace_journey() {
         "exec.metrics-unserved"
     };
     assert_eq!(stream_refusal.code, expected);
+    // ADR 0036 S12: the process event stream handshake preserves its named refusal too.
+    let Err(SdkError::Refusal(process_refusal)) =
+        managed.client().process_events("proc_missing", None).await
+    else {
+        panic!("a process event stream of an absent record must be a named refusal")
+    };
+    assert_eq!(process_refusal.code, "process.not-found");
 
     let policy = ExecutionPolicy::builder()
         .timeout(Duration::from_secs(5))

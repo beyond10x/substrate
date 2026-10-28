@@ -79,7 +79,7 @@ use output_retention::OutputRetention;
 // The host-process port and the vocabulary its signatures force, at the crate root as `Driver`'s
 // is: a client names these, and never `host_process::HostProcessSupervisor`.
 pub use host_process::{
-    Deadline, HostProcessEnd, HostProcessObservation, HostProcessSpec, LogStream,
+    Deadline, HostProcessEnd, HostProcessObservation, HostProcessSpec, LogLine, LogRead, LogStream,
     LogStreamSelection, LogTail, ProcessExit, ProcessLogs, ProcessSupervisor, Reattached,
     SocketProtocol, StopCause, StoredProcessLogs,
 };

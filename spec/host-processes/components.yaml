@@ -52,10 +52,11 @@ components:
 # end item (exited, stopped or vanished), never from ProcessEnded directly, so it always follows
 # it: two bindings on one event would leave their order undecided, and an end item appended after
 # `ended` would be refused as StreamClosed and dropped.
-# DECIDED (point 1): delivery is at least once. Each stream item carries its per-process `seq`
-# (ADR 0036 S12), strictly increasing, beside its opaque cursor, and a reader drops an item whose
-# seq it has already seen. Exactly once is not an ESS delivery and adds nothing the seq does not
-# give.
+# DECIDED (point 1): delivery is at least once. The model's per-process `seq` is the stream's
+# order; on the wire that order is the opaque cursor each item carries (wire.yaml,
+# ProcessStreamItem), and a reader that resumes from the cursor of the last item it handled
+# receives each later item once. Exactly once is not an ESS delivery and adds nothing the cursor
+# does not give.
 # DECIDED (point 2): a refused append is dropped. The only refusal these bindings can reach is
 # StreamClosed, an append after `ended`; a later failure policy is additive.
 # S3, S11: a record that ends from Stopping reports the cause its stop recorded. Every move into

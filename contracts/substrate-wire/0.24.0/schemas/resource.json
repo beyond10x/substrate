@@ -1,0 +1,4244 @@
+{
+  "$defs": {
+    "applied-network": {
+      "oneOf": [
+        {
+          "const": "none"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "bytes": {
+              "additionalProperties": false,
+              "properties": {
+                "from_destination": {
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "to_destination": {
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "to_destination",
+                "from_destination"
+              ],
+              "type": "object"
+            },
+            "destination": {
+              "maxLength": 64,
+              "minLength": 3,
+              "type": "string"
+            },
+            "max_bytes": {
+              "description": "The declared ceiling this run ran under, over both directions summed. Absent means the aperture was declared without one (ADR 0014).",
+              "minimum": 1,
+              "type": "integer"
+            },
+            "mechanism": {
+              "const": "loopback-forwarder"
+            },
+            "mode": {
+              "const": "aperture"
+            },
+            "name": {
+              "maxLength": 64,
+              "pattern": "^[a-z][a-z0-9_]{0,63}$",
+              "type": "string"
+            }
+          },
+          "required": [
+            "mode",
+            "name",
+            "destination",
+            "mechanism",
+            "bytes"
+          ],
+          "type": "object",
+          "x-b10x-ceiling-is": "declared-by-the-operator-never-requested",
+          "x-b10x-destination-is": "the-pinned-address-not-the-configured-host"
+        },
+        {
+          "description": "Every aperture of a start that named apertures, in the order listed (design 26 section 2). A start that named one aperture reports the single object instead.",
+          "items": {
+            "additionalProperties": false,
+            "properties": {
+              "bytes": {
+                "additionalProperties": false,
+                "properties": {
+                  "from_destination": {
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "to_destination": {
+                    "minimum": 0,
+                    "type": "integer"
+                  }
+                },
+                "required": [
+                  "to_destination",
+                  "from_destination"
+                ],
+                "type": "object"
+              },
+              "destination": {
+                "maxLength": 64,
+                "minLength": 3,
+                "type": "string"
+              },
+              "listen": {
+                "description": "The loopback address and port the forwarder listened on in the run's namespace: the n-th listed aperture on 127.0.0.n.",
+                "maxLength": 21,
+                "pattern": "^127\\.0\\.0\\.[1-4]:[0-9]{1,5}$",
+                "type": "string"
+              },
+              "max_bytes": {
+                "description": "The declared ceiling this run ran under, over both directions summed. Absent means the aperture was declared without one (ADR 0014).",
+                "minimum": 1,
+                "type": "integer"
+              },
+              "mechanism": {
+                "const": "loopback-forwarder"
+              },
+              "mode": {
+                "const": "aperture"
+              },
+              "name": {
+                "maxLength": 64,
+                "pattern": "^[a-z][a-z0-9_]{0,63}$",
+                "type": "string"
+              }
+            },
+            "required": [
+              "mode",
+              "name",
+              "destination",
+              "mechanism",
+              "bytes",
+              "listen"
+            ],
+            "type": "object",
+            "x-b10x-ceiling-is": "declared-by-the-operator-never-requested",
+            "x-b10x-destination-is": "the-pinned-address-not-the-configured-host"
+          },
+          "maxItems": 4,
+          "minItems": 2,
+          "type": "array"
+        }
+      ],
+      "title": "applied network: the floor, the aperture that was installed, or every aperture of a list"
+    },
+    "confinement-applied": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "capability_snapshot": {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "cgroup": {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            "filesystem": {
+              "const": "workspace-rw-system-ro"
+            },
+            "network": {
+              "$ref": "#/$defs/applied-network"
+            },
+            "profile": {
+              "const": "workspace"
+            },
+            "read_only_files": {
+              "items": {
+                "$ref": "common.json#/$defs/read-only-file"
+              },
+              "maxItems": 16,
+              "minItems": 1,
+              "type": "array",
+              "x-b10x-applied-not-requested": "what-was-bound"
+            },
+            "read_only_roots": {
+              "items": {
+                "$ref": "common.json#/$defs/read-only-root"
+              },
+              "maxItems": 4,
+              "minItems": 1,
+              "type": "array",
+              "x-b10x-applied-not-requested": "what-was-bound"
+            },
+            "secret_slots": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "fd": {
+                    "maximum": 63,
+                    "minimum": 3,
+                    "type": "integer"
+                  },
+                  "slot": {
+                    "maxLength": 64,
+                    "pattern": "^[a-z][a-z0-9_]{0,63}$",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "slot",
+                  "fd"
+                ],
+                "type": "object"
+              },
+              "maxItems": 8,
+              "minItems": 1,
+              "type": "array",
+              "x-b10x-applied-not-requested": "what-was-placed"
+            },
+            "workdir": {
+              "$ref": "common.json#/$defs/workdir",
+              "x-b10x-applied-not-requested": "where-the-program-started"
+            },
+            "workspace_access": {
+              "$ref": "common.json#/$defs/workspace-access"
+            },
+            "writable_roots": {
+              "$ref": "common.json#/$defs/applied-writable-roots",
+              "x-b10x-applied-not-requested": "what-was-bound"
+            }
+          },
+          "required": [
+            "capability_snapshot",
+            "profile",
+            "filesystem",
+            "network",
+            "cgroup"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "capability_snapshot": {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "capsule": {
+              "additionalProperties": false,
+              "properties": {
+                "entrypoint": {
+                  "pattern": "^/runtime/(?!.*(?:^|/)\\.\\.(?:/|$))[^\\u0000]+$",
+                  "type": "string"
+                },
+                "file_count": {
+                  "maximum": 32,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "manifest_sha256": {
+                  "pattern": "^[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "mount": {
+                  "const": "/runtime"
+                },
+                "total_bytes": {
+                  "maximum": 524288,
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "manifest_sha256",
+                "entrypoint",
+                "mount",
+                "file_count",
+                "total_bytes"
+              ],
+              "type": "object"
+            },
+            "cgroup": {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            },
+            "filesystem": {
+              "const": "workspace-rw-capsule-ro-system-ro"
+            },
+            "network": {
+              "$ref": "#/$defs/applied-network"
+            },
+            "profile": {
+              "const": "workspace"
+            },
+            "read_only_files": {
+              "items": {
+                "$ref": "common.json#/$defs/read-only-file"
+              },
+              "maxItems": 16,
+              "minItems": 1,
+              "type": "array",
+              "x-b10x-applied-not-requested": "what-was-bound"
+            },
+            "read_only_roots": {
+              "items": {
+                "$ref": "common.json#/$defs/read-only-root"
+              },
+              "maxItems": 4,
+              "minItems": 1,
+              "type": "array",
+              "x-b10x-applied-not-requested": "what-was-bound"
+            },
+            "secret_slots": {
+              "items": {
+                "additionalProperties": false,
+                "properties": {
+                  "fd": {
+                    "maximum": 63,
+                    "minimum": 3,
+                    "type": "integer"
+                  },
+                  "slot": {
+                    "maxLength": 64,
+                    "pattern": "^[a-z][a-z0-9_]{0,63}$",
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "slot",
+                  "fd"
+                ],
+                "type": "object"
+              },
+              "maxItems": 8,
+              "minItems": 1,
+              "type": "array",
+              "x-b10x-applied-not-requested": "what-was-placed"
+            },
+            "workdir": {
+              "$ref": "common.json#/$defs/workdir",
+              "x-b10x-applied-not-requested": "where-the-program-started"
+            },
+            "workspace_access": {
+              "$ref": "common.json#/$defs/workspace-access"
+            },
+            "writable_roots": {
+              "$ref": "common.json#/$defs/applied-writable-roots",
+              "x-b10x-applied-not-requested": "what-was-bound"
+            }
+          },
+          "required": [
+            "capability_snapshot",
+            "profile",
+            "filesystem",
+            "network",
+            "cgroup",
+            "capsule"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "confinement-request": {
+      "additionalProperties": false,
+      "properties": {
+        "aperture": {
+          "maxLength": 64,
+          "pattern": "^[a-z][a-z0-9_]{0,63}$",
+          "type": "string"
+        },
+        "apertures": {
+          "items": {
+            "maxLength": 64,
+            "pattern": "^[a-z][a-z0-9_]{0,63}$",
+            "type": "string"
+          },
+          "maxItems": 4,
+          "minItems": 2,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "capability_snapshot": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "network": {
+          "enum": [
+            "none",
+            "aperture"
+          ]
+        },
+        "profile": {
+          "const": "workspace"
+        },
+        "require": {
+          "const": true
+        }
+      },
+      "required": [
+        "capability_snapshot",
+        "profile",
+        "network",
+        "require"
+      ],
+      "type": "object"
+    },
+    "exec": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "applied": {
+              "type": "null"
+            },
+            "exit": {
+              "type": "null"
+            },
+            "id": {
+              "$ref": "common.json#/$defs/exec-id"
+            },
+            "kind": {
+              "const": "exec"
+            },
+            "lease": {
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "actor": {
+                      "maxLength": 256,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "authorizing_operation": {
+                      "$ref": "common.json#/$defs/operation-id"
+                    },
+                    "clock_tolerance_ms": {
+                      "const": 30000
+                    },
+                    "principal": {
+                      "maxLength": 256,
+                      "minLength": 1,
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "renew_by": {
+                      "$ref": "common.json#/$defs/timestamp"
+                    },
+                    "state": {
+                      "enum": [
+                        "active",
+                        "expiring",
+                        "expired"
+                      ]
+                    },
+                    "ttl_ms": {
+                      "maximum": 86400000,
+                      "minimum": 1000,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "ttl_ms",
+                    "renew_by",
+                    "state",
+                    "clock_tolerance_ms",
+                    "authorizing_operation",
+                    "actor",
+                    "principal"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "observed_at": {
+              "$ref": "common.json#/$defs/timestamp"
+            },
+            "requested": {
+              "additionalProperties": false,
+              "properties": {
+                "aperture": {
+                  "maxLength": 64,
+                  "pattern": "^[a-z][a-z0-9_]{0,63}$",
+                  "type": "string"
+                },
+                "apertures": {
+                  "items": {
+                    "maxLength": 64,
+                    "pattern": "^[a-z][a-z0-9_]{0,63}$",
+                    "type": "string"
+                  },
+                  "maxItems": 4,
+                  "minItems": 2,
+                  "type": "array",
+                  "uniqueItems": true
+                },
+                "capability_snapshot": {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "network": {
+                  "enum": [
+                    "none",
+                    "aperture"
+                  ]
+                },
+                "profile": {
+                  "const": "workspace"
+                },
+                "require": {
+                  "const": true
+                }
+              },
+              "required": [
+                "capability_snapshot",
+                "profile",
+                "network",
+                "require"
+              ],
+              "type": "object"
+            },
+            "state": {
+              "const": "accepted"
+            },
+            "unrecorded_output": {
+              "additionalProperties": false,
+              "properties": {
+                "queue_high_water_frames": {
+                  "maximum": 16,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "stderr_observed_bytes": {
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "stderr_queued_bytes": {
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "stdout_observed_bytes": {
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "stdout_queued_bytes": {
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "stdout_observed_bytes",
+                "stderr_observed_bytes",
+                "stdout_queued_bytes",
+                "stderr_queued_bytes",
+                "queue_high_water_frames"
+              ],
+              "type": "object"
+            },
+            "usage": {
+              "$ref": "#/$defs/exec-usage"
+            },
+            "workspace": {
+              "$ref": "common.json#/$defs/workspace-id"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "workspace",
+            "state",
+            "observed_at",
+            "requested",
+            "applied",
+            "exit"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "applied": {
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "capability_snapshot": {
+                      "pattern": "^sha256:[0-9a-f]{64}$",
+                      "type": "string"
+                    },
+                    "cgroup": {
+                      "maxLength": 512,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "filesystem": {
+                      "const": "workspace-rw-system-ro"
+                    },
+                    "network": {
+                      "$ref": "#/$defs/applied-network"
+                    },
+                    "profile": {
+                      "const": "workspace"
+                    },
+                    "read_only_files": {
+                      "items": {
+                        "$ref": "common.json#/$defs/read-only-file"
+                      },
+                      "maxItems": 16,
+                      "minItems": 1,
+                      "type": "array",
+                      "x-b10x-applied-not-requested": "what-was-bound"
+                    },
+                    "read_only_roots": {
+                      "items": {
+                        "$ref": "common.json#/$defs/read-only-root"
+                      },
+                      "maxItems": 4,
+                      "minItems": 1,
+                      "type": "array",
+                      "x-b10x-applied-not-requested": "what-was-bound"
+                    },
+                    "secret_slots": {
+                      "items": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "fd": {
+                            "maximum": 63,
+                            "minimum": 3,
+                            "type": "integer"
+                          },
+                          "slot": {
+                            "maxLength": 64,
+                            "pattern": "^[a-z][a-z0-9_]{0,63}$",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "slot",
+                          "fd"
+                        ],
+                        "type": "object"
+                      },
+                      "maxItems": 8,
+                      "minItems": 1,
+                      "type": "array",
+                      "x-b10x-applied-not-requested": "what-was-placed"
+                    },
+                    "workdir": {
+                      "$ref": "common.json#/$defs/workdir",
+                      "x-b10x-applied-not-requested": "where-the-program-started"
+                    },
+                    "workspace_access": {
+                      "$ref": "common.json#/$defs/workspace-access"
+                    },
+                    "writable_roots": {
+                      "$ref": "common.json#/$defs/applied-writable-roots",
+                      "x-b10x-applied-not-requested": "what-was-bound"
+                    }
+                  },
+                  "required": [
+                    "capability_snapshot",
+                    "profile",
+                    "filesystem",
+                    "network",
+                    "cgroup"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "capability_snapshot": {
+                      "pattern": "^sha256:[0-9a-f]{64}$",
+                      "type": "string"
+                    },
+                    "capsule": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "entrypoint": {
+                          "pattern": "^/runtime/(?!.*(?:^|/)\\.\\.(?:/|$))[^\\u0000]+$",
+                          "type": "string"
+                        },
+                        "file_count": {
+                          "maximum": 32,
+                          "minimum": 1,
+                          "type": "integer"
+                        },
+                        "manifest_sha256": {
+                          "pattern": "^[0-9a-f]{64}$",
+                          "type": "string"
+                        },
+                        "mount": {
+                          "const": "/runtime"
+                        },
+                        "total_bytes": {
+                          "maximum": 524288,
+                          "minimum": 0,
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "manifest_sha256",
+                        "entrypoint",
+                        "mount",
+                        "file_count",
+                        "total_bytes"
+                      ],
+                      "type": "object"
+                    },
+                    "cgroup": {
+                      "maxLength": 512,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "filesystem": {
+                      "const": "workspace-rw-capsule-ro-system-ro"
+                    },
+                    "network": {
+                      "$ref": "#/$defs/applied-network"
+                    },
+                    "profile": {
+                      "const": "workspace"
+                    },
+                    "read_only_files": {
+                      "items": {
+                        "$ref": "common.json#/$defs/read-only-file"
+                      },
+                      "maxItems": 16,
+                      "minItems": 1,
+                      "type": "array",
+                      "x-b10x-applied-not-requested": "what-was-bound"
+                    },
+                    "read_only_roots": {
+                      "items": {
+                        "$ref": "common.json#/$defs/read-only-root"
+                      },
+                      "maxItems": 4,
+                      "minItems": 1,
+                      "type": "array",
+                      "x-b10x-applied-not-requested": "what-was-bound"
+                    },
+                    "secret_slots": {
+                      "items": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "fd": {
+                            "maximum": 63,
+                            "minimum": 3,
+                            "type": "integer"
+                          },
+                          "slot": {
+                            "maxLength": 64,
+                            "pattern": "^[a-z][a-z0-9_]{0,63}$",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "slot",
+                          "fd"
+                        ],
+                        "type": "object"
+                      },
+                      "maxItems": 8,
+                      "minItems": 1,
+                      "type": "array",
+                      "x-b10x-applied-not-requested": "what-was-placed"
+                    },
+                    "workdir": {
+                      "$ref": "common.json#/$defs/workdir",
+                      "x-b10x-applied-not-requested": "where-the-program-started"
+                    },
+                    "workspace_access": {
+                      "$ref": "common.json#/$defs/workspace-access"
+                    },
+                    "writable_roots": {
+                      "$ref": "common.json#/$defs/applied-writable-roots",
+                      "x-b10x-applied-not-requested": "what-was-bound"
+                    }
+                  },
+                  "required": [
+                    "capability_snapshot",
+                    "profile",
+                    "filesystem",
+                    "network",
+                    "cgroup",
+                    "capsule"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "exit": {
+              "type": "null"
+            },
+            "id": {
+              "$ref": "common.json#/$defs/exec-id"
+            },
+            "kind": {
+              "const": "exec"
+            },
+            "lease": {
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "actor": {
+                      "maxLength": 256,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "authorizing_operation": {
+                      "$ref": "common.json#/$defs/operation-id"
+                    },
+                    "clock_tolerance_ms": {
+                      "const": 30000
+                    },
+                    "principal": {
+                      "maxLength": 256,
+                      "minLength": 1,
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "renew_by": {
+                      "$ref": "common.json#/$defs/timestamp"
+                    },
+                    "state": {
+                      "enum": [
+                        "active",
+                        "expiring",
+                        "expired"
+                      ]
+                    },
+                    "ttl_ms": {
+                      "maximum": 86400000,
+                      "minimum": 1000,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "ttl_ms",
+                    "renew_by",
+                    "state",
+                    "clock_tolerance_ms",
+                    "authorizing_operation",
+                    "actor",
+                    "principal"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "observed_at": {
+              "$ref": "common.json#/$defs/timestamp"
+            },
+            "requested": {
+              "additionalProperties": false,
+              "properties": {
+                "aperture": {
+                  "maxLength": 64,
+                  "pattern": "^[a-z][a-z0-9_]{0,63}$",
+                  "type": "string"
+                },
+                "apertures": {
+                  "items": {
+                    "maxLength": 64,
+                    "pattern": "^[a-z][a-z0-9_]{0,63}$",
+                    "type": "string"
+                  },
+                  "maxItems": 4,
+                  "minItems": 2,
+                  "type": "array",
+                  "uniqueItems": true
+                },
+                "capability_snapshot": {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "network": {
+                  "enum": [
+                    "none",
+                    "aperture"
+                  ]
+                },
+                "profile": {
+                  "const": "workspace"
+                },
+                "require": {
+                  "const": true
+                }
+              },
+              "required": [
+                "capability_snapshot",
+                "profile",
+                "network",
+                "require"
+              ],
+              "type": "object"
+            },
+            "state": {
+              "const": "running"
+            },
+            "unrecorded_output": {
+              "additionalProperties": false,
+              "properties": {
+                "queue_high_water_frames": {
+                  "maximum": 16,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "stderr_observed_bytes": {
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "stderr_queued_bytes": {
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "stdout_observed_bytes": {
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "stdout_queued_bytes": {
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "stdout_observed_bytes",
+                "stderr_observed_bytes",
+                "stdout_queued_bytes",
+                "stderr_queued_bytes",
+                "queue_high_water_frames"
+              ],
+              "type": "object"
+            },
+            "usage": {
+              "$ref": "#/$defs/exec-usage"
+            },
+            "workspace": {
+              "$ref": "common.json#/$defs/workspace-id"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "workspace",
+            "state",
+            "observed_at",
+            "requested",
+            "applied",
+            "exit"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "applied": {
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "capability_snapshot": {
+                      "pattern": "^sha256:[0-9a-f]{64}$",
+                      "type": "string"
+                    },
+                    "cgroup": {
+                      "maxLength": 512,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "filesystem": {
+                      "const": "workspace-rw-system-ro"
+                    },
+                    "network": {
+                      "$ref": "#/$defs/applied-network"
+                    },
+                    "profile": {
+                      "const": "workspace"
+                    },
+                    "read_only_files": {
+                      "items": {
+                        "$ref": "common.json#/$defs/read-only-file"
+                      },
+                      "maxItems": 16,
+                      "minItems": 1,
+                      "type": "array",
+                      "x-b10x-applied-not-requested": "what-was-bound"
+                    },
+                    "read_only_roots": {
+                      "items": {
+                        "$ref": "common.json#/$defs/read-only-root"
+                      },
+                      "maxItems": 4,
+                      "minItems": 1,
+                      "type": "array",
+                      "x-b10x-applied-not-requested": "what-was-bound"
+                    },
+                    "secret_slots": {
+                      "items": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "fd": {
+                            "maximum": 63,
+                            "minimum": 3,
+                            "type": "integer"
+                          },
+                          "slot": {
+                            "maxLength": 64,
+                            "pattern": "^[a-z][a-z0-9_]{0,63}$",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "slot",
+                          "fd"
+                        ],
+                        "type": "object"
+                      },
+                      "maxItems": 8,
+                      "minItems": 1,
+                      "type": "array",
+                      "x-b10x-applied-not-requested": "what-was-placed"
+                    },
+                    "workdir": {
+                      "$ref": "common.json#/$defs/workdir",
+                      "x-b10x-applied-not-requested": "where-the-program-started"
+                    },
+                    "workspace_access": {
+                      "$ref": "common.json#/$defs/workspace-access"
+                    },
+                    "writable_roots": {
+                      "$ref": "common.json#/$defs/applied-writable-roots",
+                      "x-b10x-applied-not-requested": "what-was-bound"
+                    }
+                  },
+                  "required": [
+                    "capability_snapshot",
+                    "profile",
+                    "filesystem",
+                    "network",
+                    "cgroup"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "capability_snapshot": {
+                      "pattern": "^sha256:[0-9a-f]{64}$",
+                      "type": "string"
+                    },
+                    "capsule": {
+                      "additionalProperties": false,
+                      "properties": {
+                        "entrypoint": {
+                          "pattern": "^/runtime/(?!.*(?:^|/)\\.\\.(?:/|$))[^\\u0000]+$",
+                          "type": "string"
+                        },
+                        "file_count": {
+                          "maximum": 32,
+                          "minimum": 1,
+                          "type": "integer"
+                        },
+                        "manifest_sha256": {
+                          "pattern": "^[0-9a-f]{64}$",
+                          "type": "string"
+                        },
+                        "mount": {
+                          "const": "/runtime"
+                        },
+                        "total_bytes": {
+                          "maximum": 524288,
+                          "minimum": 0,
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "manifest_sha256",
+                        "entrypoint",
+                        "mount",
+                        "file_count",
+                        "total_bytes"
+                      ],
+                      "type": "object"
+                    },
+                    "cgroup": {
+                      "maxLength": 512,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "filesystem": {
+                      "const": "workspace-rw-capsule-ro-system-ro"
+                    },
+                    "network": {
+                      "$ref": "#/$defs/applied-network"
+                    },
+                    "profile": {
+                      "const": "workspace"
+                    },
+                    "read_only_files": {
+                      "items": {
+                        "$ref": "common.json#/$defs/read-only-file"
+                      },
+                      "maxItems": 16,
+                      "minItems": 1,
+                      "type": "array",
+                      "x-b10x-applied-not-requested": "what-was-bound"
+                    },
+                    "read_only_roots": {
+                      "items": {
+                        "$ref": "common.json#/$defs/read-only-root"
+                      },
+                      "maxItems": 4,
+                      "minItems": 1,
+                      "type": "array",
+                      "x-b10x-applied-not-requested": "what-was-bound"
+                    },
+                    "secret_slots": {
+                      "items": {
+                        "additionalProperties": false,
+                        "properties": {
+                          "fd": {
+                            "maximum": 63,
+                            "minimum": 3,
+                            "type": "integer"
+                          },
+                          "slot": {
+                            "maxLength": 64,
+                            "pattern": "^[a-z][a-z0-9_]{0,63}$",
+                            "type": "string"
+                          }
+                        },
+                        "required": [
+                          "slot",
+                          "fd"
+                        ],
+                        "type": "object"
+                      },
+                      "maxItems": 8,
+                      "minItems": 1,
+                      "type": "array",
+                      "x-b10x-applied-not-requested": "what-was-placed"
+                    },
+                    "workdir": {
+                      "$ref": "common.json#/$defs/workdir",
+                      "x-b10x-applied-not-requested": "where-the-program-started"
+                    },
+                    "workspace_access": {
+                      "$ref": "common.json#/$defs/workspace-access"
+                    },
+                    "writable_roots": {
+                      "$ref": "common.json#/$defs/applied-writable-roots",
+                      "x-b10x-applied-not-requested": "what-was-bound"
+                    }
+                  },
+                  "required": [
+                    "capability_snapshot",
+                    "profile",
+                    "filesystem",
+                    "network",
+                    "cgroup",
+                    "capsule"
+                  ],
+                  "type": "object"
+                }
+              ]
+            },
+            "exit": {
+              "additionalProperties": false,
+              "oneOf": [
+                {
+                  "properties": {
+                    "code": {
+                      "maximum": 255,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "signal": {
+                      "type": "null"
+                    }
+                  }
+                },
+                {
+                  "properties": {
+                    "code": {
+                      "type": "null"
+                    },
+                    "signal": {
+                      "enum": [
+                        "INT",
+                        "TERM",
+                        "KILL"
+                      ]
+                    }
+                  }
+                }
+              ],
+              "properties": {
+                "code": {
+                  "maximum": 255,
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "signal": {
+                  "enum": [
+                    "INT",
+                    "TERM",
+                    "KILL",
+                    null
+                  ]
+                }
+              },
+              "required": [
+                "code",
+                "signal"
+              ],
+              "type": "object"
+            },
+            "id": {
+              "$ref": "common.json#/$defs/exec-id"
+            },
+            "kind": {
+              "const": "exec"
+            },
+            "lease": {
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "actor": {
+                      "maxLength": 256,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "authorizing_operation": {
+                      "$ref": "common.json#/$defs/operation-id"
+                    },
+                    "clock_tolerance_ms": {
+                      "const": 30000
+                    },
+                    "principal": {
+                      "maxLength": 256,
+                      "minLength": 1,
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "renew_by": {
+                      "$ref": "common.json#/$defs/timestamp"
+                    },
+                    "state": {
+                      "enum": [
+                        "active",
+                        "expiring",
+                        "expired"
+                      ]
+                    },
+                    "ttl_ms": {
+                      "maximum": 86400000,
+                      "minimum": 1000,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "ttl_ms",
+                    "renew_by",
+                    "state",
+                    "clock_tolerance_ms",
+                    "authorizing_operation",
+                    "actor",
+                    "principal"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "observed_at": {
+              "$ref": "common.json#/$defs/timestamp"
+            },
+            "refusal": {
+              "$ref": "#/$defs/exec-refusal"
+            },
+            "requested": {
+              "additionalProperties": false,
+              "properties": {
+                "aperture": {
+                  "maxLength": 64,
+                  "pattern": "^[a-z][a-z0-9_]{0,63}$",
+                  "type": "string"
+                },
+                "apertures": {
+                  "items": {
+                    "maxLength": 64,
+                    "pattern": "^[a-z][a-z0-9_]{0,63}$",
+                    "type": "string"
+                  },
+                  "maxItems": 4,
+                  "minItems": 2,
+                  "type": "array",
+                  "uniqueItems": true
+                },
+                "capability_snapshot": {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "network": {
+                  "enum": [
+                    "none",
+                    "aperture"
+                  ]
+                },
+                "profile": {
+                  "const": "workspace"
+                },
+                "require": {
+                  "const": true
+                }
+              },
+              "required": [
+                "capability_snapshot",
+                "profile",
+                "network",
+                "require"
+              ],
+              "type": "object"
+            },
+            "state": {
+              "enum": [
+                "exited",
+                "cancelled"
+              ]
+            },
+            "unrecorded_output": {
+              "additionalProperties": false,
+              "properties": {
+                "queue_high_water_frames": {
+                  "maximum": 16,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "stderr_observed_bytes": {
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "stderr_queued_bytes": {
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "stdout_observed_bytes": {
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "stdout_queued_bytes": {
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "stdout_observed_bytes",
+                "stderr_observed_bytes",
+                "stdout_queued_bytes",
+                "stderr_queued_bytes",
+                "queue_high_water_frames"
+              ],
+              "type": "object"
+            },
+            "usage": {
+              "$ref": "#/$defs/exec-usage"
+            },
+            "workspace": {
+              "$ref": "common.json#/$defs/workspace-id"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "workspace",
+            "state",
+            "observed_at",
+            "requested",
+            "applied",
+            "exit"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "applied": {
+              "oneOf": [
+                {
+                  "oneOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "capability_snapshot": {
+                          "pattern": "^sha256:[0-9a-f]{64}$",
+                          "type": "string"
+                        },
+                        "cgroup": {
+                          "maxLength": 512,
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "filesystem": {
+                          "const": "workspace-rw-system-ro"
+                        },
+                        "network": {
+                          "$ref": "#/$defs/applied-network"
+                        },
+                        "profile": {
+                          "const": "workspace"
+                        },
+                        "read_only_files": {
+                          "items": {
+                            "$ref": "common.json#/$defs/read-only-file"
+                          },
+                          "maxItems": 16,
+                          "minItems": 1,
+                          "type": "array",
+                          "x-b10x-applied-not-requested": "what-was-bound"
+                        },
+                        "read_only_roots": {
+                          "items": {
+                            "$ref": "common.json#/$defs/read-only-root"
+                          },
+                          "maxItems": 4,
+                          "minItems": 1,
+                          "type": "array",
+                          "x-b10x-applied-not-requested": "what-was-bound"
+                        },
+                        "secret_slots": {
+                          "items": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "fd": {
+                                "maximum": 63,
+                                "minimum": 3,
+                                "type": "integer"
+                              },
+                              "slot": {
+                                "maxLength": 64,
+                                "pattern": "^[a-z][a-z0-9_]{0,63}$",
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "slot",
+                              "fd"
+                            ],
+                            "type": "object"
+                          },
+                          "maxItems": 8,
+                          "minItems": 1,
+                          "type": "array",
+                          "x-b10x-applied-not-requested": "what-was-placed"
+                        },
+                        "workdir": {
+                          "$ref": "common.json#/$defs/workdir",
+                          "x-b10x-applied-not-requested": "where-the-program-started"
+                        },
+                        "workspace_access": {
+                          "$ref": "common.json#/$defs/workspace-access"
+                        },
+                        "writable_roots": {
+                          "$ref": "common.json#/$defs/applied-writable-roots",
+                          "x-b10x-applied-not-requested": "what-was-bound"
+                        }
+                      },
+                      "required": [
+                        "capability_snapshot",
+                        "profile",
+                        "filesystem",
+                        "network",
+                        "cgroup"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "capability_snapshot": {
+                          "pattern": "^sha256:[0-9a-f]{64}$",
+                          "type": "string"
+                        },
+                        "capsule": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "entrypoint": {
+                              "pattern": "^/runtime/(?!.*(?:^|/)\\.\\.(?:/|$))[^\\u0000]+$",
+                              "type": "string"
+                            },
+                            "file_count": {
+                              "maximum": 32,
+                              "minimum": 1,
+                              "type": "integer"
+                            },
+                            "manifest_sha256": {
+                              "pattern": "^[0-9a-f]{64}$",
+                              "type": "string"
+                            },
+                            "mount": {
+                              "const": "/runtime"
+                            },
+                            "total_bytes": {
+                              "maximum": 524288,
+                              "minimum": 0,
+                              "type": "integer"
+                            }
+                          },
+                          "required": [
+                            "manifest_sha256",
+                            "entrypoint",
+                            "mount",
+                            "file_count",
+                            "total_bytes"
+                          ],
+                          "type": "object"
+                        },
+                        "cgroup": {
+                          "maxLength": 512,
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "filesystem": {
+                          "const": "workspace-rw-capsule-ro-system-ro"
+                        },
+                        "network": {
+                          "$ref": "#/$defs/applied-network"
+                        },
+                        "profile": {
+                          "const": "workspace"
+                        },
+                        "read_only_files": {
+                          "items": {
+                            "$ref": "common.json#/$defs/read-only-file"
+                          },
+                          "maxItems": 16,
+                          "minItems": 1,
+                          "type": "array",
+                          "x-b10x-applied-not-requested": "what-was-bound"
+                        },
+                        "read_only_roots": {
+                          "items": {
+                            "$ref": "common.json#/$defs/read-only-root"
+                          },
+                          "maxItems": 4,
+                          "minItems": 1,
+                          "type": "array",
+                          "x-b10x-applied-not-requested": "what-was-bound"
+                        },
+                        "secret_slots": {
+                          "items": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "fd": {
+                                "maximum": 63,
+                                "minimum": 3,
+                                "type": "integer"
+                              },
+                              "slot": {
+                                "maxLength": 64,
+                                "pattern": "^[a-z][a-z0-9_]{0,63}$",
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "slot",
+                              "fd"
+                            ],
+                            "type": "object"
+                          },
+                          "maxItems": 8,
+                          "minItems": 1,
+                          "type": "array",
+                          "x-b10x-applied-not-requested": "what-was-placed"
+                        },
+                        "workdir": {
+                          "$ref": "common.json#/$defs/workdir",
+                          "x-b10x-applied-not-requested": "where-the-program-started"
+                        },
+                        "workspace_access": {
+                          "$ref": "common.json#/$defs/workspace-access"
+                        },
+                        "writable_roots": {
+                          "$ref": "common.json#/$defs/applied-writable-roots",
+                          "x-b10x-applied-not-requested": "what-was-bound"
+                        }
+                      },
+                      "required": [
+                        "capability_snapshot",
+                        "profile",
+                        "filesystem",
+                        "network",
+                        "cgroup",
+                        "capsule"
+                      ],
+                      "type": "object"
+                    }
+                  ],
+                  "properties": {
+                    "network": {
+                      "$ref": "#/$defs/applied-network"
+                    },
+                    "read_only_roots": {
+                      "items": {
+                        "$ref": "common.json#/$defs/read-only-root"
+                      },
+                      "maxItems": 4,
+                      "minItems": 1,
+                      "type": "array",
+                      "x-b10x-applied-not-requested": "what-was-bound"
+                    },
+                    "workdir": {
+                      "$ref": "common.json#/$defs/workdir",
+                      "x-b10x-applied-not-requested": "where-the-program-started"
+                    },
+                    "writable_roots": {
+                      "$ref": "common.json#/$defs/applied-writable-roots",
+                      "x-b10x-applied-not-requested": "what-was-bound"
+                    }
+                  }
+                },
+                {
+                  "properties": {
+                    "network": {
+                      "$ref": "#/$defs/applied-network"
+                    },
+                    "read_only_roots": {
+                      "items": {
+                        "$ref": "common.json#/$defs/read-only-root"
+                      },
+                      "maxItems": 4,
+                      "minItems": 1,
+                      "type": "array",
+                      "x-b10x-applied-not-requested": "what-was-bound"
+                    },
+                    "workdir": {
+                      "$ref": "common.json#/$defs/workdir",
+                      "x-b10x-applied-not-requested": "where-the-program-started"
+                    },
+                    "writable_roots": {
+                      "$ref": "common.json#/$defs/applied-writable-roots",
+                      "x-b10x-applied-not-requested": "what-was-bound"
+                    }
+                  },
+                  "type": "null"
+                }
+              ]
+            },
+            "exit": {
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "oneOf": [
+                    {
+                      "properties": {
+                        "code": {
+                          "maximum": 255,
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "signal": {
+                          "type": "null"
+                        }
+                      }
+                    },
+                    {
+                      "properties": {
+                        "code": {
+                          "type": "null"
+                        },
+                        "signal": {
+                          "enum": [
+                            "INT",
+                            "TERM",
+                            "KILL"
+                          ]
+                        }
+                      }
+                    }
+                  ],
+                  "properties": {
+                    "code": {
+                      "maximum": 255,
+                      "minimum": 0,
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "signal": {
+                      "enum": [
+                        "INT",
+                        "TERM",
+                        "KILL",
+                        null
+                      ]
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "signal"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "id": {
+              "$ref": "common.json#/$defs/exec-id"
+            },
+            "kind": {
+              "const": "exec"
+            },
+            "lease": {
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "actor": {
+                      "maxLength": 256,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "authorizing_operation": {
+                      "$ref": "common.json#/$defs/operation-id"
+                    },
+                    "clock_tolerance_ms": {
+                      "const": 30000
+                    },
+                    "principal": {
+                      "maxLength": 256,
+                      "minLength": 1,
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "renew_by": {
+                      "$ref": "common.json#/$defs/timestamp"
+                    },
+                    "state": {
+                      "enum": [
+                        "active",
+                        "expiring",
+                        "expired"
+                      ]
+                    },
+                    "ttl_ms": {
+                      "maximum": 86400000,
+                      "minimum": 1000,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "ttl_ms",
+                    "renew_by",
+                    "state",
+                    "clock_tolerance_ms",
+                    "authorizing_operation",
+                    "actor",
+                    "principal"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "observed_at": {
+              "$ref": "common.json#/$defs/timestamp"
+            },
+            "requested": {
+              "additionalProperties": false,
+              "properties": {
+                "aperture": {
+                  "maxLength": 64,
+                  "pattern": "^[a-z][a-z0-9_]{0,63}$",
+                  "type": "string"
+                },
+                "apertures": {
+                  "items": {
+                    "maxLength": 64,
+                    "pattern": "^[a-z][a-z0-9_]{0,63}$",
+                    "type": "string"
+                  },
+                  "maxItems": 4,
+                  "minItems": 2,
+                  "type": "array",
+                  "uniqueItems": true
+                },
+                "capability_snapshot": {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "network": {
+                  "enum": [
+                    "none",
+                    "aperture"
+                  ]
+                },
+                "profile": {
+                  "const": "workspace"
+                },
+                "require": {
+                  "const": true
+                }
+              },
+              "required": [
+                "capability_snapshot",
+                "profile",
+                "network",
+                "require"
+              ],
+              "type": "object"
+            },
+            "state": {
+              "const": "expired"
+            },
+            "unrecorded_output": {
+              "additionalProperties": false,
+              "properties": {
+                "queue_high_water_frames": {
+                  "maximum": 16,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "stderr_observed_bytes": {
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "stderr_queued_bytes": {
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "stdout_observed_bytes": {
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "stdout_queued_bytes": {
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "stdout_observed_bytes",
+                "stderr_observed_bytes",
+                "stdout_queued_bytes",
+                "stderr_queued_bytes",
+                "queue_high_water_frames"
+              ],
+              "type": "object"
+            },
+            "usage": {
+              "$ref": "#/$defs/exec-usage"
+            },
+            "workspace": {
+              "$ref": "common.json#/$defs/workspace-id"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "workspace",
+            "state",
+            "observed_at",
+            "requested",
+            "applied",
+            "exit"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "applied": {
+              "oneOf": [
+                {
+                  "oneOf": [
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "capability_snapshot": {
+                          "pattern": "^sha256:[0-9a-f]{64}$",
+                          "type": "string"
+                        },
+                        "cgroup": {
+                          "maxLength": 512,
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "filesystem": {
+                          "const": "workspace-rw-system-ro"
+                        },
+                        "network": {
+                          "$ref": "#/$defs/applied-network"
+                        },
+                        "profile": {
+                          "const": "workspace"
+                        },
+                        "read_only_files": {
+                          "items": {
+                            "$ref": "common.json#/$defs/read-only-file"
+                          },
+                          "maxItems": 16,
+                          "minItems": 1,
+                          "type": "array",
+                          "x-b10x-applied-not-requested": "what-was-bound"
+                        },
+                        "read_only_roots": {
+                          "items": {
+                            "$ref": "common.json#/$defs/read-only-root"
+                          },
+                          "maxItems": 4,
+                          "minItems": 1,
+                          "type": "array",
+                          "x-b10x-applied-not-requested": "what-was-bound"
+                        },
+                        "secret_slots": {
+                          "items": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "fd": {
+                                "maximum": 63,
+                                "minimum": 3,
+                                "type": "integer"
+                              },
+                              "slot": {
+                                "maxLength": 64,
+                                "pattern": "^[a-z][a-z0-9_]{0,63}$",
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "slot",
+                              "fd"
+                            ],
+                            "type": "object"
+                          },
+                          "maxItems": 8,
+                          "minItems": 1,
+                          "type": "array",
+                          "x-b10x-applied-not-requested": "what-was-placed"
+                        },
+                        "workdir": {
+                          "$ref": "common.json#/$defs/workdir",
+                          "x-b10x-applied-not-requested": "where-the-program-started"
+                        },
+                        "workspace_access": {
+                          "$ref": "common.json#/$defs/workspace-access"
+                        },
+                        "writable_roots": {
+                          "$ref": "common.json#/$defs/applied-writable-roots",
+                          "x-b10x-applied-not-requested": "what-was-bound"
+                        }
+                      },
+                      "required": [
+                        "capability_snapshot",
+                        "profile",
+                        "filesystem",
+                        "network",
+                        "cgroup"
+                      ],
+                      "type": "object"
+                    },
+                    {
+                      "additionalProperties": false,
+                      "properties": {
+                        "capability_snapshot": {
+                          "pattern": "^sha256:[0-9a-f]{64}$",
+                          "type": "string"
+                        },
+                        "capsule": {
+                          "additionalProperties": false,
+                          "properties": {
+                            "entrypoint": {
+                              "pattern": "^/runtime/(?!.*(?:^|/)\\.\\.(?:/|$))[^\\u0000]+$",
+                              "type": "string"
+                            },
+                            "file_count": {
+                              "maximum": 32,
+                              "minimum": 1,
+                              "type": "integer"
+                            },
+                            "manifest_sha256": {
+                              "pattern": "^[0-9a-f]{64}$",
+                              "type": "string"
+                            },
+                            "mount": {
+                              "const": "/runtime"
+                            },
+                            "total_bytes": {
+                              "maximum": 524288,
+                              "minimum": 0,
+                              "type": "integer"
+                            }
+                          },
+                          "required": [
+                            "manifest_sha256",
+                            "entrypoint",
+                            "mount",
+                            "file_count",
+                            "total_bytes"
+                          ],
+                          "type": "object"
+                        },
+                        "cgroup": {
+                          "maxLength": 512,
+                          "minLength": 1,
+                          "type": "string"
+                        },
+                        "filesystem": {
+                          "const": "workspace-rw-capsule-ro-system-ro"
+                        },
+                        "network": {
+                          "$ref": "#/$defs/applied-network"
+                        },
+                        "profile": {
+                          "const": "workspace"
+                        },
+                        "read_only_files": {
+                          "items": {
+                            "$ref": "common.json#/$defs/read-only-file"
+                          },
+                          "maxItems": 16,
+                          "minItems": 1,
+                          "type": "array",
+                          "x-b10x-applied-not-requested": "what-was-bound"
+                        },
+                        "read_only_roots": {
+                          "items": {
+                            "$ref": "common.json#/$defs/read-only-root"
+                          },
+                          "maxItems": 4,
+                          "minItems": 1,
+                          "type": "array",
+                          "x-b10x-applied-not-requested": "what-was-bound"
+                        },
+                        "secret_slots": {
+                          "items": {
+                            "additionalProperties": false,
+                            "properties": {
+                              "fd": {
+                                "maximum": 63,
+                                "minimum": 3,
+                                "type": "integer"
+                              },
+                              "slot": {
+                                "maxLength": 64,
+                                "pattern": "^[a-z][a-z0-9_]{0,63}$",
+                                "type": "string"
+                              }
+                            },
+                            "required": [
+                              "slot",
+                              "fd"
+                            ],
+                            "type": "object"
+                          },
+                          "maxItems": 8,
+                          "minItems": 1,
+                          "type": "array",
+                          "x-b10x-applied-not-requested": "what-was-placed"
+                        },
+                        "workdir": {
+                          "$ref": "common.json#/$defs/workdir",
+                          "x-b10x-applied-not-requested": "where-the-program-started"
+                        },
+                        "workspace_access": {
+                          "$ref": "common.json#/$defs/workspace-access"
+                        },
+                        "writable_roots": {
+                          "$ref": "common.json#/$defs/applied-writable-roots",
+                          "x-b10x-applied-not-requested": "what-was-bound"
+                        }
+                      },
+                      "required": [
+                        "capability_snapshot",
+                        "profile",
+                        "filesystem",
+                        "network",
+                        "cgroup",
+                        "capsule"
+                      ],
+                      "type": "object"
+                    }
+                  ],
+                  "properties": {
+                    "network": {
+                      "$ref": "#/$defs/applied-network"
+                    },
+                    "read_only_roots": {
+                      "items": {
+                        "$ref": "common.json#/$defs/read-only-root"
+                      },
+                      "maxItems": 4,
+                      "minItems": 1,
+                      "type": "array",
+                      "x-b10x-applied-not-requested": "what-was-bound"
+                    },
+                    "workdir": {
+                      "$ref": "common.json#/$defs/workdir",
+                      "x-b10x-applied-not-requested": "where-the-program-started"
+                    },
+                    "writable_roots": {
+                      "$ref": "common.json#/$defs/applied-writable-roots",
+                      "x-b10x-applied-not-requested": "what-was-bound"
+                    }
+                  }
+                },
+                {
+                  "properties": {
+                    "network": {
+                      "$ref": "#/$defs/applied-network"
+                    },
+                    "read_only_roots": {
+                      "items": {
+                        "$ref": "common.json#/$defs/read-only-root"
+                      },
+                      "maxItems": 4,
+                      "minItems": 1,
+                      "type": "array",
+                      "x-b10x-applied-not-requested": "what-was-bound"
+                    },
+                    "workdir": {
+                      "$ref": "common.json#/$defs/workdir",
+                      "x-b10x-applied-not-requested": "where-the-program-started"
+                    },
+                    "writable_roots": {
+                      "$ref": "common.json#/$defs/applied-writable-roots",
+                      "x-b10x-applied-not-requested": "what-was-bound"
+                    }
+                  },
+                  "type": "null"
+                }
+              ]
+            },
+            "exit": {
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "oneOf": [
+                    {
+                      "properties": {
+                        "code": {
+                          "maximum": 255,
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "signal": {
+                          "type": "null"
+                        }
+                      }
+                    },
+                    {
+                      "properties": {
+                        "code": {
+                          "type": "null"
+                        },
+                        "signal": {
+                          "enum": [
+                            "INT",
+                            "TERM",
+                            "KILL"
+                          ]
+                        }
+                      }
+                    }
+                  ],
+                  "properties": {
+                    "code": {
+                      "maximum": 255,
+                      "minimum": 0,
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "signal": {
+                      "enum": [
+                        "INT",
+                        "TERM",
+                        "KILL",
+                        null
+                      ]
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "signal"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "id": {
+              "$ref": "common.json#/$defs/exec-id"
+            },
+            "kind": {
+              "const": "exec"
+            },
+            "lease": {
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "properties": {
+                    "actor": {
+                      "maxLength": 256,
+                      "minLength": 1,
+                      "type": "string"
+                    },
+                    "authorizing_operation": {
+                      "$ref": "common.json#/$defs/operation-id"
+                    },
+                    "clock_tolerance_ms": {
+                      "const": 30000
+                    },
+                    "principal": {
+                      "maxLength": 256,
+                      "minLength": 1,
+                      "type": [
+                        "string",
+                        "null"
+                      ]
+                    },
+                    "renew_by": {
+                      "$ref": "common.json#/$defs/timestamp"
+                    },
+                    "state": {
+                      "enum": [
+                        "active",
+                        "expiring",
+                        "expired"
+                      ]
+                    },
+                    "ttl_ms": {
+                      "maximum": 86400000,
+                      "minimum": 1000,
+                      "type": "integer"
+                    }
+                  },
+                  "required": [
+                    "ttl_ms",
+                    "renew_by",
+                    "state",
+                    "clock_tolerance_ms",
+                    "authorizing_operation",
+                    "actor",
+                    "principal"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "observed_at": {
+              "$ref": "common.json#/$defs/timestamp"
+            },
+            "refusal": {
+              "$ref": "#/$defs/exec-refusal"
+            },
+            "requested": {
+              "additionalProperties": false,
+              "properties": {
+                "aperture": {
+                  "maxLength": 64,
+                  "pattern": "^[a-z][a-z0-9_]{0,63}$",
+                  "type": "string"
+                },
+                "apertures": {
+                  "items": {
+                    "maxLength": 64,
+                    "pattern": "^[a-z][a-z0-9_]{0,63}$",
+                    "type": "string"
+                  },
+                  "maxItems": 4,
+                  "minItems": 2,
+                  "type": "array",
+                  "uniqueItems": true
+                },
+                "capability_snapshot": {
+                  "pattern": "^sha256:[0-9a-f]{64}$",
+                  "type": "string"
+                },
+                "network": {
+                  "enum": [
+                    "none",
+                    "aperture"
+                  ]
+                },
+                "profile": {
+                  "const": "workspace"
+                },
+                "require": {
+                  "const": true
+                }
+              },
+              "required": [
+                "capability_snapshot",
+                "profile",
+                "network",
+                "require"
+              ],
+              "type": "object"
+            },
+            "state": {
+              "const": "unknown"
+            },
+            "unrecorded_output": {
+              "additionalProperties": false,
+              "properties": {
+                "queue_high_water_frames": {
+                  "maximum": 16,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "stderr_observed_bytes": {
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "stderr_queued_bytes": {
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "stdout_observed_bytes": {
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                },
+                "stdout_queued_bytes": {
+                  "maximum": 18446744073709551615,
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "stdout_observed_bytes",
+                "stderr_observed_bytes",
+                "stdout_queued_bytes",
+                "stderr_queued_bytes",
+                "queue_high_water_frames"
+              ],
+              "type": "object"
+            },
+            "usage": {
+              "$ref": "#/$defs/exec-usage"
+            },
+            "workspace": {
+              "$ref": "common.json#/$defs/workspace-id"
+            }
+          },
+          "required": [
+            "kind",
+            "id",
+            "workspace",
+            "state",
+            "observed_at",
+            "requested",
+            "applied",
+            "exit"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "exec-refusal": {
+      "description": "Why this run ended without its program's own answer: the named bound that ended it, or a working directory that was no longer there when the sandbox was built (design 26 section 1). No address in either case.",
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "class": {
+              "const": "exhausted"
+            },
+            "code": {
+              "const": "exec.aperture-byte-limit"
+            },
+            "message": {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "class",
+            "code",
+            "message"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "class": {
+              "const": "refused"
+            },
+            "code": {
+              "const": "exec.workdir-missing"
+            },
+            "message": {
+              "maxLength": 512,
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "class",
+            "code",
+            "message"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "exec-usage": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "observed_at": {
+              "$ref": "common.json#/$defs/timestamp"
+            },
+            "status": {
+              "const": "pending"
+            }
+          },
+          "required": [
+            "status",
+            "observed_at"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "dependentRequired": {
+            "io_read_bytes": [
+              "io_write_bytes"
+            ],
+            "io_write_bytes": [
+              "io_read_bytes"
+            ]
+          },
+          "properties": {
+            "complete": {
+              "type": "boolean"
+            },
+            "cpu_time_us": {
+              "$ref": "common.json#/$defs/u64"
+            },
+            "io_read_bytes": {
+              "$ref": "common.json#/$defs/u64",
+              "description": "Present exactly when the binding capability snapshot publishes exec.resource-usage.block_io true; absent, never zero, otherwise (ADR 0032)."
+            },
+            "io_write_bytes": {
+              "$ref": "common.json#/$defs/u64",
+              "description": "Present exactly when the binding capability snapshot publishes exec.resource-usage.block_io true; absent, never zero, otherwise (ADR 0032)."
+            },
+            "memory_current_bytes": {
+              "$ref": "common.json#/$defs/u64"
+            },
+            "memory_oom_kills": {
+              "$ref": "common.json#/$defs/u64"
+            },
+            "memory_peak_bytes": {
+              "$ref": "common.json#/$defs/u64"
+            },
+            "observed_at": {
+              "$ref": "common.json#/$defs/timestamp"
+            },
+            "process_limit_hits": {
+              "$ref": "common.json#/$defs/u64"
+            },
+            "processes_current": {
+              "$ref": "common.json#/$defs/u64"
+            },
+            "processes_peak": {
+              "$ref": "common.json#/$defs/u64"
+            },
+            "scratch": {
+              "$ref": "#/$defs/storage-usage"
+            },
+            "status": {
+              "const": "observed"
+            },
+            "wall_time_us": {
+              "$ref": "common.json#/$defs/u64"
+            }
+          },
+          "required": [
+            "status",
+            "complete",
+            "observed_at",
+            "wall_time_us",
+            "cpu_time_us",
+            "memory_peak_bytes",
+            "processes_peak",
+            "process_limit_hits",
+            "memory_oom_kills"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "code": {
+              "maxLength": 128,
+              "minLength": 1,
+              "type": "string"
+            },
+            "message": {
+              "maxLength": 2048,
+              "minLength": 1,
+              "type": "string"
+            },
+            "observed_at": {
+              "$ref": "common.json#/$defs/timestamp"
+            },
+            "status": {
+              "const": "unavailable"
+            }
+          },
+          "required": [
+            "status",
+            "observed_at",
+            "code",
+            "message"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "exit": {
+      "additionalProperties": false,
+      "oneOf": [
+        {
+          "properties": {
+            "code": {
+              "maximum": 255,
+              "minimum": 0,
+              "type": "integer"
+            },
+            "signal": {
+              "type": "null"
+            }
+          }
+        },
+        {
+          "properties": {
+            "code": {
+              "type": "null"
+            },
+            "signal": {
+              "enum": [
+                "INT",
+                "TERM",
+                "KILL"
+              ]
+            }
+          }
+        }
+      ],
+      "properties": {
+        "code": {
+          "maximum": 255,
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "signal": {
+          "enum": [
+            "INT",
+            "TERM",
+            "KILL",
+            null
+          ]
+        }
+      },
+      "required": [
+        "code",
+        "signal"
+      ],
+      "type": "object"
+    },
+    "lease": {
+      "additionalProperties": false,
+      "properties": {
+        "actor": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "authorizing_operation": {
+          "$ref": "common.json#/$defs/operation-id"
+        },
+        "clock_tolerance_ms": {
+          "const": 30000
+        },
+        "principal": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "renew_by": {
+          "$ref": "common.json#/$defs/timestamp"
+        },
+        "state": {
+          "enum": [
+            "active",
+            "expiring",
+            "expired"
+          ]
+        },
+        "ttl_ms": {
+          "maximum": 86400000,
+          "minimum": 1000,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "ttl_ms",
+        "renew_by",
+        "state",
+        "clock_tolerance_ms",
+        "authorizing_operation",
+        "actor",
+        "principal"
+      ],
+      "type": "object"
+    },
+    "pipe-session": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "properties": {
+            "attachment": {
+              "const": "pending"
+            },
+            "capability_snapshot": {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "capture": {
+              "default": "recorded",
+              "enum": [
+                "recorded",
+                "unrecorded"
+              ]
+            },
+            "exec": {
+              "$ref": "common.json#/$defs/exec-id"
+            },
+            "exit": {
+              "type": "null"
+            },
+            "id": {
+              "$ref": "common.json#/$defs/session-id"
+            },
+            "kind": {
+              "const": "session"
+            },
+            "lease": {
+              "additionalProperties": false,
+              "properties": {
+                "actor": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "authorizing_operation": {
+                  "$ref": "common.json#/$defs/operation-id"
+                },
+                "clock_tolerance_ms": {
+                  "const": 30000
+                },
+                "principal": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "renew_by": {
+                  "$ref": "common.json#/$defs/timestamp"
+                },
+                "state": {
+                  "enum": [
+                    "active",
+                    "expiring",
+                    "expired"
+                  ]
+                },
+                "ttl_ms": {
+                  "maximum": 86400000,
+                  "minimum": 1000,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "ttl_ms",
+                "renew_by",
+                "state",
+                "clock_tolerance_ms",
+                "authorizing_operation",
+                "actor",
+                "principal"
+              ],
+              "type": "object"
+            },
+            "limits": {
+              "additionalProperties": false,
+              "properties": {
+                "frame_bytes": {
+                  "maximum": 65536,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "input_bytes": {
+                  "maximum": 16777216,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "queued_frames": {
+                  "maximum": 16,
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "input_bytes",
+                "frame_bytes",
+                "queued_frames"
+              ],
+              "type": "object"
+            },
+            "mode": {
+              "enum": [
+                "pipes",
+                "pty"
+              ]
+            },
+            "observed_at": {
+              "$ref": "common.json#/$defs/timestamp"
+            },
+            "state": {
+              "const": "accepted"
+            },
+            "workspace": {
+              "$ref": "common.json#/$defs/workspace-id"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "mode",
+            "exec",
+            "workspace",
+            "state",
+            "attachment",
+            "observed_at",
+            "capability_snapshot",
+            "limits",
+            "exit",
+            "lease"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "attachment": {
+              "const": "available"
+            },
+            "capability_snapshot": {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "capture": {
+              "default": "recorded",
+              "enum": [
+                "recorded",
+                "unrecorded"
+              ]
+            },
+            "exec": {
+              "$ref": "common.json#/$defs/exec-id"
+            },
+            "exit": {
+              "type": "null"
+            },
+            "id": {
+              "$ref": "common.json#/$defs/session-id"
+            },
+            "kind": {
+              "const": "session"
+            },
+            "lease": {
+              "additionalProperties": false,
+              "properties": {
+                "actor": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "authorizing_operation": {
+                  "$ref": "common.json#/$defs/operation-id"
+                },
+                "clock_tolerance_ms": {
+                  "const": 30000
+                },
+                "principal": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "renew_by": {
+                  "$ref": "common.json#/$defs/timestamp"
+                },
+                "state": {
+                  "enum": [
+                    "active",
+                    "expiring",
+                    "expired"
+                  ]
+                },
+                "ttl_ms": {
+                  "maximum": 86400000,
+                  "minimum": 1000,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "ttl_ms",
+                "renew_by",
+                "state",
+                "clock_tolerance_ms",
+                "authorizing_operation",
+                "actor",
+                "principal"
+              ],
+              "type": "object"
+            },
+            "limits": {
+              "additionalProperties": false,
+              "properties": {
+                "frame_bytes": {
+                  "maximum": 65536,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "input_bytes": {
+                  "maximum": 16777216,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "queued_frames": {
+                  "maximum": 16,
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "input_bytes",
+                "frame_bytes",
+                "queued_frames"
+              ],
+              "type": "object"
+            },
+            "mode": {
+              "enum": [
+                "pipes",
+                "pty"
+              ]
+            },
+            "observed_at": {
+              "$ref": "common.json#/$defs/timestamp"
+            },
+            "state": {
+              "const": "ready"
+            },
+            "workspace": {
+              "$ref": "common.json#/$defs/workspace-id"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "mode",
+            "exec",
+            "workspace",
+            "state",
+            "attachment",
+            "observed_at",
+            "capability_snapshot",
+            "limits",
+            "exit",
+            "lease"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "attachment": {
+              "const": "attached"
+            },
+            "capability_snapshot": {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "capture": {
+              "default": "recorded",
+              "enum": [
+                "recorded",
+                "unrecorded"
+              ]
+            },
+            "exec": {
+              "$ref": "common.json#/$defs/exec-id"
+            },
+            "exit": {
+              "type": "null"
+            },
+            "id": {
+              "$ref": "common.json#/$defs/session-id"
+            },
+            "kind": {
+              "const": "session"
+            },
+            "lease": {
+              "additionalProperties": false,
+              "properties": {
+                "actor": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "authorizing_operation": {
+                  "$ref": "common.json#/$defs/operation-id"
+                },
+                "clock_tolerance_ms": {
+                  "const": 30000
+                },
+                "principal": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "renew_by": {
+                  "$ref": "common.json#/$defs/timestamp"
+                },
+                "state": {
+                  "enum": [
+                    "active",
+                    "expiring",
+                    "expired"
+                  ]
+                },
+                "ttl_ms": {
+                  "maximum": 86400000,
+                  "minimum": 1000,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "ttl_ms",
+                "renew_by",
+                "state",
+                "clock_tolerance_ms",
+                "authorizing_operation",
+                "actor",
+                "principal"
+              ],
+              "type": "object"
+            },
+            "limits": {
+              "additionalProperties": false,
+              "properties": {
+                "frame_bytes": {
+                  "maximum": 65536,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "input_bytes": {
+                  "maximum": 16777216,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "queued_frames": {
+                  "maximum": 16,
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "input_bytes",
+                "frame_bytes",
+                "queued_frames"
+              ],
+              "type": "object"
+            },
+            "mode": {
+              "enum": [
+                "pipes",
+                "pty"
+              ]
+            },
+            "observed_at": {
+              "$ref": "common.json#/$defs/timestamp"
+            },
+            "state": {
+              "const": "attached"
+            },
+            "workspace": {
+              "$ref": "common.json#/$defs/workspace-id"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "mode",
+            "exec",
+            "workspace",
+            "state",
+            "attachment",
+            "observed_at",
+            "capability_snapshot",
+            "limits",
+            "exit",
+            "lease"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "attachment": {
+              "const": "consumed"
+            },
+            "capability_snapshot": {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "capture": {
+              "default": "recorded",
+              "enum": [
+                "recorded",
+                "unrecorded"
+              ]
+            },
+            "exec": {
+              "$ref": "common.json#/$defs/exec-id"
+            },
+            "exit": {
+              "additionalProperties": false,
+              "oneOf": [
+                {
+                  "properties": {
+                    "code": {
+                      "maximum": 255,
+                      "minimum": 0,
+                      "type": "integer"
+                    },
+                    "signal": {
+                      "type": "null"
+                    }
+                  }
+                },
+                {
+                  "properties": {
+                    "code": {
+                      "type": "null"
+                    },
+                    "signal": {
+                      "enum": [
+                        "INT",
+                        "TERM",
+                        "KILL"
+                      ]
+                    }
+                  }
+                }
+              ],
+              "properties": {
+                "code": {
+                  "maximum": 255,
+                  "minimum": 0,
+                  "type": [
+                    "integer",
+                    "null"
+                  ]
+                },
+                "signal": {
+                  "enum": [
+                    "INT",
+                    "TERM",
+                    "KILL",
+                    null
+                  ]
+                }
+              },
+              "required": [
+                "code",
+                "signal"
+              ],
+              "type": "object"
+            },
+            "id": {
+              "$ref": "common.json#/$defs/session-id"
+            },
+            "kind": {
+              "const": "session"
+            },
+            "lease": {
+              "additionalProperties": false,
+              "properties": {
+                "actor": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "authorizing_operation": {
+                  "$ref": "common.json#/$defs/operation-id"
+                },
+                "clock_tolerance_ms": {
+                  "const": 30000
+                },
+                "principal": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "renew_by": {
+                  "$ref": "common.json#/$defs/timestamp"
+                },
+                "state": {
+                  "enum": [
+                    "active",
+                    "expiring",
+                    "expired"
+                  ]
+                },
+                "ttl_ms": {
+                  "maximum": 86400000,
+                  "minimum": 1000,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "ttl_ms",
+                "renew_by",
+                "state",
+                "clock_tolerance_ms",
+                "authorizing_operation",
+                "actor",
+                "principal"
+              ],
+              "type": "object"
+            },
+            "limits": {
+              "additionalProperties": false,
+              "properties": {
+                "frame_bytes": {
+                  "maximum": 65536,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "input_bytes": {
+                  "maximum": 16777216,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "queued_frames": {
+                  "maximum": 16,
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "input_bytes",
+                "frame_bytes",
+                "queued_frames"
+              ],
+              "type": "object"
+            },
+            "mode": {
+              "enum": [
+                "pipes",
+                "pty"
+              ]
+            },
+            "observed_at": {
+              "$ref": "common.json#/$defs/timestamp"
+            },
+            "state": {
+              "enum": [
+                "exited",
+                "cancelled"
+              ]
+            },
+            "workspace": {
+              "$ref": "common.json#/$defs/workspace-id"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "mode",
+            "exec",
+            "workspace",
+            "state",
+            "attachment",
+            "observed_at",
+            "capability_snapshot",
+            "limits",
+            "exit",
+            "lease"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "attachment": {
+              "const": "consumed"
+            },
+            "capability_snapshot": {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "capture": {
+              "default": "recorded",
+              "enum": [
+                "recorded",
+                "unrecorded"
+              ]
+            },
+            "exec": {
+              "$ref": "common.json#/$defs/exec-id"
+            },
+            "exit": {
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "oneOf": [
+                    {
+                      "properties": {
+                        "code": {
+                          "maximum": 255,
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "signal": {
+                          "type": "null"
+                        }
+                      }
+                    },
+                    {
+                      "properties": {
+                        "code": {
+                          "type": "null"
+                        },
+                        "signal": {
+                          "enum": [
+                            "INT",
+                            "TERM",
+                            "KILL"
+                          ]
+                        }
+                      }
+                    }
+                  ],
+                  "properties": {
+                    "code": {
+                      "maximum": 255,
+                      "minimum": 0,
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "signal": {
+                      "enum": [
+                        "INT",
+                        "TERM",
+                        "KILL",
+                        null
+                      ]
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "signal"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "id": {
+              "$ref": "common.json#/$defs/session-id"
+            },
+            "kind": {
+              "const": "session"
+            },
+            "lease": {
+              "additionalProperties": false,
+              "properties": {
+                "actor": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "authorizing_operation": {
+                  "$ref": "common.json#/$defs/operation-id"
+                },
+                "clock_tolerance_ms": {
+                  "const": 30000
+                },
+                "principal": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "renew_by": {
+                  "$ref": "common.json#/$defs/timestamp"
+                },
+                "state": {
+                  "enum": [
+                    "active",
+                    "expiring",
+                    "expired"
+                  ]
+                },
+                "ttl_ms": {
+                  "maximum": 86400000,
+                  "minimum": 1000,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "ttl_ms",
+                "renew_by",
+                "state",
+                "clock_tolerance_ms",
+                "authorizing_operation",
+                "actor",
+                "principal"
+              ],
+              "type": "object"
+            },
+            "limits": {
+              "additionalProperties": false,
+              "properties": {
+                "frame_bytes": {
+                  "maximum": 65536,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "input_bytes": {
+                  "maximum": 16777216,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "queued_frames": {
+                  "maximum": 16,
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "input_bytes",
+                "frame_bytes",
+                "queued_frames"
+              ],
+              "type": "object"
+            },
+            "mode": {
+              "enum": [
+                "pipes",
+                "pty"
+              ]
+            },
+            "observed_at": {
+              "$ref": "common.json#/$defs/timestamp"
+            },
+            "state": {
+              "const": "expired"
+            },
+            "workspace": {
+              "$ref": "common.json#/$defs/workspace-id"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "mode",
+            "exec",
+            "workspace",
+            "state",
+            "attachment",
+            "observed_at",
+            "capability_snapshot",
+            "limits",
+            "exit",
+            "lease"
+          ],
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "attachment": {
+              "const": "uncertain"
+            },
+            "capability_snapshot": {
+              "pattern": "^sha256:[0-9a-f]{64}$",
+              "type": "string"
+            },
+            "capture": {
+              "default": "recorded",
+              "enum": [
+                "recorded",
+                "unrecorded"
+              ]
+            },
+            "exec": {
+              "$ref": "common.json#/$defs/exec-id"
+            },
+            "exit": {
+              "oneOf": [
+                {
+                  "additionalProperties": false,
+                  "oneOf": [
+                    {
+                      "properties": {
+                        "code": {
+                          "maximum": 255,
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "signal": {
+                          "type": "null"
+                        }
+                      }
+                    },
+                    {
+                      "properties": {
+                        "code": {
+                          "type": "null"
+                        },
+                        "signal": {
+                          "enum": [
+                            "INT",
+                            "TERM",
+                            "KILL"
+                          ]
+                        }
+                      }
+                    }
+                  ],
+                  "properties": {
+                    "code": {
+                      "maximum": 255,
+                      "minimum": 0,
+                      "type": [
+                        "integer",
+                        "null"
+                      ]
+                    },
+                    "signal": {
+                      "enum": [
+                        "INT",
+                        "TERM",
+                        "KILL",
+                        null
+                      ]
+                    }
+                  },
+                  "required": [
+                    "code",
+                    "signal"
+                  ],
+                  "type": "object"
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "id": {
+              "$ref": "common.json#/$defs/session-id"
+            },
+            "kind": {
+              "const": "session"
+            },
+            "lease": {
+              "additionalProperties": false,
+              "properties": {
+                "actor": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "authorizing_operation": {
+                  "$ref": "common.json#/$defs/operation-id"
+                },
+                "clock_tolerance_ms": {
+                  "const": 30000
+                },
+                "principal": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "renew_by": {
+                  "$ref": "common.json#/$defs/timestamp"
+                },
+                "state": {
+                  "enum": [
+                    "active",
+                    "expiring",
+                    "expired"
+                  ]
+                },
+                "ttl_ms": {
+                  "maximum": 86400000,
+                  "minimum": 1000,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "ttl_ms",
+                "renew_by",
+                "state",
+                "clock_tolerance_ms",
+                "authorizing_operation",
+                "actor",
+                "principal"
+              ],
+              "type": "object"
+            },
+            "limits": {
+              "additionalProperties": false,
+              "properties": {
+                "frame_bytes": {
+                  "maximum": 65536,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "input_bytes": {
+                  "maximum": 16777216,
+                  "minimum": 1,
+                  "type": "integer"
+                },
+                "queued_frames": {
+                  "maximum": 16,
+                  "minimum": 1,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "input_bytes",
+                "frame_bytes",
+                "queued_frames"
+              ],
+              "type": "object"
+            },
+            "mode": {
+              "enum": [
+                "pipes",
+                "pty"
+              ]
+            },
+            "observed_at": {
+              "$ref": "common.json#/$defs/timestamp"
+            },
+            "state": {
+              "const": "unknown"
+            },
+            "workspace": {
+              "$ref": "common.json#/$defs/workspace-id"
+            }
+          },
+          "required": [
+            "id",
+            "kind",
+            "mode",
+            "exec",
+            "workspace",
+            "state",
+            "attachment",
+            "observed_at",
+            "capability_snapshot",
+            "limits",
+            "exit",
+            "lease"
+          ],
+          "type": "object"
+        }
+      ]
+    },
+    "process": {
+      "additionalProperties": false,
+      "description": "One host-process record (ADR 0036 S1 to S4, S6 and S11). Unconfined, and every record says so. An observation the daemon could not make is absent, never zero; an ended record has no cgroup and carries none. Environment values are never on a record.",
+      "properties": {
+        "argv": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 256,
+          "minItems": 1,
+          "type": "array"
+        },
+        "confinement": {
+          "const": "none"
+        },
+        "cpu": {
+          "$ref": "#/$defs/process-cpu"
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "deadline": {
+          "$ref": "#/$defs/process-deadline"
+        },
+        "ended_by": {
+          "enum": [
+            "exit",
+            "stop",
+            "lease-expiry",
+            "timeout",
+            "expires-at",
+            "vanished"
+          ]
+        },
+        "env_digest": {
+          "pattern": "^sha256:[0-9a-f]{64}$",
+          "type": "string"
+        },
+        "env_names": {
+          "items": {
+            "type": "string"
+          },
+          "maxItems": 256,
+          "type": "array",
+          "uniqueItems": true
+        },
+        "exit": {
+          "$ref": "#/$defs/process-exit"
+        },
+        "expires_at": {
+          "$ref": "common.json#/$defs/timestamp"
+        },
+        "id": {
+          "$ref": "common.json#/$defs/process-id"
+        },
+        "kind": {
+          "const": "process"
+        },
+        "lease": {
+          "$ref": "#/$defs/process-lease"
+        },
+        "listening": {
+          "$ref": "#/$defs/process-listening"
+        },
+        "memory": {
+          "$ref": "#/$defs/process-memory"
+        },
+        "observed_at": {
+          "$ref": "common.json#/$defs/timestamp"
+        },
+        "owner": {
+          "$ref": "#/$defs/process-owner"
+        },
+        "profile": {
+          "const": "host"
+        },
+        "reason": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "started_at": {
+          "$ref": "common.json#/$defs/timestamp"
+        },
+        "state": {
+          "enum": [
+            "starting",
+            "running",
+            "stopping",
+            "ended"
+          ]
+        },
+        "timeout_ms": {
+          "maximum": 86400000,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "id",
+        "kind",
+        "reason",
+        "profile",
+        "confinement",
+        "argv",
+        "cwd",
+        "env_names",
+        "env_digest",
+        "state",
+        "started_at",
+        "observed_at",
+        "lease"
+      ],
+      "type": "object",
+      "x-b10x-bounds": {
+        "log_bytes": 8388608,
+        "max_live_per_subject": 64,
+        "retain_ended_count": 256,
+        "retain_ended_ms": 604800000,
+        "stop_grace_ms": 10000
+      },
+      "x-b10x-ended-by-first-recorded": true
+    },
+    "process-cpu": {
+      "additionalProperties": false,
+      "description": "Cumulative CPU from the cgroup's cpu.stat usage_usec.",
+      "properties": {
+        "observed_at": {
+          "$ref": "common.json#/$defs/timestamp"
+        },
+        "usage_usec": {
+          "$ref": "common.json#/$defs/u64"
+        }
+      },
+      "required": [
+        "usage_usec",
+        "observed_at"
+      ],
+      "type": "object"
+    },
+    "process-deadline": {
+      "additionalProperties": false,
+      "description": "The effective hard deadline as one absolute instant, and which start field set it (S11).",
+      "properties": {
+        "at": {
+          "$ref": "common.json#/$defs/timestamp"
+        },
+        "set_by": {
+          "enum": [
+            "timeout",
+            "expires-at"
+          ]
+        }
+      },
+      "required": [
+        "at",
+        "set_by"
+      ],
+      "type": "object"
+    },
+    "process-exit": {
+      "additionalProperties": false,
+      "description": "The main process's exit, as a code or as the terminating signal, never both (S3).",
+      "oneOf": [
+        {
+          "required": [
+            "code"
+          ]
+        },
+        {
+          "required": [
+            "signal"
+          ]
+        }
+      ],
+      "properties": {
+        "code": {
+          "maximum": 255,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "signal": {
+          "maxLength": 32,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "process-lease": {
+      "additionalProperties": false,
+      "description": "A TTL lease (ttl_ms, renew_by, state) or keep with its own reason, never both (S4).",
+      "oneOf": [
+        {
+          "properties": {
+            "keep": {
+              "const": false
+            }
+          },
+          "required": [
+            "ttl_ms",
+            "renew_by",
+            "state"
+          ]
+        },
+        {
+          "not": {
+            "required": [
+              "ttl_ms"
+            ]
+          },
+          "properties": {
+            "keep": {
+              "const": true
+            }
+          },
+          "required": [
+            "keep_reason"
+          ]
+        }
+      ],
+      "properties": {
+        "keep": {
+          "type": "boolean"
+        },
+        "keep_reason": {
+          "maxLength": 4096,
+          "minLength": 1,
+          "type": "string"
+        },
+        "renew_by": {
+          "$ref": "common.json#/$defs/timestamp"
+        },
+        "state": {
+          "enum": [
+            "active",
+            "expiring",
+            "expired"
+          ]
+        },
+        "ttl_ms": {
+          "maximum": 86400000,
+          "minimum": 1000,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "keep"
+      ],
+      "type": "object"
+    },
+    "process-listening": {
+      "additionalProperties": false,
+      "description": "The TCP and UDP sockets in a listening state whose inodes a member of the cgroup holds, observed at listing time.",
+      "properties": {
+        "observed_at": {
+          "$ref": "common.json#/$defs/timestamp"
+        },
+        "sockets": {
+          "items": {
+            "$ref": "#/$defs/process-listening-socket"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "sockets",
+        "observed_at"
+      ],
+      "type": "object"
+    },
+    "process-listening-socket": {
+      "additionalProperties": false,
+      "properties": {
+        "address": {
+          "maxLength": 64,
+          "minLength": 1,
+          "type": "string"
+        },
+        "port": {
+          "maximum": 65535,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "protocol": {
+          "enum": [
+            "tcp",
+            "udp"
+          ]
+        }
+      },
+      "required": [
+        "protocol",
+        "address",
+        "port"
+      ],
+      "type": "object"
+    },
+    "process-log-line": {
+      "additionalProperties": false,
+      "description": "One retained line without its newline. Bytes that are not UTF-8 are replaced and lossy is true; a line longer than the bound is kept cut at it and never split. truncated says the delivered text is shorter than the line, whether the line was cut or its replaced text outgrew the bound, and full_bytes is its written length.",
+      "properties": {
+        "full_bytes": {
+          "$ref": "common.json#/$defs/u64"
+        },
+        "lossy": {
+          "type": "boolean"
+        },
+        "stream": {
+          "enum": [
+            "stdout",
+            "stderr"
+          ]
+        },
+        "text": {
+          "type": "string",
+          "x-b10x-bound": {
+            "max_bytes": 16384
+          }
+        },
+        "truncated": {
+          "description": "The delivered text is shorter than the line.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "stream",
+        "text",
+        "lossy",
+        "truncated",
+        "full_bytes"
+      ],
+      "type": "object"
+    },
+    "process-log-tail": {
+      "additionalProperties": false,
+      "description": "A bounded tail of one record's log (S7). discarded_bytes is what the log bound has discarded since the log was created; the header repeats the record's profile and confinement.",
+      "properties": {
+        "confinement": {
+          "const": "none"
+        },
+        "discarded_bytes": {
+          "$ref": "common.json#/$defs/u64"
+        },
+        "lines": {
+          "items": {
+            "$ref": "#/$defs/process-log-line"
+          },
+          "type": "array"
+        },
+        "observed_at": {
+          "$ref": "common.json#/$defs/timestamp"
+        },
+        "process": {
+          "$ref": "common.json#/$defs/process-id"
+        },
+        "profile": {
+          "const": "host"
+        },
+        "retained_bytes": {
+          "maximum": 8388608,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "stream": {
+          "enum": [
+            "stdout",
+            "stderr",
+            "both"
+          ]
+        }
+      },
+      "required": [
+        "process",
+        "profile",
+        "confinement",
+        "stream",
+        "lines",
+        "discarded_bytes",
+        "retained_bytes",
+        "observed_at"
+      ],
+      "type": "object"
+    },
+    "process-memory": {
+      "additionalProperties": false,
+      "description": "The cgroup's memory.current, page cache included; named for what it is, not RSS.",
+      "properties": {
+        "memory_bytes": {
+          "$ref": "common.json#/$defs/u64"
+        },
+        "observed_at": {
+          "$ref": "common.json#/$defs/timestamp"
+        }
+      },
+      "required": [
+        "memory_bytes",
+        "observed_at"
+      ],
+      "type": "object"
+    },
+    "process-owner": {
+      "additionalProperties": false,
+      "description": "The owner session and name, labels beneath the subject that grant no authority.",
+      "properties": {
+        "name": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        },
+        "session": {
+          "maxLength": 256,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "session",
+        "name"
+      ],
+      "type": "object"
+    },
+    "process-transition": {
+      "additionalProperties": false,
+      "description": "The observation of a process.* event (ADR 0036 S12): the record, the state it entered, its cause once it has one, and its exit once observed. process.timed-out names timeout or expires-at here. Output lines are never events.",
+      "properties": {
+        "ended_by": {
+          "$ref": "#/$defs/process/properties/ended_by"
+        },
+        "exit": {
+          "$ref": "#/$defs/process-exit"
+        },
+        "process": {
+          "$ref": "common.json#/$defs/process-id"
+        },
+        "state": {
+          "$ref": "#/$defs/process/properties/state"
+        }
+      },
+      "required": [
+        "process",
+        "state"
+      ],
+      "type": "object"
+    },
+    "storage-usage": {
+      "additionalProperties": false,
+      "properties": {
+        "limit": {
+          "$ref": "common.json#/$defs/storage-limit"
+        },
+        "observed_at": {
+          "$ref": "common.json#/$defs/timestamp"
+        },
+        "used_bytes": {
+          "$ref": "common.json#/$defs/u64"
+        },
+        "used_inodes": {
+          "$ref": "common.json#/$defs/u64"
+        }
+      },
+      "required": [
+        "limit",
+        "used_bytes",
+        "used_inodes",
+        "observed_at"
+      ],
+      "type": "object"
+    },
+    "workspace": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "$ref": "common.json#/$defs/workspace-id"
+        },
+        "kind": {
+          "const": "workspace"
+        },
+        "labels": {
+          "$ref": "common.json#/$defs/labels"
+        },
+        "lease": {
+          "oneOf": [
+            {
+              "additionalProperties": false,
+              "properties": {
+                "actor": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": "string"
+                },
+                "authorizing_operation": {
+                  "$ref": "common.json#/$defs/operation-id"
+                },
+                "clock_tolerance_ms": {
+                  "const": 30000
+                },
+                "principal": {
+                  "maxLength": 256,
+                  "minLength": 1,
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "renew_by": {
+                  "$ref": "common.json#/$defs/timestamp"
+                },
+                "state": {
+                  "enum": [
+                    "active",
+                    "expiring",
+                    "expired"
+                  ]
+                },
+                "ttl_ms": {
+                  "maximum": 86400000,
+                  "minimum": 1000,
+                  "type": "integer"
+                }
+              },
+              "required": [
+                "ttl_ms",
+                "renew_by",
+                "state",
+                "clock_tolerance_ms",
+                "authorizing_operation",
+                "actor",
+                "principal"
+              ],
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observed_at": {
+          "$ref": "common.json#/$defs/timestamp"
+        },
+        "origin": {
+          "enum": [
+            "created",
+            "adopted"
+          ]
+        },
+        "root_name": {
+          "maxLength": 255,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9_][A-Za-z0-9_-]*$",
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "ready",
+            "destroying",
+            "destroyed",
+            "expired",
+            "unknown"
+          ]
+        },
+        "storage": {
+          "$ref": "#/$defs/storage-usage"
+        }
+      },
+      "required": [
+        "kind",
+        "id",
+        "state",
+        "observed_at",
+        "labels",
+        "origin",
+        "root_name"
+      ],
+      "type": "object"
+    }
+  },
+  "$id": "urn:b10x:substrate-wire:0.24.0:resource",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "oneOf": [
+    {
+      "$ref": "#/$defs/workspace"
+    },
+    {
+      "$ref": "#/$defs/exec"
+    },
+    {
+      "$ref": "#/$defs/pipe-session"
+    },
+    {
+      "$ref": "#/$defs/process"
+    }
+  ],
+  "title": "Phase-2 observed resource"
+}

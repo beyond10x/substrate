@@ -1,0 +1,218 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.24.0:input:process-start",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "additionalProperties": false,
+  "description": "Starts one unconfined host process (ADR 0036 S1, S2, S4 and S11). Every member that has a named refusal is optional and loosely typed here, so a request that omits or misstates it reaches that named refusal rather than request.schema-invalid; each bound is stated by x-b10x-bound and enforced as the refusal x-b10x-refusal names, before dispatch.",
+  "properties": {
+    "argv": {
+      "description": "The program and its arguments, executed directly with no shell.",
+      "items": {
+        "type": "string"
+      },
+      "type": "array",
+      "x-b10x-bound": {
+        "max_items": 256,
+        "max_total_bytes": 131072,
+        "min_items": 1,
+        "nul": "refused"
+      },
+      "x-b10x-refusal": "process.argv-invalid"
+    },
+    "cwd": {
+      "description": "The working directory: absolute, canonical, an existing directory the daemon opens without following a symlink.",
+      "type": "string",
+      "x-b10x-host-object": "an-existing-directory-reached-without-any-symlink-component",
+      "x-b10x-refusal": "process.cwd-invalid"
+    },
+    "env": {
+      "additionalProperties": {
+        "type": "string"
+      },
+      "description": "The complete environment of the process; nothing of the daemon's own is inherited. The ledger records each name and one digest of the whole map, never a value.",
+      "type": "object",
+      "x-b10x-bound": {
+        "max_items": 256,
+        "max_total_bytes": 131072,
+        "nul": "refused"
+      },
+      "x-b10x-recorded-as": [
+        "env_names",
+        "env_digest"
+      ],
+      "x-b10x-refusal": "process.env-invalid"
+    },
+    "expires_at": {
+      "description": "An absolute RFC 3339 UTC deadline. Not a lease: it cannot be renewed, extended or removed after start.",
+      "type": "string",
+      "x-b10x-bound": {
+        "max_ahead_ms": 86400000,
+        "min_ahead_ms": 1000
+      },
+      "x-b10x-refusal": "process.expires-at-invalid"
+    },
+    "lease": {
+      "additionalProperties": false,
+      "description": "Exactly one of a TTL within the lease bounds and keep: true; keep requires its own keep_reason.",
+      "properties": {
+        "keep": {
+          "type": "boolean"
+        },
+        "keep_reason": {
+          "type": "string",
+          "x-b10x-bound": {
+            "max_bytes": 4096,
+            "min_bytes": 1
+          },
+          "x-b10x-refusal": "process.keep-reason-required"
+        },
+        "ttl_ms": {
+          "type": "integer",
+          "x-b10x-bound": {
+            "maximum": 86400000,
+            "minimum": 1000
+          }
+        }
+      },
+      "type": "object",
+      "x-b10x-refusal": "process.lease-invalid"
+    },
+    "owner": {
+      "additionalProperties": false,
+      "description": "A label beneath the subject, never an identity. name is unique among the subject's live records with the same session.",
+      "properties": {
+        "name": {
+          "type": "string",
+          "x-b10x-bound": {
+            "max_bytes": 256,
+            "min_bytes": 1
+          }
+        },
+        "session": {
+          "type": "string",
+          "x-b10x-bound": {
+            "max_bytes": 256,
+            "min_bytes": 1
+          }
+        }
+      },
+      "required": [
+        "session",
+        "name"
+      ],
+      "type": "object",
+      "x-b10x-refusal": "process.owner-invalid",
+      "x-b10x-unique": "name-per-subject-and-owner-session-among-live-records"
+    },
+    "profile": {
+      "description": "Requested, never defaulted. The only value is host.",
+      "type": "string",
+      "x-b10x-one-value": "host",
+      "x-b10x-refusal": "process.profile-unknown",
+      "x-b10x-refusal-when-absent": "process.profile-required"
+    },
+    "reason": {
+      "description": "Why the process exists, as free text.",
+      "type": "string",
+      "x-b10x-bound": {
+        "max_bytes": 4096,
+        "min_bytes": 1
+      },
+      "x-b10x-refusal": "process.reason-required"
+    },
+    "timeout_ms": {
+      "description": "A wall-clock limit measured from the start. Not a lease; with expires_at, the earlier wins.",
+      "type": "integer",
+      "x-b10x-bound": {
+        "maximum": 86400000,
+        "minimum": 1
+      },
+      "x-b10x-refusal": "process.timeout-invalid"
+    }
+  },
+  "required": [],
+  "title": "process-start operation input",
+  "type": "object",
+  "x-b10x-refusals": [
+    {
+      "class": "unserved",
+      "code": "process.host-unserved",
+      "status": 501
+    },
+    {
+      "class": "refused",
+      "code": "process.host-posture-refused",
+      "status": 403
+    },
+    {
+      "class": "refused",
+      "code": "process.host-subject-mismatch",
+      "status": 403
+    },
+    {
+      "class": "refused",
+      "code": "process.profile-required",
+      "status": 422
+    },
+    {
+      "class": "refused",
+      "code": "process.profile-unknown",
+      "status": 422
+    },
+    {
+      "class": "refused",
+      "code": "process.argv-invalid",
+      "status": 422
+    },
+    {
+      "class": "refused",
+      "code": "process.cwd-invalid",
+      "status": 422
+    },
+    {
+      "class": "refused",
+      "code": "process.env-invalid",
+      "status": 422
+    },
+    {
+      "class": "refused",
+      "code": "process.owner-invalid",
+      "status": 422
+    },
+    {
+      "class": "refused",
+      "code": "process.reason-required",
+      "status": 422
+    },
+    {
+      "class": "conflict",
+      "code": "process.name-conflict",
+      "status": 409
+    },
+    {
+      "class": "refused",
+      "code": "process.lease-invalid",
+      "status": 422
+    },
+    {
+      "class": "refused",
+      "code": "process.keep-reason-required",
+      "status": 422
+    },
+    {
+      "class": "exhausted",
+      "code": "process.limit-exceeded",
+      "status": 429
+    },
+    {
+      "class": "refused",
+      "code": "process.timeout-invalid",
+      "status": 422
+    },
+    {
+      "class": "refused",
+      "code": "process.expires-at-invalid",
+      "status": 422
+    }
+  ],
+  "x-b10x-requires-capability": "process.host"
+}

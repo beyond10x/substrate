@@ -21,6 +21,7 @@ mod git_roots;
 mod health;
 mod metrics;
 mod operations;
+mod process_events;
 mod processes;
 mod responses;
 mod routes;

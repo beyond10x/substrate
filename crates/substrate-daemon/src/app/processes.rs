@@ -573,10 +573,13 @@ impl ProcessCtx {
             let Some(new) = supervisor_operation(&due.scope, &due.id, now) else {
                 continue;
             };
+            // S12: a lease expiry or a deadline is placed in the record's stream where its log
+            // stood when the clock decided it.
+            let log_end = self.supervisor.log_end(&due.id).ok();
             let reserved = self
                 .io(|| {
                     self.store
-                        .reserve_host_process_stop(&new, &due.id, due.cause)
+                        .reserve_host_process_stop_at(&new, &due.id, due.cause, log_end)
                 })
                 .await;
             if let Ok(HostProcessStopReservation::Accepted(_)) = reserved {
@@ -1071,7 +1074,7 @@ fn observed(
 
 /// S2: the personal Unix socket, and a peer whose uid is the daemon's own. Decided from the
 /// listener the router was built for and the kernel-derived subject, never from request data.
-fn admission(
+pub(super) fn admission(
     app: &App,
     identity: &Identity,
     transport: SessionTransport,
@@ -1087,7 +1090,12 @@ fn admission(
 
 /// A named refusal of this family as a failure response, with the status and message the wire
 /// publishes for it.
-fn refusal(request_id: &str, operation: Option<&str>, code: &str, address: &str) -> Response {
+pub(super) fn refusal(
+    request_id: &str,
+    operation: Option<&str>,
+    code: &str,
+    address: &str,
+) -> Response {
     let named = process_refusal(code).expect("every refusal this module raises is named");
     failure(
         StatusCode::from_u16(named.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
@@ -2009,15 +2017,21 @@ pub(super) async fn process_lease_renew(
     }
     let now = app.authority.now();
     let mut answered = None;
+    // S12: the renewal is placed in the record's stream where its log stood when it was decided.
+    let log_end = app
+        .host_processes
+        .as_ref()
+        .and_then(|supervisor| supervisor.log_end(&process_id).ok());
     let renewed = app
         .store_io(|| {
-            app.store.renew_host_process_lease_with(
+            app.store.renew_host_process_lease_at(
                 &scope,
                 &operation,
                 now,
                 StatusCode::OK.as_u16(),
                 &process_id,
                 ttl_ms,
+                log_end,
                 |record| {
                     let result = wire_record(record, None, now);
                     let value = serde_json::to_value(&result)?;

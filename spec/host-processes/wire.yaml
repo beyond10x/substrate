@@ -5,8 +5,11 @@ domain: substrate.host_processes
 # `{op, input}` mutation and `{api_version, request_id, operation?, result}` success envelopes.
 # `POST /v1/processes/{process_id}/lease/renew` takes the existing `LeaseRenewInput` (`ttl_ms`),
 # as exec and session renewals do, and a single stop takes the existing empty input; neither needs
-# a type here. S8 (containers), S9 (adoption) and S12 (the per-process stream) are not on this
-# surface and add their shapes when they are built.
+# a type here. S8 (containers) and S9 (adoption) are not on this surface and add their shapes
+# when they are built. S12 adds the observation of the seven `process.*` event-log variants
+# (`ProcessTransition`) and the item of the per-process WebSocket stream
+# `GET /v1/processes/{process_id}/events` (`ProcessStreamItem`); its one query member, `cursor`,
+# is the hand-written `ProcessEventsQuery`.
 #
 # `cargo xtask check-ess` regenerates these roots into
 # crates/substrate-wire/src/generated/host_process.rs and compares bytes. ESS generates the
@@ -193,8 +196,8 @@ types:
       - {name: stopped, type: List<substrate.host_processes.ProcessStopped>}
 
   # S7: one retained line, without its newline. `text` is the line as UTF-8; bytes that are not
-  # UTF-8 are replaced and `lossy` is true (the log keeps the bytes). `truncated` says the line is
-  # shorter than the program wrote, and `full_bytes` is the length it wrote.
+  # UTF-8 are replaced and `lossy` is true (the log keeps the bytes). `truncated` says the delivered
+  # text is shorter than the line, and `full_bytes` is the length the program wrote.
   - name: substrate.host_processes.ProcessLogLine
     kind: struct
     fields:
@@ -217,3 +220,70 @@ types:
       - {name: discarded_bytes, type: Integer}
       - {name: retained_bytes, type: Integer}
       - {name: observed_at, type: Timestamp}
+
+  # S12: the observation of every `process.*` event in the existing event log. Seven closed
+  # variants of the one event union carry it, each with `resource_kind: process`, the process id
+  # as `resource` and an operation cause:
+  #   process.started        the record is running; cause: its start operation
+  #   process.lease-renewed  its lease was renewed; cause: the renewal
+  #   process.lease-expired  its lease expired and its stop began; cause: the supervisor's stop
+  #   process.timed-out      its timeout or expires_at was reached and its stop began (`ended_by`
+  #                          says which); cause: the supervisor's stop
+  #   process.stopped        a stop of any cause completed; cause: that stop
+  #   process.exited         its main process exited, with the code or the signal; cause: its start
+  #   process.vanished       a restart found its cgroup gone; cause: its start
+  # `state` is the state the record entered, `ended_by` is present once the record has a cause,
+  # and `exit` once an exit status was observed. Output lines are never events in this log.
+  - name: substrate.host_processes.ProcessTransition
+    kind: struct
+    fields:
+      - {name: process, type: String}
+      - {name: state, type: substrate.host_processes.ProcessState}
+      - {name: ended_by, type: Optional<substrate.host_processes.EndedBy>}
+      - {name: exit, type: Optional<substrate.host_processes.ProcessExit>}
+
+  # S12: what one item of the per-process stream is. `event` is one `process.*` event from the
+  # event log, `line` one output line from the S7 log, `gap` the log bytes the bound discarded
+  # before the reader reached them, and `ended` the terminal item, after which the stream closes.
+  - name: substrate.host_processes.ProcessStreamItemKind
+    kind: enum
+    variants: [event, line, gap, ended]
+  # S12: a reader resumed from, or started before, a log offset the S7 bound has discarded.
+  # `discarded_bytes` is how many log bytes it will never receive; the stream then continues with
+  # the oldest retained line. Lines are never skipped without one.
+  - name: substrate.host_processes.ProcessStreamGap
+    kind: struct
+    fields:
+      - {name: discarded_bytes, type: Integer}
+  # S12: the terminal item. `ended_by` is the record's one cause; `exit` is present when an exit
+  # status was observed.
+  - name: substrate.host_processes.ProcessStreamEnd
+    kind: struct
+    fields:
+      - {name: ended_by, type: substrate.host_processes.EndedBy}
+      - {name: exit, type: Optional<substrate.host_processes.ProcessExit>}
+  # S12: one text frame of `GET /v1/processes/{process_id}/events`. Exactly one of `event`,
+  # `line`, `gap` and `ended` is present, the one `kind` names. ESS 0.72.0 realizes a union with
+  # an explicit tag member, so `kind` is that tag and the item is one struct.
+  # `event` is the event-log event verbatim (the bundle's event schema, one of the seven
+  # `process.*` variants); ESS does not model the hand-written event union, so it is `Json` here.
+  # `line` is the S7 line shape: `text` is at most MAX_PROCESS_EVENT_LINE_BYTES bytes, a longer
+  # line arrives cut there with `truncated: true` and `full_bytes` stating its full length, never
+  # split into two items; bytes that are not UTF-8 arrive replaced with `lossy: true`, and
+  # `truncated` is also true when the replaced text outgrew the bound and was cut.
+  # `cursor` is opaque: it encodes the record, the event-log position (source, generation and the
+  # last delivered event `seq`) and the log byte offset after this item. A reader that reconnects
+  # with it to the same record's stream receives what followed it.
+  # DECIDED (S12 wire): the item carries no per-process `seq` of its own. Its order is the
+  # cursor's, and a lifecycle item carries its event's `seq`; a reader that resumes from the last
+  # cursor it read receives each later item once. The model's per-process `seq` (point 1, point
+  # 16) is that order.
+  - name: substrate.host_processes.ProcessStreamItem
+    kind: struct
+    fields:
+      - {name: kind, type: substrate.host_processes.ProcessStreamItemKind}
+      - {name: cursor, type: String}
+      - {name: event, type: Optional<Json>}
+      - {name: line, type: Optional<substrate.host_processes.ProcessLogLine>}
+      - {name: gap, type: Optional<substrate.host_processes.ProcessStreamGap>}
+      - {name: ended, type: Optional<substrate.host_processes.ProcessStreamEnd>}

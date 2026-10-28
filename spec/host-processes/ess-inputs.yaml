@@ -12,8 +12,10 @@ scenarios:
   - scenarios/timeout-kills.yaml
   - scenarios/renewal-keeps-deadline.yaml
   - scenarios/deadline-refusals.yaml
-  - scenarios/stream-order.yaml
-  - scenarios/stream-terminal.yaml
+  - scenarios/stream-interleaves-events-and-lines.yaml
+  - scenarios/stream-ends-with-one-terminal-item.yaml
+  - scenarios/stream-terminal-names-ended-by.yaml
+  - scenarios/stream-ended-record-replays.yaml
   - scenarios/logs-bounded.yaml
   - scenarios/subject-is-the-authority.yaml
   - scenarios/name-unique-per-owner.yaml

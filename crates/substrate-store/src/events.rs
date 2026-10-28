@@ -366,16 +366,36 @@ pub(crate) fn event_cursor(source_scope: &str, generation: u64, sequence: u64) -
     format!("ev2.{source_scope}.{generation}.{sequence}")
 }
 
+/// The position a cursor states when it matches the published `event-cursor` pattern,
+/// `^ev2\.scope_[A-Za-z0-9_-]+\.[1-9][0-9]*\.(?:0|[1-9][0-9]*)$`, at most 512 characters; `None`
+/// for anything else. The pattern bounds no number's width, so a number beyond `u64` reads as
+/// `u64::MAX`: a generation no source has, a sequence beyond every barrier.
 fn parse_event_cursor(value: &str) -> Option<(&str, u64, u64)> {
+    fn number(part: &str) -> Option<u64> {
+        let canonical = !part.is_empty()
+            && part.bytes().all(|byte| byte.is_ascii_digit())
+            && (part == "0" || !part.starts_with('0'));
+        canonical.then(|| part.parse().unwrap_or(u64::MAX))
+    }
+    if value.chars().count() > 512 {
+        return None;
+    }
     let mut parts = value.strip_prefix("ev2.")?.split('.');
     let source_scope = parts.next()?;
-    let generation = parse_canonical_u64(parts.next()?)?;
-    let sequence = parse_canonical_u64(parts.next()?)?;
-    (parts.next().is_none() && !source_scope.is_empty()).then_some((
-        source_scope,
-        generation,
-        sequence,
-    ))
+    let tail = source_scope.strip_prefix("scope_")?;
+    if tail.is_empty()
+        || !tail
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    {
+        return None;
+    }
+    let generation = number(parts.next()?).filter(|generation| *generation > 0)?;
+    let sequence = number(parts.next()?)?;
+    parts
+        .next()
+        .is_none()
+        .then_some((source_scope, generation, sequence))
 }
 
 pub(crate) fn parse_canonical_u64(value: &str) -> Option<u64> {

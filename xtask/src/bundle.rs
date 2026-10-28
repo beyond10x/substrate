@@ -46,6 +46,7 @@ use crate::report::Report;
 
 mod host_process;
 mod omitted_entries;
+mod process_events;
 mod read_only_roots;
 mod session_exec_fields;
 mod stream_bounds;
@@ -903,6 +904,14 @@ fn check_additions(version: &str, released: &Tree, failures: &mut Vec<String>) {
         stream_bounds::check(released, failures);
         // ADR 0043's omitted-entries header binds every bundle from `0.23.0` on as well.
         omitted_entries::check(released, failures);
+    }
+    // ADR 0036 S12 binds every bundle from `0.24.0` on.
+    if process_events::applies_to(version) {
+        process_events::check(released, failures);
+    }
+    if version == "0.24.0" {
+        process_events::check_introduction(released, failures);
+        return;
     }
     if version == "0.23.0" {
         read_only_roots::check(version, released, failures);
@@ -5901,7 +5910,7 @@ mod tests {
                 .unwrap_or_else(|error| panic!("{}: {error}", bundle.display()));
             checked += 1;
         }
-        assert_eq!(checked, 23, "every released bundle must be checked");
+        assert_eq!(checked, 24, "every released bundle must be checked");
     }
 
     /// Class, the other half: if a parameter's name is not a discriminator, then renaming one is
