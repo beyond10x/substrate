@@ -353,10 +353,13 @@ fn counters<const N: usize>() -> [AtomicU64; N] {
     std::array::from_fn(|_| AtomicU64::new(0))
 }
 
-/// A fixed-bucket histogram: per-bucket counts, the observation count and the summed nanoseconds.
+/// A fixed-bucket histogram: per-bucket counts, the observations above the last bound and the
+/// summed nanoseconds. The observation count is not stored: a render derives it from the buckets
+/// it read, so `+Inf` and `_count` are never below a finite bucket, whatever a concurrent
+/// observation is doing.
 struct Histogram {
     buckets: [AtomicU64; 11],
-    count: AtomicU64,
+    overflow: AtomicU64,
     sum_nanos: AtomicU64,
 }
 
@@ -364,7 +367,7 @@ impl Default for Histogram {
     fn default() -> Self {
         Self {
             buckets: counters(),
-            count: AtomicU64::new(0),
+            overflow: AtomicU64::new(0),
             sum_nanos: AtomicU64::new(0),
         }
     }
@@ -373,10 +376,10 @@ impl Default for Histogram {
 impl Histogram {
     fn observe(&self, elapsed: Duration) {
         let seconds = elapsed.as_secs_f64();
-        if let Some(bucket) = BUCKETS.iter().position(|(bound, _)| seconds <= *bound) {
-            self.buckets[bucket].fetch_add(1, Ordering::Relaxed);
-        }
-        self.count.fetch_add(1, Ordering::Relaxed);
+        match BUCKETS.iter().position(|(bound, _)| seconds <= *bound) {
+            Some(bucket) => self.buckets[bucket].fetch_add(1, Ordering::Relaxed),
+            None => self.overflow.fetch_add(1, Ordering::Relaxed),
+        };
         let nanos = u64::try_from(elapsed.as_nanos()).unwrap_or(u64::MAX);
         let _ = self
             .sum_nanos
@@ -454,6 +457,11 @@ impl Telemetry {
             .position(|known| *known == code)
             .unwrap_or(REFUSAL_CODES.len());
         self.refusals[index].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A failure answer that names no code: counted under `other`.
+    fn unnamed_refusal(&self) {
+        self.refusals[REFUSAL_CODES.len()].fetch_add(1, Ordering::Relaxed);
     }
 
     fn dispatch(&self, family: Family, outcome: Outcome, elapsed: Duration) {
@@ -784,7 +792,7 @@ impl Exposition {
             with_le.push(("le", le));
             self.sample(&bucket, &with_le, cumulative);
         }
-        let count = histogram.count.load(Ordering::Relaxed);
+        let count = cumulative.saturating_add(histogram.overflow.load(Ordering::Relaxed));
         let mut with_le = labels.to_vec();
         with_le.push(("le", "+Inf"));
         self.sample(&bucket, &with_le, count);
@@ -843,8 +851,12 @@ pub(crate) async fn record_request(
     metrics
         .telemetry
         .request(metrics.listener, family, outcome, started.elapsed());
+    // Every failure answer is counted once among the refusals: by its named code, or `other`
+    // when it carries none (the router's `405`, the development listener's `401`).
     if let Some(detail) = response.extensions().get::<ErrorDetail>() {
         metrics.telemetry.refusal(&detail.code);
+    } else if outcome != Outcome::Ok {
+        metrics.telemetry.unnamed_refusal();
     }
     if let Some(at) = *admitted.lock() {
         metrics.telemetry.dispatch(family, outcome, at.elapsed());
@@ -1037,13 +1049,51 @@ fn present_facts(facts: &substrate_wire::CapabilityFacts) -> BTreeSet<String> {
     }
 }
 
-/// Whether `name` has the shape of a capability fact name; startup refuses any other.
-pub(crate) fn valid_fact_name(name: &str) -> bool {
-    (1..=128).contains(&name.len())
-        && name.as_bytes()[0].is_ascii_lowercase()
-        && name.bytes().all(|byte| {
-            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'.' | b'-' | b'_')
-        })
+/// Whether `name` is one of the closed set of capability fact names; startup refuses any other,
+/// since a name outside the set is never published and would leave the daemon unready for life.
+pub(crate) fn is_capability_fact_name(name: &str) -> bool {
+    capability_fact_names().contains(&name)
+}
+
+/// The capability fact names, read from `CapabilityFacts`' own serde declaration, so a fact the
+/// wire crate adds is accepted without a second list to keep in step.
+fn capability_fact_names() -> &'static [&'static str] {
+    use serde::Deserialize as _;
+    use serde::de::{self, Visitor};
+
+    /// A deserializer that records the field names a struct asks for and deserializes nothing.
+    struct FieldNames<'a>(&'a mut &'static [&'static str]);
+
+    impl<'de> de::Deserializer<'de> for FieldNames<'_> {
+        type Error = de::value::Error;
+
+        fn deserialize_any<V: Visitor<'de>>(self, _: V) -> Result<V::Value, Self::Error> {
+            Err(de::Error::custom("field names only"))
+        }
+
+        fn deserialize_struct<V: Visitor<'de>>(
+            self,
+            _: &'static str,
+            fields: &'static [&'static str],
+            _: V,
+        ) -> Result<V::Value, Self::Error> {
+            *self.0 = fields;
+            Err(de::Error::custom("field names only"))
+        }
+
+        serde::forward_to_deserialize_any! {
+            bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string bytes byte_buf
+            option unit unit_struct newtype_struct seq tuple tuple_struct map enum identifier
+            ignored_any
+        }
+    }
+
+    static NAMES: std::sync::OnceLock<&'static [&'static str]> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        let mut fields: &'static [&'static str] = &[];
+        let _ = substrate_wire::CapabilityFacts::deserialize(FieldNames(&mut fields));
+        fields
+    })
 }
 
 /// The conventional process metrics, read from `/proc/self`.
@@ -1542,5 +1592,54 @@ mod tests {
         assert!(!exposition.contains("process_"));
         let check_order = Check::ALL.map(Check::label);
         assert_eq!(check_order, ["store", "schema", "maintenance", "driver"]);
+    }
+
+    /// A failure answer without a named code is counted once, under `other`, and adds no series.
+    #[test]
+    fn a_failure_answer_without_a_code_is_counted_as_other() {
+        let telemetry = Telemetry::default();
+        telemetry.unnamed_refusal();
+        let exposition = telemetry.render(every_check_passes(), Some(&process()), 0);
+        assert!(exposition.contains("substrate_refusals_total{code=\"other\"} 1\n"));
+        assert_eq!(samples(&exposition).len(), SERIES_MAXIMUM);
+    }
+
+    /// The fact names `--ops-require-fact` accepts are exactly `CapabilityFacts`' keys: every
+    /// key a host driver publishes is one, and a misspelling is not.
+    #[test]
+    fn the_capability_fact_names_are_the_closed_wire_set() {
+        let names = super::capability_fact_names();
+        assert!(names.len() >= 40, "{names:?}");
+        for name in [
+            "exec.no-egress",
+            "process.host",
+            "operation.ledger-subject-max-rows",
+        ] {
+            assert!(super::is_capability_fact_name(name), "{name}");
+        }
+        for name in ["exec.no-egres", "", "exec_no_egress", "Exec.no-egress"] {
+            assert!(!super::is_capability_fact_name(name), "{name:?}");
+        }
+        let (_root, app) = app();
+        for published in super::present_facts(&app.driver.machine().facts) {
+            assert!(super::is_capability_fact_name(&published), "{published}");
+        }
+    }
+
+    /// `+Inf` and `_count` are derived from the buckets a render read, overflow included, so a
+    /// render cannot publish a finite bucket above them.
+    #[test]
+    fn a_histogram_count_is_its_buckets_plus_overflow() {
+        let telemetry = Telemetry::default();
+        telemetry.maintenance_round(MaintenanceTask::Containment, Duration::from_millis(1));
+        telemetry.maintenance_round(MaintenanceTask::Containment, Duration::from_secs(20));
+        let exposition = telemetry.render(every_check_passes(), None, 0);
+        for expected in [
+            "substrate_maintenance_round_duration_seconds_bucket{task=\"containment\",le=\"10.0\"} 1\n",
+            "substrate_maintenance_round_duration_seconds_bucket{task=\"containment\",le=\"+Inf\"} 2\n",
+            "substrate_maintenance_round_duration_seconds_count{task=\"containment\"} 2\n",
+        ] {
+            assert!(exposition.contains(expected), "{expected}{exposition}");
+        }
     }
 }

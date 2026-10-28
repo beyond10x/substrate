@@ -5024,3 +5024,81 @@ fn schema_version_is_stamped_at_open_and_read_without_writing() {
         "reading the version wrote the store"
     );
 }
+
+/// ADR 0045 decision 6: a database a newer binary stamped is refused at open by name and keeps
+/// its stamp; an unstamped one (every release up to 0.14.0 left 0) opens and is stamped.
+#[test]
+fn a_store_stamped_by_a_newer_binary_is_refused_and_keeps_its_stamp() {
+    let directory = tempdir().expect("tempdir");
+    let path = directory.path().join("state.sqlite");
+    drop(Store::open(&path).expect("first open"));
+    let newer = crate::SCHEMA_VERSION + 1;
+    let other = rusqlite::Connection::open(&path).expect("second connection");
+    other
+        .pragma_update(None, "user_version", newer)
+        .expect("stamp as a newer binary would");
+    let changes_before: i64 = other
+        .query_row("PRAGMA data_version", [], |row| row.get(0))
+        .expect("data version");
+    let refused = Store::open(&path)
+        .map(|_| ())
+        .expect_err("a newer store opened");
+    assert!(
+        matches!(
+            refused,
+            StoreError::NewerSchema { found, supported }
+                if found == newer && supported == crate::SCHEMA_VERSION
+        ),
+        "{refused:?}"
+    );
+    let stamp: i64 = other
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .expect("stamp");
+    assert_eq!(stamp, newer, "the refused open lowered the stamp");
+    let changes_after: i64 = other
+        .query_row("PRAGMA data_version", [], |row| row.get(0))
+        .expect("data version");
+    assert_eq!(
+        changes_before, changes_after,
+        "the refused open wrote the store"
+    );
+
+    other
+        .pragma_update(None, "user_version", 0_i64)
+        .expect("unstamp as 0.14.0 left it");
+    let store = Store::open(&path).expect("an unstamped store opens");
+    assert_eq!(
+        store
+            .schema_version(std::time::Duration::from_secs(1))
+            .expect("schema version"),
+        Some(crate::SCHEMA_VERSION)
+    );
+}
+
+/// ADR 0045: the store probe bounds its statement with a busy timeout no longer than its wait,
+/// and leaves the ledger connection's normal busy timeout in place for control traffic.
+#[test]
+fn schema_version_restores_the_ledger_busy_timeout() {
+    let wait = std::time::Duration::from_millis(200);
+    let directory = tempdir().expect("tempdir");
+    let path = directory.path().join("state.sqlite");
+    let store = Store::open(&path).expect("open store");
+    let busy_timeout = |store: &Store| -> i64 {
+        store
+            .connection
+            .lock()
+            .query_row("PRAGMA busy_timeout", [], |row| row.get(0))
+            .expect("busy timeout")
+    };
+    let normal = busy_timeout(&store);
+    assert_eq!(normal, 5_000);
+    assert_eq!(
+        store.schema_version(wait).expect("schema version"),
+        Some(crate::SCHEMA_VERSION)
+    );
+    assert_eq!(
+        busy_timeout(&store),
+        normal,
+        "the probe left its short busy timeout behind"
+    );
+}

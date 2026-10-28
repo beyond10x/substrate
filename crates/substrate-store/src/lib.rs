@@ -164,6 +164,10 @@ pub enum StoreError {
     ResourceOccupancy(ResourceCapacity),
     #[error("legacy store exceeds the bounded automatic migration limit; run an offline migration")]
     OfflineMigrationRequired,
+    #[error(
+        "state database schema version {found} is newer than this binary's {supported}; refusing to open it"
+    )]
+    NewerSchema { found: i64, supported: i64 },
     #[error("snapshot retention or materialization limit is exhausted")]
     SnapshotLimit,
     #[error("event does not match the closed Substrate event union")]

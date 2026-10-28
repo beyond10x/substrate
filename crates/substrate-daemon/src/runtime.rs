@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use crate::app::{
     ConnectionGauge, Listener, MaintenanceTask, Operations, RequestMetrics, development_router,
-    hosted_router, record_request, valid_fact_name,
+    hosted_router, is_capability_fact_name, record_request,
 };
 use crate::delegation::{DelegatedContextPolicy, TrustedKey};
 use crate::hosted::{HostedAdmission, HostedIdentityConfig, require_hosted_authority};
@@ -354,6 +354,20 @@ impl TcpConnectionLimits {
             by_source: Mutex::new(BTreeMap::new()),
             per_source: 16,
             max_sources: 1_024,
+            sequence: AtomicU64::new(1),
+            rejected: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    /// The operational listener's bound (ADR 0045 decision 1): eight connections at once, at most
+    /// four of them from one source address, so one source cannot hold every slot.
+    fn operational() -> Self {
+        Self {
+            global: Arc::new(Semaphore::new(OPS_MAX_CONNECTIONS)),
+            global_limit: OPS_MAX_CONNECTIONS,
+            by_source: Mutex::new(BTreeMap::new()),
+            per_source: OPS_MAX_CONNECTIONS_PER_SOURCE,
+            max_sources: OPS_MAX_CONNECTIONS,
             sequence: AtomicU64::new(1),
             rejected: Arc::new(AtomicU64::new(0)),
         }
@@ -1804,6 +1818,8 @@ fn prepare_socket(path: &Path) -> anyhow::Result<()> {
 
 /// Connections the operational listener serves at once; a ninth is closed unanswered.
 const OPS_MAX_CONNECTIONS: usize = 8;
+/// Of those, the connections one source address may hold; a fifth from it is closed unanswered.
+const OPS_MAX_CONNECTIONS_PER_SOURCE: usize = 4;
 /// How long a connection to the operational listener has to send its request head.
 const OPS_HEADER_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
 /// How long one operational connection may live, its one exchange included.
@@ -1831,18 +1847,25 @@ fn check_ops_listener(config: &DaemonConfig) -> anyhow::Result<()> {
         .map(|tcp| tcp.listen)
         .chain(config.tls.iter().map(|tls| tls.listen))
         .any(|control| {
+            // `[::ffff:a.b.c.d]` is `a.b.c.d` in its IPv4-mapped spelling: compare canonically.
+            let (control_ip, ops_ip) =
+                (control.ip().to_canonical(), ops.listen.ip().to_canonical());
             control.port() == ops.listen.port()
-                && (control.ip() == ops.listen.ip()
-                    || control.ip().is_unspecified()
-                    || ops.listen.ip().is_unspecified())
+                && (control_ip == ops_ip || control_ip.is_unspecified() || ops_ip.is_unspecified())
         });
     if shares_control {
         bail!(
             "ops.listener-config-invalid: the operational listener must not share a control listener's address"
         );
     }
-    if !ops.require_facts.iter().all(|fact| valid_fact_name(fact)) {
-        bail!("ops.listener-config-invalid: a required fact is not a capability fact name");
+    if let Some(unknown) = ops
+        .require_facts
+        .iter()
+        .find(|fact| !is_capability_fact_name(fact))
+    {
+        bail!(
+            "ops.listener-config-invalid: --ops-require-fact {unknown:?} is not a capability fact name"
+        );
     }
     Ok(())
 }
@@ -1883,16 +1906,16 @@ async fn start_ops_listener(
 
 /// One exchange per connection, no keep-alive, no upgrade, no body read, no credential read.
 async fn serve_ops(listener: TcpListener, operations: Arc<Operations>) {
-    let slots = Arc::new(Semaphore::new(OPS_MAX_CONNECTIONS));
+    let slots = TcpConnectionLimits::operational();
     let mut connections = tokio::task::JoinSet::new();
     loop {
         tokio::select! {
             accepted = listener.accept() => {
-                let Ok((stream, _)) = accepted else {
+                let Ok((stream, peer)) = accepted else {
                     tokio::time::sleep(std::time::Duration::from_millis(25)).await;
                     continue;
                 };
-                let Ok(slot) = Arc::clone(&slots).try_acquire_owned() else {
+                let Some(slot) = slots.acquire(peer.ip().to_canonical()) else {
                     continue;
                 };
                 let operations = Arc::clone(&operations);

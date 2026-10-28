@@ -1817,3 +1817,8 @@ async fn operational_listener_refuses_the_control_address() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+#[path = "ops_listener/adversary.rs"]
+mod adversary_ops_listener;
+#[path = "ops_listener/security.rs"]
+mod security_ops_listener;

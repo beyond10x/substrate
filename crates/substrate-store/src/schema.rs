@@ -10,6 +10,9 @@ use rusqlite::{Connection, OptionalExtension as _, TransactionBehavior, params};
 
 const MAX_AUTOMATIC_MIGRATION_ROWS: u64 = 4_096;
 
+/// The ledger connection's busy timeout for every statement but the readiness probe's.
+const LEDGER_BUSY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 impl Store {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, StoreError> {
         Self::open_with_config(path, StoreConfig::default())
@@ -35,10 +38,20 @@ impl Store {
     ) -> Result<Self, StoreError> {
         validate_store_config(config)?;
         let mut connection = Connection::open(path)?;
+        connection.busy_timeout(LEDGER_BUSY_TIMEOUT)?;
+        // A database a newer binary stamped is refused before anything writes it, so its stamp
+        // is never lowered (ADR 0045 decision 6). An unstamped one (0, every release up to
+        // 0.14.0) migrates and is stamped below.
+        let found: i64 = connection.query_row("PRAGMA user_version", [], |row| row.get(0))?;
+        if found > crate::SCHEMA_VERSION {
+            return Err(StoreError::NewerSchema {
+                found,
+                supported: crate::SCHEMA_VERSION,
+            });
+        }
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "synchronous", "FULL")?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
-        connection.pragma_update(None, "busy_timeout", 5_000_i64)?;
         connection.execute_batch(
             "
             CREATE TABLE IF NOT EXISTS operations (
@@ -299,15 +312,22 @@ impl Store {
     ///
     /// `None` when the connection is not free within `wait`: the caller is never held behind a
     /// statement that does not finish.
+    ///
+    /// The statement's own lock wait is bounded by what remains of `wait`: the probe sets that as
+    /// the connection's busy timeout while it holds the connection and restores
+    /// the ledger's 5 s one before releasing it, so control traffic never runs with the short one.
     pub fn schema_version(&self, wait: std::time::Duration) -> Result<Option<i64>, StoreError> {
+        let started = std::time::Instant::now();
         let Some(connection) = self.connection.try_lock_for(wait) else {
             return Ok(None);
         };
-        Ok(Some(connection.query_row(
-            "PRAGMA user_version",
-            [],
-            |row| row.get(0),
-        )?))
+        let remaining = wait
+            .saturating_sub(started.elapsed())
+            .max(std::time::Duration::from_millis(1));
+        connection.busy_timeout(remaining)?;
+        let version = connection.query_row("PRAGMA user_version", [], |row| row.get(0));
+        connection.busy_timeout(LEDGER_BUSY_TIMEOUT)?;
+        Ok(Some(version?))
     }
 }
 

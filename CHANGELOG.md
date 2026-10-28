@@ -12,17 +12,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - An operational listener for probes and scraping (ADR 0045). It adds no wire route and leaves the
   contract bundle unchanged.
   - **Flags:** `--ops-listen <address:port>` (`SUBSTRATE_OPS_LISTEN`) turns it on; it is off by
-    default. Startup refuses a zero port or an address a control listener uses, with
+    default. Startup refuses a zero port, an address a control listener uses (in any spelling,
+    IPv4-mapped included) or an `--ops-require-fact` name that is not a capability fact, with
     `ops.listener-config-invalid`.
   - **Transport:** plaintext and unauthenticated. It never reads an `Authorization` header or a
-    body and never upgrades. It allows at most 8 connections, a 2-second request-head deadline and
-    one exchange per connection. It answers `GET` on `/livez`, `/readyz` and `/metrics`; anything
+    body and never upgrades. It allows at most 8 connections, at most 4 from one source address, a
+    2-second request-head deadline and one exchange per connection. It answers `GET` on `/livez`, `/readyz` and `/metrics`; anything
     else gets `404` with an empty body.
   - **`/livez`:** `200 ok` while both maintenance tasks run.
   - **`/readyz`:** `200`, or `503` otherwise, with one `ok` or `failed` line each for four checks:
     - `store`: one read-only statement answers within 1 s;
     - `schema`: the database's schema version matches the binary's. The store now stamps it at
-      open as SQLite `user_version` 1;
+      open as SQLite `user_version` 1. A database stamped higher, by a newer binary, is refused
+      at open and keeps its stamp, so the daemon does not start on it;
     - `maintenance`: each task completed a round within 5 s;
     - `driver`: the startup snapshot publishes every `--ops-require-fact <fact>`
       (`SUBSTRATE_OPS_REQUIRE_FACT`, repeatable).
@@ -34,8 +36,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
     - `substrate_build_info{version,contract_bundle}`, `substrate_ready{check}`;
     - `substrate_http_requests_total{listener,family,outcome}`,
       `substrate_http_request_duration_seconds{listener,family}`;
-    - `substrate_refusals_total{code}`, with any code the wire crate does not name counted as
-      `other`;
+    - `substrate_refusals_total{code}`, one count per failure answer; a code the wire crate does
+      not name, or a failure answer with no code (a `405`, the development listener's `401`), is
+      counted as `other`;
     - `substrate_dispatch_total{family,outcome}`, `substrate_dispatch_duration_seconds{family}`;
     - `substrate_connections_open{listener}`, `substrate_connections_limit{listener}`,
       `substrate_connections_rejected_total{listener}`;

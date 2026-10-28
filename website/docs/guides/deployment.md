@@ -122,8 +122,8 @@ for local development.
 It is off by default, and it must use a different address from every control listener. It is
 plaintext and unauthenticated, so bind it to loopback or a network only your monitoring can reach.
 It answers `GET` on three paths. Every other path and method, a request body and an upgrade get
-`404` with an empty body. It serves at most 8 connections and gives each 2 seconds to send its
-request head.
+`404` with an empty body. It serves at most 8 connections, at most 4 of them from one source
+address, and gives each 2 seconds to send its request head.
 
 | Path | Answer |
 |---|---|
@@ -134,10 +134,12 @@ request head.
 The four readiness checks:
 
 - `store`: one read-only statement returns within 1 second.
-- `schema`: that statement reads the schema version this binary expects.
+- `schema`: that statement reads the schema version this binary expects. The daemon refuses to
+  start on a database a newer binary stamped, and leaves its stamp unchanged.
 - `maintenance`: each maintenance task completed a round in the last 5 seconds.
 - `driver`: the startup capability snapshot publishes every `--ops-require-fact <fact>`. The flag is
-  repeatable (or `SUBSTRATE_OPS_REQUIRE_FACT`, comma-separated).
+  repeatable (or `SUBSTRATE_OPS_REQUIRE_FACT`, comma-separated). Startup refuses a name that is not
+  a capability fact.
 
 `/readyz` never calls Identity. It answers `503` from the moment shutdown begins, before any
 listener closes.
