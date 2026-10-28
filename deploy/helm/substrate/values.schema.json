@@ -1,0 +1,440 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "b10x-substrate chart values",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "replicas",
+    "image",
+    "clusterDomain",
+    "nodePool",
+    "persistence",
+    "tls",
+    "identity",
+    "execution",
+    "daemon",
+    "readiness",
+    "resources",
+    "podAnnotations",
+    "networkPolicy",
+    "nodeProfiles"
+  ],
+  "properties": {
+    "global": {
+      "type": "object"
+    },
+    "replicas": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 64
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["repository", "digest", "tag", "pullPolicy"],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9._/:-]*[a-z0-9]$"
+        },
+        "digest": {
+          "type": "string",
+          "pattern": "^(sha256:[0-9a-f]{64})?$"
+        },
+        "tag": {
+          "type": "string",
+          "pattern": "^([A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?$"
+        },
+        "pullPolicy": {
+          "enum": ["Always", "IfNotPresent", "Never"]
+        }
+      }
+    },
+    "clusterDomain": {
+      "$ref": "#/$defs/dnsName"
+    },
+    "nodePool": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label", "taint"],
+      "properties": {
+        "label": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["key", "value"],
+          "properties": {
+            "key": {
+              "$ref": "#/$defs/labelKey"
+            },
+            "value": {
+              "$ref": "#/$defs/labelValue"
+            }
+          }
+        },
+        "taint": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["key", "value", "effect"],
+          "properties": {
+            "key": {
+              "$ref": "#/$defs/labelKey"
+            },
+            "value": {
+              "$ref": "#/$defs/labelValue"
+            },
+            "effect": {
+              "enum": ["NoSchedule", "NoExecute"]
+            }
+          }
+        }
+      }
+    },
+    "persistence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["storageClassName", "size", "projectQuotaCapable"],
+      "properties": {
+        "storageClassName": {
+          "$ref": "#/$defs/dnsName"
+        },
+        "size": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*(Mi|Gi|Ti)$"
+        },
+        "projectQuotaCapable": {
+          "type": "boolean"
+        }
+      }
+    },
+    "tls": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["secretName"],
+      "properties": {
+        "secretName": {
+          "$ref": "#/$defs/objectName"
+        }
+      }
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["origin", "caConfigMap", "egress"],
+      "properties": {
+        "origin": {
+          "type": "string",
+          "pattern": "^https://[^/@?#\\s]+$"
+        },
+        "caConfigMap": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "key"],
+          "properties": {
+            "name": {
+              "$ref": "#/$defs/objectName"
+            },
+            "key": {
+              "type": "string",
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,252}$"
+            }
+          }
+        },
+        "egress": {
+          "$ref": "#/$defs/destination"
+        }
+      }
+    },
+    "execution": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "projectQuotas"],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "projectQuotas": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "ids"],
+          "properties": {
+            "enabled": {
+              "type": "boolean"
+            },
+            "ids": {
+              "type": "string",
+              "pattern": "^([0-9]{1,10}-[0-9]{1,10})?$"
+            }
+          }
+        }
+      }
+    },
+    "daemon": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "eventRetention",
+        "execCpuCores",
+        "allowUnrecordedSessions",
+        "logFilter",
+        "gitSources",
+        "egressApertures"
+      ],
+      "properties": {
+        "eventRetention": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000000
+        },
+        "execCpuCores": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1024
+        },
+        "allowUnrecordedSessions": {
+          "type": "boolean"
+        },
+        "logFilter": {
+          "enum": ["error", "warn", "info", "debug"]
+        },
+        "gitSources": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "urlPrefix", "cidr", "port"],
+            "properties": {
+              "name": {
+                "type": "string",
+                "pattern": "^[a-z0-9_]{1,64}$"
+              },
+              "urlPrefix": {
+                "type": "string",
+                "pattern": "^https://[^\\s,@?#]+/$"
+              },
+              "cidr": {
+                "$ref": "#/$defs/cidr"
+              },
+              "port": {
+                "$ref": "#/$defs/port"
+              }
+            }
+          }
+        },
+        "egressApertures": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["name", "host", "port", "cidr"],
+            "properties": {
+              "name": {
+                "type": "string",
+                "pattern": "^[a-z][a-z0-9_]{0,63}$"
+              },
+              "host": {
+                "type": "string",
+                "pattern": "^[A-Za-z0-9.-]{1,253}$"
+              },
+              "port": {
+                "$ref": "#/$defs/port"
+              },
+              "maxBytes": {
+                "type": "string",
+                "pattern": "^[0-9]{1,15}(KiB|MiB|GiB|TiB)?$"
+              },
+              "cidr": {
+                "$ref": "#/$defs/cidr"
+              }
+            }
+          }
+        }
+      }
+    },
+    "readiness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requireFacts"],
+      "properties": {
+        "requireFacts": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "string",
+            "pattern": "^[a-z][a-z0-9_.-]{0,127}$"
+          }
+        }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requests", "limits"],
+      "properties": {
+        "requests": {
+          "$ref": "#/$defs/computeResources"
+        },
+        "limits": {
+          "$ref": "#/$defs/computeResources"
+        }
+      }
+    },
+    "podAnnotations": {
+      "type": "object",
+      "maxProperties": 32,
+      "propertyNames": {
+        "allOf": [
+          {
+            "pattern": "^([a-z0-9.-]{1,253}/)?[A-Za-z0-9][A-Za-z0-9._-]{0,62}$"
+          },
+          {
+            "not": {
+              "pattern": "[Aa][Pp][Pp][Aa][Rr][Mm][Oo][Rr]"
+            }
+          },
+          {
+            "not": {
+              "pattern": "[Ss][Ee][Cc][Cc][Oo][Mm][Pp]\\.[Ss][Ee][Cc][Uu][Rr][Ii][Tt][Yy]\\.[Aa][Ll][Pp][Hh][Aa]\\.[Kk][Uu][Bb][Ee][Rr][Nn][Ee][Tt][Ee][Ss]\\.[Ii][Oo]/"
+            }
+          }
+        ]
+      },
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "networkPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dns", "clients", "scrapers", "allowAnyEgress"],
+      "properties": {
+        "dns": {
+          "$ref": "#/$defs/peer"
+        },
+        "clients": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/peer"
+          }
+        },
+        "scrapers": {
+          "type": "array",
+          "maxItems": 16,
+          "items": {
+            "$ref": "#/$defs/peer"
+          }
+        },
+        "allowAnyEgress": {
+          "type": "boolean"
+        }
+      }
+    },
+    "nodeProfiles": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "namespace", "kubeletRoot"],
+      "properties": {
+        "enabled": {
+          "type": "boolean"
+        },
+        "namespace": {
+          "type": "string",
+          "pattern": "^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)?$"
+        },
+        "kubeletRoot": {
+          "type": "string",
+          "pattern": "^/[A-Za-z0-9._/-]*[A-Za-z0-9._-]$"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "dnsName": {
+      "type": "string",
+      "pattern": "^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)*$",
+      "maxLength": 253
+    },
+    "objectName": {
+      "type": "string",
+      "pattern": "^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$"
+    },
+    "labelKey": {
+      "type": "string",
+      "pattern": "^([a-z0-9.-]{1,253}/)?[A-Za-z0-9]([A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$"
+    },
+    "labelValue": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9]([A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$"
+    },
+    "port": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535
+    },
+    "cidr": {
+      "type": "string",
+      "pattern": "^(([0-9]{1,3}\\.){3}[0-9]{1,3}/([0-9]|[12][0-9]|3[0-2])|[0-9A-Fa-f:]{2,39}/([0-9]|[1-9][0-9]|1[01][0-9]|12[0-8]))$"
+    },
+    "destination": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cidr", "port"],
+      "properties": {
+        "cidr": {
+          "$ref": "#/$defs/cidr"
+        },
+        "port": {
+          "$ref": "#/$defs/port"
+        }
+      }
+    },
+    "computeResources": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["cpu", "memory"],
+      "properties": {
+        "cpu": {
+          "type": "string",
+          "pattern": "^([1-9][0-9]*m|[0-9]+(\\.[0-9]+)?)$"
+        },
+        "memory": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]*(Ki|Mi|Gi|Ti)$"
+        }
+      }
+    },
+    "selector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["matchLabels"],
+      "properties": {
+        "matchLabels": {
+          "type": "object",
+          "minProperties": 1,
+          "maxProperties": 16,
+          "propertyNames": {
+            "$ref": "#/$defs/labelKey"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/labelValue"
+          }
+        }
+      }
+    },
+    "peer": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "namespaceSelector": {
+          "$ref": "#/$defs/selector"
+        },
+        "podSelector": {
+          "$ref": "#/$defs/selector"
+        }
+      }
+    }
+  }
+}

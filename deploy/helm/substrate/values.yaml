@@ -1,0 +1,66 @@
+replicas: 2
+image:
+  repository: ghcr.io/beyond10x/b10x-substrate-daemon
+  digest: ""
+  tag: ""
+  pullPolicy: IfNotPresent
+clusterDomain: cluster.local
+nodePool:
+  label:
+    key: ""
+    value: ""
+  taint:
+    key: ""
+    value: ""
+    effect: NoSchedule
+persistence:
+  storageClassName: ""
+  size: 20Gi
+  projectQuotaCapable: false
+tls:
+  secretName: ""
+identity:
+  origin: ""
+  caConfigMap:
+    name: ""
+    key: ca.crt
+  egress:
+    cidr: ""
+    port: 443
+execution:
+  enabled: false
+  projectQuotas:
+    enabled: false
+    ids: ""
+daemon:
+  eventRetention: 10000
+  execCpuCores: 1
+  allowUnrecordedSessions: false
+  logFilter: info
+  gitSources: []
+  egressApertures: []
+readiness:
+  requireFacts: []
+resources:
+  requests:
+    cpu: 500m
+    memory: 512Mi
+  limits:
+    cpu: "2"
+    memory: 2Gi
+podAnnotations: {}
+networkPolicy:
+  dns:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: kube-system
+    podSelector:
+      matchLabels:
+        k8s-app: kube-dns
+  clients: []
+  scrapers: []
+  allowAnyEgress: false
+nodeProfiles:
+  enabled: false
+  namespace: ""
+  kubeletRoot: /var/lib/kubelet

@@ -226,6 +226,9 @@ bundles' reproducibility proof (invariant 6), not as tooling.
 | `check-bundle <version>` | a released bundle whose bytes are not the fixed point of `xtask/bundle-source/<version>/` | no — focused form of the batched gate check |
 | `check-bundles <version>...` | the same checks with a bounded worker count and deterministic version-order reporting | yes, `0.5.0` through `0.23.0` in one invocation |
 | `check-json [<version>...]` | JSON beneath a released bundle that no bundled schema classifies, that its schema rejects, or that is not in deterministic source form | yes, all twenty-three |
+| `chart-lane static [--helm <path>]` | a rendering of `deploy/helm/substrate` that breaks ADR 0046 (a second Service selecting the pods, a Service certificate name, an unretained ledger claim, a token, a capability, host namespace or host path the profile does not grant, an open NetworkPolicy rule), or a privilege, cgroup, mount, quota, transport or egress posture the chart renders instead of refusing | no — `chart-lane.yml` |
+| `chart-lane cluster --image <ref> --node-image <ref>` | creates and deletes its own kind cluster, then refuses a pod that is not ready on its own pool node, a certificate that verifies under the Service name, a ledger that does not survive a rolling restart, an undeclared egress that arrives, an execution pod `baseline` admits, or an uninstall that leaves more than the ledger claims; a scenario it cannot prove is reported absent | no — `chart-lane.yml` |
+| `package-chart --version <v> --image-digest <d> --out <dir>` | produces the released chart, a byte-for-byte reproducible archive, with its version set and its default image pinned to the daemon digest | no — `release.yml` |
 
 **`cargo xtask package-bundle <version> --out <dir>`** packages a released bundle as a
 deterministic OCI image layout. It is not a gate step of its own: its cases run under
@@ -456,6 +459,28 @@ conclusion for the tagged SHA rather than re-running a lookalike, and copies the
 layout with ORAS rather than constructing another manifest at publication time. It proves the
 bundle is anonymously retrievable before mutating the daemon-image tag, so correcting first-push
 package visibility leaves a safe retry path.
+
+**A release also publishes the Kubernetes chart, and requires a green chart lane for the tagged
+commit** (ADR 0046, K7 and K9). The preflight waits for `.github/workflows/chart-lane.yml`'s own
+recorded `success` for that exact commit, as it does for `gate.yml`, and refuses a tag without one.
+Both steps count only a `push` run on `main` or a `workflow_dispatch` run of this repository: a
+pull-request run tested a merge, not the tagged tree. The scenarios the chart lane reports absent
+(always the four execution-enabled ones it cannot run on kind) are read from that run's
+annotations and printed under the chart lane in the release notes and both job summaries.
+That workflow runs on every push to `main`, so every taggable commit has a run; on pull requests it
+runs only when the chart, its xtask modules, the daemon and the crates it links, the toolchain, the
+`Dockerfile` or a release workflow changes. An existing chart tag refuses a tag push before any
+artifact is published. After the daemon image is pushed, `cargo xtask package-chart` packages the
+chart with that digest as its default image, byte for byte reproducibly, before the registry login.
+The release job pushes it once to
+`oci://ghcr.io/beyond10x/charts/b10x-substrate:<version>` (write-once; a recovery dispatch reuses it
+only when its chart layer is byte for byte the local package), keyless-signs and `cosign verify`-es it, attests its
+build provenance with `actions/attest-build-provenance` and checks that with `gh attestation
+verify`, then reads it back anonymously, all before announcing. `attestations: write` is granted to
+the release job only. A recovery dispatch of a tag whose source has no chart publishes none and says
+so; a tag push without a chart is refused. A first push can create the chart package private, so
+the anonymous read-back fails before anything is announced; make the package public and dispatch a
+recovery.
 
 **Two of those three images ship for adopters outside this collection, and that is deliberate.** No
 repository in the `beyond10x` collection pulls `ghcr.io/beyond10x/b10x-substrate-wire` or

@@ -89,7 +89,7 @@
       },
       "reading_load.median": {
         "tolerance": 0,
-        "value": 9.0
+        "value": 7.0
       }
     },
     "page:guides/mcp-adapter": {

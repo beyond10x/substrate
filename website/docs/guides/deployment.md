@@ -164,6 +164,86 @@ credential appears in a label or a value. A scrape carries at most 578 samples.
 
 Every histogram uses the same 11 buckets, from 5 ms to 10 s.
 
+## Kubernetes: one daemon per dedicated node
+
+Each release publishes a Helm chart at `oci://ghcr.io/beyond10x/charts/b10x-substrate`, with the
+release's version. Its default image is that release's daemon, pinned by digest. The chart runs
+one daemon pod per node of a dedicated pool. Each pod is its own trust domain with its own ledger.
+
+Check the chart before you install it:
+
+```bash
+cosign verify \
+  --certificate-identity https://github.com/beyond10x/substrate/.github/workflows/release.yml@refs/tags/<version> \
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  ghcr.io/beyond10x/charts/b10x-substrate@<digest>
+gh attestation verify oci://ghcr.io/beyond10x/charts/b10x-substrate@<digest> --repo beyond10x/substrate
+helm install substrate oci://ghcr.io/beyond10x/charts/b10x-substrate --version <version> \
+  --namespace substrate --values values.yaml
+```
+
+Use Helm 3.22.1 or later on Kubernetes 1.32 or later. The chart lane tests Helm 3.22.1 on
+Kubernetes 1.37.
+
+### Before you install
+
+Create the namespace yourself. The chart never creates or deletes it. With `execution.enabled`,
+label it to enforce Pod Security `privileged`, with `warn` and `audit` at `baseline`. Without
+execution, `restricted` is enough.
+
+The chart refuses to render until you supply each of these:
+
+| Value | What it names |
+|---|---|
+| `nodePool` | the label and taint of the dedicated nodes |
+| `persistence.storageClassName` | a class that binds `WaitForFirstConsumer` |
+| `tls.secretName` | the TLS secret with each pod's certificate |
+| `identity.origin` | the HTTPS Identity origin |
+| `identity.caConfigMap` | Identity's trust roots |
+| `identity.egress` | Identity's address range and port |
+| `cidr` of each Git source and aperture | the range its egress rule admits |
+
+The certificate names each pod's host and nothing else. `helm template` prints the names, and the
+chart writes them to the ConfigMap `<release>-certificate-names`.
+
+### Address one pod, never the Service
+
+Every pod has its own name:
+`<release>-<ordinal>.<release>.<namespace>.svc.<cluster domain>`. Send a client's requests to one
+pod by that name. The Service name resolves to every ready pod. A workspace or operation created on
+one pod does not exist on another, and the certificate does not name the Service.
+
+### What the chart refuses
+
+- a privileged container, a host namespace or a host path for the daemon;
+- the development TCP listener and a local uid list;
+- a cgroup root, a writable root or a read-only host root;
+- project quotas without `execution.enabled`, without `persistence.projectQuotaCapable` or without
+  an identity range;
+- a pod annotation that selects an AppArmor or seccomp profile;
+- egress to any prefix length 0, such as `0.0.0.0/0` or `::/0`, unless
+  `networkPolicy.allowAnyEgress` is true.
+
+With `execution.enabled`, the daemon starts as design 25's bootstrap. It holds five capabilities
+and selects the seccomp and AppArmor profiles from each node. `nodeProfiles.enabled` installs those
+profiles with a DaemonSet in its own `privileged` namespace. Otherwise the node image must carry
+them.
+
+### Operate it
+
+| Task | How |
+|---|---|
+| Probes | `/livez` and `/readyz` on port 9090 |
+| Required facts | list them in `readiness.requireFacts` |
+| Scraping | name the scrapers in `networkPolicy.scrapers` |
+| Clients | name them in `networkPolicy.clients` |
+| Certificate rotation | replace the secret, then `kubectl rollout restart statefulset/<release>` |
+| Upgrade | `helm upgrade` replaces one ready pod at a time |
+| Uninstall | keeps each `ledger-<release>-<ordinal>` claim |
+
+A pod reads its certificate only when it starts, so a rotation needs the restart. Each ledger claim
+stays with its ordinal. Delete the claims yourself to destroy the ledgers.
+
 ## Rules that do not change by posture
 
 - Never bind a reachable unauthenticated control listener.

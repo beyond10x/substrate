@@ -48,8 +48,9 @@
 #     Registry writes cannot be rolled back here, but no release, changelog stanza or digest claim
 #     is emitted on their strength.
 #
-# Permissions. `contents: read` at workflow level. `preflight` adds `actions: read`, which is the
-# only scope that can read another workflow's conclusion for a SHA; there is no way to ask "was
+# Permissions. `contents: read` at workflow level. `preflight` adds `actions: read`, the only
+# scope that can read another workflow's conclusion for a SHA, and `checks: read`, which reads the
+# chart lane's absent scenarios from that run's annotations; there is no way to ask "was
 # gate.yml green for this commit" with `contents: read` alone. `release` adds `packages: write`
 # (push to GHCR) and `id-token: write` (the OIDC token keyless cosign signs with) and nothing else.
 # Neither write scope exists anywhere but that one job.
@@ -134,6 +135,11 @@ env:
   GLIBC_CEILING: "2.35"
   GLIBC_FLOOR_IMAGE: ubuntu:22.04@sha256:e0f80c829509ef4df9e76bd8944eb7b8ec25cbb379b112a7f9448b2c77a77c9b
   GATE_WORKFLOW: gate.yml
+  CHART_WORKFLOW: chart-lane.yml
+  CHART_REPOSITORY: ghcr.io/beyond10x/charts
+  CHART_IMAGE: ghcr.io/beyond10x/charts/b10x-substrate
+  HELM_VERSION: v3.22.1
+  HELM_SHA256: 896cf63684a42a723d61c980369d6e588330927deb13676ca0d85006dd6da0ea
 
 jobs:
   preflight:
@@ -145,10 +151,14 @@ jobs:
       # Reading `gate.yml`'s conclusion for a SHA is an Actions API read. It is a read-only scope
       # on a job that builds nothing, pushes nothing and holds no write scope of any kind.
       actions: read
+      checks: read
     outputs:
       version: ${{ steps.tag.outputs.version }}
       source-sha: ${{ steps.tag.outputs.source-sha }}
       gate-run-url: ${{ steps.gate.outputs.run-url }}
+      chart: ${{ steps.chart-lane.outputs.chart }}
+      chart-lane-run-url: ${{ steps.chart-lane.outputs.run-url }}
+      chart-lane-absent: ${{ steps.chart-lane.outputs.absent }}
       confinement-evidence: ${{ steps.confinement.outputs.evidence }}
       quota-evidence: ${{ steps.quota.outputs.evidence }}
 
@@ -255,11 +265,12 @@ jobs:
         run: |
           set -euo pipefail
           deadline=$(( $(date +%s) + 50 * 60 ))
+          admitted=".workflow_runs[] | select((.event == \"push\" and .head_branch == \"main\") or .event == \"workflow_dispatch\") | select(.head_repository.full_name == \"${GITHUB_REPOSITORY}\")"
 
           while :; do
             runs=$(gh api --paginate \
               "repos/${GITHUB_REPOSITORY}/actions/workflows/${GATE_WORKFLOW}/runs?head_sha=${SOURCE_SHA}&per_page=100" \
-              --jq '.workflow_runs[] | [.status, (.conclusion // "-"), .html_url] | @tsv')
+              --jq "${admitted} | [.status, (.conclusion // \"-\"), .html_url] | @tsv")
 
             success_url=$(printf '%s\n' "$runs" \
               | awk -F'\t' '$1 == "completed" && $2 == "success" { print $3; exit }')
@@ -284,6 +295,80 @@ jobs:
             if [ "$(date +%s)" -ge "$deadline" ]; then
               echo "refused: no successful ${GATE_WORKFLOW} run for ${SOURCE_SHA} within the wait window." >&2
               echo "The gate is the bar for main (AGENTS.md, section \"The gate\"); nothing is published without it." >&2
+              exit 1
+            fi
+            sleep 30
+          done
+
+      - name: Require a green chart-lane run for this commit
+        id: chart-lane
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SOURCE_SHA: ${{ steps.tag.outputs.source-sha }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if ! git cat-file -e "${SOURCE_SHA}:deploy/helm/substrate/Chart.yaml" 2>/dev/null; then
+            if [ "$EVENT_NAME" != workflow_dispatch ]; then
+              echo "refused: the tagged source ${SOURCE_SHA} has no deploy/helm/substrate chart; a tag push always publishes one." >&2
+              exit 1
+            fi
+            echo "the tagged source ${SOURCE_SHA} predates the chart; this recovery run publishes no chart"
+            echo "chart=absent" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          deadline=$(( $(date +%s) + 90 * 60 ))
+          admitted=".workflow_runs[] | select((.event == \"push\" and .head_branch == \"main\") or .event == \"workflow_dispatch\") | select(.head_repository.full_name == \"${GITHUB_REPOSITORY}\")"
+          api_root="${GITHUB_API_URL:-https://api.github.com}/"
+
+          while :; do
+            runs=$(gh api --paginate \
+              "repos/${GITHUB_REPOSITORY}/actions/workflows/${CHART_WORKFLOW}/runs?head_sha=${SOURCE_SHA}&per_page=100" \
+              --jq "${admitted} | [.status, (.conclusion // \"-\"), .html_url, .id] | @tsv")
+
+            success=$(printf '%s\n' "$runs" \
+              | awk -F'\t' '$1 == "completed" && $2 == "success" { print $3 "\t" $4; exit }')
+            if [ -n "$success" ]; then
+              success_url=${success%%$'\t'*}
+              run_id=${success##*$'\t'}
+              absent=""
+              check_runs=$(gh api --paginate "repos/${GITHUB_REPOSITORY}/actions/runs/${run_id}/jobs?per_page=100" \
+                --jq '(.jobs // [])[] | .check_run_url // empty')
+              while IFS= read -r check_run; do
+                [ -n "$check_run" ] || continue
+                notes=$(gh api --paginate "${check_run#"$api_root"}/annotations?per_page=100" \
+                  --jq '.[] | select(.annotation_level == "notice" and .title == "chart-lane absent") | .message')
+                while IFS= read -r note; do
+                  [ -n "$note" ] || continue
+                  absent="${absent:+${absent}; }${note}"
+                done <<< "$notes"
+              done <<< "$check_runs"
+              absent=$(printf '%s' "$absent" | tr -d '\r\n')
+              echo "chart lane green for ${SOURCE_SHA}: ${success_url}"
+              echo "chart lane absent, not passed: ${absent:-none recorded}"
+              {
+                echo "chart=present"
+                echo "run-url=${success_url}"
+                echo "absent=${absent:-none recorded}"
+              } >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+
+            pending=$(printf '%s\n' "$runs" | awk -F'\t' 'NF && $1 != "completed" { c++ } END { print c + 0 }')
+            if [ "$pending" -eq 0 ]; then
+              if [ -n "${runs//[[:space:]]/}" ]; then
+                echo "refused: every ${CHART_WORKFLOW} run for ${SOURCE_SHA} is completed and none concluded success:" >&2
+                printf '%s\n' "$runs" >&2
+                exit 1
+              fi
+              echo "no ${CHART_WORKFLOW} run recorded for ${SOURCE_SHA} yet; waiting"
+            else
+              echo "${pending} ${CHART_WORKFLOW} run(s) for ${SOURCE_SHA} still running; waiting"
+            fi
+
+            if [ "$(date +%s)" -ge "$deadline" ]; then
+              echo "refused: no successful ${CHART_WORKFLOW} run for ${SOURCE_SHA} within the wait window." >&2
+              echo "The chart is published only for a commit whose chart lane passed (ADR 0046, K9)." >&2
               exit 1
             fi
             sleep 30
@@ -515,6 +600,8 @@ jobs:
           VERSION: ${{ steps.tag.outputs.version }}
           SOURCE_SHA: ${{ steps.tag.outputs.source-sha }}
           GATE_RUN_URL: ${{ steps.gate.outputs.run-url }}
+          CHART_LANE_RUN_URL: ${{ steps.chart-lane.outputs.run-url }}
+          CHART_LANE_ABSENT: ${{ steps.chart-lane.outputs.absent }}
           CONFINEMENT_EVIDENCE: ${{ steps.confinement.outputs.evidence }}
           QUOTA_EVIDENCE: ${{ steps.quota.outputs.evidence }}
         run: |
@@ -526,6 +613,8 @@ jobs:
             echo "| version | \`${VERSION}\` |"
             echo "| SOURCE_SHA | \`${SOURCE_SHA}\` |"
             echo "| gate run | ${GATE_RUN_URL} |"
+            echo "| chart lane run | ${CHART_LANE_RUN_URL:-no chart in the tagged source} |"
+            echo "| chart lane absent, not passed | ${CHART_LANE_ABSENT:-no chart in the tagged source} |"
             echo "| confinement lane | \`${CONFINEMENT_EVIDENCE}\` |"
             echo "| quota lane | \`${QUOTA_EVIDENCE}\` |"
           } >> "$GITHUB_STEP_SUMMARY"
@@ -545,10 +634,14 @@ jobs:
       contents: write
       packages: write
       id-token: write
+      attestations: write
     env:
       VERSION: ${{ needs.preflight.outputs.version }}
       SOURCE_SHA: ${{ needs.preflight.outputs.source-sha }}
       GATE_RUN_URL: ${{ needs.preflight.outputs.gate-run-url }}
+      CHART: ${{ needs.preflight.outputs.chart }}
+      CHART_LANE_RUN_URL: ${{ needs.preflight.outputs.chart-lane-run-url }}
+      CHART_LANE_ABSENT: ${{ needs.preflight.outputs.chart-lane-absent }}
       CONFINEMENT_EVIDENCE: ${{ needs.preflight.outputs.confinement-evidence }}
       QUOTA_EVIDENCE: ${{ needs.preflight.outputs.quota-evidence }}
 
@@ -622,6 +715,24 @@ jobs:
             echo "mcp-exists=true" >> "$GITHUB_OUTPUT"
           else
             echo "mcp-exists=false" >> "$GITHUB_OUTPUT"
+          fi
+          if [ "$CHART" = present ]; then
+            if chart_found=$(oras resolve "${CHART_IMAGE}:${VERSION}" 2>&1); then
+              if [ "$EVENT_NAME" != workflow_dispatch ]; then
+                echo "refused: ${CHART_IMAGE}:${VERSION} already exists; initial release runs never reuse chart tags." >&2
+                exit 1
+              fi
+              echo "chart-exists=true" >> "$GITHUB_OUTPUT"
+            else
+              case "$chart_found" in
+                *"not found"*|*"manifest unknown"*) echo "chart-exists=false" >> "$GITHUB_OUTPUT" ;;
+                *)
+                  echo "refused: could not resolve ${CHART_IMAGE}:${VERSION} reliably:" >&2
+                  printf '%s\n' "$chart_found" >&2
+                  exit 1
+                  ;;
+              esac
+            fi
           fi
 
       # The packager reads the frozen directory and writes only under target/. Full checkout
@@ -1184,6 +1295,171 @@ jobs:
           anonymous_config=$(mktemp -d)
           DOCKER_CONFIG="$anonymous_config" docker pull "${MCP_IMAGE}@${MCP_DIGEST}"
 
+      - name: Install the pinned Helm release
+        if: env.CHART == 'present'
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/helm-download" "$RUNNER_TEMP/helm-bin"
+          curl --fail --location --retry 3 "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz" --output "$RUNNER_TEMP/helm-download/helm.tar.gz"
+          echo "$HELM_SHA256  $RUNNER_TEMP/helm-download/helm.tar.gz" | sha256sum --check --strict
+          tar -xzf "$RUNNER_TEMP/helm-download/helm.tar.gz" -C "$RUNNER_TEMP/helm-download" linux-amd64/helm
+          install -m 0755 "$RUNNER_TEMP/helm-download/linux-amd64/helm" "$RUNNER_TEMP/helm-bin/helm"
+          echo "$RUNNER_TEMP/helm-bin" >> "$GITHUB_PATH"
+
+      - name: Package the Kubernetes chart
+        if: env.CHART == 'present'
+        env:
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cargo run --release --locked -p xtask -- package-chart \
+            --version "${VERSION}" \
+            --image-digest "${DIGEST}" \
+            --out target/release-chart \
+            --helm "$RUNNER_TEMP/helm-bin/helm"
+          archive="target/release-chart/b10x-substrate-${VERSION}.tgz"
+          echo "packaged ${archive} -> sha256:$(sha256sum "$archive" | cut -d' ' -f1)"
+
+      - name: Log in to the chart registry
+        if: env.CHART == 'present'
+        env:
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GHCR_TOKEN" \
+            | helm registry login ghcr.io --username "$GHCR_USER" --password-stdin
+
+      - name: Package and push the Kubernetes chart once
+        id: chart
+        if: env.CHART == 'present'
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          resolve_chart() {
+            local found
+            if found=$(oras resolve "${CHART_IMAGE}:${VERSION}" 2>&1); then
+              case "$found" in
+                sha256:*) printf '%s\n' "$found" ;;
+                *) echo "refused: the registry reported no chart digest ('${found}')." >&2; return 1 ;;
+              esac
+            else
+              case "$found" in
+                *"not found"*|*"manifest unknown"*) echo absent ;;
+                *)
+                  echo "refused: could not resolve ${CHART_IMAGE}:${VERSION} reliably:" >&2
+                  printf '%s\n' "$found" >&2
+                  return 1
+                  ;;
+              esac
+            fi
+          }
+          chart_layer() {
+            oras manifest fetch "${CHART_IMAGE}@$1" \
+              | jq -er '[.layers[] | select(.mediaType == "application/vnd.cncf.helm.chart.content.v1.tar+gzip")] as $charts
+                  | if (.layers | length) == 1 and ($charts | length) == 1 then $charts[0].digest else error("not exactly one chart layer") end'
+          }
+          remote_digest=$(resolve_chart)
+          archive="target/release-chart/b10x-substrate-${VERSION}.tgz"
+          if [ ! -f "$archive" ]; then
+            echo "refused: ${archive} was not packaged; nothing is published or reused without the local chart to compare." >&2
+            exit 1
+          fi
+          local_layer="sha256:$(sha256sum "$archive" | cut -d' ' -f1)"
+          if [ "$remote_digest" != absent ]; then
+            if [ "$EVENT_NAME" != workflow_dispatch ]; then
+              echo "refused: ${CHART_IMAGE}:${VERSION} already exists; initial release runs never reuse chart tags." >&2
+              exit 1
+            fi
+            remote_layer=$(chart_layer "$remote_digest")
+            if [ "$remote_layer" != "$local_layer" ]; then
+              echo "refused: ${CHART_IMAGE}@${remote_digest} carries chart ${remote_layer}, not the deterministic package ${local_layer}; it will not be overwritten." >&2
+              exit 1
+            fi
+            echo "reusing ${CHART_IMAGE}:${VERSION} at ${remote_digest}, whose chart is byte for byte ${local_layer}"
+          else
+            if [ "$(resolve_chart)" != absent ]; then
+              echo "refused: ${CHART_IMAGE}:${VERSION} appeared before push; it will not be overwritten." >&2
+              exit 1
+            fi
+            helm push "$archive" "oci://${CHART_REPOSITORY}"
+            remote_digest=$(resolve_chart)
+            if [ "$remote_digest" = absent ]; then
+              echo "refused: ${CHART_IMAGE}:${VERSION} does not resolve after the push." >&2
+              exit 1
+            fi
+            pushed_layer=$(chart_layer "$remote_digest")
+            if [ "$pushed_layer" != "$local_layer" ]; then
+              echo "refused: ${CHART_IMAGE}@${remote_digest} carries chart ${pushed_layer}, not the pushed ${local_layer}." >&2
+              exit 1
+            fi
+          fi
+          echo "chart ${CHART_IMAGE}:${VERSION} -> ${remote_digest} (chart ${local_layer})"
+          echo "digest=${remote_digest}" >> "$GITHUB_OUTPUT"
+
+      - name: Sign the Kubernetes chart keylessly
+        if: env.CHART == 'present'
+        env:
+          CHART_DIGEST: ${{ steps.chart.outputs.digest }}
+        run: |
+          set -euo pipefail
+          cosign sign --yes "${CHART_IMAGE}@${CHART_DIGEST}"
+
+      - name: Verify the chart signature with the workflow identity
+        id: chart-verify
+        if: env.CHART == 'present'
+        env:
+          CHART_DIGEST: ${{ steps.chart.outputs.digest }}
+        run: |
+          set -euo pipefail
+          identity="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}"
+          cosign verify \
+            --certificate-identity "${identity}" \
+            --certificate-oidc-issuer 'https://token.actions.githubusercontent.com' \
+            "${CHART_IMAGE}@${CHART_DIGEST}" > chart-cosign-verify.json
+          jq -e 'length > 0' chart-cosign-verify.json > /dev/null
+          echo "identity=${identity}" >> "$GITHUB_OUTPUT"
+
+      - name: Attest the chart's build provenance
+        id: chart-attest
+        if: env.CHART == 'present'
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.CHART_IMAGE }}
+          subject-digest: ${{ steps.chart.outputs.digest }}
+          push-to-registry: true
+
+      - name: Verify the chart provenance with the workflow identity
+        id: chart-provenance
+        if: env.CHART == 'present'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHART_DIGEST: ${{ steps.chart.outputs.digest }}
+        run: |
+          set -euo pipefail
+          gh attestation verify "oci://${CHART_IMAGE}@${CHART_DIGEST}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --cert-identity "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}" \
+            --cert-oidc-issuer 'https://token.actions.githubusercontent.com' \
+            --predicate-type 'https://slsa.dev/provenance/v1'
+
+      - name: Prove the chart is anonymously retrievable
+        id: chart-anonymous
+        if: env.CHART == 'present'
+        env:
+          CHART_DIGEST: ${{ steps.chart.outputs.digest }}
+        run: |
+          set -euo pipefail
+          anonymous_config=$(mktemp -d)
+          anonymous_digest=$(DOCKER_CONFIG="$anonymous_config" oras resolve "${CHART_IMAGE}:${VERSION}")
+          if [ "$anonymous_digest" != "$CHART_DIGEST" ]; then
+            echo "refused: ${CHART_IMAGE}:${VERSION} resolves anonymously to '${anonymous_digest}', not ${CHART_DIGEST}." >&2
+            exit 1
+          fi
+          HELM_REGISTRY_CONFIG="$anonymous_config/registry.json" \
+            helm pull "oci://${CHART_IMAGE}" --version "${VERSION}" --destination "$anonymous_config"
+
       # Everything below announces. Nothing above it did.
 
       # The release notes state what each artifact is and, as explicitly, what it is not. The wire
@@ -1206,6 +1482,8 @@ jobs:
           SUMS_DIGEST: ${{ steps.binaries.outputs.sums-digest }}
           BINARIES_IDENTITY: ${{ steps.binaries-verify.outputs.identity }}
           BINARIES: ${{ steps.binary-source.outputs.present }}
+          CHART_DIGEST: ${{ steps.chart.outputs.digest }}
+          CHART_IDENTITY: ${{ steps.chart-verify.outputs.identity }}
         run: |
           set -euo pipefail
           cat > release-notes.md <<NOTES
@@ -1304,6 +1582,48 @@ jobs:
           exit 1
           ;;
           esac
+          case "$CHART" in
+          present)
+          cat >> release-notes.md <<NOTES
+          ## Kubernetes chart
+
+          | | |
+          | --- | --- |
+          | chart | \`oci://${CHART_IMAGE}\` version \`${VERSION}\` |
+          | digest | \`${CHART_DIGEST}\` |
+          | default image | \`${IMAGE}@${DIGEST}\` |
+          | chart lane | ${CHART_LANE_RUN_URL} |
+          | chart lane absent, not passed | ${CHART_LANE_ABSENT} |
+
+          The node-bound serving profile of ADR 0046: one StatefulSet pod per dedicated node, each
+          with its own ledger claim, addressed by its own host name. Install by version and check
+          the digest, the signature and the build provenance first:
+
+          \`\`\`console
+          cosign verify \\
+            --certificate-identity ${CHART_IDENTITY} \\
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \\
+            ${CHART_IMAGE}@${CHART_DIGEST}
+          gh attestation verify oci://${CHART_IMAGE}@${CHART_DIGEST} --repo ${GITHUB_REPOSITORY}
+          helm install substrate oci://${CHART_IMAGE} --version ${VERSION} --values values.yaml
+          \`\`\`
+
+          NOTES
+          ;;
+          absent)
+          cat >> release-notes.md <<NOTES
+          ## Kubernetes chart
+
+          This release carries no chart. It was published by a recovery run of a tag whose source
+          predates \`deploy/helm/substrate\`.
+
+          NOTES
+          ;;
+          *)
+          echo "refused: no answer on whether this release carries a chart ('${CHART}')." >&2
+          exit 1
+          ;;
+          esac
           cat >> release-notes.md <<NOTES
           ## Confinement lane
 
@@ -1335,8 +1655,8 @@ jobs:
 
           ## Verify the signatures
 
-          All three OCI artifacts are signed keylessly through Sigstore, and so is any \`SHA256SUMS\`
-          (see *Release binaries* above). Each certificate identity is this workflow at the ref that
+          All three image and bundle artifacts are signed keylessly through Sigstore, and so are
+          any chart (see *Kubernetes chart* above) and any \`SHA256SUMS\` (see *Release binaries*). Each certificate identity is this workflow at the ref that
           performed the release, so a signature from any other workflow, ref or repository fails:
 
           \`\`\`console
@@ -1438,6 +1758,7 @@ jobs:
           MCP_DIGEST: ${{ steps.mcp-build.outputs.digest }}
           SUMS_DIGEST: ${{ steps.binaries.outputs.sums-digest }}
           BINARIES: ${{ steps.binary-source.outputs.present }}
+          CHART_DIGEST: ${{ steps.chart.outputs.digest }}
         run: |
           {
             echo "CHANGELOG.md is protected by the Full gate and is not pushed directly."
@@ -1451,6 +1772,11 @@ jobs:
             else
               echo "Release binaries: not published: the tagged source has no release-binaries stage."
             fi
+            if [ "$CHART" = present ]; then
+              echo "Kubernetes chart: \`oci://${CHART_IMAGE}\` version \`${VERSION}\` at \`${CHART_DIGEST}\`, keyless-signed with build provenance; verify with \`cosign verify\` and \`gh attestation verify\`."
+            else
+              echo "Kubernetes chart: not published: the tagged source has no chart."
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Release summary
@@ -1461,6 +1787,7 @@ jobs:
           MCP_DIGEST: ${{ steps.mcp-build.outputs.digest }}
           SUMS_DIGEST: ${{ steps.binaries.outputs.sums-digest }}
           BINARIES: ${{ steps.binary-source.outputs.present }}
+          CHART_DIGEST: ${{ steps.chart.outputs.digest }}
         run: |
           case "$BINARIES" in
             true) binaries_row="\`${BINARY_TARGET}\`, SHA256SUMS \`${SUMS_DIGEST:-<not built>}\`" ;;
@@ -1479,8 +1806,12 @@ jobs:
             echo "| disposable MCP image | \`${MCP_IMAGE}:${VERSION}\` |"
             echo "| MCP digest | \`${MCP_DIGEST:-<not built>}\` |"
             echo "| release binaries | ${binaries_row} |"
+            echo "| Kubernetes chart | \`${CHART_IMAGE}:${VERSION}\` (${CHART:-<undecided>}) |"
+            echo "| chart digest | \`${CHART_DIGEST:-<not built>}\` |"
             echo "| SOURCE_SHA | \`${SOURCE_SHA}\` |"
             echo "| gate run | ${GATE_RUN_URL} |"
+            echo "| chart lane run | ${CHART_LANE_RUN_URL:-<none>} |"
+            echo "| chart lane absent, not passed | ${CHART_LANE_ABSENT:-<none>} |"
             echo "| confinement lane | \`${CONFINEMENT_EVIDENCE:-<none recorded>}\` |"
             echo "| quota lane | \`${QUOTA_EVIDENCE:-<none recorded>}\` |"
             echo "| daemon signature step | ${{ steps.verify.outcome }} |"
@@ -1489,6 +1820,9 @@ jobs:
             echo "| binaries signature step | ${{ steps.binaries-verify.outcome }} |"
             echo "| anonymous pull step | ${{ steps.anonymous.outcome }} |"
             echo "| MCP anonymous pull step | ${{ steps.mcp-anonymous.outcome }} |"
+            echo "| chart signature step | ${{ steps.chart-verify.outcome }} |"
+            echo "| chart provenance step | ${{ steps.chart-provenance.outcome }} |"
+            echo "| chart anonymous pull step | ${{ steps.chart-anonymous.outcome }} |"
             echo "| release publication step | ${{ steps.publish.outcome }} |"
             echo
             echo "The published wire contract remains a **development** bundle; this release does not make it stable."

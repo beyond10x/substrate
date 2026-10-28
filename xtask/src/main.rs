@@ -10,6 +10,9 @@ mod adrs;
 mod advisories;
 mod bot_files;
 mod bundle;
+mod chart;
+mod chart_cluster;
+mod chart_yaml;
 mod container_profiles;
 mod docs;
 mod ess;
@@ -48,6 +51,12 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Check the Kubernetes chart (static) or run its kind scenarios (cluster), per ADR 0046.
+    #[command(name = "chart-lane")]
+    ChartLane(chart::LaneArgs),
+    /// Package the released Kubernetes chart with its version and pinned daemon digest.
+    #[command(name = "package-chart")]
+    PackageChart(chart::PackageArgs),
     /// Validate the standalone public documentation.
     CheckDocs,
     /// Validate ESS and reject drift in the committed conformance suite.
@@ -131,6 +140,8 @@ fn main() -> ExitCode {
 fn dispatch() -> Result<ExitCode> {
     let cli = Cli::parse();
     let report = match cli.command {
+        Command::ChartLane(args) => return chart::run_lane(&args),
+        Command::PackageChart(args) => return chart::run_package(&args),
         Command::CheckEss => ess::check(&repo::root()?)?,
         Command::CheckDocs => docs::check(&repo::root()?)?,
         Command::DocsProvenance(args) => return docs::provenance(&args),
