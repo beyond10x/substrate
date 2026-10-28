@@ -1,6 +1,6 @@
 # Design 23: policy-controlled terminal capture
 
-**Status:** proposed implementation design · **Date:** 2026-10-02
+**Status:** implemented in 0.7.9 by `story:unrecorded-terminal-streaming` · **Date:** 2026-10-02
 
 ## Requirement and boundary
 

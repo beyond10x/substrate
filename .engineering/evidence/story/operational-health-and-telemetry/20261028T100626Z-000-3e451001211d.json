@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-28T10:06:26Z",
+  "actor": "human:timo",
+  "artifact": "story:operational-health-and-telemetry",
+  "kind": "story",
+  "revision": 6,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "gate.yml on main at 54a76dbdceb621cf3a7465018b50aa76f9ad6d3b (Full gate, Pod lane), success",
+    "reference": "https://github.com/beyond10x/substrate/actions/runs/40666945349"
+  }
+}
