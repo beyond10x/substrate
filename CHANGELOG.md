@@ -112,7 +112,9 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   the run's observed end a write is `session.input-closed` while a pending one fails
   `session.write-failed`. The default, `StdinMode::Null`, is `/dev/null` as before. The trait's two
   new methods answer `session.not-pipe` by default, so an implementor outside the crate compiles
-  unchanged.
+  unchanged. `local`, `linux`, `macos` and `systemd` around either prove `stdin_pipe`; `oci`
+  proves it only on a runtime its lane pinned (Docker 29.7.2), and `pod` refuses `Piped` naming
+  the fact.
 
 ### Security
 

@@ -77,6 +77,7 @@ Each profile field needs the family or the fact beside it.
 | `ipc.socket_allowlist` | the fact `ipc_socket_allowlist` |
 | `ipc.signals_contained` | the fact `ipc_signals_contained` |
 | `process_bounds`, `io_bounds` | `limits` |
+| `stdin: Piped` | `process_run` and the fact `stdin_pipe` |
 | `audit` | `audit`; admission, refusal and start records go to the sink |
 | `image` | on an adapter that proves `image_digest_pinned`, `name@sha256:` and 64 lowercase hex digits |
 
