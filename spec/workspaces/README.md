@@ -25,7 +25,7 @@ not the daemon; the daemon's native tests (`crates/substrate-daemon/src/app/test
   The model's alphabet has to hold the prefix's `_`, so it also admits a `_` after the prefix,
   which the wire pattern refuses.
 
-Under ESS 0.70.0 the generated `RootName` decoder checks the alphabet and the length bound; the
+Under ESS 0.72.0 the generated `RootName` decoder checks the alphabet and the length bound; the
 leading-`-` rule and the other invariants stay runtime obligations. The adopt input decodes its
 root name without that check, so the daemon's admission refuses it and records the operation.
 The daemon's admission is the evidence for these rules, not this model.
@@ -65,7 +65,7 @@ refusal is the daemon test's to assert.
 ## Scenarios
 
 Synthesis writes 18 scenarios. Five more are authored under `scenarios/`. All 23 pass against
-ESS 0.70.0's `interpreted` target, which checks the model, not the daemon.
+ESS 0.72.0's `interpreted` target, which checks the model, not the daemon.
 
 | file | claim |
 |---|---|
