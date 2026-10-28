@@ -263,7 +263,7 @@ fn storing(pod_create: fn() -> Reply, phase: &'static str) -> Handler {
                     Reply::Answer(200, json!({"kind": "NetworkPolicyList", "items": items}))
                 }
                 "POST" => {
-                    let object: Value = serde_json::from_str(&request.body).expect("object");
+                    let mut object: Value = serde_json::from_str(&request.body).expect("object");
                     let name = object["metadata"]["name"]
                         .as_str()
                         .expect("name")
@@ -273,6 +273,9 @@ fn storing(pod_create: fn() -> Reply, phase: &'static str) -> Handler {
                     } else {
                         "networkpolicies"
                     };
+                    // The API server assigns every object a uid; a Pod's ownerReference names
+                    // its policy's.
+                    object["metadata"]["uid"] = json!(format!("uid-{collection}-{name}"));
                     objects.insert(format!("{collection}/{name}"), object.clone());
                     if collection == "pods" {
                         pod_create()
@@ -719,9 +722,21 @@ async fn a_run_creates_the_rendered_objects_and_deletes_only_its_own_by_name_pod
         sent_policy, rendered["items"][0],
         "the policy sent is not the rendered one"
     );
+    // Decision D3: the Pod sent is the rendered one plus exactly one ownerReference, to the run's
+    // policy by the uid its create answered, so the garbage collector removes a Pod whose policy
+    // is gone; never a controller reference, never one that blocks the policy's deletion.
+    let mut expected_pod = rendered["items"][1].clone();
+    expected_pod["metadata"]["ownerReferences"] = json!([{
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "name": run.as_str(),
+        "uid": format!("uid-networkpolicies-{}", run.as_str()),
+        "controller": false,
+    }]);
     assert_eq!(
-        sent_pod, rendered["items"][1],
-        "the Pod sent is not the rendered one"
+        sent_pod, expected_pod,
+        "story:pod-unknown-cleanup-outlives-adapter: the Pod sent is not the rendered one with its \
+         ownerReference to its own policy"
     );
     let deletes: Vec<&Seen> = seen.iter().filter(|s| s.method == "DELETE").collect();
     assert!(!deletes.is_empty(), "{seen:?}");

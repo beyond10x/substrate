@@ -268,8 +268,9 @@ fn open_fake(cluster: &FakeCluster) -> Arc<PodAdapter> {
 /// read `pods/log` sees answered 404.
 const LOG_PROBE: &str = "GET /api/v1/namespaces/substrate-fake/pods/substrate-log-access-probe/log?container=run&limitBytes=1 ";
 
-/// Open's last request: the list its sweep of orphaned `NetworkPolicy` objects reads (design 28).
-const SWEEP: &str = "GET /apis/networking.k8s.io/v1/namespaces/substrate-fake/networkpolicies?labelSelector=app.kubernetes.io%2Fmanaged-by%3Db10x-substrate ";
+/// Open's last request: the first page of the list its sweep of orphaned `NetworkPolicy` objects
+/// reads (design 28).
+const SWEEP: &str = "GET /apis/networking.k8s.io/v1/namespaces/substrate-fake/networkpolicies?labelSelector=app.kubernetes.io%2Fmanaged-by%3Db10x-substrate&limit=100 ";
 
 /// Open's requests: the two probes and the sweep's list.
 const OPEN_REQUESTS: usize = 3;

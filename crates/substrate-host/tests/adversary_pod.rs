@@ -147,12 +147,28 @@ struct Behaviour {
     /// Store the Pod a create names, then close the connection without answering: the create
     /// committed and its answer was lost (a timeout, a dropped connection).
     lose_pod_create_answer: bool,
-    /// After the Pod is created, accept every connection and never answer it.
+    /// After the Pod is created and `start` has read its policy back (design 28), accept every
+    /// connection and never answer it.
     blackhole_after_pod_create: bool,
     /// The log endpoint's answer.
     log: (u16, String),
     /// Answer a list of `NetworkPolicy` objects 403, as to a credential that may not list them.
     refuse_policy_list: bool,
+    /// What goes wrong with the run's `NetworkPolicy` between its create and `start`'s read-back.
+    policy_fault: PolicyFault,
+}
+
+#[derive(Clone, Copy, Default)]
+enum PolicyFault {
+    #[default]
+    None,
+    /// Remove the run's `NetworkPolicy` when its Pod is stored, as another adapter's sweep that
+    /// read the Pod absent just before would.
+    GoneWhenThePodIsStored,
+    /// Answer every read of one `NetworkPolicy` by name with this status instead.
+    ReadAnswers(u16),
+    /// Answer a `NetworkPolicy` create without the `metadata.uid` the API server assigns.
+    CreateAnswersNoUid,
 }
 
 impl Default for Behaviour {
@@ -162,6 +178,7 @@ impl Default for Behaviour {
             blackhole_after_pod_create: false,
             log: (200, "hello\n".to_owned()),
             refuse_policy_list: false,
+            policy_fault: PolicyFault::None,
         }
     }
 }
@@ -185,6 +202,8 @@ struct Shared {
     requests: Arc<Mutex<Vec<String>>>,
     objects: Arc<Mutex<BTreeMap<String, Value>>>,
     blackhole: AtomicBool,
+    /// A Pod was created; the next read of a policy by name arms `blackhole`.
+    pod_created: AtomicBool,
     held: Mutex<Vec<TcpStream>>,
 }
 
@@ -216,6 +235,7 @@ impl Fake {
             requests: Arc::clone(&requests),
             objects: Arc::clone(&objects),
             blackhole: AtomicBool::new(false),
+            pod_created: AtomicBool::new(false),
             held: Mutex::new(Vec::new()),
         });
         let stopped = Arc::clone(&stop);
@@ -377,17 +397,35 @@ fn serve(
         } else {
             "networkpolicies"
         };
+        // The API server assigns every object a uid; a Pod's ownerReference names its policy's.
+        if object["metadata"].is_object()
+            && !(collection == "networkpolicies"
+                && matches!(
+                    shared.behaviour.policy_fault,
+                    PolicyFault::CreateAnswersNoUid
+                ))
+        {
+            object["metadata"]["uid"] = json!(format!("uid-{collection}-{name}"));
+        }
         shared
             .objects
             .lock()
             .insert(key(collection, &name), object.clone());
+        if collection == "pods"
+            && matches!(
+                shared.behaviour.policy_fault,
+                PolicyFault::GoneWhenThePodIsStored
+            )
+        {
+            shared.objects.lock().remove(&key("networkpolicies", &name));
+        }
         if collection == "pods" && shared.behaviour.lose_pod_create_answer {
             // Committed; the answer is lost.
             let _ = stream.get_mut().sock.shutdown(std::net::Shutdown::Both);
             return Ok(());
         }
-        if collection == "pods" && shared.behaviour.blackhole_after_pod_create {
-            shared.blackhole.store(true, Ordering::SeqCst);
+        if collection == "pods" {
+            shared.pod_created.store(true, Ordering::SeqCst);
         }
         (201, object.to_string())
     } else if let Some(rest) = path.strip_prefix(&pods) {
@@ -423,10 +461,23 @@ fn serve(
     } else if let Some(rest) = path.strip_prefix(&policies) {
         let id = key("networkpolicies", rest);
         match method.as_str() {
-            "GET" => match shared.objects.lock().get(&id) {
-                Some(object) => (200, object.to_string()),
-                None => (404, r#"{"kind":"Status","code":404}"#.to_owned()),
-            },
+            "GET" if let PolicyFault::ReadAnswers(status) = shared.behaviour.policy_fault => (
+                status,
+                r#"{"kind":"Status","message":"the policy read failed"}"#.to_owned(),
+            ),
+            "GET" => {
+                // `start`'s read-back of the policy once the Pod is stored is answered; then the
+                // server goes silent.
+                if shared.behaviour.blackhole_after_pod_create
+                    && shared.pod_created.load(Ordering::SeqCst)
+                {
+                    shared.blackhole.store(true, Ordering::SeqCst);
+                }
+                match shared.objects.lock().get(&id) {
+                    Some(object) => (200, object.to_string()),
+                    None => (404, r#"{"kind":"Status","code":404}"#.to_owned()),
+                }
+            }
             "DELETE" => match shared.objects.lock().remove(&id) {
                 Some(object) => (200, object.to_string()),
                 None => (404, r#"{"kind":"Status","code":404}"#.to_owned()),
@@ -489,6 +540,54 @@ async fn adversary_a_pod_whose_create_answer_was_lost_is_not_left_behind() {
         "after a failed start the cluster still holds {left:?}; requests: {:#?}",
         fake.requests()
     );
+}
+
+/// `story:pod-unknown-cleanup-outlives-adapter`, security finding S1 (decision D2): once the Pod
+/// is stored, `start` reads the run's `NetworkPolicy` back. A policy another adapter's sweep removed
+/// meanwhile (404), a read that fails, or a policy create answered without the uid the Pod's
+/// ownerReference names (D3) each remove the Pod and refuse the start `confinement.pod-api-failed`,
+/// so no started run's Pod is without its default-deny policy.
+#[tokio::test(flavor = "multi_thread")]
+async fn adversary_a_start_whose_policy_is_not_read_back_removes_its_pod_and_is_refused() {
+    let cases = [
+        (
+            "the policy gone when the Pod was stored",
+            PolicyFault::GoneWhenThePodIsStored,
+        ),
+        (
+            "the policy read answered 500",
+            PolicyFault::ReadAnswers(500),
+        ),
+        (
+            "the policy create answered no uid",
+            PolicyFault::CreateAnswersNoUid,
+        ),
+    ];
+    for (case, policy_fault) in cases {
+        let behaviour = Behaviour {
+            policy_fault,
+            ..Behaviour::default()
+        };
+        let fake = Fake::start(behaviour);
+        let adapter = fake.open();
+        let admitted = adapter.admit(&admitted_profile()).expect("admitted");
+        let started = adapter.start(&admitted, &echo()).await;
+        assert_eq!(
+            started
+                .as_ref()
+                .err()
+                .map(substrate_host::confinement::ConfinementError::code),
+            Some("confinement.pod-api-failed"),
+            "{case}: start answered {started:?}; requests: {:#?}",
+            fake.requests()
+        );
+        let left = fake.objects();
+        assert!(
+            left.is_empty(),
+            "{case}: the refused start left {left:?}; requests: {:#?}",
+            fake.requests()
+        );
+    }
 }
 
 /// The adapter's own unread log must not read as a complete, untruncated, empty output: the open
@@ -810,7 +909,7 @@ fn policy(name: &str, labels: &[(&str, &str)], age: Duration) -> Value {
 /// before a run's cleanup leaves the run's `NetworkPolicy`. Open removes a policy carrying the
 /// adapter's owner label whose run's Pod is gone, and nothing else: not a policy without the owner
 /// label, not one whose Pod exists (here in a terminal phase), and not one younger than the
-/// adapter's 30 s API timeout, which may fence a run another adapter is still starting.
+/// sweep's 90 s age floor, which may fence a run another adapter is still starting.
 #[tokio::test(flavor = "multi_thread")]
 async fn adversary_open_removes_only_an_old_owned_policy_whose_pod_is_gone() {
     let fake = Fake::start(Behaviour::default());
@@ -899,7 +998,7 @@ fn adversary_open_is_refused_when_its_sweep_cannot_list_policies() {
 }
 
 /// The open sweep on a cluster: a `NetworkPolicy` carrying the adapter's labels whose Pod never
-/// existed is gone once a fresh adapter opens. It waits out the sweep's 30 s age floor first, by
+/// existed is gone once a fresh adapter opens. It waits out the sweep's 90 s age floor first, by
 /// the API server's own clock. That wait is too long for the pod lane, so the case is manual like
 /// `cleanup_pass1`: run it by hand with the lane variables and `SUBSTRATE_POD_MANUAL_CLEANUP=1`.
 /// `adversary_open_removes_only_an_old_owned_policy_whose_pod_is_gone` holds the sweep in seconds.
@@ -956,7 +1055,7 @@ async fn adversary_lane_open_sweeps_an_orphaned_policy() {
         "kubectl create: {}",
         String::from_utf8_lossy(&created.stderr)
     );
-    tokio::time::sleep(Duration::from_secs(32)).await;
+    tokio::time::sleep(Duration::from_secs(92)).await;
     assert!(
         !leftovers(&kubeconfig, &namespace, &run).is_empty(),
         "the policy is there before the sweep"
@@ -1225,3 +1324,8 @@ mod cleanup_pass1 {
         drop(adapter);
     }
 }
+
+#[path = "adversary_pod/adversary_pass1.rs"]
+mod adversary_pass1;
+#[path = "adversary_pod/security_pass1.rs"]
+mod security_pass1;

@@ -86,6 +86,18 @@ const MAX_CLUSTER_FILE_BYTES: u64 = 1_048_576;
 const MAX_API_BODY_BYTES: usize = 4 * 1_048_576;
 const MAX_ARGV_BYTES: usize = 262_144;
 const API_TIMEOUT: Duration = Duration::from_secs(30);
+/// What the open sweep adds to `start`'s two creates: whole-second `creationTimestamp` and `Date`
+/// values, and skew between API server members, one stamping the policy and another answering.
+const SWEEP_MARGIN: Duration = Duration::from_secs(30);
+/// The age below which the open sweep keeps an owned policy whose Pod is absent: `start` creates
+/// the policy and then the Pod, each call bounded by [`API_TIMEOUT`], and the API server stamps a
+/// `creationTimestamp` before admission and storage, so a younger policy may be the only fence of a
+/// run another adapter is still starting.
+const SWEEP_AGE_FLOOR: Duration = API_TIMEOUT.saturating_mul(2).saturating_add(SWEEP_MARGIN);
+/// The policies one page of the sweep's list asks for.
+const SWEEP_PAGE_ITEMS: usize = 100;
+/// The pages the sweep reads before it fails, and with it the open.
+const SWEEP_MAX_PAGES: usize = 64;
 const OPEN_TIMEOUT: Duration = Duration::from_secs(10);
 const POLL: Duration = Duration::from_millis(500);
 /// How long past its wall bound a Pod may stay unended before the adapter deletes it.
@@ -502,13 +514,13 @@ impl Api {
         Ok((status, date, bytes))
     }
 
-    /// Creates `object` in `collection`.
-    async fn create(&self, collection: &str, object: &Value) -> Result<(), String> {
+    /// Creates `object` in `collection` and returns the API's answer, `Null` when it is not JSON.
+    async fn create(&self, collection: &str, object: &Value) -> Result<Value, String> {
         match self
             .call(Method::POST, collection, Some(object), MAX_API_BODY_BYTES)
             .await
         {
-            Ok((200..=202, _)) => Ok(()),
+            Ok((200..=202, body)) => Ok(serde_json::from_slice(&body).unwrap_or(Value::Null)),
             Ok((status, body)) => Err(format!(
                 "create answered {status}: {}",
                 status_message(&body)
@@ -723,18 +735,59 @@ fn probe(api: &Arc<Api>) -> Result<(), String> {
 }
 
 /// Deletes the `NetworkPolicy` objects a process that ended before its runs' cleanup left behind
-/// (`approval-record:pod-orphan-policy-sweep-d124`): each carrying the adapter's owner label whose
+/// (`approval-record:pod-orphan-policy-sweep-d124`): each carrying the adapter's owner label, named
+/// for the run that label names, at least [`SWEEP_AGE_FLOOR`] old by the API server's clock, whose
 /// run's Pod the API no longer has, in any phase. A policy without the label is never a candidate,
-/// and one whose Pod exists is left to the task that owns it. Every request is bounded by
-/// [`API_TIMEOUT`] and there are at most two per listed policy, so open stays bounded; any failure
-/// fails the sweep, and with it the open.
+/// and one whose Pod exists is left to the task that owns it. The list is read whole first, in at
+/// most [`SWEEP_MAX_PAGES`] pages of [`SWEEP_PAGE_ITEMS`], each bounded in bytes; every request is
+/// bounded by [`API_TIMEOUT`] and there are at most two per candidate, so open stays bounded. Any
+/// failure, a list longer than that included, fails the sweep, and with it the open.
 async fn sweep(api: &Api) -> Result<(), String> {
     let selector: String =
         url::form_urlencoded::byte_serialize(format!("{MANAGED_BY_LABEL}={MANAGED_BY}").as_bytes())
             .collect();
-    let path = format!("{}?labelSelector={selector}", api.policies());
+    let first = format!(
+        "{}?labelSelector={selector}&limit={SWEEP_PAGE_ITEMS}",
+        api.policies()
+    );
+    let mut candidates = Vec::new();
+    let mut path = first.clone();
+    let mut pages = 0;
+    loop {
+        if pages == SWEEP_MAX_PAGES {
+            return Err(format!(
+                "the policy list did not end within {SWEEP_MAX_PAGES} pages of {SWEEP_PAGE_ITEMS}"
+            ));
+        }
+        pages += 1;
+        let Some(next) = sweep_page(api, &path, &mut candidates).await? else {
+            break;
+        };
+        let token: String = url::form_urlencoded::byte_serialize(next.as_bytes()).collect();
+        path = format!("{first}&continue={token}");
+    }
+    for run in candidates {
+        if api.get(&format!("{}/{run}", api.pods())).await?.is_some() {
+            continue;
+        }
+        api.delete(&format!("{}/{run}", api.policies()), 0).await?;
+        tracing::info!(
+            policy = run,
+            "pod: open removed a NetworkPolicy whose run's Pod is gone"
+        );
+    }
+    Ok(())
+}
+
+/// Reads one page of the sweep's list at `path` and adds its owned policies old enough to be
+/// orphans to `candidates`; the `continue` token of the next page, or `None` on the last.
+async fn sweep_page(
+    api: &Api,
+    path: &str,
+    candidates: &mut Vec<String>,
+) -> Result<Option<String>, String> {
     let (status, date, body) = api
-        .call_dated(Method::GET, &path, None, MAX_API_BODY_BYTES)
+        .call_dated(Method::GET, path, None, MAX_API_BODY_BYTES)
         .await?;
     if status != 200 {
         return Err(format!(
@@ -750,50 +803,44 @@ async fn sweep(api: &Api) -> Result<(), String> {
         .as_array()
         .ok_or("the policy list holds no items")?;
     for policy in items {
-        let Some((name, run, created)) = owned(policy) else {
+        let Some((run, created)) = owned(policy) else {
             continue;
         };
         let now = now.ok_or("the policy list carries no Date the adapter can read")?;
-        // `start` creates a run's policy before its Pod and waits up to `API_TIMEOUT` for the Pod's
-        // create: a younger policy without a Pod may be the only network fence of a run another
-        // adapter is still starting.
         let old = now
             .signed_duration_since(created)
             .to_std()
-            .is_ok_and(|age| age >= API_TIMEOUT);
-        if !old {
-            continue;
+            .is_ok_and(|age| age >= SWEEP_AGE_FLOOR);
+        if old {
+            candidates.push(run.to_owned());
         }
-        if api.get(&format!("{}/{run}", api.pods())).await?.is_some() {
-            continue;
-        }
-        api.delete(&format!("{}/{name}", api.policies()), 0).await?;
-        tracing::info!(
-            policy = name,
-            "pod: open removed a NetworkPolicy whose run's Pod is gone"
-        );
     }
-    Ok(())
+    Ok(list["metadata"]["continue"]
+        .as_str()
+        .filter(|token| !token.is_empty())
+        .map(str::to_owned))
 }
 
-/// The policy's name, the run its label names and when the API server created it, for a policy
-/// that carries the adapter's owner label, names that are DNS labels and a creation time the sweep
-/// can read. Any other policy is never a candidate.
-fn owned(policy: &Value) -> Option<(&str, &str, chrono::DateTime<chrono::FixedOffset>)> {
+/// The run a policy fences and when the API server created it, for a policy that carries the
+/// adapter's owner label, whose name is a DNS label equal to its run label (the adapter names both
+/// objects of a run for it) and whose creation time the sweep can read. Any other policy is never a
+/// candidate: the sweep reads the Pod the label names and deletes the policy the name names, so the
+/// two must be one.
+fn owned(policy: &Value) -> Option<(&str, chrono::DateTime<chrono::FixedOffset>)> {
     let metadata = &policy["metadata"];
     if metadata["labels"][MANAGED_BY_LABEL] != MANAGED_BY {
         return None;
     }
-    let name = metadata["name"]
-        .as_str()
-        .filter(|name| is_dns_label(name))?;
     let run = metadata["labels"][RUN_LABEL]
         .as_str()
         .filter(|run| is_dns_label(run))?;
+    if metadata["name"].as_str() != Some(run) {
+        return None;
+    }
     let created = metadata["creationTimestamp"]
         .as_str()
         .and_then(|created| chrono::DateTime::parse_from_rfc3339(created).ok())?;
-    Some((name, run, created))
+    Some((run, created))
 }
 
 // --- rendering ------------------------------------------------------------------------------
@@ -1120,6 +1167,8 @@ struct PodRun {
     /// Whether the API has shown the container running or terminated.
     started: AtomicBool,
     stop: Mutex<Option<Stop>>,
+    /// Whether the API has confirmed the run's Pod gone after the adapter's removal.
+    pod_gone: AtomicBool,
 }
 
 /// The `pod` adapter, opened against one cluster and one namespace.
@@ -1162,17 +1211,19 @@ impl PodAdapter {
         }
     }
 
-    /// Makes room for one more run, forgetting ended runs oldest first.
+    /// Makes room for one more run, forgetting runs that are over oldest first. A run read
+    /// `Unknown` whose Pod's removal the API has not confirmed is not over: its task is still
+    /// removing it, and the tasks never outnumber [`POD_MAX_TRACKED_RUNS`].
     fn reserve(&self) -> Result<(), ConfinementError> {
         let mut runs = self.runs.lock();
         while runs.len() >= POD_MAX_TRACKED_RUNS {
-            let Some(ended) = runs
-                .iter()
-                .position(|run| !matches!(*run.phase.borrow(), Phase::Running))
-            else {
+            let Some(ended) = runs.iter().position(|run| {
+                !matches!(*run.phase.borrow(), Phase::Running)
+                    && run.pod_gone.load(Ordering::SeqCst)
+            }) else {
                 return Err(DriverError::exhausted(
                     "exec.tracking-capacity",
-                    "Every tracked pod run is still running.",
+                    "Every tracked pod run is still running or its Pod's removal is not confirmed.",
                     "run",
                 )
                 .into());
@@ -1198,23 +1249,53 @@ impl PodAdapter {
         self.reserve()?;
         let policy_path = format!("{}/{name}", self.api.policies());
         // The policy first, so the Pod is never without it.
-        if let Err(error) = self.api.create(&self.api.policies(), &policy).await {
-            // No Pod exists yet; a policy stored before its answer was lost is removed.
-            self.api.remove(&policy_path, 0).await;
-            return Err(api_failed(&error));
-        }
-        if let Err(error) = self.api.create(&self.api.pods(), &pod).await {
-            // An answer lost after the API stored the Pod looks like a refusal: delete the Pod by
-            // name, and only once it is confirmed gone its policy.
-            let pod_path = format!("{}/{name}", self.api.pods());
-            if !self.api.remove(&pod_path, KILL_GRACE_SECONDS).await {
-                return Err(api_failed(&format!(
-                    "{error}; the Pod {name} may have been stored and its removal was not \
-                     confirmed, so its NetworkPolicy stays"
-                )));
+        let created = match self.api.create(&self.api.policies(), &policy).await {
+            Ok(created) => created,
+            Err(error) => {
+                // No Pod exists yet; a policy stored before its answer was lost is removed.
+                self.api.remove(&policy_path, 0).await;
+                return Err(api_failed(&error));
             }
+        };
+        let Some(uid) = created["metadata"]["uid"]
+            .as_str()
+            .filter(|uid| !uid.is_empty())
+            .map(str::to_owned)
+        else {
             self.api.remove(&policy_path, 0).await;
-            return Err(api_failed(&error));
+            return Err(api_failed("the NetworkPolicy create answered no uid"));
+        };
+        // The garbage collector removes a Pod whose owner is gone, so a Pod never outlives its
+        // policy for long, whoever removed the policy. Not a controller and never blocking the
+        // policy's deletion, which would need a further permission.
+        let mut pod = pod;
+        pod["metadata"]["ownerReferences"] = json!([{
+            "apiVersion": "networking.k8s.io/v1",
+            "kind": "NetworkPolicy",
+            "name": name,
+            "uid": uid,
+            "controller": false,
+        }]);
+        if let Err(error) = self.api.create(&self.api.pods(), &pod).await {
+            // An answer lost after the API stored the Pod looks like a refusal.
+            return Err(self.abandon(&name, &error).await);
+        }
+        // Another adapter's open sweep may have removed the policy while the Pod's create was in
+        // flight: a run starts only when its policy is read back after its Pod is stored.
+        let unfenced = match self.api.get(&policy_path).await {
+            Ok(Some(read)) if read["metadata"]["uid"].as_str() == Some(uid.as_str()) => None,
+            Ok(Some(_)) => {
+                Some("the run's NetworkPolicy was replaced before its Pod was stored".into())
+            }
+            Ok(None) => {
+                Some("the run's NetworkPolicy was removed before its Pod was stored".into())
+            }
+            Err(error) => Some(format!(
+                "the run's NetworkPolicy was not read back: {error}"
+            )),
+        };
+        if let Some(detail) = unfenced {
+            return Err(self.abandon(&name, &detail).await);
         }
         let id = RunId::new(name);
         let (sender, phase) = watch::channel(Phase::Running);
@@ -1225,6 +1306,7 @@ impl PodAdapter {
             captured: Mutex::new(Captured::default()),
             started: AtomicBool::new(false),
             stop: Mutex::new(None),
+            pod_gone: AtomicBool::new(false),
         });
         let wall = Duration::from_secs(resolved.deadline_seconds);
         tokio::spawn(monitor(
@@ -1236,6 +1318,22 @@ impl PodAdapter {
         self.runs.lock().push(run);
         admitted.audit_start(&id, &command.argv[0]);
         Ok(id)
+    }
+
+    /// A start that fails once its Pod may be stored: deletes the Pod by name and only once it is
+    /// confirmed gone its policy. The failure names the Pod when its removal was not confirmed.
+    async fn abandon(&self, name: &str, error: &str) -> ConfinementError {
+        let pod_path = format!("{}/{name}", self.api.pods());
+        if !self.api.remove(&pod_path, KILL_GRACE_SECONDS).await {
+            return api_failed(&format!(
+                "{error}; the Pod {name} may have been stored and its removal was not confirmed, \
+                 so its NetworkPolicy stays"
+            ));
+        }
+        self.api
+            .remove(&format!("{}/{name}", self.api.policies()), 0)
+            .await;
+        api_failed(error)
     }
 }
 
@@ -1452,6 +1550,7 @@ async fn monitor(api: Arc<Api>, run: Arc<PodRun>, phase: watch::Sender<Phase>, g
         .await
         .unwrap_or(false);
     if removed {
+        run.pod_gone.store(true, Ordering::SeqCst);
         let policy_removed = tokio::time::timeout_at(deadline, api.remove(&policy_path, 0))
             .await
             .unwrap_or(false);
@@ -1466,7 +1565,9 @@ async fn monitor(api: Arc<Api>, run: Arc<PodRun>, phase: watch::Sender<Phase>, g
     phase.send_replace(Phase::Unknown);
     // A kubelet may stay away longer than any bound the adapter could pick: the task asks until the
     // API confirms the Pod gone, for as long as its runtime lives, and only then removes the policy.
+    // Until then the run counts against `POD_MAX_TRACKED_RUNS`, so these tasks stay bounded.
     api.remove_until_gone(&pod_path, KILL_GRACE_SECONDS).await;
+    run.pod_gone.store(true, Ordering::SeqCst);
     api.remove_until_gone(&policy_path, 0).await;
 }
 
