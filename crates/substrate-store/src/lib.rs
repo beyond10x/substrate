@@ -51,6 +51,10 @@ pub use workspaces::{
     WorkspaceDestroyReservation, WorkspaceObservationWrite, WorkspaceRootHolder, adopt_not_found,
 };
 
+/// The schema version this binary opens: stamped into the database's `user_version` once every
+/// migration has run, and compared by the daemon's readiness check (ADR 0045).
+pub const SCHEMA_VERSION: i64 = 1;
+
 pub const DEFAULT_OPERATION_SUBJECT_MAX_ROWS: u64 = OPERATION_LEDGER_SUBJECT_MAX_ROWS;
 
 pub const DEFAULT_OPERATION_SUBJECT_MAX_BYTES: u64 = OPERATION_LEDGER_SUBJECT_MAX_BYTES;

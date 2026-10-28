@@ -3752,7 +3752,9 @@ async fn forward_frame(
         }
         Err(_) => {
             if let Some(e) = execution {
-                e.pipe_backpressure.store(true, Ordering::Release);
+                if !e.pipe_backpressure.swap(true, Ordering::AcqRel) {
+                    crate::OUTPUT_STALL_TERMINATIONS.fetch_add(1, Ordering::Relaxed);
+                }
                 e.cancellation_requested.store(true, Ordering::Release);
             }
             false
@@ -5714,6 +5716,7 @@ mod tests {
                 observation.resource.unrecorded_output =
                     Some(substrate_wire::UnrecordedOutput::default());
             }
+            let stalls_before = crate::output_stall_terminations();
             let execution = Arc::new(Execution::new(observation, None, Instant::now(), None));
             let (sender, mut receiver) = mpsc::channel(1);
             let stdout = tokio::spawn(drain_capped(
@@ -5757,6 +5760,9 @@ mod tests {
                     b"aa".to_vec()
                 }
             );
+            // ADR 0045: the stall is counted for the operational metric. Other cases in this process
+            // may stall too, so the count only rises here.
+            assert!(crate::output_stall_terminations() > stalls_before);
             assert!(execution.pipe_backpressure.load(Ordering::Acquire));
             assert!(execution.cancellation_requested.load(Ordering::Acquire));
             // An attached consumer can free capacity before the supervisor's next tick closes

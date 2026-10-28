@@ -283,6 +283,7 @@ impl Store {
         migrate_operation_ledger_accounting(&mut connection, config)?;
         migrate_operation_grant_attribution(&connection)?;
         crate::host_processes::migrate_host_processes(&connection)?;
+        connection.pragma_update(None, "user_version", crate::SCHEMA_VERSION)?;
         Ok(Self {
             connection: Mutex::new(connection),
             event_retention: config.event_retention,
@@ -290,6 +291,23 @@ impl Store {
             effect_sink: RwLock::new(None),
             host_process_run: RwLock::new(None),
         })
+    }
+
+    /// The schema version recorded in the database, read with one read-only statement on the
+    /// ledger connection (ADR 0045 decision 6). Opening stamps [`crate::SCHEMA_VERSION`] after
+    /// every migration has run, so a different value means a database this binary did not open.
+    ///
+    /// `None` when the connection is not free within `wait`: the caller is never held behind a
+    /// statement that does not finish.
+    pub fn schema_version(&self, wait: std::time::Duration) -> Result<Option<i64>, StoreError> {
+        let Some(connection) = self.connection.try_lock_for(wait) else {
+            return Ok(None);
+        };
+        Ok(Some(connection.query_row(
+            "PRAGMA user_version",
+            [],
+            |row| row.get(0),
+        )?))
     }
 }
 

@@ -116,6 +116,52 @@ The currently implemented TCP transport is deliberately restricted. It requires 
 It is not production hosted admission and cannot be bound to a non-loopback address. Use it only
 for local development.
 
+## Operational health and metrics
+
+`--ops-listen <address:port>` (or `SUBSTRATE_OPS_LISTEN`) starts a separate operational listener.
+It is off by default, and it must use a different address from every control listener. It is
+plaintext and unauthenticated, so bind it to loopback or a network only your monitoring can reach.
+It answers `GET` on three paths. Every other path and method, a request body and an upgrade get
+`404` with an empty body. It serves at most 8 connections and gives each 2 seconds to send its
+request head.
+
+| Path | Answer |
+|---|---|
+| `/livez` | `200 ok` while both maintenance tasks run; `503` once either has stopped |
+| `/readyz` | `200` when every check passes, otherwise `503`; one `<check> ok` or `<check> failed` line each for `store`, `schema`, `maintenance` and `driver` |
+| `/metrics` | OpenMetrics text, `application/openmetrics-text; version=1.0.0` |
+
+The four readiness checks:
+
+- `store`: one read-only statement returns within 1 second.
+- `schema`: that statement reads the schema version this binary expects.
+- `maintenance`: each maintenance task completed a round in the last 5 seconds.
+- `driver`: the startup capability snapshot publishes every `--ops-require-fact <fact>`. The flag is
+  repeatable (or `SUBSTRATE_OPS_REQUIRE_FACT`, comma-separated).
+
+`/readyz` never calls Identity. It answers `503` from the moment shutdown begins, before any
+listener closes.
+
+The metric set is fixed. Labels are closed sets: listener, route family, outcome class, refusal
+code, check, maintenance task and admission result. No subject, resource id, path, address or
+credential appears in a label or a value. A scrape carries at most 578 samples.
+
+- **Build and readiness:** `substrate_build_info`, `substrate_ready`.
+- **Requests:** `substrate_http_requests_total`, `substrate_http_request_duration_seconds`,
+  `substrate_refusals_total`.
+- **Dispatch:** `substrate_dispatch_total`, `substrate_dispatch_duration_seconds`.
+- **Connections:** `substrate_connections_open`, `substrate_connections_limit`,
+  `substrate_connections_rejected_total`.
+- **Output:** `substrate_output_stalls_total`.
+- **Maintenance:** `substrate_maintenance_rounds_total`,
+  `substrate_maintenance_round_duration_seconds`,
+  `substrate_maintenance_last_round_timestamp_seconds`.
+- **Hosted Identity:** `substrate_hosted_admissions_total`,
+  `substrate_hosted_resolution_duration_seconds`.
+- **Process:** the standard `process_*` metrics.
+
+Every histogram uses the same 11 buckets, from 5 ms to 10 s.
+
 ## Rules that do not change by posture
 
 - Never bind a reachable unauthenticated control listener.

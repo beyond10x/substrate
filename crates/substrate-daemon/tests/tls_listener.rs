@@ -1413,3 +1413,407 @@ async fn development_static_bearer_refuses_non_loopback_binding() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// The largest number of samples `/metrics` may carry (ADR 0045 decision 7): 471 without
+/// `substrate_refusals_total`, plus one series per refusal code the wire crate names and `other`.
+/// `app::health::tests` pins the same number against the catalogue itself.
+const OPS_SERIES_MAXIMUM: usize = 578;
+
+struct OpsAnswer {
+    status: u16,
+    /// Header lines, lowercased, without `date` (the only header that varies between answers).
+    headers: Vec<String>,
+    body: Vec<u8>,
+}
+
+/// One request on the operational listener, which serves one request per connection.
+async fn ops_exchange(address: SocketAddr, request: &[u8]) -> OpsAnswer {
+    let mut stream = TcpStream::connect(address)
+        .await
+        .expect("operational listener connection");
+    stream
+        .write_all(request)
+        .await
+        .expect("operational request");
+    let mut bytes = Vec::new();
+    tokio::time::timeout(Duration::from_secs(5), stream.read_to_end(&mut bytes))
+        .await
+        .expect("operational answer timeout")
+        .expect("operational answer");
+    let split = bytes
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .expect("operational answer headers");
+    let head = std::str::from_utf8(&bytes[..split]).expect("ASCII operational headers");
+    let mut lines = head.split("\r\n");
+    let status = lines
+        .next()
+        .and_then(|line| line.get(9..12))
+        .and_then(|code| code.parse().ok())
+        .expect("operational status");
+    let headers = lines
+        .map(str::to_ascii_lowercase)
+        .filter(|line| !line.starts_with("date:"))
+        .collect();
+    OpsAnswer {
+        status,
+        headers,
+        body: bytes[split + 4..].to_vec(),
+    }
+}
+
+async fn ops_get(address: SocketAddr, path: &str, extra: &str) -> OpsAnswer {
+    let request =
+        format!("GET {path} HTTP/1.1\r\nHost: operations.test\r\n{extra}Connection: close\r\n\r\n");
+    ops_exchange(address, request.as_bytes()).await
+}
+
+async fn ops_when_ready(child: &mut Child, address: SocketAddr) -> OpsAnswer {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(status) = child.try_wait().expect("inspect daemon") {
+            let mut stderr = String::new();
+            if let Some(mut pipe) = child.stderr.take() {
+                pipe.read_to_string(&mut stderr)
+                    .await
+                    .expect("read early daemon error");
+            }
+            panic!("daemon exited before operational readiness: {status}: {stderr}");
+        }
+        if TcpStream::connect(address).await.is_ok() {
+            let answer = ops_get(address, "/readyz", "").await;
+            if answer.status == 200 {
+                return answer;
+            }
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "operational readiness timed out"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+fn samples(exposition: &str) -> Vec<&str> {
+    exposition
+        .lines()
+        .filter(|line| !line.starts_with('#') && !line.is_empty())
+        .collect()
+}
+
+/// ADR 0045: the operational listener serves `/livez`, `/readyz` and `/metrics` and nothing else,
+/// reads no credential, reaches no Identity, and its exposition carries no subject, path,
+/// workspace, operation id or credential whatever the control listener was asked.
+#[tokio::test]
+#[allow(
+    clippy::too_many_lines,
+    reason = "one daemon proves the three paths, the 404 surface, readiness transitions and secrecy"
+)]
+async fn operational_listener_serves_three_paths_and_leaks_nothing() {
+    let root = TempDir::new().expect("temporary root");
+    let server = current_identity();
+    let authority_identity = identity_for(IDENTITY_NAME, (2025, 1, 1), (2035, 1, 1));
+    let identity_ca = root.path().join("identity-ca.pem");
+    std::fs::write(&identity_ca, &authority_identity.certificate_pem).expect("Identity CA");
+    let (authority, authority_task) = start_identity_authority(&authority_identity).await;
+    let (certificate, private_key) = write_identity(root.path(), &server);
+    let address = unused_address();
+    let ops = unused_address();
+    let mut child = daemon_command(
+        root.path(),
+        address,
+        &certificate,
+        &private_key,
+        &authority.origin,
+        &identity_ca,
+    )
+    .arg("--ops-listen")
+    .arg(ops.to_string())
+    .spawn()
+    .expect("spawn TLS daemon with an operational listener");
+    let trusted = connector([server.certificate_der.clone()]);
+    let mut https = connect_when_ready(&mut child, address, &trusted).await;
+
+    let ready = ops_when_ready(&mut child, ops).await;
+    assert_eq!(
+        ready.body,
+        b"store ok\nschema ok\nmaintenance ok\ndriver ok\n",
+        "{}",
+        String::from_utf8_lossy(&ready.body)
+    );
+    let live = ops_get(ops, "/livez", "").await;
+    assert_eq!(
+        (live.status, live.body.as_slice()),
+        (200, b"ok\n".as_slice())
+    );
+    assert_eq!(
+        authority.accepts.load(Ordering::SeqCst),
+        0,
+        "operational probes reached Identity"
+    );
+
+    // No answer on this listener depends on a credential: the same request with and without one
+    // gets the same bytes, apart from the date.
+    let bearer = format!("Authorization: Bearer {}\r\n", authority.observe);
+    for path in ["/livez", "/readyz"] {
+        let open = ops_get(ops, path, "").await;
+        let presented = ops_get(ops, path, &bearer).await;
+        assert_eq!(
+            (open.status, &open.headers, &open.body),
+            (presented.status, &presented.headers, &presented.body),
+            "{path} depends on Authorization"
+        );
+    }
+
+    // Every route of the registry answers 404 with an empty body here, with or without a bearer.
+    let registry: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../contracts/substrate-wire/0.23.0/operations.json"),
+        )
+        .expect("operation registry bytes"),
+    )
+    .expect("operation registry JSON");
+    let operations = registry["operations"].as_array().expect("operations");
+    assert!(
+        operations.len() > 40,
+        "registry shrank: {}",
+        operations.len()
+    );
+    let mut refused = None;
+    for operation in operations {
+        let method = operation["method"].as_str().expect("method");
+        let path = operation["path"]
+            .as_str()
+            .expect("path")
+            .split('/')
+            .map(|segment| {
+                if segment.starts_with('{') {
+                    "ops_probe"
+                } else {
+                    segment
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("/");
+        for credential in ["", bearer.as_str()] {
+            let request = format!(
+                "{method} {path} HTTP/1.1\r\nHost: operations.test\r\n{credential}Content-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            let answer = ops_exchange(ops, request.as_bytes()).await;
+            assert_eq!(answer.status, 404, "{method} {path}");
+            assert!(answer.body.is_empty(), "{method} {path}");
+            match &refused {
+                None => refused = Some(answer.headers),
+                Some(headers) => assert_eq!(&answer.headers, headers, "{method} {path}"),
+            }
+        }
+    }
+    for request in [
+        "POST /metrics HTTP/1.1\r\nHost: operations.test\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+        "HEAD /livez HTTP/1.1\r\nHost: operations.test\r\nConnection: close\r\n\r\n",
+        "GET /livez HTTP/1.1\r\nHost: operations.test\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok",
+        "GET /metrics HTTP/1.1\r\nHost: operations.test\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\n\r\n",
+        "GET /metrics/ HTTP/1.1\r\nHost: operations.test\r\nConnection: close\r\n\r\n",
+        "GET /healthz HTTP/1.1\r\nHost: operations.test\r\nConnection: close\r\n\r\n",
+    ] {
+        let answer = ops_exchange(ops, request.as_bytes()).await;
+        assert_eq!(answer.status, 404, "{request}");
+        assert!(answer.body.is_empty(), "{request}");
+    }
+
+    // The control listener is asked things whose subject, path, workspace, operation id and
+    // credential are recognisable.
+    let invalid = access_credential('x');
+    for (credential, path) in [
+        (
+            Some(authority.workspace.as_str()),
+            "/v1/workspaces/ws_markerworkspace01",
+        ),
+        (
+            Some(authority.workspace.as_str()),
+            "/v2/workspaces/ws_markerworkspace01/files/marker-path-segment/notes.txt",
+        ),
+        (
+            Some(authority.observe.as_str()),
+            "/v1/ops/op_markeroperation01",
+        ),
+        (Some(authority.observe.as_str()), "/v1/machine"),
+        (
+            Some(authority.observe.as_str()),
+            "/v1/execs/ex_markerexec01",
+        ),
+        (Some(invalid.as_str()), "/v1/machine"),
+        (Some(authority.unavailable.as_str()), "/v1/machine"),
+        (None, "/v1/workspaces/ws_markerworkspace01"),
+    ] {
+        let authorization = credential
+            .map(|value| format!("Authorization: Bearer {value}\r\n"))
+            .unwrap_or_default();
+        let control = format!(
+            "GET {path} HTTP/1.1\r\nHost: substrate.test\r\n{authorization}X-Substrate-Subject: marker-subject-header\r\nX-Substrate-Tenant: marker-tenant-header\r\nConnection: keep-alive\r\n\r\n"
+        );
+        let response = request(&mut https, control.as_bytes()).await;
+        assert!(response.starts_with(b"HTTP/1.1 "), "{path}");
+    }
+
+    let scrape = ops_get(ops, "/metrics", "").await;
+    assert_eq!(scrape.status, 200);
+    assert!(
+        scrape.headers.iter().any(|line| line
+            == "content-type: application/openmetrics-text; version=1.0.0; charset=utf-8"),
+        "{:?}",
+        scrape.headers
+    );
+    let exposition = String::from_utf8(scrape.body).expect("UTF-8 exposition");
+    assert!(exposition.ends_with("# EOF\n"), "{exposition}");
+    let series = samples(&exposition);
+    assert!(
+        series.len() <= OPS_SERIES_MAXIMUM,
+        "{} series exceed the pinned maximum",
+        series.len()
+    );
+    for leaked in [
+        authority.observe.as_str(),
+        authority.workspace.as_str(),
+        authority.exec.as_str(),
+        authority.unavailable.as_str(),
+        invalid.as_str(),
+        "identity_access",
+        "sensitive-subject-marker",
+        "sensitive-actor-marker",
+        "sensitive-tenant-marker",
+        "sensitive-jti-marker",
+        hosted_subject(&authority.origin).as_str(),
+        "hosted:",
+        "markerworkspace",
+        "marker-path-segment",
+        "notes.txt",
+        "markeroperation",
+        "markerexec",
+        "marker-subject-header",
+        "marker-tenant-header",
+        "/v1/",
+        "/v2/",
+        "127.0.0.1",
+        "tls-test",
+        root.path().to_str().expect("UTF-8 root"),
+    ] {
+        assert!(!exposition.contains(leaked), "metrics carry {leaked:?}");
+    }
+    for expected in [
+        "substrate_hosted_admissions_total{result=\"authority-invalid\"} 1",
+        "substrate_hosted_admissions_total{result=\"credential-absent\"} 1",
+        "substrate_hosted_admissions_total{result=\"authority-unavailable\"} 1",
+        "substrate_hosted_admissions_total{result=\"admitted\"} 4",
+        "substrate_hosted_admissions_total{result=\"scope-denied\"} 1",
+        "substrate_refusals_total{code=\"auth.authority-invalid\"} 1",
+        "substrate_refusals_total{code=\"auth.credential-absent\"} 1",
+        "substrate_http_requests_total{listener=\"tls\",family=\"observe\",outcome=\"ok\"} 1",
+        "substrate_http_requests_total{listener=\"tls\",family=\"observe\",outcome=\"unserved\"} 1",
+        "substrate_connections_limit{listener=\"tls\"} 128",
+        "substrate_ready{check=\"store\"} 1",
+        "substrate_ready{check=\"driver\"} 1",
+    ] {
+        assert!(
+            series.contains(&expected),
+            "missing {expected:?}:\n{exposition}"
+        );
+    }
+    assert!(
+        series.iter().any(|line| line
+            .starts_with("substrate_maintenance_rounds_total{task=\"lease-sweep\"} ")
+            && !line.ends_with(" 0")),
+        "{exposition}"
+    );
+
+    // Readiness reads the schema version on the ledger connection: a database stamped with a
+    // version this binary does not open is not ready, and becomes ready again once it is.
+    let state = rusqlite::Connection::open(root.path().join("state.sqlite")).expect("open state");
+    state
+        .busy_timeout(Duration::from_secs(5))
+        .expect("state busy timeout");
+    let opened: i64 = state
+        .query_row("PRAGMA user_version", [], |row| row.get(0))
+        .expect("schema version");
+    assert_eq!(opened, substrate_store::SCHEMA_VERSION);
+    state
+        .pragma_update(None, "user_version", 999_i64)
+        .expect("stamp a foreign schema version");
+    let unready = ops_get(ops, "/readyz", "").await;
+    assert_eq!(unready.status, 503);
+    assert_eq!(
+        unready.body,
+        b"store ok\nschema failed\nmaintenance ok\ndriver ok\n",
+        "{}",
+        String::from_utf8_lossy(&unready.body)
+    );
+    let live = ops_get(ops, "/livez", "").await;
+    assert_eq!(
+        live.status, 200,
+        "a dependency failure restarted the daemon"
+    );
+    state
+        .pragma_update(None, "user_version", opened)
+        .expect("restore the schema version");
+    drop(state);
+    assert_eq!(ops_get(ops, "/readyz", "").await.status, 200);
+
+    signal(&child, Signal::SIGTERM);
+    let output = tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
+        .await
+        .expect("daemon shutdown timed out")
+        .expect("wait for daemon");
+    assert!(output.status.success(), "daemon: {output:?}");
+    assert!(
+        TcpStream::connect(ops).await.is_err(),
+        "the operational listener outlived the daemon"
+    );
+    authority_task.abort();
+}
+
+/// ADR 0045 decision 1: the operational address must differ from every control listener's, and
+/// a fact requirement without the listener it configures is refused.
+#[tokio::test]
+async fn operational_listener_refuses_the_control_address() {
+    let root = TempDir::new().expect("temporary root");
+    let server = current_identity();
+    let (certificate, private_key) = write_identity(root.path(), &server);
+    let address = unused_address();
+    let output = daemon_command(
+        root.path(),
+        address,
+        &certificate,
+        &private_key,
+        "https://127.0.0.1:9",
+        &certificate,
+    )
+    .arg("--ops-listen")
+    .arg(address.to_string())
+    .output()
+    .await
+    .expect("run daemon with a colliding operational address");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("ops.listener-config-invalid"), "{stderr}");
+
+    let output = daemon_command(
+        root.path(),
+        address,
+        &certificate,
+        &private_key,
+        "https://127.0.0.1:9",
+        &certificate,
+    )
+    .arg("--ops-require-fact")
+    .arg("exec.no-egress")
+    .output()
+    .await
+    .expect("run daemon with a fact requirement and no operational listener");
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("--ops-listen"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

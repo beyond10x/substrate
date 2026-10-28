@@ -1284,7 +1284,10 @@ pub(super) async fn workspace_destroy(
         Ok(WorkspaceDestroyReservation::Admitted {
             root_name,
             resource,
-        }) => (root_name, resource.origin),
+        }) => {
+            super::health::dispatch_admitted();
+            (root_name, resource.origin)
+        }
         Err(error) => return store_failure(&request_id, Some(&operation), &error),
     };
     match run_maintenance_driver(end_workspace(

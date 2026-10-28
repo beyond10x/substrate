@@ -4984,3 +4984,43 @@ mod session_retire_waits_for_proven_absence {
         assert!(store.exec(&scope, EXEC).expect("exec lookup").is_none());
     }
 }
+
+/// ADR 0045: readiness compares the version this statement reads with the version this binary
+/// opens. Opening stamps it; reading it changes nothing, a foreign stamp reads back as written, and
+/// a ledger connection held past the wait is `None`, not a stalled caller.
+#[test]
+fn schema_version_is_stamped_at_open_and_read_without_writing() {
+    let wait = std::time::Duration::from_millis(200);
+    let directory = tempdir().expect("tempdir");
+    let path = directory.path().join("state.sqlite");
+    let store = Store::open(&path).expect("open store");
+    assert_eq!(
+        store.schema_version(wait).expect("schema version"),
+        Some(crate::SCHEMA_VERSION)
+    );
+    let held = store.connection.lock();
+    let started = std::time::Instant::now();
+    assert_eq!(store.schema_version(wait).expect("held connection"), None);
+    assert!(started.elapsed() >= wait);
+    assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    drop(held);
+    let other = rusqlite::Connection::open(&path).expect("second connection");
+    other
+        .pragma_update(None, "user_version", 999_i64)
+        .expect("foreign stamp");
+    assert_eq!(
+        store.schema_version(wait).expect("foreign version"),
+        Some(999)
+    );
+    let changes_before: i64 = other
+        .query_row("PRAGMA data_version", [], |row| row.get(0))
+        .expect("data version");
+    store.schema_version(wait).expect("read again");
+    let changes_after: i64 = other
+        .query_row("PRAGMA data_version", [], |row| row.get(0))
+        .expect("data version");
+    assert_eq!(
+        changes_before, changes_after,
+        "reading the version wrote the store"
+    );
+}

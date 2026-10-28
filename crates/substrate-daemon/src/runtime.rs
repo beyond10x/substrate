@@ -8,7 +8,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::app::{development_router, hosted_router};
+use crate::app::{
+    ConnectionGauge, Listener, MaintenanceTask, Operations, RequestMetrics, development_router,
+    hosted_router, record_request, valid_fact_name,
+};
 use crate::delegation::{DelegatedContextPolicy, TrustedKey};
 use crate::hosted::{HostedAdmission, HostedIdentityConfig, require_hosted_authority};
 use crate::tls::{TlsDaemonConfig, load_server_config};
@@ -135,7 +138,10 @@ pub(crate) fn hand_over_transport<S: StreamSlot>(
 
 struct ConnectionLimits {
     global: Arc<Semaphore>,
+    global_limit: usize,
     by_uid: BTreeMap<u32, Arc<Semaphore>>,
+    /// Admissions refused at capacity, global or per uid (ADR 0045); an unmapped uid is not one.
+    rejected: Arc<AtomicU64>,
 }
 
 impl ConnectionLimits {
@@ -155,15 +161,33 @@ impl ConnectionLimits {
             .collect();
         Self {
             global: Arc::new(Semaphore::new(policy.global_connections)),
+            global_limit: policy.global_connections,
             by_uid,
+            rejected: Arc::new(AtomicU64::new(0)),
         }
     }
 
     fn acquire(&self, uid: u32) -> Option<TransportPermit> {
         let subject_limit = Arc::clone(self.by_uid.get(&uid)?);
-        let global = Arc::clone(&self.global).try_acquire_owned().ok()?;
-        let subject = subject_limit.try_acquire_owned().ok()?;
-        Some(TransportPermit::new(global, subject))
+        let permit = Arc::clone(&self.global)
+            .try_acquire_owned()
+            .ok()
+            .and_then(|global| {
+                let subject = subject_limit.try_acquire_owned().ok()?;
+                Some(TransportPermit::new(global, subject))
+            });
+        if permit.is_none() {
+            self.rejected.fetch_add(1, Ordering::Relaxed);
+        }
+        permit
+    }
+
+    fn gauge(&self) -> ConnectionGauge {
+        ConnectionGauge {
+            global: Arc::clone(&self.global),
+            limit: self.global_limit,
+            rejected: Arc::clone(&self.rejected),
+        }
     }
 }
 
@@ -308,10 +332,13 @@ where
 
 pub(crate) struct TcpConnectionLimits {
     global: Arc<Semaphore>,
+    global_limit: usize,
     by_source: Mutex<BTreeMap<IpAddr, TcpSourceLimit>>,
     per_source: usize,
     max_sources: usize,
     sequence: AtomicU64,
+    /// Admissions refused at capacity: global, per source, or a full source table (ADR 0045).
+    rejected: Arc<AtomicU64>,
 }
 
 struct TcpSourceLimit {
@@ -323,14 +350,32 @@ impl TcpConnectionLimits {
     pub(crate) fn production() -> Self {
         Self {
             global: Arc::new(Semaphore::new(128)),
+            global_limit: 128,
             by_source: Mutex::new(BTreeMap::new()),
             per_source: 16,
             max_sources: 1_024,
             sequence: AtomicU64::new(1),
+            rejected: Arc::new(AtomicU64::new(0)),
+        }
+    }
+
+    pub(crate) fn gauge(&self) -> ConnectionGauge {
+        ConnectionGauge {
+            global: Arc::clone(&self.global),
+            limit: self.global_limit,
+            rejected: Arc::clone(&self.rejected),
         }
     }
 
     pub(crate) fn acquire(&self, source: IpAddr) -> Option<TransportPermit> {
+        let permit = self.admit(source);
+        if permit.is_none() {
+            self.rejected.fetch_add(1, Ordering::Relaxed);
+        }
+        permit
+    }
+
+    fn admit(&self, source: IpAddr) -> Option<TransportPermit> {
         let source_limit = {
             let mut sources = self.by_source.lock();
             let sequence = self.sequence.fetch_add(1, Ordering::Relaxed);
@@ -446,6 +491,17 @@ pub struct DaemonConfig {
     pub tls: Option<TlsDaemonConfig>,
     /// Identity authority resolved for every production TLS request (ADR 0026).
     pub hosted_identity: Option<HostedIdentityConfig>,
+    /// The operational listener (ADR 0045): liveness, readiness and metrics, off when `None`.
+    pub ops: Option<OpsListenerConfig>,
+}
+
+/// The operational listener: plaintext, unauthenticated, `GET /livez`, `/readyz` and `/metrics`
+/// only, on an address of its own (ADR 0045).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OpsListenerConfig {
+    pub listen: SocketAddr,
+    /// Capability facts readiness requires the startup snapshot to publish (decision 5).
+    pub require_facts: Vec<String>,
 }
 
 /// One operator-declared trusted key for delegated context: a `kid`, its issuer, public material.
@@ -553,6 +609,7 @@ impl DaemonConfig {
             tcp: None,
             tls: None,
             hosted_identity: None,
+            ops: None,
         }
     }
 }
@@ -594,6 +651,7 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
     if config.event_retention == 0 {
         bail!("event retention must be nonzero");
     }
+    check_ops_listener(&config)?;
     check_secret_slots(&config.secret_slots)?;
     let git_sources = config
         .git_sources
@@ -721,6 +779,7 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
     configured.host_process_logs = host_process_logs;
     app.sweep_expired().await;
     let maintenance = MaintenanceTasks::start(&app);
+    let _ops_listener = start_ops_listener(&app, &maintenance, config.ops.as_ref()).await?;
     if let Some(tcp) = config.tcp.as_ref() {
         let result = serve_tcp(Arc::clone(&app), tcp).await;
         maintenance.abort();
@@ -743,9 +802,13 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
     let allowed = config.allow_uids.into_iter().collect::<BTreeSet<_>>();
     let transport_policy = UnixTransportPolicy::production();
     let connection_limits = ConnectionLimits::new(&allowed, transport_policy);
+    app.telemetry
+        .register_listener(Listener::Unix, connection_limits.gauge());
+    let request_metrics = RequestMetrics::new(&app, Listener::Unix);
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
     let mut connections = tokio::task::JoinSet::new();
+    app.telemetry.start_accepting();
     info!(socket = %config.socket.display(), "substrate ready");
 
     loop {
@@ -767,7 +830,12 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
                     actor: format!("unix-peer:{uid}"),
                     principal: peer.pid.map(|pid| format!("pid:{pid}")),
                 };
-                let service = router(Arc::clone(&app)).layer(Extension(identity));
+                let service = router(Arc::clone(&app))
+                    .layer(Extension(identity))
+                    .layer(middleware::from_fn_with_state(
+                        request_metrics.clone(),
+                        record_request,
+                    ));
                 connections.spawn(async move {
                     let io = TokioIo::new(stream);
                     let builder = http1_builder(transport_policy);
@@ -796,6 +864,8 @@ pub async fn serve(config: DaemonConfig) -> anyhow::Result<()> {
                 }
             }
             signal = &mut shutdown => {
+                // Readiness turns before any listener closes (ADR 0045 decision 6).
+                app.telemetry.stop_accepting();
                 signal?;
                 break;
             }
@@ -1266,6 +1336,7 @@ struct TcpAuthState {
     bearer_sha256: [u8; 32],
 }
 
+#[allow(clippy::too_many_lines)] // Admission, instrumentation and the accept loop stay adjacent.
 async fn serve_tcp(app: Arc<App>, config: &TcpDaemonConfig) -> anyhow::Result<()> {
     if !config.development_only {
         bail!("static-bearer TCP is available only in the explicit development profile");
@@ -1292,7 +1363,11 @@ async fn serve_tcp(app: Arc<App>, config: &TcpDaemonConfig) -> anyhow::Result<()
     };
     let service = development_router(Arc::clone(&app))
         .layer(Extension(identity))
-        .layer(middleware::from_fn_with_state(auth, require_tcp_bearer));
+        .layer(middleware::from_fn_with_state(auth, require_tcp_bearer))
+        .layer(middleware::from_fn_with_state(
+            RequestMetrics::new(&app, Listener::TcpDevelopment),
+            record_request,
+        ));
     let service = if config.path_prefix == "/" {
         service
     } else {
@@ -1304,6 +1379,9 @@ async fn serve_tcp(app: Arc<App>, config: &TcpDaemonConfig) -> anyhow::Result<()
     info!(listen = %config.listen, "substrate development-only authenticated TCP ready");
     let policy = UnixTransportPolicy::production();
     let limits = TcpConnectionLimits::production();
+    app.telemetry
+        .register_listener(Listener::TcpDevelopment, limits.gauge());
+    app.telemetry.start_accepting();
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
     let mut connections = tokio::task::JoinSet::new();
@@ -1351,6 +1429,8 @@ async fn serve_tcp(app: Arc<App>, config: &TcpDaemonConfig) -> anyhow::Result<()
                 }
             }
             signal = &mut shutdown => {
+                // Readiness turns before any listener closes (ADR 0045 decision 6).
+                app.telemetry.stop_accepting();
                 signal?;
                 break;
             }
@@ -1381,13 +1461,16 @@ async fn serve_tls(
     }
     let mut reload = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
         .context("tls.listener-config-invalid: install SIGHUP reload signal")?;
-    let hosted_admission = Arc::new(hosted_admission);
+    let hosted_admission = Arc::new(hosted_admission.with_telemetry(Arc::clone(&app.telemetry)));
     let listener = TcpListener::bind(config.listen)
         .await
         .context("tls.listener-config-invalid: bind production TLS listener")?;
     info!(listen = %config.listen, "substrate production HTTPS/WSS transport ready");
     let policy = UnixTransportPolicy::production();
     let limits = TcpConnectionLimits::production();
+    app.telemetry
+        .register_listener(Listener::Tls, limits.gauge());
+    app.telemetry.start_accepting();
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
     let mut connections = tokio::task::JoinSet::new();
@@ -1439,6 +1522,8 @@ async fn serve_tls(
                 }
             }
             signal = &mut shutdown => {
+                // Readiness turns before any listener closes (ADR 0045 decision 6).
+                app.telemetry.stop_accepting();
                 signal?;
                 break;
             }
@@ -1488,10 +1573,16 @@ async fn serve_tls_connection(
         warn!(source = %address.ip(), "TLS session exporter unavailable");
         return;
     }
-    let service = hosted_router(app, exporter).layer(middleware::from_fn_with_state(
-        hosted_admission,
-        require_hosted_authority,
-    ));
+    let request_metrics = RequestMetrics::new(&app, Listener::Tls);
+    let service = hosted_router(app, exporter)
+        .layer(middleware::from_fn_with_state(
+            hosted_admission,
+            require_hosted_authority,
+        ))
+        .layer(middleware::from_fn_with_state(
+            request_metrics,
+            record_request,
+        ));
     let io = TokioIo::new(tls);
     let builder = http1_builder(policy);
     let connection = builder
@@ -1711,6 +1802,125 @@ fn prepare_socket(path: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Connections the operational listener serves at once; a ninth is closed unanswered.
+const OPS_MAX_CONNECTIONS: usize = 8;
+/// How long a connection to the operational listener has to send its request head.
+const OPS_HEADER_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
+/// How long one operational connection may live, its one exchange included.
+const OPS_CONNECTION_LIFETIME: std::time::Duration = std::time::Duration::from_secs(10);
+/// The request head the operational listener buffers: twice hyper's 8 KiB floor.
+const OPS_MAX_BUFFER_BYTES: usize = 16 * 1024;
+const OPS_MAX_HEADERS: usize = 32;
+
+/// Every rule the operational listener's declaration must satisfy before the daemon serves.
+///
+/// # Errors
+///
+/// `ops.listener-config-invalid` for a zero port, an address a control listener also binds, or a
+/// required fact that is not a capability fact name.
+fn check_ops_listener(config: &DaemonConfig) -> anyhow::Result<()> {
+    let Some(ops) = config.ops.as_ref() else {
+        return Ok(());
+    };
+    if ops.listen.port() == 0 {
+        bail!("ops.listener-config-invalid: the operational listener requires a nonzero port");
+    }
+    let shares_control = config
+        .tcp
+        .iter()
+        .map(|tcp| tcp.listen)
+        .chain(config.tls.iter().map(|tls| tls.listen))
+        .any(|control| {
+            control.port() == ops.listen.port()
+                && (control.ip() == ops.listen.ip()
+                    || control.ip().is_unspecified()
+                    || ops.listen.ip().is_unspecified())
+        });
+    if shares_control {
+        bail!(
+            "ops.listener-config-invalid: the operational listener must not share a control listener's address"
+        );
+    }
+    if !ops.require_facts.iter().all(|fact| valid_fact_name(fact)) {
+        bail!("ops.listener-config-invalid: a required fact is not a capability fact name");
+    }
+    Ok(())
+}
+
+/// The running operational listener; dropping it stops the listener and every connection on it.
+struct OpsListener(tokio::task::JoinHandle<()>);
+
+impl Drop for OpsListener {
+    fn drop(&mut self) {
+        self.0.abort();
+    }
+}
+
+/// Binds and starts the operational listener when one is declared. It is bound before any
+/// control listener, so the readiness a probe reads is `503` until a control listener is bound.
+async fn start_ops_listener(
+    app: &Arc<App>,
+    maintenance: &MaintenanceTasks,
+    config: Option<&OpsListenerConfig>,
+) -> anyhow::Result<Option<OpsListener>> {
+    let Some(config) = config else {
+        return Ok(None);
+    };
+    let listener = TcpListener::bind(config.listen)
+        .await
+        .map_err(|_| anyhow!("ops.listener-config-invalid: bind the operational listener"))?;
+    let operations = Operations::new(
+        Arc::clone(app),
+        maintenance.handles(),
+        config.require_facts.clone(),
+        substrate_host::output_stall_terminations,
+    );
+    info!(listen = %config.listen, "substrate operational listener ready");
+    Ok(Some(OpsListener(tokio::spawn(serve_ops(
+        listener, operations,
+    )))))
+}
+
+/// One exchange per connection, no keep-alive, no upgrade, no body read, no credential read.
+async fn serve_ops(listener: TcpListener, operations: Arc<Operations>) {
+    let slots = Arc::new(Semaphore::new(OPS_MAX_CONNECTIONS));
+    let mut connections = tokio::task::JoinSet::new();
+    loop {
+        tokio::select! {
+            accepted = listener.accept() => {
+                let Ok((stream, _)) = accepted else {
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                    continue;
+                };
+                let Ok(slot) = Arc::clone(&slots).try_acquire_owned() else {
+                    continue;
+                };
+                let operations = Arc::clone(&operations);
+                connections.spawn(async move {
+                    let _slot = slot;
+                    let service = hyper::service::service_fn(
+                        move |request: hyper::Request<hyper::body::Incoming>| {
+                            let (parts, _body) = request.into_parts();
+                            let answer = operations.answer(&hyper::Request::from_parts(parts, ()));
+                            std::future::ready(Ok::<_, std::convert::Infallible>(answer))
+                        },
+                    );
+                    let mut builder = http1::Builder::new();
+                    builder
+                        .timer(TokioTimer::new())
+                        .header_read_timeout(OPS_HEADER_DEADLINE)
+                        .keep_alive(false)
+                        .max_buf_size(OPS_MAX_BUFFER_BYTES)
+                        .max_headers(OPS_MAX_HEADERS);
+                    let connection = builder.serve_connection(TokioIo::new(stream), service);
+                    let _ = tokio::time::timeout(OPS_CONNECTION_LIFETIME, connection).await;
+                });
+            }
+            Some(_) = connections.join_next(), if !connections.is_empty() => {}
+        }
+    }
+}
+
 /// The daemon's two maintenance tasks: the lease sweeper and the containment step.
 ///
 /// They are separate tasks so a driver that hangs on a containment kill stalls no other
@@ -1734,7 +1944,11 @@ impl MaintenanceTasks {
                     _ = interval.tick() => {}
                     () = sweeper_app.maintenance_notified() => {}
                 }
+                let started = std::time::Instant::now();
                 sweeper_app.sweep_expired().await;
+                sweeper_app
+                    .telemetry
+                    .maintenance_round(MaintenanceTask::LeaseSweep, started.elapsed());
             }
         });
         let containment_app = Arc::clone(app);
@@ -1748,7 +1962,11 @@ impl MaintenanceTasks {
                     _ = interval.tick() => {}
                     () = containment_app.containment_notified() => {}
                 }
+                let started = std::time::Instant::now();
                 containment_app.contain_pending().await;
+                containment_app
+                    .telemetry
+                    .maintenance_round(MaintenanceTask::Containment, started.elapsed());
             }
         });
         Self {
@@ -1760,6 +1978,14 @@ impl MaintenanceTasks {
     fn abort(&self) {
         self.lease_sweeper.abort();
         self.containment.abort();
+    }
+
+    /// What liveness watches: whether either task has ended.
+    fn handles(&self) -> Vec<tokio::task::AbortHandle> {
+        vec![
+            self.lease_sweeper.abort_handle(),
+            self.containment.abort_handle(),
+        ]
     }
 }
 
@@ -1850,10 +2076,12 @@ mod tests {
     fn tcp_source_limit_evicts_only_idle_sources() {
         let limits = TcpConnectionLimits {
             global: Arc::new(Semaphore::new(8)),
+            global_limit: 8,
             by_source: Mutex::new(BTreeMap::new()),
             per_source: 1,
             max_sources: 2,
             sequence: AtomicU64::new(1),
+            rejected: Arc::new(AtomicU64::new(0)),
         };
         let active = limits.acquire("127.0.0.1".parse().unwrap()).unwrap();
         assert!(limits.acquire("127.0.0.2".parse().unwrap()).is_some());
@@ -1883,6 +2111,10 @@ mod tests {
         let uid_1001 = limits.acquire(1001).expect("uid 1001 capacity");
         assert!(limits.acquire(1002).is_none());
         assert!(limits.acquire(9999).is_none());
+        // ADR 0045: the two refused at capacity are counted; the unmapped uid is not one.
+        let gauge = limits.gauge();
+        assert_eq!(gauge.rejected.load(Ordering::Relaxed), 2);
+        assert_eq!((gauge.open(), gauge.limit), (2, 2));
 
         drop(uid_1000);
         assert!(limits.acquire(1000).is_some());
@@ -2113,6 +2345,9 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(limits.acquire(source).is_none());
         assert!(limits.acquire("192.0.2.2".parse().unwrap()).is_some());
+        let gauge = limits.gauge();
+        assert_eq!(gauge.rejected.load(Ordering::Relaxed), 1);
+        assert_eq!((gauge.open(), gauge.limit), (16, 128));
         drop(permits);
         assert!(limits.acquire(source).is_some());
     }

@@ -18,6 +18,7 @@ const MAINTENANCE_DRIVER_TIMEOUT: std::time::Duration = std::time::Duration::fro
 mod events;
 mod execs;
 mod git_roots;
+mod health;
 mod metrics;
 mod operations;
 mod processes;
@@ -30,6 +31,10 @@ mod workspaces;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use self::health::{
+    Admission, ConnectionGauge, Listener, MaintenanceTask, Operations, RequestMetrics, Telemetry,
+    record_request, valid_fact_name,
+};
 pub use self::routes::router;
 pub(crate) use self::routes::{development_router, hosted_router};
 pub(crate) use self::service::SessionTransport;
