@@ -49,7 +49,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
     It never calls Identity and answers `503` once shutdown begins, before any listener closes.
   - **`/metrics`:** a fixed OpenMetrics catalogue. Labels are closed sets only, and a scrape holds
-    at most 578 samples, 471 without the refusal counter. Every histogram has 11 buckets from
+    at most 579 samples, 471 without the refusal counter. Every histogram has 11 buckets from
     5 ms to 10 s. The metrics:
     - `substrate_build_info{version,contract_bundle}`, `substrate_ready{check}`;
     - `substrate_http_requests_total{listener,family,outcome}`,

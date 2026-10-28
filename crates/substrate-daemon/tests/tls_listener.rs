@@ -1417,7 +1417,7 @@ async fn development_static_bearer_refuses_non_loopback_binding() {
 /// The largest number of samples `/metrics` may carry (ADR 0045 decision 7): 471 without
 /// `substrate_refusals_total`, plus one series per refusal code the wire crate names and `other`.
 /// `app::health::tests` pins the same number against the catalogue itself.
-const OPS_SERIES_MAXIMUM: usize = 578;
+const OPS_SERIES_MAXIMUM: usize = 579;
 
 struct OpsAnswer {
     status: u16,
