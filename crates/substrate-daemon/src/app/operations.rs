@@ -1776,6 +1776,19 @@ pub(super) async fn finish_lease_store_error(
                 operation: Some(operation.to_owned()),
             },
         ),
+        // A renewal reads its clock again inside its transaction; one that read it in `new_lease`
+        // and not there is the refusal `new_lease` would have made, recorded on the operation.
+        StoreError::LeaseClockUnavailable => (
+            StatusCode::NOT_IMPLEMENTED,
+            ErrorDetail {
+                class: ErrorClass::Unserved,
+                code: "lease.clock-unavailable".to_owned(),
+                message: "A durable Linux boot-relative lease clock is unavailable.".to_owned(),
+                retriable: false,
+                address: Some("lease.clock".to_owned()),
+                operation: Some(operation.to_owned()),
+            },
+        ),
         _ => return store_failure(request_id, Some(operation), error),
     };
     if let Err(store_error) = app
