@@ -2971,8 +2971,9 @@ pub struct ProcessEventCursor {
 
 impl ProcessEventCursor {
     /// The position `text` states when it matches the published `process-event-cursor` pattern
-    /// and is at most [`MAX_PROCESS_EVENT_CURSOR_CHARS`] long; `None` for anything else, including
-    /// a number beyond `u64`.
+    /// and is at most [`MAX_PROCESS_EVENT_CURSOR_CHARS`] long; `None` for anything else. The
+    /// pattern bounds no number's width, so a number beyond `u64` reads as `u64::MAX`: a
+    /// generation no source has, a seq beyond every barrier, an offset beyond every log.
     pub fn parse(text: &str) -> Option<Self> {
         fn tail_of<'a>(
             part: &'a str,
@@ -2986,7 +2987,7 @@ impl ProcessEventCursor {
             let canonical = !part.is_empty()
                 && part.bytes().all(|byte| byte.is_ascii_digit())
                 && (part == "0" || !part.starts_with('0'));
-            let value: u64 = canonical.then(|| part.parse().ok())??;
+            let value = canonical.then(|| part.parse().unwrap_or(u64::MAX))?;
             (zero || value > 0).then_some(value)
         }
         if text.chars().count() > MAX_PROCESS_EVENT_CURSOR_CHARS {

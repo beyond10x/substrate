@@ -80,6 +80,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - The specification and CI use ESS 0.72.0 (was 0.70.0); the suites, wire types and CLI package regenerate unchanged apart from the generator header.
 - The specification and CI use ESS 0.74.0 (was 0.72.0). The host-process suite gains the synthesized `AppendStreamEvent/unknown-process` scenario (92 synthesized, 27 refusals); the other suites, wire types and CLI package regenerate unchanged apart from the generator header.
 
+### Fixed
+
+- The event log reads an `ev2` cursor by its published `event-cursor` pattern: one outside it
+  (a scope without the `scope_` form, generation 0, more than 512 characters) is
+  `event.cursor-invalid` (409), where it was `event.source-mismatch`. A cursor inside the pattern
+  whose number does not fit 64 bits reads as the largest one: another generation is
+  `event.source-mismatch`, a seq or offset beyond the stream `event.cursor-invalid`. A
+  process-event cursor whose seq is 2^63 or more is `event.cursor-invalid`, where it was 500
+  `state.store-failed`, and an empty process-event cursor is `event.cursor-invalid`, where it was
+  422 `request.schema-invalid`.
+
 ## [0.14.0] — 2026-10-27
 
 Published by [release run 40558015370](https://github.com/beyond10x/substrate/actions/runs/40558015370)

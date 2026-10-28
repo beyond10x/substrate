@@ -321,9 +321,11 @@ pub(super) async fn process_events(
     else {
         return schema_invalid(&request_id, None, "query");
     };
-    if query.cursor.as_ref().is_some_and(|cursor| {
-        cursor.is_empty() || cursor.chars().count() > MAX_PROCESS_EVENT_CURSOR_CHARS
-    }) {
+    if query
+        .cursor
+        .as_ref()
+        .is_some_and(|cursor| cursor.chars().count() > MAX_PROCESS_EVENT_CURSOR_CHARS)
+    {
         return schema_invalid(&request_id, None, "query");
     }
     let scope = app.scope(&identity);
@@ -345,7 +347,11 @@ pub(super) async fn process_events(
             None => return event_cursor_failure(&request_id, &EventCursorError::Invalid),
         },
     };
-    let after_seq = requested.as_ref().map_or(0, |position| position.seq);
+    // The store reads seqs as SQLite integers; a seq past `i64::MAX` is past every barrier, and
+    // `start_position` refuses it from the position itself.
+    let after_seq = requested
+        .as_ref()
+        .map_or(0, |position| position.seq.min(i64::MAX.unsigned_abs()));
     let read = match app
         .store_io(|| {
             app.store

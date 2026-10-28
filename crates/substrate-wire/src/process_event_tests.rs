@@ -239,10 +239,23 @@ fn process_event_cursor_names_its_record_and_reads_only_its_form() {
         "pe1.proc_01.scope_a.01.0.0",
         "pe1.proc_01.scope_a.1.00.0",
         "pe1.proc_01.scope_a.1.0.+1",
-        "pe1.proc_01.scope_a.1.0.18446744073709551616",
         "pe1.proc_01.scope_\u{e9}.1.0.0",
         &long,
     ] {
         assert_eq!(super::ProcessEventCursor::parse(foreign), None, "{foreign}");
     }
+    // The pattern bounds no number's width: a number beyond `u64` is read as `u64::MAX`, so a
+    // foreign generation still answers `event.source-mismatch` and a seq or offset no stream
+    // reaches answers `event.cursor-invalid`.
+    let wide = "18446744073709551616";
+    assert_eq!(
+        super::ProcessEventCursor::parse(&format!("pe1.proc_01.scope_a.{wide}.{wide}.{wide}")),
+        Some(super::ProcessEventCursor {
+            process: "proc_01".to_owned(),
+            source: "scope_a".to_owned(),
+            generation: u64::MAX,
+            seq: u64::MAX,
+            offset: u64::MAX,
+        })
+    );
 }

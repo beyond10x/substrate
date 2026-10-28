@@ -54,6 +54,7 @@ fn cursor_corpus() -> Vec<String> {
         "pe1.proc_a.scope_b.1.0.0".to_owned(),
         "pe1.proc_a.scope_b.18446744073709551615.18446744073709551615.18446744073709551615"
             .to_owned(),
+        "pe1.proc_a.scope_b.18446744073709551616.0.0".to_owned(),
         String::new(),
         "pe1.".to_owned(),
         format!("{valid}.0"),

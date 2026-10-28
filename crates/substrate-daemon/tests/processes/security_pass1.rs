@@ -291,6 +291,61 @@ async fn security_pass1_a_cursor_outside_the_published_pattern_is_cursor_invalid
     );
 }
 
+/// `spec/host-processes/README.md` § S12 *Cursor*: another generation is `event.source-mismatch`,
+/// and a cursor the daemon cannot honour is `event.cursor-invalid` (409). The published pattern
+/// admits a generation and a seq of any width, and the input schema admits the empty string; none
+/// of them may answer 500 or 422.
+#[tokio::test(flavor = "multi_thread")]
+async fn security_pass1_pattern_valid_wide_numbers_and_empty_cursor_are_named_refusals() {
+    let (harness, _fake) = Harness::faked();
+    let cwd = harness.workdir("sp1-wide");
+    let id = harness
+        .started(
+            "op_sp1_wide_start01",
+            input(&["/bin/true"], &cwd, "s-1", "dev"),
+        )
+        .await;
+    let served = serve(&harness.app).await;
+    let Opened::Upgraded(mut reader) = open(&served, &id, None).await else {
+        panic!("the stream opens");
+    };
+    let first = next_item(&mut reader).await.expect("first item");
+    let cursor = text(&first["cursor"]).to_owned();
+    let parts: Vec<&str> = cursor.split('.').collect();
+    assert_eq!(parts.len(), 6, "{cursor}");
+    let (source, generation, seq) = (parts[2], parts[3], parts[4]);
+    let cases = [
+        (
+            format!("pe1.{id}.{source}.18446744073709551616.0.0"),
+            "event.source-mismatch",
+        ),
+        (
+            format!("pe1.{id}.{source}.{generation}.9223372036854775808.0"),
+            "event.cursor-invalid",
+        ),
+        (
+            format!("pe1.{id}.{source}.{generation}.18446744073709551615.0"),
+            "event.cursor-invalid",
+        ),
+        (
+            format!("pe1.{id}.{source}.{generation}.18446744073709551616.0"),
+            "event.cursor-invalid",
+        ),
+        (
+            format!("pe1.{id}.{source}.{generation}.{seq}.18446744073709551616"),
+            "event.cursor-invalid",
+        ),
+        (String::new(), "event.cursor-invalid"),
+    ];
+    for (bad, code) in cases {
+        let Opened::Refused(status, body) = open(&served, &id, Some(&bad)).await else {
+            panic!("{bad:?} was upgraded");
+        };
+        assert_eq!(status, 409, "{bad:?}: {body}");
+        assert_eq!(body["error"]["code"], code, "{bad:?}: {body}");
+    }
+}
+
 /// The safety fact behind "a program's output cannot forge an event or a terminal item": every
 /// output byte reaches a reader only inside a `line` item's `text`. A program that prints a line
 /// spelling an `ended` item, a carriage return, a NUL and a byte that is not UTF-8 is still one
