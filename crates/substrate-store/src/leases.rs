@@ -136,7 +136,17 @@ impl Store {
         Ok(resource)
     }
 
-    pub fn renew_exec_lease(
+    /// Renews exec `id`'s lease as `lease` states it, issued at a clock `read_clock` reads inside
+    /// this renewal's transaction; `lease.clock` is replaced by that reading. No reading is
+    /// [`StoreError::LeaseClockUnavailable`] and writes nothing.
+    ///
+    /// A clock read before the transaction can predate a renewal another request issued and
+    /// committed in between, and `lease_due` reads a boot-relative time below the stored issue as
+    /// a monotonic regression: the earlier reading would refuse a live lease as expired. Every
+    /// lease write holds this store's connection, so a reading taken here is no earlier than the
+    /// issue it judges.
+    #[allow(clippy::too_many_arguments)]
+    pub fn renew_exec_lease_reading(
         &self,
         scope: &Scope,
         operation: &str,
@@ -144,9 +154,11 @@ impl Store {
         status: u16,
         id: &str,
         lease: &NewLease,
+        read_clock: impl FnOnce() -> Option<LeaseClock>,
     ) -> Result<Exec, StoreError> {
         let mut connection = self.connection.lock();
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let lease = &lease_read_now(lease, read_clock)?;
         ensure_lease_renewable(&transaction, scope, "exec", id, &lease.clock)?;
         let json: String = transaction.query_row(
             "SELECT resource_json FROM execs
@@ -186,7 +198,10 @@ impl Store {
         Ok(resource)
     }
 
-    pub fn renew_pipe_session_lease(
+    /// Renews the lease of session `session_id`'s exec as [`Store::renew_exec_lease_reading`]
+    /// does: issued at a clock `read_clock` reads inside this renewal's transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub fn renew_pipe_session_lease_reading(
         &self,
         scope: &Scope,
         operation: &str,
@@ -194,9 +209,11 @@ impl Store {
         status: u16,
         session_id: &str,
         lease: &NewLease,
+        read_clock: impl FnOnce() -> Option<LeaseClock>,
     ) -> Result<PipeSession, StoreError> {
         let mut connection = self.connection.lock();
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let lease = &lease_read_now(lease, read_clock)?;
         let mut session = load_session(&transaction, scope, session_id)?
             .ok_or_else(|| StoreError::NotAccepted(session_id.to_owned()))?;
         ensure_lease_renewable(&transaction, scope, "exec", &session.exec, &lease.clock)?;
@@ -375,14 +392,42 @@ impl Store {
         Ok(candidates)
     }
 
-    #[allow(clippy::too_many_lines)]
+    /// Claims `candidate` when its lease is due by `clock`.
+    ///
+    /// `clock` must have been read after every write this claim can observe; a sweeper reads its
+    /// clock inside the claim with [`Store::claim_expired_lease_reading`] instead.
     pub fn claim_expired_lease(
         &self,
         candidate: &ExpiredLease,
         clock: &LeaseClock,
     ) -> Result<Option<ExpiredLease>, StoreError> {
+        Ok(self
+            .claim_expired_lease_reading(candidate, || Some(clock.clone()))?
+            .map(|(claimed, _)| claimed))
+    }
+
+    /// Claims `candidate` when its lease is due by a clock `read_clock` reads inside this claim's
+    /// transaction, and returns that reading with the claim. No reading leaves it unclaimed.
+    ///
+    /// A clock read before the transaction can predate a lease another request issued and
+    /// committed in between. `lease_due` reads a boot-relative time below a lease's issue as a
+    /// monotonic regression and expires it, so that stale reading killed a session its start had
+    /// just answered as ready (`story:pty-session-refuses-first-attach-under-load`). Every lease
+    /// write holds this store's connection, and every issuing request reads its clock before it
+    /// writes, so a reading taken here is no earlier than the issue of any lease the claim sees.
+    #[allow(clippy::too_many_lines)]
+    pub fn claim_expired_lease_reading(
+        &self,
+        candidate: &ExpiredLease,
+        read_clock: impl FnOnce() -> Option<LeaseClock>,
+    ) -> Result<Option<(ExpiredLease, LeaseClock)>, StoreError> {
         let mut connection = self.connection.lock();
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let Some(reading) = read_clock() else {
+            transaction.commit()?;
+            return Ok(None);
+        };
+        let clock = &reading;
         let kind = match candidate.resource {
             LeaseResource::Workspace { .. } => "workspace",
             LeaseResource::Exec { .. } => "exec",
@@ -511,7 +556,7 @@ impl Store {
         if let Some(event) = event {
             self.report_committed(&[commit_effect(&candidate.scope, &event)]);
         }
-        Ok(Some(candidate.clone()))
+        Ok(Some((candidate.clone(), reading)))
     }
 
     pub fn claim_expired_leases(
@@ -1036,6 +1081,17 @@ fn lease_authorizing_operation(
             |row| row.get(0),
         )
         .map_err(StoreError::from)
+}
+
+/// `lease` issued at the clock `read_clock` reads now, inside the caller's transaction.
+fn lease_read_now(
+    lease: &NewLease,
+    read_clock: impl FnOnce() -> Option<LeaseClock>,
+) -> Result<NewLease, StoreError> {
+    Ok(NewLease {
+        clock: read_clock().ok_or(StoreError::LeaseClockUnavailable)?,
+        ..lease.clone()
+    })
 }
 
 fn ensure_lease_renewable(
