@@ -15,7 +15,7 @@ relations:
 - depends_on: story:remote-sdk-transport
 - depends_on: story:node-bound-kubernetes-serving-profile
 - depends_on: story:operational-health-and-telemetry
-revision: 2
+revision: 3
 transitions:
 - {from: "draft", to: "proposed", at: "2026-08-31T22:54:33Z", actor: "human:timo", revision: 2, imported: true}
 ---
@@ -27,7 +27,11 @@ A deployed Substrate endpoint can be certified from outside its process, contain
 
 ## Acceptance
 
-A Rust conformance runner accepts an HTTPS endpoint, trust roots and a token-provider command or file descriptor without persisting credentials. It verifies machine facts, workspace/file/exec lifecycle, operation-id recovery after a deliberately lost response, restart-to-unknown behavior, event ordering and retention gaps, TLS/auth negatives, raw-pipe or PTY WSS attachment when advertised, exact resource observations and cleanup. Capability-dependent cases are reported passed, failed or absent; absent is never counted as passed. The runner produces a machine-readable signed report with endpoint identity, advertised contract, capability snapshot digest and case inventory but no credential, argv output or tenant data.
+A Rust conformance runner accepts an HTTPS endpoint, trust roots and a token-provider command or file descriptor without persisting credentials. It verifies machine facts, workspace/file/exec lifecycle, operation-id recovery after a deliberately lost response, restart-to-unknown behavior, event ordering and retention gaps, TLS/auth negatives, raw-pipe or PTY WSS attachment when advertised, exact resource observations and cleanup. Capability-dependent cases are reported passed, failed or absent; absent is never counted as passed. The runner produces a machine-readable report and its SHA-256 digest file, carrying endpoint identity, advertised contract, capability snapshot digest and case inventory but no credential, argv output or tenant data; the certification run signs the report with a detached signature (design 31 § 6), and the runner holds no signing key.
+
+## Design
+
+[Design 31](../../../docs/design/31-remote-clean-room-conformance-runner.md) (proposed) is the design this story is built from (invariant 8).
 
 ## Boundaries
 
