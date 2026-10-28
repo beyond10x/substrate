@@ -4296,6 +4296,8 @@ dependencies = [
  "jsonschema",
  "libc",
  "pulldown-cmark",
+ "rcgen",
+ "rustls",
  "rustsec",
  "serde",
  "serde_json",

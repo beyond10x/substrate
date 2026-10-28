@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ printf "%s-certificate-names" (include "substrate.name" .) | quote }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    {{- include "substrate.labels" . | nindent 4 }}
+data:
+  dns-names: {{ include "substrate.certificateNames" . | quote }}
