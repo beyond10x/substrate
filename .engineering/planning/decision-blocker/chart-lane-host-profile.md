@@ -2,12 +2,14 @@
 format: aep.planning-md/3
 id: decision-blocker:chart-lane-host-profile
 kind: decision-blocker
-status: open
+status: cleared
 title: The local chart lane cannot run beside a host kernel that already holds the execution profile
 relations:
 - blocks: story:chart-lane-local-execution-record
 withholds: test_result
-revision: 1
+revision: 3
+transitions:
+- {from: "open", to: "cleared", at: "2026-10-28T19:46:32Z", actor: "human:timo", revision: 3}
 ---
 # The local chart lane cannot run beside a host kernel that already holds the execution profile
 
@@ -40,3 +42,19 @@ needs no shared-kernel assumption.
 
 A chosen option, and for A an accepted design. Until then PR 190 stays a draft, because its
 release step requires a `Chart-lane:` record nobody can produce here.
+
+
+## Decided, 2026-10-28: A, design first
+
+Taken by the coordinating session as its D167 under the operator's standing grant.
+
+- The profile name becomes a deployment parameter whose default is `substrate-host-exec-v1`, so
+  no current deployment changes. The policy source, the installer's exact-source check and the
+  bootstrap's label check all take the name from it.
+- The chart lane uses a lane-unique name; a loaded profile it does not own stays untouched.
+- B is rejected: adopting a profile whose loader is unknown weakens the exact-source guarantee.
+  C is rejected: it adds a VM to every release.
+- Limit: if the design finds the change needs an ADR, or alters what a deployed profile
+  enforces, it stops and is filed for the operator.
+- Order: after the open pull requests and the `story:adapter-stdin-pipe` wave. PR 190 stays a
+  draft until then. The work is `story:host-profile-name-is-a-deployment-parameter`.
