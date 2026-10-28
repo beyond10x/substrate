@@ -869,11 +869,19 @@ pub async fn stdin_echoes_and_ends_on_close(
     profile: &ConfinementProfile,
     chunks: &[&[u8]],
 ) {
+    stdin_echoes_through(adapter, profile, &sh("exec cat"), chunks).await;
+}
+
+/// T2 as [`stdin_echoes_and_ends_on_close`], with `cat` started as `command`: for an adapter
+/// under which `/bin/sh` may not run another program.
+pub async fn stdin_echoes_through(
+    adapter: &Arc<dyn ConfinementAdapter>,
+    profile: &ConfinementProfile,
+    command: &Command,
+    chunks: &[&[u8]],
+) {
     let admitted = adapter.admit(profile).expect("a piped profile is admitted");
-    let run = adapter
-        .start(&admitted, &sh("exec cat"))
-        .await
-        .expect("cat starts");
+    let run = adapter.start(&admitted, command).await.expect("cat starts");
     for chunk in chunks {
         adapter.write_stdin(&run, chunk).await.expect("written");
     }

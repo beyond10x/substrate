@@ -601,6 +601,28 @@ fn a_narrower_workspace_is_refused_scoped_write_unserved() {
     }
 }
 
+// T14 of design 32: `/bin/cat` under Seatbelt reads three writes through the adapter's writer,
+// and `close_stdin` ends it.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_macos_run_reads_its_piped_stdin() {
+    let adapter = macos();
+    let workspace = tempfile::tempdir().expect("workspace");
+    support::stdin_echoes_through(
+        &adapter,
+        &ConfinementProfile {
+            workspace: Some(workspace.path().to_path_buf()),
+            stdin: confinement::StdinMode::Piped { limit_bytes: 1_024 },
+            ..ConfinementProfile::default()
+        },
+        &Command {
+            argv: vec!["/bin/cat".into()],
+            env: BTreeMap::new(),
+        },
+        &[b"one\n", b"two\n", b"three\n"],
+    )
+    .await;
+}
+
 // B9: a `macos` run keeps the last bytes under `Tail`. The numbers come from bash's own `printf`:
 // only the program itself is executable, so `/usr/bin/seq` ends the run with 126.
 #[tokio::test(flavor = "multi_thread")]

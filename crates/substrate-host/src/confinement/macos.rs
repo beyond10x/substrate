@@ -12,6 +12,8 @@
 //! to `(target same-sandbox)`). ADR 0037 "What Seatbelt cannot confine": no pids or memory bound,
 //! no egress forwarder and no ingress, so `limits`, `network_egress` and `network_ingress` are not
 //! served; a child can leave the process group with `setsid`, so `whole_tree_kill` is not proved.
+//! It proves `stdin_pipe`: a run whose profile asks for it reads a pipe the embedder writes
+//! (design 32), the child's own descriptor 0 and nothing Seatbelt has to allow.
 //!
 //! Since `story:macos-seatbelt-policy-runs-cargo-test` (ADR 0109 S2) it also proves the three
 //! facts a Rust build needs, each only when [`seatbelt::probe_build`] saw Seatbelt enforce it at
@@ -67,6 +69,7 @@ use substrate_wire::{
 };
 use tokio::sync::watch;
 
+use super::stdin::{self, StdinWriter};
 use super::{
     AdapterFacts, AdapterName, AdmittedProfile, Command, ConfinementAdapter, ConfinementError,
     ConfinementProfile, ContractFamily, Fact, RenderedCommand, RunExit, RunId, RunObservation,
@@ -415,6 +418,7 @@ fn proved(build: BuildProof) -> AdapterFacts {
             (Fact::SealedPaths, build.sealed_paths),
             (Fact::ExecSubpaths, build.exec_subpaths),
             (Fact::PrivateTmpdir, build.private_tmpdir),
+            (Fact::StdinPipe, true),
         ],
     )
 }
@@ -435,6 +439,8 @@ struct MacosRun {
     /// before the leader is reaped: while it is false the leader is at least a zombie, so its pid
     /// still names this run's process group.
     reaped: Arc<Mutex<bool>>,
+    /// The run's standard input, when its profile asked for a pipe (design 32).
+    stdin: Option<Arc<StdinWriter>>,
 }
 
 /// Blocks until `pid` has exited, without reaping it.
@@ -654,7 +660,7 @@ impl MacosAdapter {
         }
         confined
             .current_dir(directory)
-            .stdin(Stdio::null())
+            .stdin(stdin::stdio(profile.stdin))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         Ok(confined)
@@ -884,6 +890,8 @@ impl MacosAdapter {
             .id()
             .and_then(|pid| i32::try_from(pid).ok())
             .ok_or_else(|| DriverError::failed("exec.spawn-failed", "macos spawn: no pid"))?;
+        let writer = stdin::child_writer(admitted.profile().stdin, child.stdin.take());
+        let ending = writer.clone();
         let id = {
             let mut sequence = self.sequence.lock();
             *sequence += 1;
@@ -904,7 +912,7 @@ impl MacosAdapter {
             .map(|stream| tokio::spawn(drain(stream, Arc::clone(&captured), false)));
         let reaped = Arc::new(Mutex::new(false));
         let reaping = Arc::clone(&reaped);
-        let ending = admitted.clone();
+        let ending_profile = admitted.clone();
         let ending_id = id.clone();
         tokio::spawn(async move {
             let _ = tokio::task::spawn_blocking(move || await_exit_unreaped(pid)).await;
@@ -927,7 +935,12 @@ impl MacosAdapter {
             if let Some((directory, resolved)) = private {
                 // The removal below decides; the guard must not try again, silently.
                 let _ = directory.keep();
-                remove_private_tmpdir(&ending, &ending_id, &resolved);
+                remove_private_tmpdir(&ending_profile, &ending_id, &resolved);
+            }
+            // The run's end, for its standard input too: a write pending now fails, and a
+            // descendant outside the group still holding descriptor 0 no longer holds the writer.
+            if let Some(writer) = ending {
+                writer.end().await;
             }
             let _ = phase.send(match ended {
                 Ok(status) => Phase::Ended(RunExit {
@@ -943,6 +956,7 @@ impl MacosAdapter {
             phase: observed,
             captured,
             reaped,
+            stdin: writer,
         }));
         admitted.audit_start(&id, &command.argv[0]);
         Ok(id)
@@ -960,6 +974,7 @@ impl ConfinementAdapter for MacosAdapter {
     /// read-only file, more roots than the wire bound, and a root that would appear anywhere but
     /// at its host path (`paths_are_host_paths`).
     fn check(&self, profile: &ConfinementProfile) -> Result<(), ConfinementError> {
+        stdin::check_streams(profile)?;
         super::refuse_workspace_access("macos", profile)?;
         if !profile.secret_slots.is_empty() {
             return Err(DriverError::unserved(
@@ -1108,6 +1123,17 @@ impl ConfinementAdapter for MacosAdapter {
         }
         Ok(())
     }
+
+    async fn write_stdin(&self, run: &RunId, bytes: &[u8]) -> Result<(), ConfinementError> {
+        let run = self.run(run)?;
+        stdin::piped(run.stdin.as_ref())?.write(bytes).await
+    }
+
+    async fn close_stdin(&self, run: &RunId) -> Result<(), ConfinementError> {
+        let run = self.run(run)?;
+        stdin::piped(run.stdin.as_ref())?.close().await;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1171,6 +1197,7 @@ mod tests {
                 Fact::SealedPaths,
                 Fact::ExecSubpaths,
                 Fact::PrivateTmpdir,
+                Fact::StdinPipe,
             ]
         );
         assert!(!facts.declared_insecure());
@@ -1220,7 +1247,7 @@ mod tests {
         ];
         for (adapter, profile, missing) in cases {
             assert!(!adapter.facts().proves(&missing), "{missing:?}");
-            assert_eq!(adapter.facts().facts.len(), 4, "{missing:?}");
+            assert_eq!(adapter.facts().facts.len(), 5, "{missing:?}");
             match adapter.admit(&profile) {
                 Err(ConfinementError::FactUnserved { fact, .. }) => assert_eq!(fact, missing),
                 other => panic!("{missing:?}: expected confinement.fact-unserved, got {other:?}"),
