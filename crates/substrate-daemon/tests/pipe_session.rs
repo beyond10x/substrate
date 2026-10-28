@@ -56,6 +56,9 @@ mod adversary_pass1;
 #[path = "pipe_session/sweep_clock_predates_start.rs"]
 mod sweep_clock_predates_start;
 
+#[path = "pipe_session/concurrent_renewals_refuse_a_live_lease.rs"]
+mod concurrent_renewals_refuse_a_live_lease;
+
 struct FixturePipe {
     observation: ExecObservation,
     sender: Option<mpsc::Sender<PipeFrame>>,

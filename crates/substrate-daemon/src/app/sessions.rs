@@ -838,13 +838,14 @@ pub(super) async fn pipe_session_lease_renew(
     }
     match app
         .store_io(|| {
-            app.store.renew_pipe_session_lease(
+            app.store.renew_pipe_session_lease_reading(
                 &scope,
                 &operation,
                 &app.authority.now().to_rfc3339(),
                 200,
                 &session_id,
                 &lease,
+                || app.lease_clock().ok(),
             )
         })
         .await
