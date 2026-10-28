@@ -1296,8 +1296,14 @@ pub(super) async fn finish_pipe_session_start(
         })
         .await
     {
-        Ok((authoritative, _)) => {
-            app.driver.acknowledge_exec(&observation);
+        Ok((authoritative, authoritative_exec)) => {
+            if authoritative_exec == stored {
+                app.driver.acknowledge_exec(&observation);
+            } else {
+                // A terminal exec recorded before this write kept its place (as in
+                // `finish_exec_leased`); the start's stale observation is superseded.
+                app.driver.discard_superseded_exec(&observation.resource.id);
+            }
             success(
                 StatusCode::ACCEPTED,
                 Success::mutation(request_id, operation, authoritative),
