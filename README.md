@@ -305,6 +305,19 @@ input, resize, worker capability removal, live resource observations and whole-t
 Run both ordinary and quota variants, the existing delegated lane and image-startup checks before
 admitting terminals. The portable CI lane alone does not prove container execution.
 
+### Kubernetes
+
+[`deploy/helm/substrate/`](deploy/helm/substrate/) is the node-bound serving profile of
+[ADR 0046](adr/0046-kubernetes-serves-one-node-bound-daemon-per-stable-pod-address.md): one daemon pod per dedicated node,
+each with its own ledger claim, TLS certificate and Identity admission, addressed by its own host
+name. With `execution.enabled` the pod starts the bootstrap above, and `nodeProfiles.enabled`
+installs the node profiles. Each release publishes the chart, signed and with build provenance, at
+`oci://ghcr.io/beyond10x/charts/b10x-substrate`. The
+[deployment guide](website/docs/guides/deployment.md#kubernetes-one-daemon-per-dedicated-node)
+lists what to supply, what the chart refuses and how to rotate certificates. `cargo xtask
+chart-lane static` checks the chart offline with Helm; `chart-lane cluster` runs it on kind
+(`.github/workflows/chart-lane.yml`).
+
 ### Git workspace sources
 
 `--git-source <name>=<https-prefix>/` (repeatable) declares a segment-bounded Connector byte-plane

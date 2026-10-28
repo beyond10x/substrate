@@ -13,6 +13,8 @@ clap.workspace = true
 fancy-regex.workspace = true
 hex.workspace = true
 pulldown-cmark.workspace = true
+rcgen = { version = "0.14", default-features = false, features = ["aws_lc_rs", "pem"] }
+rustls.workspace = true
 rustsec.workspace = true
 jsonschema.workspace = true
 libc.workspace = true

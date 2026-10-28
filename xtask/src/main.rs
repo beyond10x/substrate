@@ -10,6 +10,9 @@ mod adrs;
 mod advisories;
 mod bot_files;
 mod bundle;
+mod chart;
+mod chart_cluster;
+mod chart_yaml;
 mod container_profiles;
 mod docs;
 mod ess;
@@ -48,6 +51,12 @@ struct Cli {
 
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Check the Kubernetes chart (static) or run its kind scenarios (cluster), per ADR 0046.
+    #[command(name = "chart-lane")]
+    ChartLane(chart::LaneArgs),
+    /// Package the released Kubernetes chart with its version and pinned daemon digest.
+    #[command(name = "package-chart")]
+    PackageChart(chart::PackageArgs),
     /// Validate the standalone public documentation.
     CheckDocs,
     /// Validate ESS and reject drift in the committed conformance suite.
@@ -130,35 +139,39 @@ fn main() -> ExitCode {
 
 fn dispatch() -> Result<ExitCode> {
     let cli = Cli::parse();
-    let report = match cli.command {
-        Command::CheckEss => ess::check(&repo::root()?)?,
-        Command::CheckDocs => docs::check(&repo::root()?)?,
-        Command::DocsProvenance(args) => return docs::provenance(&args),
-        Command::DocsReleases => return docs::write_release_notes(),
-        Command::DocsBaseline(args) => return site_ux::write_baseline(&args),
-        Command::ImageStartup(args) => return image_startup::run(&args),
-        Command::Advisories => advisories::check(&repo::root()?)?,
-        Command::Licenses => licenses::check(&repo::root()?)?,
-        Command::Packages => packages::check(&repo::root()?)?,
-        Command::Secrets => secrets::check(&repo::root()?)?,
-        Command::BotFiles(args) => bot_files::check(&args),
+    // Each arm ends in its own exit code: a check prints its own report there, so no verb's
+    // outcome shares a binding with another verb's report.
+    match cli.command {
+        Command::ChartLane(args) => chart::run_lane(&args),
+        Command::PackageChart(args) => chart::run_package(&args),
+        Command::CheckEss => Ok(ess::check(&repo::root()?)?.emit()),
+        Command::CheckDocs => Ok(docs::check(&repo::root()?)?.emit()),
+        Command::DocsProvenance(args) => docs::provenance(&args),
+        Command::DocsReleases => docs::write_release_notes(),
+        Command::DocsBaseline(args) => site_ux::write_baseline(&args),
+        Command::ImageStartup(args) => image_startup::run(&args),
+        Command::Advisories => Ok(advisories::check(&repo::root()?)?.emit()),
+        Command::Licenses => Ok(licenses::check(&repo::root()?)?.emit()),
+        Command::Packages => Ok(packages::check(&repo::root()?)?.emit()),
+        Command::Secrets => Ok(secrets::check(&repo::root()?)?.emit()),
+        Command::BotFiles(args) => Ok(bot_files::check(&args).emit()),
         Command::Toolchain { root } => {
             let root = match root {
                 Some(root) => root,
                 None => repo::root()?,
             };
-            toolchain::check(&root)
+            Ok(toolchain::check(&root).emit())
         }
-        Command::Links => links::check(&repo::root()?)?,
-        Command::McpBoundary => mcp::check(&repo::root()?)?,
-        Command::McpCodexSmoke(args) => return mcp_smoke::run(&args),
-        Command::QuotaLane(args) => return quota_lane::run(&args),
-        Command::QuotaFixture(args) => return quota_fixture::run(&args),
-        Command::Adrs => adrs::check(&repo::root()?)?,
-        Command::CheckJson(args) => return json::run(&args),
-        Command::PackageBundle(args) => return package::run(&args),
-        Command::CheckBundle(args) => return bundle::run(&args),
-        Command::CheckBundles(args) => return bundle::run_many(&args),
+        Command::Links => Ok(links::check(&repo::root()?)?.emit()),
+        Command::McpBoundary => Ok(mcp::check(&repo::root()?)?.emit()),
+        Command::McpCodexSmoke(args) => mcp_smoke::run(&args),
+        Command::QuotaLane(args) => quota_lane::run(&args),
+        Command::QuotaFixture(args) => quota_fixture::run(&args),
+        Command::Adrs => Ok(adrs::check(&repo::root()?)?.emit()),
+        Command::CheckJson(args) => json::run(&args),
+        Command::PackageBundle(args) => package::run(&args),
+        Command::CheckBundle(args) => bundle::run(&args),
+        Command::CheckBundles(args) => bundle::run_many(&args),
         Command::RenderBundle(args) => {
             let root = repo::root()?;
             let source = args
@@ -172,14 +185,13 @@ fn dispatch() -> Result<ExitCode> {
                 .pointer("/generator/name")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or_default();
-            return if generator == "xtask/src/render_v2.rs" {
+            if generator == "xtask/src/render_v2.rs" {
                 render_v2::run(&args)
             } else {
                 render::run(&args)
-            };
+            }
         }
-    };
-    Ok(report.emit())
+    }
 }
 
 #[cfg(test)]

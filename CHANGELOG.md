@@ -68,6 +68,40 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
       `substrate_hosted_resolution_duration_seconds`;
     - `process_cpu_seconds_total`, `process_resident_memory_bytes`, `process_open_fds`,
       `process_max_fds`, `process_start_time_seconds`.
+- A Helm chart for the node-bound Kubernetes serving profile (ADR 0046), `deploy/helm/substrate`,
+  named `b10x-substrate`. It adds no wire route and leaves the contract bundle unchanged.
+  - **Shape:** a StatefulSet behind one headless Service, one daemon per node of a labelled and
+    tainted pool, and one retained `ReadWriteOnce` ledger claim per ordinal. `--deployment` is the
+    pod name. The probes use the operational listener.
+  - **Trust:** TLS and Identity admission only. Init containers copy the certificate, key and
+    Identity trust roots into memory-backed volumes, owner-only. The certificate names each pod's
+    host and never the Service; the chart publishes those names in `<release>-certificate-names`.
+    The ServiceAccount mounts no token and has no Role.
+  - **Network:** a default-deny NetworkPolicy. Egress goes only to DNS and to the declared Identity,
+    Git source and aperture ranges.
+  - **Refusals:** a closed `values.schema.json` and template checks refuse a privileged container,
+    host namespaces and host paths, the development TCP listener, a cgroup root, host roots,
+    project quotas without execution or a quota-capable class, pod annotations that select an
+    AppArmor or seccomp profile, and egress to any prefix length 0 unless admitted. Every value
+    the templates interpolate is quoted, so a value rendered with the schema skipped cannot add a
+    key.
+  - **Execution:** `execution.enabled` starts design 25's bootstrap with its five capabilities and
+    the node's Localhost seccomp and AppArmor profiles; `nodeProfiles.enabled` installs those with
+    a DaemonSet in a separate namespace.
+  - **Lane:** `cargo xtask chart-lane static` renders and lints the chart and holds every rendering
+    to ADR 0046. `cargo xtask chart-lane cluster` runs install, rolling upgrade, egress, Pod
+    Security and uninstall scenarios on kind, and reports the four execution-enabled scenarios it
+    cannot run there absent, by name. `.github/workflows/chart-lane.yml` runs both on every push
+    to `main` and on pull requests that touch the chart or what the daemon image is built from.
+  - **Release:** `release.yml` refuses a tag without a successful chart-lane run for its commit,
+    counting only a push to `main` or a dispatch in this repository, and refuses an existing chart
+    tag before it publishes anything. It packages the chart reproducibly with
+    `cargo xtask package-chart`, pinning the daemon digest it just pushed, before the registry
+    login, pushes it once to `oci://ghcr.io/beyond10x/charts/b10x-substrate`, signs it keylessly,
+    attests its build provenance, verifies both and reads it back anonymously before announcing.
+    A recovery reuses an existing chart only when its chart layer is the local package byte for
+    byte. The release notes list the scenarios the chart lane reported absent.
+  - The gate preflight now also counts only a push to `main` or a dispatch in this repository.
 
 ### Security
 
