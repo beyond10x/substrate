@@ -2,15 +2,17 @@
 format: aep.planning-md/3
 id: decision-blocker:pod-force-deleted-policy-rbac
 kind: decision-blocker
-status: open
+status: cleared
 title: How the pod adapter tells a force-deleted Pod's container is gone
 relations:
 - blocks: story:pod-force-deleted-keeps-its-policy
-revision: 1
+revision: 3
+transitions:
+- {from: "open", to: "cleared", at: "2026-10-28T21:18:38Z", actor: "human:timo", revision: 3}
 ---
 # Decision: how the pod adapter tells a force-deleted Pod's container is gone
 
-Decider: operator
+Decider: orchestrator (D173, under the operator's grant)
 
 ## Why it stops here
 
@@ -43,3 +45,27 @@ Defect sites: `pod.rs:572`, `pod.rs:636-639`, monitor `pod.rs:1762-1810`, open s
 
 The adapter never force-deletes and run names are unique, so no path inside the adapter reaches
 the defect.
+
+## Decided: A (D173, 2026-10-28)
+
+The coordinating session's message, verbatim:
+
+> D173: I decide decision-blocker:pod-force-deleted-policy-rbac under the grant: A. Change its
+> Decider line to the orchestrator, quote this message and close it.
+> - Why mine: a security trade-off inside the approved design 28, not a never-list item. Timo's
+>   rule (~/.claude/CLAUDE.md): "take the decisions yourself (defaults, sequencing, security
+>   trade-offs inside an approved design)".
+> - `watch` on pods in the same namespaced Role adds no read the Role lacks today: it already has
+>   get and list on pods.
+> - Steps:
+>   1. Run the kind lane once to confirm the kubelet writes terminal status before the final
+>      delete. That is local and needs no device.
+>   2. Add `watch` to the Role.
+>   3. A bounded watch reads the DELETED object; keep the policy on 410, timeout or a running pod.
+>   4. Record the new verb in design 28's Role table and in the chart's CHANGELOG as a required
+>      RBAC change for deployments that pre-create the Role.
+> - B rejected: a ClusterRole widens scope beyond the namespace, plus a delay of about 5 min.
+> - C rejected: it leaves the gap open.
+> - If the kind run shows the kubelet does not write terminal status first, stop and send me the
+>   run output.
+> Unit 4 goes back into wave/adapter-io.
