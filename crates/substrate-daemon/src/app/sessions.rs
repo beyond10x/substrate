@@ -957,13 +957,15 @@ pub(super) async fn pipe_session_authority_mint(
                 substrate_wire::SESSION_ATTACHMENT_CAPACITY,
             ),
         ),
-        Ok(SessionAuthorityMint::NotAttachable) => failure(
+        Ok(SessionAuthorityMint::NotAttachable(session)) => failure(
             StatusCode::CONFLICT,
             &request_id,
             None,
             ErrorClass::Conflict,
             substrate_wire::SESSION_NOT_ATTACHABLE,
-            "The session is not ready to mint an attachment authority.",
+            not_attachable_message(&session)
+                .as_deref()
+                .unwrap_or("The session is not ready to mint an attachment authority."),
             Some("session"),
             false,
         ),

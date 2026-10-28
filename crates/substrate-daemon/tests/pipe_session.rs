@@ -50,6 +50,9 @@ const HANDSHAKE_KEY: &str = "dGhlIHNhbXBsZSBub25jZQ==";
 #[path = "pipe_session/attach_refusal_names_condition.rs"]
 mod attach_refusal_names_condition;
 
+#[path = "pipe_session/adversary_pass1.rs"]
+mod adversary_pass1;
+
 struct FixturePipe {
     observation: ExecObservation,
     sender: Option<mpsc::Sender<PipeFrame>>,

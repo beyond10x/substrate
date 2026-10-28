@@ -1413,3 +1413,93 @@ async fn development_static_bearer_refuses_non_loopback_binding() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+/// `story:pty-session-refuses-first-attach-under-load`: under the hosted posture the first
+/// `session.not-attachable` a client sees comes from the attachment-authority mint, and it names
+/// the failed condition and the observed values as the attach refusal does.
+#[tokio::test]
+async fn hosted_mint_refusal_names_the_failed_condition() {
+    let root = TempDir::new().expect("temporary root");
+    let daemon_identity = current_identity();
+    let authority_identity = identity_for(IDENTITY_NAME, (2025, 1, 1), (2035, 1, 1));
+    let identity_ca = root.path().join("identity-ca.pem");
+    std::fs::write(&identity_ca, &authority_identity.certificate_pem).expect("Identity CA");
+    let (authority_state, authority_task) = start_identity_authority(&authority_identity).await;
+    let (certificate, private_key) = write_identity(root.path(), &daemon_identity);
+    let address = unused_address();
+    let mut child = daemon_command(
+        root.path(),
+        address,
+        &certificate,
+        &private_key,
+        &authority_state.origin,
+        &identity_ca,
+    )
+    .spawn()
+    .expect("spawn TLS daemon");
+    let trusted = connector([daemon_identity.certificate_der.clone()]);
+    drop(connect_when_ready(&mut child, address, &trusted).await);
+    let state_path = root.path().join("state.sqlite");
+    seed_ready_pipe_session(&state_path, &authority_state.origin);
+    let store = Store::open(&state_path).expect("open live daemon state");
+    let scope = Scope {
+        deployment: "tls-test".to_owned(),
+        subject: hosted_subject(&authority_state.origin),
+    };
+    let mut exec = store
+        .exec(&scope, "ex_network_authority")
+        .expect("read seeded exec")
+        .expect("seeded exec");
+    exec.resource.state = ExecState::Exited;
+    exec.resource.observed_at = Utc::now();
+    exec.output_complete = true;
+    store.put_exec(&scope, &exec).expect("record the exit");
+    drop(store);
+
+    let public_key = URL_SAFE_NO_PAD.encode(
+        SigningKey::from_bytes(&[7_u8; 32])
+            .verifying_key()
+            .to_bytes(),
+    );
+    let body = json!({ "public_key": public_key }).to_string();
+    let (status, refused) = hosted_json(
+        address,
+        &trusted,
+        &authority_state.exec,
+        "POST",
+        "/v1/sessions/ses_network_authority/attachment-authorities",
+        Some(&body),
+    )
+    .await;
+    assert_eq!(
+        (
+            status,
+            &refused["error"]["code"],
+            &refused["error"]["class"],
+            &refused["error"]["retriable"]
+        ),
+        (
+            409,
+            &json!("session.not-attachable"),
+            &json!("conflict"),
+            &json!(false)
+        ),
+        "{refused}"
+    );
+    assert_eq!(
+        refused["error"]["message"],
+        json!(
+            "The raw-pipe session is not attachable: its state is not ready, its attachment is not \
+             available. Observed state exited, attachment consumed, lease active."
+        ),
+        "{refused}"
+    );
+
+    signal(&child, Signal::SIGTERM);
+    let output = tokio::time::timeout(Duration::from_secs(10), child.wait_with_output())
+        .await
+        .expect("TLS daemon shutdown timed out")
+        .expect("wait for TLS daemon");
+    assert!(output.status.success(), "TLS daemon: {output:?}");
+    authority_task.abort();
+}

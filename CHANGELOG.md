@@ -10,7 +10,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ### Changed
 
 - The specification and CI use ESS 0.72.0 (was 0.70.0); the suites, wire types and CLI package regenerate unchanged apart from the generator header.
-- A `session.not-attachable` refusal now names which condition failed (state not `ready`, attachment not `available`, lease not `active`) and states the three observed values, for example "The pty session is not attachable: its state is not ready, its attachment is not available. Observed state exited, attachment consumed, lease active." Code, status, class and `retriable` are unchanged; only the free-text `error.message` differs, and no bundle changes.
+- A `session.not-attachable` refusal now names which condition failed (state not `ready`, attachment not `available`, lease not `active`) and states the three observed values, for example "The pty session is not attachable: its state is not ready, its attachment is not available. Observed state exited, attachment consumed, lease active." Code, status, class and `retriable` are unchanged; only the free-text `error.message` differs, and no bundle changes. Under the hosted posture the attachment-authority mint, where a hosted client meets this refusal first, says the same.
+
+### Fixed
+
+- A raw-pipe or pty session whose child exited after the driver answered the start and before the daemon recorded it no longer reads `ready` with attachment `available` over the dead child. The start keeps the recorded exit: the session reads `exited` with attachment `consumed`, its exec reads `exited`, and the start's result is that session.
 
 ## [0.14.0] — 2026-10-27
 
