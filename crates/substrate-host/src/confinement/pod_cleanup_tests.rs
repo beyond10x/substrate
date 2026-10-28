@@ -839,3 +839,6 @@ mod security_pass2;
 
 #[path = "pod_cleanup_force_deleted.rs"]
 mod force_deleted;
+
+#[path = "pod_cleanup_adversary_watch.rs"]
+mod adversary_watch;
