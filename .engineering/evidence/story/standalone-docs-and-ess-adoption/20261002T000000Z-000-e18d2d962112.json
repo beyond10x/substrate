@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-02T00:00:00Z",
+  "actor": "human:timo",
+  "artifact": "story:standalone-docs-and-ess-adoption",
+  "kind": "story",
+  "revision": 4,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "commit 8c4cb348: gate exit 0 and 119 artifacts migrated with --verify, recorded in .engineering/reports/standalone-docs-and-ess-adoption.md; pages.yml and b10x-docs-site.yml success at cff3f219"
+  }
+}

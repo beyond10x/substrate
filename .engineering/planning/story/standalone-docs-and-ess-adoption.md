@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:standalone-docs-and-ess-adoption
 kind: story
-status: draft
+status: implemented
 title: Adopt ESS and a standalone Substrate documentation site
 relations:
 - informed_by: epic:resource-bounded-execution
@@ -21,7 +21,11 @@ scope:
   path: website
 - confidence: cited
   path: xtask
-revision: 2
+revision: 5
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-28T07:37:20Z", actor: "human:timo", revision: 3, decided_on: {"recorded":{"test_result":1}}}
+- {from: "proposed", to: "active", at: "2026-10-28T07:37:20Z", actor: "human:timo", revision: 4, decided_on: {"recorded":{"test_result":1}}, executor: "agent:substrate-adr-0109"}
+- {from: "active", to: "implemented", at: "2026-10-28T07:37:20Z", actor: "human:timo", revision: 5, decided_on: {"recorded":{"test_result":2}}}
 ---
 ## Outcome
 
