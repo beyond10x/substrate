@@ -36,7 +36,9 @@
 //! silently discarded (invariant 3).
 //!
 //! It serves `process_run`, `process_watch`, `output_read`, `wait`, `workspace`,
-//! `filesystem_view`, `limits` and `audit`, and proves `image_digest_pinned`. It does not prove
+//! `filesystem_view`, `limits` and `audit`, and proves `image_digest_pinned`, and `stdin_pipe` on a
+//! runtime flavor and version in `OCI_STDIN_PINNED`: a piped run is created `--interactive` and
+//! started `start --attach --interactive` with the runtime client's stdin piped. It does not prove
 //! `ipc_socket_allowlist`: a Unix socket beneath a bound root is reachable from the container.
 //! Whether the runtime is rootless has no `Fact` variant; [`probe`] reports it.
 //!
@@ -62,6 +64,7 @@ use substrate_wire::{
 };
 use tokio::sync::watch;
 
+use super::stdin::{self, StdinWriter};
 use crate::output_retention::{Captured, drain};
 
 use super::{
@@ -147,6 +150,12 @@ pub enum RuntimeFlavor {
     Docker,
     Podman,
 }
+
+/// The runtime flavor and version pairs on which the oci lane wrote the bytes `0x10 0x11` through
+/// a container and read back every byte and the end of file (design 32 D13, T15). `stdin_pipe` is
+/// proved on these pairs only: on any other a detach sequence or a stdin the runtime keeps open
+/// could eat bytes or the end of file, so `Piped` is refused by the fact's name there.
+pub(crate) const OCI_STDIN_PINNED: &[(RuntimeFlavor, &str)] = &[(RuntimeFlavor::Docker, "29.7.2")];
 
 /// What `open` read from the runtime.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -386,8 +395,18 @@ pub fn proof(runtime: &RuntimeProbe) -> AdapterFacts {
             (ContractFamily::Limits, runtime.limits),
             (ContractFamily::Audit, true),
         ],
-        &[(Fact::ImageDigestPinned, true)],
+        &[
+            (Fact::ImageDigestPinned, true),
+            (Fact::StdinPipe, stdin_pinned(runtime)),
+        ],
     )
+}
+
+/// Whether the runtime's flavor and version are a pair in [`OCI_STDIN_PINNED`].
+fn stdin_pinned(runtime: &RuntimeProbe) -> bool {
+    OCI_STDIN_PINNED
+        .iter()
+        .any(|(flavor, version)| *flavor == runtime.flavor && *version == runtime.version)
 }
 
 fn check_declared(roots: &[DeclaredWritableRoot]) -> Result<(), ConfinementError> {
@@ -682,6 +701,9 @@ struct OciRun {
     id: RunId,
     phase: watch::Receiver<Phase>,
     captured: Arc<Mutex<Captured>>,
+    /// The runtime client's standard input, which the runtime forwards to the container, when
+    /// the profile asked for a pipe (design 32).
+    stdin: Option<Arc<StdinWriter>>,
 }
 
 /// A container's state as the runtime's `container inspect` reports it.
@@ -1066,6 +1088,10 @@ impl OciAdapter {
                 .iter()
                 .map(|arg| (*arg).to_owned()),
         );
+        if profile.stdin.is_piped() {
+            // The container's stdin is open, and closed when the attached client's ends.
+            args.push("--interactive".to_owned());
+        }
         if self.runtime.flavor == RuntimeFlavor::Podman && self.runtime.rootless {
             args.push("--userns=keep-id".to_owned());
         }
@@ -1143,10 +1169,20 @@ impl OciAdapter {
         self.reserve()?;
         let program = self.runtime.program.clone();
         create(&program, &args, image, &id).await?;
+        let mode = admitted.profile().stdin;
         let mut client = tokio::process::Command::new(&program);
+        client.args(["start", "--attach"]);
+        if mode.is_piped() {
+            client.arg("--interactive");
+            // Podman can disable its detach sequence; on a pinned Docker pair the lane showed
+            // that, with no terminal, the sequence crosses as data (T15).
+            if self.runtime.flavor == RuntimeFlavor::Podman {
+                client.arg("--detach-keys=");
+            }
+        }
         client
-            .args(["start", "--attach", id.as_str()])
-            .stdin(Stdio::null())
+            .arg(id.as_str())
+            .stdin(stdin::stdio(mode))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true)
@@ -1183,6 +1219,7 @@ impl OciAdapter {
                 "The container runtime did not start the run's container.",
             ));
         }
+        let writer = stdin::child_writer(mode, child.stdin.take());
         let (phase, observed) = watch::channel(Phase::Running);
         tokio::spawn(monitor(
             program,
@@ -1191,11 +1228,13 @@ impl OciAdapter {
             readers,
             bounds.timeout,
             phase,
+            writer.clone(),
         ));
         self.runs.lock().push(Arc::new(OciRun {
             id: id.clone(),
             phase: observed,
             captured,
+            stdin: writer,
         }));
         admitted.audit_start(&id, &command.argv[0]);
         Ok(id)
@@ -1350,7 +1389,8 @@ async fn create(
 }
 
 /// Watches one started run to its end: its timeout kills the container, then the output is
-/// drained, the container's state read and the container removed before the phase is published.
+/// drained, the container's state read and the container removed, and the run's standard input
+/// ended, before the phase is published.
 async fn monitor(
     program: PathBuf,
     run: RunId,
@@ -1358,6 +1398,7 @@ async fn monitor(
     readers: [Option<tokio::task::JoinHandle<()>>; 2],
     timeout: Duration,
     phase: watch::Sender<Phase>,
+    writer: Option<Arc<StdinWriter>>,
 ) {
     let deadline = tokio::time::sleep(timeout);
     tokio::pin!(deadline);
@@ -1391,6 +1432,10 @@ async fn monitor(
     }
     let state = inspect(&program, &run).await;
     let removed = remove(&program, &run).await;
+    // The run's end, for its standard input too: a write pending now fails.
+    if let Some(writer) = writer {
+        writer.end().await;
+    }
     let _ = phase.send(match (ended, state) {
         (Some(Ok(_)), Some(state)) if removed && !state.running => {
             state.exit().map_or(Phase::Unknown, Phase::Ended)
@@ -1474,6 +1519,7 @@ impl ConfinementAdapter for OciAdapter {
 
     /// Refuses, after the contract's order, what the runtime could not apply as asked.
     fn check(&self, profile: &ConfinementProfile) -> Result<(), ConfinementError> {
+        stdin::check_streams(profile)?;
         check_profile(profile)?;
         self.bounds(profile)?;
         self.check_mounts(profile)
@@ -1539,6 +1585,19 @@ impl ConfinementAdapter for OciAdapter {
             }
             tokio::time::sleep(RETRY_PAUSE).await;
         }
+    }
+
+    /// Writes through the runtime client's stdin; `Ok` once the client's pipe took the bytes,
+    /// not once the container read them (design 32 § 2).
+    async fn write_stdin(&self, run: &RunId, bytes: &[u8]) -> Result<(), ConfinementError> {
+        let run = self.run(run)?;
+        stdin::piped(run.stdin.as_ref())?.write(bytes).await
+    }
+
+    async fn close_stdin(&self, run: &RunId) -> Result<(), ConfinementError> {
+        let run = self.run(run)?;
+        stdin::piped(run.stdin.as_ref())?.close().await;
+        Ok(())
     }
 }
 
@@ -1626,6 +1685,50 @@ mod tests {
                 !reference_is_plain(&format!("{odd}@sha256:{digest}")),
                 "{odd}"
             );
+        }
+    }
+
+    /// T16 of design 32: `stdin_pipe` is proved for a pinned runtime flavor and version and for
+    /// nothing else, and a piped profile on any other is refused naming it.
+    #[test]
+    fn stdin_pipe_is_proved_only_on_a_pinned_runtime() {
+        let probe = |flavor, version: &str| RuntimeProbe {
+            program: PathBuf::from("/x"),
+            flavor,
+            version: version.to_owned(),
+            rootless: false,
+            limits: true,
+            cpus: 4,
+            sockets: Vec::new(),
+        };
+        assert!(!OCI_STDIN_PINNED.is_empty());
+        for (flavor, version) in OCI_STDIN_PINNED {
+            assert!(
+                proof(&probe(*flavor, version)).proves(&Fact::StdinPipe),
+                "{flavor:?} {version}"
+            );
+        }
+        let piped = ConfinementProfile {
+            stdin: super::super::StdinMode::Piped { limit_bytes: 1_024 },
+            image: Some(format!("registry.invalid/run@sha256:{}", "0".repeat(64))),
+            ..ConfinementProfile::default()
+        };
+        for (flavor, version) in [
+            (RuntimeFlavor::Docker, "29.0.0"),
+            (RuntimeFlavor::Docker, "29.7.20"),
+            (RuntimeFlavor::Podman, "29.7.2"),
+            (RuntimeFlavor::Podman, "5.0.0"),
+        ] {
+            let facts = proof(&probe(flavor, version));
+            assert!(!facts.proves(&Fact::StdinPipe), "{flavor:?} {version}");
+            match super::super::admission(&facts, &piped, check_profile) {
+                Err(ConfinementError::FactUnserved { fact, .. }) => {
+                    assert_eq!(fact, Fact::StdinPipe, "{flavor:?} {version}");
+                }
+                other => {
+                    panic!("{flavor:?} {version}: expected stdin_pipe unserved, got {other:?}")
+                }
+            }
         }
     }
 
