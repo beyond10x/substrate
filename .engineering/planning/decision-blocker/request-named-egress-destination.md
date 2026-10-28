@@ -2,11 +2,13 @@
 format: aep.planning-md/3
 id: decision-blocker:request-named-egress-destination
 kind: decision-blocker
-status: open
+status: cleared
 title: Whether a launch may name its egress destination, against ADR 0013
 relations:
 - blocks: story:request-named-egress
-revision: 1
+revision: 3
+transitions:
+- {from: "open", to: "cleared", at: "2026-10-28T18:06:40Z", actor: "human:timo", revision: 3}
 ---
 # A consumer asks for egress to a destination the request names
 
@@ -39,3 +41,12 @@ Recommendation: A, and B only if a concrete consumer cannot enumerate its destin
 
 An accepted decision (an ADR for B or C, or a recorded "A stands" answer to the consumer). Until
 then no implementation story for request-named egress is accepted.
+
+
+## Decided, 2026-10-28: A
+
+ADR 0013 stands. The consumer's operator declares one aperture per destination it needs, and the
+consumer maps each host:port to the declared aperture name. Taken by the coordinating session as
+its D160, because option A changes no ADR; reversing ADR 0013 (option C) or adding a destination
+set (option B) would need an accepted ADR first. `story:request-named-egress` is archived with
+this answer.

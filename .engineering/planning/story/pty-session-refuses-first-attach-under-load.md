@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:pty-session-refuses-first-attach-under-load
 kind: story
-status: active
+status: implemented
 title: A fresh pty session refuses its first attach under host load
 scope:
 - confidence: cited
@@ -13,10 +13,11 @@ scope:
   path: crates/substrate-daemon/src/app/sessions.rs
 - confidence: inferred
   path: crates/substrate-host/src/pty.rs
-revision: 5
+revision: 6
 transitions:
 - {from: "draft", to: "proposed", at: "2026-10-28T07:37:20Z", actor: "human:timo", revision: 2}
 - {from: "proposed", to: "active", at: "2026-10-28T07:37:20Z", actor: "human:timo", revision: 3, executor: "agent:substrate-adr-0109"}
+- {from: "active", to: "implemented", at: "2026-10-28T18:06:40Z", actor: "human:timo", revision: 6, decided_on: {"recorded":{"test_result":1,"review_outcome":2}}}
 ---
 # Story: a fresh pty session refuses its first attach under host load
 

@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-28T18:06:40Z",
+  "actor": "human:timo",
+  "artifact": "story:pty-session-refuses-first-attach-under-load",
+  "kind": "story",
+  "revision": 5,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "Full gate, PR 185 head f445c96d, merged as ec2ff58d",
+    "reference": "https://github.com/beyond10x/substrate/actions/runs/40738463797"
+  }
+}
