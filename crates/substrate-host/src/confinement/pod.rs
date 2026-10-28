@@ -141,6 +141,30 @@ const TERM_GRACE_SECONDS: u64 = 5;
 /// object without the kubelet confirming the container stopped.
 const KILL_GRACE_SECONDS: u64 = 1;
 
+/// Two windows the adapter waits out: how long one call to the cluster API may take, and how long
+/// the API may stay unreachable, or a Pod's removal unconfirmed, before a run is reported
+/// `Unknown`. [`PodTiming::default`] holds the adapter's own, 30 seconds and two minutes, and is
+/// what [`open_pod`] uses; [`open_pod_timed`] takes others, so a case that has to wait one out
+/// finishes in seconds. The open sweep's age floor stays derived from the adapter's own 30-second
+/// call bound whatever this one is: it covers starts by other adapters, which use their own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PodTiming {
+    /// The bound on one call to the cluster API.
+    pub api_timeout: Duration,
+    /// How long the API may stay unreachable, or a Pod's removal unconfirmed, before a run is
+    /// reported `Unknown`.
+    pub unreachable_limit: Duration,
+}
+
+impl Default for PodTiming {
+    fn default() -> Self {
+        Self {
+            api_timeout: API_TIMEOUT,
+            unreachable_limit: UNREACHABLE_LIMIT,
+        }
+    }
+}
+
 /// What opening `pod` takes.
 #[derive(Debug, Clone)]
 pub struct PodRequest {
@@ -195,6 +219,18 @@ pub(crate) fn open(request: PodRequest) -> Result<Arc<dyn ConfinementAdapter>, C
 /// (design 28 names each refused member), the cluster does not answer the probe, the credential
 /// may not read `pods/log`, or the sweep of orphaned `NetworkPolicy` objects fails.
 pub fn open_pod(request: PodRequest) -> Result<Arc<PodAdapter>, ConfinementError> {
+    open_pod_timed(request, PodTiming::default())
+}
+
+/// Opens `pod` as [`open_pod`] does, waiting out `timing` instead of the adapter's own windows.
+///
+/// # Errors
+///
+/// Those of [`open_pod`].
+pub fn open_pod_timed(
+    request: PodRequest,
+    timing: PodTiming,
+) -> Result<Arc<PodAdapter>, ConfinementError> {
     let unserved = |detail: String| ConfinementError::AdapterUnserved {
         adapter: AdapterName::Pod,
         detail,
@@ -203,7 +239,8 @@ pub fn open_pod(request: PodRequest) -> Result<Arc<PodAdapter>, ConfinementError
         .cluster
         .ok_or_else(|| unserved("no cluster configuration".to_owned()))?;
     let bytes = read_bounded(&path).map_err(unserved)?;
-    let (api, settings) = parse_cluster(&bytes).map_err(unserved)?;
+    let (mut api, settings) = parse_cluster(&bytes).map_err(unserved)?;
+    api.timing = timing;
     let api = Arc::new(api);
     let kept = probe(&api).map_err(unserved)?;
     let adapter = Arc::new(PodAdapter {
@@ -376,6 +413,7 @@ struct Api {
     bearer: Option<Zeroizing<String>>,
     namespace: String,
     pacing: Pacing,
+    timing: PodTiming,
 }
 
 impl Api {
@@ -432,6 +470,7 @@ impl Api {
             bearer,
             namespace: namespace.to_owned(),
             pacing: PACING,
+            timing: PodTiming::default(),
         })
     }
 
@@ -474,7 +513,7 @@ impl Api {
         limit: usize,
     ) -> Result<(u16, Option<String>, Bytes), String> {
         tokio::time::timeout(
-            API_TIMEOUT,
+            self.timing.api_timeout,
             self.exchange(method, path, body, accept, limit),
         )
         .await
@@ -1772,7 +1811,7 @@ async fn monitor(api: Arc<Api>, run: Arc<PodRun>, phase: watch::Sender<Phase>, g
                 };
             }
             Err(_) => {
-                if answered.elapsed() >= UNREACHABLE_LIMIT {
+                if answered.elapsed() >= api.timing.unreachable_limit {
                     break Phase::Unknown;
                 }
             }
@@ -1784,7 +1823,7 @@ async fn monitor(api: Arc<Api>, run: Arc<PodRun>, phase: watch::Sender<Phase>, g
     }
     // The Pod first, never forced, and its policy only once the Pod is confirmed gone; a removal
     // not confirmed within the limit reports the run `Unknown` while the adapter keeps trying.
-    let deadline = tokio::time::Instant::from_std(Instant::now() + UNREACHABLE_LIMIT);
+    let deadline = tokio::time::Instant::from_std(Instant::now() + api.timing.unreachable_limit);
     let removed = tokio::time::timeout_at(deadline, api.remove(&pod_path, KILL_GRACE_SECONDS))
         .await
         .unwrap_or(false);
