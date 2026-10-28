@@ -726,6 +726,14 @@ mod imp {
         async fn signal(&self, run: &RunId, signal: Signal) -> Result<(), ConfinementError> {
             self.inner.signal(run, signal).await
         }
+
+        async fn write_stdin(&self, run: &RunId, bytes: &[u8]) -> Result<(), ConfinementError> {
+            self.inner.write_stdin(run, bytes).await
+        }
+
+        async fn close_stdin(&self, run: &RunId) -> Result<(), ConfinementError> {
+            self.inner.close_stdin(run).await
+        }
     }
 
     // ---- around `local` ----

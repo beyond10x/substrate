@@ -281,7 +281,6 @@ impl StdinWriter {
     }
 
     /// Whether the adapter observed the run's end.
-    #[cfg(test)]
     pub(crate) fn ended(&self) -> bool {
         *self.ended.borrow()
     }

@@ -809,27 +809,41 @@ pub async fn fill(adapter: &Arc<dyn ConfinementAdapter>, run: &RunId) -> (u64, P
 
 /// The gate of design 32 § 9: a marker file the child waits for. Dropped, it opens, so a case
 /// that fails before it opened the gate does not leave its child waiting.
-pub struct Gate(std::path::PathBuf);
+pub struct Gate {
+    host: std::path::PathBuf,
+    child: std::path::PathBuf,
+}
 
 impl Gate {
-    /// A gate whose marker is `go` in `directory`, a directory the child sees.
+    /// A gate whose marker is `go` in `directory`, a directory the child sees at the same path.
     pub fn new(directory: &std::path::Path) -> Self {
-        Self(directory.join("go"))
+        Self::seen_as(directory, directory)
+    }
+
+    /// A gate whose marker is `go` in the host's `directory`, which the child sees at `child`.
+    pub fn seen_as(directory: &std::path::Path, child: &std::path::Path) -> Self {
+        Self {
+            host: directory.join("go"),
+            child: child.join("go"),
+        }
     }
 
     /// The shell line that waits for the gate to open.
     pub fn line(&self) -> String {
-        format!("while [ ! -e '{}' ]; do sleep 0.05; done", self.0.display())
+        format!(
+            "while [ ! -e '{}' ]; do sleep 0.05; done",
+            self.child.display()
+        )
     }
 
     pub fn open(&self) {
-        std::fs::write(&self.0, b"").expect("the gate opens");
+        std::fs::write(&self.host, b"").expect("the gate opens");
     }
 }
 
 impl Drop for Gate {
     fn drop(&mut self) {
-        let _ = std::fs::write(&self.0, b"");
+        let _ = std::fs::write(&self.host, b"");
     }
 }
 

@@ -802,3 +802,208 @@ async fn a_linux_run_keeps_each_stream_in_its_own_mode() {
     )
     .await;
 }
+
+// ---- design 32, T12's stdin rows: a piped standard input under `linux` ----
+
+/// A `linux` profile in `workspace` with a piped standard input of `limit_bytes`, and the output
+/// bound the design's linux cases lower to 4096.
+fn linux_piped(workspace: &Path, limit_bytes: u64) -> ConfinementProfile {
+    ConfinementProfile {
+        workspace: Some(workspace.to_path_buf()),
+        stdin: confinement::StdinMode::Piped { limit_bytes },
+        io_bounds: Some(confinement::IoBounds {
+            output_bytes: LINUX_BOUND as u64,
+        }),
+        ..ConfinementProfile::default()
+    }
+}
+
+/// The gate as the confined child sees it: `go` beneath its `/workspace`.
+fn linux_gate(workspace: &Path) -> support::Gate {
+    support::Gate::seen_as(workspace, Path::new(substrate_wire::EXEC_WORKSPACE_MOUNT))
+}
+
+// T12: T2.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_linux_run_reads_three_writes_and_close_ends_it() {
+    const NAME: &str = "ESS confinement linux stdin echo";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    support::stdin_echoes_and_ends_on_close(
+        &adapter,
+        &linux_piped(&workspace, 1_024),
+        &[b"one\n", b"two \x10\x11\n", b"three\n"],
+    )
+    .await;
+    println!("{NAME}: executed");
+}
+
+/// A gated child that then counts what it reads: T8's and T9's run under `linux`.
+async fn linux_counting_behind(
+    adapter: &Arc<dyn ConfinementAdapter>,
+    workspace: &Path,
+    gate: &support::Gate,
+) -> confinement::RunId {
+    let admitted = adapter
+        .admit(&linux_piped(workspace, confinement::MAX_STDIN_BYTES))
+        .expect("admitted");
+    adapter
+        .start(&admitted, &support::sh(&format!("{}; wc -c", gate.line())))
+        .await
+        .expect("started")
+}
+
+// T12: T8.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_cancelled_linux_write_closes_stdin_and_the_child_reads_a_prefix_then_eof() {
+    const NAME: &str = "ESS confinement linux stdin cancel";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    let gate = linux_gate(&workspace);
+    let run = linux_counting_behind(&adapter, &workspace, &gate).await;
+    let (completed, pending) = support::fill(&adapter, &run).await;
+    pending.abort();
+    assert!(pending.await.is_err(), "the pending write was cancelled");
+    support::assert_refused(
+        &adapter
+            .write_stdin(&run, b"x")
+            .await
+            .expect_err("after a cancellation"),
+        substrate_wire::SESSION_INPUT_CLOSED,
+        422,
+    );
+    adapter.close_stdin(&run).await.expect("close is Ok");
+    gate.open();
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(30), adapter.wait(&run))
+        .await
+        .expect("the child read end of file")
+        .expect("waited");
+    assert_eq!(ended.exit.as_ref().and_then(|exit| exit.code), Some(0));
+    let output = adapter.output(&run).await.expect("output");
+    let read: u64 = String::from_utf8_lossy(&output.stdout)
+        .trim()
+        .parse()
+        .expect("wc's count");
+    assert!(
+        (completed..=completed + 65_536).contains(&read),
+        "{NAME}: the child read {read} bytes; the completed writes held {completed}"
+    );
+    println!("{NAME}: executed");
+}
+
+// T12: T9.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_linux_close_waits_for_a_pending_write_until_it_is_cancelled() {
+    const NAME: &str = "ESS confinement linux stdin close waits";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    let gate = linux_gate(&workspace);
+    let run = linux_counting_behind(&adapter, &workspace, &gate).await;
+    let (_, pending) = support::fill(&adapter, &run).await;
+    let mut closing = tokio::spawn({
+        let adapter = Arc::clone(&adapter);
+        let run = run.clone();
+        async move { adapter.close_stdin(&run).await }
+    });
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), &mut closing)
+            .await
+            .is_err(),
+        "{NAME}: close returned while a write was pending"
+    );
+    pending.abort();
+    let _ = pending.await;
+    tokio::time::timeout(std::time::Duration::from_secs(3), closing)
+        .await
+        .expect("close returned once the write was cancelled")
+        .expect("joined")
+        .expect("close is Ok");
+    gate.open();
+    adapter.wait(&run).await.expect("waited");
+    println!("{NAME}: executed");
+}
+
+// T12: T10 (a).
+#[tokio::test(flavor = "multi_thread")]
+async fn after_a_linux_run_ended_a_write_is_input_closed_and_close_is_ok() {
+    const NAME: &str = "ESS confinement linux stdin after the end";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    let admitted = adapter
+        .admit(&linux_piped(&workspace, 1_024))
+        .expect("admitted");
+    let run = adapter
+        .start(&admitted, &support::sh("exit 0"))
+        .await
+        .expect("started");
+    adapter.wait(&run).await.expect("waited");
+    support::assert_refused(
+        &adapter
+            .write_stdin(&run, b"x")
+            .await
+            .expect_err("after the end"),
+        substrate_wire::SESSION_INPUT_CLOSED,
+        422,
+    );
+    adapter.close_stdin(&run).await.expect("close is Ok");
+    println!("{NAME}: executed");
+}
+
+// T12: T10 (b).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_linux_write_pending_when_the_child_exits_fails() {
+    const NAME: &str = "ESS confinement linux stdin pending at the end";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    let gate = linux_gate(&workspace);
+    let admitted = adapter
+        .admit(&linux_piped(&workspace, confinement::MAX_STDIN_BYTES))
+        .expect("admitted");
+    let run = adapter
+        .start(&admitted, &support::sh(&gate.line()))
+        .await
+        .expect("started");
+    let (_, pending) = support::fill(&adapter, &run).await;
+    gate.open();
+    let written = tokio::time::timeout(std::time::Duration::from_secs(10), pending)
+        .await
+        .expect("the pending write returned")
+        .expect("joined");
+    support::assert_refused(
+        &written.expect_err("the child exited"),
+        substrate_wire::SESSION_WRITE_FAILED,
+        500,
+    );
+    adapter.wait(&run).await.expect("waited");
+    println!("{NAME}: executed");
+}
+
+// T12: `Piped` with `Recorded` output never stalls: 64 KiB the embedder never reads is recorded
+// to the bound, and the run ends on its own.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_piped_linux_run_with_unread_recorded_output_does_not_stall() {
+    const NAME: &str = "ESS confinement linux stdin recorded output";
+    let Some((_host, adapter, workspace)) = linux_workspace(NAME) else {
+        return;
+    };
+    let admitted = adapter
+        .admit(&linux_piped(&workspace, 1_024))
+        .expect("admitted");
+    let run = adapter
+        .start(&admitted, &support::sh("head -c 65536 /dev/zero"))
+        .await
+        .expect("started");
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(30), adapter.wait(&run))
+        .await
+        .expect("the run ended without anyone reading its output")
+        .expect("waited");
+    assert_eq!(ended.exit.as_ref().and_then(|exit| exit.code), Some(0));
+    let output = adapter.output(&run).await.expect("output");
+    assert!(output.stdout_truncated, "{NAME}: 64 KiB is past the bound");
+    println!("{NAME}: executed");
+}

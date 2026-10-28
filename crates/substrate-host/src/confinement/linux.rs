@@ -95,7 +95,7 @@ pub use imp::proof;
 
 #[cfg(target_os = "linux")]
 mod imp {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeSet, HashMap};
     use std::path::Path;
     use std::sync::Arc;
     use std::time::Duration;
@@ -107,10 +107,11 @@ mod imp {
         WritableRoot,
     };
 
+    use super::super::stdin::{self, StdinPipe, StdinWriter};
     use super::super::{
         AdapterFacts, AdapterName, AdmittedProfile, Command, ConfinementAdapter, ConfinementError,
         ConfinementProfile, ContractFamily, Fact, KeptOutput, Network, ProcessBounds,
-        RenderedCommand, RunExit, RunId, RunObservation, RunOutput, RunState,
+        RenderedCommand, RunExit, RunId, RunObservation, RunOutput, RunState, StdinMode,
     };
     use super::LinuxRequest;
     use crate::{DispatchOutcome, Driver as _, DriverError, HostDriver, PLATFORM_UNSERVED};
@@ -145,6 +146,7 @@ mod imp {
             capability: machine.facts,
             snapshot: machine.snapshot,
             driver,
+            writers: parking_lot::Mutex::new(HashMap::new()),
         }))
     }
 
@@ -185,6 +187,7 @@ mod imp {
             &[
                 (Fact::WholeTreeKill, facts.exec_cgroup_kill == Some(true)),
                 (Fact::IpcSocketAllowlist, floor),
+                (Fact::StdinPipe, floor),
                 (
                     Fact::IpcSignalsContained,
                     floor
@@ -203,9 +206,69 @@ mod imp {
         capability: CapabilityFacts,
         snapshot: String,
         driver: Arc<HostDriver>,
+        /// The writer of each run started with a piped standard input, kept while the driver
+        /// still tracks the run, so a write after its end is `session.input-closed`.
+        writers: parking_lot::Mutex<HashMap<RunId, Arc<StdinWriter>>>,
+    }
+
+    /// A run's standard input under `linux`: the host driver's pipe, by exec id. The host never
+    /// drops it at the run's end, so the adapter closes it then (design 32 § 2).
+    struct HostPipe {
+        driver: Arc<HostDriver>,
+        id: String,
+    }
+
+    #[async_trait]
+    impl StdinPipe for HostPipe {
+        async fn write(&mut self, bytes: &[u8]) -> Result<(), ConfinementError> {
+            Ok(self.driver.write_pipe_session(&self.id, bytes).await?)
+        }
+
+        async fn close(&mut self) {
+            let _ = self.driver.close_pipe_session_input(&self.id).await;
+        }
+
+        /// Closing is async here: started on the current runtime, where there is one. Where there
+        /// is none, the next write or close closes it, and so does the run's end.
+        fn close_now(&mut self) {
+            if let Ok(runtime) = tokio::runtime::Handle::try_current() {
+                let driver = Arc::clone(&self.driver);
+                let id = self.id.clone();
+                runtime.spawn(async move {
+                    let _ = driver.close_pipe_session_input(&id).await;
+                });
+            }
+        }
     }
 
     impl LinuxAdapter {
+        /// The writer of `run`; for a run without one, `session.not-pipe` while the driver tracks
+        /// it and the driver's own refusal once it does not.
+        fn writer(&self, run: &RunId) -> Result<Arc<StdinWriter>, ConfinementError> {
+            if let Some(writer) = self.writers.lock().get(run) {
+                return Ok(Arc::clone(writer));
+            }
+            self.driver.processes.observe(run.as_str())?;
+            Err(stdin::not_pipe())
+        }
+
+        /// The run's end, observed: its standard input is closed and ended (design 32 § 2).
+        async fn ended(&self, run: &RunId) {
+            let writer = self.writers.lock().get(run).cloned();
+            if let Some(writer) = writer
+                && !writer.ended()
+            {
+                writer.end().await;
+            }
+        }
+
+        /// Forgets the writers of ended runs the driver no longer tracks.
+        fn forget_writers(&self) {
+            self.writers.lock().retain(|run, writer| {
+                !writer.ended() || self.driver.processes.observe(run.as_str()).is_ok()
+            });
+        }
+
         /// The workspace's root name: it must be a directory directly beneath the driver's
         /// workspace root, which is where the driver resolves and pins it.
         fn root_name(&self, workspace: &Path) -> Result<String, ConfinementError> {
@@ -321,13 +384,30 @@ mod imp {
                 ulid::Ulid::generate().to_string().to_ascii_lowercase()
             );
             let retention = admitted.profile().output_retention;
+            let piped = admitted.profile().stdin;
+            self.forget_writers();
             match self
                 .driver
-                .start_exec_for_adapter(&id, &root_name, &input, retention)
+                .start_exec_for_adapter(&id, &root_name, &input, retention, piped.is_piped())
                 .await
             {
                 DispatchOutcome::Observed(_) => {
-                    let run = RunId::new(id);
+                    let run = RunId::new(id.clone());
+                    if let StdinMode::Piped { limit_bytes } = piped {
+                        let writer = StdinWriter::new(
+                            limit_bytes,
+                            Box::new(HostPipe {
+                                driver: Arc::clone(&self.driver),
+                                id: id.clone(),
+                            }),
+                        );
+                        self.writers.lock().insert(run.clone(), Arc::clone(&writer));
+                        let driver = Arc::clone(&self.driver);
+                        tokio::spawn(async move {
+                            driver.processes.wait_ended(&id).await;
+                            writer.end().await;
+                        });
+                    }
                     admitted.audit_start(&run, &command.argv[0]);
                     Ok(run)
                 }
@@ -365,6 +445,7 @@ mod imp {
         capability: &CapabilityFacts,
         profile: &ConfinementProfile,
     ) -> Result<(), ConfinementError> {
+        stdin::check_streams(profile)?;
         super::super::check_workspace_access(profile)?;
         if !profile.workspace_access.is_read_write()
             && capability.exec_workspace_scoped_write != Some(true)
@@ -485,7 +566,11 @@ mod imp {
 
         async fn observe(&self, run: &RunId) -> Result<RunObservation, ConfinementError> {
             let observed = self.driver.observe_exec(run.as_str()).await?;
-            Ok(Self::observation(run, &observed))
+            let observation = Self::observation(run, &observed);
+            if observation.state != RunState::Running {
+                self.ended(run).await;
+            }
+            Ok(observation)
         }
 
         async fn output(&self, run: &RunId) -> Result<RunOutput, ConfinementError> {
@@ -514,6 +599,7 @@ mod imp {
                 let observation = Self::observation(run, &observed);
                 // The driver bounds every run by its timeout, so this ends.
                 if observation.state != RunState::Running && observed.output_complete {
+                    self.ended(run).await;
                     return Ok(observation);
                 }
                 tokio::time::sleep(WAIT_POLL).await;
@@ -530,6 +616,15 @@ mod imp {
                     },
                 )
                 .await?;
+            Ok(())
+        }
+
+        async fn write_stdin(&self, run: &RunId, bytes: &[u8]) -> Result<(), ConfinementError> {
+            self.writer(run)?.write(bytes).await
+        }
+
+        async fn close_stdin(&self, run: &RunId) -> Result<(), ConfinementError> {
+            self.writer(run)?.close().await;
             Ok(())
         }
     }

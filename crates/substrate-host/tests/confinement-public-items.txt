@@ -29,6 +29,7 @@ confinement/linux.rs: mod imp > pub const DEFAULT_BOUNDS: ProcessBounds = Proces
 confinement/linux.rs: mod imp > pub fn proof(machine: &CapabilitySnapshot) -> AdapterFacts
 confinement/linux.rs: mod imp > pub struct LinuxAdapter
 confinement/linux.rs: mod imp > struct LinuxAdapter > (private fields)
+confinement/linux.rs: mod imp > #[async_trait] impl StdinPipe for HostPipe
 confinement/linux.rs: mod imp > #[async_trait] impl ConfinementAdapter for LinuxAdapter
 confinement/local.rs: pub const LOCAL_POLICY_ENV: &str = "SUBSTRATE_CONFINEMENT_LOCAL";
 confinement/local.rs: pub const LOCAL_OUTPUT_LIMIT_BYTES: usize = 1_048_576;
