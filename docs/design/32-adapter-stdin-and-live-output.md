@@ -274,7 +274,10 @@ wire's `OutputStream` is a different type and is not reused.
   `macos` and `oci`, `Int` and `Term` close nothing: the child may trap them, and delivery
   continues until the run ends or stalls, so a run that ends after one is a natural end for
   delivery. Of the embedder's signals there, only `Kill` closes the shared drain's queue, before
-  the adapter signals. On an imposed end the adapter stops delivery at once: under `linux` the
+  the adapter signals. `Receiver::close` needs the receiver mutably, which the reading side holds,
+so on these adapters the close is a flag on the sending side: the drain stops forwarding once it
+is set, and `read_output` returns `None` after the queued chunks; it does not take the receiver
+lock that H1 bounds under `linux`. On an imposed end the adapter stops delivery at once: under `linux` the
   host closes the live receiver before it reconciles (§ 1), and the shared drain closes its queue
   as just stated. Chunks queued before that stay readable, in order. The drain keeps reading the pipes and keeps filling the record within its bound, so the record,
   not the delivered chunks, is the complete account of what the run wrote: the chunks are a prefix
@@ -458,14 +461,16 @@ spec commit updates it by hand (authored 49 → 57 → 65, outcomes 35 → 36 �
 `check-ess` reports). The obligation and synthesis counts in the README are what
 `cargo xtask check-ess` reports after regeneration; the spec commit records them.
 
-**ADR 0044 decision 6.** Its rule, "no adapter story edits the suite", binds the story that adds
-an adapter: each such story "adds a test file that runs its lane against the adapter", and the
-rule keeps a new adapter from rewriting the contract it is held to. Neither story here adds an
-adapter or a lane test file (§ 9 adds no test binary). Each changes the contract itself (a fact,
-an outcome, its scenarios) and then serves that change on adapters that already exist, so it is
-a contract story that also edits adapters, not an adapter story in decision 6's sense, and its
-suite edit is the contract change the decision places in `spec/confinement/`. The suite edit is
-the story's first commit, so no adapter commit edits the suite.
+**ADR 0044 decision 6.** Its rule is "no adapter story edits the suite". Each story here edits
+adapters, and design 29 reads the rule as binding a story that changes an existing adapter, so
+this design does not argue the rule away. It meets it inside the one story by role: the spec
+commit (facts, outcomes, scenarios, pinned lane counts, the contracts page counts) is written
+and reviewed by a spec author before any adapter commit, as the story's first commit, and the
+implementor of the adapter commits does not edit anything under `spec/confinement/`, the
+generated suite or the pinned counts. A change the implementor needs there goes back to the spec
+author as a separate commit with its own review. The story merges as one unit, with every lane
+green on its head, so no commit on `main` leaves a lane red. This keeps what the rule protects,
+an adapter author never rewriting the contract the adapter is held to, without an ADR change.
 
 | lane | today | after `story:adapter-stdin-pipe` | after `story:adapter-live-output` | pinned by |
 |---|---|---|---|---|
@@ -592,7 +597,7 @@ total and lanes table of `contracts.md#scenarios-and-lanes`, move with the spec,
 | D6 | ordering and loss | per stream in order, contiguous offsets; at a natural end every byte within the bound is delivered and the bound is named; no order between streams; the contract counts chunks, not bytes | a total order across stdout and stderr (not observable from two pipes); coalescing to 64 KiB chunks (holds back written lines) |
 | D7 | capability statement | two facts, `stdin_pipe` and `output_live`, appended to `Fact` | two new families (changes atlas ADR 0109 decision 8); host-local refusals with no fact (no selection by facts) |
 | D8 | refusal names | session codes of `substrate_wire` for per-call refusals; two new codes, `confinement.live-output-retention-invalid` and `confinement.live-output-unread`, on the existing `Driver` variant | a parallel `confinement.*` vocabulary for the same refusals; a new `ConfinementError` variant (a further break) |
-| D9 | delivery | one story per fact, each holding the fact's spec change as its first commit and the adapters after it, merged only with every lane green on its head; stdin first, live output after it; `local`, `linux`, `systemd`, `macos`, `oci`. ADR 0044 decision 6 binds stories that add an adapter, and these add none (§ 6) | one spec story for both facts (no adapter unit could show a green lane, review pass 2 G5); a spec story and an adapter story per fact (the spec story's acceptance needs the adapter story, so it cannot merge alone under one story per unit, review pass 3 H3); one wave for all of it |
+| D9 | delivery | one story per fact, each holding the fact's spec change as its first commit and the adapters after it, merged only with every lane green on its head; stdin first, live output after it; `local`, `linux`, `systemd`, `macos`, `oci`. ADR 0044 decision 6 is met by role inside the story: a spec author writes the first commit and the adapter implementor never edits the suite (§ 6) | one spec story for both facts (no adapter unit could show a green lane, review pass 2 G5); a spec story and an adapter story per fact (the spec story's acceptance needs the adapter story, so it cannot merge alone under one story per unit, review pass 3 H3); one wave for all of it |
 | D10 | `pod` | neither capability: stdin needs new Role authority, and live output waits for a merged-stream statement | `pods/attach` now; live output labelled `Stdout` |
 | D11 | wire | no change, no bundle | a successor bundle for adapter stdin (the session family already serves it on the wire) |
 | D12 | `run_with_stdin` | refuses `Null`, an input over `limit_bytes` and (with `output_live`) `Live` before start; a dropped helper kills its run | draining and discarding the events inside the helper (hides the stream the profile asked for); leaving a cancelled helper's run running |
@@ -699,3 +704,5 @@ needs-revision with three blocking findings and three notes (H1 to H6). Where ea
 | H4 `check-docs` also holds the contracts page's scenario counts; `spec/coverage.md` states them | § 6 (total 49 → 57 → 65, the lanes table, the coverage paragraph by hand); § 9; § 11 |
 | H5 the `linux` bound is the smaller of two | § 1 row on `output_limit`; § 3 *Bounded* and *Loss events* (`Bounded` when the delivered offset equals the final record's length); D3; T6, T12 |
 | H6 T19 can stall; BSD `wc` pads; `read_pipe` adds up to 5 s after `None` | T19 writes a fixed 14 bytes; T8 trims the count; § 3 *Timeouts*; § 9 note on T5 |
+| J1 reading ADR 0044 decision 6 as not binding these stories was unrecorded | § 6 *ADR 0044 decision 6* (met by role inside the story: a spec author writes the first commit, the adapter implementor never edits the suite); D9 |
+| J2 the `local` queue close on `Kill` named no mechanism | § 3 (a sending-side flag; no receiver lock taken) |

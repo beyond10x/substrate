@@ -7,7 +7,7 @@ title: A confinement adapter delivers a child's output while it runs
 relations:
 - decomposes: epic:confinement-contract-family
 - depends_on: story:adapter-stdin-pipe
-revision: 4
+revision: 5
 ---
 # A confinement adapter delivers a run's output while it runs
 
@@ -17,7 +17,7 @@ A consumer needs a child's output while it runs; today it is read after the run 
 [Design 32](../../../docs/design/32-adapter-stdin-and-live-output.md) § 3, § 5, § 6 (live half),
 § 11 story 2, D3 to D7, D9, D12 (the `Live` refusal), D16. One unit: the spec commit first
 (`output_live`, its outcome, open steps, eight scenarios, pinned counts), then the adapters. It
-adds no adapter and no lane test file, so ADR 0044 decision 6 does not bind it (design § 6).
+is written by a spec author; the adapter implementor never edits the suite (ADR 0044 decision 6, design § 6).
 
 ## Depends on
 

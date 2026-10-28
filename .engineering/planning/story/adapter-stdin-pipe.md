@@ -6,7 +6,7 @@ status: draft
 title: A confinement adapter feeds a child's standard input
 relations:
 - decomposes: epic:confinement-contract-family
-revision: 4
+revision: 5
 ---
 # A confinement adapter feeds a child's standard input
 
@@ -16,7 +16,7 @@ A consumer needs to write a child's standard input; today every adapter gives it
 [Design 32](../../../docs/design/32-adapter-stdin-and-live-output.md) § 2, § 5, § 6 (stdin half),
 § 11 story 1, D1, D2, D7, D9, D12 (without the `Live` refusal), D13, D15. One unit: the spec commit
 first (`stdin_pipe`, its outcome, open steps, eight scenarios, pinned counts), then the adapters.
-It adds no adapter and no lane test file, so ADR 0044 decision 6 does not bind it (design § 6).
+A spec author writes the spec commit; the adapter implementor never edits the suite (ADR 0044 decision 6, design § 6).
 
 ## Depends on
 
