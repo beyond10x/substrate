@@ -1,0 +1,52 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "command": {
+      "operation": "session.retire",
+      "session": "ses_vector"
+    },
+    "kind": "driver",
+    "port": "lifecycle"
+  },
+  "context": {
+    "authority": "driver-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000"
+  },
+  "covers": [
+    "route.session.retire"
+  ],
+  "expected": {
+    "kind": "driver-outcome",
+    "outcome": {
+      "exec_absent": true,
+      "session_absent": true
+    }
+  },
+  "id": "session-retirement-removes-session-and-private-exec-atomically",
+  "layer": "driver",
+  "phase": 4,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/orphaned_exec_row",
+      "expected": false,
+      "operator": "equals"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "session",
+      "name": "durable-pipe",
+      "state": {
+        "exec": "ex_vector",
+        "id": "ses_vector"
+      }
+    }
+  ]
+}

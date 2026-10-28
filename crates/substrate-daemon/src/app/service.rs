@@ -201,6 +201,9 @@ pub struct App {
     pub(super) host_process_reconciled: Mutex<bool>,
     /// What this run's host-process driver is known to hold, and the stops it has begun.
     pub(super) host_process_run: Arc<super::processes::DriverRun>,
+    /// The open event streams of each host-process record, at most
+    /// `MAX_PROCESS_EVENT_READERS` per record (S12).
+    pub(super) process_event_readers: Arc<super::process_events::ProcessEventReaders>,
     /// This daemon run's identity, minted at construction and stamped by the store on every
     /// host-process record it starts: a record of any other run is reconciled as an earlier
     /// run's (S3), whatever its wall-clock `started_at` says.
@@ -292,6 +295,7 @@ impl App {
             host_process_uid: nix::unistd::geteuid().as_raw(),
             host_process_reconciled: Mutex::new(false),
             host_process_run: Arc::default(),
+            process_event_readers: Arc::default(),
             host_process_run_id,
             lease_sweep: Mutex::new(()),
             workspace_recovery: Mutex::new(()),

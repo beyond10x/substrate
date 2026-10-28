@@ -218,17 +218,19 @@ fn check_capture_types(root: &Path, dir: &Path) -> Result<()> {
 const HOST_PROCESSES: &str = "spec/host-processes";
 /// The suite `ess verify conform synthesize` derives from [`HOST_PROCESSES`], committed.
 const HOST_PROCESSES_SUITE: &str = "spec/host-processes-suite.json";
-/// The host-process wire types (ADR 0036 S1-S7, S11) generated from [`HOST_PROCESSES`], committed.
+/// The host-process wire types (ADR 0036 S1-S7, S11, S12) generated from [`HOST_PROCESSES`], committed.
 const HOST_PROCESS_TYPES: &str = "crates/substrate-wire/src/generated/host_process.rs";
 /// The roots of [`HOST_PROCESS_TYPES`]: every request, record, page and tail of the surface. Their
 /// transitive closure brings the closed vocabularies (state, `ended_by`, profile, confinement).
-const HOST_PROCESS_TYPE_ROOTS: [&str; 6] = [
+const HOST_PROCESS_TYPE_ROOTS: [&str; 8] = [
     "substrate.host_processes.ProcessStartInput",
     "substrate.host_processes.ProcessRecord",
     "substrate.host_processes.ProcessPage",
     "substrate.host_processes.ProcessStopByOwnerInput",
     "substrate.host_processes.ProcessStopByOwnerResult",
     "substrate.host_processes.ProcessLogTail",
+    "substrate.host_processes.ProcessTransition",
+    "substrate.host_processes.ProcessStreamItem",
 ];
 
 /// Validates the host-process specification, checks its committed suite for drift and runs the

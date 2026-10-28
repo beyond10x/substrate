@@ -81,6 +81,22 @@ pub struct LogTail {
     pub confinement: Confinement,
 }
 
+/// The lines of one log read forward from a logical byte offset (ADR 0036 S12).
+///
+/// Logical offsets count every record byte the log was ever given: the first record starts at 0,
+/// the oldest retained one at the discarded count, and the next one to be written at
+/// [`LogRead::end`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogRead {
+    /// Bytes between the requested offset and the oldest retained record that the byte bound has
+    /// discarded; 0 when the offset was retained.
+    pub gap: u64,
+    /// Whole records, oldest first, each with the logical offset just after it.
+    pub lines: Vec<(LogLine, u64)>,
+    /// The logical offset the next record will start at.
+    pub end: u64,
+}
+
 struct Ring {
     file: File,
     capacity: u64,
@@ -221,6 +237,62 @@ impl ProcessLog {
         self.ring.lock().append(&record)
     }
 
+    /// The logical offset the next record will start at: every record byte ever written.
+    pub(crate) fn end_offset(&self) -> u64 {
+        let ring = self.ring.lock();
+        ring.discarded + ring.len
+    }
+
+    /// Whole records from the logical offset `from`, oldest first, at most `max_bytes` of them
+    /// unless the first record alone is longer (a record is never split). `None` when `from` is
+    /// beyond the end or inside a retained record: no record starts there.
+    pub(crate) fn read_from(
+        &self,
+        from: u64,
+        max_bytes: u64,
+    ) -> Result<Option<LogRead>, DriverError> {
+        let ring = self.ring.lock();
+        let (first, end) = (ring.discarded, ring.discarded + ring.len);
+        if from > end {
+            return Ok(None);
+        }
+        let start = from.max(first);
+        if from > first {
+            // A record starts at `from` only when the byte before it ends one.
+            let before = ring.read_circular(ring.head + (from - 1 - first), 1)?;
+            if before != *b"\n" {
+                return Ok(None);
+            }
+        }
+        // A record is at most the line bound plus its tag and length, so one bound's worth more
+        // than the budget always holds the first whole record.
+        let window = (end - start).min(max_bytes.saturating_add(self.max_line as u64 + 32));
+        let data = ring.read_circular(ring.head + (start - first), window)?;
+        drop(ring);
+        let mut lines = Vec::new();
+        let mut offset = start;
+        let mut used = 0_u64;
+        for record in data.split_inclusive(|byte| *byte == b'\n') {
+            if record.last() != Some(&b'\n') {
+                break;
+            }
+            let size = record.len() as u64;
+            if !lines.is_empty() && used + size > max_bytes {
+                break;
+            }
+            used += size;
+            offset += size;
+            if let Some(line) = parse_record(&record[..record.len() - 1]) {
+                lines.push((line, offset));
+            }
+        }
+        Ok(Some(LogRead {
+            gap: start - from,
+            lines,
+            end,
+        }))
+    }
+
     /// The newest lines of `selection` whose bytes fit `max_bytes`, oldest first. A newest line
     /// longer than the whole budget is returned cut from its front, marked truncated.
     pub(crate) fn tail(
@@ -331,8 +403,12 @@ impl Ring {
     fn append(&mut self, record: &[u8]) -> Result<(), DriverError> {
         let size = record.len() as u64;
         if size > self.capacity {
-            // A record larger than the whole log is discarded whole and counted.
-            self.discarded += size;
+            // A record larger than the whole log is discarded whole and counted, and the records
+            // retained before it with it: the retained records stay one contiguous range of
+            // logical offsets that ends where the next record starts (S12 reads by offset).
+            self.discarded += self.len + size;
+            self.head = (self.head + self.len) % self.capacity;
+            self.len = 0;
             return self.write_header();
         }
         if self.len + size > self.capacity {

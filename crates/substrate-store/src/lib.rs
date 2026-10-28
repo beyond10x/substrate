@@ -14,6 +14,7 @@ mod execs;
 mod host_processes;
 mod leases;
 mod operations;
+mod process_events;
 mod recovery;
 mod schema;
 mod sessions;
@@ -40,6 +41,7 @@ pub use leases::{ExpiredLease, LeaseClock, LeaseResource, NewLease};
 pub use operations::{
     NewOperation, OperationCapacity, Reservation, ResourceCapacity, StoredAnswer,
 };
+pub use process_events::{ProcessStreamEvent, ProcessStreamEvents};
 pub use recovery::{RecoveryExec, RecoveryWorkspace};
 pub use sessions::{
     NewSessionAuthority, SessionAttachmentClaim, SessionAuthorityLookup, SessionAuthorityMint,

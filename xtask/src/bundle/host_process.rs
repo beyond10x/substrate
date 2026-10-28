@@ -437,8 +437,7 @@ fn other_bounds() -> [(&'static str, &'static str, Value); 13] {
 /// no code the crate can emit is missing from the contract and the contract names none the crate
 /// cannot.
 fn check_refusal_annotations(released: &Tree, failures: &mut Vec<String>) {
-    let expected: BTreeSet<(String, u64, String)> = wire::PROCESS_REFUSALS
-        .iter()
+    let expected: BTreeSet<(String, u64, String)> = published_refusals()
         .chain(wire::PROCESS_SHARED_REFUSALS.iter())
         .map(|refusal| {
             (
@@ -484,6 +483,14 @@ fn check_refusal_annotations(released: &Tree, failures: &mut Vec<String>) {
              crate emits"
         ));
     }
+}
+
+/// The refusals of the slices `0.20.0` publishes: the wire crate's whole table, less the S12
+/// refusal, which its own successor (`0.24.0`, `process_events.rs`) publishes with its route.
+fn published_refusals() -> impl Iterator<Item = &'static wire::ProcessRefusal> {
+    wire::PROCESS_REFUSALS
+        .iter()
+        .filter(|refusal| refusal.code != wire::PROCESS_EVENTS_READERS_EXCEEDED)
 }
 
 fn class(refusal: &wire::ProcessRefusal) -> String {
@@ -569,7 +576,7 @@ fn check_vectors(version: &str, released: &Tree, failures: &mut Vec<String>) {
             ));
         }
     }
-    for refusal in &wire::PROCESS_REFUSALS {
+    for refusal in published_refusals() {
         if !refused.contains_key(refusal.code) {
             failures.push(format!(
                 "vectors: no host-process vector answers {}",

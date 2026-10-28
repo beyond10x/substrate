@@ -15,9 +15,9 @@ pub const API_VERSION: &str = "v1";
 ///
 /// This is the SHA-256 of the inner immutable `bundle.json`, not the outer OCI manifest digest.
 /// Moving either member is an explicit coordinated promotion (Atlas ADR 0019).
-pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.23.0";
+pub const ADVERTISED_CONTRACT_BUNDLE: &str = "substrate-wire/0.24.0";
 pub const ADVERTISED_CONTRACT_BUNDLE_SHA256: &str =
-    "fc88fb9aa9feee20504cc29725a23c19886a2343e2c16757e6c2482e28f49bdc";
+    "1570cc116e9b38c105607fefde705416b0ac2e199eb157a004c1e9b63d205d34";
 pub const MAX_FILE_BYTES: u64 = 1_048_576;
 pub const MAX_IO_BYTES: u64 = 1_048_576;
 pub const MAX_LIST_ITEMS: u32 = 1_000;
@@ -2305,6 +2305,13 @@ impl Event {
             "snapshot.created" | "snapshot.refused" => {
                 self.resource_kind == "snapshot" && control_cause
             }
+            // ADR 0036 S12: the seven host-process lifecycle variants.
+            transition if PROCESS_EVENT_TRANSITIONS.contains(&transition) => {
+                self.resource_kind == "process"
+                    && operation_cause
+                    && serde_json::from_value::<ProcessTransition>(self.observation.clone())
+                        .is_ok_and(|observation| observation.process == self.resource)
+            }
             _ => false,
         };
         if valid {
@@ -2516,7 +2523,9 @@ pub use host_process_types::{
     ProcessKind, ProcessLease, ProcessLeaseRequest, ProcessLeaseState, ProcessListening,
     ProcessLogLine, ProcessLogTail, ProcessMemory, ProcessOwner, ProcessPage, ProcessRecord,
     ProcessStartInput, ProcessStartInputEnv as ProcessEnv, ProcessState, ProcessStopByOwnerInput,
-    ProcessStopByOwnerResult, ProcessStopped, SocketProtocol as ProcessSocketProtocol,
+    ProcessStopByOwnerResult, ProcessStopped, ProcessStreamEnd, ProcessStreamGap,
+    ProcessStreamItem, ProcessStreamItemKind, ProcessTransition,
+    SocketProtocol as ProcessSocketProtocol,
 };
 
 impl From<DateTime<Utc>> for ProcessTimestamp {
@@ -2607,6 +2616,16 @@ process_vocabulary!(ProcessConfinement {
 process_vocabulary!(ProcessKind {
     Process => "process",
 });
+process_vocabulary!(ProcessStreamItemKind {
+    // The terminal item, after which the stream closes (S12).
+    Ended => "ended",
+    // One `process.*` event from the event log.
+    Event => "event",
+    // Log bytes the S7 bound discarded before the reader reached them.
+    Gap => "gap",
+    // One output line from the S7 log.
+    Line => "line",
+});
 
 impl<T> ProcessPresence<T> {
     /// The value, when present.
@@ -2670,6 +2689,34 @@ pub const PROCESS_RETAIN_ENDED_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
 pub const PROCESS_RETAIN_ENDED_COUNT: u64 = 256;
 /// The grace between `SIGTERM` to every cgroup member and `cgroup.kill` on every stop (S3).
 pub const PROCESS_STOP_GRACE_MS: u64 = 10_000;
+/// The longest `text` of one line item of the per-process stream (S12). A longer line is
+/// delivered cut at this bound, at a character boundary, with `truncated: true` and its full
+/// length, and never split into two items. Its own constant, at the S7 line bound's value.
+pub const MAX_PROCESS_EVENT_LINE_BYTES: usize = 16 * 1024;
+/// Most concurrent streams of one process (S12); the next is `process.events-readers-exceeded`.
+pub const MAX_PROCESS_EVENT_READERS: usize = 8;
+/// Most concurrent process event streams one subject holds, over all its records, live and ended
+/// (S12); the next is `process.events-readers-exceeded`. It is the readers bound of every live
+/// record the subject may hold: [`MAX_PROCESSES_PER_SUBJECT`] × [`MAX_PROCESS_EVENT_READERS`].
+pub const MAX_PROCESS_EVENT_STREAMS_PER_SUBJECT: usize = 512;
+/// Most concurrent process event streams one deployment holds, over every subject (S12); the next
+/// is `process.events-readers-exceeded`. Only the daemon's own uid is served a host process, so it
+/// is the subject bound.
+pub const MAX_PROCESS_EVENT_STREAMS_PER_DEPLOYMENT: usize = 512;
+/// The longest per-process stream cursor, in characters (S12).
+pub const MAX_PROCESS_EVENT_CURSOR_CHARS: usize = 512;
+/// The seven closed `process.*` variants of the one event union (S12), in ADR 0036's order. Each
+/// carries `resource_kind: process`, the process id as `resource`, an operation cause and a
+/// [`ProcessTransition`] observation. Output lines are never events in that log.
+pub const PROCESS_EVENT_TRANSITIONS: [&str; 7] = [
+    "process.started",
+    "process.lease-renewed",
+    "process.lease-expired",
+    "process.timed-out",
+    "process.stopped",
+    "process.exited",
+    "process.vanished",
+];
 
 /// `process.start` with no delegated cgroup v2 subtree usable for process cgroups (S2).
 pub const PROCESS_HOST_UNSERVED: &str = "process.host-unserved";
@@ -2709,6 +2756,10 @@ pub const PROCESS_TIMEOUT_INVALID: &str = "process.timeout-invalid";
 /// An `expires_at` that is not an RFC 3339 UTC instant, is nearer than [`MIN_LEASE_TTL_MS`] or
 /// lies beyond [`MAX_PROCESS_TIMEOUT_MS`] (S11).
 pub const PROCESS_EXPIRES_AT_INVALID: &str = "process.expires-at-invalid";
+/// A stream of a process that already has [`MAX_PROCESS_EVENT_READERS`] concurrent readers, of a
+/// subject that holds [`MAX_PROCESS_EVENT_STREAMS_PER_SUBJECT`] or of a deployment that holds
+/// [`MAX_PROCESS_EVENT_STREAMS_PER_DEPLOYMENT`] (S12).
+pub const PROCESS_EVENTS_READERS_EXCEEDED: &str = "process.events-readers-exceeded";
 
 /// One named refusal of the host-process family: its code, HTTP status, class and message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2738,9 +2789,9 @@ const fn process_refusal_entry(
     }
 }
 
-/// ADR 0036 § Named refusals for the slices on this surface (S1-S7, S11), in the ADR's order.
-/// S8 (containers), S9 (adoption) and S12 (the per-process stream) add theirs with their routes.
-pub const PROCESS_REFUSALS: [ProcessRefusal; 17] = [
+/// ADR 0036 § Named refusals for the slices on this surface (S1-S7, S11, S12), in the ADR's order.
+/// S8 (containers) and S9 (adoption) add theirs with their routes.
+pub const PROCESS_REFUSALS: [ProcessRefusal; 18] = [
     process_refusal_entry(
         PROCESS_HOST_UNSERVED,
         501,
@@ -2822,6 +2873,11 @@ pub const PROCESS_REFUSALS: [ProcessRefusal; 17] = [
         422,
         "expires_at must be an RFC 3339 UTC instant at least the minimum lease TTL ahead and within the process timeout bound.",
     ),
+    process_refusal_entry(
+        PROCESS_EVENTS_READERS_EXCEEDED,
+        429,
+        "This host process, its subject or the deployment already holds the maximum number of concurrent event streams.",
+    ),
 ];
 
 /// Renewing a lease the daemon's lease clock has already expired, on every renewable resource: a
@@ -2885,6 +2941,82 @@ impl ProcessLogsQuery {
     /// The byte budget, [`MAX_PROCESS_LOG_TAIL_BYTES`] when absent.
     pub fn budget(&self) -> u64 {
         self.max_bytes.unwrap_or(MAX_PROCESS_LOG_TAIL_BYTES)
+    }
+}
+
+/// The query of `GET /v1/processes/{process_id}/events` (S12), hand-written for the reason
+/// [`ProcessListQuery`] is. `cursor` is the opaque cursor of the last item a reader received;
+/// absent, the stream starts with what the event log and the log still hold.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProcessEventsQuery {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+}
+
+/// The position one per-process stream item's cursor states (S12), as
+/// `pe1.{process}.{source}.{generation}.{seq}.{offset}`: the record whose stream carried it, the
+/// event-log source and generation, the event-log seq through which every event of the record was
+/// delivered, and the log byte offset after the last delivered line. Clients treat the cursor as
+/// opaque; this is the daemon's reading of it, held to the bundle's `process-event-cursor`
+/// pattern by `cargo xtask check-bundle`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProcessEventCursor {
+    pub process: String,
+    pub source: String,
+    pub generation: u64,
+    pub seq: u64,
+    pub offset: u64,
+}
+
+impl ProcessEventCursor {
+    /// The position `text` states when it matches the published `process-event-cursor` pattern
+    /// and is at most [`MAX_PROCESS_EVENT_CURSOR_CHARS`] long; `None` for anything else, including
+    /// a number beyond `u64`.
+    pub fn parse(text: &str) -> Option<Self> {
+        fn tail_of<'a>(
+            part: &'a str,
+            prefix: &str,
+            allowed: impl Fn(u8) -> bool,
+        ) -> Option<&'a str> {
+            let tail = part.strip_prefix(prefix)?;
+            (!tail.is_empty() && tail.bytes().all(allowed)).then_some(part)
+        }
+        fn number(part: &str, zero: bool) -> Option<u64> {
+            let canonical = !part.is_empty()
+                && part.bytes().all(|byte| byte.is_ascii_digit())
+                && (part == "0" || !part.starts_with('0'));
+            let value: u64 = canonical.then(|| part.parse().ok())??;
+            (zero || value > 0).then_some(value)
+        }
+        if text.chars().count() > MAX_PROCESS_EVENT_CURSOR_CHARS {
+            return None;
+        }
+        let mut parts = text.strip_prefix("pe1.")?.split('.');
+        let process = tail_of(parts.next()?, "proc_", |byte| byte.is_ascii_alphanumeric())?;
+        let source = tail_of(parts.next()?, "scope_", |byte| {
+            byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-'
+        })?;
+        let generation = number(parts.next()?, false)?;
+        let seq = number(parts.next()?, true)?;
+        let offset = number(parts.next()?, true)?;
+        parts.next().is_none().then(|| Self {
+            process: process.to_owned(),
+            source: source.to_owned(),
+            generation,
+            seq,
+            offset,
+        })
+    }
+}
+
+impl std::fmt::Display for ProcessEventCursor {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "pe1.{}.{}.{}.{}.{}",
+            self.process, self.source, self.generation, self.seq, self.offset
+        )
     }
 }
 
@@ -5787,8 +5919,8 @@ mod tests {
         let version = ADVERTISED_CONTRACT_BUNDLE
             .strip_prefix("substrate-wire/")
             .expect("advertised contract prefix");
-        assert_eq!(version, "0.23.0", "the reviewed promotion target moved");
-        let bytes = include_bytes!("../../../contracts/substrate-wire/0.23.0/bundle.json");
+        assert_eq!(version, "0.24.0", "the reviewed promotion target moved");
+        let bytes = include_bytes!("../../../contracts/substrate-wire/0.24.0/bundle.json");
         assert_eq!(
             hex::encode(Sha256::digest(bytes)),
             ADVERTISED_CONTRACT_BUNDLE_SHA256
@@ -6358,6 +6490,9 @@ mod workdir_aperture_tests;
 
 #[cfg(test)]
 mod host_process_tests;
+
+#[cfg(test)]
+mod process_event_tests;
 
 #[cfg(test)]
 mod writable_root_tests;

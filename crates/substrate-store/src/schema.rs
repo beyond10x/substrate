@@ -283,6 +283,7 @@ impl Store {
         migrate_operation_ledger_accounting(&mut connection, config)?;
         migrate_operation_grant_attribution(&connection)?;
         crate::host_processes::migrate_host_processes(&connection)?;
+        crate::process_events::migrate_process_events(&connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
             event_retention: config.event_retention,

@@ -7,6 +7,27 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+### Added
+
+- Host processes publish their lifecycle and stream it (ADR 0036 S12, contract bundle `0.24.0`).
+  Each transition (`process.started`, `process.lease-renewed`, `process.lease-expired`,
+  `process.timed-out`, `process.stopped`, `process.exited`, `process.vanished`) is an event of the
+  existing event log with `resource_kind: process` and the operation that caused it. The new
+  WebSocket `GET /v1/processes/{process_id}/events`, on the same socket and posture as the other
+  process routes, sends one record's events and its log lines in one order, each item with a
+  resumable cursor, a `gap` item for log bytes the bound discarded before the reader reached them,
+  and one `ended` item after the record's end, after which it closes; a stream of an ended record
+  replays what the event log and the log still hold and closes; a stream opened without a cursor
+  is never refused for what retention removed. No line is sent before `process.started` while the
+  record is starting. Lines are read from the log file, never from the program's pipes, so a
+  slow reader never blocks the program, and they never enter the event log; an idle stream reads
+  the store at most once a second. A ninth concurrent stream of one record, a subject's 513th over
+  all its records, live or ended, or a deployment's 513th is `process.events-readers-exceeded`
+  (429, retriable). The cursor names its record; one of another record, or outside the published
+  pattern, is `event.cursor-invalid`, and every cursor the daemon cannot honour is refused before
+  the upgrade with the event log's codes. The Rust SDK gains `Client::process_events` and
+  `ProcessEventStream`.
+
 ### Changed
 
 - The specification and CI use ESS 0.72.0 (was 0.70.0); the suites, wire types and CLI package regenerate unchanged apart from the generator header.

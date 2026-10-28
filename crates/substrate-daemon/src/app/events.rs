@@ -455,7 +455,7 @@ async fn event_page_response(
     }
 }
 
-fn event_cursor_failure(request_id: &str, error: &EventCursorError) -> Response {
+pub(super) fn event_cursor_failure(request_id: &str, error: &EventCursorError) -> Response {
     let (code, message, retriable) = match error {
         EventCursorError::Source => (
             "event.source-mismatch",

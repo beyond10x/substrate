@@ -622,6 +622,7 @@ mod tests {
             ("/v1/processes", Some("process")),
             ("/v1/processes/stop", Some("process")),
             ("/v1/processes/proc_test/logs", Some("process")),
+            ("/v1/processes/proc_test/events", Some("process")),
             ("/v1/processes/proc_test/lease/renew", Some("process")),
             ("/v1/not-a-route", None),
         ] {

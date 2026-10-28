@@ -170,6 +170,17 @@ const PORT_ITEMS: &[(&str, &str)] = &[
          LogLine is LogTail::lines (log.rs:75), returned by ProcessLogs::log_tail \
          (crates/substrate-host/src/host_process/mod.rs:1179)",
     ),
+    (
+        "LogRead",
+        "returned by ProcessLogs::log_read, the forward read of ADR 0036 S12 \
+         (crates/substrate-host/src/host_process/log.rs:90, mod.rs:1272)",
+    ),
+    (
+        "LogLine",
+        "the element of the public field LogRead::lines \
+         (crates/substrate-host/src/host_process/log.rs:61, :95); LogRead is returned by \
+         ProcessLogs::log_read (crates/substrate-host/src/host_process/mod.rs:1272)",
+    ),
 ];
 
 #[test]
