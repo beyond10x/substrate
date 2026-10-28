@@ -93,6 +93,18 @@ pub use unsupported::HostDriver;
 /// compiles and refuses at open rather than failing to build.
 pub const PLATFORM_UNSERVED: &str = "host.platform-unserved";
 
+/// Executions this process ended because their live output was not drained within the stall
+/// deadline, counted once per execution whichever stream stalled first.
+static OUTPUT_STALL_TERMINATIONS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+/// How many executions this process has ended for an output stall, since it started. Always zero
+/// where the driver does not run executions.
+#[must_use]
+pub fn output_stall_terminations() -> u64 {
+    OUTPUT_STALL_TERMINATIONS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// One deployment-owned Git source aperture. The URL is a non-secret HTTPS prefix; request
 /// authority arrives separately and is never retained in this configuration.
 #[derive(Debug, Clone)]

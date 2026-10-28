@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:operational-health-and-telemetry
 kind: story
-status: proposed
+status: active
 title: Operators get safe health and service telemetry
 summary: Dedicated liveness, readiness and OpenMetrics endpoints report service health without leaking subjects, credentials or high-cardinality resource identifiers.
 owner: substrate
@@ -30,9 +30,10 @@ scope:
   path: crates/substrate-host/src/probe.rs
 - confidence: inferred
   path: crates/substrate-store/src/schema.rs
-revision: 5
+revision: 6
 transitions:
 - {from: "draft", to: "proposed", at: "2026-08-31T22:54:32Z", actor: "human:timo", revision: 2, imported: true}
+- {from: "proposed", to: "active", at: "2026-10-28T06:30:00Z", actor: "human:timo", revision: 6, executor: "agent:substrate-adr-0109"}
 ---
 # Story: Operators get safe health and service telemetry
 

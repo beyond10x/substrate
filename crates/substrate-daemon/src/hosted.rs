@@ -32,6 +32,7 @@ use tokio::net::TcpStream;
 use tokio_rustls::TlsConnector;
 use ulid::Ulid;
 
+use crate::app::{Admission, Telemetry};
 use crate::{CONTRACT_BUNDLE, CONTRACT_BUNDLE_SHA256, Identity};
 
 const AUDIENCE: &str = "urn:b10x:substrate";
@@ -65,6 +66,8 @@ pub(crate) struct HostedAdmission {
     connector: TlsConnector,
     /// Connections that completed a clean exchange, most recent last (ADR 0040).
     idle: Arc<Mutex<IdlePool>>,
+    /// Where admission results and resolution times are counted (ADR 0045); absent, nothing is.
+    telemetry: Option<Arc<Telemetry>>,
 }
 
 /// The idle half of the Identity connection pool and whether its reaper is running.
@@ -200,7 +203,14 @@ impl HostedAdmission {
             server_name,
             connector,
             idle: Arc::new(Mutex::new(IdlePool::default())),
+            telemetry: None,
         })
+    }
+
+    /// Counts every admission this listener decides into the daemon's telemetry.
+    pub(crate) fn with_telemetry(mut self, telemetry: Arc<Telemetry>) -> Self {
+        self.telemetry = Some(telemetry);
+        self
     }
 
     async fn admit(
@@ -475,7 +485,7 @@ fn hosted_reference(issuer: &str, tenant: &str, subject: &str) -> String {
     format!("hosted:{}", BASE64URL.encode(digest.finalize()))
 }
 
-fn required_scope(_method: &Method, path: &str) -> Option<&'static str> {
+pub(crate) fn required_scope(path: &str) -> Option<&'static str> {
     if path == "/v1/machine"
         || path.starts_with("/v1/metrics")
         || path.starts_with("/v1/events")
@@ -520,11 +530,25 @@ pub(crate) async fn require_hosted_authority(
     mut request: Request,
     next: Next,
 ) -> Response {
-    let required = required_scope(request.method(), request.uri().path());
-    let admitted = match access_credential(&request) {
-        Ok(credential) => admission.admit(credential, required).await,
-        Err(failure) => Err(failure),
+    let required = required_scope(request.uri().path());
+    let (admitted, resolution) = match access_credential(&request) {
+        Ok(credential) => {
+            let started = Instant::now();
+            let admitted = admission.admit(credential, required).await;
+            (admitted, Some(started.elapsed()))
+        }
+        Err(failure) => (Err(failure), None),
     };
+    if let Some(telemetry) = &admission.telemetry {
+        let result = match &admitted {
+            Ok(_) => Admission::Admitted,
+            Err(AdmissionFailure::Absent) => Admission::CredentialAbsent,
+            Err(AdmissionFailure::Invalid) => Admission::AuthorityInvalid,
+            Err(AdmissionFailure::Scope) => Admission::ScopeDenied,
+            Err(AdmissionFailure::Unavailable) => Admission::AuthorityUnavailable,
+        };
+        telemetry.admission(result, resolution);
+    }
     let identity = match admitted {
         Ok(identity) => identity,
         Err(failure) => return refusal(request.uri().path(), failure),
@@ -566,22 +590,25 @@ fn refusal(path: &str, failure: AdmissionFailure) -> Response {
         ),
     };
     let api_version = if path.starts_with("/v2/") { "v2" } else { "v1" };
+    let error = ErrorDetail {
+        class,
+        code: code.to_owned(),
+        message: message.to_owned(),
+        retriable,
+        address: None,
+        operation: None,
+    };
     let mut response = (
         status,
         axum::Json(Failure {
             api_version: api_version.to_owned(),
             request_id: format!("req_{}", Ulid::generate()),
-            error: ErrorDetail {
-                class,
-                code: code.to_owned(),
-                message: message.to_owned(),
-                retriable,
-                address: None,
-                operation: None,
-            },
+            error: error.clone(),
         }),
     )
         .into_response();
+    // The code the request-outcome layer counts, as every other failure answer carries it.
+    response.extensions_mut().insert(error);
     response.headers_mut().insert(
         "x-b10x-contract",
         CONTRACT_BUNDLE.parse().expect("static contract header"),
@@ -607,7 +634,6 @@ mod tests {
         AdmissionFailure, HostedIdentityConfig, ResolvedActor, ResolvedAuthority,
         access_credential, hosted_reference, required_scope, validate_authority,
     };
-    use axum::http::Method;
     use tempfile::TempDir;
 
     #[test]
@@ -626,7 +652,7 @@ mod tests {
             ("/v1/processes/proc_test/lease/renew", Some("process")),
             ("/v1/not-a-route", None),
         ] {
-            assert_eq!(required_scope(&Method::GET, path), expected, "{path}");
+            assert_eq!(required_scope(path), expected, "{path}");
         }
     }
 

@@ -1476,7 +1476,7 @@ pub(super) async fn process_start(
         })
         .await
     {
-        Ok(HostProcessStartReservation::Accepted(_)) => {}
+        Ok(HostProcessStartReservation::Accepted(_)) => super::health::dispatch_admitted(),
         Ok(HostProcessStartReservation::Existing(reservation)) => {
             return reservation_response(Ok(reservation), &request_id, &operation)
                 .unwrap_or_else(|| outcome_unknown(&request_id, &operation));
@@ -1755,6 +1755,7 @@ pub(super) async fn process_stop(
         .await
     {
         Ok(HostProcessStopReservation::Accepted(record)) => {
+            super::health::dispatch_admitted();
             // Bundle 0.20.0 vectors/http/process-stop.json: the answer is the record as recorded
             // `stopping`; the supervisor clock records the end.
             match ctx.accept_stop(&scope, &operation, &record).await {
@@ -1883,6 +1884,7 @@ pub(super) async fn process_stop_by_owner(
             })
             .await;
         if let Ok(HostProcessStopReservation::Accepted(record)) = reserved {
+            super::health::dispatch_admitted();
             if let Err(error) = ctx.accept_stop(&scope, &new.operation, &record).await {
                 tracing::warn!(process = %id, %error, "host process stop was not completed");
             }
