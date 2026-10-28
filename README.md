@@ -298,6 +298,13 @@ files or an already-loaded profile without its exact retained source. `--check` 
 writing; `--hold` supports deployment readiness and normal termination. Application pods never
 receive these mounts or installation authority.
 
+The profile name is a deployment parameter
+([design 33](docs/design/33-host-profile-name-parameter.md)). `--apparmor-profile <name>` on both
+executables, and `execution.appArmorProfile` in the chart, name `substrate-host-exec-v1` or
+`substrate-host-exec-v1-<suffix>`. The installer renders the same policy under that name, loads it
+from `<name>.apparmor` and holds it to those exact bytes; the bootstrap requires
+`<name> (enforce)`. Unset, every byte is as before.
+
 The `container-checker` Docker build target contains a public-SDK example for final-image
 acceptance. Run its `container-pty-check SOCKET` executable as the admitted non-root UID inside
 the tested container's PID, mount and cgroup namespaces. It verifies file bytes, generated PTY

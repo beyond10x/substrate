@@ -1,6 +1,8 @@
 {{- $name := include "substrate.name" . -}}
 {{- $execution := .Values.execution.enabled -}}
 {{- $quotas := .Values.execution.projectQuotas.enabled -}}
+{{- $profile := toString .Values.execution.appArmorProfile -}}
+{{- $namedProfile := ne $profile "substrate-host-exec-v1" -}}
 apiVersion: apps/v1
 kind: StatefulSet
 metadata:
@@ -144,6 +146,10 @@ spec:
             {{- if $quotas }}
             - --project-quotas
             {{- end }}
+            {{- if $namedProfile }}
+            - --apparmor-profile
+            - {{ $profile | quote }}
+            {{- end }}
             - --
             {{- end }}
             - --socket
@@ -250,7 +256,11 @@ spec:
               localhostProfile: b10x-substrate/host-exec-v1-amd64.json
             appArmorProfile:
               type: Localhost
+              {{- if $namedProfile }}
+              localhostProfile: {{ $profile | quote }}
+              {{- else }}
               localhostProfile: substrate-host-exec-v1
+              {{- end }}
           {{- else }}
           securityContext:
             runAsUser: 65532
