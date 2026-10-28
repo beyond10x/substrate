@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-28T09:52:06Z",
+  "actor": "human:timo",
+  "artifact": "story:operational-health-and-telemetry",
+  "kind": "story",
+  "revision": 6,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "macOS host crate on main at 54a76dbdceb621cf3a7465018b50aa76f9ad6d3b, success",
+    "reference": "https://github.com/beyond10x/substrate/actions/runs/40666945523"
+  }
+}

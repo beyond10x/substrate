@@ -1065,7 +1065,10 @@ pub(super) fn reservation_response(
     operation: &str,
 ) -> Option<Response> {
     match reservation {
-        Ok(Reservation::Accepted) => None,
+        Ok(Reservation::Accepted) => {
+            super::health::dispatch_admitted();
+            None
+        }
         Ok(Reservation::Replay(answer)) => Some(replay(request_id, operation, answer)),
         Ok(Reservation::Conflict) => Some(conflict(
             request_id,

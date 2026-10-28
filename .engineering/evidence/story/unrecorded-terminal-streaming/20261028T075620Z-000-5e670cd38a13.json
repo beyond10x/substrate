@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-28T07:56:20Z",
+  "actor": "human:timo",
+  "artifact": "story:unrecorded-terminal-streaming",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "bash scripts/delegated-lane.sh on story/operational-health-and-telemetry (main cff3f219 plus ADR 0045 work): delegated_sdk_streaming_never_records_terminal_canaries passed all 22 pipe and pty endings with the exec.resource-usage fact served (no 'measurement lane absent' line); lane exit 0"
+  }
+}

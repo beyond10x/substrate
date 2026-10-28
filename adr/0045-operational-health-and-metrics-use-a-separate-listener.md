@@ -69,7 +69,7 @@ A, so § *Decision* stands as written.
    ADR 0024's "no production plaintext fallback" as applying to control traffic. The operational
    listener is not a fallback for it: it carries no control route, reads no credential and answers
    with no identifier. Exposure is bounded by the bind address and, in Kubernetes, by NetworkPolicy
-   (the Kubernetes serving profile, proposed as ADR 0046).
+   ([ADR 0046](0046-kubernetes-serves-one-node-bound-daemon-per-stable-pod-address.md)).
 4. **Paths** (D3 A): `/livez`, `/readyz`, `/metrics`.
 5. **Liveness reports the process loop only.** `/livez` answers `200 ok` when its handler runs and
    neither maintenance task has *finished*. Both are infinite loops, so a finished task has panicked
@@ -204,7 +204,7 @@ outage must not empty every pod at once.
   stays within the pinned maximum. The second asserts that every registry route answers `404` on
   the operational listener and that no response there depends on an `Authorization` header.
 - Readiness transitions are tested against an unreadable store and a stopped maintenance task, each
-  scenario run once. The Kubernetes probe behaviour is left to the Kubernetes serving profile (proposed ADR 0046).
+  scenario run once. The Kubernetes probe behaviour is exercised by ADR 0046's chart lane.
 - The metric names and label sets are pinned by a test against this catalogue. Renaming a metric,
   or changing a label set, changes that test and the deployment guide together and is recorded in
   `CHANGELOG.md`.
@@ -220,3 +220,13 @@ outage must not empty every pod at once.
 - Re-probing driver facts at runtime (D5 B), and authentication on this listener at a later date.
 - Any wire change. None of the options above needs one. Mounting the endpoints on `router_for`
   would need a successor bundle and is not offered.
+
+## Addendum, 2026-10-28: review pass 1
+
+Two bounds tightened at implementation, after the security and adversary reviews
+(`review-result:ops-listener-security-pass-1`, `review-result:ops-listener-adversary-pass-1`):
+
+- Of decision 1's 8 concurrent connections, at most 4 come from one source address
+  (`TcpConnectionLimits::operational()`), so one peer cannot hold every slot against kubelet.
+- The schema check reads a stamp; it never writes one. A ledger stamped by a newer binary is refused
+  at open (`StoreError::NewerSchema`) instead of being re-stamped and reported current.
