@@ -160,6 +160,7 @@ mod imp {
     use substrate_wire::Signal;
     use tokio::sync::watch;
 
+    use super::super::stdin::{self, StdinWriter};
     use super::super::{
         AdapterFacts, AdapterName, AdmittedProfile, Command, ConfinementAdapter, ConfinementError,
         ConfinementProfile, ContractFamily, FACT_ORDER, FAMILY_ORDER, Fact, InnerAdapter,
@@ -763,6 +764,8 @@ mod imp {
         cgroup: PathBuf,
         phase: watch::Receiver<Phase>,
         captured: Arc<Mutex<Captured>>,
+        /// The run's standard input, when its profile piped it (design 32).
+        stdin: Option<Arc<StdinWriter>>,
     }
 
     struct SystemdLocal {
@@ -936,11 +939,12 @@ mod imp {
     }
 
     /// Spawns `command` in `directory` as its own process group, joined to `cgroup` before it
-    /// executes.
+    /// executes, with the standard input `profile` asks for.
     fn spawn_in(
         cgroup: &Path,
         command: &Command,
         directory: &Path,
+        profile: &ConfinementProfile,
     ) -> Result<tokio::process::Child, ConfinementError> {
         let procs = std::fs::OpenOptions::new()
             .write(true)
@@ -962,7 +966,7 @@ mod imp {
             .env_clear()
             .envs(&command.env)
             .current_dir(directory)
-            .stdin(Stdio::null())
+            .stdin(stdin::stdio(profile.stdin))
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .process_group(0);
@@ -1235,6 +1239,17 @@ mod imp {
             }
             Ok(())
         }
+
+        async fn write_stdin(&self, run: &RunId, bytes: &[u8]) -> Result<(), ConfinementError> {
+            let run = self.run(run)?;
+            stdin::piped(run.stdin.as_ref())?.write(bytes).await
+        }
+
+        async fn close_stdin(&self, run: &RunId) -> Result<(), ConfinementError> {
+            let run = self.run(run)?;
+            stdin::piped(run.stdin.as_ref())?.close().await;
+            Ok(())
+        }
     }
 
     impl SystemdLocal {
@@ -1256,9 +1271,10 @@ mod imp {
             );
             let cgroup = self.scope.join(&name);
             create_run_cgroup(&cgroup, &bounds)?;
-            let mut child = spawn_in(&cgroup, command, &directory).inspect_err(|_| {
-                let _ = std::fs::remove_dir(&cgroup);
-            })?;
+            let mut child = spawn_in(&cgroup, command, &directory, admitted.profile())
+                .inspect_err(|_| {
+                    let _ = std::fs::remove_dir(&cgroup);
+                })?;
             let Some(pid) = child.id().and_then(|pid| i32::try_from(pid).ok()) else {
                 let _ = kill_tree(&cgroup);
                 return Err(
@@ -1266,6 +1282,8 @@ mod imp {
                 );
             };
             let id = RunId::new(format!("systemd-{name}"));
+            let writer = stdin::child_writer(admitted.profile().stdin, child.stdin.take());
+            let ending = writer.clone();
             let captured = Arc::new(Mutex::new(Captured::new(
                 admitted.profile().output_retention,
                 output_limit,
@@ -1307,6 +1325,10 @@ mod imp {
                     }
                 }
                 let drained = drain_tree(&tree, deadline).await && closed;
+                // The run's end, for its standard input too (design 32 § 2).
+                if let Some(writer) = ending {
+                    writer.end().await;
+                }
                 let _ = phase.send(match ended {
                     Ok(status) if drained => Phase::Ended(RunExit {
                         code: status.code(),
@@ -1323,6 +1345,7 @@ mod imp {
                 cgroup,
                 phase: observed,
                 captured,
+                stdin: writer,
             }));
             admitted.audit_start(&id, &command.argv[0]);
             Ok(id)
@@ -1364,6 +1387,7 @@ mod imp {
                     Fact::WholeTreeKill,
                     Fact::LocalPermitted,
                     Fact::HostNetwork,
+                    Fact::StdinPipe,
                 ]
             );
             assert!(super::super::super::check_open(&facts).is_ok());

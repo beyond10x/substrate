@@ -20,8 +20,8 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use serde_json::{Value, json};
 use substrate_host::confinement::{
-    self, AdapterFacts, AdapterName, AuditRecord, AuditSink, ConfinementAdapter, ConfinementError,
-    ConfinementProfile, ContractFamily, Fact, InnerAdapter,
+    self, AdapterFacts, AdapterName, AuditRecord, AuditSink, Command, ConfinementAdapter,
+    ConfinementError, ConfinementProfile, ContractFamily, Fact, InnerAdapter, RunId,
 };
 
 pub const SUITE: &str = include_str!("../../../../spec/confinement-suite.json");
@@ -773,4 +773,118 @@ pub fn tree(root: &std::path::Path) -> BTreeMap<std::path::PathBuf, Option<Vec<u
     let mut entries = BTreeMap::new();
     walk(root, root, &mut entries);
     entries
+}
+
+// ---- design 32's two stdin drivers (§ 9), shared by every adapter's lane ----
+
+/// The pending write the fill left: a task, so the write stays pending until the case ends or
+/// cancels it.
+pub type PendingWrite = tokio::task::JoinHandle<Result<(), ConfinementError>>;
+
+/// The fill of design 32 § 9: 64 KiB chunks to a child that does not read, each write raced
+/// against 100 ms, until one has not returned; at most 16 chunks, or the case fails. Returns the
+/// bytes of the completed writes and the write that has not returned, still pending.
+pub async fn fill(adapter: &Arc<dyn ConfinementAdapter>, run: &RunId) -> (u64, PendingWrite) {
+    let chunk = vec![b'x'; confinement::STDIN_CHUNK_BYTES];
+    let mut completed = 0_u64;
+    for _ in 0..16 {
+        let mut write = tokio::spawn({
+            let adapter = Arc::clone(adapter);
+            let run = run.clone();
+            let chunk = chunk.clone();
+            async move { adapter.write_stdin(&run, &chunk).await }
+        });
+        match tokio::time::timeout(std::time::Duration::from_millis(100), &mut write).await {
+            Ok(joined) => {
+                joined
+                    .expect("the write task")
+                    .expect("the pipe took the chunk");
+                completed += chunk.len() as u64;
+            }
+            Err(_) => return (completed, write),
+        }
+    }
+    panic!("16 chunks of 64 KiB went into a pipe nobody reads without one pending");
+}
+
+/// The gate of design 32 § 9: a marker file the child waits for. Dropped, it opens, so a case
+/// that fails before it opened the gate does not leave its child waiting.
+pub struct Gate(std::path::PathBuf);
+
+impl Gate {
+    /// A gate whose marker is `go` in `directory`, a directory the child sees.
+    pub fn new(directory: &std::path::Path) -> Self {
+        Self(directory.join("go"))
+    }
+
+    /// The shell line that waits for the gate to open.
+    pub fn line(&self) -> String {
+        format!("while [ ! -e '{}' ]; do sleep 0.05; done", self.0.display())
+    }
+
+    pub fn open(&self) {
+        std::fs::write(&self.0, b"").expect("the gate opens");
+    }
+}
+
+impl Drop for Gate {
+    fn drop(&mut self) {
+        let _ = std::fs::write(&self.0, b"");
+    }
+}
+
+/// `/bin/sh -c script` with a `PATH` that finds the tools the cases run.
+pub fn sh(script: &str) -> Command {
+    Command {
+        argv: vec!["/bin/sh".into(), "-c".into(), script.into()],
+        env: BTreeMap::from([("PATH".to_owned(), "/usr/bin:/bin".to_owned())]),
+    }
+}
+
+/// Asserts `error` is the refusal `code` with `status`.
+pub fn assert_refused(error: &ConfinementError, code: &str, status: u16) {
+    assert_eq!(error.code(), code, "{error}");
+    assert_eq!(error.status(), status, "{error}");
+}
+
+/// T2 of design 32 on any adapter: `cat` with `Piped` echoes three writes on stdout;
+/// `close_stdin` ends it with exit 0; a second `close_stdin` is `Ok`; a write after close is
+/// `session.input-closed`. `profile` is the adapter's own profile, with `Piped` set.
+pub async fn stdin_echoes_and_ends_on_close(
+    adapter: &Arc<dyn ConfinementAdapter>,
+    profile: &ConfinementProfile,
+    chunks: &[&[u8]],
+) {
+    let admitted = adapter.admit(profile).expect("a piped profile is admitted");
+    let run = adapter
+        .start(&admitted, &sh("exec cat"))
+        .await
+        .expect("cat starts");
+    for chunk in chunks {
+        adapter.write_stdin(&run, chunk).await.expect("written");
+    }
+    adapter.close_stdin(&run).await.expect("closed");
+    let ended = tokio::time::timeout(std::time::Duration::from_secs(10), adapter.wait(&run))
+        .await
+        .expect("cat ends on end of file")
+        .expect("waited");
+    assert_eq!(ended.exit.as_ref().and_then(|exit| exit.code), Some(0));
+    adapter
+        .close_stdin(&run)
+        .await
+        .expect("a second close is Ok");
+    assert_refused(
+        &adapter
+            .write_stdin(&run, b"late")
+            .await
+            .expect_err("a write after close"),
+        substrate_wire::SESSION_INPUT_CLOSED,
+        422,
+    );
+    let output = adapter.output(&run).await.expect("output");
+    assert_eq!(
+        output.stdout,
+        chunks.concat(),
+        "every byte crossed the pipe"
+    );
 }

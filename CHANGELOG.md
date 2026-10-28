@@ -102,6 +102,17 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
     A recovery reuses an existing chart only when its chart layer is the local package byte for
     byte. The release notes list the scenarios the chart lane reported absent.
   - The gate preflight now also counts only a push to `main` or a dispatch in this repository.
+- A confinement adapter run can read a piped standard input (design 32). A profile asks for it
+  with `StdinMode::Piped { limit_bytes }`, 1 to `MAX_STDIN_BYTES` (16 MiB, the daemon session's
+  input bound), and requires the new fact `stdin_pipe`. The embedder writes with
+  `ConfinementAdapter::write_stdin`, 1 to `STDIN_CHUNK_BYTES` (64 KiB) a call, one write in flight
+  a run, and ends input with `close_stdin`; `run_with_stdin` writes a whole buffer, closes, waits
+  and returns the output with the bytes the pipe took, and kills its run if it is dropped first.
+  A cancelled write closes the pipe, so the child reads a prefix and then end of file, and from
+  the run's observed end a write is `session.input-closed` while a pending one fails
+  `session.write-failed`. The default, `StdinMode::Null`, is `/dev/null` as before. The trait's two
+  new methods answer `session.not-pipe` by default, so an implementor outside the crate compiles
+  unchanged.
 
 ### Security
 
@@ -116,6 +127,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - A `session.not-attachable` refusal now names which condition failed (state not `ready`, attachment not `available`, lease not `active`) and states the three observed values, for example "The pty session is not attachable: its state is not ready, its attachment is not available. Observed state exited, attachment consumed, lease active." Code, status, class and `retriable` are unchanged; only the free-text `error.message` differs, and no bundle changes. Under the hosted posture the attachment-authority mint, where a hosted client meets this refusal first, says the same.
 - **Breaking (`substrate-host` public API, design 32):** the confinement `Fact` enum gains `StdinPipe`, so an exhaustive `match` on it breaks and a consumer on an older revision cannot deserialize an `AdapterFacts` or an audit record that names `stdin_pipe`.
 - **Breaking (`substrate-host` public API, design 32):** `FACT_ORDER` changes type from `[Fact; 11]` to `[Fact; 12]`; code that names the array type or relies on its length breaks.
+- **Breaking (`substrate-host` public API, design 32):** `ConfinementProfile` gains `stdin`, so a struct literal without `..ConfinementProfile::default()` and an exhaustive destructuring pattern break.
 
 ### Fixed
 

@@ -39,6 +39,7 @@ pub mod macos;
 pub mod oci;
 pub mod pod;
 pub mod profile;
+mod stdin;
 pub mod systemd;
 
 use std::collections::BTreeMap;
@@ -59,7 +60,11 @@ pub use crate::{DeclaredWritableRoot, HostConfig};
 // Which bytes of each output stream a run keeps (design 29 § 5).
 pub use crate::output_retention::{KeptOutput, OutputRetention, Retention};
 pub use facts::{AdapterFacts, FACT_ORDER, FAMILY_ORDER, InnerAdapter, ReservedField};
-pub use profile::{ConfinementProfile, IoBounds, Ipc, Network, ProcessBounds, image_is_pinned};
+pub use profile::{
+    ConfinementProfile, IoBounds, Ipc, Network, ProcessBounds, StdinMode, image_is_pinned,
+};
+// A run's standard input (design 32 § 2).
+pub use stdin::{MAX_STDIN_BYTES, STDIN_CHUNK_BYTES, run_with_stdin};
 pub use substrate_wire::{ReadOnlyFile, ReadOnlyRoot, SecretSlotRequest, Signal, WritableHostRoot};
 // What a run may write inside its workspace: the wire's own type, so one validator answers it
 // (design 29 § 1).
@@ -739,6 +744,33 @@ pub trait ConfinementAdapter: Send + Sync {
     async fn wait(&self, run: &RunId) -> Result<RunObservation, ConfinementError>;
 
     async fn signal(&self, run: &RunId, signal: Signal) -> Result<(), ConfinementError>;
+
+    /// Writes one chunk to the run's standard input, returning once the pipe took every byte
+    /// (design 32 § 2). At most one write is in flight per run; a second waits for the first.
+    /// Dropping the future while it writes closes the run's standard input.
+    ///
+    /// # Errors
+    ///
+    /// `session.not-pipe` (422) for a run admitted without [`StdinMode::Piped`], and on an
+    /// adapter that does not prove `stdin_pipe`; `session.frame-limit` (429) for an empty write
+    /// or one over [`STDIN_CHUNK_BYTES`]; `session.input-limit` (429) past the run's
+    /// `limit_bytes`; `session.input-closed` (422) after `close_stdin`, a cancelled write or the
+    /// run's observed end; `session.write-failed` (500) when the pipe refused the bytes or the run
+    /// ended while the write was pending.
+    async fn write_stdin(&self, _run: &RunId, _bytes: &[u8]) -> Result<(), ConfinementError> {
+        Err(stdin::not_pipe())
+    }
+
+    /// Ends the run's standard input: the child reads end of file. Waits for a pending write, and
+    /// returns `Ok` however often it is called.
+    ///
+    /// # Errors
+    ///
+    /// `session.not-pipe` (422) for a run admitted without [`StdinMode::Piped`], and on an
+    /// adapter that does not prove `stdin_pipe`.
+    async fn close_stdin(&self, _run: &RunId) -> Result<(), ConfinementError> {
+        Err(stdin::not_pipe())
+    }
 }
 
 /// `open` for an adapter this tree does not serve yet: always `confinement.adapter-unserved`.
@@ -931,6 +963,40 @@ mod tests {
                 records[0]["code"],
                 substrate_wire::EXEC_WORKSPACE_ACCESS_INVALID
             );
+        }
+    }
+
+    // T1a of design 32: a piped standard input outside 1 to 16 MiB is refused at admission, by
+    // the shared stream check every adapter's `check` runs first, with its audit record.
+    #[test]
+    fn a_piped_stdin_bound_outside_one_to_sixteen_mib_is_refused_at_admission() {
+        let adapter =
+            open(AdapterRequest::Local(local::LocalRequest::default())).expect("local opens");
+        for limit_bytes in [0, MAX_STDIN_BYTES + 1] {
+            let records = Arc::new(parking_lot::Mutex::new(Vec::new()));
+            let sink_records = Arc::clone(&records);
+            let error = adapter
+                .admit(&ConfinementProfile {
+                    local_reason: Some(REASON.into()),
+                    stdin: StdinMode::Piped { limit_bytes },
+                    audit: Some(AuditSink::new(move |record: &AuditRecord| {
+                        sink_records
+                            .lock()
+                            .push(serde_json::to_value(record).expect("record"));
+                    })),
+                    ..ConfinementProfile::default()
+                })
+                .expect_err("refused");
+            assert_eq!(
+                error.code(),
+                substrate_wire::SESSION_LIMIT_UNSERVED,
+                "{limit_bytes}: {error}"
+            );
+            assert_eq!(error.status(), 429);
+            let records = records.lock();
+            assert_eq!(records.len(), 1, "{records:?}");
+            assert_eq!(records[0]["event"], "profile_refused");
+            assert_eq!(records[0]["code"], substrate_wire::SESSION_LIMIT_UNSERVED);
         }
     }
 
