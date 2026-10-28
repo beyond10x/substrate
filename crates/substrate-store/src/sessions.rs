@@ -49,11 +49,12 @@ pub struct NewSessionAuthority {
     pub expires_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SessionAuthorityMint {
     Minted,
     Capacity,
-    NotAttachable,
+    /// The session as the refusing transaction read it, so the refusal can name what failed.
+    NotAttachable(Box<PipeSession>),
     Missing,
 }
 
@@ -86,7 +87,7 @@ impl Store {
             || session.lease.state != LeaseState::Active
         {
             transaction.commit()?;
-            return Ok(SessionAuthorityMint::NotAttachable);
+            return Ok(SessionAuthorityMint::NotAttachable(Box::new(session)));
         }
         let now_ms = now.timestamp_millis();
         transaction.execute(
@@ -454,6 +455,14 @@ impl Store {
         Ok(SessionRetireReservation::Retired(absence))
     }
 
+    /// Records a dispatched session start as `ready` over the driver's first observation.
+    ///
+    /// A terminal exec already in the store wins: a sweep can persist the child's exit, and the
+    /// driver retire it, between dispatch and this write. Writing the start's `running`
+    /// observation over it would leave the session `ready` and `available` over a dead child that
+    /// nothing reports again. The stored exec is kept, the session is projected from it, the lease
+    /// row is left as that write left it, and the operation's result is that session. The returned
+    /// exec differs from `exec` exactly when the stored one won.
     #[allow(clippy::too_many_arguments)]
     pub fn complete_pipe_session_start(
         &self,
@@ -467,14 +476,37 @@ impl Store {
     ) -> Result<(PipeSession, StoredExec), StoreError> {
         let mut connection = self.connection.lock();
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if load_exec(&transaction, scope, &exec.resource.id)?.is_none()
-            || load_session(&transaction, scope, &session.id)?.is_none()
-        {
+        let previous_exec = load_exec(&transaction, scope, &exec.resource.id)?;
+        let (Some(previous_exec), Some(_)) = (
+            previous_exec,
+            load_session(&transaction, scope, &session.id)?,
+        ) else {
             transaction.commit()?;
             return Err(StoreError::NotAccepted(operation.to_owned()));
-        }
+        };
+        let (session, exec) = if is_terminal_exec_state(previous_exec.resource.state) {
+            upsert_exec(&transaction, scope, &previous_exec)?;
+            let Some((projected, _)) =
+                project_session_from_exec(&transaction, scope, &previous_exec.resource)?
+            else {
+                return Err(StoreError::NotAccepted(operation.to_owned()));
+            };
+            (projected, previous_exec)
+        } else {
+            upsert_exec(&transaction, scope, exec)?;
+            upsert_session(&transaction, scope, session)?;
+            upsert_lease(
+                &transaction,
+                scope,
+                "exec",
+                &exec.resource.id,
+                lease,
+                operation,
+            )?;
+            (session.clone(), exec.clone())
+        };
         let outcome = OperationOutcome::Success {
-            result: serde_json::to_value(session)?,
+            result: serde_json::to_value(&session)?,
         };
         let changed = transaction.execute(
             "UPDATE operations
@@ -496,16 +528,6 @@ impl Store {
             return Err(StoreError::NotAccepted(operation.to_owned()));
         }
         finalize_operation_accounting(&transaction, self.config, scope, operation)?;
-        upsert_exec(&transaction, scope, exec)?;
-        upsert_session(&transaction, scope, session)?;
-        upsert_lease(
-            &transaction,
-            scope,
-            "exec",
-            &exec.resource.id,
-            lease,
-            operation,
-        )?;
         let (actor, principal, _) = operation_identity_full(&transaction, scope, operation)?;
         let event = append_event(
             &transaction,
@@ -513,17 +535,17 @@ impl Store {
             scope,
             &session.id,
             "session",
-            "session.ready",
+            session_transition(session.state),
             terminal_at,
             &actor,
             principal.as_deref(),
             operation,
-            Some(serde_json::to_value(session)?),
+            Some(serde_json::to_value(&session)?),
         )?;
         transaction.commit()?;
         drop(connection);
         self.report_committed(&[commit_effect(scope, &event)]);
-        Ok((session.clone(), exec.clone()))
+        Ok((session, exec))
     }
 
     pub fn complete_pipe_session_observation(
