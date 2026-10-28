@@ -1224,21 +1224,14 @@ pub(super) async fn pipe_session_attach(
         Ok(None) => return not_found(&request_id),
         Err(error) => return store_failure(&request_id, None, &error),
     };
-    if session.state != SessionState::Ready
-        || session.attachment != SessionAttachmentState::Available
-        || session.lease.state != substrate_wire::LeaseState::Active
-    {
+    if let Some(message) = not_attachable_message(&session) {
         return failure(
             StatusCode::CONFLICT,
             &request_id,
             None,
             ErrorClass::Conflict,
             substrate_wire::SESSION_NOT_ATTACHABLE,
-            channel_message(
-                session.mode,
-                "The raw-pipe session is not running under an active lease.",
-                "The pty session is not running under an active lease.",
-            ),
+            &message,
             Some("session"),
             false,
         );
@@ -1315,17 +1308,28 @@ pub(super) async fn pipe_session_attach(
             );
         }
         Ok(SessionAttachmentClaim::NotAttachable) => {
+            // The session changed between the preflight above and the claim; name what it is now.
+            let reread = app
+                .store_io(|| app.store.session(&scope, session_id.as_str()))
+                .await;
+            let message = reread
+                .ok()
+                .flatten()
+                .as_ref()
+                .and_then(not_attachable_message);
             return failure(
                 StatusCode::CONFLICT,
                 &request_id,
                 None,
                 ErrorClass::Conflict,
                 substrate_wire::SESSION_NOT_ATTACHABLE,
-                channel_message(
-                    session.mode,
-                    "The raw-pipe session is not attachable.",
-                    "The pty session is not attachable.",
-                ),
+                message.as_deref().unwrap_or_else(|| {
+                    channel_message(
+                        session.mode,
+                        "The raw-pipe session is not attachable.",
+                        "The pty session is not attachable.",
+                    )
+                }),
                 Some("session"),
                 false,
             );
@@ -1838,6 +1842,45 @@ const fn channel_message(
     match mode {
         SessionMode::Pipes => pipes,
         SessionMode::Pty => pty,
+    }
+}
+
+/// Why `session` cannot be attached, or `None` when it can.
+///
+/// Three conditions gate an attachment: the session is `ready`, its attachment is `available` and
+/// its lease is `active`. The refusal names each one that failed and states all three observed
+/// values in their wire spelling, so a client's read-back and the refusal can be compared. One
+/// sentence for all three once left a refused first attach undiagnosable
+/// (`story:pty-session-refuses-first-attach-under-load`).
+fn not_attachable_message(session: &PipeSession) -> Option<String> {
+    let mut failed = Vec::new();
+    if session.state != SessionState::Ready {
+        failed.push("its state is not ready");
+    }
+    if session.attachment != SessionAttachmentState::Available {
+        failed.push("its attachment is not available");
+    }
+    if session.lease.state != LeaseState::Active {
+        failed.push("its lease is not active");
+    }
+    if failed.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "The {} session is not attachable: {}. Observed state {}, attachment {}, lease {}.",
+        channel_message(session.mode, "raw-pipe", "pty"),
+        failed.join(", "),
+        wire_word(session.state),
+        wire_word(session.attachment),
+        wire_word(session.lease.state),
+    ))
+}
+
+/// A unit enum value as the wire spells it, taken from its own serialization so it cannot drift.
+fn wire_word(value: impl serde::Serialize) -> String {
+    match serde_json::to_value(value) {
+        Ok(serde_json::Value::String(word)) => word,
+        _ => "unrecognized".to_owned(),
     }
 }
 

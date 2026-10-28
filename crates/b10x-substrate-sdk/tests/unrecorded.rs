@@ -406,10 +406,27 @@ async fn delegated_sdk_streaming_never_records_terminal_canaries() {
                         .start()
                         .await
                         .unwrap();
-                    let mut attachment = next
-                        .attach()
-                        .await
-                        .expect("attachment capacity is recovered");
+                    // story:pty-session-refuses-first-attach-under-load: a refusal here once named
+                    // no condition. Read the session and its exec back so the panic does.
+                    let mut attachment = match next.attach().await {
+                        Ok(attachment) => attachment,
+                        Err(error) => {
+                            let session = client
+                                .get_pipe_session(next.id())
+                                .await
+                                .map(|read| read.observation().clone());
+                            let exec = client
+                                .get_exec(&next.observation().exec_id)
+                                .await
+                                .map(|read| read.observation().clone());
+                            panic!(
+                                "attachment capacity is recovered: {} attach refused with \
+                                 {error:?}; session read back: {session:?}; exec read back: \
+                                 {exec:?}",
+                                if pty { "pty" } else { "pipes" }
+                            );
+                        }
+                    };
                     attachment.write(b"done\n").await.unwrap();
                     tokio::time::timeout(Duration::from_secs(5), async {
                         // A terminal exec can close the transport without a WS close handshake;
