@@ -206,7 +206,7 @@ containers:
     match chart_yaml::documents(text) {
         Err(_) => {}
         Ok(documents) => {
-            let failures = pod_posture(&documents[0], false, "daemon pod");
+            let failures = pod_posture(&documents[0], None, "daemon pod");
             assert!(
                 failures.iter().any(|f| f.contains("privileged"))
                     && failures.iter().any(|f| f.contains("hostNetwork")),

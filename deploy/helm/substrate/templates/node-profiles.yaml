@@ -1,5 +1,7 @@
 {{- if .Values.nodeProfiles.enabled }}
 {{- $name := printf "%s-node-profiles" (include "substrate.name" .) -}}
+{{- $profile := toString .Values.execution.appArmorProfile -}}
+{{- $namedProfile := ne $profile "substrate-host-exec-v1" -}}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -51,6 +53,10 @@ spec:
           command:
             - /usr/local/bin/substrate-container-profiles
             - --hold
+            {{- if $namedProfile }}
+            - --apparmor-profile
+            - {{ $profile | quote }}
+            {{- end }}
           securityContext:
             runAsUser: 0
             runAsGroup: 0
@@ -72,6 +78,10 @@ spec:
               command:
                 - /usr/local/bin/substrate-container-profiles
                 - --check
+                {{- if $namedProfile }}
+                - --apparmor-profile
+                - {{ $profile | quote }}
+                {{- end }}
             periodSeconds: 10
             timeoutSeconds: 5
           resources:
