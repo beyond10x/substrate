@@ -11,6 +11,11 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 - The specification and CI use ESS 0.72.0 (was 0.70.0); the suites, wire types and CLI package regenerate unchanged apart from the generator header.
 
+### Fixed
+
+- `pod`: a run read `Unknown` because its Pod's removal was not confirmed no longer gives up after two removal rounds; its task deletes and reads the Pod again, the pause doubling from 500 ms to 30 s, until the API confirms it gone, then removes its NetworkPolicy (design 28).
+- `pod`: open removes a NetworkPolicy carrying the adapter's owner label whose run's Pod no longer exists and which the API server created at least 30 s earlier, the policy a process that ended before its run's cleanup left behind; a sweep the API refuses does not open (`confinement.adapter-unserved`).
+
 ## [0.14.0] — 2026-10-27
 
 Published by [release run 40558015370](https://github.com/beyond10x/substrate/actions/runs/40558015370)

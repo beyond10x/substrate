@@ -5,7 +5,8 @@
 //! configuration names, beside a default-deny `NetworkPolicy`, creates both through the cluster API,
 //! polls the Pod's phase, reads its log once it ends and deletes the Pod, then the policy, before
 //! `wait` reports the run ended. A Pod whose removal the API does not confirm keeps its policy,
-//! and the run reads `Unknown`. It serves `process_run`, `process_watch`, `output_read`, `wait`,
+//! and the run reads `Unknown` while its task keeps removing it; open removes a policy whose run's
+//! Pod is gone. It serves `process_run`, `process_watch`, `output_read`, `wait`,
 //! `workspace` (an `emptyDir` at `/workspace`), `limits` and `audit`, and proves
 //! `image_digest_pinned`. It serves no `filesystem_view` (a Pod reaches no host path) and neither
 //! network family: a `NetworkPolicy`'s enforcement depends on the cluster's network plugin, which
@@ -98,6 +99,16 @@ const STOP_CONFIRM: Duration = Duration::from_mins(1);
 /// Polls of a Pod in a terminal phase whose container has no terminated state yet.
 const TERMINAL_POLLS: u32 = 10;
 const REMOVE_ATTEMPTS: u32 = 60;
+/// How the adapter paces a removal: [`POLL`] and [`REMOVE_ATTEMPTS`], which a unit case shortens.
+#[derive(Debug, Clone, Copy)]
+struct Pacing {
+    poll: Duration,
+    remove_attempts: u32,
+}
+const PACING: Pacing = Pacing {
+    poll: POLL,
+    remove_attempts: REMOVE_ATTEMPTS,
+};
 /// Reads of a log before the adapter reports it unreadable.
 const LOG_ATTEMPTS: u32 = 5;
 const TERM_GRACE_SECONDS: u64 = 5;
@@ -156,8 +167,8 @@ pub(crate) fn open(request: PodRequest) -> Result<Arc<dyn ConfinementAdapter>, C
 /// # Errors
 ///
 /// `confinement.adapter-unserved` when there is no cluster configuration, it is unusable
-/// (design 28 names each refused member), the cluster does not answer the probe, or the credential
-/// may not read `pods/log`.
+/// (design 28 names each refused member), the cluster does not answer the probe, the credential
+/// may not read `pods/log`, or the sweep of orphaned `NetworkPolicy` objects fails.
 pub fn open_pod(request: PodRequest) -> Result<Arc<PodAdapter>, ConfinementError> {
     let unserved = |detail: String| ConfinementError::AdapterUnserved {
         adapter: AdapterName::Pod,
@@ -332,6 +343,7 @@ struct Api {
     connector: TlsConnector,
     bearer: Option<Zeroizing<String>>,
     namespace: String,
+    pacing: Pacing,
 }
 
 impl Api {
@@ -387,6 +399,7 @@ impl Api {
             connector,
             bearer,
             namespace: namespace.to_owned(),
+            pacing: PACING,
         })
     }
 
@@ -409,6 +422,18 @@ impl Api {
         body: Option<&Value>,
         limit: usize,
     ) -> Result<(u16, Bytes), String> {
+        let (status, _, bytes) = self.call_dated(method, path, body, limit).await?;
+        Ok((status, bytes))
+    }
+
+    /// [`Api::call`], with the answer's `Date` header: the API server's clock.
+    async fn call_dated(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<&Value>,
+        limit: usize,
+    ) -> Result<(u16, Option<String>, Bytes), String> {
         tokio::time::timeout(API_TIMEOUT, self.exchange(method, path, body, limit))
             .await
             .map_err(|_| "the cluster API did not answer in time".to_owned())?
@@ -420,7 +445,7 @@ impl Api {
         path: &str,
         body: Option<&Value>,
         limit: usize,
-    ) -> Result<(u16, Bytes), String> {
+    ) -> Result<(u16, Option<String>, Bytes), String> {
         let tcp = tokio::net::TcpStream::connect((self.host.as_str(), self.port))
             .await
             .map_err(|error| format!("connect: {error}"))?;
@@ -463,13 +488,18 @@ impl Api {
             .await
             .map_err(|error| format!("HTTP: {error}"))?;
         let status = response.status().as_u16();
+        let date = response
+            .headers()
+            .get(header::DATE)
+            .and_then(|date| date.to_str().ok())
+            .map(str::to_owned);
         let bytes = Limited::new(response.into_body(), limit)
             .collect()
             .await
             .map_err(|_| "the response body failed or exceeded its bound".to_owned())?
             .to_bytes();
         driver.abort();
-        Ok((status, bytes))
+        Ok((status, date, bytes))
     }
 
     /// Creates `object` in `collection`.
@@ -526,15 +556,31 @@ impl Api {
     /// A Pod is deleted with a grace of at least one second, never forced, so its disappearance is
     /// the kubelet's confirmation that its container stopped.
     async fn remove(&self, path: &str, grace_seconds: u64) -> bool {
-        for _ in 0..REMOVE_ATTEMPTS {
-            if matches!(self.delete(path, grace_seconds).await, Ok(true))
-                || matches!(self.get(path).await, Ok(None))
-            {
+        for _ in 0..self.pacing.remove_attempts {
+            if self.remove_once(path, grace_seconds).await {
                 return true;
             }
-            tokio::time::sleep(POLL).await;
+            tokio::time::sleep(self.pacing.poll).await;
         }
         false
+    }
+
+    /// Deletes and reads the object at `path` until the API no longer has it, with no bound on the
+    /// tries: the pause between two doubles from one poll to one round of `remove_attempts` polls
+    /// (500 ms to 30 s), so an object that never goes costs two requests every 30 seconds.
+    async fn remove_until_gone(&self, path: &str, grace_seconds: u64) {
+        let limit = self.pacing.poll * self.pacing.remove_attempts;
+        let mut pause = self.pacing.poll;
+        while !self.remove_once(path, grace_seconds).await {
+            tokio::time::sleep(pause).await;
+            pause = (pause * 2).min(limit);
+        }
+    }
+
+    /// One deletion of the object at `path` and one read of it; `true` once it is gone.
+    async fn remove_once(&self, path: &str, grace_seconds: u64) -> bool {
+        matches!(self.delete(path, grace_seconds).await, Ok(true))
+            || matches!(self.get(path).await, Ok(None))
     }
 
     /// The API's answer to a read of the container's log, at most `limit` bytes plus one.
@@ -606,10 +652,10 @@ fn api_failed(detail: &str) -> ConfinementError {
     DriverError::failed(POD_API_FAILED, format!("pod: the cluster API: {detail}")).into()
 }
 
-/// Open's two requests, on a thread of its own so `open` stays synchronous inside or outside a
+/// Open's requests, on a thread of its own so `open` stays synchronous inside or outside a
 /// runtime: a list of at most one Pod in the namespace, then a read of the log of a Pod no run is
 /// named, which the API answers 404 only to a credential that may read `pods/log` and 403 to one
-/// that may not. Without that access every run's output would be unreadable.
+/// that may not. Without that access every run's output would be unreadable. Then [`sweep`].
 fn probe(api: &Arc<Api>) -> Result<(), String> {
     let api = Arc::clone(api);
     std::thread::scope(|scope| {
@@ -651,22 +697,103 @@ fn probe(api: &Arc<Api>) -> Result<(), String> {
                     match ask(log).await? {
                         // Authorized: no such Pod, or (should one exist) its log or its refusal
                         // to name a container it does not have.
-                        (200 | 400 | 404, _) => Ok(()),
-                        (status @ (401 | 403), body) => Err(format!(
-                            "the credential may not read pods/log in the namespace, so no run's \
-                             output could be read ({status}: {})",
-                            status_message(&body)
-                        )),
-                        (status, body) => Err(format!(
-                            "the cluster answered the pods/log probe {status}: {}",
-                            status_message(&body)
-                        )),
+                        (200 | 400 | 404, _) => {}
+                        (status @ (401 | 403), body) => {
+                            return Err(format!(
+                                "the credential may not read pods/log in the namespace, so no \
+                                 run's output could be read ({status}: {})",
+                                status_message(&body)
+                            ));
+                        }
+                        (status, body) => {
+                            return Err(format!(
+                                "the cluster answered the pods/log probe {status}: {}",
+                                status_message(&body)
+                            ));
+                        }
                     }
+                    sweep(api).await.map_err(|error| {
+                        format!("the open sweep of orphaned NetworkPolicies failed: {error}")
+                    })
                 })
             })
             .join()
             .map_err(|_| "the probe failed".to_owned())?
     })
+}
+
+/// Deletes the `NetworkPolicy` objects a process that ended before its runs' cleanup left behind
+/// (`approval-record:pod-orphan-policy-sweep-d124`): each carrying the adapter's owner label whose
+/// run's Pod the API no longer has, in any phase. A policy without the label is never a candidate,
+/// and one whose Pod exists is left to the task that owns it. Every request is bounded by
+/// [`API_TIMEOUT`] and there are at most two per listed policy, so open stays bounded; any failure
+/// fails the sweep, and with it the open.
+async fn sweep(api: &Api) -> Result<(), String> {
+    let selector: String =
+        url::form_urlencoded::byte_serialize(format!("{MANAGED_BY_LABEL}={MANAGED_BY}").as_bytes())
+            .collect();
+    let path = format!("{}?labelSelector={selector}", api.policies());
+    let (status, date, body) = api
+        .call_dated(Method::GET, &path, None, MAX_API_BODY_BYTES)
+        .await?;
+    if status != 200 {
+        return Err(format!(
+            "the policy list answered {status}: {}",
+            status_message(&body)
+        ));
+    }
+    // The API server's clock, never this host's: a skewed host would read a young policy as old.
+    let now = date.and_then(|date| chrono::DateTime::parse_from_rfc2822(&date).ok());
+    let list: Value = serde_json::from_slice(&body)
+        .map_err(|_| "the API answered something other than JSON".to_owned())?;
+    let items = list["items"]
+        .as_array()
+        .ok_or("the policy list holds no items")?;
+    for policy in items {
+        let Some((name, run, created)) = owned(policy) else {
+            continue;
+        };
+        let now = now.ok_or("the policy list carries no Date the adapter can read")?;
+        // `start` creates a run's policy before its Pod and waits up to `API_TIMEOUT` for the Pod's
+        // create: a younger policy without a Pod may be the only network fence of a run another
+        // adapter is still starting.
+        let old = now
+            .signed_duration_since(created)
+            .to_std()
+            .is_ok_and(|age| age >= API_TIMEOUT);
+        if !old {
+            continue;
+        }
+        if api.get(&format!("{}/{run}", api.pods())).await?.is_some() {
+            continue;
+        }
+        api.delete(&format!("{}/{name}", api.policies()), 0).await?;
+        tracing::info!(
+            policy = name,
+            "pod: open removed a NetworkPolicy whose run's Pod is gone"
+        );
+    }
+    Ok(())
+}
+
+/// The policy's name, the run its label names and when the API server created it, for a policy
+/// that carries the adapter's owner label, names that are DNS labels and a creation time the sweep
+/// can read. Any other policy is never a candidate.
+fn owned(policy: &Value) -> Option<(&str, &str, chrono::DateTime<chrono::FixedOffset>)> {
+    let metadata = &policy["metadata"];
+    if metadata["labels"][MANAGED_BY_LABEL] != MANAGED_BY {
+        return None;
+    }
+    let name = metadata["name"]
+        .as_str()
+        .filter(|name| is_dns_label(name))?;
+    let run = metadata["labels"][RUN_LABEL]
+        .as_str()
+        .filter(|run| is_dns_label(run))?;
+    let created = metadata["creationTimestamp"]
+        .as_str()
+        .and_then(|created| chrono::DateTime::parse_from_rfc3339(created).ok())?;
+    Some((name, run, created))
 }
 
 // --- rendering ------------------------------------------------------------------------------
@@ -1331,15 +1458,16 @@ async fn monitor(api: Arc<Api>, run: Arc<PodRun>, phase: watch::Sender<Phase>, g
         seal(&run);
         phase.send_replace(outcome);
         if !policy_removed {
-            api.remove(&policy_path, 0).await;
+            api.remove_until_gone(&policy_path, 0).await;
         }
         return;
     }
     seal(&run);
     phase.send_replace(Phase::Unknown);
-    if api.remove(&pod_path, KILL_GRACE_SECONDS).await {
-        api.remove(&policy_path, 0).await;
-    }
+    // A kubelet may stay away longer than any bound the adapter could pick: the task asks until the
+    // API confirms the Pod gone, for as long as its runtime lives, and only then removes the policy.
+    api.remove_until_gone(&pod_path, KILL_GRACE_SECONDS).await;
+    api.remove_until_gone(&policy_path, 0).await;
 }
 
 #[async_trait]
@@ -1553,3 +1681,7 @@ mod tests {
         .expect("head on both streams is served");
     }
 }
+
+#[cfg(test)]
+#[path = "pod_cleanup_tests.rs"]
+mod cleanup_tests;

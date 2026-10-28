@@ -151,6 +151,8 @@ struct Behaviour {
     blackhole_after_pod_create: bool,
     /// The log endpoint's answer.
     log: (u16, String),
+    /// Answer a list of `NetworkPolicy` objects 403, as to a credential that may not list them.
+    refuse_policy_list: bool,
 }
 
 impl Default for Behaviour {
@@ -159,8 +161,15 @@ impl Default for Behaviour {
             lose_pod_create_answer: false,
             blackhole_after_pod_create: false,
             log: (200, "hello\n".to_owned()),
+            refuse_policy_list: false,
         }
     }
+}
+
+/// The API server's form of an instant `age` ago: RFC 3339, whole seconds, UTC.
+fn timestamp(age: Duration) -> String {
+    let at = chrono::Utc::now() - chrono::Duration::from_std(age).expect("an age");
+    at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
 struct Fake {
@@ -331,8 +340,34 @@ fn serve(
             200,
             r#"{"kind":"PodList","apiVersion":"v1","items":[]}"#.to_owned(),
         )
+    } else if method == "GET" && path == policies {
+        if shared.behaviour.refuse_policy_list {
+            (
+                403,
+                r#"{"kind":"Status","message":"networkpolicies is forbidden"}"#.to_owned(),
+            )
+        } else {
+            // Every policy in the namespace, whatever the selector asks: the adapter checks the
+            // labels itself.
+            let items: Vec<Value> = shared
+                .objects
+                .lock()
+                .iter()
+                .filter(|(key, _)| key.starts_with("networkpolicies/"))
+                .map(|(_, object)| object.clone())
+                .collect();
+            (
+                200,
+                json!({"kind": "NetworkPolicyList", "apiVersion": "networking.k8s.io/v1",
+                       "metadata": {}, "items": items})
+                .to_string(),
+            )
+        }
     } else if method == "POST" && (path == pods || path == policies) {
-        let object: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        let mut object: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
+        if object["metadata"].is_object() {
+            object["metadata"]["creationTimestamp"] = json!(timestamp(Duration::ZERO));
+        }
         let name = object["metadata"]["name"]
             .as_str()
             .unwrap_or("?")
@@ -407,8 +442,9 @@ fn serve(
     let writer = stream.get_mut();
     write!(
         writer,
-        "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{payload}",
-        payload.len()
+        "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\ndate: {}\r\nconnection: close\r\n\r\n{payload}",
+        payload.len(),
+        chrono::Utc::now().format("%a, %d %b %Y %H:%M:%S GMT"),
     )?;
     writer.flush()?;
     writer.conn.send_close_notify();
@@ -753,6 +789,184 @@ async fn adversary_wait_returns_when_the_api_server_goes_silent() {
         started.elapsed(),
         observed.state
     );
+}
+
+/// A `NetworkPolicy` as the fake stores it, created `age` ago, with `labels`.
+fn policy(name: &str, labels: &[(&str, &str)], age: Duration) -> Value {
+    let mut object = json!({
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "metadata": {"name": name, "namespace": NAMESPACE, "labels": {},
+                     "creationTimestamp": timestamp(age)},
+        "spec": {"podSelector": {}, "policyTypes": ["Ingress", "Egress"]},
+    });
+    for (label, value) in labels {
+        object["metadata"]["labels"][*label] = json!(value);
+    }
+    object
+}
+
+/// `story:pod-unknown-cleanup-outlives-adapter`, finding A3 (decision D124): a process that ends
+/// before a run's cleanup leaves the run's `NetworkPolicy`. Open removes a policy carrying the
+/// adapter's owner label whose run's Pod is gone, and nothing else: not a policy without the owner
+/// label, not one whose Pod exists (here in a terminal phase), and not one younger than the
+/// adapter's 30 s API timeout, which may fence a run another adapter is still starting.
+#[tokio::test(flavor = "multi_thread")]
+async fn adversary_open_removes_only_an_old_owned_policy_whose_pod_is_gone() {
+    let fake = Fake::start(Behaviour::default());
+    let old = Duration::from_hours(1);
+    let owned = |run| {
+        [
+            (pod::MANAGED_BY_LABEL, pod::MANAGED_BY),
+            (pod::RUN_LABEL, run),
+        ]
+    };
+    let seeded = [
+        (
+            "substrate-run-orphan",
+            policy("substrate-run-orphan", &owned("substrate-run-orphan"), old),
+        ),
+        (
+            "substrate-run-live",
+            policy("substrate-run-live", &owned("substrate-run-live"), old),
+        ),
+        (
+            "substrate-run-unowned",
+            policy(
+                "substrate-run-unowned",
+                &[(pod::RUN_LABEL, "substrate-run-unowned")],
+                old,
+            ),
+        ),
+        (
+            "substrate-run-starting",
+            policy(
+                "substrate-run-starting",
+                &owned("substrate-run-starting"),
+                Duration::from_secs(2),
+            ),
+        ),
+    ];
+    {
+        let mut objects = fake.objects.lock();
+        for (name, object) in seeded {
+            objects.insert(format!("networkpolicies/{name}"), object);
+        }
+        objects.insert(
+            "pods/substrate-run-live".to_owned(),
+            json!({"metadata": {"name": "substrate-run-live"}}),
+        );
+    }
+    let _adapter = fake.open();
+    assert_eq!(
+        fake.objects(),
+        [
+            "networkpolicies/substrate-run-live",
+            "networkpolicies/substrate-run-starting",
+            "networkpolicies/substrate-run-unowned",
+            "pods/substrate-run-live",
+        ],
+        "open swept the wrong policies; requests: {:#?}",
+        fake.requests()
+    );
+    let deletions: Vec<String> = fake
+        .requests()
+        .into_iter()
+        .filter(|request| request.starts_with("DELETE "))
+        .collect();
+    assert_eq!(
+        deletions.len(),
+        1,
+        "open deleted more than the orphan: {deletions:?}"
+    );
+}
+
+/// A sweep that cannot list the namespace's policies does not open as if it had swept: the
+/// adapter is refused by name, as a failed probe is.
+#[test]
+fn adversary_open_is_refused_when_its_sweep_cannot_list_policies() {
+    let fake = Fake::start(Behaviour {
+        refuse_policy_list: true,
+        ..Behaviour::default()
+    });
+    let error = pod::open_pod(PodRequest {
+        cluster: Some(fake.kubeconfig.clone()),
+    })
+    .err()
+    .expect("open is refused");
+    assert_eq!(error.code(), "confinement.adapter-unserved", "{error}");
+    assert!(error.to_string().contains("sweep"), "{error}");
+}
+
+/// The open sweep on a cluster: a `NetworkPolicy` carrying the adapter's labels whose Pod never
+/// existed is gone once a fresh adapter opens. It waits out the sweep's 30 s age floor first, by
+/// the API server's own clock. That wait is too long for the pod lane, so the case is manual like
+/// `cleanup_pass1`: run it by hand with the lane variables and `SUBSTRATE_POD_MANUAL_CLEANUP=1`.
+/// `adversary_open_removes_only_an_old_owned_policy_whose_pod_is_gone` holds the sweep in seconds.
+#[tokio::test(flavor = "multi_thread")]
+async fn adversary_lane_open_sweeps_an_orphaned_policy() {
+    let Some(kubeconfig) = lane("SUBSTRATE_POD_KUBECONFIG") else {
+        return;
+    };
+    if std::env::var_os("SUBSTRATE_POD_MANUAL_CLEANUP").as_deref() != Some("1".as_ref()) {
+        println!(
+            "adversary pod sweep lane: manual; SUBSTRATE_POD_MANUAL_CLEANUP is not 1; skipped"
+        );
+        return;
+    }
+    let namespace = pod::open_pod(PodRequest {
+        cluster: Some(kubeconfig.clone()),
+    })
+    .expect("opens")
+    .settings()
+    .namespace
+    .clone();
+    let run = format!(
+        "substrate-run-sweep-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("after the epoch")
+            .as_nanos()
+    );
+    let directory = tempfile::tempdir().expect("directory");
+    let manifest = directory.path().join("policy.json");
+    let mut object = policy(
+        &run,
+        &[
+            (pod::MANAGED_BY_LABEL, pod::MANAGED_BY),
+            (pod::RUN_LABEL, &run),
+        ],
+        Duration::ZERO,
+    );
+    object["metadata"]
+        .as_object_mut()
+        .expect("metadata")
+        .remove("creationTimestamp");
+    object["metadata"]["namespace"] = json!(namespace);
+    std::fs::write(&manifest, serde_json::to_vec(&object).expect("json")).expect("write");
+    let created = std::process::Command::new("kubectl")
+        .arg("--kubeconfig")
+        .arg(&kubeconfig)
+        .args(["--namespace", &namespace, "create", "--filename"])
+        .arg(&manifest)
+        .output()
+        .expect("kubectl runs");
+    assert!(
+        created.status.success(),
+        "kubectl create: {}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+    tokio::time::sleep(Duration::from_secs(32)).await;
+    assert!(
+        !leftovers(&kubeconfig, &namespace, &run).is_empty(),
+        "the policy is there before the sweep"
+    );
+    let _adapter = pod::open_pod(PodRequest {
+        cluster: Some(kubeconfig.clone()),
+    })
+    .expect("opens");
+    let left = leftovers(&kubeconfig, &namespace, &run);
+    assert!(left.is_empty(), "open left the orphaned policy: {left}");
 }
 
 mod cleanup_pass1 {

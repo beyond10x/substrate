@@ -252,6 +252,16 @@ fn storing(pod_create: fn() -> Reply, phase: &'static str) -> Handler {
                     Reply::Answer(200, json!({"kind": "PodList", "items": []}))
                 }
                 "GET" if path.ends_with("/log") => Reply::Answer(200, json!("hi")),
+                // Open's sweep (design 28): the stored policies, which carry no creation time
+                // and so are never its candidates.
+                "GET" if path.ends_with("/networkpolicies") => {
+                    let items: Vec<Value> = objects
+                        .iter()
+                        .filter(|(key, _)| key.starts_with("networkpolicies/"))
+                        .map(|(_, object)| object.clone())
+                        .collect();
+                    Reply::Answer(200, json!({"kind": "NetworkPolicyList", "items": items}))
+                }
                 "POST" => {
                     let object: Value = serde_json::from_str(&request.body).expect("object");
                     let name = object["metadata"]["name"]
@@ -506,8 +516,13 @@ fn the_api_server_certificate_is_verified_against_the_kubeconfig_trust_roots_and
     });
     open(good).unwrap_or_else(|error| panic!("the verified server does not open: {error}"));
     let seen = api.seen();
-    // story:pod-adapter, adversary decision 3: open's second request checks `pods/log` access.
-    assert_eq!(seen.len(), 2, "{seen:?}");
+    // story:pod-adapter, adversary decision 3: open's second request checks `pods/log` access;
+    // story:pod-unknown-cleanup-outlives-adapter: its third lists policies for the open sweep.
+    assert_eq!(
+        seen.len(),
+        3,
+        "story:pod-unknown-cleanup-outlives-adapter: two probes and the sweep's list: {seen:?}"
+    );
     for request in &seen {
         assert_eq!(
             request.authorization.as_deref(),
