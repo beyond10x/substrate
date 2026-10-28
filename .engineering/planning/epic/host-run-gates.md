@@ -2,9 +2,13 @@
 format: aep.planning-md/3
 id: epic:host-run-gates
 kind: epic
-status: draft
+status: implemented
 title: Run repository gates and session commands under the host driver
-revision: 1
+revision: 4
+transitions:
+- {from: "draft", to: "proposed", at: "2026-10-28T15:49:10Z", actor: "human:timo", revision: 2}
+- {from: "proposed", to: "active", at: "2026-10-28T15:49:10Z", actor: "human:timo", revision: 3}
+- {from: "active", to: "implemented", at: "2026-10-28T15:49:10Z", actor: "human:timo", revision: 4}
 ---
 # Epic: run repository gates and session commands under the host driver
 

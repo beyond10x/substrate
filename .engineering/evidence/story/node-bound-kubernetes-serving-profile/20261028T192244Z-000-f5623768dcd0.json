@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-28T19:22:44Z",
+  "actor": "human:timo",
+  "artifact": "story:node-bound-kubernetes-serving-profile",
+  "kind": "story",
+  "revision": 7,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "Full gate and chart lanes, PR 182 head f8b890c0, merged as 11455884",
+    "reference": "https://github.com/beyond10x/substrate/actions/runs/40750384206"
+  }
+}

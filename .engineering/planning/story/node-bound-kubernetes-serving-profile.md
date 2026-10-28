@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: story:node-bound-kubernetes-serving-profile
 kind: story
-status: active
+status: implemented
 title: Kubernetes serves one stable address per node-bound daemon
 summary: A signed public Helm chart deploys stateful host-backed daemons without round-robin mutation routing.
 owner: substrate
@@ -37,10 +37,11 @@ scope:
   path: docs/design/04-security-and-isolation.md
 - confidence: inferred
   path: xtask/src
-revision: 7
+revision: 8
 transitions:
 - {from: "draft", to: "proposed", at: "2026-08-31T22:54:32Z", actor: "human:timo", revision: 2, imported: true}
 - {from: "proposed", to: "active", at: "2026-10-28T11:59:39Z", actor: "human:timo", revision: 7}
+- {from: "active", to: "implemented", at: "2026-10-28T19:22:45Z", actor: "human:timo", revision: 8, decided_on: {"recorded":{"test_result":1,"review_outcome":2}}}
 ---
 # Story: Kubernetes serves one stable address per node-bound daemon
 
