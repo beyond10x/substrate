@@ -209,8 +209,8 @@ restart: never|on-failure|always, resources?, lease_ttl?, labels}`.
   is the same not-found response as an unknown resource; a row is one of `refused`, `accepted`,
   `unknown`, or `terminal`. This is the recovery surface for the unanswered modes (§6.2), not a
   cross-principal ledger oracle.
-- Metrics are per-resource and machine-level usage, JSON. Prometheus exposition is a later
-  telemetry adapter and does not add a second v1 control listener.
+- Metrics are per-resource and machine-level usage, JSON. Operational health and OpenMetrics
+  exposition: [ADR 0045](../../adr/0045-operational-health-and-metrics-use-a-separate-listener.md).
 
 ## 4. Sandbox & environment model
 
@@ -361,6 +361,7 @@ capability fact `workload.replace: recreate|rolling` rather than papered over.
    journey proves one. Nothing in the host wire anticipates CRD shapes.
 4. **Confined builds:** image build is unserved by the host driver and deferred beyond the Docker
    driver. A later rootless BuildKit proof may add a capability; v1 carries no speculative path.
-5. **Metrics:** JSON on the authenticated control API. Prometheus is a later adapter/listener.
+5. **Metrics:** JSON on the authenticated control API. Operational health and OpenMetrics:
+   [ADR 0045](../../adr/0045-operational-health-and-metrics-use-a-separate-listener.md).
 6. **Volume quotas:** volumes are outside the minimum slice. A later driver serves them only when it
    can report and enforce a quota capability; otherwise quota requests are `unserved`.

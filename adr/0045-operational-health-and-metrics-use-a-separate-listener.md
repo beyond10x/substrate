@@ -220,3 +220,13 @@ outage must not empty every pod at once.
 - Re-probing driver facts at runtime (D5 B), and authentication on this listener at a later date.
 - Any wire change. None of the options above needs one. Mounting the endpoints on `router_for`
   would need a successor bundle and is not offered.
+
+## Addendum, 2026-10-28: review pass 1
+
+Two bounds tightened at implementation, after the security and adversary reviews
+(`review-result:ops-listener-security-pass-1`, `review-result:ops-listener-adversary-pass-1`):
+
+- Of decision 1's 8 concurrent connections, at most 4 come from one source address
+  (`TcpConnectionLimits::operational()`), so one peer cannot hold every slot against kubelet.
+- The schema check reads a stamp; it never writes one. A ledger stamped by a newer binary is refused
+  at open (`StoreError::NewerSchema`) instead of being re-stamped and reported current.

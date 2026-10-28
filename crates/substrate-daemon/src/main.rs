@@ -8,7 +8,7 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD as BASE64URL;
 use clap::Parser;
 use substrate_daemon::{
     DaemonConfig, DelegatedContextKey, EgressAperture, GitSourceConfig, HostedIdentityConfig,
-    SecretSlot, TcpDaemonConfig, TlsDaemonConfig, WritableRootConfig, serve,
+    OpsListenerConfig, SecretSlot, TcpDaemonConfig, TlsDaemonConfig, WritableRootConfig, serve,
 };
 use tracing_subscriber::EnvFilter;
 
@@ -440,6 +440,21 @@ struct Arguments {
         requires_all = ["tls_listen", "hosted_identity_origin"]
     )]
     hosted_identity_ca_bundle: Option<PathBuf>,
+
+    /// Bind the operational listener (ADR 0045): plaintext and unauthenticated, `GET /livez`,
+    /// `/readyz` and `/metrics` only. Off unless given; never a control listener's address.
+    #[arg(long, env = "SUBSTRATE_OPS_LISTEN")]
+    ops_listen: Option<SocketAddr>,
+
+    /// A capability fact readiness requires the startup snapshot to publish. Repeatable.
+    #[arg(
+        long = "ops-require-fact",
+        env = "SUBSTRATE_OPS_REQUIRE_FACT",
+        value_name = "FACT",
+        value_delimiter = ',',
+        requires = "ops_listen"
+    )]
+    ops_require_facts: Vec<String>,
 }
 
 impl From<Arguments> for DaemonConfig {
@@ -498,6 +513,10 @@ impl From<Arguments> for DaemonConfig {
             tcp,
             tls,
             hosted_identity,
+            ops: arguments.ops_listen.map(|listen| OpsListenerConfig {
+                listen,
+                require_facts: arguments.ops_require_facts,
+            }),
         }
     }
 }
@@ -596,6 +615,39 @@ mod tests {
         ] {
             assert!(parse_writable_root(refused).is_err(), "{refused}");
         }
+    }
+
+    /// ADR 0045 decision 1: off by default; a required fact needs the listener it is read by.
+    #[test]
+    fn the_operational_listener_is_off_by_default_and_takes_repeatable_required_facts() {
+        let default = Arguments::try_parse_from(REQUIRED).expect("default arguments");
+        assert!(super::DaemonConfig::from(default).ops.is_none());
+        let declared = Arguments::try_parse_from(REQUIRED.into_iter().chain([
+            "--ops-listen",
+            "127.0.0.1:9464",
+            "--ops-require-fact",
+            "exec.no-egress",
+            "--ops-require-fact",
+            "events.pull,workspace.git",
+        ]))
+        .expect("declared listener");
+        let ops = super::DaemonConfig::from(declared)
+            .ops
+            .expect("operational listener");
+        assert_eq!(ops.listen.to_string(), "127.0.0.1:9464");
+        assert_eq!(
+            ops.require_facts,
+            ["exec.no-egress", "events.pull", "workspace.git"]
+        );
+        assert!(
+            Arguments::try_parse_from(
+                REQUIRED
+                    .into_iter()
+                    .chain(["--ops-require-fact", "exec.no-egress"])
+            )
+            .is_err(),
+            "a required fact without the operational listener is refused"
+        );
     }
 
     #[test]
