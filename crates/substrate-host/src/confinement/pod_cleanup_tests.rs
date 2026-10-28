@@ -48,6 +48,9 @@ struct Cluster {
     /// While set, the policy list and the owned Pod list answer 200 with a body that names no
     /// list kind and holds no items.
     kindless_lists: AtomicBool,
+    /// Security review pass 2: while set, the policy list and the owned Pod list answer 200 with
+    /// exactly this body.
+    list_body: Mutex<Option<String>>,
 }
 
 /// The orphan the policy list's page `page` holds: owned, an hour old, its Pod gone.
@@ -194,6 +197,9 @@ fn answer(cluster: &Cluster, method: &str, path: &str, accept: &str) -> (u16, St
         && (pod_path == policies || pod_path == pods);
     if listed && cluster.kindless_lists.load(Ordering::SeqCst) {
         return (200, r#"{"metadata":{"continue":""}}"#.to_owned());
+    }
+    if listed && let Some(body) = cluster.list_body.lock().clone() {
+        return (200, body);
     }
     // Open's probe: a list of at most one Pod, then the log of a Pod that does not exist.
     if method == "GET" && pod_path == pods && query == "limit=1" {
@@ -707,3 +713,6 @@ mod deferred;
 
 #[path = "pod_cleanup_review.rs"]
 mod review;
+
+#[path = "pod_cleanup_security_pass2.rs"]
+mod security_pass2;
