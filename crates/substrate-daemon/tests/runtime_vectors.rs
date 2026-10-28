@@ -43,9 +43,9 @@ const DAEMON: &str = env!("CARGO_BIN_EXE_substrate-daemon");
 const CGROUP_EXEC: &str = env!("CARGO_BIN_EXE_substrate-cgroup-exec");
 const DAEMON_OVERRIDE_VARIABLE: &str = "SUBSTRATE_VECTORS_DAEMON";
 /// Pinned independently of the daemon implementation: the clean-room client verifies what ships.
-const ADVERTISED_CONTRACT: &str = "substrate-wire/0.23.0";
+const ADVERTISED_CONTRACT: &str = "substrate-wire/0.24.0";
 const ADVERTISED_CONTRACT_SHA256: &str =
-    "fc88fb9aa9feee20504cc29725a23c19886a2343e2c16757e6c2482e28f49bdc";
+    "1570cc116e9b38c105607fefde705416b0ac2e199eb157a004c1e9b63d205d34";
 
 fn daemon_binary() -> PathBuf {
     std::env::var_os(DAEMON_OVERRIDE_VARIABLE).map_or_else(|| PathBuf::from(DAEMON), PathBuf::from)
@@ -2834,6 +2834,14 @@ async fn check_promoted_route_inventory(
             422,
             "request.schema-invalid",
         ),
+        // ADR 0036 S12: answered on both lanes before the upgrade; no record of this subject
+        // exists.
+        (
+            "process.events",
+            "/v1/processes/proc_01JPROBEABSENT0000000001/events",
+            404,
+            "process.not-found",
+        ),
     ];
     // The host-process family (ADR 0036): no probe may start a program. Without a delegated
     // cgroup the daemon serves no host process, so a well-formed start and every mutation of a
@@ -2932,7 +2940,7 @@ async fn check_promoted_route_inventory(
     let expected: BTreeSet<String> = {
         let registry = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
-            .join("contracts/substrate-wire/0.23.0/operations.json");
+            .join("contracts/substrate-wire/0.24.0/operations.json");
         let document: Value = serde_json::from_slice(
             &std::fs::read(&registry).expect("promoted operation registry bytes"),
         )
@@ -3028,6 +3036,92 @@ async fn check_promoted_route_inventory(
         expect_error(&stopped_by_owner, 501, "process.host-unserved");
     }
     covered.len()
+}
+
+/// Bundle `0.24.0`'s vector `process-events-beyond-the-readers-bound-is-exhausted`, executed on
+/// the delegated lane, which serves host processes: the record holds the vector's `event_readers`
+/// open streams, and the next is answered the vector's own status and body before any upgrade.
+/// The record is one this daemon started, because the vector's id is a fixture; its request,
+/// readers count and expected response are read from the released vector.
+async fn check_process_event_readers_vector(daemon: &Daemon) -> usize {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(
+        "../../contracts/substrate-wire/0.24.0/vectors/http/\
+         process-events-beyond-the-readers-bound-is-exhausted.json",
+    );
+    let vector: Value =
+        serde_json::from_slice(&std::fs::read(&path).expect("released readers vector"))
+            .expect("readers vector JSON");
+    let readers = vector["setup"]
+        .as_array()
+        .expect("vector setup")
+        .iter()
+        .find(|step| step["kind"] == "process")
+        .and_then(|step| step["state"]["event_readers"].as_u64())
+        .expect("the vector's process holds event_readers");
+    let request_id = text(&vector["action"]["request"]["headers"]["x-request-id"]);
+    let start = mutation(
+        "01JVECTORREADERSSTART0001",
+        &json!({
+            "argv": ["/usr/bin/sleep", "300"],
+            "cwd": "/",
+            "env": {},
+            "lease": { "ttl_ms": 60_000 },
+            "owner": { "name": "readers", "session": "sess-vector-readers" },
+            "profile": "host",
+            "reason": "Hold the readers bound of the process event stream.",
+        }),
+    );
+    let (status, started) = daemon
+        .call(
+            "POST",
+            "/v1/processes",
+            "req_vector_readers_start",
+            Some(&start),
+        )
+        .await;
+    assert_eq!(status, 200, "{started}");
+    let id = text(&started["result"]["id"]);
+    let events = format!("/v1/processes/{id}/events");
+    let mut open = Vec::new();
+    for _ in 0..readers {
+        open.push(EventStream::open(&daemon.socket, &events).await);
+    }
+    let (status, body) = upgrade_refusal(&daemon.socket, &events, &request_id).await;
+    assert_eq!(
+        json!(status),
+        vector["expected"]["response"]["status"],
+        "{body}"
+    );
+    assert_eq!(body, vector["expected"]["response"]["body"]);
+    drop(open);
+    let stop = mutation("01JVECTORREADERSSTOP00001", &json!({}));
+    let (status, stopped) = daemon
+        .call(
+            "POST",
+            &format!("/v1/processes/{id}/stop"),
+            "req_vector_readers_stop",
+            Some(&stop),
+        )
+        .await;
+    assert_eq!(status, 200, "{stopped}");
+    let deadline = Instant::now() + Duration::from_secs(20);
+    loop {
+        let (status, record) = daemon
+            .call(
+                "GET",
+                &format!("/v1/processes/{id}"),
+                "req_vector_readers_get",
+                None,
+            )
+            .await;
+        assert_eq!(status, 200, "{record}");
+        if record["result"]["state"] == "ended" {
+            break;
+        }
+        assert!(Instant::now() < deadline, "{id} did not end: {record}");
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    1
 }
 
 /// The caps, lifetime and refusal of each upgraded stream family, as `/v1/machine` publishes them
@@ -3234,6 +3328,9 @@ async fn check_http_journey(
 
     passed += check_promoted_route_inventory(daemon, &workspace, cgroup_root.is_some()).await;
     passed += check_stream_bound_facts(daemon, cgroup_root.is_some()).await;
+    if cgroup_root.is_some() {
+        passed += check_process_event_readers_vector(daemon).await;
+    }
     passed += check_omitted_entries(daemon, &workspace).await;
 
     let (status, replay) = daemon
@@ -7107,8 +7204,8 @@ async fn check_git_root_refusals(
 // ---------------------------------------------------------------------------------------------
 
 /// The predecessor printed its case count; the port asserts it, so a case cannot vanish quietly.
-const PORTABLE_CASES: usize = 118;
-const DELEGATED_CASES: usize = 180;
+const PORTABLE_CASES: usize = 119;
+const DELEGATED_CASES: usize = 182;
 
 #[tokio::test(flavor = "multi_thread")]
 async fn runtime_clean_room_drives_the_shipped_daemon_over_its_unix_socket() {

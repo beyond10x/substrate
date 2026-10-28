@@ -3,8 +3,8 @@
     "suite_version": "ess-conformance/50",
     "system": "substrate",
     "specification_version": "v1",
-    "spec_digest": "9542fa7a33b8fbffebed1592a22a1a710a64d44c74ecf230bcd4c0a6e8f5b3e2",
-    "contract_digest": "998bbc1fbcb1c239ec642d33d33818fa5c1ffe153ddc829136b742896c5b847a",
+    "spec_digest": "3489d17aa91975cb8056e42c008372b7e195591658fab057d7bb008b580d4364",
+    "contract_digest": "3ceff8abd091ca15492322738ec7e6538289056725d42719eab57b702782a0b4",
     "scenario_initial_state": "empty"
   },
   "scenarios": {

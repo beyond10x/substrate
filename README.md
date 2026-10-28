@@ -99,7 +99,7 @@ The table is the gate's own order (`scripts/gate.sh`).
 | contract bundle 0.2.0 | `python3 scripts/check-contract-bundle-0.2.0.py` |
 | contract bundle 0.3.0 | `python3 scripts/check-contract-bundle-0.3.0.py` |
 | contract bundle 0.4.0 | `python3 scripts/check-contract-bundle-0.4.0.py` |
-| contract bundles 0.5.0–0.23.0 | `cargo xtask check-bundles 0.5.0 … 0.23.0` — bounded parallel fixed-point, compatibility, classification and version-addition checks; `check-bundle <version>` remains the focused form |
+| contract bundles 0.5.0–0.24.0 | `cargo xtask check-bundles 0.5.0 … 0.24.0` — bounded parallel fixed-point, compatibility, classification and version-addition checks; `check-bundle <version>` remains the focused form |
 | contract JSON | `cargo xtask check-json` — every JSON under `contracts/` is classified by exactly one bundled schema, or it fails closed |
 | toolchain | `cargo xtask check-toolchain` |
 
@@ -165,7 +165,7 @@ without running anything, and `scripts/delegated-lane.sh` ends with it so a gree
 cannot be read as covering these cases.
 
 `cargo xtask check-json` fails closed on unclassified or schema-invalid contract JSON and
-meta-validates every Draft 2020-12 schema offline, across all twenty-three released bundles. Classification
+meta-validates every Draft 2020-12 schema offline, across all twenty-four released bundles. Classification
 used to live in a Python module the four checkers imported — shared live machinery, not any one
 bundle's reproducibility proof — so it moved with the rest of the tooling, and the four checkers no
 longer do it. They verify everything else about the bundles they froze.

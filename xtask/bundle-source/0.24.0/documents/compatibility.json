@@ -1,0 +1,24 @@
+{
+  "$schema": "schemas/compatibility.json",
+  "contract": "substrate-wire",
+  "development_constraints": [
+    "This development bundle is contract-execution-ready but cannot satisfy a stable dependency.",
+    "Passing the bundle gate proves bundle integrity; it does not claim producer or host-driver conformance.",
+    "No compatibility promise begins before a signed stable release."
+  ],
+  "request_policy": "closed",
+  "response_policy": "closed-route-selected-envelopes",
+  "status": "development",
+  "supported_api_majors": [
+    1,
+    2
+  ],
+  "version": "0.24.0",
+  "client_visible_changes": [
+    "0.24.0 adds one route and preserves the 44 routes of 0.23.0 (ADR 0036 S12): GET /v1/processes/{process_id}/events, scope process, a WebSocket over the same socket and posture as the session attach route. It carries no capability predicate, like process.logs.get: a daemon that supervises nothing still serves the stream of a record an earlier run left, from its stored log.",
+    "The event union (schemas/event.json) is closed, and 0.24.0 adds one variant: the seven lifecycle transitions process.started, process.lease-renewed, process.lease-expired, process.timed-out, process.stopped, process.exited and process.vanished, each with resource_kind process, the process id as resource, an operation cause and a process-transition observation (the state entered, ended_by once the record has a cause, exit once observed). A client that validates events against predecessor 0.23.0 rejects the event log of a subject that started a host process until it moves to 0.24.0. Output lines are never events in that log.",
+    "The stream speaks b10x.substrate-process-events.v1: one text frame per process-stream item (schemas/process-stream-item.json), oldest first. The record's process.* events and its output lines arrive in one order, each lifecycle event placed at the log offset the log had reached when it was recorded; a gap item states the log bytes the bound discarded before the reader reached them; exactly one ended item naming ended_by is last, and then the daemon closes the stream. A line is at most 16384 bytes, cut at a character boundary with truncated true and full_bytes its written length, and bytes that are not UTF-8 arrive replaced with lossy true. A stream the daemon can no longer serve closes with WebSocket status 1011 and no ended item.",
+    "Every item carries an opaque per-process cursor, pe1 and the record id, the event-log source, generation, the seq through which the record's events were delivered, and the log byte offset after the last delivered line. A reader that reconnects with it receives what followed it. A cursor the daemon cannot honour is refused before the upgrade with the event log's own codes (409): event.source-mismatch for another source or generation, event.retention-gap when event history it needs is no longer retained, and event.cursor-invalid when it is malformed, names another record, is beyond the event barrier, beyond the end of the log or not at a line boundary. A stream opened without a cursor is never refused for retention: it delivers what the event log and the log still hold, live or ended.",
+    "One refusal is new: process.events-readers-exceeded (429, exhausted, retriable), answered before the upgrade to a ninth concurrent stream of one record (MAX_PROCESS_EVENT_READERS, 8), to a subject's 513th stream over all its records, live or ended (MAX_PROCESS_EVENT_STREAMS_PER_SUBJECT, 512), or to a deployment's 513th (MAX_PROCESS_EVENT_STREAMS_PER_DEPLOYMENT, 512). From the upgrade on, the stream is counted by those bounds and the transport slot it was accepted under returns (ADR 0042). The vector schema's process setup gains the optional event_readers count, at most 8, which the new refusal vector uses."
+  ]
+}

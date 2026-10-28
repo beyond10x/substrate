@@ -1,0 +1,8 @@
+{
+  "$schema": "../schemas/hash-fixtures.json",
+  "algorithm": "sha256",
+  "cases": {
+    "$hash": "cases"
+  },
+  "format": "b10x.substrate-canonical-hash-fixtures.v2"
+}

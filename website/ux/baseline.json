@@ -145,7 +145,7 @@
     "page:reference/contract": {
       "reading_load.max": {
         "tolerance": 0,
-        "value": 241.0
+        "value": 235.0
       },
       "reading_load.median": {
         "tolerance": 0,
