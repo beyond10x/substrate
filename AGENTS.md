@@ -415,7 +415,11 @@ about it still looks well-formed. The four Python checkers stay for `0.1.0`–`0
 authored source tree and never will.
 
 **A green local gate does not guarantee a green CI.** The steps mirror each other, and
-`.github/workflows/gate.yml` runs the same `bash scripts/gate.sh` on push and pull request. The
+`.github/workflows/gate.yml` runs the same `bash scripts/gate.sh` on push and pull request, split
+into its two phases as parallel jobs: `bash scripts/gate.sh tests` (workspace tests and Clippy) and
+`bash scripts/gate.sh static` (formatting, the `cargo xtask` checks and the Python bundle
+checkers). Every step belongs to exactly one phase, and no argument runs them all in order. The
+required `Full gate` context is a third job that needs both and succeeds only when both did. The
 toolchain is pinned by `rust-toolchain.toml`, not by whatever `stable` is that day: bumping it is
 **one commit** that moves `rust-toolchain.toml`, the `rust-version` in `Cargo.toml` and the
 `Dockerfile` builder tag together, and `cargo xtask check-toolchain` fails the gate when the three

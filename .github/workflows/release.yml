@@ -255,7 +255,7 @@ jobs:
       #
       # It waits rather than failing immediately when no conclusion exists yet, because tagging a
       # commit the moment it lands on `main` is the normal case and the gate takes up to 45 minutes
-      # (gate.yml:41 `timeout-minutes: 45`). A recorded `failure` or `cancelled` with no successful
+      # (gate.yml:38 `timeout-minutes: 45`). A recorded `failure` or `cancelled` with no successful
       # run alongside it refuses at once — waiting cannot turn a red gate green.
       - name: Require a green gate run for this commit
         id: gate
