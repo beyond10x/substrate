@@ -448,13 +448,20 @@ impl App {
                 LeaseResource::Exec { workspace_id } => workspace_id,
             };
             let _workspace_guard = self.lock_workspace(&candidate.scope, workspace_id).await;
-            let Ok(Some(claimed)) = self
-                .store_io(|| self.store.claim_expired_lease(&candidate, &clock))
+            // The claim decides by a clock it reads inside its own transaction, never by `clock`:
+            // a start or renewal can issue and commit a lease from a later reading in between,
+            // and `clock` would then read as a regression that expires it
+            // (`story:pty-session-refuses-first-attach-under-load`).
+            let Ok(Some((claimed, claimed_at))) = self
+                .store_io(|| {
+                    self.store
+                        .claim_expired_lease_reading(&candidate, || self.lease_clock().ok())
+                })
                 .await
             else {
                 continue;
             };
-            self.cleanup_expired(claimed, clock.wall).await;
+            self.cleanup_expired(claimed, claimed_at.wall).await;
         }
     }
 
