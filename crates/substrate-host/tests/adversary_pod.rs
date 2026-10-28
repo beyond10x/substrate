@@ -1263,7 +1263,7 @@ mod cleanup_pass1 {
             .expect("runtime")
     }
 
-    /// Red until `story:pod-unknown-cleanup-outlives-adapter` lands. Manual: `scripts/pod-lane.sh`
+    /// Held by `story:pod-unknown-cleanup-outlives-adapter`. Manual: `scripts/pod-lane.sh`
     /// runs this binary but not this case, which skips without `SUBSTRATE_POD_MANUAL_CLEANUP=1`. Run
     /// it by hand against a kind cluster with the pod lane's variables,
     /// `SUBSTRATE_POD_MANUAL_CLEANUP=1` and `--test-threads=1`.
@@ -1294,7 +1294,7 @@ mod cleanup_pass1 {
         );
     }
 
-    /// Red until `story:pod-unknown-cleanup-outlives-adapter` lands. Manual: `scripts/pod-lane.sh`
+    /// Held by `story:pod-unknown-cleanup-outlives-adapter`. Manual: `scripts/pod-lane.sh`
     /// runs this binary but not this case, which skips without `SUBSTRATE_POD_MANUAL_CLEANUP=1`. Run
     /// it by hand against a kind cluster with the pod lane's variables,
     /// `SUBSTRATE_POD_MANUAL_CLEANUP=1` and `--test-threads=1`.

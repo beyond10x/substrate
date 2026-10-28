@@ -111,15 +111,21 @@ const STOP_CONFIRM: Duration = Duration::from_mins(1);
 /// Polls of a Pod in a terminal phase whose container has no terminated state yet.
 const TERMINAL_POLLS: u32 = 10;
 const REMOVE_ATTEMPTS: u32 = 60;
-/// How the adapter paces a removal: [`POLL`] and [`REMOVE_ATTEMPTS`], which a unit case shortens.
+/// How soon the adapter notices that a Pod it waits on is gone: the pause between two reads of a
+/// Pod whose removal is not confirmed after `Unknown`, and between two rounds of the deferred sweep.
+const NOTICE: Duration = Duration::from_secs(2);
+/// How the adapter paces a removal: [`POLL`], [`REMOVE_ATTEMPTS`] and [`NOTICE`], which a unit
+/// case shortens.
 #[derive(Debug, Clone, Copy)]
 struct Pacing {
     poll: Duration,
     remove_attempts: u32,
+    notice: Duration,
 }
 const PACING: Pacing = Pacing {
     poll: POLL,
     remove_attempts: REMOVE_ATTEMPTS,
+    notice: NOTICE,
 };
 /// Reads of a log before the adapter reports it unreadable.
 const LOG_ATTEMPTS: u32 = 5;
@@ -192,7 +198,7 @@ pub fn open_pod(request: PodRequest) -> Result<Arc<PodAdapter>, ConfinementError
     let bytes = read_bounded(&path).map_err(unserved)?;
     let (api, settings) = parse_cluster(&bytes).map_err(unserved)?;
     let api = Arc::new(api);
-    probe(&api).map_err(unserved)?;
+    let kept = probe(&api).map_err(unserved)?;
     let adapter = Arc::new(PodAdapter {
         facts: proof(),
         api,
@@ -200,6 +206,13 @@ pub fn open_pod(request: PodRequest) -> Result<Arc<PodAdapter>, ConfinementError
         runs: Mutex::new(Vec::new()),
     });
     super::check_open(adapter.facts())?;
+    if !kept.is_empty() {
+        defer_sweep(&adapter.api, kept).map_err(|error| {
+            unserved(format!(
+                "the deferred sweep of the NetworkPolicies open kept cannot start: {error}"
+            ))
+        })?;
+    }
     Ok(adapter)
 }
 
@@ -578,14 +591,26 @@ impl Api {
     }
 
     /// Deletes and reads the object at `path` until the API no longer has it, with no bound on the
-    /// tries: the pause between two doubles from one poll to one round of `remove_attempts` polls
-    /// (500 ms to 30 s), so an object that never goes costs two requests every 30 seconds.
+    /// tries: the pause between two deletions doubles from one poll to one round of
+    /// `remove_attempts` polls (500 ms to 30 s), and in that pause the object is read every
+    /// `notice` (2 s), so its removal by the kubelet is seen within one `notice`, not at the next
+    /// deletion. An object that never goes costs a read every 2 seconds and a deletion every 30.
     async fn remove_until_gone(&self, path: &str, grace_seconds: u64) {
-        let limit = self.pacing.poll * self.pacing.remove_attempts;
+        let ceiling = self.pacing.poll * self.pacing.remove_attempts;
         let mut pause = self.pacing.poll;
         while !self.remove_once(path, grace_seconds).await {
-            tokio::time::sleep(pause).await;
-            pause = (pause * 2).min(limit);
+            let next = tokio::time::Instant::now() + pause;
+            pause = (pause * 2).min(ceiling);
+            loop {
+                let wake = next.min(tokio::time::Instant::now() + self.pacing.notice);
+                tokio::time::sleep_until(wake).await;
+                if wake >= next {
+                    break;
+                }
+                if matches!(self.get(path).await, Ok(None)) {
+                    return;
+                }
+            }
         }
     }
 
@@ -667,8 +692,9 @@ fn api_failed(detail: &str) -> ConfinementError {
 /// Open's requests, on a thread of its own so `open` stays synchronous inside or outside a
 /// runtime: a list of at most one Pod in the namespace, then a read of the log of a Pod no run is
 /// named, which the API answers 404 only to a credential that may read `pods/log` and 403 to one
-/// that may not. Without that access every run's output would be unreadable. Then [`sweep`].
-fn probe(api: &Arc<Api>) -> Result<(), String> {
+/// that may not. Without that access every run's output would be unreadable. Then [`sweep`], whose
+/// kept policies it returns.
+fn probe(api: &Arc<Api>) -> Result<Vec<Deferred>, String> {
     let api = Arc::clone(api);
     std::thread::scope(|scope| {
         scope
@@ -734,21 +760,28 @@ fn probe(api: &Arc<Api>) -> Result<(), String> {
     })
 }
 
+/// The label selector of the objects the adapter owns, URL-encoded.
+fn owner_selector() -> String {
+    url::form_urlencoded::byte_serialize(format!("{MANAGED_BY_LABEL}={MANAGED_BY}").as_bytes())
+        .collect()
+}
+
 /// Deletes the `NetworkPolicy` objects a process that ended before its runs' cleanup left behind
 /// (`approval-record:pod-orphan-policy-sweep-d124`): each carrying the adapter's owner label, named
 /// for the run that label names, at least [`SWEEP_AGE_FLOOR`] old by the API server's clock, whose
-/// run's Pod the API no longer has, in any phase. A policy without the label is never a candidate,
-/// and one whose Pod exists is left to the task that owns it. The list is read whole first, in at
-/// most [`SWEEP_MAX_PAGES`] pages of [`SWEEP_PAGE_ITEMS`], each bounded in bytes; every request is
-/// bounded by [`API_TIMEOUT`] and there are at most two per candidate, so open stays bounded. Any
-/// failure, a list longer than that included, fails the sweep, and with it the open.
-async fn sweep(api: &Api) -> Result<(), String> {
-    let selector: String =
-        url::form_urlencoded::byte_serialize(format!("{MANAGED_BY_LABEL}={MANAGED_BY}").as_bytes())
-            .collect();
+/// run's Pod the API no longer has, in any phase. A policy without the label is never a candidate.
+/// The list is read whole first, in at most [`SWEEP_MAX_PAGES`] pages of [`SWEEP_PAGE_ITEMS`],
+/// each bounded in bytes; every request is bounded by [`API_TIMEOUT`] and there are at most two per
+/// owned policy, so open stays bounded. Any failure, a list longer than that included, fails the
+/// sweep, and with it the open.
+///
+/// Returns the owned policies it kept, younger than the floor or with their Pod present, each
+/// marked with whether the API showed its Pod; [`defer_sweep`] checks them again.
+async fn sweep(api: &Api) -> Result<Vec<Deferred>, String> {
     let first = format!(
-        "{}?labelSelector={selector}&limit={SWEEP_PAGE_ITEMS}",
-        api.policies()
+        "{}?labelSelector={}&limit={SWEEP_PAGE_ITEMS}",
+        api.policies(),
+        owner_selector()
     );
     let mut candidates = Vec::new();
     let mut path = first.clone();
@@ -766,8 +799,15 @@ async fn sweep(api: &Api) -> Result<(), String> {
         let token: String = url::form_urlencoded::byte_serialize(next.as_bytes()).collect();
         path = format!("{first}&continue={token}");
     }
-    for run in candidates {
-        if api.get(&format!("{}/{run}", api.pods())).await?.is_some() {
+    let mut deferred = Vec::new();
+    for (run, created, old) in candidates {
+        let pod_seen = api.get(&format!("{}/{run}", api.pods())).await?.is_some();
+        if !old || pod_seen {
+            deferred.push(Deferred {
+                run,
+                created,
+                pod_seen,
+            });
             continue;
         }
         api.delete(&format!("{}/{run}", api.policies()), 0).await?;
@@ -776,15 +816,16 @@ async fn sweep(api: &Api) -> Result<(), String> {
             "pod: open removed a NetworkPolicy whose run's Pod is gone"
         );
     }
-    Ok(())
+    Ok(deferred)
 }
 
-/// Reads one page of the sweep's list at `path` and adds its owned policies old enough to be
-/// orphans to `candidates`; the `continue` token of the next page, or `None` on the last.
+/// Reads one page of the sweep's list at `path` and adds its owned policies to `candidates`, each
+/// with its creation time and whether it is old enough to be an orphan; the `continue` token of
+/// the next page, or `None` on the last.
 async fn sweep_page(
     api: &Api,
     path: &str,
-    candidates: &mut Vec<String>,
+    candidates: &mut Vec<(String, chrono::DateTime<chrono::FixedOffset>, bool)>,
 ) -> Result<Option<String>, String> {
     let (status, date, body) = api
         .call_dated(Method::GET, path, None, MAX_API_BODY_BYTES)
@@ -811,14 +852,186 @@ async fn sweep_page(
             .signed_duration_since(created)
             .to_std()
             .is_ok_and(|age| age >= SWEEP_AGE_FLOOR);
-        if old {
-            candidates.push(run.to_owned());
-        }
+        candidates.push((run.to_owned(), created, old));
     }
-    Ok(list["metadata"]["continue"]
+    Ok(continuation(&list))
+}
+
+/// A list's `continue` token, or `None` on its last page.
+fn continuation(list: &Value) -> Option<String> {
+    list["metadata"]["continue"]
         .as_str()
         .filter(|token| !token.is_empty())
-        .map(str::to_owned))
+        .map(str::to_owned)
+}
+
+/// An owned policy the open sweep kept: younger than [`SWEEP_AGE_FLOOR`], or its run's Pod exists.
+#[derive(Debug, Clone)]
+struct Deferred {
+    run: String,
+    created: chrono::DateTime<chrono::FixedOffset>,
+    /// The API has shown the run's Pod: its start stored it and creates it no more, so once it is
+    /// gone the policy fences nothing, whatever its age.
+    pod_seen: bool,
+}
+
+/// Starts the deferred sweep of what open kept, on a thread of its own with its own runtime, so it
+/// runs whether or not the embedder opened the adapter inside one: a round of [`resweep`] every
+/// `notice` (2 s) until nothing is kept, or until the adapter and every task of its runs are gone.
+/// One thread per open, one list per round, and at most what one sweep can list
+/// ([`SWEEP_MAX_PAGES`] pages of [`SWEEP_PAGE_ITEMS`]) kept. A failed round is tried again at the
+/// next. Returns once the thread has its runtime, or why it has none. The runtime is built on the
+/// thread, never on the caller's, which may be inside a runtime that must not drop another.
+fn defer_sweep(
+    api: &Arc<Api>,
+    mut deferred: Vec<Deferred>,
+) -> Result<std::thread::JoinHandle<()>, String> {
+    let api = Arc::downgrade(api);
+    let (ready, started) = std::sync::mpsc::sync_channel(1);
+    let thread = std::thread::Builder::new()
+        .name("substrate-pod-sweep".to_owned())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    let _ = ready.send(Err(format!("no runtime: {error}")));
+                    return;
+                }
+            };
+            let _ = ready.send(Ok(()));
+            runtime.block_on(async move {
+                while !deferred.is_empty() {
+                    let Some(notice) = api.upgrade().map(|api| api.pacing.notice) else {
+                        return;
+                    };
+                    tokio::time::sleep(notice).await;
+                    let Some(api) = api.upgrade() else {
+                        return;
+                    };
+                    if let Err(error) = resweep(&api, &mut deferred).await {
+                        tracing::warn!(
+                            error,
+                            "pod: a round of the deferred NetworkPolicy sweep failed"
+                        );
+                    }
+                }
+            });
+        })
+        .map_err(|error| format!("no thread: {error}"))?;
+    started
+        .recv()
+        .map_err(|_| "the thread ended before its runtime was built".to_owned())??;
+    Ok(thread)
+}
+
+/// One round of the deferred sweep. Reads the namespace's owned Pods whole, then, for each kept
+/// policy whose Pod that list lacks and whose Pod the API showed before or which is at least
+/// [`SWEEP_AGE_FLOOR`] old by the list's `Date`, reads the Pod once more and deletes the policy
+/// when that read says the Pod is gone, as the open sweep does. A Pod listed or read marks its
+/// policy seen. A list that fails fails the round before anything is deleted; a read or a deletion
+/// that fails keeps its policy for the next round.
+async fn resweep(api: &Api, deferred: &mut Vec<Deferred>) -> Result<(), String> {
+    let (now, present) = owned_pods(api).await?;
+    let mut index = 0;
+    while let Some(policy) = deferred.get_mut(index) {
+        if present.contains(&policy.run) {
+            policy.pod_seen = true;
+            index += 1;
+            continue;
+        }
+        let old = now.is_some_and(|now| {
+            now.signed_duration_since(policy.created)
+                .to_std()
+                .is_ok_and(|age| age >= SWEEP_AGE_FLOOR)
+        });
+        if !policy.pod_seen && !old {
+            index += 1;
+            continue;
+        }
+        match api.get(&format!("{}/{}", api.pods(), policy.run)).await {
+            Ok(None) => {}
+            Ok(Some(_)) => {
+                policy.pod_seen = true;
+                index += 1;
+                continue;
+            }
+            Err(_) => {
+                index += 1;
+                continue;
+            }
+        }
+        if api
+            .delete(&format!("{}/{}", api.policies(), policy.run), 0)
+            .await
+            .is_err()
+        {
+            index += 1;
+            continue;
+        }
+        tracing::info!(
+            policy = policy.run,
+            "pod: the adapter removed a NetworkPolicy its open kept, once its run's Pod was gone"
+        );
+        deferred.swap_remove(index);
+    }
+    Ok(())
+}
+
+/// The names of the namespace's Pods that carry the adapter's owner label, read whole in at most
+/// [`SWEEP_MAX_PAGES`] pages of [`SWEEP_PAGE_ITEMS`], and the API server's clock on the first page.
+async fn owned_pods(
+    api: &Api,
+) -> Result<
+    (
+        Option<chrono::DateTime<chrono::FixedOffset>>,
+        std::collections::BTreeSet<String>,
+    ),
+    String,
+> {
+    let first = format!(
+        "{}?labelSelector={}&limit={SWEEP_PAGE_ITEMS}",
+        api.pods(),
+        owner_selector()
+    );
+    let mut path = first.clone();
+    let mut now = None;
+    let mut names = std::collections::BTreeSet::new();
+    for page in 0..SWEEP_MAX_PAGES {
+        let (status, date, body) = api
+            .call_dated(Method::GET, &path, None, MAX_API_BODY_BYTES)
+            .await?;
+        if status != 200 {
+            return Err(format!(
+                "the Pod list answered {status}: {}",
+                status_message(&body)
+            ));
+        }
+        if page == 0 {
+            now = date.and_then(|date| chrono::DateTime::parse_from_rfc2822(&date).ok());
+        }
+        let list: Value = serde_json::from_slice(&body)
+            .map_err(|_| "the API answered something other than JSON".to_owned())?;
+        let items = list["items"]
+            .as_array()
+            .ok_or("the Pod list holds no items")?;
+        names.extend(
+            items
+                .iter()
+                .filter_map(|pod| pod["metadata"]["name"].as_str())
+                .map(str::to_owned),
+        );
+        let Some(next) = continuation(&list) else {
+            return Ok((now, names));
+        };
+        let token: String = url::form_urlencoded::byte_serialize(next.as_bytes()).collect();
+        path = format!("{first}&continue={token}");
+    }
+    Err(format!(
+        "the Pod list did not end within {SWEEP_MAX_PAGES} pages of {SWEEP_PAGE_ITEMS}"
+    ))
 }
 
 /// The run a policy fences and when the API server created it, for a policy that carries the

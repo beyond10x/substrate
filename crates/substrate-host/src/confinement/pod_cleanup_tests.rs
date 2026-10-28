@@ -20,6 +20,7 @@ const RUN: &str = "substrate-run-cleanup";
 const PACED: Pacing = Pacing {
     poll: Duration::from_millis(10),
     remove_attempts: 3,
+    notice: Duration::from_millis(10),
 };
 /// The deletion of the Pod after which the fake kubelet lets it go: past the two rounds of
 /// `remove_attempts` the task made before this story.
@@ -36,6 +37,9 @@ struct Cluster {
     pages: u32,
     /// Each request's method and path, in arrival order.
     requests: Mutex<Vec<String>>,
+    /// The `substrate-run-deferred-*` Pods that exist: the owned Pod list names them and a read
+    /// of one answers it; any other `substrate-run-deferred-*` Pod is gone.
+    present: Mutex<std::collections::BTreeSet<String>>,
 }
 
 /// The orphan the policy list's page `page` holds: owned, an hour old, its Pod gone.
@@ -86,6 +90,41 @@ fn answer(cluster: &Cluster, method: &str, path: &str) -> (u16, String) {
         return gone;
     }
     if method == "DELETE" && orphan(&format!("{policies}/")) {
+        return (200, "{}".to_owned());
+    }
+    let pods = format!("/api/v1/namespaces/{NAMESPACE}/pods");
+    if method == "GET" && pod_path == pods && query.starts_with("labelSelector=") {
+        let items: Vec<Value> = cluster
+            .present
+            .lock()
+            .iter()
+            .map(|name| {
+                json!({"metadata": {
+                    "name": name,
+                    "labels": {MANAGED_BY_LABEL: MANAGED_BY, RUN_LABEL: name},
+                }})
+            })
+            .collect();
+        return (
+            200,
+            json!({"kind": "PodList", "metadata": {"continue": ""}, "items": items}).to_string(),
+        );
+    }
+    let deferred = |prefix: &str| {
+        pod_path
+            .strip_prefix(prefix)
+            .filter(|name| name.starts_with("substrate-run-deferred-"))
+    };
+    if method == "GET"
+        && let Some(name) = deferred(&format!("{pods}/"))
+    {
+        return if cluster.present.lock().contains(name) {
+            (200, json!({"metadata": {"name": name}}).to_string())
+        } else {
+            gone
+        };
+    }
+    if method == "DELETE" && deferred(&format!("{policies}/")).is_some() {
         return (200, "{}".to_owned());
     }
     match method {
@@ -422,3 +461,6 @@ async fn the_open_sweep_fails_past_its_page_bound_and_deletes_nothing() {
 
 #[path = "pod_cleanup_adversary.rs"]
 mod adversary_pass1;
+
+#[path = "pod_cleanup_deferred.rs"]
+mod deferred;
