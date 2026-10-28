@@ -10,6 +10,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ### Changed
 
 - The specification and CI use ESS 0.72.0 (was 0.70.0); the suites, wire types and CLI package regenerate unchanged apart from the generator header.
+- The specification and CI use ESS 0.74.0 (was 0.72.0). The host-process suite gains the synthesized `AppendStreamEvent/unknown-process` scenario (92 synthesized, 27 refusals); the other suites, wire types and CLI package regenerate unchanged apart from the generator header.
 
 ## [0.14.0] — 2026-10-27
 

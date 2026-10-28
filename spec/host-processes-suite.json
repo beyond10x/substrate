@@ -3061,6 +3061,162 @@
         }
       ]
     },
+    "substrate.host_processes.AppendStreamEvent/outcome/unknown-process": {
+      "purpose": "`substrate.host_processes.AppendStreamEvent` answers `unknown-process` for an arranged row of the entity its input names, or none",
+      "steps": [
+        {
+          "step": "execute_command",
+          "command": "substrate.host_processes.AppendStreamEvent",
+          "actor": "substrate.host_processes.Supervisor",
+          "input": {
+            "ended_by": {
+              "kind": "literal",
+              "value": "exit"
+            },
+            "kind": {
+              "kind": "literal",
+              "value": "output-line"
+            },
+            "line": {
+              "kind": "literal",
+              "value": "listening on 5173"
+            },
+            "process": {
+              "kind": "literal",
+              "value": "p-1"
+            }
+          }
+        },
+        {
+          "step": "expect_outcome",
+          "outcome": {
+            "command": "substrate.host_processes.AppendStreamEvent",
+            "outcome": "unknown-process"
+          }
+        },
+        {
+          "step": "expect_error",
+          "error": "substrate.host_processes.UnknownProcess"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.LeaseRenewed"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.LogDiscarded"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.OwnerStopped"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessAdopted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessEnded"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessObserved"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessRunning"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.ProcessStarted"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.StopRequested"
+        },
+        {
+          "step": "expect_no_event",
+          "event": "substrate.host_processes.StreamEventAppended"
+        }
+      ],
+      "source": [
+        {
+          "kind": "type",
+          "name": "substrate.host_processes.EndedBy"
+        },
+        {
+          "kind": "type",
+          "name": "substrate.host_processes.StreamEventKind"
+        },
+        {
+          "kind": "entity",
+          "name": "substrate.host_processes.HostProcess"
+        },
+        {
+          "kind": "entity",
+          "name": "substrate.host_processes.ProcessEvent"
+        },
+        {
+          "kind": "command",
+          "name": "substrate.host_processes.AppendStreamEvent"
+        },
+        {
+          "kind": "outcome",
+          "name": {
+            "command": "substrate.host_processes.AppendStreamEvent",
+            "outcome": "unknown-process"
+          }
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.LeaseRenewed"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.LogDiscarded"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.OwnerStopped"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessAdopted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessEnded"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessObserved"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessRunning"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.ProcessStarted"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.StopRequested"
+        },
+        {
+          "kind": "event",
+          "name": "substrate.host_processes.StreamEventAppended"
+        },
+        {
+          "kind": "error",
+          "name": "substrate.host_processes.UnknownProcess"
+        },
+        {
+          "kind": "actor",
+          "name": "substrate.host_processes.Supervisor"
+        }
+      ]
+    },
     "substrate.host_processes.ConfirmRunning/outcome/running": {
       "purpose": "`substrate.host_processes.ConfirmRunning` answers `running` for an input no other branch's guard claims",
       "steps": [
