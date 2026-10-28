@@ -180,11 +180,11 @@ What it does not establish:
 confinement contract of atlas ADR 0109 before any adapter code. What the green check establishes:
 
 - The model validates under ESS 0.74.0 with no warning, and `confinement-suite.json` is its exact
-  synthesized suite (5 scenarios, 30 refusals) plus the 49 authored scenarios under
-  `confinement/scenarios/`. Each of the 35 outcomes has at least one scenario, and each refused
+  synthesized suite (5 scenarios, 31 refusals) plus the 57 authored scenarios under
+  `confinement/scenarios/`. Each of the 36 outcomes has at least one scenario, and each refused
   obligation an authored one ([`confinement/README.md`](confinement/README.md) says why synthesis
   refuses them).
-- All 54 scenarios pass against ESS's `interpreted` reference. That checks the model, not an
+- All 62 scenarios pass against ESS's `interpreted` reference. That checks the model, not an
   adapter.
 - `OpenAdapter` refuses a `local` (or `systemd` around `local`) set without `declared_insecure` and
   an `oci` or `pod` set without `image_digest_pinned`, so no admission can report `local`
@@ -201,12 +201,15 @@ What it does not establish:
 - **Synthesized scenarios reach no adapter.** ESS names them by command and outcome and cannot
   rename them, so they name no adapter or lane and no adapter lane selects them; they check the
   model against the interpreted reference only. The same holds for the authored `model-*`
-  scenario. Adapter lanes run the authored scenarios.
+  scenarios. Adapter lanes run the authored scenarios.
 - **No full digest check.** ESS 0.74.0 has no pattern predicate, so the model checks that an image
   names `@sha256:`, ends with a lowercase hex character and is at least 73 characters long. That
   exactly 64 lowercase hex characters follow `@sha256:` is the `oci` and `pod` adapters' check.
 - **No probe.** Each scenario's open step states the adapter's declared set. Whether a host
   actually proves those facts is the adapter's runtime claim.
+- **No stream bounds.** A profile asking for a piped standard input requires `stdin_pipe`, which
+  the model holds. Its `limit_bytes` range is raised by an adapter's `check`, which `AdmitProfile`
+  does not model, and is held by the adapters' Rust cases (design 32 § 6).
 - **No refusal audit record.** ESS admits no event on an outcome that reports an error, so the
   refusal's `ProfileRefused` record is an adapter-test obligation: S0's tests assert it.
 - **No wire.** The contract is substrate-host's API. No route, wire field or bundle changes.

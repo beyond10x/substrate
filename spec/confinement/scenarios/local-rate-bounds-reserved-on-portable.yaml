@@ -12,7 +12,7 @@ timeline:
     input:
       adapter: local
       served_families: [process_run, process_watch, output_read, wait, workspace, audit]
-      facts: [declared_insecure, paths_are_host_paths, local_permitted, host_network]
+      facts: [declared_insecure, paths_are_host_paths, local_permitted, host_network, stdin_pipe]
     outcome: opened
   - at: 2026-10-27T09:00:01Z
     command: substrate.confinement.AdmitProfile

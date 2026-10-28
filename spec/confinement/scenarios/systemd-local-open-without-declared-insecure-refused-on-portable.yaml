@@ -13,7 +13,7 @@ timeline:
       adapter: systemd
       inner: local
       served_families: [process_run, process_watch, output_read, wait, workspace, limits, audit]
-      facts: [paths_are_host_paths, whole_tree_kill, local_permitted, host_network]
+      facts: [paths_are_host_paths, whole_tree_kill, local_permitted, host_network, stdin_pipe]
     outcome: systemd-local-not-declared-insecure
     error:
       name: substrate.confinement.FactUnserved

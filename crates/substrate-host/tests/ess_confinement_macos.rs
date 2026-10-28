@@ -1,5 +1,6 @@
 //! The confinement contract's macos lane (`story:macos-adapter-on-seatbelt`, S1, and
-//! `story:macos-seatbelt-policy-runs-cargo-test`, S2).
+//! `story:macos-seatbelt-policy-runs-cargo-test`, S2), and the `macos-io-*` stage of design 32
+//! (`story:adapter-stdin-pipe`).
 //!
 //! Executes every authored `-on-macos` scenario of `spec/confinement-suite.json` against the real
 //! `macos` adapter, opened through `confinement::open` on a macOS host, and `absent-linux-*`
@@ -7,8 +8,9 @@
 //! it must equal what ran.
 //!
 //! Every macos open step states the final declared set, `sealed_paths`, `exec_subpaths` and
-//! `private_tmpdir` included, and the adapter must have proved exactly that set; each
-//! `macos-s2-*` admission runs through the runner like every other scenario.
+//! `private_tmpdir` included, and `stdin_pipe` since design 32, and the adapter must have proved
+//! exactly that set; each `macos-s2-*` and `macos-io-*` admission runs through the runner like
+//! every other scenario.
 //!
 //! Beside the suite: a run is confined to its workspace and its declared read-only roots, a root
 //! that would appear anywhere but at its host path is refused by name, and `limits`,
@@ -87,11 +89,13 @@ fn events(records: &Mutex<Vec<AuditRecord>>) -> Vec<String> {
 
 /// The authored `-on-macos` scenarios `spec/confinement-suite.json` holds. Pinned, so a scenario
 /// lost or renamed out of the lane fails here instead of shrinking what runs.
-const MACOS_DECLARED: usize = 8;
+const MACOS_DECLARED: usize = 9;
 
-/// Of those, the `macos-s1-*` and the `macos-s2-*` scenarios; the rest are `absent-*`.
+/// Of those, the `macos-s1-*`, the `macos-s2-*` and the `macos-io-*` scenarios (design 32); the
+/// rest are `absent-*`.
 const MACOS_S1: usize = 4;
 const MACOS_S2: usize = 3;
+const MACOS_IO: usize = 1;
 
 #[test]
 fn ess_confinement_macos_lane_executes_every_authored_macos_scenario() {
@@ -109,21 +113,23 @@ fn ess_confinement_macos_lane_executes_every_authored_macos_scenario() {
             .filter(|(id, _)| id.contains(&format!("/macos-{stage}-")))
             .count()
     };
-    let (s1, s2) = (count("s1"), count("s2"));
+    let (s1, s2, io) = (count("s1"), count("s2"), count("io"));
     assert_eq!(s1, MACOS_S1, "the macos-s1 scenarios this lane pins");
     assert_eq!(s2, MACOS_S2, "the macos-s2 scenarios for {S2_STORY}");
+    assert_eq!(io, MACOS_IO, "the macos-io scenarios of design 32");
     assert!(
         scenarios.iter().all(|(id, _)| id.contains("/macos-s1-")
             || id.contains("/macos-s2-")
+            || id.contains("/macos-io-")
             || id.contains("/absent-")),
-        "a macos-lane scenario is neither S1's, S2's nor an absent adapter's: {:?}",
+        "a macos-lane scenario is neither S1's, S2's, the I/O stage's nor an absent adapter's: {:?}",
         scenarios.iter().map(|(id, _)| id).collect::<Vec<_>>()
     );
     let (executed, audited, _) = support::run(&scenarios, open_macos_lane);
     assert_eq!(executed, declared, "a macos scenario did not run");
     assert!(audited > 0, "no refusal audit record was asserted");
     println!(
-        "ESS confinement macos lane: {executed} scenarios executed ({s1} macos-s1, {s2} macos-s2) \
+        "ESS confinement macos lane: {executed} scenarios executed ({s1} macos-s1, {s2} macos-s2, {io} macos-io) \
          of {declared} declared; {audited} refusal audit records asserted, 0 failed"
     );
 }

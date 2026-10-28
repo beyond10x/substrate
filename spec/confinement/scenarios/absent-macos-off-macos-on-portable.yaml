@@ -13,7 +13,7 @@ timeline:
     input:
       adapter: macos
       served_families: [process_run, process_watch, output_read, wait, workspace, filesystem_view, audit]
-      facts: [paths_are_host_paths, ipc_signals_contained, sealed_paths, exec_subpaths, private_tmpdir]
+      facts: [paths_are_host_paths, ipc_signals_contained, sealed_paths, exec_subpaths, private_tmpdir, stdin_pipe]
     outcome: unserved
     error:
       name: substrate.confinement.AdapterUnserved

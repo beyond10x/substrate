@@ -2,7 +2,7 @@
 # tests/confinement_public_items.rs. Regenerate with
 # SUBSTRATE_BLESS_PUBLIC_ITEMS=1 cargo test -p b10x-substrate-host --test confinement_public_items
 confinement/facts.rs: pub const FAMILY_ORDER: [ContractFamily; 10] = [ContractFamily::ProcessRun, ContractFamily::ProcessWatch, ContractFamily::OutputRead, ContractFamily::Wait, ContractFamily::Workspace, ContractFamily::FilesystemView, ContractFamily::NetworkEgress, ContractFamily::NetworkIngress, ContractFamily::Limits, ContractFamily::Audit];
-confinement/facts.rs: pub const FACT_ORDER: [Fact; 11] = [Fact::DeclaredInsecure, Fact::PathsAreHostPaths, Fact::WholeTreeKill, Fact::LocalPermitted, Fact::IpcSocketAllowlist, Fact::IpcSignalsContained, Fact::SealedPaths, Fact::ExecSubpaths, Fact::PrivateTmpdir, Fact::HostNetwork, Fact::ImageDigestPinned];
+confinement/facts.rs: pub const FACT_ORDER: [Fact; 12] = [Fact::DeclaredInsecure, Fact::PathsAreHostPaths, Fact::WholeTreeKill, Fact::LocalPermitted, Fact::IpcSocketAllowlist, Fact::IpcSignalsContained, Fact::SealedPaths, Fact::ExecSubpaths, Fact::PrivateTmpdir, Fact::HostNetwork, Fact::ImageDigestPinned, Fact::StdinPipe];
 confinement/facts.rs: #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)] #[serde(rename_all = "snake_case")] pub enum InnerAdapter
 confinement/facts.rs: enum InnerAdapter > Local,
 confinement/facts.rs: enum InnerAdapter > Linux,
@@ -316,6 +316,7 @@ generated/confinement.rs: enum Fact > #[serde(rename = "local_permitted")] Local
 generated/confinement.rs: enum Fact > #[serde(rename = "paths_are_host_paths")] PathsAreHostPaths,
 generated/confinement.rs: enum Fact > #[serde(rename = "private_tmpdir")] PrivateTmpdir,
 generated/confinement.rs: enum Fact > #[serde(rename = "sealed_paths")] SealedPaths,
+generated/confinement.rs: enum Fact > #[serde(rename = "stdin_pipe")] StdinPipe,
 generated/confinement.rs: enum Fact > #[serde(rename = "whole_tree_kill")] WholeTreeKill,
 lib.rs: #[derive(Debug, Clone)] pub struct GitSourceBinding
 lib.rs: struct GitSourceBinding > pub name: String,

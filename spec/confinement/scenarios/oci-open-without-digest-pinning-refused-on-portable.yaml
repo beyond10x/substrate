@@ -13,7 +13,7 @@ timeline:
     input:
       adapter: oci
       served_families: [process_run, process_watch, output_read, wait, workspace, filesystem_view, limits, audit]
-      facts: []
+      facts: [stdin_pipe]
     outcome: image-not-digest-pinned
     error:
       name: substrate.confinement.FactUnserved
