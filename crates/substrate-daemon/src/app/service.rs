@@ -795,61 +795,66 @@ impl App {
             }
             LeaseResource::Workspace { root_name, origin } => {
                 let mut child_failure = None;
-                if let Ok(execs) = self
+                // Invariant 3: execs that could not be read cannot be ended, so the workspace is
+                // not ended either; the round fails by name and the lease is retried.
+                let execs = match self
                     .store_io(|| {
                         self.store
                             .execs_holding_workspace(&expired.scope, &expired.id)
                     })
                     .await
                 {
-                    for exec in execs {
-                        if matches!(
-                            exec.state,
-                            ExecState::Accepted | ExecState::Running | ExecState::Unknown
-                        ) {
-                            match run_maintenance_driver(self.driver.signal(
-                                &exec.id,
-                                &ExecSignalInput {
-                                    signal: substrate_wire::Signal::Kill,
-                                    grace_ms: 0,
-                                },
-                            ))
-                            .await
-                            {
-                                Ok(observation) => {
-                                    let write = self
-                                        .store_io(|| {
-                                            self.store.put_exec(
-                                                &expired.scope,
-                                                &stored_exec(&observation),
-                                            )
-                                        })
-                                        .await;
-                                    match write {
-                                        Ok(ExecWrite::PersistedExact(_)) => {
-                                            self.driver.acknowledge_exec(&observation);
-                                        }
-                                        Ok(ExecWrite::Superseded(_) | ExecWrite::Retired) => {
-                                            self.driver
-                                                .discard_superseded_exec(&observation.resource.id);
-                                        }
-                                        Ok(ExecWrite::PersistedTransformed(authoritative)) => {
-                                            self.driver.set_exec_lease(
-                                                &observation.resource.id,
-                                                authoritative.resource.lease,
-                                            );
-                                        }
-                                        Err(error) => {
-                                            child_failure = Some(error.to_string());
-                                            break;
-                                        }
+                    Ok(execs) => execs,
+                    Err(error) => {
+                        child_failure = Some(error.to_string());
+                        Vec::new()
+                    }
+                };
+                for exec in execs {
+                    if matches!(
+                        exec.state,
+                        ExecState::Accepted | ExecState::Running | ExecState::Unknown
+                    ) {
+                        match run_maintenance_driver(self.driver.signal(
+                            &exec.id,
+                            &ExecSignalInput {
+                                signal: substrate_wire::Signal::Kill,
+                                grace_ms: 0,
+                            },
+                        ))
+                        .await
+                        {
+                            Ok(observation) => {
+                                let write = self
+                                    .store_io(|| {
+                                        self.store
+                                            .put_exec(&expired.scope, &stored_exec(&observation))
+                                    })
+                                    .await;
+                                match write {
+                                    Ok(ExecWrite::PersistedExact(_)) => {
+                                        self.driver.acknowledge_exec(&observation);
+                                    }
+                                    Ok(ExecWrite::Superseded(_) | ExecWrite::Retired) => {
+                                        self.driver
+                                            .discard_superseded_exec(&observation.resource.id);
+                                    }
+                                    Ok(ExecWrite::PersistedTransformed(authoritative)) => {
+                                        self.driver.set_exec_lease(
+                                            &observation.resource.id,
+                                            authoritative.resource.lease,
+                                        );
+                                    }
+                                    Err(error) => {
+                                        child_failure = Some(error.to_string());
+                                        break;
                                     }
                                 }
-                                Err(error) if error.class == DriverErrorClass::NotFound => {}
-                                Err(error) => {
-                                    child_failure = Some(error.code.to_owned());
-                                    break;
-                                }
+                            }
+                            Err(error) if error.class == DriverErrorClass::NotFound => {}
+                            Err(error) => {
+                                child_failure = Some(error.code.to_owned());
+                                break;
                             }
                         }
                     }

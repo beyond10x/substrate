@@ -5,7 +5,8 @@
 //! record names the root. These cases cover the two paths that file does not:
 //!
 //! - the lease-expiry path, which kills only the execs whose *own* workspace expired
-//!   (`execs_for_workspace`) before it ends the workspace, and
+//!   (`execs_for_workspace`) before it ends the workspace, and which ends nothing when that read
+//!   fails,
 //! - an exec whose dispatch outcome is unknown, whose stored record carries no applied
 //!   confinement and therefore no writable root.
 //!
@@ -419,6 +420,33 @@ impl Harness {
             .join(checkout)
             .is_dir()
     }
+
+    /// Rewrites the state recorded in an exec's `resource_json` through a raw connection to this
+    /// harness's own state database: a value no `ExecState` decodes makes every read of it fail.
+    fn record_exec_state(&self, exec_id: &str, state: &str) {
+        let changed = rusqlite::Connection::open(self.directory.path().join("state.db"))
+            .expect("fault connection")
+            .execute(
+                "UPDATE execs SET resource_json = json_set(resource_json, '$.state', ?2)
+                 WHERE id = ?1",
+                rusqlite::params![exec_id, state],
+            )
+            .expect("rewrite the recorded exec state");
+        assert_eq!(changed, 1, "exactly the named exec is rewritten");
+    }
+
+    /// The event transitions recorded for one resource, in order.
+    fn transitions(&self, scope: &Scope, resource: &str) -> Vec<String> {
+        self.store
+            .events(scope, None, 1_000)
+            .expect("event read")
+            .expect("event page")
+            .items
+            .into_iter()
+            .filter(|event| event.resource == resource)
+            .map(|event| event.transition)
+            .collect()
+    }
 }
 
 #[allow(clippy::needless_pass_by_value)]
@@ -465,6 +493,108 @@ async fn lease_expiry_does_not_destroy_a_git_root_under_the_exec_that_binds_it()
         harness.checkout_on_host(&checkout) || signalled.contains(&exec_id),
         "lease cleanup destroyed writable Git root {checkout} while exec {exec_id}, which binds \
          it writable, was running and was never signalled (signalled: {signalled:?})"
+    );
+}
+
+/// Lease cleanup reads the execs that hold an expired workspace before it ends the workspace. When
+/// that read fails, it cannot know which execs to end, so it must not end the workspace either
+/// (invariant 3): the round records a named cleanup failure and the lease is retried. Once the read
+/// succeeds again, the next round signals the holding exec and only then ends the workspace.
+///
+/// The read is made to fail through the test's own state database: the exec's recorded
+/// `resource_json` state is rewritten to a value no `ExecState` decodes, and restored afterwards.
+#[tokio::test(flavor = "multi_thread")]
+async fn lease_expiry_ends_no_workspace_whose_holding_execs_it_cannot_read() {
+    let harness = Harness::open();
+    let own = harness
+        .workspace("01JWRSECREADERR00000001", false, None)
+        .await;
+    let checkout = harness
+        .workspace("01JWRSECREADERR00000002", true, Some(1_000))
+        .await;
+    let (status, started) = harness
+        .start("01JWRSECREADERR00000003", &own, &checkout)
+        .await;
+    assert!(status.is_success(), "{status} {started}");
+    assert_eq!(started["result"]["state"], "running", "{started}");
+    let exec_id = started["result"]["id"]
+        .as_str()
+        .expect("exec id")
+        .to_owned();
+    let scope = Scope {
+        deployment: "dep_wrsecurity".to_owned(),
+        subject: SUBJECT.to_owned(),
+    };
+
+    harness.record_exec_state(&exec_id, "unreadable");
+    tokio::time::sleep(Duration::from_millis(1_500)).await;
+    harness.app.sweep_expired().await;
+
+    let signalled = harness
+        .driver
+        .signalled
+        .lock()
+        .expect("fixture lock")
+        .clone();
+    assert!(
+        harness.checkout_on_host(&checkout),
+        "lease cleanup destroyed {checkout} although it could not read the execs holding it \
+         (signalled: {signalled:?})"
+    );
+    assert!(signalled.is_empty(), "signalled: {signalled:?}");
+    assert!(
+        harness
+            .store
+            .workspace(&scope, &checkout)
+            .expect("workspace lookup")
+            .is_some(),
+        "the expired workspace's record survives a failed round"
+    );
+    let failed_round = harness.transitions(&scope, &checkout);
+    assert!(
+        failed_round.iter().any(|t| t == "workspace.cleanup-failed"),
+        "the failed read is a named cleanup failure: {failed_round:?}"
+    );
+    assert!(
+        !failed_round.iter().any(|t| t == "workspace.lease-expired"),
+        "no destroy is recorded for a failed round: {failed_round:?}"
+    );
+
+    harness.record_exec_state(&exec_id, "running");
+    for _ in 0..20 {
+        if !harness.checkout_on_host(&checkout) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        harness.app.sweep_expired().await;
+    }
+
+    let signalled = harness
+        .driver
+        .signalled
+        .lock()
+        .expect("fixture lock")
+        .clone();
+    assert_eq!(
+        signalled,
+        vec![exec_id.clone()],
+        "the retry ends the holder"
+    );
+    assert!(
+        !harness.checkout_on_host(&checkout),
+        "the retry ends {checkout} once its holders are read and signalled"
+    );
+    assert!(
+        harness
+            .store
+            .workspace(&scope, &checkout)
+            .expect("workspace lookup")
+            .is_none()
+    );
+    let retried = harness.transitions(&scope, &checkout);
+    assert!(
+        retried.iter().any(|t| t == "workspace.lease-expired"),
+        "the retry records the expiry: {retried:?}"
     );
 }
 
