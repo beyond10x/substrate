@@ -851,7 +851,7 @@ commands:
           ended_by: input.ended_by
           # DECIDED (point 16): the daemon assigns the per-process `seq`, strictly increasing, and
           # the opaque cursor beside it. ESS 0.60.0 cannot state monotonicity of a generated value,
-          # so it is implementation-side, and the ordering scenarios (stream-order, `ranked`)
+          # so it is implementation-side, and the ordering scenarios (`ranked`)
           # check it.
           seq: {generated: true}
           cursor: {generated: true}

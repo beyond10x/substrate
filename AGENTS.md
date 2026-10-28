@@ -43,7 +43,18 @@ Each is a claim that can be checked. Breaking one is a design change, not a refa
 5. **Operations are durable before driver dispatch**
    (`adr/0005-operations-are-durable-before-driver-dispatch.md`).
 6. **Every released contract bundle directory is immutable.** `contracts/substrate-wire/0.1.0`
-   through `0.23.0` exist; `0.23.0` adds no route and publishes ADR 0010's declared read-only
+   through `0.24.0` exist; `0.24.0` adds ADR 0036 S12: one route,
+   `GET /v1/processes/{process_id}/events`, a WebSocket under the `process` scope with no
+   capability predicate, whose frames are `schemas/process-stream-item.json` (a record's
+   `process.*` events and its log lines in one order, a `gap`, one terminal `ended`, an opaque
+   per-process `pe1.` cursor that names its record, whose published pattern is held to the
+   daemon's reader `ProcessEventCursor::parse`); the seven `process.*` variants of the closed
+   event union; the `MAX_PROCESS_EVENT_READERS` (8), `MAX_PROCESS_EVENT_STREAMS_PER_SUBJECT` and
+   `MAX_PROCESS_EVENT_STREAMS_PER_DEPLOYMENT` (512) and `MAX_PROCESS_EVENT_LINE_BYTES` (16 KiB)
+   bounds; and the named refusal `process.events-readers-exceeded` (429), each held to its
+   `substrate_wire` constant by `cargo xtask check-bundle 0.24.0`
+   (`xtask/src/bundle/process_events.rs`);
+   `0.23.0` added no route and published ADR 0010's declared read-only
    roots: the optional `read_only_roots` start list (closed `{host_path, mount}` entries, at most
    `MAX_READ_ONLY_ROOTS`), the optional `exec.read-only-roots` fact (`max_roots`), the applied
    `read_only_roots` record and the three refusals a root has always raised, now published with a
@@ -91,8 +102,8 @@ Each is a claim that can be checked. Breaking one is a design change, not a refa
    context and grant attribution (ADR 0011); `0.6.0` added destination-bound egress
    apertures (ADR 0013), and **every earlier directory is frozen** (`STATUS.md:36`,
    `xtask/src/json.rs:152`, `contracts/substrate-wire/0.2.0/README.md:13`).
-   The daemon and Rust SDK advertise `substrate-wire/0.23.0` with the SHA-256 of that bundle's
-   inner `bundle.json` (`crates/substrate-wire/src/lib.rs`); ADR 0010 records the read-only roots, ADR 0038 the writable-root
+   The daemon and Rust SDK advertise `substrate-wire/0.24.0` with the SHA-256 of that bundle's
+   inner `bundle.json` (`crates/substrate-wire/src/lib.rs`); ADR 0036 S12 records the process event stream, ADR 0010 the read-only roots, ADR 0038 the writable-root
    additions, design 26 records the working
    directory and aperture-list additions, design 21 records the Git source and
    observation additions, ADR 0028 records the preceding route promotion, and the gate retains the
@@ -161,7 +172,7 @@ Substrate is confinement. Everything below is the reason it can be trusted with 
   deliberately not committed (`docs/design/09-delegated-context-and-grant-attribution.md` § 6), so
   the vectors are verify-only. They do **not** verify with `delegated_signing_key` in
   `crates/substrate-daemon/tests/runtime_vectors.rs`, whose published seed signs only the
-  documents that runner mints at run time. This holds for bundles `0.17.0` through `0.23.0`. The exception is scoped by rule
+  documents that runner mints at run time. This holds for bundles `0.17.0` through `0.24.0`. The exception is scoped by rule
   **and** by path; a JWT anywhere else, including any other vector, is still a finding. Proven, not
   asserted: the same token in `contracts/substrate-wire/0.7.0/vectors/http/delegated-context-*.json`
   is allowed and in `crates/substrate-daemon/src/` is caught. **Widening this allowlist is a
@@ -194,7 +205,7 @@ In order: `cargo test --workspace --release --locked`, `cargo fmt --all --check`
 `cargo xtask check-licenses`, `cargo xtask check-packages`, `cargo xtask check-mcp-boundary`,
 `check-contract-bundle.py`, `check-contract-bundle-0.2.0.py`,
 `-0.3.0.py`, `-0.4.0.py`, one bounded
-`cargo xtask check-bundles 0.5.0 ... 0.23.0`,
+`cargo xtask check-bundles 0.5.0 ... 0.24.0`,
 `cargo xtask check-json` and `cargo xtask check-toolchain`.
 Green here is the bar for `main`.
 
@@ -224,8 +235,8 @@ bundles' reproducibility proof (invariant 6), not as tooling.
 | `package-bundle <version> --out <dir>` | produces a released bundle as a deterministic OCI image layout | no — under `cargo test` |
 | `render-bundle <version> --out <dir>` | produces a bundle tree from `substrate-wire` and `xtask/bundle-source/<version>/`; refuses to write anywhere under `contracts/` | no — under `cargo test` |
 | `check-bundle <version>` | a released bundle whose bytes are not the fixed point of `xtask/bundle-source/<version>/` | no — focused form of the batched gate check |
-| `check-bundles <version>...` | the same checks with a bounded worker count and deterministic version-order reporting | yes, `0.5.0` through `0.23.0` in one invocation |
-| `check-json [<version>...]` | JSON beneath a released bundle that no bundled schema classifies, that its schema rejects, or that is not in deterministic source form | yes, all twenty-three |
+| `check-bundles <version>...` | the same checks with a bounded worker count and deterministic version-order reporting | yes, `0.5.0` through `0.24.0` in one invocation |
+| `check-json [<version>...]` | JSON beneath a released bundle that no bundled schema classifies, that its schema rejects, or that is not in deterministic source form | yes, all twenty-four |
 
 **`cargo xtask package-bundle <version> --out <dir>`** packages a released bundle as a
 deterministic OCI image layout. It is not a gate step of its own: its cases run under
@@ -248,7 +259,7 @@ already ahead of `0.4.0` — `ExecStartInput::read_only_roots` (the `ExecStartIn
 `crates/substrate-wire/src/lib.rs`) has no `0.4.0` schema — and no bound sits *on* a type as a
 derive attribute. The bounds the schemas state are free constants: the wire crate's own
 `pub const MAX_…`/`MIN_…` items (`grep -c '^pub const \(MAX\|MIN\)_' crates/substrate-wire/src/lib.rs`
-= 48), which a schema binds with the `{"$wire": "CONSTANT"}` marker, plus the daemon- and
+= 50), which a schema binds with the `{"$wire": "CONSTANT"}` marker, plus the daemon- and
 host-local literals their enforcement sites hold — `PIPE_MAX_FRAME_BYTES`,
 `PIPE_MAX_INPUT_BYTES` and `PIPE_MAX_QUEUED_FRAMES` in `crates/substrate-daemon/src/app.rs`, and
 `PIPE_FRAME_BYTES` and `PIPE_QUEUED_FRAMES` in `crates/substrate-host/src/process.rs`.
@@ -273,7 +284,7 @@ a list, and the six lexical writable-root refusals (422) of ADR 0038 with
 `exec.writable-roots-host-unserved` and `exec.writable-roots-git-unserved` (501), which both lanes
 answer for a host root the daemon did not declare and for every Git root, and the portable lane
 also for the one host root the runner declares, which it cannot prove without confinement — across
-118 cases, and its delegated lane 180, whose four writable-root cases bind that declared root and
+119 cases, and its delegated lane 182, whose four writable-root cases bind that declared root and
 check the host side: the write lands, its parent and sibling do not change, a working directory
 beneath the mount runs there, and the declared path swapped for a symlink is
 `exec.writable-root-not-a-directory` (422). Its read-only-root cases (ADR 0010, bundle `0.23.0`): portable, the `exec.read-only-roots` fact is absent, one root is refused `exec.sandbox-unavailable` (501) by the daemon before dispatch and five roots are `exec.read-only-root-invalid` (422), the lexical rule checked first; delegated, the fact is `{"max_roots": 4}`, four roots are bound, read and refused writes, listed in the applied record and left unchanged on the host, a fifth is `exec.read-only-root-invalid` (422), and an absent host path is `exec.read-only-root-absent` (422) while a plain file and a symlink to a directory are `exec.read-only-root-not-a-directory` (422). Both totals also count a second daemon that declares a
@@ -289,7 +300,10 @@ neither listing carries the header and the tree is not truncated.
 Both totals include
 one route/refusal probe for every operation in the promoted registry (the seven host-process routes
 of `0.20.0` among them: unserved on the portable lane, served and refused before anything runs on
-the delegated one), and an operator's directory adopted through `workspace.adopt` (ADR 0035): its
+the delegated one; the process event stream of `0.24.0` answers an absent record
+`process.not-found` before the upgrade on both, and the delegated lane executes its vector
+`process-events-beyond-the-readers-bound-is-exhausted`, holding a started record's readers bound
+open and comparing the refusal with the vector's response), and an operator's directory adopted through `workspace.adopt` (ADR 0035): its
 out-of-set neighbour refused as `request.schema-invalid` before dispatch, an exec addressing it by
 root name refused, a destroy that leaves its files, and, delegated, an exec run in it plus every
 `check_confined_isolation` case run again against it (portable: `exec.sandbox-unavailable`
@@ -376,8 +390,8 @@ cases, because they are in a different crate and outside `DELEGATED_CASES`.
 **The gate verifies every released bundle, not just `0.1.0`.** The four
 `run python3 scripts/check-contract-bundle*.py` lines in `scripts/gate.sh` run the
 four frozen Python checkers, and the line after them runs `cargo xtask check-bundles` for `0.5.0`
-through `0.23.0`, so
-a green gate *is* evidence that all twenty-three still hold. Cutting a successor bundle therefore means
+through `0.24.0`, so
+a green gate *is* evidence that all twenty-four still hold. Cutting a successor bundle therefore means
 **adding its check to `scripts/gate.sh`** — a bundle whose check is not in the gate is unverified
 from the next commit onward.
 
@@ -518,17 +532,19 @@ offline against throwaway tagged repositories by `xtask/tests/release_workflow.r
 `packages: write` and `id-token: write` exist on the release job and nowhere else; that job holds
 `contents: write` only to create the GitHub release. Everything it does uses the run's own
 `GITHUB_TOKEN`; **the release needs no repository secret at all** (§ *Bot identity*). The GitHub
-release records all artifact digests and the exact `cosign verify` and `cosign verify-blob` commands. **`0.7.7` is the published
-release**: daemon `ghcr.io/beyond10x/b10x-substrate-daemon:0.7.7` at
-`sha256:5e20467bd03ad7e619ffcf8664dcc6d3323c62fb62eb1f0e25f001333092a409`, disposable MCP
-`ghcr.io/beyond10x/b10x-substrate-mcp:0.7.7` at
-`sha256:e40c16ae56fa06353e508e5245b8d78b336ecd1cebf3fde20b8dddaf18b42b7c`, and development bundle
-`ghcr.io/beyond10x/b10x-substrate-wire:0.16.0` at
-`sha256:4c4e57a1b2427cb004a05cb475c1193e979777c5c79d9a9505ba5facbe10daf7`. All three were
-keyless-signed, `cosign verify`-ed with the exact tagged workflow identity
-(`release.yml@refs/tags/0.7.7`), and anonymously read back before the GitHub release was announced.
+release records all artifact digests and the exact `cosign verify` and `cosign verify-blob` commands. **`0.14.0` is the published
+release** (2026-10-27, tagged commit `0b9d50c`): daemon
+`ghcr.io/beyond10x/b10x-substrate-daemon:0.14.0` at
+`sha256:a22fc8a1707ac750eb86115422e26ecfb2fde64fb3df588e9fced32ef2a52182`, disposable MCP
+`ghcr.io/beyond10x/b10x-substrate-mcp:0.14.0` at
+`sha256:c6844980db262412db962228bb263421e285d57226e7c8a3a28fbbb85d589d42`, and development bundle
+`ghcr.io/beyond10x/b10x-substrate-wire:0.23.0` at
+`sha256:c2a50222da154028011a794cc93724043943581ba4ee44051c38dd084b759ff5`, plus the two binary
+archives under a signed `SHA256SUMS`. All were keyless-signed and verified with the exact tagged
+workflow identity (`release.yml@refs/tags/0.14.0`), and the three images were anonymously read back
+before the GitHub release was announced.
 Do not maintain a second digest list here: the digests of every release are the GitHub release's own
-([0.7.7](https://github.com/beyond10x/substrate/releases/tag/0.7.7)) and
+([0.14.0](https://github.com/beyond10x/substrate/releases/tag/0.14.0)) and
 [CHANGELOG.md](CHANGELOG.md)'s.
 
 **Ruleset `main-requires-the-full-gate` (id 23425552, no bypass actors) requires that check on `main` (`gh api repos/beyond10x/substrate/rules/branches/main` → `required_status_checks` beside `creation`, `update`, `deletion`, `non_fast_forward` and the two email patterns); the legacy `GET …/branches/main/protection` still answers 404 `Branch not protected`, because rulesets are not branch protection.** The gate is also enforced at release time: `release.yml` reads

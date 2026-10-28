@@ -1,0 +1,120 @@
+{
+  "$id": "urn:b10x:substrate-wire:0.24.0:process-stream-item",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "description": "One text frame of GET /v1/processes/{process_id}/events (ADR 0036 S12). kind names the one member beside cursor; cursor resumes the stream after this item. A lifecycle item is the event-log event verbatim; a line is the S7 line shape; a gap states the log bytes the bound discarded before the reader reached them; ended is the last item, after which the daemon closes the stream.",
+  "oneOf": [
+    {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "$ref": "common.json#/$defs/process-event-cursor"
+        },
+        "event": {
+          "allOf": [
+            {
+              "$ref": "event.json"
+            }
+          ],
+          "properties": {
+            "resource_kind": {
+              "const": "process"
+            }
+          }
+        },
+        "kind": {
+          "const": "event"
+        }
+      },
+      "required": [
+        "kind",
+        "cursor",
+        "event"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "$ref": "common.json#/$defs/process-event-cursor"
+        },
+        "kind": {
+          "const": "line"
+        },
+        "line": {
+          "$ref": "resource.json#/$defs/process-log-line"
+        }
+      },
+      "required": [
+        "kind",
+        "cursor",
+        "line"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "$ref": "common.json#/$defs/process-event-cursor"
+        },
+        "gap": {
+          "additionalProperties": false,
+          "properties": {
+            "discarded_bytes": {
+              "maximum": 18446744073709551615,
+              "minimum": 1,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "discarded_bytes"
+          ],
+          "type": "object"
+        },
+        "kind": {
+          "const": "gap"
+        }
+      },
+      "required": [
+        "kind",
+        "cursor",
+        "gap"
+      ],
+      "type": "object"
+    },
+    {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "$ref": "common.json#/$defs/process-event-cursor"
+        },
+        "ended": {
+          "additionalProperties": false,
+          "properties": {
+            "ended_by": {
+              "$ref": "resource.json#/$defs/process/properties/ended_by"
+            },
+            "exit": {
+              "$ref": "resource.json#/$defs/process-exit"
+            }
+          },
+          "required": [
+            "ended_by"
+          ],
+          "type": "object"
+        },
+        "kind": {
+          "const": "ended"
+        }
+      },
+      "required": [
+        "kind",
+        "cursor",
+        "ended"
+      ],
+      "type": "object"
+    }
+  ],
+  "title": "process event stream item"
+}

@@ -153,9 +153,20 @@ Earlier bundle directories remain immutable. This source contract promotion is n
 daemon release; consumers must pin and test the matching SDK/daemon revision. The SDK refuses an
 older daemon's contract before issuing mutations.
 
+### `0.24.0`
+
+Development source now advertises `substrate-wire/0.24.0`. It adds one route, the per-process
+event stream of ADR 0036 S12: `GET /v1/processes/{process_id}/events`, a WebSocket under the
+`process` scope. Its frames interleave the record's `process.*` events and its output lines in one
+order, report a `gap` for log bytes the bound discarded, and end with exactly one `ended` item
+naming `ended_by`. Each frame carries an opaque cursor to resume from. The event union gains seven
+`process.*` variants, so a client that validates events against `0.23.0` must move to `0.24.0`. A
+ninth concurrent stream of one record, a subject's 513th or a deployment's 513th, live or ended
+records alike, is refused `process.events-readers-exceeded` (429).
+
 ### `0.23.0`
 
-Development source now advertises `substrate-wire/0.23.0`. It adds no route and publishes the
+`0.23.0` adds no route and publishes the
 read-only roots the wire has always admitted (ADR 0010): an exec or session start may name
 `read_only_roots`, at most four `{"host_path": <path>, "mount": <path>}` entries, each path absolute
 and canonical. A host publishes `exec.read-only-roots`, `{"max_roots": 4}`, only when it is

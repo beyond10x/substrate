@@ -239,7 +239,7 @@ impl Check {
 /// Every code `substrate_refusals_total` names: the codes the wire crate names as constants.
 /// Any other code is counted as `other`. `tests::the_refusal_codes_are_the_wire_constants` holds
 /// this list to the wire crate's source, so a constant added there fails until it is added here.
-const REFUSAL_CODES: [&str; 106] = [
+const REFUSAL_CODES: [&str; 107] = [
     substrate_wire::EXEC_METRICS_UNSERVED,
     substrate_wire::EXEC_SCRATCH_QUOTA_UNSERVED,
     substrate_wire::EXEC_SCRATCH_QUOTA_LIMIT,
@@ -345,6 +345,7 @@ const REFUSAL_CODES: [&str; 106] = [
     substrate_wire::PROCESS_NOT_FOUND,
     substrate_wire::PROCESS_TIMEOUT_INVALID,
     substrate_wire::PROCESS_EXPIRES_AT_INVALID,
+    substrate_wire::PROCESS_EVENTS_READERS_EXCEEDED,
     substrate_wire::LEASE_EXPIRED,
 ];
 
@@ -1201,7 +1202,7 @@ mod tests {
     fn the_series_count_is_pinned_at_its_maximum() {
         let telemetry = Telemetry::default();
         let exposition = telemetry.render(every_check_passes(), Some(&process()), 0);
-        assert_eq!(SERIES_MAXIMUM, 578);
+        assert_eq!(SERIES_MAXIMUM, 579);
         assert_eq!(samples(&exposition).len(), SERIES_MAXIMUM);
         let refusals = samples(&exposition)
             .iter()

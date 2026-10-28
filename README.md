@@ -53,9 +53,9 @@ non-publishable.
 
 ## Status
 
-**Release [0.7.7](https://github.com/beyond10x/substrate/releases/tag/0.7.7) (2026-09-10)**
-ships keyless-signed daemon and disposable MCP images plus the signed `0.16.0` development
-contract bundle. Signed distribution does not make the contract stable. Why bytes annotated
+**Release [0.14.0](https://github.com/beyond10x/substrate/releases/tag/0.14.0) (2026-10-27)**
+ships keyless-signed daemon and disposable MCP images, the signed `0.23.0` development contract
+bundle, and signed x86_64 Linux binaries of the daemon and the command-line client. Signed distribution does not make the contract stable. Why bytes annotated
 `development` are signed, digest-pinned and published under a write-once tag at all is recorded in
 [ADR 0006](adr/0006-substrate-publishes-its-own-contract-bundle.md) § *Addendum*, which also records
 that no accepted text states the write-once-tag motive.
@@ -99,7 +99,7 @@ The table is the gate's own order (`scripts/gate.sh`).
 | contract bundle 0.2.0 | `python3 scripts/check-contract-bundle-0.2.0.py` |
 | contract bundle 0.3.0 | `python3 scripts/check-contract-bundle-0.3.0.py` |
 | contract bundle 0.4.0 | `python3 scripts/check-contract-bundle-0.4.0.py` |
-| contract bundles 0.5.0–0.23.0 | `cargo xtask check-bundles 0.5.0 … 0.23.0` — bounded parallel fixed-point, compatibility, classification and version-addition checks; `check-bundle <version>` remains the focused form |
+| contract bundles 0.5.0–0.24.0 | `cargo xtask check-bundles 0.5.0 … 0.24.0` — bounded parallel fixed-point, compatibility, classification and version-addition checks; `check-bundle <version>` remains the focused form |
 | contract JSON | `cargo xtask check-json` — every JSON under `contracts/` is classified by exactly one bundled schema, or it fails closed |
 | toolchain | `cargo xtask check-toolchain` |
 
@@ -165,7 +165,7 @@ without running anything, and `scripts/delegated-lane.sh` ends with it so a gree
 cannot be read as covering these cases.
 
 `cargo xtask check-json` fails closed on unclassified or schema-invalid contract JSON and
-meta-validates every Draft 2020-12 schema offline, across all twenty-three released bundles. Classification
+meta-validates every Draft 2020-12 schema offline, across all twenty-four released bundles. Classification
 used to live in a Python module the four checkers imported — shared live machinery, not any one
 bundle's reproducibility proof — so it moved with the rest of the tooling, and the four checkers no
 longer do it. They verify everything else about the bundles they froze.
@@ -180,7 +180,7 @@ write-once and ordering assertions run in `xtask/tests/release_workflow.rs`.
 
 ### Release binaries
 
-From the release after 0.13.0 on, each GitHub release also carries the daemon and the command-line
+From 0.14.0 on, each GitHub release also carries the daemon and the command-line
 client as prebuilt x86_64 Linux binaries:
 
 | asset | holds |

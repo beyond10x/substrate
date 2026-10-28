@@ -1,0 +1,52 @@
+{
+  "$schema": "../../schemas/vector.json",
+  "action": {
+    "command": {
+      "operation": "stream.reset",
+      "reason": "restore-before-sequence"
+    },
+    "kind": "driver",
+    "port": "lifecycle"
+  },
+  "context": {
+    "authority": "driver-harness",
+    "clock": "2026-08-13T12:00:00Z",
+    "deployment": "dep_vector",
+    "subject": "local:1000"
+  },
+  "covers": [
+    "events.generation-reset"
+  ],
+  "expected": {
+    "kind": "driver-outcome",
+    "outcome": {
+      "generation_changed": true,
+      "next_seq": 1
+    }
+  },
+  "id": "lost-sequence-proof-resets-generation",
+  "layer": "driver",
+  "phase": 3,
+  "postconditions": [
+    {
+      "actual": "/fixture_identity_from_request",
+      "expected": false,
+      "operator": "equals"
+    },
+    {
+      "actual": "/probes/old_cursor_accepted",
+      "expected": false,
+      "operator": "equals"
+    }
+  ],
+  "setup": [
+    {
+      "kind": "event",
+      "name": "old-generation",
+      "state": {
+        "generation": 41,
+        "through_seq": 99
+      }
+    }
+  ]
+}
