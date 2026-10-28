@@ -1,0 +1,13 @@
+{
+  "at": "2026-10-28T19:22:44Z",
+  "actor": "human:timo",
+  "artifact": "story:pod-unknown-cleanup-outlives-adapter",
+  "kind": "story",
+  "revision": 6,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "Full gate, PR 184 head 0d13dcb9, merged as 59827f77",
+    "reference": "https://github.com/beyond10x/substrate/actions/runs/40742003718"
+  }
+}
