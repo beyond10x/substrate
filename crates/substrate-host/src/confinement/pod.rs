@@ -85,6 +85,13 @@ const DEFAULT_BOUNDS: ProcessBounds = ProcessBounds {
 const MAX_CLUSTER_FILE_BYTES: u64 = 1_048_576;
 const MAX_API_BODY_BYTES: usize = 4 * 1_048_576;
 const MAX_ARGV_BYTES: usize = 262_144;
+/// What a request asks the API server for.
+const JSON: &str = "application/json";
+/// What a sweep's list asks for: a `PartialObjectMetadataList`, whose items carry each object's
+/// `metadata` alone. The sweeps read only names, labels and creation times, and a full Pod of a run
+/// the adapter admits holds up to 256 KiB of argv and 256 KiB of environment, so a page of
+/// [`SWEEP_PAGE_ITEMS`] full Pods of ten such runs is past [`MAX_API_BODY_BYTES`].
+const METADATA_LIST: &str = "application/json;as=PartialObjectMetadataList;g=meta.k8s.io;v=v1";
 const API_TIMEOUT: Duration = Duration::from_secs(30);
 /// What the open sweep adds to `start`'s two creates: whole-second `creationTimestamp` and `Date`
 /// values, and skew between API server members, one stamping the policy and another answering.
@@ -447,21 +454,31 @@ impl Api {
         body: Option<&Value>,
         limit: usize,
     ) -> Result<(u16, Bytes), String> {
-        let (status, _, bytes) = self.call_dated(method, path, body, limit).await?;
+        let (status, _, bytes) = self.timed(method, path, body, JSON, limit).await?;
         Ok((status, bytes))
     }
 
-    /// [`Api::call`], with the answer's `Date` header: the API server's clock.
-    async fn call_dated(
+    /// A GET of one page of the list at `path`, its items' `metadata` alone ([`METADATA_LIST`]),
+    /// bounded at [`MAX_API_BODY_BYTES`], with the answer's `Date` header: the API server's clock.
+    async fn list_metadata(&self, path: &str) -> Result<(u16, Option<String>, Bytes), String> {
+        self.timed(Method::GET, path, None, METADATA_LIST, MAX_API_BODY_BYTES)
+            .await
+    }
+
+    async fn timed(
         &self,
         method: Method,
         path: &str,
         body: Option<&Value>,
+        accept: &'static str,
         limit: usize,
     ) -> Result<(u16, Option<String>, Bytes), String> {
-        tokio::time::timeout(API_TIMEOUT, self.exchange(method, path, body, limit))
-            .await
-            .map_err(|_| "the cluster API did not answer in time".to_owned())?
+        tokio::time::timeout(
+            API_TIMEOUT,
+            self.exchange(method, path, body, accept, limit),
+        )
+        .await
+        .map_err(|_| "the cluster API did not answer in time".to_owned())?
     }
 
     async fn exchange(
@@ -469,6 +486,7 @@ impl Api {
         method: Method,
         path: &str,
         body: Option<&Value>,
+        accept: &'static str,
         limit: usize,
     ) -> Result<(u16, Option<String>, Bytes), String> {
         let tcp = tokio::net::TcpStream::connect((self.host.as_str(), self.port))
@@ -488,7 +506,7 @@ impl Api {
             .method(method)
             .uri(format!("{}{path}", self.base_path))
             .header(header::HOST, &self.authority)
-            .header(header::ACCEPT, "application/json")
+            .header(header::ACCEPT, accept)
             .header(header::USER_AGENT, "b10x-substrate-pod");
         if body.is_some() {
             request = request.header(header::CONTENT_TYPE, "application/json");
@@ -771,7 +789,7 @@ fn owner_selector() -> String {
 /// for the run that label names, at least [`SWEEP_AGE_FLOOR`] old by the API server's clock, whose
 /// run's Pod the API no longer has, in any phase. A policy without the label is never a candidate.
 /// The list is read whole first, in at most [`SWEEP_MAX_PAGES`] pages of [`SWEEP_PAGE_ITEMS`],
-/// each bounded in bytes; every request is bounded by [`API_TIMEOUT`] and there are at most two per
+/// each policy's metadata alone ([`METADATA_LIST`]) and each page bounded in bytes; every request is bounded by [`API_TIMEOUT`] and there are at most two per
 /// owned policy, so open stays bounded. Any failure, a list longer than that included, fails the
 /// sweep, and with it the open.
 ///
@@ -827,9 +845,7 @@ async fn sweep_page(
     path: &str,
     candidates: &mut Vec<(String, chrono::DateTime<chrono::FixedOffset>, bool)>,
 ) -> Result<Option<String>, String> {
-    let (status, date, body) = api
-        .call_dated(Method::GET, path, None, MAX_API_BODY_BYTES)
-        .await?;
+    let (status, date, body) = api.list_metadata(path).await?;
     if status != 200 {
         return Err(format!(
             "the policy list answered {status}: {}",
@@ -981,7 +997,8 @@ async fn resweep(api: &Api, deferred: &mut Vec<Deferred>) -> Result<(), String> 
 }
 
 /// The names of the namespace's Pods that carry the adapter's owner label, read whole in at most
-/// [`SWEEP_MAX_PAGES`] pages of [`SWEEP_PAGE_ITEMS`], and the API server's clock on the first page.
+/// [`SWEEP_MAX_PAGES`] pages of [`SWEEP_PAGE_ITEMS`], each Pod's metadata alone
+/// ([`METADATA_LIST`]), and the API server's clock on the first page.
 async fn owned_pods(
     api: &Api,
 ) -> Result<
@@ -1000,9 +1017,7 @@ async fn owned_pods(
     let mut now = None;
     let mut names = std::collections::BTreeSet::new();
     for page in 0..SWEEP_MAX_PAGES {
-        let (status, date, body) = api
-            .call_dated(Method::GET, &path, None, MAX_API_BODY_BYTES)
-            .await?;
+        let (status, date, body) = api.list_metadata(&path).await?;
         if status != 200 {
             return Err(format!(
                 "the Pod list answered {status}: {}",

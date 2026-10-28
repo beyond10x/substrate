@@ -86,7 +86,23 @@ fn the_adapter_checks_what_its_open_kept_until_nothing_is_left() {
     cluster.present.lock().insert(SEEN.to_owned());
     let api = Arc::new(start(&cluster));
     let thread = defer_sweep(&api, vec![kept(SEEN, Duration::from_secs(10))]).expect("spawned");
-    std::thread::sleep(Duration::from_millis(200));
+    // The rounds run one after another, so a second list means a whole round has listed the Pod,
+    // which a fixed pause does not on a loaded host: a policy 10 s old whose Pod no round saw is
+    // rightly kept for 90 s.
+    let list = format!("GET {}?labelSelector=", api.pods());
+    let lists = || {
+        cluster
+            .requests
+            .lock()
+            .iter()
+            .filter(|request| request.starts_with(&list))
+            .count()
+    };
+    let started = Instant::now();
+    while lists() < 2 && started.elapsed() < Duration::from_secs(10) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(lists() >= 2, "the deferred sweep finished no round in 10 s");
     assert!(
         !policy_deleted(&cluster, &api, SEEN),
         "a policy whose Pod exists was removed"

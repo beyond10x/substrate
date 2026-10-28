@@ -40,6 +40,11 @@ struct Cluster {
     /// The `substrate-run-deferred-*` Pods that exist: the owned Pod list names them and a read
     /// of one answers it; any other `substrate-run-deferred-*` Pod is gone.
     present: Mutex<std::collections::BTreeSet<String>>,
+    /// Security review: each listed Pod carries an argv of this many bytes and a full environment
+    /// at the adapter's own bounds, as a run the adapter admitted does; 0 lists bare metadata.
+    pod_argv_bytes: usize,
+    /// Security review: while set, the owned Pod list answers 500.
+    pod_list_fails: AtomicBool,
 }
 
 /// The orphan the policy list's page `page` holds: owned, an hour old, its Pod gone.
@@ -47,27 +52,123 @@ fn page_orphan(page: u32) -> String {
     format!("substrate-run-page-{page}")
 }
 
+/// Whether `accept` asks for a `meta.k8s.io/v1` `PartialObjectMetadataList`, as an API server
+/// reads it: one of its comma-separated media types is `application/json` with the parameters
+/// `as=PartialObjectMetadataList`, `g=meta.k8s.io` and `v=v1`, in any order.
+fn metadata_only(accept: &str) -> bool {
+    accept.split(',').any(|media| {
+        let mut parts = media.split(';').map(str::trim);
+        let media_type = parts.next();
+        let mut parameters: Vec<&str> = parts.collect();
+        parameters.sort_unstable();
+        media_type == Some("application/json")
+            && parameters == ["as=PartialObjectMetadataList", "g=meta.k8s.io", "v=v1"]
+    })
+}
+
+/// A list of `kind` holding `items` and ending at `token`, as the API server answers `accept`: each
+/// item's `metadata` alone in a `PartialObjectMetadataList`, or the objects whole.
+fn list(accept: &str, kind: &str, items: Vec<Value>, token: &Value) -> String {
+    if metadata_only(accept) {
+        let items: Vec<Value> = items
+            .into_iter()
+            .map(|item| {
+                json!({
+                    "kind": "PartialObjectMetadata",
+                    "apiVersion": "meta.k8s.io/v1",
+                    "metadata": item["metadata"],
+                })
+            })
+            .collect();
+        return json!({
+            "kind": "PartialObjectMetadataList",
+            "apiVersion": "meta.k8s.io/v1",
+            "metadata": {"continue": token},
+            "items": items,
+        })
+        .to_string();
+    }
+    json!({"kind": format!("{kind}List"), "metadata": {"continue": token}, "items": items})
+        .to_string()
+}
+
 /// Page `page` (from 1) of the policy list: one orphan, and a `continue` token unless it is the last.
-fn page(cluster: &Cluster, page: u32) -> String {
+fn page(cluster: &Cluster, page: u32, accept: &str) -> String {
     let name = page_orphan(page);
     let token = if page < cluster.pages {
         json!(format!("token-{}", page + 1))
     } else {
         json!("")
     };
-    json!({
-        "kind": "NetworkPolicyList",
-        "metadata": {"continue": token},
-        "items": [{"metadata": {
+    let policy = json!({
+        "kind": "NetworkPolicy",
+        "metadata": {
             "name": name,
             "creationTimestamp": "2020-01-01T00:00:00Z",
             "labels": {MANAGED_BY_LABEL: MANAGED_BY, RUN_LABEL: name},
-        }}],
-    })
-    .to_string()
+        },
+        "spec": {
+            "podSelector": {"matchLabels": {RUN_LABEL: name}},
+            "policyTypes": ["Ingress", "Egress"],
+        },
+    });
+    list(accept, "NetworkPolicy", vec![policy], &token)
 }
 
-fn answer(cluster: &Cluster, method: &str, path: &str) -> (u16, String) {
+/// The owned Pod list: the `present` Pods, or 500 while `pod_list_fails` is set.
+fn owned_pod_list(cluster: &Cluster, accept: &str) -> (u16, String) {
+    if cluster.pod_list_fails.load(Ordering::SeqCst) {
+        return (
+            500,
+            r#"{"kind":"Status","message":"unavailable"}"#.to_owned(),
+        );
+    }
+    let items: Vec<Value> = cluster
+        .present
+        .lock()
+        .iter()
+        .map(|name| {
+            let mut pod = json!({"metadata": {
+                "name": name,
+                "labels": {MANAGED_BY_LABEL: MANAGED_BY, RUN_LABEL: name},
+            }});
+            if cluster.pod_argv_bytes > 0 {
+                let env: Vec<Value> = (0..crate::environment::MAX_SET)
+                    .map(|index| json!({"name": format!("V{index}"), "value": "x".repeat(4096)}))
+                    .collect();
+                // The API server records the fields the create set in `metadata.managedFields`,
+                // which a metadata-only list keeps: one key per variable, never its value.
+                let fields: serde_json::Map<String, Value> = (0..crate::environment::MAX_SET)
+                    .map(|index| {
+                        (
+                            format!("k:{{\"name\":\"V{index}\"}}"),
+                            json!({".": {}, "f:name": {}, "f:value": {}}),
+                        )
+                    })
+                    .collect();
+                pod["metadata"]["managedFields"] = json!([{
+                    "manager": "b10x-substrate-pod",
+                    "operation": "Update",
+                    "apiVersion": "v1",
+                    "fieldsType": "FieldsV1",
+                    "fieldsV1": {"f:spec": {"f:containers": {
+                        format!("k:{{\"name\":\"{CONTAINER}\"}}"): {"f:args": {}, "f:env": fields},
+                    }}},
+                }]);
+                pod["spec"] = json!({"containers": [{
+                    "name": CONTAINER,
+                    "command": ["sh"],
+                    "args": ["x".repeat(cluster.pod_argv_bytes - 2)],
+                    "env": env,
+                }]});
+            }
+            pod
+        })
+        .collect();
+    (200, list(accept, "Pod", items, &json!("")))
+}
+
+fn answer(cluster: &Cluster, method: &str, path: &str, accept: &str) -> (u16, String) {
     let pod = format!("/api/v1/namespaces/{NAMESPACE}/pods/{RUN}");
     let policies = format!("/apis/networking.k8s.io/v1/namespaces/{NAMESPACE}/networkpolicies");
     let policy = format!("{policies}/{RUN}");
@@ -78,7 +179,7 @@ fn answer(cluster: &Cluster, method: &str, path: &str) -> (u16, String) {
             .split('&')
             .find_map(|pair| pair.strip_prefix("continue=token-"))
             .map_or(1, |number| number.parse().expect("a page number"));
-        return (200, page(cluster, number));
+        return (200, page(cluster, number, accept));
     }
     let orphan = |prefix: &str| {
         cluster.pages > 0
@@ -94,21 +195,7 @@ fn answer(cluster: &Cluster, method: &str, path: &str) -> (u16, String) {
     }
     let pods = format!("/api/v1/namespaces/{NAMESPACE}/pods");
     if method == "GET" && pod_path == pods && query.starts_with("labelSelector=") {
-        let items: Vec<Value> = cluster
-            .present
-            .lock()
-            .iter()
-            .map(|name| {
-                json!({"metadata": {
-                    "name": name,
-                    "labels": {MANAGED_BY_LABEL: MANAGED_BY, RUN_LABEL: name},
-                }})
-            })
-            .collect();
-        return (
-            200,
-            json!({"kind": "PodList", "metadata": {"continue": ""}, "items": items}).to_string(),
-        );
+        return owned_pod_list(cluster, accept);
     }
     let deferred = |prefix: &str| {
         pod_path
@@ -176,6 +263,7 @@ fn serve(stream: TcpStream, config: Arc<ServerConfig>, cluster: &Cluster) -> std
     let mut line = String::new();
     stream.read_line(&mut line)?;
     let mut length = 0_usize;
+    let mut accept = String::new();
     loop {
         let mut header = String::new();
         stream.read_line(&mut header)?;
@@ -183,8 +271,13 @@ fn serve(stream: TcpStream, config: Arc<ServerConfig>, cluster: &Cluster) -> std
         if header.is_empty() {
             break;
         }
-        if let Some(value) = header.to_ascii_lowercase().strip_prefix("content-length:") {
+        let Some((name, value)) = header.split_once(':') else {
+            continue;
+        };
+        if name.eq_ignore_ascii_case("content-length") {
             length = value.trim().parse().unwrap_or(0);
+        } else if name.eq_ignore_ascii_case("accept") {
+            value.trim().clone_into(&mut accept);
         }
     }
     let mut body = vec![0_u8; length];
@@ -192,7 +285,7 @@ fn serve(stream: TcpStream, config: Arc<ServerConfig>, cluster: &Cluster) -> std
     let mut parts = line.split(' ');
     let (method, path) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""));
     cluster.requests.lock().push(format!("{method} {path}"));
-    let (status, payload) = answer(cluster, method, path);
+    let (status, payload) = answer(cluster, method, path, &accept);
     let writer = stream.get_mut();
     write!(
         writer,
@@ -464,3 +557,6 @@ mod adversary_pass1;
 
 #[path = "pod_cleanup_deferred.rs"]
 mod deferred;
+
+#[path = "pod_cleanup_review.rs"]
+mod review;

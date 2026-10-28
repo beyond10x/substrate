@@ -59,14 +59,19 @@ up to 30 seconds for that answer, then creates the Pod and waits up to 30 second
 server stamps a `creationTimestamp` in whole seconds before admission and storage, possibly on
 another member than the one whose `Date` the sweep reads; a younger policy may fence a run another
 adapter is still starting. A policy without that label, or whose name is not its run label, is never
-touched. The list is read in pages of 100 with `continue`, each page bounded at 4 MiB, at most 64
-pages; every page is read before anything is deleted. A list longer than that, or a sweep the API
+touched. The list asks for each policy's metadata alone (`Accept:
+application/json;as=PartialObjectMetadataList;g=meta.k8s.io;v=v1`) and is read in pages of 100 with
+`continue`, each page bounded at 4 MiB, at most 64 pages; every page is read before anything is
+deleted. A list longer than that, or a sweep the API
 refuses or does not answer, does not open (`confinement.adapter-unserved`).
 
 The sweep reads the Pod of every owned policy, the young ones included, and keeps a policy younger
 than 90 seconds or whose Pod exists. The opened adapter checks what it kept again, every 2 seconds,
-on a thread of its own: each round lists the namespace's Pods labelled
-`app.kubernetes.io/managed-by: b10x-substrate`, in pages of 100, at most 64, and a kept policy
+on a thread of its own: each round lists the metadata alone of the namespace's Pods labelled
+`app.kubernetes.io/managed-by: b10x-substrate`, as the open sweep lists policies, in pages of 100
+bounded at 4 MiB, at most 64. A whole Pod of a run the adapter admits holds up to 256 KiB of argv
+and 256 KiB of environment, so a page of whole Pods of ten such runs would pass the bound and fail
+every round; a Pod's metadata holds neither. A kept policy
 whose Pod the list lacks is deleted after one more read of its Pod finds it gone, when the API has
 shown that Pod before (its start stored the Pod and creates it no more) or the policy is 90 seconds
 old by that list's `Date`. A young policy whose Pod was never seen therefore stays until it is 90
