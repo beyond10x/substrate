@@ -2,6 +2,8 @@
 
 #[path = "../container_bootstrap.rs"]
 mod bootstrap;
+#[path = "../container_profile_name.rs"]
+mod profile_name;
 
 use std::ffi::OsString;
 use std::process::ExitCode;
@@ -17,6 +19,9 @@ struct Args {
     /// Select the image's existing `SYS_ADMIN` file-capability quota executable.
     #[arg(long)]
     project_quotas: bool,
+    /// The `AppArmor` profile this container must run under, enforced.
+    #[arg(long, default_value = profile_name::DEFAULT)]
+    apparmor_profile: profile_name::ProfileName,
     /// Normal daemon arguments. The cgroup root is fixed by this entrypoint.
     #[arg(last = true, required = true)]
     daemon_arguments: Vec<OsString>,
@@ -24,11 +29,44 @@ struct Args {
 
 fn main() -> ExitCode {
     let args = Args::parse();
-    match bootstrap::run(args.project_quotas, args.daemon_arguments) {
+    match bootstrap::run(
+        args.project_quotas,
+        &args.apparmor_profile,
+        args.daemon_arguments,
+    ) {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("container execution bootstrap refused: {error:#}");
             ExitCode::FAILURE
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_profile_defaults_and_a_stated_one_never_reaches_the_daemon() {
+        let args = Args::try_parse_from(["exec", "--", "--socket", "s"]).unwrap();
+        assert_eq!(args.apparmor_profile.to_string(), profile_name::DEFAULT);
+        let args = Args::try_parse_from([
+            "exec",
+            "--project-quotas",
+            "--apparmor-profile",
+            "substrate-host-exec-v1-lane-a",
+            "--",
+            "--socket",
+            "s",
+        ])
+        .unwrap();
+        assert_eq!(
+            args.apparmor_profile.to_string(),
+            "substrate-host-exec-v1-lane-a"
+        );
+        assert_eq!(args.daemon_arguments, ["--socket", "s"]);
+        assert!(
+            Args::try_parse_from(["exec", "--apparmor-profile", "unconfined", "--", "x"]).is_err()
+        );
     }
 }

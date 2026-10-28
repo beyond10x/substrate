@@ -102,6 +102,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
     A recovery reuses an existing chart only when its chart layer is the local package byte for
     byte. The release notes list the scenarios the chart lane reported absent.
   - The gate preflight now also counts only a push to `main` or a dispatch in this repository.
+- The host execution AppArmor profile name is a deployment parameter (design 33). The chart
+  value `execution.appArmorProfile` (default `substrate-host-exec-v1`) and `--apparmor-profile`
+  on `substrate-container-profiles` and `substrate-container-exec` accept `substrate-host-exec-v1`
+  or `substrate-host-exec-v1-<suffix>`. The installer renders the unchanged policy under that
+  name, renaming its declaration and its two self-peers, installs and loads it from
+  `<name>.apparmor`, and refuses any source that is not those exact bytes. The bootstrap
+  requires `<name> (enforce)`. The schema and the templates refuse any other name. With the
+  value unset, the policy, the installer, the bootstrap check and `helm template` output are
+  byte-identical to before.
 
 ### Security
 
