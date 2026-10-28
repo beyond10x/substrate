@@ -2,7 +2,7 @@
 format: aep.planning-md/3
 id: epic:container-driver-entry
 kind: epic
-status: proposed
+status: active
 title: Container driver entry
 summary: 'Plan 03''s entry criteria proven before any Docker code: no host type crosses the driver port, one driver-parameterised conformance journey, named root-equivalent Docker authorities.'
 owner: substrate
@@ -10,9 +10,10 @@ tags:
 - phase-5
 relations:
 - depends_on: epic:byte-plane-completion
-revision: 5
+revision: 6
 transitions:
 - {from: "draft", to: "proposed", at: "2026-08-31T22:50:11Z", actor: "human:timo", revision: 4, imported: true}
+- {from: "proposed", to: "active", at: "2026-10-28T19:32:44Z", actor: "human:timo", revision: 6}
 ---
 # Epic: Container driver entry
 
