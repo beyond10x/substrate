@@ -2,12 +2,14 @@
 format: aep.planning-md/3
 id: dependency-blocker:gates-scan-limit
 kind: dependency-blocker
-status: open
+status: cleared
 title: 'The org source gate refuses substrate main: candidate exceeds scan limit'
 relations:
 - blocks: story:pod-unknown-cleanup-outlives-adapter
 - blocks: story:node-bound-kubernetes-serving-profile
-revision: 1
+revision: 2
+transitions:
+- {from: "open", to: "cleared", at: "2026-10-28T14:49:48Z", actor: "human:timo", revision: 2}
 ---
 # The org source gate refuses substrate main: candidate exceeds scan limit
 
