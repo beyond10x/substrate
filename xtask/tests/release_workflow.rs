@@ -1465,3 +1465,685 @@ fn release_archives_are_deterministic_named_as_documented_and_summed_exactly() {
         );
     }
 }
+
+const CHART_LANE_STEP: &str = "Require a green chart-lane run for this commit";
+const CHART_SOURCE: &str = "deploy/helm/substrate/Chart.yaml";
+
+/// A routing `gh` stub: `gh api <path> --jq F` applies `F` with `jq -r` to `$STUB_JOBS` for a
+/// jobs path, `$STUB_ANNOTATIONS` for an annotations path and `$STUB_JSON` otherwise, and logs
+/// each path to `$GH_LOG`. `sleep` fails, so a step that would wait ends at once.
+fn routing_stub_tools() -> tempfile::TempDir {
+    let tools = api_stub_tools();
+    let gh = tools.path().join("gh");
+    fs::write(
+        &gh,
+        "#!/bin/bash\nfilter=.\npath=\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    --jq) filter=$2; shift 2 ;;\n    api|--paginate) shift ;;\n    *) path=$1; shift ;;\n  esac\ndone\nprintf '%s\\n' \"$path\" >> \"$GH_LOG\"\ncase \"$path\" in\n  */jobs*) json=$STUB_JOBS ;;\n  */annotations*) json=$STUB_ANNOTATIONS ;;\n  *) json=$STUB_JSON ;;\nesac\nprintf '%s' \"$json\" | jq -r \"$filter\"\n",
+    )
+    .expect("routing gh stub");
+    tools
+}
+
+/// Chart-lane runs of the tagged commit, each a `push` to `main` of this repository, as
+/// `(status, conclusion)`.
+fn main_runs(runs: &[(&str, &str)]) -> String {
+    let runs: Vec<String> = runs
+        .iter()
+        .enumerate()
+        .map(|(index, (status, conclusion))| {
+            format!(
+                "{{\"id\":{index},\"status\":\"{status}\",\"conclusion\":\"{conclusion}\",\"event\":\"push\",\"head_branch\":\"main\",\"head_repository\":{{\"full_name\":\"example/substrate\"}},\"html_url\":\"https://example.invalid/runs/{index}\"}}"
+            )
+        })
+        .collect();
+    format!("{{\"workflow_runs\":[{}]}}", runs.join(","))
+}
+
+/// Runs the chart-lane preflight step offline against the routing `gh` stub; the tagged source
+/// either carries the chart or predates it. Returns the step's success, log, output and the API
+/// paths it read.
+fn chart_lane_reading(
+    with_chart: bool,
+    event: &str,
+    runs: &str,
+    jobs: &str,
+    annotations: &str,
+) -> (bool, String, String, String) {
+    let files: &[(&str, &str)] = if with_chart {
+        &[(CHART_SOURCE, "apiVersion: v2\nname: b10x-substrate\n")]
+    } else {
+        &[("README.md", "a source before the chart\n")]
+    };
+    let source = TaggedSource::with_files(files, "release {sha}");
+    let tools = routing_stub_tools();
+    let gh_log = tools.path().join("gh.log");
+    fs::write(&gh_log, "").expect("gh log");
+    let gh_log_path = gh_log.display().to_string();
+    let (success, log, output) = run_release_step(
+        CHART_LANE_STEP,
+        source.directory.path(),
+        &[
+            ("SOURCE_SHA", &source.sha),
+            ("EVENT_NAME", event),
+            ("STUB_JSON", runs),
+            ("STUB_JOBS", jobs),
+            ("STUB_ANNOTATIONS", annotations),
+            ("GH_LOG", &gh_log_path),
+            ("CHART_WORKFLOW", "chart-lane.yml"),
+            ("GITHUB_REPOSITORY", "example/substrate"),
+            ("GITHUB_API_URL", "https://api.github.com"),
+            ("GIT_CONFIG_GLOBAL", "/dev/null"),
+            ("GIT_CONFIG_NOSYSTEM", "1"),
+        ],
+        Some(tools.path()),
+    );
+    (
+        success,
+        log,
+        output,
+        fs::read_to_string(&gh_log).expect("gh log"),
+    )
+}
+
+fn chart_lane(with_chart: bool, event: &str, runs: &str) -> (bool, String, String) {
+    let (success, log, output, _) =
+        chart_lane_reading(with_chart, event, runs, "{\"jobs\":[]}", "[]");
+    (success, log, output)
+}
+
+#[test]
+fn a_tag_with_a_green_chart_lane_run_is_accepted_and_its_run_recorded() {
+    let (success, log, output) = chart_lane(
+        true,
+        "push",
+        &main_runs(&[("completed", "failure"), ("completed", "success")]),
+    );
+    assert!(success, "{log}");
+    assert!(output.contains("chart=present\n"), "{output}");
+    assert!(
+        output.contains("run-url=https://example.invalid/runs/1\n"),
+        "{output}"
+    );
+}
+
+#[test]
+fn the_chart_lanes_absent_scenarios_are_read_from_its_run_and_carried_to_the_release() {
+    let (success, log, output, paths) = chart_lane_reading(
+        true,
+        "push",
+        &main_runs(&[("completed", "success")]),
+        "{\"jobs\":[{\"id\":41,\"check_run_url\":\"https://api.github.com/repos/example/substrate/check-runs/41\"}]}",
+        "[{\"annotation_level\":\"notice\",\"title\":\"chart-lane absent\",\"message\":\"execution bootstrap: not run on kind\"},{\"annotation_level\":\"warning\",\"title\":\"chart-lane absent\",\"message\":\"a warning is not a record\"},{\"annotation_level\":\"notice\",\"title\":\"something else\",\"message\":\"another notice\"},{\"annotation_level\":\"notice\",\"title\":\"chart-lane absent\",\"message\":\"egress: never dialled\"}]",
+    );
+    assert!(success, "{log}");
+    assert!(
+        output.contains("absent=execution bootstrap: not run on kind; egress: never dialled\n"),
+        "{output}"
+    );
+    assert!(
+        paths.contains("repos/example/substrate/actions/runs/0/jobs?per_page=100\n"),
+        "{paths}"
+    );
+    assert!(
+        paths.contains("repos/example/substrate/check-runs/41/annotations?per_page=100\n"),
+        "{paths}"
+    );
+    for (summary, line) in [
+        ("Preflight summary", "chart lane absent, not passed"),
+        (
+            "Compose release notes",
+            "| chart lane absent, not passed | ${CHART_LANE_ABSENT} |",
+        ),
+        ("Release summary", "chart lane absent, not passed"),
+    ] {
+        assert!(
+            step_block(summary).contains(line),
+            "{summary} omits the absent scenarios"
+        );
+    }
+    assert!(WORKFLOW.contains("      chart-lane-absent: ${{ steps.chart-lane.outputs.absent }}\n"));
+    assert!(WORKFLOW.contains("      actions: read\n      checks: read\n"));
+}
+
+#[test]
+fn a_chart_lane_run_with_no_absent_annotation_says_none_recorded() {
+    let (success, log, output) = chart_lane(true, "push", &main_runs(&[("completed", "success")]));
+    assert!(success, "{log}");
+    assert!(output.contains("absent=none recorded\n"), "{output}");
+}
+
+#[test]
+fn a_tag_whose_chart_lane_runs_all_failed_is_refused() {
+    let (success, log, output) = chart_lane(
+        true,
+        "push",
+        &main_runs(&[("completed", "failure"), ("completed", "cancelled")]),
+    );
+    assert!(!success, "{log}");
+    assert!(log.contains("none concluded success"), "{log}");
+    assert!(!output.contains("chart="), "{output}");
+}
+
+#[test]
+fn a_tag_push_of_a_source_without_the_chart_is_refused() {
+    let (success, log, output) = chart_lane(false, "push", &main_runs(&[("completed", "success")]));
+    assert!(!success, "{log}");
+    assert!(log.contains("has no deploy/helm/substrate chart"), "{log}");
+    assert!(!output.contains("chart="), "{output}");
+}
+
+#[test]
+fn a_recovery_of_a_tag_that_predates_the_chart_publishes_no_chart() {
+    let (success, log, output) = chart_lane(false, "workflow_dispatch", "");
+    assert!(success, "{log}");
+    assert_eq!(output, "chart=absent\n");
+}
+
+#[test]
+fn a_dispatch_run_of_this_repository_is_admitted_and_a_fork_dispatch_is_not() {
+    let own = json_runs(&[("workflow_dispatch", "story/x", "example/substrate")]);
+    let (success, log, output) = chart_lane(true, "push", &own);
+    assert!(
+        success && output.contains("chart=present\n"),
+        "{log}{output}"
+    );
+    let fork = json_runs(&[("workflow_dispatch", "main", "someone/substrate")]);
+    let (success, log, output) = chart_lane(true, "push", &fork);
+    assert!(
+        !success && !output.contains("chart=present"),
+        "{log}{output}"
+    );
+    let branch = json_runs(&[("push", "story/x", "example/substrate")]);
+    let (success, log, output) = chart_lane(true, "push", &branch);
+    assert!(
+        !success && !output.contains("chart=present"),
+        "{log}{output}"
+    );
+}
+
+#[test]
+fn the_chart_is_published_after_the_daemon_and_signed_attested_and_read_back_before_announcement() {
+    let preflight_gate = position("- name: Require a green gate run for this commit\n");
+    let preflight_chart = position(&format!("- name: {CHART_LANE_STEP}\n"));
+    let release_job = position("\n  release:\n");
+    let daemon_push = position("docker push \"${IMAGE}:${VERSION}\"");
+    let package = position("-- package-chart \\");
+    let digest_argument = position("--image-digest \"${DIGEST}\"");
+    let push = position("helm push \"$archive\" \"oci://${CHART_REPOSITORY}\"");
+    let sign = position("cosign sign --yes \"${CHART_IMAGE}@${CHART_DIGEST}\"");
+    let verify = position("\"${CHART_IMAGE}@${CHART_DIGEST}\" > chart-cosign-verify.json");
+    let attest = position("uses: actions/attest-build-provenance@");
+    let provenance = position("gh attestation verify \"oci://${CHART_IMAGE}@${CHART_DIGEST}\"");
+    let anonymous =
+        position("DOCKER_CONFIG=\"$anonymous_config\" oras resolve \"${CHART_IMAGE}:${VERSION}\"");
+    let announce = position("gh release create \"${VERSION}\"");
+    assert!(preflight_gate < preflight_chart && preflight_chart < release_job);
+    assert!(daemon_push < package && package < digest_argument && digest_argument < push);
+    assert!(push < sign && sign < verify && verify < attest && attest < provenance);
+    assert!(provenance < anonymous && anonymous < announce);
+    assert_eq!(occurrences("helm push "), 1);
+    assert!(occurrences(".github/workflows/release.yml@${GITHUB_REF}") >= 5);
+    let block = step_block("Attest the chart's build provenance");
+    assert!(
+        block.contains("subject-digest: ${{ steps.chart.outputs.digest }}"),
+        "{block}"
+    );
+    assert!(block.contains("push-to-registry: true"), "{block}");
+}
+
+#[test]
+fn the_chart_tag_is_write_once_and_a_recovery_reuses_only_the_same_chart() {
+    let block = step_block("Package and push the Kubernetes chart once");
+    let exists = block
+        .find("remote_digest=$(resolve_chart)")
+        .expect("the chart tag is looked up before anything is pushed");
+    let refused = block
+        .find("initial release runs never reuse chart tags")
+        .expect("a tag push refuses an existing chart tag");
+    let compared = block
+        .find("if [ \"$remote_layer\" != \"$local_layer\" ]; then")
+        .expect("a recovery compares the existing chart with the local package");
+    let raced = block
+        .find("appeared before push; it will not be overwritten")
+        .expect("the tag is checked again right before the push");
+    let push = block.find("helm push ").expect("the push");
+    assert!(exists < refused && refused < compared && compared < raced && raced < push);
+    let package = position("- name: Package the Kubernetes chart\n");
+    let login = position("- name: Log in to the chart registry\n");
+    let publish = position("- name: Package and push the Kubernetes chart once\n");
+    assert!(
+        package < login && login < publish,
+        "the repository's packager runs before any chart-registry credential exists"
+    );
+    assert!(
+        !block.contains("cargo "),
+        "the step holding the registry login runs no repository code"
+    );
+    for gated in [
+        "Install the pinned Helm release",
+        "Package the Kubernetes chart",
+        "Log in to the chart registry",
+        "Package and push the Kubernetes chart once",
+        "Sign the Kubernetes chart keylessly",
+        "Verify the chart signature with the workflow identity",
+        "Attest the chart's build provenance",
+        "Verify the chart provenance with the workflow identity",
+        "Prove the chart is anonymously retrievable",
+    ] {
+        assert!(
+            step_block(gated).contains("if: env.CHART == 'present'"),
+            "{gated} runs for a source without a chart"
+        );
+    }
+    assert!(
+        !step_block("Package the Kubernetes chart").contains("secrets."),
+        "the packaging step, which runs repository code, receives no token"
+    );
+}
+
+/// Runs the chart publication step against a local package `genuine` and a registry stub:
+/// `existing` names a chart already at the tag whose layer is `remote_layer`; `helm push` makes
+/// the tag resolve to a chart whose layer is `remote_layer` too.
+fn chart_publication_against(
+    event: &str,
+    existing: bool,
+    remote_layer: &str,
+) -> (bool, String, String, String) {
+    let root = tempfile::tempdir().expect("runner directory");
+    let tools = tempfile::tempdir().expect("stub tools");
+    fs::create_dir_all(root.path().join("target/release-chart")).expect("chart directory");
+    fs::write(
+        root.path()
+            .join(format!("target/release-chart/b10x-substrate-{TAG}.tgz")),
+        "genuine",
+    )
+    .expect("local package");
+    stub(
+        tools.path(),
+        "oras",
+        &format!(
+            "case \"$1\" in\n  resolve) if [ -n \"$EXISTING\" ] || [ -f \"$STATE/pushed\" ]; then echo sha256:{}; else echo \"Error: $2: not found\" >&2; exit 1; fi ;;\n  manifest) printf '{{\"layers\":[{{\"mediaType\":\"application/vnd.cncf.helm.chart.content.v1.tar+gzip\",\"digest\":\"%s\"}}]}}\\n' \"$REMOTE_LAYER\" ;;\n  *) exit 2 ;;\nesac",
+            "c".repeat(64)
+        ),
+    );
+    stub(
+        tools.path(),
+        "helm",
+        "echo \"$*\" >> \"$HELM_LOG\"\n[ \"$1\" = push ] && : > \"$STATE/pushed\"\nexit 0",
+    );
+    let helm_log = root.path().join("helm.log");
+    fs::write(&helm_log, "").expect("helm log");
+    let state = root.path().display().to_string();
+    let helm_log_path = helm_log.display().to_string();
+    let (success, log, output) = run_release_step(
+        CHART_PUBLISH_STEP,
+        root.path(),
+        &[
+            ("CHART_IMAGE", "ghcr.io/example/charts/b10x-substrate"),
+            ("CHART_REPOSITORY", "ghcr.io/example/charts"),
+            ("VERSION", TAG),
+            ("EVENT_NAME", event),
+            ("EXISTING", if existing { "1" } else { "" }),
+            ("REMOTE_LAYER", remote_layer),
+            ("STATE", &state),
+            ("HELM_LOG", &helm_log_path),
+        ],
+        Some(tools.path()),
+    );
+    (
+        success,
+        log,
+        output,
+        fs::read_to_string(&helm_log).expect("helm log"),
+    )
+}
+
+fn genuine_layer() -> String {
+    use sha2::Digest as _;
+    format!("sha256:{}", hex::encode(sha2::Sha256::digest(b"genuine")))
+}
+
+#[test]
+fn a_recovery_reuses_an_existing_chart_whose_layer_is_the_local_package() {
+    let (success, log, output, helm) =
+        chart_publication_against("workflow_dispatch", true, &genuine_layer());
+    assert!(success, "{log}");
+    assert_eq!(helm, "", "a reused chart is not pushed again");
+    assert!(
+        output.contains(&format!("digest=sha256:{}\n", "c".repeat(64))),
+        "{output}"
+    );
+    assert!(log.contains("byte for byte"), "{log}");
+}
+
+#[test]
+fn a_recovery_refuses_an_existing_chart_whose_layer_differs_from_the_local_package() {
+    let other = format!("sha256:{}", "d".repeat(64));
+    let (success, log, output, helm) = chart_publication_against("workflow_dispatch", true, &other);
+    assert!(!success, "{log}");
+    assert!(log.contains("not the deterministic package"), "{log}");
+    assert_eq!(helm, "");
+    assert!(!output.contains("digest="), "{output}");
+}
+
+#[test]
+fn a_tag_push_refuses_an_existing_chart_even_when_it_is_byte_identical() {
+    let (success, log, _, helm) = chart_publication_against("push", true, &genuine_layer());
+    assert!(!success, "{log}");
+    assert!(
+        log.contains("initial release runs never reuse chart tags"),
+        "{log}"
+    );
+    assert_eq!(helm, "");
+}
+
+#[test]
+fn a_fresh_chart_is_pushed_once_and_its_pushed_layer_is_verified() {
+    let (success, log, output, helm) = chart_publication_against("push", false, &genuine_layer());
+    assert!(success, "{log}");
+    assert_eq!(
+        helm,
+        format!(
+            "push target/release-chart/b10x-substrate-{TAG}.tgz oci://ghcr.io/example/charts\n"
+        )
+    );
+    assert!(output.contains("digest=sha256:"), "{output}");
+    let other = format!("sha256:{}", "d".repeat(64));
+    let (success, log, output, _) = chart_publication_against("push", false, &other);
+    assert!(!success, "{log}");
+    assert!(log.contains("not the pushed"), "{log}");
+    assert!(!output.contains("digest="), "{output}");
+}
+
+#[test]
+fn the_write_once_step_refuses_an_existing_or_unresolvable_chart_tag_on_a_tag_push() {
+    let block = step_block("Resolve write-once image version tags");
+    let chart = block
+        .find("if chart_found=$(oras resolve \"${CHART_IMAGE}:${VERSION}\" 2>&1); then")
+        .expect("the write-once step resolves the chart tag");
+    let refused = block[chart..]
+        .find("initial release runs never reuse chart tags")
+        .expect("and refuses it on a tag push");
+    let unreliable = block[chart..]
+        .find("could not resolve ${CHART_IMAGE}:${VERSION} reliably")
+        .expect("and refuses an answer that is neither a digest nor not-found");
+    assert!(refused < unreliable);
+    assert!(block.contains("if [ \"$CHART\" = present ]; then"));
+}
+
+#[test]
+fn only_the_release_job_may_write_attestations() {
+    let release_job = position("\n  release:\n");
+    let grants: Vec<usize> = WORKFLOW
+        .match_indices("attestations: write")
+        .map(|(at, _)| at)
+        .collect();
+    assert_eq!(
+        grants.len(),
+        1,
+        "attestations: write is granted {} times",
+        grants.len()
+    );
+    assert!(grants[0] > release_job);
+}
+
+#[test]
+fn the_chart_lane_workflow_runs_static_checks_before_a_pinned_kind_cluster() {
+    let lane = include_str!("../../.github/workflows/chart-lane.yml");
+    for line in lane.lines().map(str::trim) {
+        assert!(
+            !line.starts_with('#'),
+            "chart-lane.yml carries a comment: {line}"
+        );
+        if let Some(action) = line.strip_prefix("uses: ") {
+            let reference = action.split_whitespace().next().expect("action reference");
+            let (_, revision) = reference.rsplit_once('@').expect("pinned action");
+            assert_eq!(revision.len(), 40, "action is not commit-pinned: {line}");
+        }
+    }
+    for pin in ["KIND_VERSION", "KIND_SHA256", "KIND_NODE_IMAGE"] {
+        let value = |text: &str| {
+            text.lines()
+                .find_map(|line| line.trim().strip_prefix(&format!("{pin}: ")))
+                .map(str::to_owned)
+        };
+        assert_eq!(
+            value(lane),
+            value(GATE_WORKFLOW),
+            "{pin} differs from gate.yml's"
+        );
+    }
+    let helm_pin = |text: &str| {
+        text.lines()
+            .find_map(|line| line.trim().strip_prefix("HELM_SHA256: "))
+            .map(str::to_owned)
+    };
+    assert_eq!(
+        helm_pin(lane),
+        helm_pin(WORKFLOW),
+        "the two workflows pin different Helm releases"
+    );
+    assert!(lane.contains("    needs: static\n"));
+    assert!(lane.contains("chart-lane static --helm"));
+    assert!(lane.contains("chart-lane cluster \\"));
+    assert!(lane.contains("permissions:\n  contents: read\n"));
+    for write in ["contents: write", "packages: write", "id-token: write"] {
+        assert!(!lane.contains(write), "chart-lane.yml grants {write}");
+    }
+}
+
+// --- adversary: a run that did not test the tagged tree is not evidence for it -------------------
+
+/// Stub tools for a preflight step that reads the Actions API: `gh api --jq F` applies `F` to
+/// `$STUB_JSON` with `jq -r` (as `gh` prints strings raw), and `sleep` fails, so a step that would
+/// wait for another run ends unsuccessfully at once instead of hanging the test.
+fn api_stub_tools() -> tempfile::TempDir {
+    let tools = tempfile::tempdir().expect("stub tools");
+    let executable = |name: &str, body: &str| {
+        let path = tools.path().join(name);
+        fs::write(&path, body).expect("stub tool");
+        fs::set_permissions(
+            &path,
+            <fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+        )
+        .expect("stub tool is executable");
+    };
+    executable(
+        "gh",
+        "#!/bin/bash\nfilter=.\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    --jq) filter=$2; shift 2 ;;\n    *) shift ;;\n  esac\ndone\nprintf '%s' \"$STUB_JSON\" | jq -r \"$filter\"\n",
+    );
+    executable(
+        "sleep",
+        "#!/bin/sh\necho 'stub sleep: the step chose to wait' >&2\nexit 97\n",
+    );
+    tools
+}
+
+/// A `pull_request` run's `head_sha` is the pull request's head commit, but the run checked out
+/// and tested `refs/pull/N/merge`: that head merged into whatever base the pull request targets,
+/// with the base's workflow file. This repository merges by merge commit, so every pull-request
+/// head is an ancestor of `main` and passes the tag step's ancestry check; a chart-lane `push`
+/// run exists only for commits pushed to `main`, so for a tagged pull-request head the
+/// pull-request run is the only one there is, and it never ran on the tagged tree.
+fn pull_request_runs(fork: bool) -> String {
+    json_runs(&[(
+        "pull_request",
+        "story/node-bound-kubernetes-serving-profile",
+        if fork {
+            "someone/substrate"
+        } else {
+            "example/substrate"
+        },
+    )])
+}
+
+fn json_runs(runs: &[(&str, &str, &str)]) -> String {
+    let runs: Vec<String> = runs
+        .iter()
+        .enumerate()
+        .map(|(index, (event, branch, repository))| {
+            format!(
+                "{{\"id\":{index},\"status\":\"completed\",\"conclusion\":\"success\",\"event\":\"{event}\",\"head_branch\":\"{branch}\",\"head_repository\":{{\"full_name\":\"{repository}\"}},\"html_url\":\"https://example.invalid/runs/{index}\"}}"
+            )
+        })
+        .collect();
+    format!(
+        "{{\"total_count\":{},\"workflow_runs\":[{}]}}",
+        runs.len(),
+        runs.join(",")
+    )
+}
+
+fn chart_lane_api(event: &str, json: &str) -> (bool, String, String) {
+    let source = TaggedSource::with_files(
+        &[(CHART_SOURCE, "apiVersion: v2\nname: b10x-substrate\n")],
+        "release {sha}",
+    );
+    let tools = api_stub_tools();
+    run_release_step(
+        CHART_LANE_STEP,
+        source.directory.path(),
+        &[
+            ("SOURCE_SHA", &source.sha),
+            ("EVENT_NAME", event),
+            ("STUB_JSON", json),
+            ("CHART_WORKFLOW", "chart-lane.yml"),
+            ("GITHUB_REPOSITORY", "example/substrate"),
+            ("GIT_CONFIG_GLOBAL", "/dev/null"),
+            ("GIT_CONFIG_NOSYSTEM", "1"),
+        ],
+        Some(tools.path()),
+    )
+}
+
+#[test]
+fn adversary_the_stub_api_admits_a_push_run_on_main() {
+    let (success, log, output) =
+        chart_lane_api("push", &json_runs(&[("push", "main", "example/substrate")]));
+    assert!(success, "{log}");
+    assert!(output.contains("chart=present\n"), "{output}");
+}
+
+#[test]
+fn adversary_a_chart_lane_pull_request_run_is_not_evidence_for_the_tagged_commit() {
+    for fork in [false, true] {
+        let (success, log, output) = chart_lane_api("push", &pull_request_runs(fork));
+        assert!(
+            !success && !output.contains("chart=present"),
+            "a pull_request run (fork: {fork}) was taken as the chart lane of the tagged commit: {log}{output}"
+        );
+    }
+}
+
+#[test]
+fn adversary_a_gate_pull_request_run_is_not_evidence_for_the_tagged_commit() {
+    let directory = tempfile::tempdir().expect("step directory");
+    let tools = api_stub_tools();
+    let runs = pull_request_runs(true);
+    let (success, log, output) = run_release_step(
+        "Require a green gate run for this commit",
+        directory.path(),
+        &[
+            ("SOURCE_SHA", "1111111111111111111111111111111111111111"),
+            ("STUB_JSON", &runs),
+            ("GATE_WORKFLOW", "gate.yml"),
+            ("GITHUB_REPOSITORY", "example/substrate"),
+        ],
+        Some(tools.path()),
+    );
+    assert!(
+        !success && !output.contains("run-url="),
+        "a fork's pull_request gate run was taken as the gate of the tagged commit: {log}{output}"
+    );
+}
+
+// Security review (story:node-bound-kubernetes-serving-profile): the chart publication's
+// write-once and refuse-before-publish claims, run offline against stub tools.
+
+const CHART_PUBLISH_STEP: &str = "Package and push the Kubernetes chart once";
+
+fn stub(directory: &Path, name: &str, body: &str) {
+    let path = directory.join(name);
+    fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("stub tool");
+    fs::set_permissions(
+        &path,
+        <fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+    )
+    .expect("stub tool is executable");
+}
+
+/// Runs the chart publication step with `oras` answering `oras_body`; returns the step's
+/// success, its log and every `helm` invocation it made.
+fn chart_publication(event: &str, oras_body: &str) -> (bool, String, String) {
+    let root = tempfile::tempdir().expect("runner directory");
+    let tools = tempfile::tempdir().expect("stub tools");
+    let digest = format!("sha256:{}", "b".repeat(64));
+    stub(tools.path(), "oras", oras_body);
+    stub(
+        tools.path(),
+        "helm",
+        "echo \"$*\" >> \"$HELM_LOG\"\ncase \"$1\" in\n  show) printf '  digest: \"%s\"\\n' \"$DIGEST\" ;;\n  pull) d=\"\"; while [ $# -gt 0 ]; do [ \"$1\" = --destination ] && d=\"$2\"; shift; done; printf 'tampered' > \"$d/b10x-substrate-$VERSION.tgz\" ;;\nesac\nexit 0",
+    );
+    stub(
+        tools.path(),
+        "cargo",
+        "mkdir -p target/release-chart && printf 'genuine' > \"target/release-chart/b10x-substrate-$VERSION.tgz\"",
+    );
+    let helm_log = root.path().join("helm.log");
+    fs::write(&helm_log, "").expect("helm log");
+    let runner_temp = root.path().display().to_string();
+    let helm_log_path = helm_log.display().to_string();
+    let (success, log, _) = run_release_step(
+        CHART_PUBLISH_STEP,
+        root.path(),
+        &[
+            ("CHART_IMAGE", "ghcr.io/example/charts/b10x-substrate"),
+            ("CHART_REPOSITORY", "ghcr.io/example/charts"),
+            ("VERSION", TAG),
+            ("DIGEST", &digest),
+            ("EVENT_NAME", event),
+            ("RUNNER_TEMP", &runner_temp),
+            ("HELM_LOG", &helm_log_path),
+        ],
+        Some(tools.path()),
+    );
+    (
+        success,
+        log,
+        fs::read_to_string(&helm_log).expect("helm log"),
+    )
+}
+
+#[test]
+fn security_review_an_unanswered_chart_tag_lookup_never_reaches_helm_push() {
+    let (_, log, helm) = chart_publication(
+        "push",
+        "echo 'Error: failed to resolve: GET https://ghcr.io/v2/example/charts/b10x-substrate/manifests/9.9.9: 503 Service Unavailable' >&2\nexit 1",
+    );
+    assert!(
+        !helm.lines().any(|line| line.starts_with("push ")),
+        "a registry error was read as an absent tag and the chart was pushed over whatever the tag names:\nhelm: {helm}\nlog: {log}"
+    );
+}
+
+#[test]
+fn security_review_a_recovery_reuses_a_chart_only_after_comparing_its_whole_content() {
+    let (success, log, helm) = chart_publication(
+        "workflow_dispatch",
+        &format!("echo sha256:{}", "c".repeat(64)),
+    );
+    assert!(
+        !success,
+        "a recovery signed and attested an existing chart whose content it compared only by one values line:\nhelm: {helm}\nlog: {log}"
+    );
+}
+
+#[test]
+fn security_review_an_existing_chart_tag_is_refused_before_anything_is_published() {
+    let refusal = position("initial release runs never reuse chart tags");
+    let first_publication = position("oras cp --from-oci-layout --no-tty")
+        .min(position("docker push \"${IMAGE}:${VERSION}\""));
+    assert!(
+        refusal < first_publication,
+        "a tag push whose chart tag already exists publishes the bundle and daemon image before it is refused"
+    );
+}

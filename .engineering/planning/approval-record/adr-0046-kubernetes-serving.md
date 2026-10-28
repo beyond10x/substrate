@@ -2,11 +2,13 @@
 format: aep.planning-md/3
 id: approval-record:adr-0046-kubernetes-serving
 kind: approval-record
-status: draft
+status: active
 title: Operator accepts ADR 0046 with every recommended option (K1-K9)
 relations:
 - decides: story:node-bound-kubernetes-serving-profile
-revision: 1
+revision: 2
+transitions:
+- {from: "draft", to: "active", at: "2026-10-28T15:49:11Z", actor: "human:timo", revision: 2}
 ---
 # Decision: accept ADR 0046 with every recommended option
 

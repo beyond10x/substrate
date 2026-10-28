@@ -68,6 +68,40 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
       `substrate_hosted_resolution_duration_seconds`;
     - `process_cpu_seconds_total`, `process_resident_memory_bytes`, `process_open_fds`,
       `process_max_fds`, `process_start_time_seconds`.
+- A Helm chart for the node-bound Kubernetes serving profile (ADR 0046), `deploy/helm/substrate`,
+  named `b10x-substrate`. It adds no wire route and leaves the contract bundle unchanged.
+  - **Shape:** a StatefulSet behind one headless Service, one daemon per node of a labelled and
+    tainted pool, and one retained `ReadWriteOnce` ledger claim per ordinal. `--deployment` is the
+    pod name. The probes use the operational listener.
+  - **Trust:** TLS and Identity admission only. Init containers copy the certificate, key and
+    Identity trust roots into memory-backed volumes, owner-only. The certificate names each pod's
+    host and never the Service; the chart publishes those names in `<release>-certificate-names`.
+    The ServiceAccount mounts no token and has no Role.
+  - **Network:** a default-deny NetworkPolicy. Egress goes only to DNS and to the declared Identity,
+    Git source and aperture ranges.
+  - **Refusals:** a closed `values.schema.json` and template checks refuse a privileged container,
+    host namespaces and host paths, the development TCP listener, a cgroup root, host roots,
+    project quotas without execution or a quota-capable class, pod annotations that select an
+    AppArmor or seccomp profile, and egress to any prefix length 0 unless admitted. Every value
+    the templates interpolate is quoted, so a value rendered with the schema skipped cannot add a
+    key.
+  - **Execution:** `execution.enabled` starts design 25's bootstrap with its five capabilities and
+    the node's Localhost seccomp and AppArmor profiles; `nodeProfiles.enabled` installs those with
+    a DaemonSet in a separate namespace.
+  - **Lane:** `cargo xtask chart-lane static` renders and lints the chart and holds every rendering
+    to ADR 0046. `cargo xtask chart-lane cluster` runs install, rolling upgrade, egress, Pod
+    Security and uninstall scenarios on kind, and reports the four execution-enabled scenarios it
+    cannot run there absent, by name. `.github/workflows/chart-lane.yml` runs both on every push
+    to `main` and on pull requests that touch the chart or what the daemon image is built from.
+  - **Release:** `release.yml` refuses a tag without a successful chart-lane run for its commit,
+    counting only a push to `main` or a dispatch in this repository, and refuses an existing chart
+    tag before it publishes anything. It packages the chart reproducibly with
+    `cargo xtask package-chart`, pinning the daemon digest it just pushed, before the registry
+    login, pushes it once to `oci://ghcr.io/beyond10x/charts/b10x-substrate`, signs it keylessly,
+    attests its build provenance, verifies both and reads it back anonymously before announcing.
+    A recovery reuses an existing chart only when its chart layer is the local package byte for
+    byte. The release notes list the scenarios the chart lane reported absent.
+  - The gate preflight now also counts only a push to `main` or a dispatch in this repository.
 
 ### Security
 
@@ -84,11 +118,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 ### Fixed
 
 - A raw-pipe or pty session whose child exited after the driver answered the start and before the daemon recorded it no longer reads `ready` with attachment `available` over the dead child. The start keeps the recorded exit: the session reads `exited` with attachment `consumed`, its exec reads `exited`, and the start's result is that session.
+- The lease sweeper no longer expires a lease issued while it runs: a just-started raw-pipe or pty session or exec is no longer killed, and a just-leased workspace no longer frozen. The lease sweeper judged each lease by a clock it had read before its store calls; a start that issued its lease from a later reading in between looked like a clock regression, which expires conservatively, so the sweeper killed the child and a freshly started session refused its first attach with `session.not-attachable` (state `expired`, attachment `consumed`, lease `expired`). The claim now reads the clock inside its own transaction. Seen once in 1,500 sequential pty start-and-attach rounds on a loaded host.
+- Two concurrent renewals of one live session or exec lease no longer refuse the slower one `lease.expired` (409). A renewal judged the stored lease by a clock it had read before its store calls, so a renewal that committed a later issue in between made that reading look like a clock regression. Session and exec renewals now read the clock inside their own transaction and issue the renewed lease from that reading; workspace renewals read it under the workspace lock and were not affected.
 
 ### Fixed
 
 - `pod`: a run read `Unknown` because its Pod's removal was not confirmed no longer gives up after two removal rounds; its task deletes and reads the Pod again, the pause doubling from 500 ms to 30 s, until the API confirms it gone, then removes its NetworkPolicy (design 28). Until then the run stays counted against the 128 tracked runs, so at that cap a start is refused `exec.tracking-capacity` rather than adding another removal task.
-- `pod`: open removes a NetworkPolicy carrying the adapter's owner label, named for the run that label names, whose run's Pod no longer exists and which the API server created at least 90 s earlier (twice the 30 s API timeout plus 30 s), the policy a process that ended before its run's cleanup left behind. It reads the list in pages of 100, at most 64; a longer list, or a sweep the API refuses, does not open (`confinement.adapter-unserved`).
+- `pod`: open removes a NetworkPolicy carrying the adapter's owner label, named for the run that label names, whose run's Pod no longer exists and which the API server created at least 90 s earlier (twice the 30 s API timeout plus 30 s), the policy a process that ended before its run's cleanup left behind. It reads the list in pages of 100, at most 64, each policy's metadata alone (`PartialObjectMetadataList`); a longer list, or a sweep the API refuses, does not open (`confinement.adapter-unserved`).
+- `pod`: a policy open keeps, younger than 90 s or with its run's Pod present, no longer stays until the next open: the adapter checks it again every 2 s on a thread of its own, with one list of its owned Pods' metadata alone per round (a page of whole Pods of ten admitted runs, each up to 256 KiB of argv and 256 KiB of environment, would pass the 4 MiB page bound and fail every round), and deletes it once its Pod is gone and either the API showed that Pod before or the policy is 90 s old. The thread ends when nothing is kept or the adapter and its runs' tasks are gone.
+- `pod`: after `Unknown` the task reads the Pod every 2 s between its backed-off deletions, so a policy follows its Pod within 2 s of the kubelet removing it, not at the next deletion up to 30 s later.
 - `pod`: `start` reads the run's NetworkPolicy back once the Pod is stored, and the Pod carries an `ownerReference` to that policy (`controller: false`), so a Pod whose policy is gone is removed by the garbage collector; a policy not read back removes the Pod and refuses the start `confinement.pod-api-failed`.
 
 ### Fixed
