@@ -491,7 +491,10 @@ fn bind(
     })
 }
 
-fn probe_lease_clock() -> bool {
+/// Whether this host can serve explicit leases: its boot id and uptime read as a lease clock needs
+/// them. Every driver the daemon runs publishes `leases.explicit` from this, because the daemon,
+/// not the driver, keeps lease time.
+pub fn probe_lease_clock() -> bool {
     let boot_id = std::fs::read_to_string("/proc/sys/kernel/random/boot_id");
     let uptime = std::fs::read_to_string("/proc/uptime");
     boot_id.is_ok_and(|value| {

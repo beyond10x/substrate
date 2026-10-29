@@ -1,10 +1,10 @@
 //! The executor the Kubernetes namespace driver runs inside the cluster (design 34 § 7, ADR 0047
 //! N3, N4 and N10), and the protocol types and frame codec the driver decodes it with.
 //!
-//! One static binary has the roles `version`, `keeper`, `fs`, `install` and `run`. It links
-//! `substrate-wire` and `substrate-guarded` and nothing else of this workspace; `cargo xtask
-//! check-packages` refuses a normal dependency path to the host driver, the store, the daemon, the
-//! Kubernetes client, `rustls` or `gix` (design 34 § 2).
+//! One static binary has the roles `version`, `keeper`, `fs`, `install`, `run` and `probe-child`.
+//! It links `substrate-wire` and `substrate-guarded` and nothing else of this workspace; `cargo
+//! xtask check-packages` refuses a normal dependency path to the host driver, the store, the
+//! daemon, the Kubernetes client, `rustls` or `gix` (design 34 § 2).
 
 #![allow(unsafe_code)]
 #![deny(unsafe_op_in_unsafe_fn)]
@@ -15,6 +15,7 @@ pub mod frame;
 #[cfg(target_os = "linux")]
 pub mod keeper;
 pub mod message;
+pub mod probe;
 #[cfg(target_os = "linux")]
 pub mod run;
 #[cfg(target_os = "linux")]

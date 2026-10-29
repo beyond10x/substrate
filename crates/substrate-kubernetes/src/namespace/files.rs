@@ -41,7 +41,7 @@ pub const EXECUTOR_UNANSWERED: &str = "kubernetes.executor-unanswered";
 const RESPONSE_BYTES: usize = 4 + MAX_HEADER_BYTES as usize + 8;
 
 /// Why one `fs` call has no answer to decode.
-enum CallFailure {
+pub(super) enum CallFailure {
     /// No answer came: the call may have run.
     Unanswered(String),
     /// Anything else, already the route's answer.
@@ -359,6 +359,17 @@ impl NamespaceDriver {
             .serving_keeper(workspace)
             .await
             .map_err(CallFailure::Failed)?;
+        self.keeper_call(&keeper, request, content).await
+    }
+
+    /// One `substrate-executor fs` call in the keeper Pod named `keeper`, which the caller has
+    /// shown to be the bound one: the request on stdin, one response on stdout.
+    pub(super) async fn keeper_call(
+        &self,
+        keeper: &str,
+        request: &Request,
+        content: &[u8],
+    ) -> Result<(Value, u64), CallFailure> {
         let mut stdin = Vec::new();
         request.write_to(&mut stdin, content).map_err(|error| {
             CallFailure::Failed(DriverError::failed(
@@ -369,7 +380,7 @@ impl NamespaceDriver {
         let output = match self
             .api
             .exec(
-                &keeper,
+                keeper,
                 KEEPER_CONTAINER,
                 &[EXECUTOR_PATH, "fs"],
                 &stdin,

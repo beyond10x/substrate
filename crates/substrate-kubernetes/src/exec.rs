@@ -91,7 +91,7 @@ enum Gone {
     Unanswered(String),
 }
 
-enum LogRead {
+pub(crate) enum LogRead {
     Read(Vec<u8>),
     Overlong,
     Gone,
@@ -547,7 +547,9 @@ impl NamespaceDriver {
         let code = terminated["exitCode"].as_i64();
         let deadline = pod["status"]["reason"] == "DeadlineExceeded";
         let budget = pod::log_budget_bytes(tracked.output_bytes);
-        let read = self.read_owned_log(&tracked, budget).await;
+        let read = self
+            .read_owned_log(&tracked.pod, &tracked.uid, budget)
+            .await;
         if let (LogRead::Unreadable(why), true) = (&read, present) {
             return Err(DriverError::failed(API_FAILED, why.clone()));
         }
@@ -624,28 +626,28 @@ impl NamespaceDriver {
     /// `pods/log` addresses a Pod by name only (§ 4 uid rule): the log is read only when a GET
     /// right before shows the name holding the bound uid, and what it answered is this exec's
     /// only when a GET right after shows the same uid.
-    async fn read_owned_log(&self, tracked: &Tracked, budget: u64) -> LogRead {
-        match self.holder(tracked).await {
+    pub(crate) async fn read_owned_log(&self, pod: &str, uid: &str, budget: u64) -> LogRead {
+        match self.holder(pod, uid).await {
             Ok(Holder::Ours) => {}
             Ok(Holder::Other) => return LogRead::NotOurs,
             Ok(Holder::Absent) => return LogRead::Gone,
             Err(why) => return LogRead::Unreadable(why),
         }
-        let read = self.read_log(&tracked.pod, budget).await;
+        let read = self.read_log(pod, budget).await;
         if !matches!(read, LogRead::Read(_) | LogRead::Overlong) {
             return read;
         }
-        match self.holder(tracked).await {
+        match self.holder(pod, uid).await {
             Ok(Holder::Ours) => read,
             Ok(Holder::Other | Holder::Absent) => LogRead::NotOurs,
             Err(why) => LogRead::Unreadable(why),
         }
     }
 
-    async fn holder(&self, tracked: &Tracked) -> Result<Holder, String> {
-        let path = format!("{}/{}", self.api().pods(), tracked.pod);
+    async fn holder(&self, pod: &str, uid: &str) -> Result<Holder, String> {
+        let path = format!("{}/{}", self.api().pods(), pod);
         match self.api().get(&path).await {
-            Ok(Some(pod)) if uid_of(&pod) == Some(tracked.uid.as_str()) => Ok(Holder::Ours),
+            Ok(Some(object)) if uid_of(&object) == Some(uid) => Ok(Holder::Ours),
             Ok(Some(_)) => Ok(Holder::Other),
             Ok(None) => Ok(Holder::Absent),
             Err(error) => Err(format!("the exec Pod beside its log: {error}")),
@@ -1268,12 +1270,12 @@ fn api_exit(code: Option<i64>, record: Option<&ExitRecord>) -> Option<ExecExit> 
 
 /// A terminal observation needs the container `terminated` in a Pod with `restartPolicy:
 /// Never` (§ 5.2); the caller has checked the uid.
-fn shows_end(pod: &Value) -> bool {
+pub(crate) fn shows_end(pod: &Value) -> bool {
     container_state(pod, RUN_CONTAINER)["terminated"].is_object()
         && pod["spec"]["restartPolicy"] == "Never"
 }
 
-fn uid_of(object: &Value) -> Option<&str> {
+pub(crate) fn uid_of(object: &Value) -> Option<&str> {
     object["metadata"]["uid"].as_str()
 }
 

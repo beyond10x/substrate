@@ -25,6 +25,9 @@ use crate::{
 };
 
 pub(crate) mod files;
+pub(crate) mod probe;
+#[cfg(test)]
+mod probe_tests;
 pub(crate) mod workspace;
 #[cfg(test)]
 mod workspace_tests;
@@ -36,6 +39,21 @@ const POLICY_PAGE_ITEMS: usize = 100;
 const POLICY_PAGES: usize = 64;
 /// What Pod Security admission writes when a Pod violates the `restricted` level.
 const RESTRICTED_VIOLATION: &str = "violates PodSecurity \"restricted:";
+/// The daemon's default event retention, until [`NamespaceDriver::with_event_retention`] states
+/// the configured one.
+const DEFAULT_EVENT_RETENTION: u64 = 10_000;
+
+/// Whether this host serves explicit leases (the daemon keeps lease time, whatever the driver).
+fn lease_clock_is_provable() -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        substrate_host::probe_lease_clock()
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
+    }
+}
 
 /// What [`NamespaceDriver::remove_owned`] observed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -73,6 +91,11 @@ pub struct NamespaceDriver {
     collisions: AtomicU64,
     incomplete_reviews: AtomicU64,
     execs: crate::exec::Execs,
+    probe: Mutex<probe::ProbeState>,
+    /// The daemon's event retention, which the snapshot states as `events.retention-events`.
+    event_retention: u64,
+    /// Whether this host serves explicit leases, which the daemon keeps.
+    lease_clock: bool,
 }
 
 impl std::fmt::Debug for NamespaceDriver {
@@ -151,7 +174,18 @@ impl NamespaceDriver {
             collisions: AtomicU64::new(0),
             incomplete_reviews: AtomicU64::new(0),
             execs: crate::exec::Execs::default(),
+            probe: Mutex::new(probe::ProbeState::default()),
+            event_retention: DEFAULT_EVENT_RETENTION,
+            lease_clock: lease_clock_is_provable(),
         })
+    }
+
+    /// States the daemon's event retention, which the snapshot publishes as
+    /// `events.retention-events`.
+    #[must_use]
+    pub fn with_event_retention(mut self, events: u64) -> Self {
+        self.event_retention = events;
+        self
     }
 
     /// Steps 2 to 5, once: the rules review, the Lease, the default-deny policy and the

@@ -28,6 +28,24 @@ fn version_writes_the_handshake_line_and_nothing_else() {
 }
 
 #[test]
+fn probe_child_writes_its_whole_argv_as_one_json_line_and_exits_0() {
+    let output = Command::new(EXECUTOR)
+        .arg(substrate_executor::probe::PROBE_CHILD)
+        .args(substrate_executor::probe::PROBE_ARGUMENTS)
+        .env_clear()
+        .output()
+        .expect("executor");
+    assert_eq!(output.status.code(), Some(0));
+    let mut argv = vec![EXECUTOR, substrate_executor::probe::PROBE_CHILD];
+    argv.extend(substrate_executor::probe::PROBE_ARGUMENTS);
+    assert_eq!(
+        String::from_utf8(output.stdout).expect("utf-8"),
+        substrate_executor::probe::report(&argv)
+    );
+    assert!(output.stderr.is_empty());
+}
+
+#[test]
 fn an_unknown_or_missing_subcommand_exits_2() {
     for arguments in [
         vec![],
