@@ -460,10 +460,16 @@ distribution decision, not a release convenience (ADR 0030).
 builds the distinct `daemon` and `mcp` runtime targets from one shared pinned builder in `Dockerfile`
 and packages the explicitly pinned current development bundle with
 `cargo xtask package-bundle`. It publishes
-`ghcr.io/beyond10x/b10x-substrate-daemon:<version>` and
-`ghcr.io/beyond10x/b10x-substrate-mcp:<version>`, plus
-`ghcr.io/beyond10x/b10x-substrate-wire:<bundle-version>`; keyless-signs all three digests and verifies
-all three signatures **before** it announces anything. It also exports `substrate-daemon` and the
+`ghcr.io/beyond10x/b10x-substrate-daemon:<version>`,
+`ghcr.io/beyond10x/b10x-substrate-mcp:<version>` and
+`ghcr.io/beyond10x/b10x-substrate-executor:<version>`, plus
+`ghcr.io/beyond10x/b10x-substrate-wire:<bundle-version>`; keyless-signs all four digests and verifies
+all four signatures **before** it announces anything. The executor image is the `executor` target,
+the static musl `substrate-executor` on an empty base built from the same pinned `rust` image
+(design 34 § 10.4); it is pushed only after its `version` handshake names `substrate-executor/1`,
+the tag's version and the tagged commit, and its executable has no interpreter. A recovery of a tag
+whose Dockerfile has no `executor` stage publishes none and says so; a tag push without it is
+refused. It also exports `substrate-daemon` and the
 `b10x-substrate` CLI from that same builder stage (Dockerfile target `release-binaries`) and attaches
 four files to the GitHub release:
 `substrate-daemon-<version>-x86_64-unknown-linux-gnu.tar.gz`,
@@ -479,7 +485,7 @@ publishes without the four files, and its release notes and summary say so; a ta
 stage is refused. It refuses — publishing nothing — a tag that is
 not the bare version form (so `0.2.2-rc.0` produces nothing), a lightweight tag, a commit that is not
 an ancestor of `main`, a version that disagrees with `[workspace.package] version`, a commit for
-which `gate.yml` has not concluded `success`, an existing daemon or MCP version tag on an initial
+which `gate.yml` has not concluded `success`, an existing daemon, MCP or executor version tag on an initial
 tag-push run, or an existing bundle tag whose digest differs from the deterministic local package.
 An explicit protected-`main` recovery dispatch may reuse an image already written by that same
 release only after its source-revision label and exact shipped binary pass again; it never replaces
@@ -515,7 +521,7 @@ so; a tag push without a chart is refused. A first push can create the chart pac
 the anonymous read-back fails before anything is announced; make the package public and dispatch a
 recovery.
 
-**Two of those three images ship for adopters outside this collection, and that is deliberate.** No
+**Two of those images ship for adopters outside this collection, and that is deliberate.** No
 repository in the `beyond10x` collection pulls `ghcr.io/beyond10x/b10x-substrate-wire` or
 `ghcr.io/beyond10x/b10x-substrate-mcp`: the only in-collection consumer of the wire contract,
 `harness/crates/harness-substrate`, pins the *crate* `b10x-substrate-wire` by Git revision, not the
@@ -618,6 +624,26 @@ three-field rules; the line is written into the GitHub release under *Chart lane
 summaries, and a recovery dispatch may pass it as the `chart_evidence` input instead. A tagged
 source without `deploy/helm/substrate` needs no record. The step's refusals are executed offline by
 `xtask/tests/release_workflow.rs`.
+
+**A release also requires a recorded namespace-lane run for the tagged commit**
+(`decision-blocker:namespace-lane-runs-on-a-workstation`, D182), in the same shape: the kind cluster
+design 34 § 10.3's observations need does not fit the CI budget, so `namespace-lane.yml` runs only
+the static checks. Before tagging, run `cargo xtask namespace-lane observe` at that commit with a
+clean checkout and put the line it prints in the annotated tag's message:
+
+```
+Namespace-lane: <source-sha> <observation-count> <RFC 3339 UTC>
+```
+
+`release.yml` refuses to publish without it, refuses a record naming any other commit, refuses a
+count other than the number of entries in the literal `OBSERVATIONS` array of
+[`xtask/src/namespace_lane.rs`](xtask/src/namespace_lane.rs) at the tagged commit (the length the
+verb records; the declared length must equal the entries), and applies the same calendar, one-line
+and three-field rules; another lane's line does not satisfy it. The line is written into the GitHub
+release under *Namespace lane* and into both job summaries, and a recovery dispatch may pass it as
+the `namespace_evidence` input instead. A tag push whose source has no `xtask/src/namespace_lane.rs`
+is refused; only a recovery of an older tag needs no record, and its notes say so. The step's
+refusals are executed offline by `xtask/tests/release_workflow.rs`.
 
 `packages: write` and `id-token: write` exist on the release job and nowhere else; that job holds
 `contents: write` only to create the GitHub release. Everything it does uses the run's own

@@ -124,7 +124,8 @@ fn a_partial_release_can_recover_only_an_existing_tag_from_protected_main() {
     position("[ \"$EVENT_NAME\" = \"push\" ] && [ \"$source_sha\" != \"$EVENT_SHA\" ]");
     position("daemon-exists=true");
     position("mcp-exists=true");
-    assert_eq!(occurrences("from the same tagged source ${SOURCE_SHA}"), 2);
+    position("executor-exists=true");
+    assert_eq!(occurrences("from the same tagged source ${SOURCE_SHA}"), 3);
     assert!(occurrences("org.opencontainers.image.revision") >= 2);
 }
 
@@ -545,12 +546,18 @@ impl TaggedSource {
     }
 
     fn run_step(&self, step: &str, input: &str) -> (bool, String, String) {
+        self.run_step_on(step, input, "push")
+    }
+
+    /// As [`Self::run_step`], for the named workflow event.
+    fn run_step_on(&self, step: &str, input: &str, event: &str) -> (bool, String, String) {
         let output_file = self.directory.path().join("github-output");
         fs::write(&output_file, "").expect("GITHUB_OUTPUT");
         let output = std::process::Command::new("bash")
             .current_dir(self.directory.path())
             .env("GIT_CONFIG_GLOBAL", "/dev/null")
             .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("EVENT_NAME", event)
             .env("TAG", TAG)
             .env("INPUT_EVIDENCE", input)
             .env("SOURCE_SHA", &self.sha)
@@ -756,7 +763,7 @@ type LaneStep = (
 );
 
 /// Every lane-record step, each with a source it accepts and the trailer name it reads.
-fn lane_steps() -> [LaneStep; 3] {
+fn lane_steps() -> [LaneStep; 4] {
     [
         (
             CONFINEMENT_STEP,
@@ -769,6 +776,9 @@ fn lane_steps() -> [LaneStep; 3] {
         }),
         (CHART_RECORD_STEP, "Chart-lane", "10", |message| {
             chart_record_source(&chart_scenarios(10), message)
+        }),
+        (NAMESPACE_STEP, "Namespace-lane", "8", |message| {
+            namespace_source(&namespace_observations(8), message)
         }),
     ]
 }
@@ -959,6 +969,237 @@ fn the_chart_record_step_counts_the_repositorys_own_scenarios() {
         &format!("release\n\nChart-lane: {{sha}} {} {AT}\n", declared - 1),
     );
     chart_refused(&off_by_one, "", "chart-lane scenarios;");
+}
+
+const NAMESPACE_STEP: &str = "Require a recorded namespace-lane run for this commit";
+const NAMESPACE_LANE_SOURCE: &str = "xtask/src/namespace_lane.rs";
+
+/// A namespace-lane source declaring `count` observations on one line, as the lane does today.
+fn namespace_observations(count: usize) -> String {
+    namespace_observations_declaring(count, count)
+}
+
+fn namespace_observations_declaring(length: usize, entries: usize) -> String {
+    let names: Vec<String> = (1..=entries).map(|entry| format!("\"O{entry}\"")).collect();
+    format!(
+        "const TRAILER: &str = \"Namespace-lane\";\n\n/// The observations.\npub const \
+         OBSERVATIONS: [&str; {length}] = [{}];\n\nconst OTHER: [&str; 1] = [\"O99\"];\n",
+        names.join(", ")
+    )
+}
+
+fn namespace_source(observations: &str, message: &str) -> TaggedSource {
+    TaggedSource::with_files(&[(NAMESPACE_LANE_SOURCE, observations)], message)
+}
+
+fn namespace_refused(source: &TaggedSource, input: &str, reason: &str) {
+    refused_by(NAMESPACE_STEP, source, input, reason);
+}
+
+#[test]
+fn a_release_refuses_without_a_recorded_namespace_lane_run() {
+    let require = position(&format!(
+        "- name: {NAMESPACE_STEP}\n        id: namespace\n"
+    ));
+    let release_job = position("\n  release:\n");
+    let announce = position("gh release create \"${VERSION}\"");
+    assert!(require < release_job && release_job < announce);
+    position("namespace_evidence:");
+    position("Namespace-lane:");
+    position("refused: no recorded namespace lane run for");
+    position("## Namespace lane");
+    position("cargo xtask namespace-lane observe");
+    assert!(WORKFLOW.contains("namespace-evidence: ${{ steps.namespace.outputs.evidence }}"));
+    assert!(WORKFLOW.contains("namespace-lane: ${{ steps.namespace.outputs.lane }}"));
+    assert!(WORKFLOW.contains("NAMESPACE_EVIDENCE: ${{ steps.namespace.outputs.evidence }}"));
+    assert!(
+        WORKFLOW.contains("NAMESPACE_EVIDENCE: ${{ needs.preflight.outputs.namespace-evidence }}")
+    );
+    assert_eq!(occurrences("| namespace lane |"), 2);
+    // The release notes say what the record is, or why a recovered older tag carries none.
+    let notes = &WORKFLOW[position("- name: Compose release notes\n")..announce];
+    assert!(notes.contains("${NAMESPACE_EVIDENCE}"), "{notes}");
+    assert!(notes.contains("predates the namespace lane"), "{notes}");
+}
+
+#[test]
+fn the_namespace_lane_record_naming_the_tagged_commit_and_its_observation_count_is_accepted() {
+    let source = namespace_source(
+        &namespace_observations(8),
+        &format!("release\n\nNamespace-lane: {{sha}} 8 {AT}\n"),
+    );
+    let (success, stderr, output) = source.run_step(NAMESPACE_STEP, "");
+    assert!(success, "{stderr}");
+    assert_eq!(
+        output.trim(),
+        format!("lane=present\nevidence={} 8 {AT}", source.sha)
+    );
+
+    // A recovery dispatch carries the same record as an input, for a tag annotated without it.
+    let untrailed = namespace_source(&namespace_observations(8), "release\n");
+    let (success, stderr, output) = untrailed.run_step_on(
+        NAMESPACE_STEP,
+        &format!("{} 8 {AT}", untrailed.sha),
+        "workflow_dispatch",
+    );
+    assert!(success, "{stderr}");
+    assert!(output.contains("evidence="), "{output}");
+}
+
+#[test]
+fn the_namespace_lane_record_is_refused_when_absent_or_only_another_lanes_record() {
+    let absent = namespace_source(&namespace_observations(8), "release\n");
+    namespace_refused(&absent, "", "refused: no recorded namespace lane run for");
+    for other in ["Confinement-lane", "Quota-lane", "Chart-lane"] {
+        let source = namespace_source(
+            &namespace_observations(8),
+            &format!("release\n\n{other}: {{sha}} 8 {AT}\n"),
+        );
+        namespace_refused(&source, "", "refused: no recorded namespace lane run for");
+    }
+}
+
+#[test]
+fn the_namespace_lane_record_for_another_commit_is_refused() {
+    let source = namespace_source(
+        &namespace_observations(8),
+        &format!("release\n\nNamespace-lane: 0123456789abcdef0123456789abcdef01234567 8 {AT}\n"),
+    );
+    namespace_refused(
+        &source,
+        "",
+        "records commit '0123456789abcdef0123456789abcdef01234567'",
+    );
+}
+
+#[test]
+fn the_namespace_lane_record_with_another_observation_count_is_refused() {
+    let fewer = namespace_source(
+        &namespace_observations(8),
+        &format!("release\n\nNamespace-lane: {{sha}} 7 {AT}\n"),
+    );
+    namespace_refused(&fewer, "", "records 7 namespace-lane observations;");
+    let word = namespace_source(
+        &namespace_observations(8),
+        &format!("release\n\nNamespace-lane: {{sha}} eight {AT}\n"),
+    );
+    namespace_refused(
+        &word,
+        "",
+        "records 'eight' where a namespace-lane observation count belongs",
+    );
+    for (name, observations) in [
+        (
+            "no array",
+            "const TRAILER: &str = \"Namespace-lane\";\n".to_owned(),
+        ),
+        (
+            "a disagreeing length",
+            namespace_observations_declaring(9, 8),
+        ),
+        ("an empty array", namespace_observations(0)),
+        (
+            "two arrays",
+            namespace_observations(8) + &namespace_observations(8),
+        ),
+        (
+            "an entry that is not a quoted name",
+            namespace_observations(8).replace("\"O8\"", "O8"),
+        ),
+    ] {
+        let source = namespace_source(
+            &observations,
+            &format!("release\n\nNamespace-lane: {{sha}} 8 {AT}\n"),
+        );
+        let (success, stderr, output) = source.run_step(NAMESPACE_STEP, "");
+        assert!(!success, "{name}: accepted {output}");
+        assert!(
+            stderr.contains("declares no OBSERVATIONS array"),
+            "{name}: {stderr}"
+        );
+        assert!(!output.contains("evidence="), "{name}: {output}");
+    }
+}
+
+#[test]
+fn the_namespace_step_counts_an_observations_array_rustfmt_wrapped() {
+    // rustfmt packs short names several to a line once the declaration outgrows one line.
+    let wrapped = "pub const OBSERVATIONS: [&str; 12] = [\n    \"O1\", \"O2\", \"O3\", \"O4\", \
+                   \"O5\", \"O6\", \"O7\", \"O8\", \"O9\", \"O10\",\n    \"O11\", \"O12\",\n];\n";
+    let source = namespace_source(
+        wrapped,
+        &format!("release\n\nNamespace-lane: {{sha}} 12 {AT}\n"),
+    );
+    let (success, stderr, _) = source.run_step(NAMESPACE_STEP, "");
+    assert!(success, "{stderr}");
+    let off = namespace_source(
+        wrapped,
+        &format!("release\n\nNamespace-lane: {{sha}} 11 {AT}\n"),
+    );
+    namespace_refused(&off, "", "records 11 namespace-lane observations;");
+}
+
+#[test]
+fn the_namespace_lane_record_with_a_timestamp_that_is_not_rfc_3339_utc_is_refused() {
+    for instant in ["2026-10-23", "2026-10-23T10:00:00+02:00", "yesterday"] {
+        let source = namespace_source(
+            &namespace_observations(8),
+            &format!("release\n\nNamespace-lane: {{sha}} 8 {instant}\n"),
+        );
+        namespace_refused(&source, "", "where an RFC 3339 UTC instant belongs");
+    }
+}
+
+#[test]
+fn only_a_recovered_tag_that_predates_the_namespace_lane_needs_no_namespace_record() {
+    let older = TaggedSource::with_files(&[("README.md", "before the lane\n")], "release\n");
+    let (success, stderr, output) = older.run_step_on(NAMESPACE_STEP, "", "workflow_dispatch");
+    assert!(success, "{stderr}");
+    assert_eq!(output.trim(), "lane=absent");
+    // A tag push runs this workflow from the tag itself, so the lane is always there; its absence
+    // there is a broken source, not an older one, even with a record that names the commit.
+    let forged = TaggedSource::with_files(
+        &[("README.md", "before the lane\n")],
+        &format!("release\n\nNamespace-lane: {{sha}} 8 {AT}\n"),
+    );
+    namespace_refused(&forged, "", "has no xtask/src/namespace_lane.rs");
+}
+
+#[test]
+fn the_namespace_step_counts_the_repositorys_own_observations() {
+    // The step counts the entries of one literal array in the *tagged* source, the array
+    // `cargo xtask namespace-lane observe` records the length of; assert that count against the
+    // file it parses, so a reformatting cannot make every release refuse with a message about the
+    // check rather than about the release.
+    let real = fs::read_to_string(repository_root().join(NAMESPACE_LANE_SOURCE))
+        .expect("namespace lane source");
+    assert!(
+        real.contains("Decision::Record(OBSERVATIONS.len())"),
+        "the lane no longer records the length of OBSERVATIONS"
+    );
+    let declaration = real
+        .lines()
+        .find(|line| line.starts_with("pub const OBSERVATIONS: [&str; "))
+        .expect("the OBSERVATIONS array");
+    let declared = declaration
+        .trim_start_matches("pub const OBSERVATIONS: [&str; ")
+        .split(']')
+        .next()
+        .and_then(|length| length.parse::<usize>().ok())
+        .expect("a declared length");
+    assert!(declared >= 8, "{NAMESPACE_LANE_SOURCE} declares {declared}");
+    let source = namespace_source(
+        &real,
+        &format!("release\n\nNamespace-lane: {{sha}} {declared} {AT}\n"),
+    );
+    let (success, stderr, output) = source.run_step(NAMESPACE_STEP, "");
+    assert!(success, "{stderr}");
+    assert!(output.contains(&format!(" {declared} ")), "{output}");
+    let off_by_one = namespace_source(
+        &real,
+        &format!("release\n\nNamespace-lane: {{sha}} {} {AT}\n", declared - 1),
+    );
+    namespace_refused(&off_by_one, "", "namespace-lane observations;");
 }
 
 #[test]
@@ -1264,6 +1505,258 @@ fn only_a_recovered_tag_that_predates_the_binaries_stage_publishes_without_binar
         );
     }
     assert!(position(&format!("- name: {SOURCE_STEP}\n")) < position(BINARY_STEPS[0]));
+}
+
+const EXECUTOR_SOURCE_STEP: &str = "Find out whether the tagged source builds the executor image";
+const EXECUTOR_BUILD_STEP: &str = "Build, smoke-test and push the executor image once";
+const EXECUTOR_STEPS: [&str; 4] = [
+    EXECUTOR_BUILD_STEP,
+    "Sign the executor image keylessly",
+    "Verify the executor signature with the workflow identity",
+    "Prove the executor image is anonymously retrievable",
+];
+
+#[test]
+fn the_executor_image_is_pushed_once_signed_verified_and_read_back_before_announcement() {
+    position("EXECUTOR_IMAGE: ghcr.io/beyond10x/b10x-substrate-executor\n");
+    assert!(DOCKERFILE.contains("\nFROM scratch AS executor\n"));
+    let write_once = position("- name: Resolve write-once image version tags\n");
+    let source = position(&format!(
+        "- name: {EXECUTOR_SOURCE_STEP}\n        id: executor-source\n"
+    ));
+    let build = position(&format!(
+        "- name: {EXECUTOR_BUILD_STEP}\n        id: executor-build\n"
+    ));
+    let push = position("docker push \"${EXECUTOR_IMAGE}:${VERSION}\"");
+    let sign = position("cosign sign --yes \"${EXECUTOR_IMAGE}@${EXECUTOR_DIGEST}\"");
+    let verify = position("\"${EXECUTOR_IMAGE}@${EXECUTOR_DIGEST}\" > executor-cosign-verify.json");
+    let anonymous = position(
+        "DOCKER_CONFIG=\"$anonymous_config\" docker pull \"${EXECUTOR_IMAGE}@${EXECUTOR_DIGEST}\"",
+    );
+    let notes = position("- name: Compose release notes\n");
+    let announce = position("gh release create \"${VERSION}\"");
+    assert!(write_once < source && source < build && build < push);
+    assert!(push < sign && sign < verify && verify < anonymous);
+    assert!(anonymous < notes && notes < announce);
+    assert_eq!(
+        occurrences("docker push \"${EXECUTOR_IMAGE}:${VERSION}\""),
+        1
+    );
+
+    let state = step_script("Resolve write-once image version tags");
+    assert!(
+        state.contains("if docker manifest inspect \"${EXECUTOR_IMAGE}:${VERSION}\""),
+        "{state}"
+    );
+    assert!(state.contains("executor-exists=true"), "{state}");
+    assert!(
+        state.contains(
+            "refused: ${EXECUTOR_IMAGE}:${VERSION} already exists; initial release runs never reuse image tags."
+        ),
+        "{state}"
+    );
+
+    let build_script = step_script(EXECUTOR_BUILD_STEP);
+    for argument in [
+        "--target executor",
+        "--platform linux/amd64",
+        "--build-arg \"SOURCE_SHA=${SOURCE_SHA}\"",
+        "--provenance=false",
+        "--sbom=false",
+    ] {
+        assert!(build_script.contains(argument), "{build_script}");
+    }
+    for step in EXECUTOR_STEPS {
+        assert!(
+            step_block(step).contains("if: steps.executor-source.outputs.present == 'true'\n"),
+            "step {step:?} is not conditional on the tagged source building the executor"
+        );
+    }
+    let verify_script = step_script("Verify the executor signature with the workflow identity");
+    assert!(
+        verify_script.contains(
+            "identity=\"${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}\""
+        ),
+        "{verify_script}"
+    );
+    assert!(
+        verify_script
+            .contains("--certificate-oidc-issuer 'https://token.actions.githubusercontent.com'"),
+        "{verify_script}"
+    );
+
+    // Recorded beside the other digests: the release notes, the changelog stanza and the summary.
+    let composed = &WORKFLOW[notes..announce];
+    assert!(composed.contains("## Executor image"), "{composed}");
+    assert!(composed.contains("| digest | \\`${EXECUTOR_DIGEST}\\` |"));
+    assert!(composed.contains("--certificate-identity ${EXECUTOR_IDENTITY} \\\\"));
+    assert!(composed.contains("predates the Dockerfile's \\`executor\\` stage"));
+    position(
+        "Executor image: \\`${EXECUTOR_IMAGE}:${VERSION}\\` at \\`${EXECUTOR_DIGEST}\\`, keyless-signed",
+    );
+    position("| executor digest | \\`${EXECUTOR_DIGEST:-<not built>}\\` |");
+    position("| executor signature step | ${{ steps.executor-verify.outcome }} |");
+    position("| executor anonymous pull step | ${{ steps.executor-anonymous.outcome }} |");
+}
+
+fn executor_source(dockerfile: &str, event: &str) -> (bool, String, String) {
+    let directory = tempfile::tempdir().expect("temporary checkout");
+    fs::write(directory.path().join("Dockerfile"), dockerfile).expect("Dockerfile");
+    run_release_step(
+        EXECUTOR_SOURCE_STEP,
+        directory.path(),
+        &[("EVENT_NAME", event)],
+        None,
+    )
+}
+
+#[test]
+fn only_a_recovered_tag_that_predates_the_executor_stage_publishes_no_executor_image() {
+    let old = "FROM rust:1 AS builder\nFROM builder AS daemon\nFROM daemon AS release\n";
+    let (success, output, outputs) = executor_source(old, "workflow_dispatch");
+    assert!(success, "{output}");
+    assert_eq!(outputs.trim(), "present=false");
+    assert!(output.contains("no executor image"), "{output}");
+    let (success, output, outputs) = executor_source(old, "push");
+    assert!(!success, "{output}");
+    assert!(output.contains("refused:"), "{output}");
+    assert!(!outputs.contains("present="), "{outputs}");
+    for event in ["push", "workflow_dispatch"] {
+        let (success, output, outputs) = executor_source(DOCKERFILE, event);
+        assert!(success, "{output}");
+        assert_eq!(outputs.trim(), "present=true");
+    }
+}
+
+/// Runs the executor build step against stub `docker`, `readelf` and `git`: the image answers
+/// `handshake` to `version`, carries `revision` as its source label, and `readelf` reports an
+/// interpreter when `dynamic`. Returns the step's success, log, output and every push it made.
+fn executor_build(
+    exists: &str,
+    handshake: &str,
+    revision: &str,
+    dynamic: bool,
+) -> (bool, String, String, String) {
+    let root = tempfile::tempdir().expect("runner directory");
+    let tools = tempfile::tempdir().expect("stub tools");
+    stub(
+        tools.path(),
+        "docker",
+        &format!(
+            "case \"$1\" in\n  buildx) [ \"$2\" = imagetools ] && echo '\"sha256:{}\"'; exit 0 ;;\n  run) printf '%s\\n' \"$HANDSHAKE\" ;;\n  create) echo container ;;\n  cp) printf 'executor' > \"$3\" ;;\n  rm) ;;\n  pull) ;;\n  image) printf '%s\\n' \"$REVISION\" ;;\n  manifest) exit 1 ;;\n  push) echo \"$2\" >> \"$PUSH_LOG\" ;;\n  *) exit 2 ;;\nesac",
+            "e".repeat(64)
+        ),
+    );
+    stub(
+        tools.path(),
+        "readelf",
+        "printf 'Program Headers:\\n  LOAD 0x0\\n'\n[ -n \"$DYNAMIC\" ] && printf '  INTERP 0x0\\n'\nexit 0",
+    );
+    stub(
+        tools.path(),
+        "git",
+        "case \"$1\" in\n  fetch) ;;\n  rev-parse) echo \"$SOURCE_SHA\" ;;\n  *) exit 2 ;;\nesac",
+    );
+    let push_log = root.path().join("push.log");
+    fs::write(&push_log, "").expect("push log");
+    let push_log_path = push_log.display().to_string();
+    let sha = "0123456789abcdef0123456789abcdef01234567";
+    let (success, log, output) = run_release_step(
+        EXECUTOR_BUILD_STEP,
+        root.path(),
+        &[
+            ("EXISTS", exists),
+            ("EXECUTOR_IMAGE", "ghcr.io/example/executor"),
+            ("VERSION", TAG),
+            ("SOURCE_SHA", sha),
+            ("HANDSHAKE", &handshake.replace("{sha}", sha)),
+            ("REVISION", &revision.replace("{sha}", sha)),
+            ("DYNAMIC", if dynamic { "1" } else { "" }),
+            ("PUSH_LOG", &push_log_path),
+        ],
+        Some(tools.path()),
+    );
+    (
+        success,
+        log,
+        output,
+        fs::read_to_string(&push_log).expect("push log"),
+    )
+}
+
+const HANDSHAKE: &str =
+    "{\"protocol\":\"substrate-executor/1\",\"version\":\"9.9.9\",\"source\":\"{sha}\"}";
+
+#[test]
+fn the_executor_image_is_pushed_only_when_its_handshake_names_this_release_and_it_is_static() {
+    let (success, log, output, pushes) = executor_build("false", HANDSHAKE, "{sha}", false);
+    assert!(success, "{log}");
+    assert_eq!(pushes.trim(), format!("ghcr.io/example/executor:{TAG}"));
+    assert_eq!(output.trim(), format!("digest=sha256:{}", "e".repeat(64)));
+
+    for (name, handshake, dynamic, reason) in [
+        (
+            "another release",
+            HANDSHAKE.replace("9.9.9", "9.9.8"),
+            false,
+            "answers the version handshake",
+        ),
+        (
+            "an unstamped source",
+            HANDSHAKE.replace("{sha}", "unknown"),
+            false,
+            "answers the version handshake",
+        ),
+        (
+            "another protocol",
+            HANDSHAKE.replace("substrate-executor/1", "substrate-executor/2"),
+            false,
+            "answers the version handshake",
+        ),
+        (
+            "a second line",
+            format!("{HANDSHAKE}\n{HANDSHAKE}"),
+            false,
+            "answers the version handshake",
+        ),
+        (
+            "a dynamic executable",
+            HANDSHAKE.to_owned(),
+            true,
+            "is not a static executable",
+        ),
+    ] {
+        let (success, log, output, pushes) = executor_build("false", &handshake, "{sha}", dynamic);
+        assert!(!success, "{name}: accepted {log}");
+        assert!(log.contains(reason), "{name}: {log}");
+        assert_eq!(pushes, "", "{name}: pushed before refusing");
+        assert!(!output.contains("digest="), "{name}: {output}");
+    }
+
+    // Anything but an explicit answer about the image tag is refused, not read as `false`.
+    for exists in ["", "yes"] {
+        let (success, log, _, pushes) = executor_build(exists, HANDSHAKE, "{sha}", false);
+        assert!(!success, "accepted EXISTS={exists:?}: {log}");
+        assert_eq!(pushes, "");
+    }
+}
+
+#[test]
+fn a_recovery_reuses_an_executor_image_only_from_the_same_source_and_release() {
+    let (success, log, output, pushes) = executor_build("true", HANDSHAKE, "{sha}", false);
+    assert!(success, "{log}");
+    assert!(log.contains("reusing ghcr.io/example/executor:9.9.9 from the same tagged source"));
+    assert_eq!(pushes, "", "a reused image is not pushed again");
+    assert!(output.contains("digest=sha256:"), "{output}");
+    let (success, log, _, pushes) = executor_build(
+        "true",
+        HANDSHAKE,
+        "fedcba9876543210fedcba9876543210fedcba98",
+        false,
+    );
+    assert!(!success, "{log}");
+    assert!(log.contains("names source fedcba98"), "{log}");
+    assert_eq!(pushes, "");
 }
 
 /// Runs the publication step with a fake `gh` and returns its success, output and the argument

@@ -22,6 +22,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
   `kubernetes`, a driver may publish the optional fact `confinement.no-egress`, and three refusals
   are published at 501 with a vector each: `exec.inline-capsule-unserved`, `exec.signal-unserved`
   and `workspace.adopt-unserved`. The host daemon's answers do not change.
+- The release publishes the executor image `ghcr.io/beyond10x/b10x-substrate-executor:<version>`
+  from the Dockerfile's `executor` target (design 34 § 10.4): write-once, pushed only after its
+  `version` handshake names this release and the tagged commit and its executable is static,
+  keyless-signed, verified with the tagged workflow identity and read back anonymously before the
+  GitHub release is announced, with its digest beside the others. The release also refuses a tag
+  without a `Namespace-lane: <sha> <observation-count> <RFC 3339 UTC>` record for the tagged commit,
+  counted from `OBSERVATIONS` in `xtask/src/namespace_lane.rs` (D182).
 
 ### Changed
 
