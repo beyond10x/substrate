@@ -67,6 +67,10 @@ const ABSENCE_BOUND: Duration = Duration::from_mins(3);
 /// How long a Role-verb case watches for its dependent to be refused: a probe on pulled images,
 /// then past the Lease's 20 s held window and one more 10 s round, so a lost renewal shows.
 const VERB_BOUND: Duration = Duration::from_mins(2);
+/// How long a Role-verb case waits on a pending destroy to finish or name why it cannot.
+const PENDING_BOUND: Duration = Duration::from_secs(90);
+/// The daemon's answer to a mutation whose driver reported progress, not an end.
+const OUTCOME_UNKNOWN: &str = "operation.outcome-unknown";
 /// When a Role-verb case whose facts stayed whole tries its dependent route.
 const VERB_ROUTE_AFTER: Duration = Duration::from_secs(5);
 /// How long the privileged dry-run case waits for its refusal.
@@ -84,7 +88,7 @@ pub const NO_EXEC: &str = "no exec is admitted on this wave: the driver never pu
                            is refused exec.sandbox-unavailable before a Pod exists";
 
 /// The cases named absent, with their reasons; none is ever counted as passed.
-pub const ABSENT: [(&str, &str); 6] = [
+pub const ABSENT: [(&str, &str); 7] = [
     ("S4 clean-room runner", STEP_FOUR_ABSENT),
     ("S6 quota exec.capacity", NO_EXEC),
     (
@@ -101,6 +105,12 @@ pub const ABSENT: [(&str, &str); 6] = [
         "S6 Role without persistentvolumeclaims list",
         "no driver path lists PersistentVolumeClaims, so the verb has no dependent fact or route \
          to refuse: decision 3 grants a verb the driver does not use",
+    ),
+    (
+        "S6 Role without networkpolicies get",
+        "the driver reads NetworkPolicies only by list (the default-deny check); no driver path \
+         gets one, so the verb has no dependent fact or route to refuse: decision 3 grants a verb \
+         the driver does not use",
     ),
 ];
 
@@ -419,7 +429,9 @@ impl Daemon {
         let socket = directory.join("d.sock");
         let log = directory.join(format!("daemon-{}.log", ulid::Ulid::generate()));
         let _ = fs::remove_file(&socket);
+        // `tracing_subscriber::fmt()` writes to stdout, so the log the cases read holds both.
         let stderr = fs::File::create(&log)?;
+        let stdout = stderr.try_clone()?;
         let child = Command::new(binary)
             .args(["--driver", "kubernetes", "--kubernetes-config"])
             .arg(config)
@@ -433,7 +445,7 @@ impl Daemon {
             .env_remove("RUST_LOG")
             .env_remove("KUBECONFIG")
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
+            .stdout(stdout)
             .stderr(stderr)
             .spawn()
             .with_context(|| format!("starting {}", binary.display()))?;
@@ -1307,8 +1319,38 @@ impl Steps<'_> {
                 ));
             }
         };
+        let before = named_codes(&daemon.log());
         match daemon.destroy(&workspace).await? {
             Ok(()) => Ok((None, None)),
+            // Pending is the daemon's ordinary answer while the keeper terminates, not a refusal:
+            // reconciliation goes on, and either finishes or names why it cannot.
+            Err((500, code)) if code == OUTCOME_UNKNOWN => {
+                let deadline = Instant::now() + PENDING_BOUND;
+                loop {
+                    if daemon.absent(&workspace).await? {
+                        return Ok((None, None));
+                    }
+                    let named: Vec<String> = named_codes(&daemon.log())
+                        .difference(&before)
+                        .cloned()
+                        .collect();
+                    if !named.is_empty() {
+                        return Ok((
+                            Some(format!(
+                                "workspace.destroy stayed pending and reconciliation names \
+                                 {named:?}"
+                            )),
+                            Some(workspace),
+                        ));
+                    }
+                    ensure!(
+                        Instant::now() < deadline,
+                        "workspace.destroy stayed pending {} s and named no code",
+                        PENDING_BOUND.as_secs()
+                    );
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
+            }
             Err((status, code)) => Ok((
                 Some(format!("workspace.destroy answered {status} {code}")),
                 Some(workspace),
@@ -1521,6 +1563,14 @@ mod tests {
         }
         assert!(ABSENT.contains(&("S4 clean-room runner", STEP_FOUR_ABSENT)));
         assert!(STEP_FOUR_ABSENT.contains("postponed to story:remote-clean-room-conformance"));
+        for unused in ["persistentvolumeclaims list", "networkpolicies get"] {
+            let name = format!("S6 Role without {unused}");
+            assert!(
+                ABSENT.iter().any(|(absent, reason)| *absent == name
+                    && reason.contains("decision 3 grants a verb the driver does not use")),
+                "{name} has no dependent and is named absent as a finding"
+            );
+        }
         for (absent, _) in ABSENT {
             assert!(
                 names.contains(&absent.to_owned()),

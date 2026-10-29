@@ -7346,6 +7346,9 @@ const NAMESPACE_DEPLOYMENT: &str = "dep_namespace_vectors";
 /// How long the driver may take from start to a probed snapshot: Lease, policy, dry run, a PVC
 /// bound by first consumer, a keeper and a probe Pod, each image pulled once.
 const NAMESPACE_SERVING: Duration = Duration::from_mins(4);
+/// How long reconciliation may take to finish a destroy: its backoff reaches 30 s, and the PVC
+/// goes only after its keeper.
+const NAMESPACE_DESTROY: Duration = Duration::from_mins(3);
 /// The cases the namespace lane executes, selected by the facts the driver publishes. Its exec
 /// cases are absent, never counted: no exec is admitted while `confinement.no-egress` is absent,
 /// which it is on every cluster this lane has run on (design 34 § 10.3 O3).
@@ -7543,6 +7546,9 @@ async fn check_namespace_journey(daemon: &Daemon) -> usize {
     assert_eq!(deleted["result"]["absent"], true, "{deleted}");
     executed += 1;
 
+    // The keeper and the PVC go one after the other, each once the one before reads absent: an
+    // answer before the PVC is gone is `operation.outcome-unknown` (retriable) and the daemon's
+    // reconciliation finishes the destroy, which the workspace then reads as.
     let (status, destroyed) = daemon
         .call(
             "DELETE",
@@ -7551,8 +7557,38 @@ async fn check_namespace_journey(daemon: &Daemon) -> usize {
             Some(&mutation("01JNAMESPACELANEDESTROY1", &json!({}))),
         )
         .await;
-    assert_eq!(status, 200, "{destroyed}");
-    assert_eq!(destroyed["result"]["absent"], true, "{destroyed}");
+    if status == 200 {
+        assert_eq!(destroyed["result"]["absent"], true, "{destroyed}");
+    } else {
+        expect_error(
+            &(status, destroyed.clone()),
+            500,
+            "operation.outcome-unknown",
+        );
+        assert_eq!(destroyed["error"]["retriable"], true, "{destroyed}");
+        let deadline = Instant::now() + NAMESPACE_DESTROY;
+        loop {
+            let (status, observed) = daemon
+                .call(
+                    "GET",
+                    &format!("/v1/workspaces/{workspace}"),
+                    "req_namespace_destroyed",
+                    None,
+                )
+                .await;
+            if status == 404 {
+                break;
+            }
+            // Until then a read sees the frozen record, or the driver's retriable answer for a
+            // keeper already gone.
+            assert!(
+                Instant::now() < deadline,
+                "the destroyed workspace did not read absent within {NAMESPACE_DESTROY:?}: \
+                 {status} {observed}"
+            );
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    }
     executed += 1;
     executed
 }
