@@ -170,8 +170,15 @@ fn a_feature_forwarding_fake_through_an_inherited_renamed_edge_is_refused() {
     assert_refused(scratch.path(), "[features] testing = [\"k8s/fake\"]");
 }
 
+/// The workspace version every internal edge pins exactly; xtask carries the same version.
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// A manifest that enables `fake` on its own runtime edge, for the path-dependency cases below.
-const SHIM: &str = "[package]\nname = \"shim\"\nversion = \"0.15.0\"\nedition = \"2024\"\npublish = false\n\n[dependencies]\nsubstrate-kubernetes-client = { package = \"b10x-substrate-kubernetes-client\", path = \"../crates/substrate-kubernetes-client\", version = \"=0.15.0\", features = [\"fake\"] }\n";
+fn shim() -> String {
+    format!(
+        "[package]\nname = \"shim\"\nversion = \"{VERSION}\"\nedition = \"2024\"\npublish = false\n\n[dependencies]\nsubstrate-kubernetes-client = {{ package = \"b10x-substrate-kubernetes-client\", path = \"../crates/substrate-kubernetes-client\", version = \"={VERSION}\", features = [\"fake\"] }}\n"
+    )
+}
 
 /// A package at `directory` with `manifest` and an empty library root: Cargo refuses a package
 /// with no target, so a shim without one would be refused by Cargo, not by the fence.
@@ -195,7 +202,7 @@ fn add_host_dependency(root: &Path, entry: &str) {
 #[test]
 fn a_fake_edge_in_an_unlisted_path_member_is_refused() {
     let scratch = copy_manifests();
-    write_shim(&scratch.path().join("shim"), SHIM);
+    write_shim(&scratch.path().join("shim"), &shim());
     add_host_dependency(scratch.path(), "shim = { path = \"../../shim\" }");
     assert_refused(
         scratch.path(),
@@ -215,7 +222,7 @@ fn a_fake_edge_in_a_path_manifest_outside_the_root_is_refused() {
     let outside = tempfile::tempdir().expect("outside directory");
     write_shim(
         outside.path(),
-        &SHIM.replace(
+        &shim().replace(
             "../crates/substrate-kubernetes-client",
             &scratch
                 .path()
@@ -242,7 +249,9 @@ fn add_fake_dev_dependency(root: &Path, relative: &str) {
     edit(root, relative, |text| {
         text.replacen(
             "[dev-dependencies]\n",
-            "[dev-dependencies]\nsubstrate-kubernetes-client = { package = \"b10x-substrate-kubernetes-client\", path = \"../substrate-kubernetes-client\", version = \"=0.15.0\", features = [\"fake\"] }\n",
+            &format!(
+                "[dev-dependencies]\nsubstrate-kubernetes-client = {{ package = \"b10x-substrate-kubernetes-client\", path = \"../substrate-kubernetes-client\", version = \"={VERSION}\", features = [\"fake\"] }}\n"
+            ),
             1,
         )
     });
