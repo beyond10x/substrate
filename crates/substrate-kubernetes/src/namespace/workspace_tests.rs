@@ -705,8 +705,11 @@ async fn a_lost_answer_with_another_digest_is_executor_unanswered_and_retriable(
     assert!(!s.file("a.txt").exists());
 }
 
+/// Only an unconditional delete (or write) is resolved by its `stat`; every request with a
+/// precondition (replace, edit, patch) is `kubernetes.executor-unanswered` and retriable even when
+/// it applied and the `stat` shows exactly the state it would leave.
 #[tokio::test]
-async fn lost_answers_of_replace_delete_and_edit_resolve_by_the_state_each_requests() {
+async fn lost_answers_resolve_only_unconditional_mutations_by_their_stat() {
     let mut s = setup();
     s.created().await;
     std::fs::write(s.file("a.txt"), b"old\n").expect("seeded");
@@ -720,10 +723,11 @@ async fn lost_answers_of_replace_delete_and_edit_resolve_by_the_state_each_reque
     .expect("a replacement");
     let replaced = Driver::replace_workspace_file_v2(&s.driver, WORKSPACE, &pvc, "a.txt", &replace)
         .await
-        .expect("the stat shows the replacing content");
-    assert_eq!(replaced.before_sha256, Some(sha(b"old\n")));
-    assert_eq!(replaced.after_sha256, sha(b"new\n"));
-    assert!(replaced.diff.truncated && replaced.diff.text.is_empty());
+        .expect_err("a conditional replace is never resolved by its stat");
+    assert_eq!(replaced.class, DriverErrorClass::Failed);
+    assert_eq!(replaced.code, EXECUTOR_UNANSWERED);
+    assert!(replaced.retriable);
+    assert_eq!(std::fs::read(s.file("a.txt")).expect("applied"), b"new\n");
 
     stall_next(&mut s);
     let edit: FileEditInput = serde_json::from_value(json!({
@@ -735,7 +739,24 @@ async fn lost_answers_of_replace_delete_and_edit_resolve_by_the_state_each_reque
         .await
         .expect_err("an edit states no resulting digest");
     assert_eq!(edited.code, EXECUTOR_UNANSWERED);
+    assert!(edited.retriable);
     assert_eq!(std::fs::read(s.file("a.txt")).expect("kept"), b"edited\n");
+
+    stall_next(&mut s);
+    let patch: FilePatchInput = serde_json::from_value(json!({
+        "expected_sha256": sha(b"edited\n"),
+        "edits": [{"kind": "insert_before", "line": 1, "text": "zero\n"}],
+    }))
+    .expect("a patch");
+    let patched = Driver::patch_workspace_file_v2(&s.driver, WORKSPACE, &pvc, "a.txt", &patch)
+        .await
+        .expect_err("a conditional patch is never resolved by its stat");
+    assert_eq!(patched.code, EXECUTOR_UNANSWERED);
+    assert!(patched.retriable);
+    assert_eq!(
+        std::fs::read(s.file("a.txt")).expect("patched"),
+        b"zero\nedited\n"
+    );
 
     stall_next(&mut s);
     let absence = Driver::delete_workspace_file(&s.driver, WORKSPACE, &pvc, "a.txt")
@@ -745,7 +766,16 @@ async fn lost_answers_of_replace_delete_and_edit_resolve_by_the_state_each_reque
 
     assert_eq!(
         s.executor.fs_ops(),
-        ["replace-v2", "stat", "edit-v2", "stat", "delete", "stat"]
+        [
+            "replace-v2",
+            "stat",
+            "edit-v2",
+            "stat",
+            "patch-v2",
+            "stat",
+            "delete",
+            "stat"
+        ]
     );
 }
 
