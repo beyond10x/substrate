@@ -1,0 +1,12 @@
+{
+  "at": "2026-10-29T02:00:39Z",
+  "actor": "human:timo",
+  "artifact": "story:host-profile-name-is-a-deployment-parameter",
+  "kind": "story",
+  "revision": 3,
+  "change": {
+    "change": "evidence",
+    "kind": "test_result",
+    "source": "red: cargo xtask chart-lane cluster --node-profiles at aa63fdba; execution bootstrap refused exec.sandbox-unavailable (exec.namespaces); the probe sandbox's read-only bind remount of a noatime /tmp source is denied by the profile's remount rule (failed flags match, noatime)"
+  }
+}
